@@ -95,17 +95,41 @@ def input(prompt=""):
         python_exe = sys.executable
         if getattr(sys, 'frozen', False):
             # If frozen (packaged), sys.executable is the exe itself.
-            # We need to find the system python to run the script.
-            # Try finding 'python' in PATH
-            import shutil
-            sys_python = shutil.which("python")
-            if sys_python:
-                python_exe = sys_python
-            else:
-                # Fallback: try standard install paths or warn user
-                self.output_signal.emit("⚠️ Warning: System 'python' not found in PATH. Execution might fail if 'sys.executable' points to this app.")
-                # We stick to sys.executable but it likely won't work for scripts if onefile
-                python_exe = "python" 
+            # We need to find the system python or bundled python to run the script.
+            
+            # Check for bundled python in 'python_env' subdirectory
+            # For onedir: os.path.dirname(sys.executable)/python_env/python.exe
+            # For onefile: sys._MEIPASS/python_env/python.exe
+            
+            base_dir = os.path.dirname(sys.executable)
+            possible_paths = [
+                os.path.join(base_dir, "python_env", "python.exe"),
+                os.path.join(base_dir, "_internal", "python_env", "python.exe")
+            ]
+            
+            if hasattr(sys, '_MEIPASS'):
+                possible_paths.insert(0, os.path.join(sys._MEIPASS, "python_env", "python.exe"))
+            
+            python_exe = "python" # Default fallback
+            
+            found_bundled = False
+            for p in possible_paths:
+                if os.path.exists(p):
+                    python_exe = p
+                    found_bundled = True
+                    break
+            
+            if not found_bundled:
+                # Try finding 'python' in PATH
+                import shutil
+                sys_python = shutil.which("python")
+                if sys_python:
+                    python_exe = sys_python
+                else:
+                    # Fallback: try standard install paths or warn user
+                    self.output_signal.emit("⚠️ Warning: Bundled Python not found and System 'python' not found in PATH.")
+                    # We stick to sys.executable but it likely won't work for scripts if onefile
+                    python_exe = "python" 
 
         try:
             if self.is_stopped: return

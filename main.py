@@ -10,8 +10,9 @@ from datetime import datetime
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.agent import LLMWorker
+from core.interaction import bridge
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox)
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog)
 from PySide6.QtCore import Qt, QThread, Signal
 
 # Try importing OpenAI
@@ -94,14 +95,19 @@ class SettingsDialog(QDialog):
         self.skill_checks = {}
         
         # Iterate over skill directories
-        if os.path.exists(self.temp_skill_manager.skills_dir):
-            for skill_name in os.listdir(self.temp_skill_manager.skills_dir):
-                skill_path = os.path.join(self.temp_skill_manager.skills_dir, skill_name)
-                if os.path.isdir(skill_path):
-                    chk = QCheckBox(skill_name)
-                    chk.setChecked(self.config_manager.is_skill_enabled(skill_name))
-                    self.skill_checks[skill_name] = chk
-                    skills_layout.addWidget(chk)
+        for skills_dir in self.temp_skill_manager.skills_dirs:
+            if os.path.exists(skills_dir):
+                for skill_name in os.listdir(skills_dir):
+                    skill_path = os.path.join(skills_dir, skill_name)
+                    if os.path.isdir(skill_path):
+                        # Avoid duplicates if skill exists in multiple locations (though unlikely with current logic)
+                        if skill_name in self.skill_checks:
+                            continue
+                            
+                        chk = QCheckBox(skill_name)
+                        chk.setChecked(self.config_manager.is_skill_enabled(skill_name))
+                        self.skill_checks[skill_name] = chk
+                        skills_layout.addWidget(chk)
         
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -145,6 +151,9 @@ class MainWindow(QMainWindow):
         
         self.config_manager = ConfigManager()
         # API Key is now in config_manager
+
+        # Connect to Interaction Bridge
+        bridge.request_confirmation_signal.connect(self.handle_confirmation_request)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -214,6 +223,45 @@ class MainWindow(QMainWindow):
         self.log_display.setMaximumHeight(200)
         layout.addWidget(self.log_display, 1)
 
+        # Load chat history
+        self.load_chat_history()
+
+    def handle_confirmation_request(self, message):
+        """Handle confirmation requests from background threads"""
+        reply = QMessageBox.question(self, '需要确认', message, 
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        bridge.respond(reply == QMessageBox.Yes)
+
+    def load_chat_history(self):
+        """Load chat history from JSON file"""
+        history_path = os.path.join(os.getcwd(), 'chat_history.json')
+        if os.path.exists(history_path):
+            try:
+                with open(history_path, 'r', encoding='utf-8') as f:
+                    self.messages = json.load(f)
+                
+                # Reconstruct UI bubbles
+                for msg in self.messages:
+                    role = msg.get('role')
+                    content = msg.get('content')
+                    if role == 'user':
+                        self.add_chat_bubble('User', content, save=False)
+                    elif role == 'assistant' and content:
+                        self.add_chat_bubble('Agent', content, save=False)
+                
+                self.append_log(f"System: 已加载 {len(self.messages)} 条历史消息")
+            except Exception as e:
+                self.append_log(f"Error loading history: {e}")
+
+    def save_chat_history(self):
+        """Save chat history to JSON file"""
+        history_path = os.path.join(os.getcwd(), 'chat_history.json')
+        try:
+            with open(history_path, 'w', encoding='utf-8') as f:
+                json.dump(self.messages, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.append_log(f"Error saving history: {e}")
+
     def select_workspace(self):
         directory = QFileDialog.getExistingDirectory(self, "选择工作区")
         if directory:
@@ -223,9 +271,13 @@ class MainWindow(QMainWindow):
             self.append_log(f"System: 工作区已切换至 {directory}")
 
     def open_settings(self):
-        dialog = SettingsDialog(self.config_manager, self)
-        if dialog.exec():
-            self.append_log("System: 配置已更新")
+        try:
+            dialog = SettingsDialog(self.config_manager, self)
+            if dialog.exec():
+                self.append_log("System: 配置已更新")
+        except Exception as e:
+            self.append_log(f"Error opening settings: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to open settings: {str(e)}")
 
     def toggle_pause(self):
         if hasattr(self, 'llm_worker') and self.llm_worker.isRunning():
@@ -255,6 +307,7 @@ class MainWindow(QMainWindow):
         
         # Update messages history
         self.messages.append({"role": "user", "content": user_text})
+        self.save_chat_history()
         
         self.process_agent_logic(user_text)
 
@@ -315,19 +368,42 @@ class MainWindow(QMainWindow):
         # 2. Update History (Important: Do not include reasoning_content in context for next turn)
         # According to DeepSeek docs, we just append content.
         self.messages.append({"role": role, "content": content})
+        self.save_chat_history()
 
         # 3. Extract and Execute Code
         code_match = re.search(r'```python(.*?)```', content, re.DOTALL)
         if code_match:
             code_block = code_match.group(1).strip()
             self.append_log("Agent: 检测到代码块，准备执行...")
-            self.worker = CodeWorker(code_block, self.workspace_dir)
-            self.worker.output_signal.connect(self.append_log)
-            self.worker.finished_signal.connect(lambda: self.send_btn.setEnabled(True))
-            self.worker.start()
+            self.code_worker = CodeWorker(code_block, self.workspace_dir)
+            self.code_worker.output_signal.connect(self.append_log)
+            self.code_worker.finished_signal.connect(self.handle_code_finished)
+            self.code_worker.input_request_signal.connect(self.handle_code_input_request)
+            
+            # Show Stop Button for Code Execution
+            self.stop_btn.setVisible(True)
+            self.stop_btn.setEnabled(True)
+            self.stop_btn.setText("⏹️ 停止代码")
+            
+            self.code_worker.start()
         else:
             self.send_btn.setEnabled(True)
 
+    def handle_code_finished(self):
+        self.stop_btn.setVisible(False)
+        self.stop_btn.setText("⏹️ 停止") # Reset text
+        self.send_btn.setEnabled(True)
+
+    def handle_code_input_request(self, prompt):
+        """Handle input() requests from python script"""
+        if any(k in prompt.lower() for k in ["confirm", "yes/no", "是否"]):
+             reply = QMessageBox.question(self, '需要确认', prompt, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+             response = "yes" if reply == QMessageBox.Yes else "no"
+        else:
+             text, ok = QInputDialog.getText(self, "输入请求", prompt)
+             response = text if ok else ""
+        
+        self.code_worker.provide_input(response)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

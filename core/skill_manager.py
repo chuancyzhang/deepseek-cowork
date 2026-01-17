@@ -9,27 +9,28 @@ class SkillManager:
         self.workspace_dir = workspace_dir
         self.config_manager = config_manager
         
+        self.skills_dirs = []
+        
         # Determine the base directory
         if getattr(sys, 'frozen', False):
             # If running as a PyInstaller bundle
             if hasattr(sys, '_MEIPASS'):
                  # --onefile mode: Temp directory
-                 self.skills_dir = os.path.join(sys._MEIPASS, "skills")
+                 self.skills_dirs.append(os.path.join(sys._MEIPASS, "skills"))
             else:
                  # --onedir mode
                  base_dir = os.path.dirname(sys.executable)
-                 # Check standard location (next to exe)
-                 path_1 = os.path.join(base_dir, "skills")
-                 # Check _internal location (PyInstaller 6+ default)
-                 path_2 = os.path.join(base_dir, "_internal", "skills")
                  
-                 if os.path.exists(path_2):
-                     self.skills_dir = path_2
-                 else:
-                     self.skills_dir = path_1
+                 # Check _internal location (PyInstaller 6+ default) - Built-in skills
+                 path_internal = os.path.join(base_dir, "_internal", "skills")
+                 if os.path.exists(path_internal):
+                     self.skills_dirs.append(path_internal)
+                 
+                 # Check standard location (next to exe) - User added skills
+                 self.skills_dirs.append(os.path.join(base_dir, "skills"))
         else:
             # Normal python execution
-            self.skills_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills")
+            self.skills_dirs.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills"))
 
         self.tools = {} # name -> function
         self.tool_definitions = [] # JSON schemas for LLM
@@ -42,27 +43,28 @@ class SkillManager:
 
     def load_skills(self):
         """Scan skills directory and load SKILL.md + implementations"""
-        if not os.path.exists(self.skills_dir):
-            return
-
-        for skill_name in os.listdir(self.skills_dir):
-            # Check config if enabled
-            if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):
+        for skills_dir in self.skills_dirs:
+            if not os.path.exists(skills_dir):
                 continue
 
-            skill_path = os.path.join(self.skills_dir, skill_name)
-            if not os.path.isdir(skill_path):
-                continue
-            
-            # 1. Parse SKILL.md
-            md_path = os.path.join(skill_path, "SKILL.md")
-            if os.path.exists(md_path):
-                self._parse_skill_md(md_path)
-            
-            # 2. Load Implementation (impl.py)
-            impl_path = os.path.join(skill_path, "impl.py")
-            if os.path.exists(impl_path):
-                self._load_implementation(skill_name, impl_path)
+            for skill_name in os.listdir(skills_dir):
+                # Check config if enabled
+                if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):
+                    continue
+    
+                skill_path = os.path.join(skills_dir, skill_name)
+                if not os.path.isdir(skill_path):
+                    continue
+                
+                # 1. Parse SKILL.md
+                md_path = os.path.join(skill_path, "SKILL.md")
+                if os.path.exists(md_path):
+                    self._parse_skill_md(md_path)
+                
+                # 2. Load Implementation (impl.py)
+                impl_path = os.path.join(skill_path, "impl.py")
+                if os.path.exists(impl_path):
+                    self._load_implementation(skill_name, impl_path)
 
     def _parse_skill_md(self, md_path):
         """Extract frontmatter and body"""

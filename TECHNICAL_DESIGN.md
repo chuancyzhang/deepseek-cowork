@@ -47,6 +47,13 @@
 ### 2.3 Executor (执行器)
 *   **职责**: 解析 Agent 的指令，安全地运行工具，并将结果标准化返回。
 *   **特性**: 错误处理、超时控制、权限验证。
+*   **Interaction Bridge**:
+    *   **Input Interception**: 劫持 Python `input()` 函数，将其转换为 UI 层的弹窗请求 (`__REQUEST_INPUT__` 信号)。
+    *   **GUI Modal**: 支持 Yes/No 确认框和文本输入框，实现后台代码与前台用户的同步交互。
+
+### 2.4 Skill Manager (技能管理器)
+*   **动态加载**: 支持从 `skills/` (内置) 和 `user_skills/` (用户自定义) 双路径加载技能。
+*   **自动沉淀**: 将生成的有效代码自动封装为新技能，无需重启即可立即生效。
 
 ---
 

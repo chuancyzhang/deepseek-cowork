@@ -1,5 +1,6 @@
 import os
 import json
+from core.interaction import ask_user
 
 def list_files(workspace_dir, path="."):
     """
@@ -91,6 +92,41 @@ def read_file(workspace_dir, path):
 
         with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
             return f.read()
+            
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def delete_file(workspace_dir, path):
+    """
+    Delete a file or empty directory.
+    
+    Args:
+        workspace_dir (str): The root workspace directory (injected by system).
+        path (str): Relative path to the file.
+    """
+    try:
+        if not workspace_dir:
+            return "Error: Workspace not selected."
+            
+        abs_path = os.path.abspath(os.path.join(workspace_dir, path))
+        if not abs_path.startswith(os.path.abspath(workspace_dir)):
+             return "Error: Access denied (Path Traversal)."
+        
+        if not os.path.exists(abs_path):
+            return f"Error: File '{path}' does not exist."
+            
+        # Ask for confirmation
+        if not ask_user(f"⚠️ DANGER: Are you sure you want to delete '{path}'?"):
+            return "Error: Deletion cancelled by user."
+
+        if os.path.isfile(abs_path):
+            os.remove(abs_path)
+        elif os.path.isdir(abs_path):
+            os.rmdir(abs_path) # Only empty directories
+        else:
+            return f"Error: Unknown file type for '{path}'."
+            
+        return f"Success: Deleted '{path}'."
             
     except Exception as e:
         return f"Error: {str(e)}"

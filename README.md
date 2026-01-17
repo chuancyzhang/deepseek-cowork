@@ -16,6 +16,9 @@ Unlike traditional chatbots, this assistant uses a **Chain-of-Thought (CoT)** ap
     *   **Workspace Sandbox**: Operations are strictly confined to the user-selected directory.
     *   **AST Analysis**: Static code analysis prevents unauthorized path access (e.g., `../`, absolute paths) before execution.
 *   **🤖 Multi-Agent Dispatch**: Capable of spawning sub-agents (`agent-manager`) to handle parallel tasks independently.
+*   **💾 Auto-Save History**: Chat sessions are automatically saved and restored, allowing seamless continuation of tasks.
+*   **✨ Dynamic Skill Learning**: The agent can turn successful code solutions into reusable skills permanently, expanding its capabilities over time.
+*   **🛡️ Enhanced Safety**: Critical operations (like file deletion) trigger explicit user confirmation popups to prevent accidental data loss.
 *   **🖥️ Modern UI**: Built with **PySide6** (Qt for Python), offering a responsive and native desktop experience with foldable reasoning logs.
 
 ## 📦 Installation

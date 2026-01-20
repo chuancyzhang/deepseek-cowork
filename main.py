@@ -13,7 +13,7 @@ from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.agent import LLMWorker, CodeWorker
 from core.interaction import bridge
-from PySide6.QtGui import QAction, QTextOption
+from PySide6.QtGui import QAction, QTextOption, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget)
 from PySide6.QtCore import Qt, QThread, Signal
@@ -439,6 +439,16 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSeek Cowork")
+        
+        # Set Window Icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images', 'logo.png')
+        if not os.path.exists(icon_path):
+             # Try _internal/images for one-dir mode
+             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_internal', 'images', 'logo.png')
+        
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+            
         self.resize(1000, 800)
         self.workspace_dir = None
         self.setStyleSheet("""

@@ -18,8 +18,18 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('skills', 'skills'), ('config.json', '.')],
-    hiddenimports=pyside6_hidden,
+    datas=[('skills', 'skills'), ('config.json', '.'), ('images', 'images')],
+    hiddenimports=pyside6_hidden + [
+        'docx',
+        'pptx',
+        'openpyxl',
+        'pypdf',
+        'pandas',
+        'duckduckgo_search',
+        'trafilatura',
+        'bs4',
+        'requests'
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -48,6 +58,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='images/logo.ico',
 )
 coll = COLLECT(
     exe,

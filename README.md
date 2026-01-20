@@ -2,23 +2,24 @@
 
 [中文文档](README_CN.md) | [English](README.md)
 
-DeepSeek Cowork is a powerful desktop application that leverages **DeepSeek's advanced reasoning models (R1/V3)** to automate complex file operations through natural language.
+DeepSeek Cowork is a powerful desktop application powered by the **DeepSeek-V3.2 Interleaved Chain-of-Thought (CoT)** engine. It leverages the latest **Thinking with Tool Use** capability to automatically plan and execute complex file operations through natural language.
 
-Unlike traditional chatbots, this assistant uses a **Chain-of-Thought (CoT)** approach to plan, generate, and safely execute Python code to fulfill your requests—whether it's batch renaming files, analyzing data, or restructuring project directories.
+Unlike traditional chatbots, this assistant utilizes the **DeepSeek-V3.2** model, which can invoke tools directly within its thinking process (`<think>`). Through a "Think-Call-Think" interleaved flow, it precisely plans tasks, explores the environment, and safely executes actions—whether it's batch file processing, data analysis, or complex agentic workflows.
 
 ![App Screenshot](placeholder-screenshot.png)
 
 ## 🚀 Key Features
 
-*   **🧠 DeepSeek Reasoning Core**: Utilizes the "Reasoning-Coding" pattern. The agent thinks through the problem (`<think>`) before taking action, ensuring higher accuracy for complex tasks.
-    *   **Real-time Thinking**: The "Reasoning" process is displayed in real-time in the right-side "Task Monitor" panel, keeping the main chat area clean with only final answers.
+*   **🧠 Powered by DeepSeek-V3.2**: 
+    *   **Interleaved CoT**: The industry's first model to support tool calling within thinking mode. The agent not only plans but also actively explores its environment (e.g., listing files, reading content) during the `<think>` process, adjusting strategies in real-time based on feedback.
+    *   **SOTA Inference**: Based on DeepSeek-V3.2 (performance comparable to GPT-5), balancing reasoning capability with response speed, optimized specifically for Agent scenarios.
 *   **🔌 Modular Skills Center**: 
     *   **Visual Management**: Built-in "Skills Center" panel to visually manage installed skills.
-    *   **Categorized Display**: Automatically separates "Standard Skills" and "AI Generated Skills" for better organization using tabs.
-    *   **Dynamic Extension**: The agent can solidify reusable algorithmic logic into new skills, evolving over time.
+    *   **Categorized Display**: Automatically separates "Standard Skills" and "AI Generated Skills" for better organization.
+    *   **Dynamic Evolution**: The agent can solidify general algorithmic logic into new skills, continuously evolving.
 *   **🛡️ Secure Execution**:
     *   **Workspace Sandbox**: Operations are strictly confined to the user-selected directory.
-    *   **AST Analysis**: Static code analysis prevents unauthorized path access (e.g., `../`, absolute paths) before execution.
+    *   **AST Static Analysis**: Static code analysis prevents unauthorized path access before execution.
     *   **Security Policy**: The agent is explicitly instructed to only create new skills for algorithmic/system operations, avoiding misuse.
 *   **🤖 Multi-Agent Dispatch**: Capable of spawning sub-agents (`agent-manager`) to handle parallel tasks independently.
 *   **💾 Auto-Save History**: Chat sessions are automatically saved and restored, allowing seamless continuation of tasks.
@@ -43,7 +44,7 @@ Unlike traditional chatbots, this assistant uses a **Chain-of-Thought (CoT)** ap
 
 2.  Install dependencies:
     ```bash
-    pip install PySide6 requests openai colorama
+    pip install -r requirements.txt
     ```
 
 3.  Run the application:
@@ -55,7 +56,7 @@ Unlike traditional chatbots, this assistant uses a **Chain-of-Thought (CoT)** ap
 
 1.  **Configuration**:
     *   Launch the app and click the **⚙️ Settings** button.
-    *   Enter your **DeepSeek API Key** (and optional Base URL).
+    *   Enter your **DeepSeek API Key**.
     *   Check and manage enabled skills in the "Skills Center".
 
 2.  **Select Workspace**:
@@ -63,25 +64,24 @@ Unlike traditional chatbots, this assistant uses a **Chain-of-Thought (CoT)** ap
 
 3.  **Start Chatting**:
     *   Enter a command, e.g.:
-        *   *"Rename all .txt files in this folder to .md"*
-        *   *"Read data.csv and tell me the average value of the 'Price' column"*
-        *   *"Create a new folder named 'backup' and move all images there"*
-    *   Watch the **Thinking** process in the right panel to understand how the agent plans the task.
+        *   *"Search for the latest news on DeepSeek and summarize the V3.2 features"*
+        *   *"Convert all .docx files in this folder to PDF"*
+        *   *"Read sales.xlsx and generate a sales trend chart"*
+    *   Watch the **Thinking** process in the right panel to experience how V3.2 utilizes interleaved tool calls.
 
 4.  **Control Tasks**:
     *   Use the **⏸️ Pause** and **⏹️ Stop** buttons at the bottom to control the AI execution flow in real-time.
 
 ## 🏗️ Architecture
 
-The project follows a modular design:
+This project fully leverages the new features of DeepSeek-V3.2:
 
 *   **`core/`**:
-    *   `agent.py`: Manages LLM interaction, System Prompt policies (including skill creation restrictions), and conversation history.
-    *   `skill_manager.py`: Handles dynamic tool loading, metadata parsing (supports multi-language descriptions), and categorization.
-    *   `config_manager.py`: Persists user settings.
+    *   `agent.py`: Implements the **Interleaved CoT** Agent logic, handling the tool call loop within thinking mode.
+    *   `skill_manager.py`: Manages dynamic tool loading, metadata parsing (supports multi-language descriptions), and categorization.
 *   **`skills/`**:
-    *   Plugins that extend functionality. Each skill (e.g., `file-system`) has its own `impl.py` and `SKILL.md` definition (supporting `description_cn`).
-*   **`main.py`**: The PySide6 GUI entry point, including the main window, Skills Center dialog (Tabbed view), chat bubble components, etc.
+    *   Plugins that extend functionality. Each skill has its own `impl.py` and `SKILL.md`.
+*   **`main.py`**: PySide6 GUI entry point, containing components like the Skills Center (Tabbed view) and Task Monitor (Thinking process display).
 
 ## 🛠️ Developing New Skills
 

@@ -6,7 +6,10 @@ DeepSeek Cowork is a powerful desktop application powered by the **DeepSeek-V3.2
 
 Unlike traditional chatbots, this assistant utilizes the **DeepSeek-V3.2** model, which can invoke tools directly within its thinking process (`<think>`). Through a "Think-Call-Think" interleaved flow, it precisely plans tasks, explores the environment, and safely executes actions—whether it's batch file processing, data analysis, or complex agentic workflows.
 
-![App Screenshot](placeholder-screenshot.png)
+![intro](images/english_intro.png)
+
+![App Screenshot](images/首页.png)
+
 
 ## 🚀 Key Features
 

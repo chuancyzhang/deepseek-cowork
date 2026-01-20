@@ -4,7 +4,8 @@ DeepSeek Cowork 是一款基于 **DeepSeek-V3.2 交错思维链 (Interleaved Cha
 
 与传统的聊天机器人不同，本助手采用 **DeepSeek-V3.2** 模型，能够在思考模式下同时调用工具，通过“思考-调用-再思考”的交错过程，精准地规划任务、生成代码并安全地执行，无论是批量处理文件、数据分析，还是复杂的智能体任务。
 
-![应用截图](placeholder-screenshot.png)
+![应用截图1](images/首页.png)
+![应用截图2](images/使用界面.png)
 
 ## 🚀 核心功能
 

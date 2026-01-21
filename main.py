@@ -8,10 +8,13 @@ import json
 import platform
 import uuid
 import glob
+import markdown
 from datetime import datetime
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.agent import LLMWorker, CodeWorker
+from core.skill_generator import SkillGenerator
+from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
 from PySide6.QtGui import QAction, QTextOption, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -40,6 +43,13 @@ class SettingsDialog(QDialog):
         self.api_key_input.setEchoMode(QLineEdit.Password)
         self.api_key_input.setText(self.config_manager.get("api_key", ""))
         form_layout.addRow("DeepSeek API Key:", self.api_key_input)
+        
+        # API Key Guide
+        guide_label = QLabel('API Key 获取方法：<br>① 进入 <a href="https://platform.deepseek.com/">DeepSeek 官方开发者平台</a> 注册登录<br>② 在开发者平台首页 -> API keys -> 创建 API key')
+        guide_label.setStyleSheet("color: #5f6368; font-size: 11px; margin-bottom: 8px;")
+        guide_label.setOpenExternalLinks(True)
+        guide_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        form_layout.addRow("", guide_label)
         
         # Base URL
         self.base_url_input = QLineEdit()
@@ -238,9 +248,12 @@ class AutoResizingTextEdit(QTextEdit):
         self.adjustHeight()
 
 class EventCard(QFrame):
+    save_skill_requested = Signal(str)
+
     def __init__(self, title, content, type="info", parent=None):
         super().__init__(parent)
         self.type = type
+        self.code_content = content if type == "code_source" else None
         self.setObjectName("EventCard")
         self.setFrameShape(QFrame.StyledPanel)
         self.setLineWidth(1)
@@ -259,6 +272,8 @@ class EventCard(QFrame):
             icon_label.setText("🛠️")
         elif type == "code":
             icon_label.setText("💻")
+        elif type == "code_source":
+            icon_label.setText("📜")
         elif type == "success":
             icon_label.setText("✅")
         elif type == "error":
@@ -283,6 +298,20 @@ class EventCard(QFrame):
             layout.addWidget(self.content_edit)
             self.content_edit.adjustHeight()
             
+        # Save as Skill Button
+        if type == "code_source":
+            btn_layout = QHBoxLayout()
+            btn_layout.addStretch()
+            save_btn = QPushButton("保存为技能")
+            save_btn.setCursor(Qt.PointingHandCursor)
+            save_btn.setStyleSheet("""
+                QPushButton { background-color: #e8f0fe; color: #1a73e8; border: none; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: bold; }
+                QPushButton:hover { background-color: #d2e3fc; }
+            """)
+            save_btn.clicked.connect(lambda: self.save_skill_requested.emit(self.code_content))
+            btn_layout.addWidget(save_btn)
+            layout.addLayout(btn_layout)
+
         # Style
         self.setStyleSheet("""
             QFrame#EventCard {
@@ -340,7 +369,24 @@ class ChatBubble(QFrame):
                  # Normal Content
                  if role == "Agent":
                      content_edit = AutoResizingTextEdit()
-                     content_edit.setPlainText(text)
+                     # Markdown rendering
+                     try:
+                        html_content = markdown.markdown(text, extensions=['fenced_code', 'tables'])
+                        # Basic styling
+                        style = """
+                        <style>
+                           pre { background-color: #f1f3f4; padding: 8px; border-radius: 4px; }
+                           code { background-color: #f1f3f4; padding: 2px 4px; border-radius: 2px; }
+                           h1, h2, h3, h4 { color: #202124; margin-top: 10px; margin-bottom: 5px; }
+                           a { color: #1a73e8; text-decoration: none; }
+                           ul, ol { margin-left: 0px; padding-left: 20px; }
+                        </style>
+                        """
+                        content_edit.setHtml(style + html_content)
+                     except Exception as e:
+                        # Fallback if markdown fails
+                        content_edit.setPlainText(text)
+                        
                      content_edit.setStyleSheet("color: #000; font-size: 13px; background: transparent;")
                      layout.addWidget(content_edit)
                      content_edit.adjustHeight()
@@ -356,6 +402,8 @@ class ChatBubble(QFrame):
             self.setStyleSheet("background-color: #ffffff; border-radius: 10px; margin: 5px; border: 1px solid #ddd;")
 
 class TaskMonitorWidget(QWidget):
+    save_skill_signal = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(320)
@@ -410,6 +458,9 @@ class TaskMonitorWidget(QWidget):
             
     def add_event(self, title, content, type="info"):
         card = EventCard(title, content, type)
+        if type == "code_source":
+            card.save_skill_requested.connect(self.save_skill_signal)
+            
         # Insert before stretch (last item)
         self.timeline_layout.insertWidget(self.timeline_layout.count()-1, card)
         # Auto scroll to bottom
@@ -447,7 +498,14 @@ class MainWindow(QMainWindow):
              icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_internal', 'images', 'logo.png')
         
         if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+            app_icon = QIcon(icon_path)
+            self.setWindowIcon(app_icon)
+            # Ensure taskbar icon is set for Windows
+            if platform.system() == 'Windows':
+                import ctypes
+                myappid = f'deepseek.cowork.v3.2.{uuid.getnode()}' # arbitrary string
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
             
         self.resize(1000, 800)
         self.workspace_dir = None
@@ -474,6 +532,7 @@ class MainWindow(QMainWindow):
         
         # Initialize SkillManager for UI
         self.skill_manager = SkillManager(None, self.config_manager)
+        self.skill_generator = SkillGenerator(self.config_manager)
 
         # Connect to Interaction Bridge
         bridge.request_confirmation_signal.connect(self.handle_confirmation_request)
@@ -639,6 +698,7 @@ class MainWindow(QMainWindow):
 
         # Right Sidebar (Task Monitor)
         self.task_monitor = TaskMonitorWidget()
+        self.task_monitor.save_skill_signal.connect(self.handle_save_skill_request)
         root_layout.addWidget(self.task_monitor)
 
         # Initialize session state
@@ -954,6 +1014,86 @@ class MainWindow(QMainWindow):
         else:
              self.task_monitor.add_event("信息", text, "info")
 
+    def handle_save_skill_request(self, code):
+        """Handle 'Save as Skill' request"""
+        # 1. Show Progress
+        progress = QDialog(self)
+        progress.setWindowTitle("正在生成技能")
+        progress.setFixedSize(300, 100)
+        p_layout = QVBoxLayout(progress)
+        p_layout.addWidget(QLabel("正在分析代码并生成通用技能...\n这可能需要几秒钟。"))
+        progress.setModal(True)
+        progress.show()
+        QApplication.processEvents()
+
+        # 2. Call Generator
+        result = self.skill_generator.refactor_code(code)
+        progress.close()
+
+        if "error" in result:
+            QMessageBox.critical(self, "生成失败", f"Error: {result['error']}")
+            return
+
+        # 3. Confirmation Dialog
+        dialog = QDialog(self)
+        dialog.setWindowTitle("确认新技能")
+        dialog.resize(500, 600)
+        d_layout = QVBoxLayout(dialog)
+        
+        # Form
+        form = QFormLayout()
+        name_input = QLineEdit(result.get("skill_name", ""))
+        desc_input = QLineEdit(result.get("description", ""))
+        desc_cn_input = QLineEdit(result.get("description_cn", ""))
+        tool_name_input = QLineEdit(result.get("tool_name", ""))
+        tool_desc_input = QLineEdit(result.get("description", "")) # reuse desc
+        
+        form.addRow("技能名称 (Skill Name):", name_input)
+        form.addRow("中文描述:", desc_cn_input)
+        form.addRow("英文描述:", desc_input)
+        form.addRow("函数名称 (Tool Name):", tool_name_input)
+        form.addRow("函数描述:", tool_desc_input)
+        d_layout.addLayout(form)
+        
+        # Code Editor
+        d_layout.addWidget(QLabel("代码实现:"))
+        code_edit = QTextEdit()
+        code_edit.setPlainText(result.get("code", ""))
+        d_layout.addWidget(code_edit)
+        
+        # Buttons
+        btns = QHBoxLayout()
+        save_btn = QPushButton("确认创建")
+        save_btn.setStyleSheet("background-color: #1a73e8; color: white; padding: 8px;")
+        cancel_btn = QPushButton("取消")
+        
+        btns.addWidget(save_btn)
+        btns.addWidget(cancel_btn)
+        d_layout.addLayout(btns)
+        
+        def on_save():
+            res = create_new_skill(
+                self.workspace_dir or os.getcwd(),
+                name_input.text(),
+                desc_input.text(),
+                tool_name_input.text(),
+                tool_desc_input.text(),
+                code_edit.toPlainText(),
+                desc_cn_input.text()
+            )
+            if "Success" in res:
+                QMessageBox.information(dialog, "成功", res)
+                dialog.accept()
+                # Reload skills
+                self.skill_manager.load_skills()
+            else:
+                QMessageBox.critical(dialog, "错误", res)
+
+        save_btn.clicked.connect(on_save)
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        dialog.exec()
+
     def process_agent_logic(self, user_text):
         """启动 LLM 线程获取响应"""
         self.task_monitor.set_status("thinking")
@@ -1009,9 +1149,13 @@ class MainWindow(QMainWindow):
         self.save_chat_history()
 
         # 3. Extract and Execute Code
-        code_match = re.search(r'```python(.*?)```', content, re.DOTALL)
+        # Relaxed regex to catch ```python and ``` python
+        code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
         if code_match:
             code_block = code_match.group(1).strip()
+            # Show code source in Task Monitor
+            self.task_monitor.add_event("即将执行的代码", code_block, "code_source")
+
             self.task_monitor.set_status("running", "正在执行代码...")
             self.append_log("System: 检测到代码块，准备执行...")
             self.code_worker = CodeWorker(code_block, self.workspace_dir)

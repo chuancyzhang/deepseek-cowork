@@ -29,9 +29,26 @@ class SkillManager:
                  
                  # Check standard location (next to exe) - User added skills
                  self.skills_dirs.append(os.path.join(base_dir, "skills"))
+                 self.skills_dirs.append(os.path.join(base_dir, "ai_skills"))
         else:
             # Normal python execution
-            self.skills_dirs.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills"))
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            self.skills_dirs.append(os.path.join(repo_root, "skills"))
+            self.skills_dirs.append(os.path.join(repo_root, "ai_skills"))
+            
+            # Also check dist folder (for cross-environment visibility during dev)
+            # This allows dev mode to see skills created while running the EXE
+            dist_dir = os.path.join(repo_root, "dist")
+            if os.path.exists(dist_dir):
+                for item in os.listdir(dist_dir):
+                    # Standard skills
+                    candidate_path = os.path.join(dist_dir, item, "skills")
+                    if os.path.isdir(candidate_path):
+                        self.skills_dirs.append(candidate_path)
+                    # AI skills
+                    candidate_path_ai = os.path.join(dist_dir, item, "ai_skills")
+                    if os.path.isdir(candidate_path_ai):
+                        self.skills_dirs.append(candidate_path_ai)
 
         self.tools = {} # name -> function
         self.tool_definitions = [] # JSON schemas for LLM
@@ -44,11 +61,53 @@ class SkillManager:
     def set_workspace_dir(self, workspace_dir):
         self.workspace_dir = workspace_dir
 
+    def _scan_dist_dirs(self):
+        """
+        Dynamically scan for new skills directories.
+        - In Dev mode: Scan dist folder to pick up skills created by EXE runs.
+        - In Frozen mode: Scan exe directory for newly created ai_skills folder.
+        """
+        if getattr(sys, 'frozen', False):
+            # EXE Mode
+            base_dir = os.path.dirname(sys.executable)
+            
+            # Check standard location (next to exe)
+            candidate_paths = [
+                os.path.join(base_dir, "skills"),
+                os.path.join(base_dir, "ai_skills")
+            ]
+            
+            for path in candidate_paths:
+                if os.path.isdir(path) and path not in self.skills_dirs:
+                    self.skills_dirs.append(path)
+            return
+
+        # Dev Mode
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        dist_dir = os.path.join(repo_root, "dist")
+        
+        if not os.path.exists(dist_dir):
+            return
+
+        for item in os.listdir(dist_dir):
+            # Standard skills
+            candidate_path = os.path.join(dist_dir, item, "skills")
+            if os.path.isdir(candidate_path) and candidate_path not in self.skills_dirs:
+                self.skills_dirs.append(candidate_path)
+            
+            # AI skills
+            candidate_path_ai = os.path.join(dist_dir, item, "ai_skills")
+            if os.path.isdir(candidate_path_ai) and candidate_path_ai not in self.skills_dirs:
+                self.skills_dirs.append(candidate_path_ai)
+
     def get_all_skills(self):
         """
         Scan all skill directories and return a list of skill info dictionaries.
         Includes both enabled and disabled skills.
         """
+        # Dynamically check for new dist directories in dev mode
+        self._scan_dist_dirs()
+
         all_skills = []
         seen_skills = set()
         
@@ -57,6 +116,9 @@ class SkillManager:
                 continue
             
             for skill_name in os.listdir(skills_dir):
+                if skill_name == "__pycache__" or skill_name.startswith('.'):
+                    continue
+
                 if skill_name in seen_skills:
                     continue
                 
@@ -86,6 +148,9 @@ class SkillManager:
                             skill_info["description"] = meta["description"]
                         # Merge all other meta fields
                         skill_info.update(meta)
+                
+                # Force 'ai_generated' if folder name suggests (optional fallback)
+                # or if user explicitly created it via tool (which we can't easily track without meta)
                 
                 all_skills.append(skill_info)
                 seen_skills.add(skill_name)
@@ -133,6 +198,9 @@ class SkillManager:
                 continue
 
             for skill_name in os.listdir(skills_dir):
+                if skill_name == "__pycache__" or skill_name.startswith('.'):
+                    continue
+
                 # Check config if enabled
                 if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):
                     continue

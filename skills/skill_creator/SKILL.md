@@ -1,5 +1,5 @@
 ---
-name: skill-creator
+name: skill_creator
 description: Allows creating new skills dynamically.
 description_cn: 允许动态创建新的功能模块。
 license: Apache-2.0

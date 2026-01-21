@@ -84,6 +84,13 @@ class CodeWorker(QThread):
             # Prepend input() override to capture user interaction
             input_override = """
 import sys
+import io
+
+# Set stdout/stderr to utf-8 explicitly for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 def input(prompt=""):
     print(f"__REQUEST_INPUT__:{prompt}", flush=True)
     return sys.stdin.readline().strip()
@@ -136,6 +143,10 @@ def input(prompt=""):
 
             if self.is_stopped: return
 
+            # Force environment variables for UTF-8 encoding
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+
             self.output_signal.emit(f"Running with {python_exe} in: {self.cwd}...")
             self.process = subprocess.Popen(
                 [python_exe, temp_path],
@@ -146,7 +157,8 @@ def input(prompt=""):
                 cwd=self.cwd,
                 encoding='utf-8', # 强制 UTF-8 避免中文乱码
                 errors='replace',
-                bufsize=0 # Unbuffered for real-time
+                bufsize=0, # Unbuffered for real-time
+                env=env # Apply environment variables
             )
             
             # Real-time output reading

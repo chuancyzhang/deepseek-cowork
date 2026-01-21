@@ -28,7 +28,8 @@ a = Analysis(
         'duckduckgo_search',
         'trafilatura',
         'bs4',
-        'requests'
+        'requests',
+        'markdown'
     ],
     hookspath=[],
     hooksconfig={},

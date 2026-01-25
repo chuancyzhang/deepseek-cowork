@@ -16,9 +16,17 @@ class ConfigManager:
         self.config = {
             "api_key": "",
             "base_url": "https://api.deepseek.com",
-            "disabled_skills": []
+            "disabled_skills": [],
+            "god_mode": False
         }
         self.load_config()
+
+    def get_god_mode(self):
+        return self.config.get("god_mode", False)
+
+    def set_god_mode(self, enabled: bool):
+        self.config["god_mode"] = enabled
+        self.save_config()
 
     def load_config(self):
         if os.path.exists(self.config_path):

@@ -2,7 +2,12 @@ import os
 import json
 from core.interaction import ask_user
 
-def list_files(workspace_dir, path="."):
+def _is_god_mode(context):
+    if context and 'config_manager' in context:
+        return context['config_manager'].get_god_mode()
+    return False
+
+def list_files(workspace_dir, path=".", _context=None):
     """
     List files in the current workspace directory.
     
@@ -14,9 +19,11 @@ def list_files(workspace_dir, path="."):
         if not workspace_dir:
             return "Error: Workspace not selected."
         
+        god_mode = _is_god_mode(_context)
+        
         # Security check
         abs_path = os.path.abspath(os.path.join(workspace_dir, path))
-        if not abs_path.startswith(os.path.abspath(workspace_dir)):
+        if not god_mode and not abs_path.startswith(os.path.abspath(workspace_dir)):
              return "Error: Access denied (Path Traversal)."
         
         if not os.path.exists(abs_path):
@@ -29,7 +36,7 @@ def list_files(workspace_dir, path="."):
     except Exception as e:
         return f"Error: {str(e)}"
 
-def rename_file(workspace_dir, old_path, new_path):
+def rename_file(workspace_dir, old_path, new_path, _context=None):
     """
     Rename a file or directory.
     
@@ -45,12 +52,15 @@ def rename_file(workspace_dir, old_path, new_path):
         abs_old_path = os.path.abspath(os.path.join(workspace_dir, old_path))
         abs_new_path = os.path.abspath(os.path.join(workspace_dir, new_path))
         abs_workspace = os.path.abspath(workspace_dir)
+        
+        god_mode = _is_god_mode(_context)
 
         # Security Checks
-        if not abs_old_path.startswith(abs_workspace):
-             return "Error: Access denied (Source Path Traversal)."
-        if not abs_new_path.startswith(abs_workspace):
-             return "Error: Access denied (Destination Path Traversal)."
+        if not god_mode:
+            if not abs_old_path.startswith(abs_workspace):
+                 return "Error: Access denied (Source Path Traversal)."
+            if not abs_new_path.startswith(abs_workspace):
+                 return "Error: Access denied (Destination Path Traversal)."
         
         if not os.path.exists(abs_old_path):
             return f"Error: Source '{old_path}' does not exist."
@@ -64,7 +74,7 @@ def rename_file(workspace_dir, old_path, new_path):
     except Exception as e:
         return f"Error: {str(e)}"
 
-def read_file(workspace_dir, path):
+def read_file(workspace_dir, path, _context=None):
     """
     Read the content of a file.
     
@@ -77,7 +87,9 @@ def read_file(workspace_dir, path):
             return "Error: Workspace not selected."
             
         abs_path = os.path.abspath(os.path.join(workspace_dir, path))
-        if not abs_path.startswith(os.path.abspath(workspace_dir)):
+        god_mode = _is_god_mode(_context)
+        
+        if not god_mode and not abs_path.startswith(os.path.abspath(workspace_dir)):
              return "Error: Access denied (Path Traversal)."
         
         if not os.path.exists(abs_path):
@@ -87,6 +99,7 @@ def read_file(workspace_dir, path):
             return f"Error: '{path}' is not a file."
             
         # Limit file size to avoid context overflow (e.g., 50KB)
+        # In God Mode, maybe we relax this? Or keep it for context safety. Let's keep it for now.
         if os.path.getsize(abs_path) > 50 * 1024:
              return f"Error: File '{path}' is too large to read directly (max 50KB)."
 
@@ -96,7 +109,7 @@ def read_file(workspace_dir, path):
     except Exception as e:
         return f"Error: {str(e)}"
 
-def delete_file(workspace_dir, path):
+def delete_file(workspace_dir, path, _context=None):
     """
     Delete a file or empty directory.
     
@@ -109,7 +122,9 @@ def delete_file(workspace_dir, path):
             return "Error: Workspace not selected."
             
         abs_path = os.path.abspath(os.path.join(workspace_dir, path))
-        if not abs_path.startswith(os.path.abspath(workspace_dir)):
+        god_mode = _is_god_mode(_context)
+        
+        if not god_mode and not abs_path.startswith(os.path.abspath(workspace_dir)):
              return "Error: Access denied (Path Traversal)."
         
         if not os.path.exists(abs_path):

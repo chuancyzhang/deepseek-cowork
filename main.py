@@ -18,7 +18,7 @@ from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
 from PySide6.QtGui import QAction, QTextOption, QIcon, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget)
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton)
 from PySide6.QtCore import Qt, QThread, Signal
 
 # Try importing OpenAI
@@ -57,6 +57,13 @@ class SettingsDialog(QDialog):
         self.base_url_input.setText(self.config_manager.get("base_url", "https://api.deepseek.com"))
         form_layout.addRow("API Base URL (可选):", self.base_url_input)
         
+        # God Mode Toggle
+        self.god_mode_check = QCheckBox("启用 God Mode (解除安全限制)")
+        self.god_mode_check.setToolTip("警告：开启后，Agent 将拥有对全盘文件的访问权限，并可执行任意 Python 代码。\n请仅在您完全信任 Agent 操作时开启。")
+        self.god_mode_check.setChecked(self.config_manager.get_god_mode())
+        self.god_mode_check.setStyleSheet("QCheckBox { color: #d93025; font-weight: bold; }")
+        form_layout.addRow("", self.god_mode_check)
+        
         layout.addLayout(form_layout)
 
         # Buttons
@@ -77,6 +84,9 @@ class SettingsDialog(QDialog):
         if not base_url:
             base_url = "https://api.deepseek.com"
         self.config_manager.set("base_url", base_url)
+        # Save God Mode
+        self.config_manager.set_god_mode(self.god_mode_check.isChecked())
+        
         self.accept()
 
 class SkillsCenterDialog(QDialog):
@@ -368,74 +378,292 @@ class EventCard(QFrame):
             self.layout().addWidget(self.content_edit)
             self.content_edit.adjustHeight()
 
-class ChatBubble(QFrame):
-    """自定义聊天气泡组件，支持展示 Thinking 过程"""
-    def __init__(self, role, text, thinking=None):
+class SystemToast(QFrame):
+    """System Notification in Chat Stream"""
+    def __init__(self, text, type="info"):
         super().__init__()
         self.setFrameShape(QFrame.StyledPanel)
-        self.setLineWidth(1)
         
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        icon_label = QLabel()
+        if type == "error":
+            icon_label.setText("❌")
+            bg_color = "#fce8e6"
+            text_color = "#c5221f"
+            border_color = "#f6aea9"
+        elif type == "success":
+            icon_label.setText("✅")
+            bg_color = "#e6f4ea"
+            text_color = "#137333"
+            border_color = "#ceead6"
+        elif type == "warning":
+            icon_label.setText("⚠️")
+            bg_color = "#fef7e0"
+            text_color = "#b06000"
+            border_color = "#feefc3"
+        else:
+            icon_label.setText("ℹ️")
+            bg_color = "#e8f0fe"
+            text_color = "#1967d2"
+            border_color = "#d2e3fc"
+            
+        layout.addWidget(icon_label)
+        
+        msg_label = QLabel(text)
+        msg_label.setStyleSheet(f"color: {text_color}; font-weight: 500;")
+        msg_label.setWordWrap(True)
+        msg_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(msg_label)
+        
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 16px;
+                margin: 8px 40px;
+            }}
+        """)
+
+class ChatBubble(QFrame):
+    """自定义聊天气泡组件，支持展示 Thinking 过程 (可折叠)"""
+    def __init__(self, role, text, thinking=None, duration=None):
+        super().__init__()
+        self.setFrameShape(QFrame.NoFrame)
+        self.setLineWidth(0)
+        
+        # Main Layout
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         
-        # 角色标签
-        role_label = QLabel(f"<b>{role}</b>")
-        role_label.setStyleSheet("color: #2c3e50;" if role == "User" else "color: #27ae60;")
-        layout.addWidget(role_label)
-
-        if thinking == "...":
-            # Temporary Thinking State
-            think_label = QLabel("🧠 正在思考...")
-            think_label.setStyleSheet("color: #666; font-style: italic;")
-            layout.addWidget(think_label)
-        else:
-            if thinking:
-                 # Add thinking section
-                 think_header = QLabel("💭 深度思考")
-                 think_header.setStyleSheet("color: #5f6368; font-size: 11px; font-weight: bold; margin-bottom: 2px;")
-                 layout.addWidget(think_header)
-                 
-                 think_content = AutoResizingTextEdit()
-                 think_content.setPlainText(thinking)
-                 think_content.setStyleSheet("color: #666; font-size: 12px; background: #f8f9fa; border: 1px solid #eee; border-radius: 4px;")
-                 layout.addWidget(think_content)
-                 think_content.adjustHeight()
-
-            if text:
-                 # Normal Content
-                 if role == "Agent":
-                     content_edit = AutoResizingTextEdit()
-                     # Markdown rendering
-                     try:
-                        html_content = markdown.markdown(text, extensions=['fenced_code', 'tables'])
-                        # Basic styling
-                        style = """
-                        <style>
-                           pre { background-color: #f1f3f4; padding: 8px; border-radius: 4px; }
-                           code { background-color: #f1f3f4; padding: 2px 4px; border-radius: 2px; }
-                           h1, h2, h3, h4 { color: #202124; margin-top: 10px; margin-bottom: 5px; }
-                           a { color: #1a73e8; text-decoration: none; }
-                           ul, ol { margin-left: 0px; padding-left: 20px; }
-                        </style>
-                        """
-                        content_edit.setHtml(style + html_content)
-                     except Exception as e:
-                        # Fallback if markdown fails
-                        content_edit.setPlainText(text)
-                        
-                     content_edit.setStyleSheet("color: #000; font-size: 13px; background: transparent;")
-                     layout.addWidget(content_edit)
-                     content_edit.adjustHeight()
-                 else:
-                     content_label = QLabel(text)
-                     content_label.setWordWrap(True)
-                     content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                     layout.addWidget(content_label)
-        
+        # User Bubble Design
         if role == "User":
-            self.setStyleSheet("background-color: #e3f2fd; border-radius: 10px; margin: 5px;")
-        else:
-            self.setStyleSheet("background-color: #ffffff; border-radius: 10px; margin: 5px; border: 1px solid #ddd;")
+            # Container for alignment
+            container_layout = QHBoxLayout()
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.addStretch() # Push to right
+            
+            # Bubble Frame
+            bubble_frame = QFrame()
+            bubble_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #e7f8ff;
+                    border-radius: 16px;
+                    border-bottom-right-radius: 4px;
+                    padding: 4px;
+                }
+            """)
+            bubble_layout = QVBoxLayout(bubble_frame)
+            bubble_layout.setContentsMargins(12, 12, 12, 12)
+            bubble_layout.setSpacing(4)
+            
+            # Content
+            content_label = QLabel(text)
+            content_label.setWordWrap(True)
+            content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            content_label.setStyleSheet("color: #000000; font-size: 14px; line-height: 1.5; border: none; background: transparent;")
+            bubble_layout.addWidget(content_label)
+            
+            # Toolbar (Copy) - Removed as per user request
+            # toolbar_layout = QHBoxLayout()
+            # toolbar_layout.addStretch()
+            
+            # copy_btn = QPushButton("📄")
+            # copy_btn.setCursor(Qt.PointingHandCursor)
+            # copy_btn.setToolTip("复制内容")
+            # copy_btn.setFixedSize(20, 20)
+            # copy_btn.setStyleSheet("""
+            #     QPushButton { 
+            #         color: #999; 
+            #         border: none; 
+            #         background: transparent;
+            #         font-size: 12px;
+            #     } 
+            #     QPushButton:hover { color: #333; }
+            # """)
+            # copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text))
+            
+            # toolbar_layout.addWidget(copy_btn)
+            # bubble_layout.addLayout(toolbar_layout)
+
+            container_layout.addWidget(bubble_frame)
+            
+            # Add some spacing on the left to prevent it from being too wide
+            container_layout.setStretch(0, 1) # Stretch the left side
+            container_layout.setStretch(1, 0) # Don't stretch the bubble
+            
+            layout.addLayout(container_layout)
+            
+        # Agent Bubble Design
+        else: # Agent
+            # 1. Thinking Section (DeepSeek Style)
+            self.thinking_widget = QWidget()
+            think_layout = QVBoxLayout(self.thinking_widget)
+            think_layout.setContentsMargins(0, 0, 0, 0)
+            think_layout.setSpacing(0)
+            
+            # Toggle Button
+            self.think_toggle_btn = QPushButton("> 思考过程")
+            self.think_toggle_btn.setCursor(Qt.PointingHandCursor)
+            self.think_toggle_btn.setCheckable(True)
+            self.think_toggle_btn.setChecked(False) # Default collapsed
+            self.think_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    text-align: left;
+                    background-color: #f6f6f6;
+                    color: #666;
+                    border: 1px solid #eee;
+                    border-radius: 6px;
+                    padding: 8px 12px;
+                    font-size: 13px;
+                    font-family: "Segoe UI", sans-serif;
+                }
+                QPushButton:hover { background-color: #eee; }
+                QPushButton:checked { 
+                    background-color: #f0f0f0; 
+                    border-bottom-left-radius: 0; 
+                    border-bottom-right-radius: 0;
+                    border-bottom: none;
+                }
+            """)
+            self.think_toggle_btn.toggled.connect(self.toggle_thinking)
+            think_layout.addWidget(self.think_toggle_btn)
+
+            # Container for Content + Tools
+            self.think_container = QWidget()
+            self.think_container.setVisible(False)
+            self.think_container.setStyleSheet("""
+                QWidget {
+                    background: #fcfcfc;
+                    border: 1px solid #eee;
+                    border-top: none;
+                    border-bottom-left-radius: 6px;
+                    border-bottom-right-radius: 6px;
+                }
+            """)
+            self.think_container_layout = QVBoxLayout(self.think_container)
+            self.think_container_layout.setContentsMargins(12, 12, 12, 12)
+            self.think_container_layout.setSpacing(12)
+
+            # We don't create initial content here, it will be added dynamically
+            
+            think_layout.addWidget(self.think_container)
+            layout.addWidget(self.thinking_widget)
+            
+            # Handle Initial State
+            if thinking == "...":
+                self.set_thinking_state(True)
+            elif thinking:
+                self.update_thinking(thinking, duration, is_final=True)
+            else:
+                self.thinking_widget.setVisible(False)
+
+            # 2. Main Content
+            self.content_edit = AutoResizingTextEdit()
+            self.content_edit.setStyleSheet("background: transparent; border: none; margin-left: 2px;")
+            layout.addWidget(self.content_edit)
+            
+            if text:
+                self.set_main_content(text)
+
+    def toggle_thinking(self, checked):
+        self.think_container.setVisible(checked)
+        # Update arrow
+        arrow = "v" if checked else ">"
+        text = self.think_toggle_btn.text()
+        if text.startswith(">") or text.startswith("v"):
+            text = text[1:]
+        self.think_toggle_btn.setText(f"{arrow}{text}")
+        
+    def set_thinking_state(self, is_thinking):
+        if is_thinking:
+            self.think_toggle_btn.setText("v 正在思考...")
+            self.think_toggle_btn.setChecked(True) # Auto expand when thinking starts
+            self.update_thinking("正在分析需求...")
+            self.thinking_widget.setVisible(True)
+
+    def get_active_think_widget(self):
+        """Get the last text widget in the thinking layout, or create one."""
+        count = self.think_container_layout.count()
+        if count > 0:
+            last_item = self.think_container_layout.itemAt(count - 1)
+            widget = last_item.widget()
+            if isinstance(widget, AutoResizingTextEdit):
+                return widget
+        
+        # Create new text widget
+        new_widget = AutoResizingTextEdit()
+        new_widget.setStyleSheet("background: transparent; border: none; color: #5f6368; font-size: 13px; line-height: 1.5;")
+        self.think_container_layout.addWidget(new_widget)
+        return new_widget
+        
+    def update_thinking(self, text=None, duration=None, is_final=False):
+        if text is not None:
+            widget = self.get_active_think_widget()
+            widget.setPlainText(text)
+            widget.adjustHeight()
+        
+        if duration:
+            self.think_toggle_btn.setText(f"> 已思考 (用时 {duration:.1f} 秒)")
+        
+        if is_final:
+            self.think_toggle_btn.setChecked(False) # Collapse when done
+            
+    def set_main_content(self, text):
+        try:
+            # GitHub-like CSS for Markdown
+            style = """
+            <style>
+               body { 
+                   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+                   line-height: 1.6; 
+                   color: #24292f; 
+                   margin: 0; 
+                   font-size: 14px;
+               }
+               p { margin-top: 0; margin-bottom: 16px; }
+               pre { 
+                   background-color: #f6f8fa; 
+                   padding: 16px; 
+                   border-radius: 6px; 
+                   border: 1px solid #d0d7de; 
+                   white-space: pre-wrap; 
+                   margin-bottom: 16px;
+               }
+               code { 
+                   font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace; 
+                   font-size: 85%; 
+                   padding: 0.2em 0.4em; 
+                   background-color: rgba(175, 184, 193, 0.2); 
+                   border-radius: 6px; 
+               }
+               h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.3em; margin-top: 24px; }
+               a { color: #0969da; text-decoration: none; }
+               blockquote { 
+                   border-left: 0.25em solid #d0d7de; 
+                   color: #57606a; 
+                   padding: 0 1em; 
+                   margin: 0 0 16px 0; 
+               }
+               table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+               th, td { border: 1px solid #d0d7de; padding: 6px 13px; }
+               th { background-color: #f6f8fa; }
+            </style>
+            """
+            html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
+            self.content_edit.setHtml(style + html_content)
+        except Exception:
+            self.content_edit.setPlainText(text)
+        self.content_edit.adjustHeight()
+        
+    def add_tool_card(self, card_widget):
+        self.think_container_layout.addWidget(card_widget)
+        # Ensure thinking is visible when tool is added
+        if not self.think_toggle_btn.isChecked():
+            self.think_toggle_btn.setChecked(True)
 
 class TaskMonitorWidget(QWidget):
     save_skill_signal = Signal(str)
@@ -522,6 +750,119 @@ class TaskMonitorWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+class ToolCallCard(QFrame):
+    def __init__(self, tool_name, args, tool_id):
+        super().__init__()
+        self.tool_id = tool_id
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet("""
+            ToolCallCard {
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+            }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        icon_label = QLabel("🛠️") 
+        icon_label.setStyleSheet("font-size: 14px;")
+        
+        name_label = QLabel(f"调用工具: {tool_name}")
+        name_label.setStyleSheet("font-weight: bold; color: #1a73e8; font-size: 13px;")
+        
+        self.status_label = QLabel("Running...")
+        self.status_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 11px;")
+        
+        self.toggle_btn = QToolButton()
+        self.toggle_btn.setText("展开")
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setChecked(False)
+        self.toggle_btn.setToolTip("点击查看参数和结果")
+        self.toggle_btn.setStyleSheet("border: none; background: transparent; font-weight: bold; color: #5f6368;")
+        self.toggle_btn.clicked.connect(self.toggle_details)
+
+        header_layout.addWidget(icon_label)
+        header_layout.addWidget(name_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.status_label)
+        header_layout.addWidget(self.toggle_btn)
+        layout.addLayout(header_layout)
+        
+        # Details Container (Args + Result)
+        self.details_container = QWidget()
+        self.details_container.setVisible(False)
+        details_layout = QVBoxLayout(self.details_container)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(8)
+        layout.addWidget(self.details_container)
+
+        # Args
+        if isinstance(args, str):
+            try:
+                args_obj = json.loads(args)
+                args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
+            except:
+                args_text = args
+        else:
+            args_text = json.dumps(args, indent=2, ensure_ascii=False)
+            
+        self.args_label = AutoResizingTextEdit()
+        self.args_label.setPlainText(args_text)
+        self.args_label.setStyleSheet("""
+            QTextEdit {
+                color: #444; 
+                font-family: 'Consolas', monospace; 
+                font-size: 11px; 
+                background-color: #f8f9fa; 
+                padding: 8px; 
+                border-radius: 4px;
+            }
+        """)
+        details_layout.addWidget(self.args_label)
+        
+        # Result Area (Collapsible)
+        self.result_container = QWidget()
+        self.result_container.setVisible(False)
+        res_layout = QVBoxLayout(self.result_container)
+        res_layout.setContentsMargins(0, 8, 0, 0)
+        
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #eeeeee;")
+        res_layout.addWidget(line)
+        
+        res_title = QLabel("执行结果:")
+        res_title.setStyleSheet("font-weight: bold; color: #333; font-size: 11px; margin-top: 4px;")
+        res_layout.addWidget(res_title)
+        
+        self.result_label = AutoResizingTextEdit()
+        self.result_label.setStyleSheet("color: #333; font-family: 'Consolas', monospace; font-size: 11px;")
+        res_layout.addWidget(self.result_label)
+        
+        details_layout.addWidget(self.result_container)
+
+    def toggle_details(self, checked):
+        self.details_container.setVisible(checked)
+        self.toggle_btn.setText("收起" if checked else "展开")
+
+    def set_result(self, result_text):
+        self.status_label.setText("Completed")
+        self.status_label.setStyleSheet("color: #27ae60; font-weight: bold; font-size: 11px;")
+        
+        display_text = result_text
+        if len(display_text) > 2000:
+            display_text = display_text[:2000] + "... (output truncated)"
+            
+        self.result_label.setPlainText(display_text)
+        self.result_container.setVisible(True)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -558,10 +899,29 @@ class MainWindow(QMainWindow):
             QLineEdit#MainInput:focus {
                 border: 1px solid #1a73e8;
             }
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #d0d7de;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                background-color: transparent;
+                padding: 6px 24px 6px 12px;
+                color: #24292f;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #1a73e8;
+                color: #ffffff;
+            }
         """)
         
         # Initialize conversation history
         self.messages = []
+        
+        # Track Tool Cards
+        self.tool_cards = {}
         
         self.config_manager = ConfigManager()
         # API Key is now in config_manager
@@ -732,10 +1092,10 @@ class MainWindow(QMainWindow):
         chips_layout.addStretch()
         layout.addLayout(chips_layout)
 
-        # Right Sidebar (Task Monitor)
-        self.task_monitor = TaskMonitorWidget()
-        self.task_monitor.save_skill_signal.connect(self.handle_save_skill_request)
-        root_layout.addWidget(self.task_monitor)
+        # Right Sidebar (Task Monitor) - Removed
+        # self.task_monitor = TaskMonitorWidget()
+        # self.task_monitor.save_skill_signal.connect(self.handle_save_skill_request)
+        # root_layout.addWidget(self.task_monitor)
 
         # Initialize session state
         self.current_session_id = None
@@ -748,8 +1108,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         label = QLabel(message)
         label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(label)
         hint_label = QLabel("如果不确定，可以先在下方输入问题问问 AI：")
+        hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(hint_label)
         ai_input = QLineEdit()
         ai_input.setPlaceholderText("例如：这一步会删除原文件吗？是否可以撤销？")
@@ -769,11 +1131,6 @@ class MainWindow(QMainWindow):
             text = ai_input.text().strip()
             if not text:
                 return
-            
-            # 将用户的回复显示在聊天记录中
-            self.add_chat_bubble("User", text)
-            self.messages.append({"role": "user", "content": text})
-            self.save_chat_history()
             
             # 将文本作为决策结果返回给 Agent
             decision["value"] = text
@@ -874,7 +1231,7 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
         self.chat_layout.addStretch()
-        self.task_monitor.clear()
+        # self.task_monitor.clear()
         self.active_skills_label.setText("本次会话使用的功能: ")
 
         history_path = os.path.join(os.getcwd(), 'chat_history', f'chat_history_{session_id}.json')
@@ -908,7 +1265,7 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.deleteLater()
         self.chat_layout.addStretch()
-        self.task_monitor.clear()
+        # self.task_monitor.clear()
         self.active_skills_label.setText("本次会话使用的功能: ")
         self.append_log("System: 新对话已创建")
         self.refresh_history_list()
@@ -1037,26 +1394,59 @@ class MainWindow(QMainWindow):
         
         self.process_agent_logic(user_text)
 
-    def add_chat_bubble(self, role, text, thinking=None):
-        bubble = ChatBubble(role, text, thinking)
+    def add_tool_card(self, data):
+        card = ToolCallCard(data['name'], data['args'], data['id'])
+        self.tool_cards[data['id']] = card
+        
+        # Add to the active thinking bubble if available
+        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
+            self.temp_thinking_bubble.add_tool_card(card)
+        elif hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
+             # Fallback to last bubble
+             self.last_agent_bubble.add_tool_card(card)
+        else:
+            # Fallback to direct layout insertion (should rarely happen)
+            wrapper = QWidget()
+            layout = QHBoxLayout(wrapper)
+            layout.setContentsMargins(48, 4, 16, 4)
+            layout.addWidget(card)
+            layout.addStretch()
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
+        
+        QApplication.processEvents()
+
+    def update_tool_card(self, data):
+        tool_id = data['id']
+        result = data['result']
+        if tool_id in self.tool_cards:
+            self.tool_cards[tool_id].set_result(result)
+
+    def add_chat_bubble(self, role, text, thinking=None, duration=None):
+        bubble = ChatBubble(role, text, thinking, duration)
         # 插入到倒数第二个位置（stretch之前）
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
         # 滚动到底部
         QApplication.processEvents() 
         # (实际滚动逻辑略，PySide 自动处理较好)
 
+    def add_system_toast(self, text, type="info"):
+        toast = SystemToast(text, type)
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, toast)
+        QApplication.processEvents()
+
     def append_log(self, text):
-        if text.startswith("System:"):
-             self.task_monitor.add_event("系统", text.replace("System: ", ""), "info")
-        elif text.startswith("Error:"):
-             self.task_monitor.add_event("错误", text.replace("Error: ", ""), "error")
-        elif text.startswith("Agent:"):
-             self.task_monitor.add_event("思考", text.replace("Agent: ", ""), "think")
-        elif text.startswith("Reasoning:"):
-             # Display full reasoning in TaskMonitor
-             self.task_monitor.add_event("深度思考", text.replace("Reasoning: ", ""), "think")
-        else:
-             self.task_monitor.add_event("信息", text, "info")
+        print(f"[Log] {text}")
+        # if text.startswith("System:"):
+        #      self.task_monitor.add_event("系统", text.replace("System: ", ""), "info")
+        # elif text.startswith("Error:"):
+        #      self.task_monitor.add_event("错误", text.replace("Error: ", ""), "error")
+        # elif text.startswith("Agent:"):
+        #      self.task_monitor.add_event("思考", text.replace("Agent: ", ""), "think")
+        # elif text.startswith("Reasoning:"):
+        #      # Display full reasoning in TaskMonitor
+        #      self.task_monitor.add_event("深度思考", text.replace("Reasoning: ", ""), "think")
+        # else:
+        #      self.task_monitor.add_event("信息", text, "info")
 
     def handle_save_skill_request(self, code):
         """Handle 'Save as Skill' request"""
@@ -1140,18 +1530,22 @@ class MainWindow(QMainWindow):
 
     def process_agent_logic(self, user_text):
         """启动 LLM 线程获取响应"""
-        self.task_monitor.set_status("thinking")
+        # self.task_monitor.set_status("thinking")
         self.append_log(f"Agent: 正在深度思考 (DeepSeek CoT)...")
         
-        # Insert a temporary "Thinking" bubble in the center
-        self.temp_thinking_bubble = ChatBubble("agent", "正在思考...", thinking="...")
+        # Insert a temporary "Thinking" bubble
+        self.temp_thinking_bubble = ChatBubble("agent", "", thinking="正在分析需求...")
+        self.temp_thinking_bubble.set_thinking_state(True)
         self.chat_layout.insertWidget(self.chat_layout.count()-1, self.temp_thinking_bubble)
         QApplication.processEvents()
 
         self.llm_worker = LLMWorker(self.messages, self.config_manager, self.workspace_dir)
         self.llm_worker.finished_signal.connect(self.handle_llm_response)
         self.llm_worker.step_signal.connect(self.append_log) # Use the unified handler
+        self.llm_worker.thinking_signal.connect(self.handle_thinking_signal) # Real-time thinking
         self.llm_worker.skill_used_signal.connect(self.handle_skill_used)
+        self.llm_worker.tool_call_signal.connect(self.add_tool_card)
+        self.llm_worker.tool_result_signal.connect(self.update_tool_card)
         self.llm_worker.start()
         
         # UI State Update
@@ -1161,11 +1555,23 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(True)
         self.loop_hint.setVisible(True)
 
+    def handle_thinking_signal(self, text):
+        """实时更新思考过程"""
+        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
+            self.temp_thinking_bubble.update_thinking(text)
+        elif hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
+            self.last_agent_bubble.update_thinking(text)
+
     def handle_llm_response(self, result):
-        # Remove temporary thinking bubble
-        if hasattr(self, 'temp_thinking_bubble'):
-            self.temp_thinking_bubble.deleteLater()
+        # Retrieve the bubble to update
+        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
+            bubble = self.temp_thinking_bubble
             del self.temp_thinking_bubble
+        else:
+            bubble = ChatBubble("agent", "", thinking=result.get("reasoning"))
+            self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        
+        self.last_agent_bubble = bubble
 
         # UI State Reset
         self.pause_btn.setVisible(False)
@@ -1173,23 +1579,29 @@ class MainWindow(QMainWindow):
         self.loop_hint.setVisible(False)
         
         if "error" in result:
-            self.task_monitor.set_status("idle")
+            # self.task_monitor.set_status("idle")
             self.append_log(f"Error: {result['error']}")
-            self.add_chat_bubble("System", f"Error: {result['error']}")
+            self.add_system_toast(f"Error: {result['error']}", "error")
+            bubble.set_main_content(f"⚠️ Error: {result['error']}")
             self.send_btn.setEnabled(True)
             return
 
         reasoning = result.get("reasoning", "")
         content = result.get("content", "")
         role = result.get("role", "assistant")
+        duration = result.get("duration", None)
 
-        # 1. Update UI - Only show content, reasoning is already in TaskMonitor (via step_signal)
-        # We pass thinking=None to hide it from the center chat
-        self.add_chat_bubble("Agent", content, thinking=None)
+        # 1. Update UI - Show content AND reasoning
+        # Update duration and state only. Reasoning text is already set via streaming or __init__.
+        bubble.update_thinking(duration=duration, is_final=True)
+        bubble.set_main_content(content)
 
-        # 2. Update History (Important: Do not include reasoning_content in context for next turn)
-        # According to DeepSeek docs, we just append content.
-        self.messages.append({"role": role, "content": content})
+        # 2. Update History
+        self.messages.append({
+            "role": role, 
+            "content": content,
+            "reasoning": reasoning
+        })
         self.save_chat_history()
 
         # 3. Extract and Execute Code
@@ -1197,13 +1609,17 @@ class MainWindow(QMainWindow):
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
         if code_match:
             code_block = code_match.group(1).strip()
-            # Show code source in Task Monitor
-            self.task_monitor.add_event("即将执行的代码", code_block, "code_source")
+            # self.task_monitor.add_event("即将执行的代码", code_block, "code_source")
 
-            self.task_monitor.set_status("running", "正在执行代码...")
+            # self.task_monitor.set_status("running", "正在执行代码...")
             self.append_log("System: 检测到代码块，准备执行...")
-            self.code_worker = CodeWorker(code_block, self.workspace_dir)
-            self.code_worker.output_signal.connect(self.task_monitor.add_code_output)
+            god_mode = self.config_manager.get_god_mode()
+            
+            if god_mode:
+                 self.add_system_toast("⚠️ God Mode 已启用：正在执行高权限代码，请注意风险", "warning")
+
+            self.code_worker = CodeWorker(code_block, self.workspace_dir, god_mode=god_mode)
+            self.code_worker.output_signal.connect(self.handle_code_output)
             self.code_worker.finished_signal.connect(self.handle_code_finished)
             self.code_worker.input_request_signal.connect(self.handle_code_input_request)
             
@@ -1214,12 +1630,31 @@ class MainWindow(QMainWindow):
             
             self.code_worker.start()
         else:
-            self.task_monitor.set_status("idle")
+            # self.task_monitor.set_status("idle")
             self.send_btn.setEnabled(True)
 
+    def handle_code_output(self, text):
+        if hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
+            # Check if we already have a code output widget
+            if not hasattr(self.last_agent_bubble, 'code_output_edit'):
+                # Create one
+                label = QLabel("执行结果:")
+                label.setStyleSheet("font-weight: bold; color: #333; margin-top: 8px; margin-left: 4px;")
+                self.last_agent_bubble.layout().addWidget(label)
+                
+                self.last_agent_bubble.code_output_edit = AutoResizingTextEdit()
+                self.last_agent_bubble.code_output_edit.setStyleSheet("color: #444; font-family: Consolas; background: #f8f9fa; border: 1px solid #eee; padding: 8px; border-radius: 4px; margin-left: 4px;")
+                self.last_agent_bubble.code_output_edit.setReadOnly(True)
+                self.last_agent_bubble.layout().addWidget(self.last_agent_bubble.code_output_edit)
+            
+            self.last_agent_bubble.code_output_edit.append(text)
+            self.last_agent_bubble.code_output_edit.adjustHeight()
+            QApplication.processEvents()
+
     def handle_code_finished(self):
-        self.task_monitor.set_status("idle")
-        self.task_monitor.add_event("系统", "代码执行完成", "success")
+        # self.task_monitor.set_status("idle")
+        # self.task_monitor.add_event("系统", "代码执行完成", "success")
+        self.add_system_toast("代码执行完成", "success")
         self.stop_btn.setVisible(False)
         self.stop_btn.setText("⏹️ 停止") # Reset text
         self.send_btn.setEnabled(True)

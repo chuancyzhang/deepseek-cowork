@@ -9,16 +9,33 @@ from core.env_utils import get_python_executable
 class SecurityError(Exception):
     pass
 
-def validate_code_safety(code, allowed_dir):
+def validate_code_safety(code, allowed_dir, god_mode=False):
     """AST static analysis for code safety"""
+    if god_mode:
+        return True
+
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
         raise SecurityError(f"Syntax Error: {e}")
 
     allowed_dir = os.path.abspath(allowed_dir).lower()
+    
+    # Dangerous modules that require God Mode
+    dangerous_modules = {'subprocess', 'winreg', 'ctypes'}
 
     for node in ast.walk(tree):
+        # 1. Check for dangerous imports
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split('.')[0] in dangerous_modules:
+                     raise SecurityError(f"Security Alert: Import of restricted module '{alias.name}' is not allowed in Standard Mode. Please enable God Mode to use it.")
+        
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.split('.')[0] in dangerous_modules:
+                 raise SecurityError(f"Security Alert: Import from restricted module '{node.module}' is not allowed in Standard Mode. Please enable God Mode to use it.")
+
+        # 2. Check Path Traversal in strings
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             val = node.value
             if ".." in val:
@@ -29,7 +46,7 @@ def validate_code_safety(code, allowed_dir):
                      raise SecurityError(f"Security Alert: Unauthorized absolute path access: '{val}'")
     return True
 
-def run_python_code(workspace_dir, code):
+def run_python_code(workspace_dir, code, _context=None):
     """
     Execute Python code in the workspace.
     
@@ -40,8 +57,12 @@ def run_python_code(workspace_dir, code):
     if not workspace_dir:
         return "Error: Workspace not selected."
         
+    god_mode = False
+    if _context and 'config_manager' in _context:
+        god_mode = _context['config_manager'].get_god_mode()
+
     try:
-        validate_code_safety(code, workspace_dir)
+        validate_code_safety(code, workspace_dir, god_mode=god_mode)
     except SecurityError as e:
         return f"Error: {str(e)}"
 

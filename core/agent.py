@@ -22,8 +22,11 @@ except ImportError:
 class SecurityError(Exception):
     pass
 
-def validate_code_safety(code, allowed_dir):
+def validate_code_safety(code, allowed_dir, god_mode=False):
     """AST 静态分析代码安全性"""
+    if god_mode:
+        return True
+
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
@@ -48,10 +51,11 @@ class CodeWorker(QThread):
     finished_signal = Signal()
     input_request_signal = Signal(str)
 
-    def __init__(self, code, cwd):
+    def __init__(self, code, cwd, god_mode=False):
         super().__init__()
         self.code = code
         self.cwd = cwd
+        self.god_mode = god_mode
         self.process = None
         self.is_stopped = False
 
@@ -78,7 +82,7 @@ class CodeWorker(QThread):
         try:
             # 1. Validation
             try:
-                validate_code_safety(self.code, self.cwd)
+                validate_code_safety(self.code, self.cwd, god_mode=self.god_mode)
             except SecurityError as e:
                 self.output_signal.emit(f"❌ {str(e)}")
                 # We will let the finally block emit finished_signal
@@ -175,7 +179,10 @@ class LLMWorker(QThread):
     """后台调用 LLM API 的线程，支持 Tool Calls 和多轮思考"""
     finished_signal = Signal(dict)
     step_signal = Signal(str) # 用于输出中间步骤日志
+    thinking_signal = Signal(str) # 用于实时输出思考过程
     skill_used_signal = Signal(str) # Signal to report active skill usage
+    tool_call_signal = Signal(dict)
+    tool_result_signal = Signal(dict)
 
     def __init__(self, messages, config_manager, workspace_dir=None, parent_agent_id=None):
         super().__init__()
@@ -237,6 +244,7 @@ class LLMWorker(QThread):
         full_reasoning = ""
         final_content = ""
         turn_count = 0
+        total_duration = 0
         
         last_tool_signature = None
         repetition_count = 0
@@ -253,29 +261,115 @@ class LLMWorker(QThread):
             turn_count += 1
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
 
+            # Reset reasoning for the current turn (for UI display)
+            current_turn_reasoning = ""
+
             if self.api_key and OPENAI_AVAILABLE:
                 try:
+                    start_time = time.time()
                     client = OpenAI(api_key=self.api_key, base_url="https://api.deepseek.com")
-                    response = client.chat.completions.create(
-                        model="deepseek-reasoner", # or deepseek-chat with extra_body
+                    
+                    # Streaming Call
+                    stream = client.chat.completions.create(
+                        model="deepseek-reasoner",
                         messages=current_messages,
                         tools=self.tools,
-                        # extra_body={"thinking": {"type": "enabled"}} # If using deepseek-chat
+                        stream=True
                     )
                     
-                    msg = response.choices[0].message
-                    content = msg.content or ""
-                    tool_calls = msg.tool_calls
+                    # Streaming Buffers
+                    chunk_reasoning = ""
+                    chunk_content = ""
+                    tool_calls_buffer = {} # Index -> ToolCall object (dict)
                     
-                    # Extract reasoning
-                    reasoning = getattr(msg, 'reasoning_content', "") or ""
-                    if reasoning:
-                        full_reasoning += f"\n[Step {turn_count}]: {reasoning}"
-                        # Emit full reasoning with a special prefix so UI can handle it
-                        self.step_signal.emit(f"Reasoning: {reasoning}")
+                    for chunk in stream:
+                        # Check Pause/Stop during stream
+                        while self.is_paused:
+                             if self.is_stopped: break
+                             self.msleep(100)
+                        if self.is_stopped: break
+                        
+                        delta = chunk.choices[0].delta
+                        
+                        # 1. Handle Reasoning
+                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                            r_content = delta.reasoning_content
+                            current_turn_reasoning += r_content
+                            full_reasoning += r_content
+                            self.thinking_signal.emit(current_turn_reasoning) # Update UI with current turn reasoning only
+                            
+                        # 2. Handle Content
+                        if delta.content:
+                            chunk_content += delta.content
+                        
+                        # 3. Handle Tool Calls
+                        if delta.tool_calls:
+                            for tc in delta.tool_calls:
+                                index = tc.index
+                                if index not in tool_calls_buffer:
+                                    tool_calls_buffer[index] = {
+                                        "id": tc.id,
+                                        "type": tc.type,
+                                        "function": {
+                                            "name": tc.function.name,
+                                            "arguments": ""
+                                        }
+                                    }
+                                
+                                # Append arguments
+                                if tc.function and tc.function.arguments:
+                                    tool_calls_buffer[index]["function"]["arguments"] += tc.function.arguments
+                    
+                    end_time = time.time()
+                    duration = end_time - start_time
+                    total_duration += duration
+                    
+                    # Reconstruct final message object from buffers
+                    content = chunk_content
+                    
+                    # Reconstruct tool_calls list
+                    tool_calls = []
+                    if tool_calls_buffer:
+                        # Convert buffer to list of objects mimicking OpenAI ToolCall
+                        # We need to be careful to match the structure expected by the loop logic
+                        for idx in sorted(tool_calls_buffer.keys()):
+                            t_data = tool_calls_buffer[idx]
+                            # Create a simple object structure
+                            class ToolCallObj:
+                                pass
+                            class FunctionObj:
+                                pass
+                                
+                            t_obj = ToolCallObj()
+                            t_obj.id = t_data["id"]
+                            t_obj.type = t_data["type"]
+                            t_obj.function = FunctionObj()
+                            t_obj.function.name = t_data["function"]["name"]
+                            t_obj.function.arguments = t_data["function"]["arguments"]
+                            
+                            tool_calls.append(t_obj)
 
-                    # Append Assistant Message to History
-                    current_messages.append(msg)
+                    # Append Assistant Message to History (Manual reconstruction)
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": content
+                    }
+                    if full_reasoning:
+                        assistant_msg["reasoning_content"] = full_reasoning
+                        
+                    if tool_calls:
+                         # For history, we need the dict representation
+                         assistant_msg["tool_calls"] = [
+                             {
+                                 "id": t.id,
+                                 "type": t.type,
+                                 "function": {
+                                     "name": t.function.name,
+                                     "arguments": t.function.arguments
+                                 }
+                             } for t in tool_calls
+                         ]
+                    current_messages.append(assistant_msg)
                     
                     if tool_calls:
                         # --- Loop Detection ---
@@ -310,6 +404,13 @@ class LLMWorker(QThread):
                             args = json.loads(tool.function.arguments)
                             self.step_signal.emit(f"Executing Tool: {name}({args})")
                             
+                            # Emit Tool Call Signal
+                            self.tool_call_signal.emit({
+                                "id": tool.id,
+                                "name": name,
+                                "args": args
+                            })
+                            
                             # Report Active Skill
                             skill_name = self.skill_manager.get_skill_of_tool(name)
                             if skill_name:
@@ -327,6 +428,12 @@ class LLMWorker(QThread):
                                 }
                             )
                             
+                            # Emit Tool Result Signal
+                            self.tool_result_signal.emit({
+                                "id": tool.id,
+                                "result": str(result)
+                            })
+
                             current_messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool.id,
@@ -345,7 +452,6 @@ class LLMWorker(QThread):
                     return
             else:
                 # --- Mock Logic / Warning for Missing API Key ---
-                import time
                 time.sleep(1)
                 
                 reasoning = "检测到 API Key 未配置或 OpenAI 库不可用。无法连接到 DeepSeek 模型。"
@@ -363,5 +469,6 @@ class LLMWorker(QThread):
         self.finished_signal.emit({
             "reasoning": full_reasoning.strip(),
             "content": final_content,
-            "role": "assistant"
+            "role": "assistant",
+            "duration": total_duration
         })

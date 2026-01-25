@@ -21,3 +21,10 @@ Use this when you need to calculate data, process text, or perform tasks where n
 - **Sandboxed**: Code runs in the user's workspace.
 - **Security**: File operations are restricted to the workspace.
 - **Dependencies**: Standard library + installed packages (pandas, openpyxl, etc.) are available.
+
+## God Mode (System Operations)
+When God Mode is enabled:
+- **Full Access**: Path traversal checks are disabled (access C:/, D:/, etc.).
+- **Dangerous Modules**: `subprocess`, `winreg`, `ctypes` are allowed.
+- **Use Cases**: Registry editing, Process management (kill/list), System service management.
+- **Caution**: Always explain the intent clearly to the user before running dangerous code.

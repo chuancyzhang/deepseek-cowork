@@ -175,6 +175,120 @@ def input(prompt=""):
                     pass
             self.finished_signal.emit()
 
+class PlanGeneratorWorker(QThread):
+    """
+    专门用于 Deep Plan Mode 的规划线程。
+    任务：分析用户请求 -> 生成 Markdown 格式的详细计划 -> 返回计划内容。
+    注意：不执行任何写操作或代码运行。
+    """
+    finished_signal = Signal(str)
+    step_signal = Signal(str)
+    thinking_signal = Signal(str)
+
+    def __init__(self, messages, config_manager, workspace_dir=None):
+        super().__init__()
+        self.messages = messages
+        self.config_manager = config_manager
+        self.api_key = config_manager.get("api_key")
+        self.workspace_dir = workspace_dir
+        
+        # Skill Manager (Read-only tools preferred, but for simplicity we load all and restrict usage in Prompt)
+        # Actually, for planning, we might need 'list_files', 'read_file' to know context.
+        self.skill_manager = SkillManager(workspace_dir, config_manager)
+        self.tools = self.skill_manager.get_tool_definitions()
+        
+    def run(self):
+        self.step_signal.emit("Planning: Analyzing request and environment...")
+        
+        # Construct System Context for Planner
+        context_lines = [
+            f"Current Workspace: {self.workspace_dir}",
+            f"Operating System: {platform.system()} {platform.release()}",
+            f"Current Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "ROLE: You are an expert Technical Planner.",
+            "TASK: Analyze the user's request and the current workspace state. Generate a detailed, step-by-step execution plan.",
+            "OUTPUT FORMAT: Pure Markdown. Structure it with '## Goal', '## Analysis', '## Execution Plan' (numbered steps).",
+            "CONSTRAINT 1: You are in READ-ONLY mode. You can use tools like `list_files` or `read_file` to gather context, but DO NOT propose any code execution or file modification yet.",
+            "CONSTRAINT 2: Do not ask for user confirmation. Just output the best possible plan based on your analysis.",
+            "CONSTRAINT 3: Your output MUST be the content of the plan itself. DO NOT output code blocks to write files.",
+            "IMPORTANT: If the user request is simple, you MUST still generate a plan."
+        ]
+        
+        system_prompt = "\n".join(context_lines)
+        current_messages = self.messages.copy()
+        current_messages.insert(0, {"role": "system", "content": system_prompt})
+        
+        final_plan = ""
+        
+        if self.api_key and OPENAI_AVAILABLE:
+            try:
+                client = OpenAI(api_key=self.api_key, base_url="https://api.deepseek.com")
+                
+                # Single turn for planning
+                # We might need a loop if the planner wants to call read tools first
+                
+                turn_count = 0
+                while True:
+                    turn_count += 1
+                    if turn_count > 5: # Safety break
+                        break
+                        
+                    response = client.chat.completions.create(
+                        model="deepseek-reasoner",
+                        messages=current_messages,
+                        tools=self.tools,
+                        stream=False # Simplify for planner
+                    )
+                    
+                    message = response.choices[0].message
+                    
+                    # Handle Thinking (if available in message, though non-stream might hide it or put in reasoning_content)
+                    if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                         self.thinking_signal.emit(message.reasoning_content)
+
+                    if message.tool_calls:
+                        # Execute Read-Only tools
+                        current_messages.append(message)
+                        
+                        for tool_call in message.tool_calls:
+                            func_name = tool_call.function.name
+                            args = json.loads(tool_call.function.arguments)
+                            
+                            # Security Filter for Planner
+                            if func_name not in ['list_files', 'read_file', 'search_codebase', 'glob']:
+                                self.step_signal.emit(f"Planner: Skipping restricted tool {func_name}")
+                                tool_result = "Tool execution skipped: Planner is in Read-Only mode."
+                            else:
+                                self.step_signal.emit(f"Planner: Checking context via {func_name}...")
+                                try:
+                                    func = self.skill_manager.get_tool_function(func_name)
+                                    # Inject workspace_dir if needed
+                                    import inspect
+                                    sig = inspect.signature(func)
+                                    if 'workspace_dir' in sig.parameters:
+                                        args['workspace_dir'] = self.workspace_dir
+                                        
+                                    tool_result = str(func(**args))
+                                except Exception as e:
+                                    tool_result = f"Error: {e}"
+                            
+                            current_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_result
+                            })
+                    else:
+                        # Final Plan
+                        final_plan = message.content
+                        break
+                        
+            except Exception as e:
+                final_plan = f"Planning Failed: {e}"
+        else:
+            final_plan = "Error: OpenAI/DeepSeek API not initialized."
+
+        self.finished_signal.emit(final_plan)
+
 class LLMWorker(QThread):
     """后台调用 LLM API 的线程，支持 Tool Calls 和多轮思考"""
     finished_signal = Signal(dict)
@@ -184,13 +298,14 @@ class LLMWorker(QThread):
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
 
-    def __init__(self, messages, config_manager, workspace_dir=None, parent_agent_id=None):
+    def __init__(self, messages, config_manager, workspace_dir=None, parent_agent_id=None, plan_mode=False):
         super().__init__()
         self.messages = messages
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
         self.workspace_dir = workspace_dir
         self.parent_agent_id = parent_agent_id
+        self.plan_mode = plan_mode
         
         # Flags for control
         self.is_paused = False
@@ -296,7 +411,7 @@ class LLMWorker(QThread):
                             r_content = delta.reasoning_content
                             current_turn_reasoning += r_content
                             full_reasoning += r_content
-                            self.thinking_signal.emit(current_turn_reasoning) # Update UI with current turn reasoning only
+                            self.thinking_signal.emit(r_content)
                             
                         # 2. Handle Content
                         if delta.content:

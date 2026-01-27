@@ -22,11 +22,7 @@ a = Analysis(
     hiddenimports=pyside6_hidden + [
         'docx',
         'pptx',
-        'openpyxl',
         'pypdf',
-        'pandas',
-        'duckduckgo_search',
-        'trafilatura',
         'bs4',
         'requests',
         'markdown'
@@ -34,7 +30,17 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'pandas', 
+        'numpy', 
+        'openpyxl', 
+        'yt_dlp', 
+        'duckduckgo_search', 
+        'trafilatura',
+        'matplotlib',
+        'scipy',
+        'lxml' # trafilatura dep
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

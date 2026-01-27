@@ -1,9 +1,22 @@
 import json
 import requests
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
-import trafilatura
 import urllib.parse
+from core.env_utils import ensure_package_installed
+
+def get_bs4():
+    ensure_package_installed("beautifulsoup4", "bs4")
+    from bs4 import BeautifulSoup
+    return BeautifulSoup
+
+def get_ddgs():
+    ensure_package_installed("duckduckgo-search", "duckduckgo_search")
+    from duckduckgo_search import DDGS
+    return DDGS
+
+def get_trafilatura():
+    ensure_package_installed("trafilatura")
+    import trafilatura
+    return trafilatura
 
 def _search_bing_fallback(query, max_results=5):
     """
@@ -20,6 +33,7 @@ def _search_bing_fallback(query, max_results=5):
         if response.status_code != 200:
             return f"Error: Bing returned status {response.status_code}"
             
+        BeautifulSoup = get_bs4()
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
         
@@ -60,6 +74,7 @@ def search_web(query, max_results=5):
     
     # 1. Try DuckDuckGo
     try:
+        DDGS = get_ddgs()
         with DDGS() as ddgs:
             # text() returns an iterator
             for r in ddgs.text(query, max_results=max_results):
@@ -82,6 +97,7 @@ def read_article(url):
         url (str): The URL of the article to read.
     """
     try:
+        trafilatura = get_trafilatura()
         downloaded = trafilatura.fetch_url(url)
         if downloaded is None:
             return "Error: Could not fetch URL (404 or blocked)."

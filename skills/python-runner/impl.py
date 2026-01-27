@@ -4,7 +4,21 @@ import tempfile
 import os
 import ast
 import shutil
-from core.env_utils import get_python_executable
+from core.env_utils import get_python_executable, ensure_package_installed
+
+def install_package(package_name, import_name=None):
+    """
+    Install a Python package and hot-reload it.
+    
+    Args:
+        package_name (str): The pip package name.
+        import_name (str, optional): The import module name.
+    """
+    try:
+        ensure_package_installed(package_name, import_name)
+        return f"Successfully installed and loaded '{package_name}'."
+    except Exception as e:
+        return f"Failed to install '{package_name}': {e}"
 
 class SecurityError(Exception):
     pass

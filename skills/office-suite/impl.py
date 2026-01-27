@@ -3,9 +3,14 @@ import json
 from docx import Document
 from pptx import Presentation
 from pptx.util import Inches
-import openpyxl
-import pandas as pd
 from pypdf import PdfReader
+from core.env_utils import ensure_package_installed
+
+# Lazy import helpers
+def get_openpyxl():
+    ensure_package_installed("openpyxl")
+    import openpyxl
+    return openpyxl
 
 def _get_safe_path(workspace_dir, path):
     if not workspace_dir:
@@ -148,13 +153,24 @@ def read_excel(workspace_dir, path, sheet_name=None):
         if not os.path.exists(abs_path):
             return f"Error: File '{path}' does not exist."
             
-        # Use pandas for easy reading
+        # Use openpyxl for lightweight reading
+        openpyxl = get_openpyxl()
+        wb = openpyxl.load_workbook(abs_path, data_only=True)
+        
         if sheet_name:
-            df = pd.read_excel(abs_path, sheet_name=sheet_name)
+            if sheet_name not in wb.sheetnames:
+                 return f"Error: Sheet '{sheet_name}' not found. Available: {wb.sheetnames}"
+            sheet = wb[sheet_name]
         else:
-            df = pd.read_excel(abs_path)
+            sheet = wb.active
             
-        return df.to_string()
+        rows = []
+        for row in sheet.iter_rows(values_only=True):
+            # Convert None to empty string for better display
+            cleaned_row = [str(cell) if cell is not None else "" for cell in row]
+            rows.append("\t".join(cleaned_row))
+            
+        return "\n".join(rows)
     except Exception as e:
         return f"Error reading Excel: {str(e)}"
 
@@ -178,13 +194,26 @@ def write_excel(workspace_dir, path, data, sheet_name='Sheet1'):
             except:
                 return "Error: data must be a JSON list of lists."
         
-        df = pd.DataFrame(data)
+        openpyxl = get_openpyxl()
         
         # Check if file exists to append or create
-        # For simplicity, we just overwrite or create new for now. 
-        # Pandas ExcelWriter can be used for more complex operations.
-        df.to_excel(abs_path, sheet_name=sheet_name, index=False, header=False)
+        if os.path.exists(abs_path):
+             wb = openpyxl.load_workbook(abs_path)
+             if sheet_name in wb.sheetnames:
+                 # If sheet exists, maybe we should clear it or append?
+                 # For simplicity, let's create a new sheet if it exists or overwrite?
+                 # Let's remove the old sheet and create new one to match 'overwrite' behavior
+                 del wb[sheet_name]
+             ws = wb.create_sheet(sheet_name)
+        else:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = sheet_name
+        
+        for row in data:
+            ws.append(row)
             
+        wb.save(abs_path)
         return f"Success: Written to '{path}'."
     except Exception as e:
         return f"Error writing Excel: {str(e)}"

@@ -4,6 +4,7 @@ import importlib.util
 import inspect
 import sys
 import shutil
+from .env_utils import get_app_data_dir, ensure_package_installed
 
 class SkillManager:
     def __init__(self, workspace_dir=None, config_manager=None):
@@ -12,6 +13,12 @@ class SkillManager:
         
         self.skills_dirs = []
         
+        # 1. User Data Skills (Persistence Layer - Highest Priority)
+        # This allows users to add skills that survive application updates
+        data_dir = get_app_data_dir()
+        self.skills_dirs.append(os.path.join(data_dir, "skills"))
+        self.skills_dirs.append(os.path.join(data_dir, "ai_skills"))
+
         # Determine the base directory
         if getattr(sys, 'frozen', False):
             # If running as a PyInstaller bundle
@@ -371,7 +378,43 @@ class SkillManager:
         try:
             spec = importlib.util.spec_from_file_location(f"skills.{skill_name}", impl_path)
             module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            
+            try:
+                spec.loader.exec_module(module)
+            except ImportError as e:
+                # Hot-reload logic for missing dependencies (Top-level imports)
+                print(f"[SkillManager] Skill '{skill_name}' missing dependency: {e}")
+                
+                # Try to extract package name. e.name is reliable for ModuleNotFoundError
+                missing_pkg = getattr(e, 'name', None)
+                if not missing_pkg and "No module named" in str(e):
+                    # Fallback parsing
+                    import re
+                    match = re.search(r"No module named '([^']+)'", str(e))
+                    if match:
+                        missing_pkg = match.group(1)
+                
+                if missing_pkg:
+                    print(f"[SkillManager] Auto-installing missing dependency: {missing_pkg}...")
+                    try:
+                        # Attempt to install and hot-reload
+                        ensure_package_installed(missing_pkg)
+                        
+                        # Retry loading the module
+                        print(f"[SkillManager] Retrying load of '{skill_name}' after installation...")
+                        # We need to reload the spec/module to be safe? 
+                        # Actually exec_module can be called again on the same module object, 
+                        # but it's cleaner to re-create if possible. 
+                        # Let's try exec_module again.
+                        spec.loader.exec_module(module)
+                        print(f"[SkillManager] Successfully loaded '{skill_name}' after auto-install.")
+                        
+                    except Exception as install_err:
+                        print(f"[SkillManager] Failed to auto-install dependency {missing_pkg}: {install_err}")
+                        # If install fails, we re-raise the original error or the install error
+                        raise e
+                else:
+                    raise e
             
             # Inspect functions to generate Tool Definitions
             for name, func in inspect.getmembers(module, inspect.isfunction):

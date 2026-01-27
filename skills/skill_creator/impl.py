@@ -1,5 +1,6 @@
 import os
 import sys
+from core.env_utils import get_app_data_dir
 
 def create_new_skill(workspace_dir, skill_name, description, tool_name, tool_description, tool_code, description_cn=None):
     """
@@ -15,14 +16,10 @@ def create_new_skill(workspace_dir, skill_name, description, tool_name, tool_des
         description_cn (str, optional): Chinese description of the skill.
     """
     try:
-        # Determine app root
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            # D:\code\cowork\skills\skill-creator\impl.py -> D:\code\cowork
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            
-        skills_dir = os.path.join(base_dir, 'ai_skills')
+        # Use persistent User Data Directory for new skills
+        data_dir = get_app_data_dir()
+        skills_dir = os.path.join(data_dir, 'ai_skills')
+        os.makedirs(skills_dir, exist_ok=True)
         
         # Validate skill name (alphanumeric and hyphens)
         if not all(c.isalnum() or c == '-' for c in skill_name):

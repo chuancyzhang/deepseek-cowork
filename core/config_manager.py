@@ -1,25 +1,46 @@
 import json
 import os
 import sys
+import shutil
+from .env_utils import get_app_data_dir, get_base_dir
 
 class ConfigManager:
     def __init__(self):
         self.config_file = "config.json"
-        # Determine config path (persist next to exe or in user home)
-        # For simplicity, let's try next to executable/script first
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
-        self.config_path = os.path.join(base_dir, self.config_file)
+        # Use centralized data directory logic
+        self.data_dir = get_app_data_dir()
+        self.config_path = os.path.join(self.data_dir, self.config_file)
+        
+        # Migration: Check if config exists in old location (base_dir)
+        base_dir = get_base_dir()
+        old_config_path = os.path.join(base_dir, self.config_file)
+        
+        # If old config exists and new config doesn't, migrate it.
+        # Check inequality to avoid copy error if paths are same (e.g. portable mode setup)
+        if os.path.abspath(old_config_path) != os.path.abspath(self.config_path):
+             if os.path.exists(old_config_path) and not os.path.exists(self.config_path):
+                print(f"[Config] Migrating config from {old_config_path} to {self.config_path}")
+                try:
+                    shutil.copy2(old_config_path, self.config_path)
+                except Exception as e:
+                    print(f"[Config] Migration failed: {e}")
+
         self.config = {
             "api_key": "",
             "base_url": "https://api.deepseek.com",
             "disabled_skills": [],
-            "god_mode": False
+            "god_mode": False,
+            "plan_mode": False
         }
         self.load_config()
+
+    def get_plan_mode(self):
+        return self.config.get("plan_mode", False)
+
+    def set_plan_mode(self, enabled: bool):
+        self.config["plan_mode"] = enabled
+        self.save_config()
 
     def get_god_mode(self):
         return self.config.get("god_mode", False)

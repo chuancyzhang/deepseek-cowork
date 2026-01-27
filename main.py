@@ -16,6 +16,8 @@ from core.agent import LLMWorker, CodeWorker
 from core.skill_generator import SkillGenerator
 from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
+from core.env_utils import get_app_data_dir, get_base_dir
+import shutil
 from PySide6.QtGui import QAction, QTextOption, QIcon, QFontMetrics
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton)
@@ -64,6 +66,13 @@ class SettingsDialog(QDialog):
         self.god_mode_check.setStyleSheet("QCheckBox { color: #d93025; font-weight: bold; }")
         form_layout.addRow("", self.god_mode_check)
         
+        # Plan Mode Toggle
+        self.plan_mode_check = QCheckBox("启用深度规划模式 (Deep Plan Mode)")
+        self.plan_mode_check.setToolTip("开启后，对于复杂任务，Agent 会先生成详细执行计划并请求您的批准，然后再执行。")
+        self.plan_mode_check.setChecked(self.config_manager.get_plan_mode())
+        self.plan_mode_check.setStyleSheet("QCheckBox { color: #1a73e8; font-weight: bold; }")
+        form_layout.addRow("", self.plan_mode_check)
+        
         layout.addLayout(form_layout)
 
         # Buttons
@@ -86,6 +95,8 @@ class SettingsDialog(QDialog):
         self.config_manager.set("base_url", base_url)
         # Save God Mode
         self.config_manager.set_god_mode(self.god_mode_check.isChecked())
+        # Save Plan Mode
+        self.config_manager.set_plan_mode(self.plan_mode_check.isChecked())
         
         self.accept()
 
@@ -272,6 +283,15 @@ class SkillsCenterDialog(QDialog):
             else:
                 QMessageBox.warning(self, "失败", msg)
 
+class AutoResizingLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.setCursor(Qt.IBeamCursor)
+        # Use a transparent background and specific text color
+        self.setStyleSheet("background: transparent; border: none; color: #5f6368; font-size: 13px;")
+
 class AutoResizingTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -287,7 +307,10 @@ class AutoResizingTextEdit(QTextEdit):
 
     def adjustHeight(self):
         doc_height = self.document().size().height()
-        self.setFixedHeight(int(doc_height + 10))
+        margins = self.contentsMargins()
+        height = int(doc_height + margins.top() + margins.bottom())
+        # Ensure minimum height to avoid invisible widget
+        self.setFixedHeight(max(height + 10, 24))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -547,6 +570,9 @@ class ChatBubble(QFrame):
             self.think_container_layout = QVBoxLayout(self.think_container)
             self.think_container_layout.setContentsMargins(12, 12, 12, 12)
             self.think_container_layout.setSpacing(12)
+            self._start_new_think_segment = False
+            self._last_thinking_segment_text = ""
+            self._strip_prefix = ""
 
             # We don't create initial content here, it will be added dynamically
             
@@ -582,29 +608,50 @@ class ChatBubble(QFrame):
         if is_thinking:
             self.think_toggle_btn.setText("v 正在思考...")
             self.think_toggle_btn.setChecked(True) # Auto expand when thinking starts
-            self.update_thinking("正在分析需求...")
             self.thinking_widget.setVisible(True)
 
-    def get_active_think_widget(self):
-        """Get the last text widget in the thinking layout, or create one."""
-        count = self.think_container_layout.count()
-        if count > 0:
-            last_item = self.think_container_layout.itemAt(count - 1)
-            widget = last_item.widget()
-            if isinstance(widget, AutoResizingTextEdit):
-                return widget
-        
-        # Create new text widget
-        new_widget = AutoResizingTextEdit()
-        new_widget.setStyleSheet("background: transparent; border: none; color: #5f6368; font-size: 13px; line-height: 1.5;")
+    def get_active_think_widget(self, force_new=False):
+        if not force_new:
+            count = self.think_container_layout.count()
+            if count > 0:
+                item = self.think_container_layout.itemAt(count - 1)
+                widget = item.widget()
+                if isinstance(widget, AutoResizingLabel):
+                    return widget
+
+        new_widget = AutoResizingLabel()
         self.think_container_layout.addWidget(new_widget)
+        new_widget.show()
         return new_widget
-        
+
     def update_thinking(self, text=None, duration=None, is_final=False):
         if text is not None:
-            widget = self.get_active_think_widget()
-            widget.setPlainText(text)
-            widget.adjustHeight()
+            force_new = False
+            if self._start_new_think_segment:
+                self._start_new_think_segment = False
+                force_new = True
+                self._strip_prefix = self._last_thinking_segment_text or ""
+            
+            incoming = text
+            # Stream deduplication: if incoming delta matches start of prefix, consume it
+            if self._strip_prefix:
+                if self._strip_prefix.startswith(incoming):
+                    self._strip_prefix = self._strip_prefix[len(incoming):]
+                    incoming = "" # Consumed
+                elif incoming.startswith(self._strip_prefix):
+                    # Incoming > Prefix (rare for small deltas, but possible)
+                    incoming = incoming[len(self._strip_prefix):]
+                    self._strip_prefix = ""
+                else:
+                    # Mismatch - stop stripping
+                    self._strip_prefix = ""
+            
+            if incoming:
+                widget = self.get_active_think_widget(force_new)
+                # Use setText for Label
+                current_text = widget.text()
+                widget.setText(current_text + incoming)
+                self._last_thinking_segment_text = widget.text()
         
         if duration:
             self.think_toggle_btn.setText(f"> 已思考 (用时 {duration:.1f} 秒)")
@@ -661,6 +708,7 @@ class ChatBubble(QFrame):
         
     def add_tool_card(self, card_widget):
         self.think_container_layout.addWidget(card_widget)
+        self._start_new_think_segment = True
         # Ensure thinking is visible when tool is added
         if not self.think_toggle_btn.isChecked():
             self.think_toggle_btn.setChecked(True)
@@ -1099,8 +1147,121 @@ class MainWindow(QMainWindow):
 
         # Initialize session state
         self.current_session_id = None
-        os.makedirs(os.path.join(os.getcwd(), 'chat_history'), exist_ok=True)
+        
+        # Data Persistence: Initialize Data Directory
+        self.data_dir = get_app_data_dir()
+        self.chat_history_dir = os.path.join(self.data_dir, 'chat_history')
+        os.makedirs(self.chat_history_dir, exist_ok=True)
+        
+        # Migration: Move old chat history if exists
+        old_history_dir = os.path.join(os.getcwd(), 'chat_history')
+        # Check inequality to avoid issues in portable mode or dev environment
+        if os.path.abspath(old_history_dir) != os.path.abspath(self.chat_history_dir):
+            if os.path.exists(old_history_dir) and os.path.isdir(old_history_dir):
+                print(f"[System] Migrating chat history from {old_history_dir} to {self.chat_history_dir}")
+                # Move files one by one to avoid errors if dest already exists
+                try:
+                    for item in os.listdir(old_history_dir):
+                        s = os.path.join(old_history_dir, item)
+                        d = os.path.join(self.chat_history_dir, item)
+                        if os.path.isfile(s):
+                             if not os.path.exists(d):
+                                 shutil.copy2(s, d)
+                except Exception as e:
+                    print(f"[System] Migration warning: {e}")
+                    
         self.refresh_history_list()
+
+    def handle_send(self):
+        user_input = self.input_field.text().strip()
+        if not user_input:
+            return
+
+        # Add User Message to UI
+        self.add_chat_bubble('User', user_input)
+        self.input_field.clear()
+
+        # Add to history
+        self.messages.append({"role": "user", "content": user_input})
+        
+        # Save History
+        self.save_chat_history()
+        self.refresh_history_list()
+
+        self.input_field.setDisabled(True)
+        self.send_btn.setDisabled(True)
+
+        # Get Plan Mode setting
+        plan_mode = self.config_manager.get_plan_mode()
+        
+        if plan_mode:
+            self.status_label.setText("Planning Phase: Generating Strategy...")
+            self.add_chat_bubble('System', "🔎 Deep Plan Mode: Analyzing context and generating execution plan...")
+            
+            # Use specialized PlanGeneratorWorker
+            from core.agent import PlanGeneratorWorker
+            self.plan_worker = PlanGeneratorWorker(self.messages, self.config_manager, workspace_dir=os.getcwd())
+            self.plan_worker.step_signal.connect(self.handle_step_output)
+            self.plan_worker.thinking_signal.connect(self.handle_thinking_output)
+            self.plan_worker.finished_signal.connect(self.handle_plan_generated)
+            self.plan_worker.start()
+        else:
+            # Standard Instant Mode
+            self.status_label.setText("DeepSeek 正在思考...")
+            self.worker = LLMWorker(self.messages, self.config_manager, workspace_dir=os.getcwd(), plan_mode=False)
+            self.worker.step_signal.connect(self.handle_step_output)
+            self.worker.thinking_signal.connect(self.handle_thinking_output)
+            self.worker.finished_signal.connect(self.handle_llm_finished)
+            self.worker.tool_call_signal.connect(self.handle_tool_call)
+            self.worker.tool_result_signal.connect(self.handle_tool_result)
+            self.worker.start()
+
+    def handle_plan_generated(self, plan_content):
+        """Callback when PlanGeneratorWorker finishes"""
+        self.status_label.setText("Plan Generated. Executing...")
+        
+        # 1. Save Plan to Temp File (as requested by user)
+        plan_file = os.path.join(os.getcwd(), "CURRENT_PLAN.md")
+        try:
+            with open(plan_file, "w", encoding="utf-8") as f:
+                f.write(plan_content)
+        except Exception as e:
+            self.add_chat_bubble('System', f"❌ Failed to save plan file: {e}")
+            self.input_field.setDisabled(False)
+            self.send_btn.setDisabled(False)
+            return
+
+        # 2. Show Plan in Chat
+        self.add_chat_bubble('Agent', f"📋 **Execution Plan Generated**\n\n(Saved to `{plan_file}`)\n\n" + plan_content)
+        
+        # 3. Start Executor (Standard LLMWorker) with Plan Context
+        # We inject the plan into the messages for the executor
+        executor_messages = self.messages.copy()
+        executor_messages.append({
+            "role": "system", 
+            "content": f"PRE-GENERATED PLAN LOADED from {plan_file}.\n\nCONTENT:\n{plan_content}\n\nINSTRUCTION: Execute the above plan step-by-step. You do not need to propose a plan again. Just execute."
+        })
+        
+        self.worker = LLMWorker(executor_messages, self.config_manager, workspace_dir=os.getcwd(), plan_mode=False) # Disable plan_mode flag since we already planned
+        self.worker.step_signal.connect(self.handle_step_output)
+        self.worker.thinking_signal.connect(self.handle_thinking_output)
+        self.worker.finished_signal.connect(lambda res: self.handle_executor_finished(res, plan_file))
+        self.worker.tool_call_signal.connect(self.handle_tool_call)
+        self.worker.tool_result_signal.connect(self.handle_tool_result)
+        self.worker.start()
+
+    def handle_executor_finished(self, result, plan_file):
+        """Callback when Executor finishes"""
+        # Cleanup Plan File
+        if os.path.exists(plan_file):
+            try:
+                os.remove(plan_file)
+                self.append_log(f"System: Cleaned up temporary plan file: {plan_file}")
+            except Exception as e:
+                self.append_log(f"System: Warning - Failed to delete plan file: {e}")
+        
+        # Call standard finished handler
+        self.handle_llm_finished(result)
 
     def handle_confirmation_request(self, message):
         dialog = QDialog(self)
@@ -1176,7 +1337,8 @@ class MainWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         
-        history_dir = os.path.join(os.getcwd(), 'chat_history')
+        # Use centralized chat history directory
+        history_dir = self.chat_history_dir
         if not os.path.exists(history_dir):
             self.history_layout.addStretch()
             return
@@ -1234,7 +1396,7 @@ class MainWindow(QMainWindow):
         # self.task_monitor.clear()
         self.active_skills_label.setText("本次会话使用的功能: ")
 
-        history_path = os.path.join(os.getcwd(), 'chat_history', f'chat_history_{session_id}.json')
+        history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
         if os.path.exists(history_path):
             try:
                 with open(history_path, 'r', encoding='utf-8') as f:
@@ -1278,7 +1440,7 @@ class MainWindow(QMainWindow):
         if not self.current_session_id:
             self.current_session_id = uuid.uuid4().hex
 
-        history_dir = os.path.join(os.getcwd(), 'chat_history')
+        history_dir = self.chat_history_dir
         history_path = os.path.join(history_dir, f'chat_history_{self.current_session_id}.json')
         
         try:
@@ -1534,8 +1696,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"Agent: 正在深度思考 (DeepSeek CoT)...")
         
         # Insert a temporary "Thinking" bubble
-        self.temp_thinking_bubble = ChatBubble("agent", "", thinking="正在分析需求...")
-        self.temp_thinking_bubble.set_thinking_state(True)
+        self.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
         self.chat_layout.insertWidget(self.chat_layout.count()-1, self.temp_thinking_bubble)
         QApplication.processEvents()
 
@@ -1681,6 +1842,30 @@ if __name__ == "__main__":
     # 2. Force Fusion Style for consistent look across Windows versions
     # This avoids issues where system theme (Dark/Light) breaks hardcoded colors
     app.setStyle("Fusion")
+    app.setStyleSheet("""
+        QTextEdit, QPlainTextEdit, QLineEdit, QLabel {
+            selection-background-color: #cfe3ff;
+            selection-color: #111111;
+        }
+        QMenu {
+            background-color: #ffffff;
+            color: #111111;
+            border: 1px solid #e5e7eb;
+        }
+        QMenu::item {
+            padding: 6px 12px;
+            background: transparent;
+        }
+        QMenu::item:selected {
+            background-color: #e8f0fe;
+            color: #111111;
+        }
+        QMenu::separator {
+            height: 1px;
+            background: #e5e7eb;
+            margin: 4px 8px;
+        }
+    """)
     
     window = MainWindow()
     window.show()

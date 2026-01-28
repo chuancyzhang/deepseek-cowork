@@ -205,6 +205,12 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [ ] **偏好学习**: 通过搜索历史记录，自动学习用户的长期偏好（如“总是使用 Python”、“喜欢深色主题”）。
 - [ ] **存储升级**: 放弃纯 JSON 格式，迁移至更高效的存储方案（如 SQLite 或向量数据库），以支持快速检索和大规模数据。
 
+### 7.3 多模型兼容 (Multi-Model Support)
+- [ ] **Minimax**: 接入 Minimax API (兼容 Anthropic 协议) [Docs](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api)。
+- [ ] **GLM-4.7**: 接入智谱 AI GLM-4 API [Docs](https://open.bigmodel.cn/dev/api/normal-model/glm-4)。
+- [ ] **Kimi 2.5**: 接入 Moonshot AI Kimi k2.5 API [Docs](https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart)。
+- [ ] **International Models**: 增加对主流国际模型的支持 (Gemini, GPT, Claude)。
+
 ---
 
 > **结语**：

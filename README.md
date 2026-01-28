@@ -28,6 +28,7 @@ Unlike traditional chatbots, this assistant utilizes the **DeepSeek-V3.2** model
 *   **💾 Auto-Save History**: Chat sessions are automatically saved and restored, allowing seamless continuation of tasks.
 *   **⏯️ Real-time Control**: Supports pausing/resuming tasks at any time, and forcibly stopping execution if stuck in a loop.
 *   **🖥️ Modern UI**: Built with **PySide6** (Qt for Python), offering a responsive and native desktop experience.
+*   **📂 Workspace Sidebar**: Browse workspace file structure in real-time with quick content preview.
 
 ## 📦 Installation
 
@@ -71,7 +72,7 @@ Unlike traditional chatbots, this assistant utilizes the **DeepSeek-V3.2** model
         *   *"Search for the latest news on DeepSeek and summarize the V3.2 features"*
         *   *"Convert all .docx files in this folder to PDF"*
         *   *"Read sales.xlsx and generate a sales trend chart"*
-    *   Watch the **Thinking** process in the right panel to experience how V3.2 utilizes interleaved tool calls.
+    *   Watch the **Thinking** process in the chat window to experience how V3.2 utilizes interleaved tool calls.
 
 4.  **Control Tasks**:
     *   Use the **⏸️ Pause** and **⏹️ Stop** buttons at the bottom to control the AI execution flow in real-time.

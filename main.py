@@ -17,15 +17,15 @@ from core.skill_generator import SkillGenerator
 from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir
-from core.theme import apply_theme
+from core.theme import apply_theme, DesignTokens
 import shutil
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QStackedWidget, QSizePolicy)
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout)
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QVariantAnimation
 
 # Try importing OpenAI
 try:
@@ -532,6 +532,7 @@ class AutoResizingInputEdit(QTextEdit):
         self.setFixedHeight(45) # Initial height
         self.min_height = 45
         self.max_height = 150
+        self.anim = None
         
     def adjustHeight(self):
         doc_height = self.document().size().height()
@@ -542,29 +543,34 @@ class AutoResizingInputEdit(QTextEdit):
         if height < self.min_height:
             height = self.min_height
         elif height > self.max_height:
-            # Enable scrollbar if content exceeds max height
             self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             height = self.max_height
         else:
             self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             height = max(height, self.min_height)
             
-        self.setFixedHeight(height)
+        if self.height() != height:
+            if self.anim: self.anim.stop()
+            self.anim = QVariantAnimation()
+            self.anim.setDuration(150)
+            self.anim.setStartValue(self.height())
+            self.anim.setEndValue(height)
+            self.anim.setEasingCurve(QEasingCurve.OutCubic)
+            self.anim.valueChanged.connect(lambda v: self.setFixedHeight(int(v)))
+            self.anim.start()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
             if event.modifiers() & Qt.ShiftModifier:
-                # Shift+Enter: Insert new line
                 super().keyPressEvent(event)
             else:
-                # Enter: Send message
                 self.returnPressed.emit()
         else:
             super().keyPressEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.adjustHeight()
+        # self.adjustHeight() # Avoid recursive loop or double adjust
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -577,14 +583,14 @@ class AutoResizingInputEdit(QTextEdit):
         if urls:
             path = urls[0].toLocalFile()
             if os.path.isdir(path):
-                event.ignore() # Let MainWindow handle workspace switch
+                event.ignore() 
                 return
             elif os.path.isfile(path):
                 self.insertPlainText(path)
                 event.acceptProposedAction()
                 return
         super().dropEvent(event)
-
+    
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_STYLESHEET)
@@ -636,6 +642,83 @@ class AutoResizingInputEdit(QTextEdit):
         
         menu.exec(event.globalPos())
 
+class EmptyStateWidget(QWidget):
+    def __init__(self, main_window):
+        super().__init__()
+        self.main_window = main_window
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        # Icon
+        icon = QLabel()
+        icon.setPixmap(qta.icon('fa5s.robot', color=DesignTokens.border).pixmap(64, 64))
+        icon.setAlignment(Qt.AlignCenter)
+        
+        # Title
+        title = QLabel("今天想处理什么文件？")
+        title.setStyleSheet(f"font-size: 20px; font-weight: 600; color: {DesignTokens.text_primary};")
+        title.setAlignment(Qt.AlignCenter)
+        
+        # Grid
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(24) # Increase spacing
+        
+        actions = [
+            ("📁 整理文件", "按类型自动分类", "帮我把当前目录下的文件按类型分类整理"),
+            ("🖼️ 处理图片", "批量重命名/压缩", "帮我把所有图片重命名为日期格式"),
+            ("🔍 代码搜索", "在项目中查找内容", "搜索当前项目中关于 'TODO' 的代码"),
+            ("📊 生成报告", "分析目录结构", "分析当前目录结构并生成一份报告")
+        ]
+        
+        for i, (text, desc, prompt) in enumerate(actions):
+            btn = self.create_action_card(text, desc, prompt)
+            grid.addWidget(btn, i // 2, i % 2)
+            
+        layout.addStretch()
+        layout.addWidget(icon)
+        layout.addSpacing(24)
+        layout.addWidget(title)
+        layout.addSpacing(40)
+        layout.addWidget(grid_widget)
+        layout.addStretch()
+        
+    def create_action_card(self, title, desc, prompt):
+        btn = QPushButton()
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumHeight(140) # Significantly increase card height
+        btn.setMinimumWidth(260) # Ensure sufficient width
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {DesignTokens.bg_main};
+                border: 1px solid {DesignTokens.border};
+                border-radius: 16px;
+                padding: 24px;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                border: 1px solid {DesignTokens.primary};
+                background-color: {DesignTokens.bg_secondary};
+            }}
+        """)
+        
+        layout = QVBoxLayout(btn)
+        layout.setSpacing(10) 
+        
+        t_label = QLabel(title)
+        t_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary}; background: transparent; border: none;") 
+        
+        d_label = QLabel(desc)
+        d_label.setStyleSheet(f"font-size: 14px; color: {DesignTokens.text_secondary}; background: transparent; border: none;") 
+        d_label.setWordWrap(True) # Ensure text is fully visible
+        
+        layout.addWidget(t_label)
+        layout.addWidget(d_label)
+        layout.addStretch() # Push content to top
+        
+        btn.clicked.connect(lambda: self.main_window.input_field.setText(prompt))
+        return btn
+
 class SystemToast(QFrame):
     """System Notification in Chat Stream"""
     def __init__(self, text, type="info"):
@@ -648,25 +731,25 @@ class SystemToast(QFrame):
         
         icon_label = QLabel()
         if type == "error":
-            icon_label.setPixmap(qta.icon('fa5s.times-circle', color='#991b1b').pixmap(16, 16))
-            bg_color = "#fef2f2"
-            text_color = "#991b1b"
-            border_color = "#fecaca"
+            icon_label.setPixmap(qta.icon('fa5s.times-circle', color=DesignTokens.error_icon).pixmap(16, 16))
+            bg_color = DesignTokens.error_bg
+            text_color = DesignTokens.error_text
+            border_color = DesignTokens.error_border
         elif type == "success":
-            icon_label.setPixmap(qta.icon('fa5s.check-circle', color='#166534').pixmap(16, 16))
-            bg_color = "#f0fdf4"
-            text_color = "#166534"
-            border_color = "#bbf7d0"
+            icon_label.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_icon).pixmap(16, 16))
+            bg_color = DesignTokens.success_bg
+            text_color = DesignTokens.success_text
+            border_color = DesignTokens.success_border
         elif type == "warning":
-            icon_label.setPixmap(qta.icon('fa5s.exclamation-triangle', color='#92400e').pixmap(16, 16))
-            bg_color = "#fffbeb"
-            text_color = "#92400e"
-            border_color = "#fde68a"
+            icon_label.setPixmap(qta.icon('fa5s.exclamation-triangle', color=DesignTokens.warning_icon).pixmap(16, 16))
+            bg_color = DesignTokens.warning_bg
+            text_color = DesignTokens.warning_text
+            border_color = DesignTokens.warning_border
         else:
-            icon_label.setPixmap(qta.icon('fa5s.info-circle', color='#1e40af').pixmap(16, 16))
-            bg_color = "#eff6ff"
-            text_color = "#1e40af"
-            border_color = "#bfdbfe"
+            icon_label.setPixmap(qta.icon('fa5s.info-circle', color=DesignTokens.info_icon).pixmap(16, 16))
+            bg_color = DesignTokens.info_bg
+            text_color = DesignTokens.info_text
+            border_color = DesignTokens.info_border
             
         layout.addWidget(icon_label)
         
@@ -708,12 +791,14 @@ class ChatBubble(QFrame):
             
             # Bubble Frame
             bubble_frame = QFrame()
-            bubble_frame.setStyleSheet("""
-                QFrame {
-                    background-color: #3b82f6;
+            bubble_frame.setStyleSheet(f"""
+                QFrame {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
+                                              stop:0 {DesignTokens.primary_gradient_start}, 
+                                              stop:1 {DesignTokens.primary_gradient_end});
                     border-radius: 16px;
                     border-bottom-right-radius: 4px;
-                }
+                }}
             """)
             bubble_layout = QVBoxLayout(bubble_frame)
             bubble_layout.setContentsMargins(16, 12, 16, 12)
@@ -1041,6 +1126,8 @@ class ToolCallCard(QFrame):
         self.tool_name = tool_name
         self.is_selected = False
         
+        self.setFocusPolicy(Qt.StrongFocus)
+        
         self.setFrameShape(QFrame.NoFrame)
         # Minimalist "List Item" Style
         self.setStyleSheet("""
@@ -1058,16 +1145,18 @@ class ToolCallCard(QFrame):
         # --- Main Row Container (The "List Item") ---
         self.main_row = QFrame()
         self.main_row.setCursor(Qt.PointingHandCursor)
-        self.main_row.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-            }
-            QFrame:hover {
-                background-color: #f9fafb;
-                border-color: #d1d5db;
-            }
+        self.main_row.setStyleSheet(f"""
+            QFrame {{
+                background-color: {DesignTokens.bg_main};
+                border: 1px solid {DesignTokens.border};
+                border-left: 3px solid {DesignTokens.text_tertiary};
+                border-radius: 6px;
+            }}
+            QFrame:hover {{
+                background-color: {DesignTokens.bg_secondary};
+                border-color: {DesignTokens.text_secondary};
+                border-left-color: {DesignTokens.text_secondary};
+            }}
         """)
         # Make the whole card clickable
         self.main_row.mousePressEvent = self.on_card_clicked
@@ -1087,14 +1176,13 @@ class ToolCallCard(QFrame):
         
         # Icon with base
         self.icon_label = QLabel()
-        self.icon_label.setPixmap(qta.icon(icon_name, color='#4b5563').pixmap(18, 18))
-        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setPixmap(qta.icon(icon_name, color=DesignTokens.text_secondary).pixmap(16, 16))
+        self.icon_label.setFixedSize(28, 28)
         self.icon_label.setAlignment(Qt.AlignCenter)
-        self.icon_label.setStyleSheet("""
-            background-color: #f3f4f6;
-            color: #4b5563;
-            border-radius: 16px; 
-            font-size: 16px;
+        self.icon_label.setStyleSheet(f"""
+            background-color: {DesignTokens.bg_secondary};
+            color: {DesignTokens.text_secondary};
+            border-radius: 14px; 
         """)
         
         # 2. Text Content
@@ -1106,38 +1194,39 @@ class ToolCallCard(QFrame):
         
         # Title
         name_label = QLabel(f"{tool_name}")
-        name_label.setStyleSheet("font-weight: 600; color: #374151; font-size: 13px; border: none;")
+        name_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 13px; border: none;")
         
         # Subtitle (Short Args Summary)
         short_args = str(args)
         if len(short_args) > 60:
             short_args = short_args[:60] + "..."
         args_preview = QLabel(short_args)
-        args_preview.setStyleSheet("color: #9ca3af; font-size: 11px; border: none;")
+        args_preview.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; border: none;")
         
         text_layout.addWidget(name_label)
         text_layout.addWidget(args_preview)
         
         # 3. Right Side Controls
         self.status_icon = QLabel() # Default running
-        self.status_icon.setPixmap(qta.icon('fa5s.spinner', color='#6b7280', animation=qta.Spin(self.status_icon)).pixmap(14, 14))
+        self.status_icon.setPixmap(qta.icon('fa5s.spinner', color=DesignTokens.text_secondary, animation=qta.Spin(self.status_icon)).pixmap(14, 14))
         self.status_icon.setStyleSheet("border: none; background: transparent;")
         
         self.view_btn = QPushButton("查看")
         self.view_btn.setCursor(Qt.PointingHandCursor)
         self.view_btn.setFixedWidth(40)
         self.view_btn.setToolTip("在右侧查看详情")
-        self.view_btn.setStyleSheet("""
-            QPushButton {
+        self.view_btn.setStyleSheet(f"""
+            QPushButton {{
                 border: none;
                 border-radius: 4px;
-                background: #f3f4f6;
-                color: #6b7280;
+                background: {DesignTokens.bg_secondary};
+                color: {DesignTokens.text_secondary};
                 font-size: 11px;
-                font-weight: 500;
-                padding: 2px 4px;
-            }
-            QPushButton:hover { background: #e5e7eb; color: #374151; }
+            }}
+            QPushButton:hover {{
+                color: {DesignTokens.primary};
+                background: #eff6ff;
+            }}
         """)
         self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result)))
 
@@ -1219,37 +1308,79 @@ class ToolCallCard(QFrame):
         widgets["status_label"].setText(status_text)
         widgets["status_label"].setStyleSheet(style)
 
+    def focusInEvent(self, event):
+        if not self.is_selected:
+            self.main_row.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {DesignTokens.bg_main};
+                    border: 1px solid {DesignTokens.primary};
+                    border-left: 3px solid {DesignTokens.primary};
+                    border-radius: 6px;
+                }}
+            """)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self.set_selected(self.is_selected)
+        super().focusOutEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.on_card_clicked(None)
+        else:
+            super().keyPressEvent(event)
+
     def on_card_clicked(self, event):
         self.clicked.emit(self.tool_id, str(self.args), str(self.result))
 
     def set_selected(self, selected):
         self.is_selected = selected
         if selected:
-            # 选中态：蓝色边框，背景微蓝
-            self.main_row.setStyleSheet("""
-                QFrame {
-                    background-color: #eff6ff;
-                    border: 1px solid #3b82f6;
-                    border-radius: 8px;
-                }
+            # Selected: Blue Border + Light Blue BG
+            self.main_row.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {DesignTokens.info_bg};
+                    border: 1px solid {DesignTokens.primary};
+                    border-left: 3px solid {DesignTokens.primary};
+                    border-radius: 6px;
+                }}
             """)
         else:
-            # 普通态
-            self.main_row.setStyleSheet("""
-                QFrame {
-                    background-color: #ffffff;
-                    border: 1px solid #e5e7eb;
-                    border-radius: 8px;
-                }
-                QFrame:hover {
-                    background-color: #f9fafb;
-                    border-color: #d1d5db;
-                }
+            # Normal: Border Color based on Status
+            left_color = DesignTokens.success_accent if self.result else DesignTokens.text_tertiary
+            self.main_row.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {DesignTokens.bg_main};
+                    border: 1px solid {DesignTokens.border};
+                    border-left: 3px solid {left_color};
+                    border-radius: 6px;
+                }}
+                QFrame:hover {{
+                    background-color: {DesignTokens.bg_secondary};
+                    border-color: {DesignTokens.text_secondary};
+                    border-left-color: {DesignTokens.text_secondary};
+                }}
             """)
 
     def set_result(self, result_text):
-        self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color='#10b981').pixmap(14, 14))
+        self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
         self.result = result_text
+        
+        # Update style to show success (Green left border)
+        if not self.is_selected:
+            self.main_row.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {DesignTokens.bg_main};
+                    border: 1px solid {DesignTokens.border};
+                    border-left: 3px solid {DesignTokens.success_accent};
+                    border-radius: 6px;
+                }}
+                QFrame:hover {{
+                    background-color: {DesignTokens.bg_secondary};
+                    border-color: {DesignTokens.text_secondary};
+                    border-left-color: {DesignTokens.success_accent};
+                }}
+            """)
 
 class SubAgentMonitor(QWidget):
     def __init__(self, parent=None):
@@ -1440,6 +1571,9 @@ class SessionState:
         self.active_skills_label = active_skills_label
         self.session_widget = session_widget
         self.chat_scroll = chat_scroll
+        self.empty_state = None
+        self.displayed_count = 0
+        self.load_more_btn = None
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1573,7 +1707,17 @@ class MainWindow(QMainWindow):
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(260)
-        sidebar.setStyleSheet("background-color: #f9fafb; border-right: 1px solid #e5e7eb;")
+        # sidebar.setStyleSheet("background-color: #f9fafb; border-right: 1px solid #e5e7eb;")
+        sidebar.setStyleSheet(f"background-color: #ffffff; border-right: 1px solid {DesignTokens.border};")
+        
+        # Add shadow effect
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 15))
+        shadow.setOffset(4, 0)
+        sidebar.setGraphicsEffect(shadow)
+        sidebar.raise_()
+
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(16, 24, 16, 24)
         sidebar_layout.setSpacing(16)
@@ -1855,12 +1999,6 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
         self.input_field.returnPressed.connect(self.handle_send)
 
-        self.example_btn = QPushButton(" 示例")
-        self.example_btn.setIcon(qta.icon('fa5s.lightbulb', color='#4d6bfe'))
-        self.example_btn.setCursor(Qt.PointingHandCursor)
-        self.example_btn.setStyleSheet("border: none; color: #4d6bfe; font-weight: 500; background: transparent;")
-        self.example_btn.clicked.connect(self.insert_example)
-        
         self.pause_btn = QPushButton()
         self.pause_btn.setIcon(qta.icon('fa5s.pause', color='#4b5563'))
         self.pause_btn.clicked.connect(self.toggle_pause)
@@ -1891,24 +2029,11 @@ class MainWindow(QMainWindow):
         
         bottom_controls = QHBoxLayout()
         bottom_controls.addWidget(input_wrapper, 1)
-        bottom_controls.addWidget(self.example_btn)
         bottom_controls.addWidget(self.pause_btn)
         bottom_controls.addWidget(self.loop_hint)
         bottom_controls.addWidget(self.action_btn)
 
         layout.addLayout(bottom_controls)
-
-        # Quick Chips
-        chips_layout = QHBoxLayout()
-        chips = ["批量整理文件", "重命名图片", "清理重复文件", "生成报表", "备份重要资料"]
-        for text in chips:
-            chip_btn = QPushButton(text)
-            chip_btn.setCursor(Qt.PointingHandCursor)
-            chip_btn.setStyleSheet("QPushButton { background-color: #f3f4f6; border: none; border-radius: 14px; padding: 6px 12px; color: #4b5563; font-size: 12px; } QPushButton:hover { background-color: #e5e7eb; color: #111827; }")
-            chip_btn.clicked.connect(lambda _, t=text: self.apply_chip_text(t))
-            chips_layout.addWidget(chip_btn)
-        chips_layout.addStretch()
-        layout.addLayout(chips_layout)
 
         # Init Data
         self.data_dir = get_app_data_dir()
@@ -1965,7 +2090,6 @@ class MainWindow(QMainWindow):
             # Hide extra buttons/prompts when running
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
-            self.example_btn.setVisible(False)
         else:
             self.action_btn.setText("发送")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
@@ -1975,7 +2099,6 @@ class MainWindow(QMainWindow):
             
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
-            self.example_btn.setVisible(True)
 
     def get_session_id_for_tab(self, index):
         widget = self.session_tabs.widget(index)
@@ -2039,6 +2162,11 @@ class MainWindow(QMainWindow):
         chat_layout = QVBoxLayout(chat_container)
         chat_layout.setContentsMargins(12, 12, 12, 24) # Bottom padding
         chat_layout.setSpacing(24) # Space between messages
+        
+        # Add Empty State
+        empty_state = EmptyStateWidget(self)
+        chat_layout.addWidget(empty_state)
+        
         chat_layout.addStretch()
         chat_scroll.setWidget(chat_container)
         session_layout.addWidget(chat_scroll, 1)
@@ -2047,6 +2175,7 @@ class MainWindow(QMainWindow):
         tab_index = self.session_tabs.addTab(session_widget, tab_title)
 
         state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
+        state.empty_state = empty_state
         self.sessions[session_id] = state
         self.session_tabs.setCurrentIndex(tab_index)
         self.set_current_session(session_id)
@@ -2108,23 +2237,6 @@ class MainWindow(QMainWindow):
         dialog.exec()
         bridge.respond(decision["value"])
 
-    def insert_example(self):
-        examples = [
-            "把这个文件夹里所有的 .txt 文件改成 .md",
-            "帮我把图片按日期分类到不同文件夹",
-            "找出文件名里包含“备份”的文件并列出来"
-        ]
-        text, ok = QInputDialog.getItem(self, "示例指令", "选择一个示例填入输入框：", examples, 0, False)
-        if ok and text:
-            self.input_field.setText(text)
-            self.input_field.setFocus()
-            self.input_field.selectAll()
-
-    def apply_chip_text(self, text):
-        self.input_field.setText(text)
-        self.input_field.setFocus()
-        self.input_field.selectAll()
-
     def refresh_history_list(self):
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
@@ -2165,6 +2277,115 @@ class MainWindow(QMainWindow):
                 continue
         self.history_layout.addStretch()
 
+    def create_load_more_btn(self):
+        btn = QPushButton("显示更多历史消息")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                border: none;
+                background: transparent;
+                color: {DesignTokens.text_secondary};
+                font-size: 12px;
+                padding: 8px;
+                margin-bottom: 8px;
+            }}
+            QPushButton:hover {{
+                color: {DesignTokens.primary};
+            }}
+        """)
+        btn.clicked.connect(self.load_more_history)
+        return btn
+
+    def load_more_history(self):
+        state = self.get_current_session()
+        if not state: return
+        
+        PAGE_SIZE = 20
+        total = len(state.messages)
+        remaining = total - state.displayed_count
+        if remaining <= 0: return
+        
+        count_to_load = min(PAGE_SIZE, remaining)
+        start_idx = total - state.displayed_count - count_to_load
+        end_idx = total - state.displayed_count
+        
+        msgs_to_load = state.messages[start_idx:end_idx]
+        
+        # Save scroll position
+        vbar = state.chat_scroll.verticalScrollBar()
+        old_max = vbar.maximum()
+        old_val = vbar.value()
+        
+        # Insert after the button (index 1)
+        # Use animate=False to prevent scroll jumping and ensure instant layout update
+        self.render_message_batch(msgs_to_load, state.session_id, insert_index=1, animate=False)
+        
+        # Restore scroll position (adjust for new content height)
+        QApplication.processEvents() # Ensure layout updates
+        new_max = vbar.maximum()
+        vbar.setValue(old_val + (new_max - old_max))
+        
+        state.displayed_count += count_to_load
+        
+        if state.displayed_count >= total:
+            if state.load_more_btn:
+                state.load_more_btn.deleteLater()
+                state.load_more_btn = None
+
+    def render_message_batch(self, messages, session_id, insert_index=None, animate=True):
+        state = self.get_session(session_id)
+        if not state: return
+        
+        current_idx = insert_index
+        backup_last_agent = state.last_agent_bubble
+        state.last_agent_bubble = None 
+        
+        for msg in messages:
+            role = msg.get('role')
+            content = msg.get('content')
+            reasoning = msg.get('reasoning')
+            
+            if role == 'user':
+                self.add_chat_bubble('User', content, index=current_idx, animate=animate)
+                if current_idx is not None: current_idx += 1
+                state.last_agent_bubble = None
+                
+            elif role == 'assistant':
+                bubble = None
+                if content or reasoning or msg.get('tool_calls'):
+                    bubble = self.add_chat_bubble('Agent', content, thinking=reasoning, index=current_idx, animate=animate)
+                    if current_idx is not None: current_idx += 1
+                
+                state.last_agent_bubble = bubble
+                
+                tool_calls = msg.get('tool_calls')
+                if tool_calls:
+                    for tc in tool_calls:
+                        t_id = tc.get('id')
+                        func = tc.get('function', {})
+                        t_name = func.get('name')
+                        t_args = func.get('arguments')
+                        self.add_tool_card({
+                            'id': t_id,
+                            'name': t_name,
+                            'args': t_args
+                        }, session_id=session_id, index=current_idx, animate=animate)
+                        
+                        if not bubble:
+                             if current_idx is not None: current_idx += 1
+
+            elif role == 'tool':
+                t_id = msg.get('tool_call_id')
+                t_result = content
+                if t_id:
+                    self.update_tool_card({
+                        'id': t_id,
+                        'result': t_result
+                    }, session_id=session_id)
+                    
+        if insert_index is not None:
+             state.last_agent_bubble = backup_last_agent
+
     def load_session(self, session_id):
         if session_id in self.sessions:
             state = self.sessions[session_id]
@@ -2181,6 +2402,8 @@ class MainWindow(QMainWindow):
         if not state: return
 
         self.clear_chat_layout(state.chat_layout)
+        state.empty_state = None # Reset empty state reference
+        
         state.messages = []
         state.tool_cards = {}
         state.current_content_buffer = ""
@@ -2188,44 +2411,40 @@ class MainWindow(QMainWindow):
         state.last_agent_bubble = None
         state.llm_worker = None
         state.active_skills_label.setText("本次会话使用的功能: ")
+        state.displayed_count = 0
+        state.load_more_btn = None
 
         history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
         if os.path.exists(history_path):
             try:
                 with open(history_path, 'r', encoding='utf-8') as f:
                     state.messages = json.load(f)
-                for msg in state.messages:
-                    role = msg.get('role')
-                    content = msg.get('content')
-                    reasoning = msg.get('reasoning')
-                    if role == 'user':
-                        self.add_chat_bubble('User', content)
-                    elif role == 'assistant':
-                        if content or reasoning or msg.get('tool_calls'):
-                            self.add_chat_bubble('Agent', content, thinking=reasoning)
-                        
-                        tool_calls = msg.get('tool_calls')
-                        if tool_calls:
-                            for tc in tool_calls:
-                                t_id = tc.get('id')
-                                func = tc.get('function', {})
-                                t_name = func.get('name')
-                                t_args = func.get('arguments')
-                                self.add_tool_card({
-                                    'id': t_id,
-                                    'name': t_name,
-                                    'args': t_args
-                                }, session_id=session_id)
-                    elif role == 'tool':
-                        t_id = msg.get('tool_call_id')
-                        t_result = content
-                        if t_id:
-                            self.update_tool_card({
-                                'id': t_id,
-                                'result': t_result
-                            }, session_id=session_id)
+                
+                # Pagination: Load last 20 messages
+                PAGE_SIZE = 20
+                total = len(state.messages)
+                start_idx = max(0, total - PAGE_SIZE)
+                
+                display_msgs = state.messages[start_idx:]
+                state.displayed_count = len(display_msgs)
+                
+                # Add Load More button if needed
+                if start_idx > 0:
+                    btn = self.create_load_more_btn()
+                    state.load_more_btn = btn
+                    state.chat_layout.addWidget(btn) # Add to top (since layout is empty)
+                
+                self.render_message_batch(display_msgs, session_id, animate=False)
+                
             except Exception as e:
                 print(f"Error loading session: {e}")
+        
+        # Restore Empty State if no messages
+        if len(state.messages) == 0:
+            empty_state = EmptyStateWidget(self)
+            state.chat_layout.insertWidget(0, empty_state)
+            state.empty_state = empty_state
+
         self.update_session_tab_title(session_id)
         self.refresh_history_list()
         self.normalize_session_ui(self.get_current_session())
@@ -2511,7 +2730,7 @@ class MainWindow(QMainWindow):
             
         self.td_result_edit.setPlainText(res_text)
 
-    def add_tool_card(self, data, session_id=None):
+    def add_tool_card(self, data, session_id=None, index=None, animate=True):
         card = ToolCallCard(data['name'], data['args'], data['id'])
         card.clicked.connect(self.show_tool_details)
         
@@ -2529,7 +2748,39 @@ class MainWindow(QMainWindow):
             layout.setContentsMargins(48, 4, 16, 4)
             layout.addWidget(card)
             layout.addStretch()
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
+            
+            # Animation: Fade + Slide
+            opacity_effect = QGraphicsOpacityEffect(wrapper)
+            wrapper.setGraphicsEffect(opacity_effect)
+            
+            if index is not None:
+                state.chat_layout.insertWidget(index, wrapper)
+            else:
+                state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
+            
+            QApplication.processEvents()
+            
+            if animate:
+                opacity_effect.setOpacity(0)
+                fade_anim = QPropertyAnimation(opacity_effect, b"opacity", wrapper)
+                fade_anim.setDuration(350)
+                fade_anim.setStartValue(0.0)
+                fade_anim.setEndValue(1.0)
+                fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+                
+                slide_anim = QPropertyAnimation(wrapper, b"pos", wrapper)
+                slide_anim.setDuration(350)
+                slide_anim.setStartValue(wrapper.pos() + QPoint(0, 20))
+                slide_anim.setEndValue(wrapper.pos())
+                slide_anim.setEasingCurve(QEasingCurve.OutBack)
+                
+                group = QParallelAnimationGroup(wrapper)
+                group.addAnimation(fade_anim)
+                group.addAnimation(slide_anim)
+                group.start(QAbstractAnimation.DeleteWhenStopped)
+            else:
+                opacity_effect.setOpacity(1.0)
+            
         QApplication.processEvents()
 
     def update_tool_card(self, data, session_id=None):
@@ -2549,17 +2800,55 @@ class MainWindow(QMainWindow):
                 
                 self.show_tool_details(tool_id, card.args, result, switch_tab=False)
 
-    def add_chat_bubble(self, role, text, thinking=None, duration=None):
+    def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True):
         state = self.get_current_session()
         if not state: return
+        
+        # Hide Empty State if this is the first message
+        if state.empty_state and state.empty_state.isVisible():
+            state.empty_state.setVisible(False)
+            
         bubble = ChatBubble(role, text, thinking, duration)
-        state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
+        
+        # Animation: Fade + Slide
+        opacity_effect = QGraphicsOpacityEffect(bubble)
+        bubble.setGraphicsEffect(opacity_effect)
+        
+        if index is not None:
+            state.chat_layout.insertWidget(index, bubble)
+        else:
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
+        
         QApplication.processEvents() 
-        # Scroll to bottom
-        if hasattr(state, 'chat_scroll') and state.chat_scroll:
+        
+        if animate:
+            opacity_effect.setOpacity(0)
+            fade_anim = QPropertyAnimation(opacity_effect, b"opacity", bubble)
+            fade_anim.setDuration(350)
+            fade_anim.setStartValue(0.0)
+            fade_anim.setEndValue(1.0)
+            fade_anim.setEasingCurve(QEasingCurve.OutCubic)
+            
+            slide_anim = QPropertyAnimation(bubble, b"pos", bubble)
+            slide_anim.setDuration(350)
+            slide_anim.setStartValue(bubble.pos() + QPoint(0, 20))
+            slide_anim.setEndValue(bubble.pos())
+            slide_anim.setEasingCurve(QEasingCurve.OutBack)
+            
+            group = QParallelAnimationGroup(bubble)
+            group.addAnimation(fade_anim)
+            group.addAnimation(slide_anim)
+            group.start(QAbstractAnimation.DeleteWhenStopped)
+        else:
+            opacity_effect.setOpacity(1.0)
+        
+        # Scroll to bottom only if appending
+        if index is None and hasattr(state, 'chat_scroll') and state.chat_scroll:
             state.chat_scroll.verticalScrollBar().setValue(
                 state.chat_scroll.verticalScrollBar().maximum()
             )
+            
+        return bubble
 
     def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None):
         state = self.get_session(session_id)

@@ -2,6 +2,55 @@ import qdarktheme
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt
 
+class DesignTokens:
+    # Core Colors
+    primary = "#2563eb"  # Blue 600
+    primary_hover = "#1d4ed8" # Blue 700
+    
+    # Gradient for User Bubble
+    primary_gradient_start = "#4d6bfe" 
+    primary_gradient_end = "#3d5ce5"
+    
+    # Text
+    text_primary = "#111827" # Gray 900
+    text_secondary = "#6b7280" # Gray 500
+    text_tertiary = "#9ca3af" # Gray 400
+    
+    # Borders & Backgrounds
+    border = "#e5e7eb" # Gray 200
+    bg_main = "#ffffff"
+    bg_secondary = "#f9fafb" # Gray 50
+    
+    # Shadows
+    shadow_sidebar = "2px 0 8px rgba(0,0,0,0.04)"
+    shadow_card = "0 1px 3px rgba(0,0,0,0.1)"
+
+    # Semantic Colors (Success, Error, Warning, Info)
+    # Success
+    success_bg = "#f0fdf4"
+    success_text = "#166534"
+    success_border = "#bbf7d0"
+    success_icon = "#166534"
+    success_accent = "#10b981" # Emerald 500
+    
+    # Error
+    error_bg = "#fef2f2"
+    error_text = "#991b1b"
+    error_border = "#fecaca"
+    error_icon = "#991b1b"
+    
+    # Warning
+    warning_bg = "#fffbeb"
+    warning_text = "#92400e"
+    warning_border = "#fde68a"
+    warning_icon = "#92400e"
+    
+    # Info
+    info_bg = "#eff6ff"
+    info_text = "#1e40af"
+    info_border = "#bfdbfe"
+    info_icon = "#1e40af"
+
 def get_tech_stylesheet(theme="dark"):
     is_dark = theme == "dark"
     

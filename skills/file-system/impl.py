@@ -98,13 +98,8 @@ def read_file(workspace_dir, path, _context=None):
         if not os.path.isfile(abs_path):
             return f"Error: '{path}' is not a file."
             
-        # Limit file size to avoid context overflow (e.g., 50KB)
-        # In God Mode, maybe we relax this? Or keep it for context safety. Let's keep it for now.
-        if os.path.getsize(abs_path) > 50 * 1024:
-             return f"Error: File '{path}' is too large to read directly (max 50KB)."
-
         with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
-            return f.read()
+            return f.read(100 * 1024)
             
     except Exception as e:
         return f"Error: {str(e)}"

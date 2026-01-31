@@ -25,7 +25,8 @@ a = Analysis(
         'pypdf',
         'bs4',
         'requests',
-        'markdown'
+        'markdown',
+        'qdarktheme'
     ],
     hookspath=[],
     hooksconfig={},

@@ -17,11 +17,12 @@ from core.skill_generator import SkillGenerator
 from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir
+from core.theme import apply_theme
 import shutil
-from PySide6.QtGui import QAction, QTextOption, QIcon, QFontMetrics, QPixmap, QDesktopServices
+from PySide6.QtGui import QAction, QTextOption, QIcon, QFontMetrics, QPixmap, QDesktopServices, QGuiApplication, QColor, QPainter, QBrush, QPainterPath
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QStackedWidget)
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QStackedWidget, QSizePolicy)
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect
 
 # Try importing OpenAI
 try:
@@ -29,6 +30,43 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
+
+try:
+    import qdarktheme
+    QDARKTHEME_AVAILABLE = True
+except ImportError:
+    QDARKTHEME_AVAILABLE = False
+
+# --- Helper Classes for UI ---
+
+class Avatar(QLabel):
+    def __init__(self, role, size=32, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.role = role
+        self.setText("")
+        
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        path = QPainterPath()
+        path.addEllipse(0, 0, self.width(), self.height())
+        painter.setClipPath(path)
+        
+        if self.role == "User":
+            color = QColor("#4b5563") # Dark Grey for User
+            painter.fillRect(self.rect(), color)
+            painter.setPen(Qt.white)
+            painter.setFont(self.font())
+            painter.drawText(self.rect(), Qt.AlignCenter, "Me")
+        else:
+            # DeepSeek Blue
+            color = QColor("#4d6bfe") 
+            painter.fillRect(self.rect(), color)
+            painter.setPen(Qt.white)
+            painter.setFont(self.font())
+            painter.drawText(self.rect(), Qt.AlignCenter, "DC")
 
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
@@ -109,12 +147,6 @@ class SettingsDialog(QDialog):
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         # Save God Mode
         self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-        parent = self.parent()
-        if parent and hasattr(parent, "add_system_toast"):
-            if self.api_key_input.text().strip():
-                parent.add_system_toast("API Key 保存成功", "success")
-            else:
-                parent.add_system_toast("设置已保存", "success")
         
         self.accept()
 
@@ -308,12 +340,49 @@ class AutoResizingLabel(QLabel):
         self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.setCursor(Qt.IBeamCursor)
         # Use a transparent background and specific text color
-        self.setStyleSheet("background: transparent; border: none; color: #5f6368; font-size: 13px;")
+        self.setStyleSheet("background: transparent; border: none; color: #6b7280; font-size: 13px; font-family: 'Segoe UI', sans-serif;")
 
-class AutoResizingTextEdit(QTextEdit):
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        
+        # 复制 (Copy)
+        action_copy = QAction("复制", self)
+        action_copy.triggered.connect(lambda: QApplication.clipboard().setText(self.selectedText()))
+        action_copy.setEnabled(self.hasSelectedText())
+        menu.addAction(action_copy)
+        
+        # 全选 (Select All)
+        action_select_all = QAction("全选", self)
+        action_select_all.triggered.connect(lambda: self.setSelection(0, len(self.text())))
+        menu.addAction(action_select_all)
+        
+        menu.exec(event.globalPos())
+
+class ReadOnlyTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        
+        # 复制 (Copy)
+        action_copy = QAction("复制", self)
+        action_copy.triggered.connect(self.copy)
+        action_copy.setEnabled(self.textCursor().hasSelection())
+        menu.addAction(action_copy)
+        
+        # 全选 (Select All)
+        action_select_all = QAction("全选", self)
+        action_select_all.triggered.connect(self.selectAll)
+        menu.addAction(action_select_all)
+        
+        menu.exec(event.globalPos())
+
+class AutoResizingTextEdit(ReadOnlyTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # self.setReadOnly(True) # Inherited
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameStyle(QFrame.NoFrame)
@@ -321,7 +390,7 @@ class AutoResizingTextEdit(QTextEdit):
         self.setStyleSheet("background: transparent;")
         
         # Set word wrap mode to break anywhere if needed (for long strings)
-        self.setWordWrapMode(QTextOption.WrapAnywhere)
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
 
     def adjustHeight(self):
         doc_height = self.document().size().height()
@@ -333,91 +402,6 @@ class AutoResizingTextEdit(QTextEdit):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.adjustHeight()
-
-class EventCard(QFrame):
-    save_skill_requested = Signal(str)
-
-    def __init__(self, title, content, type="info", parent=None):
-        super().__init__(parent)
-        self.type = type
-        self.code_content = content if type == "code_source" else None
-        self.setObjectName("EventCard")
-        self.setFrameShape(QFrame.StyledPanel)
-        self.setLineWidth(1)
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        
-        # Header
-        header_layout = QHBoxLayout()
-        icon_label = QLabel()
-        icon_label.setFixedWidth(24)
-        icon_label.setAlignment(Qt.AlignCenter)
-        if type == "think":
-            icon_label.setText("🧠")
-        elif type == "tool":
-            icon_label.setText("🛠️")
-        elif type == "code":
-            icon_label.setText("💻")
-        elif type == "code_source":
-            icon_label.setText("📜")
-        elif type == "success":
-            icon_label.setText("✅")
-        elif type == "error":
-            icon_label.setText("❌")
-        else:
-            icon_label.setText("ℹ️")
-            
-        title_label = QLabel(title)
-        title_label.setStyleSheet("font-weight: bold; color: #333; font-size: 13px;")
-        
-        header_layout.addWidget(icon_label)
-        header_layout.addWidget(title_label)
-        header_layout.addStretch()
-        
-        layout.addLayout(header_layout)
-        
-        # Content
-        if content:
-            self.content_edit = AutoResizingTextEdit()
-            self.content_edit.setPlainText(content)
-            self.content_edit.setStyleSheet("color: #666; font-size: 12px; margin-top: 4px; line-height: 1.4; background: transparent;")
-            layout.addWidget(self.content_edit)
-            self.content_edit.adjustHeight()
-            
-        # Save as Skill Button
-        if type == "code_source":
-            btn_layout = QHBoxLayout()
-            btn_layout.addStretch()
-            save_btn = QPushButton("保存为技能")
-            save_btn.setCursor(Qt.PointingHandCursor)
-            save_btn.setStyleSheet("""
-                QPushButton { background-color: #e8f0fe; color: #1a73e8; border: none; border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: bold; }
-                QPushButton:hover { background-color: #d2e3fc; }
-            """)
-            save_btn.clicked.connect(lambda: self.save_skill_requested.emit(self.code_content))
-            btn_layout.addWidget(save_btn)
-            layout.addLayout(btn_layout)
-
-        # Style
-        self.setStyleSheet("""
-            QFrame#EventCard {
-                background-color: #ffffff;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-            }
-        """)
-
-    def append_content(self, text):
-        if hasattr(self, 'content_edit'):
-            self.content_edit.append(text)
-        else:
-            # Initialize if not present (though usually created with content)
-            self.content_edit = AutoResizingTextEdit()
-            self.content_edit.setPlainText(text)
-            self.content_edit.setStyleSheet("color: #666; font-size: 12px; margin-top: 4px; line-height: 1.4; background: transparent;")
-            self.layout().addWidget(self.content_edit)
-            self.content_edit.adjustHeight()
 
 class SystemToast(QFrame):
     """System Notification in Chat Stream"""
@@ -432,29 +416,29 @@ class SystemToast(QFrame):
         icon_label = QLabel()
         if type == "error":
             icon_label.setText("❌")
-            bg_color = "#fce8e6"
-            text_color = "#c5221f"
-            border_color = "#f6aea9"
+            bg_color = "#fef2f2"
+            text_color = "#991b1b"
+            border_color = "#fecaca"
         elif type == "success":
             icon_label.setText("✅")
-            bg_color = "#e6f4ea"
-            text_color = "#137333"
-            border_color = "#ceead6"
+            bg_color = "#f0fdf4"
+            text_color = "#166534"
+            border_color = "#bbf7d0"
         elif type == "warning":
             icon_label.setText("⚠️")
-            bg_color = "#fef7e0"
-            text_color = "#b06000"
-            border_color = "#feefc3"
+            bg_color = "#fffbeb"
+            text_color = "#92400e"
+            border_color = "#fde68a"
         else:
             icon_label.setText("ℹ️")
-            bg_color = "#e8f0fe"
-            text_color = "#1967d2"
-            border_color = "#d2e3fc"
+            bg_color = "#eff6ff"
+            text_color = "#1e40af"
+            border_color = "#bfdbfe"
             
         layout.addWidget(icon_label)
         
         msg_label = QLabel(text)
-        msg_label.setStyleSheet(f"color: {text_color}; font-weight: 500;")
+        msg_label.setStyleSheet(f"color: {text_color}; font-weight: 500; font-size: 13px; background: transparent;")
         msg_label.setWordWrap(True)
         msg_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(msg_label)
@@ -463,117 +447,137 @@ class SystemToast(QFrame):
             QFrame {{
                 background-color: {bg_color};
                 border: 1px solid {border_color};
-                border-radius: 16px;
+                border-radius: 8px;
                 margin: 8px 40px;
             }}
         """)
 
 class ChatBubble(QFrame):
-    """自定义聊天气泡组件，支持展示 Thinking 过程 (可折叠)"""
+    """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(self, role, text, thinking=None, duration=None):
         super().__init__()
+        self.role = role
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         
-        # Main Layout
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        # Main Horizontal Layout (Avatar | Content)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 10, 0, 10)
+        main_layout.setSpacing(16)
         
-        # User Bubble Design
         if role == "User":
-            # Container for alignment
-            container_layout = QHBoxLayout()
-            container_layout.setContentsMargins(0, 0, 0, 0)
-            container_layout.addStretch() # Push to right
+            main_layout.setAlignment(Qt.AlignRight | Qt.AlignTop)
+            
+            # 1. Content Wrapper (to push content to right)
+            content_wrapper = QWidget()
+            cw_layout = QVBoxLayout(content_wrapper)
+            cw_layout.setContentsMargins(0,0,0,0)
             
             # Bubble Frame
             bubble_frame = QFrame()
             bubble_frame.setStyleSheet("""
                 QFrame {
-                    background-color: #e7f8ff;
+                    background-color: #3b82f6;
                     border-radius: 16px;
                     border-bottom-right-radius: 4px;
-                    padding: 4px;
                 }
             """)
             bubble_layout = QVBoxLayout(bubble_frame)
-            bubble_layout.setContentsMargins(12, 12, 12, 12)
-            bubble_layout.setSpacing(4)
+            bubble_layout.setContentsMargins(16, 12, 16, 12)
             
-            # Content
             content_label = QLabel(text)
             content_label.setWordWrap(True)
             content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            content_label.setStyleSheet("color: #000000; font-size: 14px; line-height: 1.5; border: none; background: transparent;")
+            content_label.setStyleSheet("color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent;")
             bubble_layout.addWidget(content_label)
+            
+            cw_layout.addWidget(bubble_frame)
+            
+            # Add to main
+            main_layout.addStretch() # Push everything right
+            main_layout.addWidget(content_wrapper)
+            
+            # Avatar
+            avatar = Avatar("User", 40)
+            main_layout.addWidget(avatar, alignment=Qt.AlignTop)
 
-            container_layout.addWidget(bubble_frame)
-            
-            # Add some spacing on the left to prevent it from being too wide
-            container_layout.setStretch(0, 1) # Stretch the left side
-            container_layout.setStretch(1, 0) # Don't stretch the bubble
-            
-            layout.addLayout(container_layout)
-            
-        # Agent Bubble Design
         else: # Agent
-            # 1. Thinking Section (DeepSeek Style)
+            main_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            
+            # Avatar
+            avatar = Avatar("Agent", 40)
+            main_layout.addWidget(avatar, alignment=Qt.AlignTop)
+            
+            # Content Column
+            content_col = QWidget()
+            content_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            col_layout = QVBoxLayout(content_col)
+            col_layout.setContentsMargins(0, 0, 0, 0)
+            col_layout.setSpacing(10)
+            
+            # 1. Thinking Section (DeepSeek Style - Grey Block)
             self.thinking_widget = QWidget()
             think_layout = QVBoxLayout(self.thinking_widget)
             think_layout.setContentsMargins(0, 0, 0, 0)
             think_layout.setSpacing(0)
             
-            # Toggle Button
-            self.think_toggle_btn = QPushButton("> 思考过程")
+            # Toggle Header
+            self.think_toggle_btn = QPushButton("💡 思考过程")
             self.think_toggle_btn.setCursor(Qt.PointingHandCursor)
             self.think_toggle_btn.setCheckable(True)
-            self.think_toggle_btn.setChecked(False) # Default collapsed
+            self.think_toggle_btn.setChecked(False)
             self.think_toggle_btn.setStyleSheet("""
                 QPushButton {
                     text-align: left;
-                    background-color: #f6f6f6;
-                    color: #666;
-                    border: 1px solid #eee;
-                    border-radius: 6px;
-                    padding: 8px 12px;
+                    background-color: #ffffff;
+                    color: #6b7280;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 18px;
+                    padding: 8px 16px;
                     font-size: 13px;
-                    font-family: "Segoe UI", sans-serif;
+                    font-weight: 500;
+                    margin-bottom: 8px;
                 }
-                QPushButton:hover { background-color: #eee; }
+                QPushButton:hover { background-color: #f9fafb; color: #4b5563; border-color: #d1d5db; }
                 QPushButton:checked { 
-                    background-color: #f0f0f0; 
+                    background-color: #f8fafc; 
+                    color: #475569; 
+                    border-color: #cbd5e1; 
                     border-bottom-left-radius: 0; 
-                    border-bottom-right-radius: 0;
-                    border-bottom: none;
+                    border-bottom-right-radius: 0; 
                 }
             """)
             self.think_toggle_btn.toggled.connect(self.toggle_thinking)
             think_layout.addWidget(self.think_toggle_btn)
 
-            # Container for Content + Tools
+            # Container for Thinking Stream
             self.think_container = QWidget()
             self.think_container.setVisible(False)
             self.think_container.setStyleSheet("""
                 QWidget {
-                    background: #fcfcfc;
-                    border: 1px solid #eee;
+                    background: #f9fafb;
+                    border: 1px solid #e5e7eb;
                     border-top: none;
-                    border-bottom-left-radius: 6px;
-                    border-bottom-right-radius: 6px;
+                    margin-top: -1px;
+                    margin-left: 0px;
+                    border-bottom-left-radius: 18px;
+                    border-bottom-right-radius: 18px;
                 }
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
             self.think_container_layout.setContentsMargins(12, 12, 12, 12)
-            self.think_container_layout.setSpacing(12)
+            self.think_container_layout.setSpacing(8)
             self._start_new_think_segment = False
             self._last_thinking_segment_text = ""
             self._strip_prefix = ""
-
-            # We don't create initial content here, it will be added dynamically
             
             think_layout.addWidget(self.think_container)
-            layout.addWidget(self.thinking_widget)
+            col_layout.addWidget(self.thinking_widget)
+            
+            # 2. Main Content
+            self.content_edit = AutoResizingTextEdit()
+            self.content_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
+            col_layout.addWidget(self.content_edit)
             
             # Handle Initial State
             if thinking == "...":
@@ -582,28 +586,34 @@ class ChatBubble(QFrame):
                 self.update_thinking(thinking, duration, is_final=True)
             else:
                 self.thinking_widget.setVisible(False)
-
-            # 2. Main Content
-            self.content_edit = AutoResizingTextEdit()
-            self.content_edit.setStyleSheet("background: transparent; border: none; margin-left: 2px;")
-            layout.addWidget(self.content_edit)
-            
+                
             if text:
                 self.set_main_content(text)
+                
+            main_layout.addWidget(content_col)
+            main_layout.addStretch() # Don't stretch content too wide
 
     def toggle_thinking(self, checked):
         self.think_container.setVisible(checked)
-        # Update arrow
-        arrow = "v" if checked else ">"
+        # Use Chevron or similar, but keep the Lightbulb fixed
         text = self.think_toggle_btn.text()
-        if text.startswith(">") or text.startswith("v"):
-            text = text[1:]
-        self.think_toggle_btn.setText(f"{arrow}{text}")
+        base_text = "💡 思考过程"
+        
+        # If we have duration in text
+        if "(" in text:
+             parts = text.split("(")
+             duration_part = "(" + parts[1]
+             base_text = f"💡 思考过程 {duration_part}"
+             
+        if checked:
+             self.think_toggle_btn.setText(base_text) # Maybe add arrow if needed, but styling shows state
+        else:
+             self.think_toggle_btn.setText(base_text)
         
     def set_thinking_state(self, is_thinking):
         if is_thinking:
-            self.think_toggle_btn.setText("v 正在思考...")
-            self.think_toggle_btn.setChecked(True) # Auto expand when thinking starts
+            self.think_toggle_btn.setText("💡 思考中…")
+            self.think_toggle_btn.setChecked(True)
             self.thinking_widget.setVisible(True)
 
     def get_active_think_widget(self, force_new=False):
@@ -622,38 +632,16 @@ class ChatBubble(QFrame):
 
     def update_thinking(self, text=None, duration=None, is_final=False):
         if text is not None:
-            force_new = False
-            if self._start_new_think_segment:
-                self._start_new_think_segment = False
-                force_new = True
-                self._strip_prefix = self._last_thinking_segment_text or ""
-            
-            incoming = text
-            # Stream deduplication: if incoming delta matches start of prefix, consume it
-            if self._strip_prefix:
-                if self._strip_prefix.startswith(incoming):
-                    self._strip_prefix = self._strip_prefix[len(incoming):]
-                    incoming = "" # Consumed
-                elif incoming.startswith(self._strip_prefix):
-                    # Incoming > Prefix (rare for small deltas, but possible)
-                    incoming = incoming[len(self._strip_prefix):]
-                    self._strip_prefix = ""
-                else:
-                    # Mismatch - stop stripping
-                    self._strip_prefix = ""
-            
-            if incoming:
-                widget = self.get_active_think_widget(force_new)
-                # Use setText for Label
-                current_text = widget.text()
-                widget.setText(current_text + incoming)
-                self._last_thinking_segment_text = widget.text()
+            # Simple streaming append for now
+            widget = self.get_active_think_widget()
+            current = widget.text()
+            widget.setText(current + text)
         
         if duration:
-            self.think_toggle_btn.setText(f"> 已思考 (用时 {duration:.1f} 秒)")
+            self.think_toggle_btn.setText(f"💡 深度思考 ({duration:.1f}s)")
         
         if is_final:
-            self.think_toggle_btn.setChecked(False) # Collapse when done
+            self.think_toggle_btn.setChecked(False) # Collapse by default when done
             
     def set_main_content(self, text):
         try:
@@ -663,37 +651,62 @@ class ChatBubble(QFrame):
                body { 
                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
                    line-height: 1.6; 
-                   color: #24292f; 
+                   color: #1f2937; 
                    margin: 0; 
                    font-size: 14px;
                }
-               p { margin-top: 0; margin-bottom: 16px; }
+               p { margin-top: 0; margin-bottom: 12px; }
                pre { 
-                   background-color: #f6f8fa; 
-                   padding: 16px; 
+                   background-color: #f3f4f6; 
+                   padding: 12px; 
                    border-radius: 6px; 
-                   border: 1px solid #d0d7de; 
+                   border: 1px solid #e5e7eb; 
                    white-space: pre-wrap; 
-                   margin-bottom: 16px;
+                   margin-bottom: 12px;
+                   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
                }
                code { 
-                   font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace; 
-                   font-size: 85%; 
+                   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; 
+                   font-size: 90%; 
                    padding: 0.2em 0.4em; 
-                   background-color: rgba(175, 184, 193, 0.2); 
-                   border-radius: 6px; 
+                   background-color: #f3f4f6; 
+                   border-radius: 4px; 
                }
-               h1, h2 { border-bottom: 1px solid #d0d7de; padding-bottom: 0.3em; margin-top: 24px; }
-               a { color: #0969da; text-decoration: none; }
+               h1, h2, h3 { color: #111827; font-weight: 600; margin-top: 24px; margin-bottom: 12px; }
+               h1 { font-size: 1.5em; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.3em; }
+               h2 { font-size: 1.3em; }
+               a { color: #2563eb; text-decoration: none; }
                blockquote { 
-                   border-left: 0.25em solid #d0d7de; 
-                   color: #57606a; 
-                   padding: 0 1em; 
+                   border-left: 3px solid #d1d5db; 
+                   color: #4b5563; 
+                   padding-left: 1em; 
                    margin: 0 0 16px 0; 
                }
-               table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
-               th, td { border: 1px solid #d0d7de; padding: 6px 13px; }
-               th { background-color: #f6f8fa; }
+               table { 
+                   border-collapse: separate; 
+                   border-spacing: 0; 
+                   width: 100%; 
+                   margin-bottom: 16px; 
+                   font-size: 13px; 
+                   border: 1px solid #e5e7eb;
+                   border-radius: 6px;
+                   overflow: hidden;
+               }
+               th, td { 
+                   border-bottom: 1px solid #e5e7eb; 
+                   border-right: 1px solid #e5e7eb; 
+                   padding: 8px 12px; 
+                   text-align: left; 
+               }
+               th { 
+                   background-color: #f8fafc; 
+                   font-weight: 600; 
+                   color: #4b5563;
+                   border-bottom: 1px solid #e5e7eb;
+               }
+               tr:last-child td { border-bottom: none; }
+               tr:hover td { background-color: #f8fafc; }
+               th:last-child, td:last-child { border-right: none; }
             </style>
             """
             html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
@@ -702,210 +715,183 @@ class ChatBubble(QFrame):
             self.content_edit.setPlainText(text)
         self.content_edit.adjustHeight()
         
-    def add_tool_card(self, card_widget):
+    def add_tool_card(self, card_widget, session_id=None):
+        # Tools inside thinking container? Or after?
+        # DeepSeek puts tool calls usually in the thought process or just after.
+        # Let's put them in the thought container if visible, else append to content column.
+        
+        # We'll put it in the Thinking Container for a cleaner log look
         self.think_container_layout.addWidget(card_widget)
         self._start_new_think_segment = True
-        # Ensure thinking is visible when tool is added
+        
+        # Ensure thinking is accessible
+        self.thinking_widget.setVisible(True)
+        # If we are streaming and a tool is called, expand to show it
         if not self.think_toggle_btn.isChecked():
             self.think_toggle_btn.setChecked(True)
 
-class TaskMonitorWidget(QWidget):
-    save_skill_signal = Signal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFixedWidth(320)
-        self.setStyleSheet("background-color: #f8f9fa; border-left: 1px solid #dadce0;")
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 2. Timeline Header
-        timeline_header = QLabel("运行记录")
-        timeline_header.setStyleSheet("padding: 16px 16px 8px; font-weight: bold; color: #5f6368; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;")
-        layout.addWidget(timeline_header)
-        
-        # 3. Timeline Area
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("border: none; background: transparent;")
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
-        self.timeline_container = QWidget()
-        self.timeline_layout = QVBoxLayout(self.timeline_container)
-        self.timeline_layout.setContentsMargins(16, 0, 16, 16)
-        self.timeline_layout.setSpacing(12)
-        self.timeline_layout.addStretch()
-        
-        self.scroll.setWidget(self.timeline_container)
-        layout.addWidget(self.scroll)
-        
-    def set_status(self, status, desc=""):
-        pass
-        # Status board removed as per user request
-        # if status == "idle":
-        #     self.status_icon.setText("🟢")
-        #     self.status_label.setText("就绪")
-        #     self.status_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #137333;")
-        #     self.status_desc.setText("等待指令...")
-        # elif status == "thinking":
-        #     self.status_icon.setText("🔵")
-        #     self.status_label.setText("思考中")
-        #     self.status_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #1a73e8;")
-        #     self.status_desc.setText(desc or "正在分析需求...")
-        # elif status == "running":
-        #     self.status_icon.setText("🟠")
-        #     self.status_label.setText("执行中")
-        #     self.status_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #f9ab00;")
-        #     self.status_desc.setText(desc or "正在操作文件...")
-        # elif status == "waiting":
-        #     self.status_icon.setText("🔴")
-        #     self.status_label.setText("等待确认")
-        #     self.status_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #d93025;")
-        #     self.status_desc.setText(desc or "请在弹窗中确认...")
-            
-    def add_event(self, title, content, type="info"):
-        card = EventCard(title, content, type)
-        if type == "code_source":
-            card.save_skill_requested.connect(self.save_skill_signal)
-            
-        # Insert before stretch (last item)
-        self.timeline_layout.insertWidget(self.timeline_layout.count()-1, card)
-        # Auto scroll to bottom
-        QApplication.processEvents()
-        self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
-
-    def add_code_output(self, text):
-        # Check if last item is code
-        if self.timeline_layout.count() > 1: # 0 is stretch
-            last_item = self.timeline_layout.itemAt(self.timeline_layout.count()-2)
-            if last_item and last_item.widget():
-                widget = last_item.widget()
-                if isinstance(widget, EventCard) and widget.type == "code":
-                    widget.append_content(text)
-                    self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum())
-                    return
-        
-        self.add_event("执行输出", text, "code")
-
-    def clear(self):
-        while self.timeline_layout.count() > 1:
-            item = self.timeline_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
 class ToolCallCard(QFrame):
+    clicked = Signal(str, str, str) # tool_id, args, result
+
     def __init__(self, tool_name, args, tool_id):
         super().__init__()
         self.tool_id = tool_id
-        self.setFrameShape(QFrame.StyledPanel)
+        self.args = args
+        self.result = ""
+        self.tool_name = tool_name
+        self.is_selected = False
+        
+        self.setFrameShape(QFrame.NoFrame)
+        # Minimalist "List Item" Style
         self.setStyleSheet("""
             ToolCallCard {
-                background-color: #ffffff;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
+                background-color: transparent;
+                border: none;
+                margin: 2px 0;
             }
         """)
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
-        # Header
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        
-        icon_label = QLabel("🛠️") 
-        icon_label.setStyleSheet("font-size: 14px;")
-        
-        name_label = QLabel(f"调用工具: {tool_name}")
-        name_label.setStyleSheet("font-weight: bold; color: #1a73e8; font-size: 13px;")
-        
-        self.status_label = QLabel("Running...")
-        self.status_label.setStyleSheet("color: #f1c40f; font-weight: bold; font-size: 11px;")
-        
-        self.toggle_btn = QToolButton()
-        self.toggle_btn.setText("展开")
-        self.toggle_btn.setCheckable(True)
-        self.toggle_btn.setChecked(False)
-        self.toggle_btn.setToolTip("点击查看参数和结果")
-        self.toggle_btn.setStyleSheet("border: none; background: transparent; font-weight: bold; color: #5f6368;")
-        self.toggle_btn.clicked.connect(self.toggle_details)
-
-        header_layout.addWidget(icon_label)
-        header_layout.addWidget(name_label)
-        header_layout.addStretch()
-        header_layout.addWidget(self.status_label)
-        header_layout.addWidget(self.toggle_btn)
-        layout.addLayout(header_layout)
-        
-        # Details Container (Args + Result)
-        self.details_container = QWidget()
-        self.details_container.setVisible(False)
-        details_layout = QVBoxLayout(self.details_container)
-        details_layout.setContentsMargins(0, 0, 0, 0)
-        details_layout.setSpacing(8)
-        layout.addWidget(self.details_container)
-
-        # Args
-        if isinstance(args, str):
-            try:
-                args_obj = json.loads(args)
-                args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
-            except:
-                args_text = args
-        else:
-            args_text = json.dumps(args, indent=2, ensure_ascii=False)
-            
-        self.args_label = AutoResizingTextEdit()
-        self.args_label.setPlainText(args_text)
-        self.args_label.setStyleSheet("""
-            QTextEdit {
-                color: #444; 
-                font-family: 'Consolas', monospace; 
-                font-size: 11px; 
-                background-color: #f8f9fa; 
-                padding: 8px; 
-                border-radius: 4px;
+        # --- Main Row Container (The "List Item") ---
+        self.main_row = QFrame()
+        self.main_row.setCursor(Qt.PointingHandCursor)
+        self.main_row.setStyleSheet("""
+            QFrame {
+                background-color: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+            }
+            QFrame:hover {
+                background-color: #f9fafb;
+                border-color: #d1d5db;
             }
         """)
-        details_layout.addWidget(self.args_label)
+        # Make the whole card clickable
+        self.main_row.mousePressEvent = self.on_card_clicked
         
-        # Result Area (Collapsible)
-        self.result_container = QWidget()
-        self.result_container.setVisible(False)
-        res_layout = QVBoxLayout(self.result_container)
-        res_layout.setContentsMargins(0, 8, 0, 0)
+        row_layout = QHBoxLayout(self.main_row)
+        row_layout.setContentsMargins(12, 10, 12, 10)
+        row_layout.setSpacing(12)
         
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: #eeeeee;")
-        res_layout.addWidget(line)
+        # 1. Icon Area 
+        tool_icons = {
+            "list_files": "📁", "read_file": "📖", "write_file": "✍️",
+            "update_file": "✍️", "delete_file": "🗑️", "run_command": "▶️",
+            "open_preview": "🧭", "search_codebase": "🔎", "grep": "🧵",
+            "glob": "🧭", "web_search": "🌐", "get_diagnostics": "🩺",
+        }
+        icon_char = tool_icons.get(tool_name, "🛠️")
         
-        res_title = QLabel("执行结果:")
-        res_title.setStyleSheet("font-weight: bold; color: #333; font-size: 11px; margin-top: 4px;")
-        res_layout.addWidget(res_title)
+        # Icon with base
+        self.icon_label = QLabel(icon_char)
+        self.icon_label.setFixedSize(32, 32)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.icon_label.setStyleSheet("""
+            background-color: #f3f4f6;
+            color: #4b5563;
+            border-radius: 16px; 
+            font-size: 16px;
+        """)
         
-        self.result_label = AutoResizingTextEdit()
-        self.result_label.setStyleSheet("color: #333; font-family: 'Consolas', monospace; font-size: 11px;")
-        res_layout.addWidget(self.result_label)
+        # 2. Text Content
+        text_container = QWidget()
+        text_container.setStyleSheet("background: transparent; border: none;")
+        text_layout = QVBoxLayout(text_container)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
         
-        details_layout.addWidget(self.result_container)
+        # Title
+        name_label = QLabel(f"{tool_name}")
+        name_label.setStyleSheet("font-weight: 600; color: #374151; font-size: 13px; border: none;")
+        
+        # Subtitle (Short Args Summary)
+        short_args = str(args)
+        if len(short_args) > 60:
+            short_args = short_args[:60] + "..."
+        args_preview = QLabel(short_args)
+        args_preview.setStyleSheet("color: #9ca3af; font-size: 11px; border: none;")
+        
+        text_layout.addWidget(name_label)
+        text_layout.addWidget(args_preview)
+        
+        # 3. Right Side Controls
+        self.status_icon = QLabel("⏳") # Default running
+        self.status_icon.setStyleSheet("font-size: 12px; border: none; background: transparent;")
+        
+        self.view_btn = QPushButton("查看")
+        self.view_btn.setCursor(Qt.PointingHandCursor)
+        self.view_btn.setFixedWidth(40)
+        self.view_btn.setToolTip("在右侧查看详情")
+        self.view_btn.setStyleSheet("""
+            QPushButton {
+                border: none;
+                border-radius: 4px;
+                background: #f3f4f6;
+                color: #6b7280;
+                font-size: 11px;
+                font-weight: 500;
+                padding: 2px 4px;
+            }
+            QPushButton:hover { background: #e5e7eb; color: #374151; }
+        """)
+        self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result)))
 
-    def toggle_details(self, checked):
-        self.details_container.setVisible(checked)
-        self.toggle_btn.setText("收起" if checked else "展开")
+        row_layout.addWidget(self.icon_label)
+        row_layout.addWidget(text_container, 1) # Expand
+        row_layout.addWidget(self.status_icon)
+        row_layout.addWidget(self.view_btn)
+        
+        layout.addWidget(self.main_row)
+
+    def on_card_clicked(self, event):
+        self.clicked.emit(self.tool_id, str(self.args), str(self.result))
+
+    def set_selected(self, selected):
+        self.is_selected = selected
+        if selected:
+            # 选中态：蓝色边框，背景微蓝
+            self.main_row.setStyleSheet("""
+                QFrame {
+                    background-color: #eff6ff;
+                    border: 1px solid #3b82f6;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            # 普通态
+            self.main_row.setStyleSheet("""
+                QFrame {
+                    background-color: #ffffff;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 8px;
+                }
+                QFrame:hover {
+                    background-color: #f9fafb;
+                    border-color: #d1d5db;
+                }
+            """)
 
     def set_result(self, result_text):
-        self.status_label.setText("Completed")
-        self.status_label.setStyleSheet("color: #27ae60; font-weight: bold; font-size: 11px;")
-        
-        display_text = result_text
-        if len(display_text) > 2000:
-            display_text = display_text[:2000] + "... (output truncated)"
-            
-        self.result_label.setPlainText(display_text)
-        self.result_container.setVisible(True)
+        self.status_icon.setText("✅") 
+        self.result = result_text
+
+class SessionState:
+    def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll):
+        self.session_id = session_id
+        self.messages = []
+        self.tool_cards = {}
+        self.current_content_buffer = ""
+        self.temp_thinking_bubble = None
+        self.last_agent_bubble = None
+        self.llm_worker = None
+        self.code_worker = None
+        self.chat_layout = chat_layout
+        self.active_skills_label = active_skills_label
+        self.session_widget = session_widget
+        self.chat_scroll = chat_scroll
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -928,49 +914,100 @@ class MainWindow(QMainWindow):
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
             
-        self.resize(1000, 800)
+        self.resize(1100, 800)
         self.workspace_dir = None
+        
+        # Apply Clean Light Theme manually for optimized components
         self.setStyleSheet("""
-            QMainWindow { background-color: #f5f7fb; }
-            QLabel[roleTitle="true"] { font-size: 18px; font-weight: 600; color: #202124; }
-            QLabel[roleSubtitle="true"] { font-size: 12px; color: #5f6368; }
+            QMainWindow { background-color: #ffffff; }
+            QLabel[roleTitle="true"] { font-size: 18px; font-weight: 600; color: #111827; }
+            QLabel[roleSubtitle="true"] { font-size: 13px; color: #6b7280; }
             QLineEdit#MainInput {
-                padding: 10px 14px;
-                border-radius: 22px;
-                border: 1px solid #dadce0;
+                padding: 12px 16px;
+                border-radius: 24px;
+                border: 1px solid #e2e8f0;
                 background: #ffffff;
+                font-size: 14px;
+                color: #1e293b;
             }
             QLineEdit#MainInput:focus {
-                border: 1px solid #1a73e8;
+                border: 1px solid #3b82f6;
+                background: #ffffff;
             }
-            QMenu {
-                background-color: #ffffff;
-                border: 1px solid #d0d7de;
+            QScrollArea { border: none; background: transparent; }
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: transparent;
+                padding: 8px 16px;
+                margin-right: 4px;
                 border-radius: 6px;
-                padding: 4px;
+                color: #6b7280;
             }
-            QMenu::item {
-                background-color: transparent;
-                padding: 6px 24px 6px 12px;
-                color: #24292f;
-                border-radius: 4px;
+            QTabBar::tab:selected {
+                background: #eff6ff;
+                color: #2563eb;
+                font-weight: bold;
             }
-            QMenu::item:selected {
-                background-color: #1a73e8;
-                color: #ffffff;
+            
+            /* Global Scrollbar Beautification */
+            QScrollBar:vertical {
+                border: none;
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #e5e7eb;
+                min-height: 20px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #d1d5db;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background: transparent;
+                height: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background: #e5e7eb;
+                min-width: 20px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #d1d5db;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
             }
         """)
         
-        # Initialize conversation history
+        self.sessions = {}
+        self.current_session_id = None
         self.messages = []
-        
-        # Track Tool Cards
         self.tool_cards = {}
+        self.current_content_buffer = ""
+        self.temp_thinking_bubble = None
+        self.last_agent_bubble = None
+        self.llm_worker = None
+        self.code_worker = None
+        self.active_run_session_id = None
+        self.active_code_session_id = None
+        self.chat_layout = None
+        self.active_skills_label = None
+        self.current_selected_tool_id = None
         
         self.config_manager = ConfigManager()
-        # API Key is now in config_manager
-        
-        # Initialize SkillManager for UI
         self.skill_manager = SkillManager(None, self.config_manager)
         self.skill_generator = SkillGenerator(self.config_manager)
 
@@ -981,33 +1018,48 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         root_layout = QHBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
+        # --- Sidebar ---
         sidebar = QWidget()
+        sidebar.setObjectName("Sidebar")
         sidebar.setFixedWidth(260)
+        sidebar.setStyleSheet("background-color: #f9fafb; border-right: 1px solid #e5e7eb;")
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(16, 16, 16, 16)
+        sidebar_layout.setContentsMargins(16, 24, 16, 24)
         sidebar_layout.setSpacing(16)
 
         app_title = QLabel("DeepSeek Cowork")
         app_title.setProperty("roleTitle", True)
-        app_subtitle = QLabel("文件助手 · DeepSeek")
-        app_subtitle.setProperty("roleSubtitle", True)
         sidebar_layout.addWidget(app_title)
+        
+        app_subtitle = QLabel("智能文件助手")
+        app_subtitle.setProperty("roleSubtitle", True)
         sidebar_layout.addWidget(app_subtitle)
 
         new_chat_btn = QPushButton("＋ 新建对话")
-        new_chat_btn.setStyleSheet("background-color: #1a73e8; color: white; border-radius: 999px; padding: 8px 16px;")
+        new_chat_btn.setCursor(Qt.PointingHandCursor)
+        new_chat_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6; 
+                color: white; 
+                border-radius: 8px; 
+                padding: 10px 16px;
+                font-weight: bold;
+                border: none;
+            }
+            QPushButton:hover { background-color: #2563eb; }
+        """)
         new_chat_btn.clicked.connect(self.new_conversation)
         sidebar_layout.addWidget(new_chat_btn)
 
         # History List
         history_label = QLabel("历史会话")
-        history_label.setStyleSheet("color: #5f6368; font-size: 12px; font-weight: bold; margin-top: 10px;")
+        history_label.setStyleSheet("color: #6b7280; font-size: 12px; font-weight: 600; margin-top: 12px;")
         sidebar_layout.addWidget(history_label)
 
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
-        self.history_scroll.setStyleSheet("background: transparent; border: none;")
         self.history_container = QWidget()
         self.history_layout = QVBoxLayout(self.history_container)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
@@ -1018,36 +1070,68 @@ class MainWindow(QMainWindow):
         sidebar_footer_label = QLabel("设置")
         sidebar_footer_label.setProperty("roleSubtitle", True)
         sidebar_layout.addWidget(sidebar_footer_label)
-        sidebar_settings_btn = QPushButton("⚙️ 打开设置")
+        
+        sidebar_btn_style = """
+            QPushButton { text-align: left; padding: 8px; border: none; color: #4b5563; background: transparent; border-radius: 6px; }
+            QPushButton:hover { background-color: #e5e7eb; color: #111827; }
+        """
+        
+        sidebar_settings_btn = QPushButton("⚙️ 系统设置")
+        sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
         sidebar_settings_btn.clicked.connect(self.open_settings)
         sidebar_layout.addWidget(sidebar_settings_btn)
         
         sidebar_skills_btn = QPushButton("🧩 功能中心")
+        sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
         sidebar_skills_btn.clicked.connect(self.open_skills_center)
         sidebar_layout.addWidget(sidebar_skills_btn)
 
         root_layout.addWidget(sidebar)
 
+        # --- Main Content ---
         main_container = QWidget()
+        main_container.setObjectName("MainContainer")
         root_layout.addWidget(main_container, 1)
 
         # Right Sidebar (Workspace File Tree)
         self.right_sidebar = QWidget()
         self.right_sidebar.setFixedWidth(280)
-        # Fix: Enforce text color for Windows 11 Dark Mode compatibility
-        self.right_sidebar.setStyleSheet("background-color: #ffffff; color: #333333; border-left: 1px solid #e0e0e0;")
-        self.right_sidebar.setVisible(False) # Default hidden until workspace selected
+        self.right_sidebar.setStyleSheet("background-color: #ffffff; border-left: 1px solid #e5e7eb;")
+        self.right_sidebar.setVisible(False)
         
         right_layout = QVBoxLayout(self.right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
         
-        # Header
-        r_header = QLabel("  工作区文件")
-        r_header.setStyleSheet("font-weight: bold; color: #5f6368; padding: 10px; background-color: #f8f9fa; border-bottom: 1px solid #e0e0e0;")
-        right_layout.addWidget(r_header)
+        # Right Sidebar Tabs (Workspace / Tool Details)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; }
+            QTabBar::tab {
+                background: transparent;
+                padding: 8px 12px;
+                margin-right: 2px;
+                border-bottom: 2px solid transparent;
+                color: #6b7280;
+                font-weight: 500;
+            }
+            QTabBar::tab:selected {
+                color: #2563eb;
+                border-bottom: 2px solid #2563eb;
+            }
+            QTabBar::tab:hover {
+                background: #f3f4f6;
+            }
+        """)
         
-        # Tree View
+        # Tab 1: Workspace Files
+        self.workspace_tab = QWidget()
+        ws_tab_layout = QVBoxLayout(self.workspace_tab)
+        ws_tab_layout.setContentsMargins(0, 0, 0, 0)
+        ws_tab_layout.setSpacing(0)
+        
         self.file_model = QFileSystemModel()
         self.file_model.setRootPath("") 
         
@@ -1055,256 +1139,379 @@ class MainWindow(QMainWindow):
         self.file_tree.setModel(self.file_model)
         self.file_tree.setRootIndex(self.file_model.index(""))
         self.file_tree.setHeaderHidden(True)
-        self.file_tree.setColumnHidden(1, True)
-        self.file_tree.setColumnHidden(2, True)
-        self.file_tree.setColumnHidden(3, True)
-        # Fix: Enhanced styling for TreeView with better visibility and interaction
+        for i in range(1, 4): self.file_tree.setColumnHidden(i, True)
         self.file_tree.setStyleSheet("""
-            QTreeView { 
-                border: none; 
-                background-color: #ffffff; 
-                color: #333333; 
-            } 
-            QTreeView::item { 
-                padding: 4px; 
-            }
-            QTreeView::item:selected {
-                background-color: #e8f0fe;
-                color: #1a73e8;
-            }
-            QTreeView::item:hover {
-                background-color: #f1f3f4;
-            }
+             QTreeView { border: none; } 
+             QTreeView::item { padding: 4px; }
+             QTreeView::item:selected { background-color: #eff6ff; color: #1d4ed8; }
         """)
         self.file_tree.clicked.connect(self.on_file_clicked)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self.show_file_context_menu)
-        right_layout.addWidget(self.file_tree, 2)
+        ws_tab_layout.addWidget(self.file_tree, 2)
         
-        # Preview Area
+        # Preview Area in Workspace Tab
         r_preview_header = QLabel("  内容预览")
-        r_preview_header.setStyleSheet("font-weight: bold; color: #5f6368; padding: 5px 10px; background-color: #f8f9fa; border-top: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0;")
-        right_layout.addWidget(r_preview_header)
+        r_preview_header.setStyleSheet("font-weight: 600; color: #4b5563; padding: 8px 12px; border-top: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; background: #f9fafb;")
+        ws_tab_layout.addWidget(r_preview_header)
         
         self.preview_stack = QStackedWidget()
-        self.preview_text = QTextEdit()
-        self.preview_text.setReadOnly(True)
-        self.preview_text.setStyleSheet("border: none; padding: 5px; background-color: #ffffff; color: #333333;")
+        self.preview_text = ReadOnlyTextEdit()
+        # self.preview_text.setReadOnly(True) # Handled by class
+        self.preview_text.setStyleSheet("border: none; padding: 8px; color: #374151; font-family: 'Consolas', monospace; font-size: 11px;")
         self.preview_text.setPlaceholderText("点击文件预览内容...")
         self.preview_image = QLabel()
         self.preview_image.setAlignment(Qt.AlignCenter)
-        self.preview_image.setStyleSheet("background-color: #ffffff;")
         self.preview_stack.addWidget(self.preview_text)
         self.preview_stack.addWidget(self.preview_image)
         self.preview_stack.setCurrentWidget(self.preview_text)
         self.preview_pixmap = None
-        right_layout.addWidget(self.preview_stack, 1)
+        ws_tab_layout.addWidget(self.preview_stack, 1)
+        
+        self.right_tabs.addTab(self.workspace_tab, "工作区文件")
+        
+        # Tab 2: Tool Details
+        self.tool_details_tab = QWidget()
+        td_layout = QVBoxLayout(self.tool_details_tab)
+        td_layout.setContentsMargins(12, 12, 12, 12)
+        td_layout.setSpacing(12)
+        
+        td_header = QLabel("工具调用详情")
+        td_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
+        td_layout.addWidget(td_header)
+        
+        # Tool ID / Name
+        self.td_info_label = QLabel("选择左侧工具卡片查看详情")
+        self.td_info_label.setStyleSheet("color: #6b7280; font-size: 12px;")
+        td_layout.addWidget(self.td_info_label)
+        
+        # Args
+        td_args_label = QLabel("Arguments:")
+        td_args_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
+        td_layout.addWidget(td_args_label)
+        
+        self.td_args_edit = ReadOnlyTextEdit()
+        # self.td_args_edit.setReadOnly(True)
+        self.td_args_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                background: #f9fafb;
+                color: #374151;
+                font-family: 'Consolas', monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        td_layout.addWidget(self.td_args_edit, 1)
+        
+        # Result
+        td_result_label = QLabel("Result:")
+        td_result_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
+        td_layout.addWidget(td_result_label)
+        
+        self.td_result_edit = ReadOnlyTextEdit()
+        # self.td_result_edit.setReadOnly(True)
+        self.td_result_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                background: #f9fafb;
+                color: #374151;
+                font-family: 'Consolas', monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        td_layout.addWidget(self.td_result_edit, 2)
+        
+        self.right_tabs.addTab(self.tool_details_tab, "工具详情")
+        
+        right_layout.addWidget(self.right_tabs)
         
         root_layout.addWidget(self.right_sidebar)
 
+        # Main Layout Construction
         layout = QVBoxLayout(main_container)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(16)
+        layout.setContentsMargins(40, 32, 40, 32)
+        layout.setSpacing(20)
 
+        # Top Bar
+        top_bar = QHBoxLayout()
+        title_box = QVBoxLayout()
         title_label = QLabel("你好，需要我为你做些什么？")
         title_label.setProperty("roleTitle", True)
-        subtitle_label = QLabel("在这里描述你想对当前文件夹做的事，我会帮你完成。")
+        subtitle_label = QLabel("选择工作区，描述你的需求，我会帮你完成文件操作。")
         subtitle_label.setProperty("roleSubtitle", True)
-        layout.addWidget(title_label)
-        layout.addWidget(subtitle_label)
-
-        steps_label = QLabel("① 选择文件夹 → ② 点击设置，输入DeepSeek API key → ③ 描述你的需求 → ④ 查看并确认操作")
-        steps_label.setStyleSheet("color: #5f6368; font-size: 12px; padding: 4px 0;")
-        layout.addWidget(steps_label)
-
-        ws_layout = QHBoxLayout()
+        title_box.addWidget(title_label)
+        title_box.addWidget(subtitle_label)
+        top_bar.addLayout(title_box)
+        top_bar.addStretch()
+        
+        # Workspace Selector
+        ws_container = QFrame()
+        ws_container.setStyleSheet("background: #f3f4f6; border-radius: 8px; padding: 4px;")
+        ws_layout = QHBoxLayout(ws_container)
+        ws_layout.setContentsMargins(8, 4, 8, 4)
+        
         self.ws_label = QLabel("当前文件夹: 未选择")
-        self.ws_label.setStyleSheet("color: red; font-weight: bold;")
+        self.ws_label.setStyleSheet("color: #6b7280; font-weight: 500;")
         
         self.recent_btn = QPushButton("🕒")
         self.recent_btn.setToolTip("最近使用的文件夹")
-        self.recent_btn.setFixedWidth(40)
+        self.recent_btn.setFixedWidth(32)
+        self.recent_btn.setCursor(Qt.PointingHandCursor)
+        self.recent_btn.setStyleSheet("border: none; background: transparent;")
         self.recent_btn.clicked.connect(self.show_recent_menu)
         
-        self.ws_btn = QPushButton("📂 选择文件夹")
+        self.ws_btn = QPushButton("📂 切换")
+        self.ws_btn.setCursor(Qt.PointingHandCursor)
+        self.ws_btn.setStyleSheet("background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 4px 12px; color: #374151;")
         self.ws_btn.clicked.connect(self.select_workspace)
         
         ws_layout.addWidget(self.ws_label)
-        ws_layout.addStretch()
         ws_layout.addWidget(self.recent_btn)
         ws_layout.addWidget(self.ws_btn)
-        layout.addLayout(ws_layout)
+        top_bar.addWidget(ws_container)
+        
+        layout.addLayout(top_bar)
         
         self.recent_workspaces = self.config_manager.get("recent_workspaces", [])
 
-        chat_frame = QFrame()
-        chat_frame.setStyleSheet("background-color: #ffffff; border-radius: 16px;")
-        chat_frame_layout = QVBoxLayout(chat_frame)
-        chat_frame_layout.setContentsMargins(16, 16, 16, 16)
-        
-        # Active Skills Tag Area
-        self.active_skills_layout = QHBoxLayout()
-        self.active_skills_label = QLabel("本次会话使用的功能: ")
-        self.active_skills_label.setStyleSheet("color: #666; font-size: 11px;")
-        self.active_skills_layout.addWidget(self.active_skills_label)
-        self.active_skills_layout.addStretch()
-        chat_frame_layout.addLayout(self.active_skills_layout)
+        # Chat Area
+        self.session_tabs = QTabWidget()
+        self.session_tabs.setDocumentMode(True)
+        self.session_tabs.setTabsClosable(True)
+        self.session_tabs.currentChanged.connect(self.on_session_tab_changed)
+        self.session_tabs.tabCloseRequested.connect(self.close_session_tab)
+        layout.addWidget(self.session_tabs, 3)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        self.chat_container = QWidget()
-        self.chat_layout = QVBoxLayout(self.chat_container)
-        self.chat_layout.addStretch()
-        scroll.setWidget(self.chat_container)
-        chat_frame_layout.addWidget(scroll)
-        layout.addWidget(chat_frame, 3)
-
+        # Input Area
         input_card = QFrame()
-        input_card.setStyleSheet("background-color: #ffffff; border-radius: 999px; padding: 4px 12px;")
+        input_card.setObjectName("ContentCard")
+        # Styling handled in global stylesheet
         input_layout = QHBoxLayout(input_card)
-        input_layout.setContentsMargins(8, 4, 8, 4)
+        input_layout.setContentsMargins(0, 0, 0, 0)
 
         self.input_field = QLineEdit()
         self.input_field.setObjectName("MainInput")
-        # Fix: Enforce text color for input field
-        self.input_field.setStyleSheet("border: none; background: transparent; color: #333333; font-size: 14px;")
         self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
         self.input_field.returnPressed.connect(self.handle_send)
 
-        self.example_btn = QPushButton("示例")
+        self.example_btn = QPushButton("💡 示例")
+        self.example_btn.setCursor(Qt.PointingHandCursor)
+        self.example_btn.setStyleSheet("border: none; color: #4d6bfe; font-weight: 500; background: transparent;")
         self.example_btn.clicked.connect(self.insert_example)
         
-        self.pause_btn = QPushButton("⏸️ 暂停")
+        self.pause_btn = QPushButton("⏸️")
         self.pause_btn.clicked.connect(self.toggle_pause)
         self.pause_btn.setVisible(False)
+        self.pause_btn.setStyleSheet("border: none; font-size: 16px;")
         
-        self.stop_btn = QPushButton("⏹️ 停止")
-        self.stop_btn.clicked.connect(self.stop_agent)
-        self.stop_btn.setVisible(False)
-        self.stop_btn.setStyleSheet("color: #d93025;")
-        self.stop_btn.setToolTip("User Control : If the model gets stuck in a loop (e.g., repeatedly listing the same directory), please use the Stop button to terminate the operation manually.")
+        self.action_btn = QPushButton("发送")
+        self.action_btn.setCursor(Qt.PointingHandCursor)
+        self.action_btn.setFixedSize(60, 36)
+        self.action_btn.setStyleSheet("background-color: #4d6bfe; color: white; border-radius: 18px; font-weight: bold; border: none;")
+        self.action_btn.clicked.connect(self.on_action_clicked)
         
-        self.send_btn = QPushButton("发送")
-        self.send_btn.clicked.connect(self.handle_send)
-        
-        self.loop_hint = QLabel("⚠️ 若陷入死循环请按停止")
-        self.loop_hint.setStyleSheet("color: #e74c3c; font-size: 10px; margin-left: 5px;")
+        self.loop_hint = QLabel("⚠️ 循环中")
+        self.loop_hint.setStyleSheet("color: #ef4444; font-size: 11px; margin-right: 8px;")
         self.loop_hint.setVisible(False)
 
-        input_layout.addWidget(self.input_field, 1)
-        input_layout.addWidget(self.example_btn)
-        input_layout.addWidget(self.pause_btn)
-        input_layout.addWidget(self.stop_btn)
-        input_layout.addWidget(self.send_btn)
-        input_layout.addWidget(self.loop_hint)
+        # Input Layout
+        input_wrapper = QWidget()
+        input_wrapper_layout = QHBoxLayout(input_wrapper)
+        input_wrapper_layout.setContentsMargins(0,0,0,0)
+        input_wrapper_layout.addWidget(self.input_field)
+        
+        # Position buttons inside the input field visually (using negative margins or overlapping layout would be complex, 
+        # so we place them in a row)
+        
+        bottom_controls = QHBoxLayout()
+        bottom_controls.addWidget(input_wrapper, 1)
+        bottom_controls.addWidget(self.example_btn)
+        bottom_controls.addWidget(self.pause_btn)
+        bottom_controls.addWidget(self.loop_hint)
+        bottom_controls.addWidget(self.action_btn)
 
-        layout.addWidget(input_card)
+        layout.addLayout(bottom_controls)
 
+        # Quick Chips
         chips_layout = QHBoxLayout()
         chips = ["批量整理文件", "重命名图片", "清理重复文件", "生成报表", "备份重要资料"]
         for text in chips:
             chip_btn = QPushButton(text)
-            chip_btn.setStyleSheet("QPushButton { background-color: #f1f3f4; border: none; border-radius: 16px; padding: 6px 12px; color: #3c4043; } QPushButton:hover { background-color: #e4e7eb; }")
+            chip_btn.setCursor(Qt.PointingHandCursor)
+            chip_btn.setStyleSheet("QPushButton { background-color: #f3f4f6; border: none; border-radius: 14px; padding: 6px 12px; color: #4b5563; font-size: 12px; } QPushButton:hover { background-color: #e5e7eb; color: #111827; }")
             chip_btn.clicked.connect(lambda _, t=text: self.apply_chip_text(t))
             chips_layout.addWidget(chip_btn)
         chips_layout.addStretch()
         layout.addLayout(chips_layout)
 
-        # Right Sidebar (Task Monitor) - Removed
-        # self.task_monitor = TaskMonitorWidget()
-        # self.task_monitor.save_skill_signal.connect(self.handle_save_skill_request)
-        # root_layout.addWidget(self.task_monitor)
-
-        # Initialize session state
-        self.current_session_id = None
-        
-        # Data Persistence: Initialize Data Directory
+        # Init Data
         self.data_dir = get_app_data_dir()
         self.chat_history_dir = os.path.join(self.data_dir, 'chat_history')
         os.makedirs(self.chat_history_dir, exist_ok=True)
         
-        # Migration: Move old chat history if exists
-        old_history_dir = os.path.join(os.getcwd(), 'chat_history')
-        # Check inequality to avoid issues in portable mode or dev environment
-        if os.path.abspath(old_history_dir) != os.path.abspath(self.chat_history_dir):
-            if os.path.exists(old_history_dir) and os.path.isdir(old_history_dir):
-                print(f"[System] Migrating chat history from {old_history_dir} to {self.chat_history_dir}")
-                # Move files one by one to avoid errors if dest already exists
-                try:
-                    for item in os.listdir(old_history_dir):
-                        s = os.path.join(old_history_dir, item)
-                        d = os.path.join(self.chat_history_dir, item)
-                        if os.path.isfile(s):
-                             if not os.path.exists(d):
-                                 shutil.copy2(s, d)
-                except Exception as e:
-                    print(f"[System] Migration warning: {e}")
-                    
+        self.create_new_session()
         self.refresh_history_list()
         self.load_default_workspace()
 
-    def handle_send(self):
-        user_input = self.input_field.text().strip()
-        if not user_input:
-            return
+    # --- Session & Logic Methods (No changes to logic, only UI wrappers) ---
+    def get_current_session(self):
+        if not self.current_session_id: return None
+        return self.sessions.get(self.current_session_id)
 
-        # Add User Message to UI
-        self.add_chat_bubble('User', user_input)
-        self.input_field.clear()
+    def get_session(self, session_id=None):
+        if session_id is None: return self.get_current_session()
+        return self.sessions.get(session_id)
 
-        # Add to history
-        self.messages.append({"role": "user", "content": user_input})
+    def sync_current_session_state(self):
+        state = self.get_current_session()
+        if not state: return
+        state.messages = self.messages
+        state.tool_cards = self.tool_cards
+        state.current_content_buffer = self.current_content_buffer
+
+    def set_current_session(self, session_id):
+        state = self.sessions.get(session_id)
+        if not state: return
+        self.current_session_id = session_id
+        self.messages = state.messages
+        self.tool_cards = state.tool_cards
+        self.current_content_buffer = state.current_content_buffer
+        self.temp_thinking_bubble = state.temp_thinking_bubble
+        self.last_agent_bubble = state.last_agent_bubble
+        self.llm_worker = state.llm_worker
+        self.code_worker = state.code_worker
+        self.chat_layout = state.chat_layout
+        self.active_skills_label = state.active_skills_label
+
+    def normalize_session_ui(self, state):
+        if not state: return
+        running = state.llm_worker and state.llm_worker.isRunning()
+        paused = running and state.llm_worker.is_paused
+        running_code = state.code_worker and state.code_worker.isRunning()
         
-        # Save History
-        self.save_chat_history()
-        self.refresh_history_list()
+        if running or running_code:
+            self.action_btn.setText("停止")
+            self.action_btn.setStyleSheet("background-color: #ef4444; color: white; border-radius: 18px; font-weight: bold; border: none;")
+            self.action_btn.setEnabled(True)
+            self.input_field.setEnabled(False)
+            
+            # Hide extra buttons/prompts when running
+            self.pause_btn.setVisible(False)
+            self.loop_hint.setVisible(False)
+            self.example_btn.setVisible(False)
+        else:
+            self.action_btn.setText("发送")
+            self.action_btn.setStyleSheet("background-color: #4d6bfe; color: white; border-radius: 18px; font-weight: bold; border: none;")
+            self.action_btn.setEnabled(True)
+            self.input_field.setEnabled(True)
+            
+            self.pause_btn.setVisible(False)
+            self.loop_hint.setVisible(False)
+            self.example_btn.setVisible(True)
 
-        self.input_field.setDisabled(True)
-        self.send_btn.setDisabled(True)
+    def get_session_id_for_tab(self, index):
+        widget = self.session_tabs.widget(index)
+        if not widget: return None
+        for session_id, state in self.sessions.items():
+            if state.session_widget == widget: return session_id
+        return None
 
-        # Standard Instant Mode
-        self.status_label.setText("DeepSeek 正在思考...")
-        self.worker = LLMWorker(self.messages, self.config_manager, workspace_dir=os.getcwd())
-        self.worker.step_signal.connect(self.handle_step_output)
-        self.worker.thinking_signal.connect(self.handle_thinking_output)
-        self.worker.finished_signal.connect(self.handle_llm_finished)
-        self.worker.tool_call_signal.connect(self.handle_tool_call)
-        self.worker.tool_result_signal.connect(self.handle_tool_result)
-        self.worker.start()
+    def close_session_tab(self, index):
+        session_id = self.get_session_id_for_tab(index)
+        if not session_id: return
+        state = self.sessions.get(session_id)
+        if state:
+            if state.llm_worker: state.llm_worker.stop()
+            if state.code_worker: state.code_worker.stop()
+            del self.sessions[session_id]
+        self.session_tabs.removeTab(index)
+        if self.session_tabs.count() == 0: self.create_new_session()
 
+    def on_session_tab_changed(self, index):
+        self.sync_current_session_state()
+        session_id = self.get_session_id_for_tab(index)
+        if session_id:
+            self.set_current_session(session_id)
+            self.refresh_history_list()
+            self.normalize_session_ui(self.get_current_session())
 
+    def clear_chat_layout(self, chat_layout):
+        while chat_layout.count():
+            item = chat_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None: widget.deleteLater()
+        chat_layout.addStretch()
+
+    def update_session_tab_title(self, session_id):
+        state = self.sessions.get(session_id)
+        if not state: return
+        title = "新对话"
+        for msg in state.messages:
+            if msg.get("role") == "user":
+                content = msg.get("content") or ""
+                if content: title = content[:15] + "..." if len(content) > 15 else content
+                break
+        index = self.session_tabs.indexOf(state.session_widget)
+        if index >= 0: self.session_tabs.setTabText(index, title)
+
+    def create_new_session(self, session_id=None, title=None):
+        if session_id is None: session_id = uuid.uuid4().hex
+        session_widget = QWidget()
+        session_layout = QVBoxLayout(session_widget)
+        session_layout.setContentsMargins(0, 0, 0, 0)
+        session_layout.setSpacing(12)
+
+        active_skills_label = QLabel("本次会话使用的功能: ")
+        active_skills_label.setStyleSheet("color: #9ca3af; font-size: 11px; margin-left: 12px;")
+        session_layout.addWidget(active_skills_label)
+
+        chat_scroll = QScrollArea()
+        chat_scroll.setWidgetResizable(True)
+        chat_container = QWidget()
+        chat_layout = QVBoxLayout(chat_container)
+        chat_layout.setContentsMargins(12, 12, 12, 24) # Bottom padding
+        chat_layout.setSpacing(24) # Space between messages
+        chat_layout.addStretch()
+        chat_scroll.setWidget(chat_container)
+        session_layout.addWidget(chat_scroll, 1)
+
+        tab_title = title or "新对话"
+        tab_index = self.session_tabs.addTab(session_widget, tab_title)
+
+        state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
+        self.sessions[session_id] = state
+        self.session_tabs.setCurrentIndex(tab_index)
+        self.set_current_session(session_id)
+        return session_id
 
     def handle_confirmation_request(self, message):
         dialog = QDialog(self)
         dialog.setWindowTitle("请再次确认")
-        dialog.resize(500, 400) # Set a default size
+        dialog.resize(500, 400)
         layout = QVBoxLayout(dialog)
 
-        # ScrollArea for potentially long message
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
-        
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
-        
         label = QLabel(message)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        # Style the label for better readability
         label.setStyleSheet("font-size: 14px; line-height: 1.4;")
-        
         content_layout.addWidget(label)
-        content_layout.addStretch() # Push text to top
-        
+        content_layout.addStretch()
         scroll_area.setWidget(content_widget)
         layout.addWidget(scroll_area)
 
         hint_label = QLabel("如果不确定，可以先在下方输入问题问问 AI：")
-        hint_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(hint_label)
         ai_input = QLineEdit()
-        ai_input.setPlaceholderText("例如：这一步会删除原文件吗？是否可以撤销？")
+        ai_input.setPlaceholderText("例如：这一步会删除原文件吗？")
         layout.addWidget(ai_input)
         button_layout = QHBoxLayout()
         ask_btn = QPushButton("发送给AI")
@@ -1319,10 +1526,7 @@ class MainWindow(QMainWindow):
 
         def send_to_ai():
             text = ai_input.text().strip()
-            if not text:
-                return
-            
-            # 将文本作为决策结果返回给 Agent
+            if not text: return
             decision["value"] = text
             dialog.accept()
 
@@ -1337,7 +1541,6 @@ class MainWindow(QMainWindow):
         ask_btn.clicked.connect(send_to_ai)
         yes_btn.clicked.connect(on_yes)
         no_btn.clicked.connect(on_no)
-
         dialog.exec()
         bridge.respond(decision["value"])
 
@@ -1359,21 +1562,16 @@ class MainWindow(QMainWindow):
         self.input_field.selectAll()
 
     def refresh_history_list(self):
-        """刷新侧边栏的历史会话列表"""
-        # Clear existing items
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            if item.widget(): item.widget().deleteLater()
         
-        # Use centralized chat history directory
         history_dir = self.chat_history_dir
         if not os.path.exists(history_dir):
             self.history_layout.addStretch()
             return
 
         files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
-        # Sort by modification time, newest first
         files.sort(key=os.path.getmtime, reverse=True)
 
         for file_path in files:
@@ -1381,142 +1579,109 @@ class MainWindow(QMainWindow):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     if not data: continue
-                    
-                    # Get title from first user message
                     title = "新对话"
                     for msg in data:
                         if msg['role'] == 'user':
                             content = msg['content']
                             title = content[:15] + "..." if len(content) > 15 else content
                             break
-                    
                     filename = os.path.basename(file_path)
                     session_id = filename.replace('chat_history_', '').replace('.json', '')
                     
                     btn = QPushButton(title)
                     btn.setCursor(Qt.PointingHandCursor)
-                    # Check if this is the current session
                     if session_id == self.current_session_id:
-                         btn.setStyleSheet("text-align: left; padding: 8px; border: none; border-radius: 8px; background-color: #e8f0fe; color: #1a73e8; font-weight: bold;")
+                         btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
                     else:
-                         btn.setStyleSheet("text-align: left; padding: 8px; border: none; border-radius: 8px; background-color: transparent; color: #5f6368;")
+                         btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
                     
-                    # Use closure to capture session_id
                     btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
                     self.history_layout.addWidget(btn)
             except Exception as e:
-                print(f"Error loading history file {file_path}: {e}")
                 continue
-        
         self.history_layout.addStretch()
 
     def load_session(self, session_id):
-        """加载指定的会话"""
-        self.current_session_id = session_id
-        
-        # Clear current view
-        self.messages = []
-        while self.chat_layout.count():
-            item = self.chat_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self.chat_layout.addStretch()
-        # self.task_monitor.clear()
-        self.active_skills_label.setText("本次会话使用的功能: ")
+        if session_id in self.sessions:
+            state = self.sessions[session_id]
+            index = self.session_tabs.indexOf(state.session_widget)
+            if index >= 0: self.session_tabs.setCurrentIndex(index)
+            self.set_current_session(session_id)
+            self.refresh_history_list()
+            self.normalize_session_ui(self.get_current_session())
+            return
+        else:
+            self.create_new_session(session_id=session_id)
+
+        state = self.get_current_session()
+        if not state: return
+
+        self.clear_chat_layout(state.chat_layout)
+        state.messages = []
+        state.tool_cards = {}
+        state.current_content_buffer = ""
+        state.temp_thinking_bubble = None
+        state.last_agent_bubble = None
+        state.llm_worker = None
+        state.active_skills_label.setText("本次会话使用的功能: ")
 
         history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
         if os.path.exists(history_path):
             try:
                 with open(history_path, 'r', encoding='utf-8') as f:
-                    self.messages = json.load(f)
-                
-                # Reconstruct UI bubbles
-                for msg in self.messages:
+                    state.messages = json.load(f)
+                for msg in state.messages:
                     role = msg.get('role')
                     content = msg.get('content')
+                    reasoning = msg.get('reasoning')
                     if role == 'user':
                         self.add_chat_bubble('User', content)
                     elif role == 'assistant' and content:
-                        self.add_chat_bubble('Agent', content)
-                
-                self.append_log(f"System: 已加载会话 {session_id}")
+                        self.add_chat_bubble('Agent', content, thinking=reasoning)
             except Exception as e:
-                self.append_log(f"Error loading session: {e}")
-        
-        # Update sidebar highlight
+                print(f"Error loading session: {e}")
+        self.update_session_tab_title(session_id)
         self.refresh_history_list()
+        self.normalize_session_ui(self.get_current_session())
 
     def new_conversation(self):
-        self.current_session_id = None
-        self.messages = []
-        while self.chat_layout.count():
-            item = self.chat_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self.chat_layout.addStretch()
-        # self.task_monitor.clear()
-        self.active_skills_label.setText("本次会话使用的功能: ")
-        self.append_log("System: 新对话已创建")
+        self.create_new_session()
         self.refresh_history_list()
 
     def save_chat_history(self):
-        """Save chat history to JSON file"""
-        if not self.messages:
-            return
-
-        if not self.current_session_id:
-            self.current_session_id = uuid.uuid4().hex
-
-        history_dir = self.chat_history_dir
-        history_path = os.path.join(history_dir, f'chat_history_{self.current_session_id}.json')
-        
+        state = self.get_current_session()
+        if not state or not state.messages: return
+        history_path = os.path.join(self.chat_history_dir, f'chat_history_{state.session_id}.json')
         try:
             with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump(self.messages, f, ensure_ascii=False, indent=2)
-            # Only refresh if this is a new session (handled above) or if we really need to update titles.
-            # To avoid flickering during chat, we don't refresh here.
-            # The initial creation of session_id above triggers a refresh which is enough for the item to appear.
-        except Exception as e:
-            self.append_log(f"Error saving history: {e}")
+                json.dump(state.messages, f, ensure_ascii=False, indent=2)
+        except Exception: pass
 
     def load_default_workspace(self):
         default_dir = self.config_manager.get("default_workspace", "")
         if default_dir and os.path.isdir(default_dir):
             self.load_workspace(default_dir)
-        elif default_dir:
-            self.append_log(f"System: 默认工作区无效或不存在: {default_dir}")
 
     def select_workspace(self):
         directory = QFileDialog.getExistingDirectory(self, "选择工作区")
-        if directory:
-            self.load_workspace(directory)
+        if directory: self.load_workspace(directory)
 
     def load_workspace(self, directory):
         self.workspace_dir = directory
-        
-        # Optimize path display using QFontMetrics
-        # Calculate available width: Window(~1000) - Sidebar(260) - Margins(64) - Buttons(~150) = ~526
-        # Use 450px to be safe and ensure UI doesn't break
         font_metrics = QFontMetrics(self.ws_label.font())
-        display_path = font_metrics.elidedText(directory, Qt.ElideMiddle, 450)
-            
+        display_path = font_metrics.elidedText(directory, Qt.ElideMiddle, 400)
         self.ws_label.setText(f"当前工作区: {display_path}")
-        self.ws_label.setToolTip(directory) # Show full path on hover
-        self.ws_label.setStyleSheet("color: green; font-weight: bold;")
-        self.append_log(f"System: 工作区已切换至 {directory}")
+        self.ws_label.setToolTip(directory)
+        self.ws_label.setStyleSheet("color: #059669; font-weight: 600;")
         self.update_recent_workspaces(directory)
         
-        # Update Right Sidebar
         if hasattr(self, 'file_model'):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
             self.right_sidebar.setVisible(True)
 
     def update_recent_workspaces(self, path):
-        if path in self.recent_workspaces:
-            self.recent_workspaces.remove(path)
+        if path in self.recent_workspaces: self.recent_workspaces.remove(path)
         self.recent_workspaces.insert(0, path)
         self.recent_workspaces = self.recent_workspaces[:10]
         self.config_manager.set("recent_workspaces", self.recent_workspaces)
@@ -1532,12 +1697,10 @@ class MainWindow(QMainWindow):
                 action = QAction(path, self)
                 action.triggered.connect(lambda checked=False, p=path: self.load_workspace(p))
                 menu.addAction(action)
-            
             menu.addSeparator()
             clear_action = QAction("清除记录", self)
             clear_action.triggered.connect(self.clear_recent_workspaces)
             menu.addAction(clear_action)
-            
         menu.exec(self.recent_btn.mapToGlobal(self.recent_btn.rect().bottomLeft()))
 
     def clear_recent_workspaces(self):
@@ -1546,32 +1709,24 @@ class MainWindow(QMainWindow):
 
     def show_file_context_menu(self, position):
         index = self.file_tree.indexAt(position)
-        if not index.isValid():
-            return
+        if not index.isValid(): return
         path = self.file_model.filePath(index)
-        if not os.path.exists(path):
-            return
+        if not os.path.exists(path): return
         menu = QMenu(self)
         open_action = QAction("打开", self)
         reveal_action = QAction("在资源管理器中显示", self)
         copy_path_action = QAction("复制路径", self)
-        copy_action = QAction("复制到...", self)
-        move_action = QAction("移动到...", self)
         delete_action = QAction("删除", self)
 
         open_action.triggered.connect(lambda: self.open_path_in_system(path))
         reveal_action.triggered.connect(lambda: self.reveal_in_explorer(path))
         copy_path_action.triggered.connect(lambda: self.copy_path_to_clipboard(path))
-        copy_action.triggered.connect(lambda: self.copy_path_to_dir(path))
-        move_action.triggered.connect(lambda: self.move_path_to_dir(path))
         delete_action.triggered.connect(lambda: self.delete_path(path))
 
         menu.addAction(open_action)
         menu.addAction(reveal_action)
         menu.addSeparator()
         menu.addAction(copy_path_action)
-        menu.addAction(copy_action)
-        menu.addAction(move_action)
         menu.addSeparator()
         menu.addAction(delete_action)
         menu.exec(self.file_tree.viewport().mapToGlobal(position))
@@ -1587,340 +1742,282 @@ class MainWindow(QMainWindow):
 
     def copy_path_to_clipboard(self, path):
         QApplication.clipboard().setText(path)
-        self.add_system_toast("路径已复制", "success")
-
-    def copy_path_to_dir(self, path):
-        dest_dir = QFileDialog.getExistingDirectory(self, "选择复制到的目录")
-        if not dest_dir:
-            return
-        try:
-            if os.path.isdir(path):
-                dest_path = os.path.join(dest_dir, os.path.basename(path))
-                if os.path.exists(dest_path):
-                    QMessageBox.warning(self, "提示", "目标已存在同名文件夹。")
-                    return
-                shutil.copytree(path, dest_path)
-            else:
-                shutil.copy2(path, dest_dir)
-            self.add_system_toast("复制完成", "success")
-        except Exception as e:
-            QMessageBox.warning(self, "失败", f"复制失败: {e}")
-
-    def move_path_to_dir(self, path):
-        dest_dir = QFileDialog.getExistingDirectory(self, "选择移动到的目录")
-        if not dest_dir:
-            return
-        try:
-            shutil.move(path, dest_dir)
-            self.add_system_toast("移动完成", "success")
-        except Exception as e:
-            QMessageBox.warning(self, "失败", f"移动失败: {e}")
 
     def delete_path(self, path):
         confirm = QMessageBox.question(self, "确认删除", f"确定要删除该项目吗？\n{path}")
-        if confirm != QMessageBox.Yes:
-            return
+        if confirm != QMessageBox.Yes: return
         try:
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
-            self.add_system_toast("删除完成", "success")
-        except Exception as e:
-            QMessageBox.warning(self, "失败", f"删除失败: {e}")
+            if os.path.isdir(path): shutil.rmtree(path)
+            else: os.remove(path)
+        except Exception: pass
 
     def on_file_clicked(self, index):
         path = self.file_model.filePath(index)
-        if not os.path.isfile(path):
-            return
+        if not os.path.isfile(path): return
         ext = os.path.splitext(path)[1].lower()
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
         try:
             size = os.path.getsize(path)
             if ext in image_exts:
                 if size > 10 * 1024 * 1024:
-                    self.preview_text.setPlainText(f"文件过大 ({size/1024/1024:.2f} MB)，不支持预览。")
+                    self.preview_text.setPlainText("文件过大")
                     self.preview_stack.setCurrentWidget(self.preview_text)
                     return
                 pixmap = QPixmap(path)
-                if pixmap.isNull():
-                    self.preview_text.setPlainText("图片无法预览。")
-                    self.preview_stack.setCurrentWidget(self.preview_text)
-                    return
                 self.preview_pixmap = pixmap
                 scaled = pixmap.scaled(self.preview_stack.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 self.preview_image.setPixmap(scaled)
                 self.preview_stack.setCurrentWidget(self.preview_image)
                 return
             if size > 1024 * 1024:
-                self.preview_text.setPlainText(f"文件过大 ({size/1024/1024:.2f} MB)，不支持预览。")
+                self.preview_text.setPlainText("文件过大")
                 self.preview_stack.setCurrentWidget(self.preview_text)
                 return
             try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                with open(path, 'r', encoding='utf-8') as f: content = f.read()
                 self.preview_text.setPlainText(content)
                 self.preview_stack.setCurrentWidget(self.preview_text)
             except UnicodeDecodeError:
-                self.preview_text.setPlainText("二进制文件或不支持的编码，无法预览。")
+                self.preview_text.setPlainText("二进制文件")
                 self.preview_stack.setCurrentWidget(self.preview_text)
-        except Exception as e:
-            self.preview_text.setPlainText(f"读取文件出错: {e}")
-            self.preview_stack.setCurrentWidget(self.preview_text)
+        except Exception: pass
 
     def open_settings(self):
-        try:
-            dialog = SettingsDialog(self.config_manager, self)
-            if dialog.exec():
-                self.append_log("System: 配置已更新")
-        except Exception as e:
-            self.append_log(f"Error opening settings: {str(e)}")
-            QMessageBox.critical(self, "Error", f"Failed to open settings: {str(e)}")
+        SettingsDialog(self.config_manager, self).exec()
 
     def open_skills_center(self):
-        try:
-            dialog = SkillsCenterDialog(self.skill_manager, self.config_manager, self)
-            dialog.exec()
-        except Exception as e:
-             self.append_log(f"Error opening skills center: {str(e)}")
-             QMessageBox.critical(self, "Error", f"Failed to open skills center: {str(e)}")
+        SkillsCenterDialog(self.skill_manager, self.config_manager, self).exec()
 
-    def handle_skill_used(self, skill_name):
-        current_text = self.active_skills_label.text()
+    def handle_skill_used(self, skill_name, session_id=None):
+        state = self.get_session(session_id)
+        if not state: return
+        current_text = state.active_skills_label.text()
         if f"[{skill_name}]" not in current_text:
-            self.active_skills_label.setText(current_text + f" [{skill_name}]")
+            state.active_skills_label.setText(current_text + f" [{skill_name}]")
 
     def toggle_pause(self):
-        if hasattr(self, 'llm_worker') and self.llm_worker.isRunning():
-            if self.llm_worker.is_paused:
-                self.llm_worker.resume()
-                self.pause_btn.setText("⏸️ 暂停")
+        state = self.get_current_session()
+        if state and state.llm_worker and state.llm_worker.isRunning():
+            if state.llm_worker.is_paused:
+                state.llm_worker.resume()
+                self.pause_btn.setText("⏸️")
             else:
-                self.llm_worker.pause()
-                self.pause_btn.setText("▶️ 继续")
+                state.llm_worker.pause()
+                self.pause_btn.setText("▶️")
 
     def stop_agent(self):
-        if hasattr(self, 'llm_worker') and self.llm_worker.isRunning():
-            self.llm_worker.stop()
-            self.stop_btn.setEnabled(False) # Prevent double click
+        state = self.get_current_session()
+        if not state: return
+        if state.llm_worker and state.llm_worker.isRunning(): state.llm_worker.stop()
+        if state.code_worker and state.code_worker.isRunning(): state.code_worker.stop()
+        state.code_worker = None
+        self.code_worker = None
+        self.add_system_toast("已强制停止当前任务", "warning", session_id=state.session_id)
+        self.normalize_session_ui(state)
+
+    def on_action_clicked(self):
+        state = self.get_current_session()
+        if not state: return
+        
+        # Check if running
+        is_running = (state.llm_worker and state.llm_worker.isRunning()) or \
+                     (state.code_worker and state.code_worker.isRunning())
+        
+        if is_running:
+            self.stop_agent()
+        else:
+            self.handle_send()
 
     def handle_send(self):
         if not self.workspace_dir:
             QMessageBox.warning(self, "提示", "请先选择一个工作区目录！")
             return
         user_text = self.input_field.text().strip()
-        if not user_text:
-            return
+        if not user_text: return
 
         self.add_chat_bubble("User", user_text)
         self.input_field.clear()
-        self.send_btn.setEnabled(False)
         
-        # Update messages history
-        self.messages.append({"role": "user", "content": user_text})
+        state = self.get_current_session()
+        if not state: return
+        state.messages.append({"role": "user", "content": user_text})
         self.save_chat_history()
-        
+        self.update_session_tab_title(state.session_id)
         self.process_agent_logic(user_text)
 
-    def add_tool_card(self, data):
-        card = ToolCallCard(data['name'], data['args'], data['id'])
-        self.tool_cards[data['id']] = card
+    def show_tool_details(self, tool_id, args, result, switch_tab=True):
+        # 1. Update selection state in UI
+        state = self.get_current_session()
+        if state:
+            for tid, card in state.tool_cards.items():
+                card.set_selected(tid == tool_id)
         
-        # Add to the active thinking bubble if available
-        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
-            self.temp_thinking_bubble.add_tool_card(card)
-        elif hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
-             # Fallback to last bubble
-             self.last_agent_bubble.add_tool_card(card)
+        self.current_selected_tool_id = tool_id
+
+        # 2. Open Sidebar & Switch Tab
+        if not self.right_sidebar.isVisible():
+            self.right_sidebar.setVisible(True)
+            
+        if switch_tab:
+            self.right_tabs.setCurrentIndex(1) # Switch to Tool Details tab
+        
+        # 3. Update Content
+        self.td_info_label.setText(f"工具 ID: {tool_id}")
+        
+        # Format JSON if possible
+        try:
+            if isinstance(args, str):
+                args_obj = json.loads(args)
+                args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
+            else:
+                args_text = json.dumps(args, indent=2, ensure_ascii=False)
+        except:
+            args_text = str(args)
+            
+        self.td_args_edit.setPlainText(args_text)
+        
+        try:
+            if isinstance(result, str):
+                # Try to parse result if it looks like JSON
+                if result.strip().startswith("{") or result.strip().startswith("["):
+                    res_obj = json.loads(result)
+                    res_text = json.dumps(res_obj, indent=2, ensure_ascii=False)
+                else:
+                    res_text = result
+            else:
+                res_text = json.dumps(result, indent=2, ensure_ascii=False)
+        except:
+            res_text = str(result)
+            
+        self.td_result_edit.setPlainText(res_text)
+
+    def add_tool_card(self, data, session_id=None):
+        card = ToolCallCard(data['name'], data['args'], data['id'])
+        card.clicked.connect(self.show_tool_details)
+        
+        state = self.get_session(session_id)
+        if not state: return
+        state.tool_cards[data['id']] = card
+        
+        if state.temp_thinking_bubble:
+            state.temp_thinking_bubble.add_tool_card(card)
+        elif state.last_agent_bubble:
+             state.last_agent_bubble.add_tool_card(card)
         else:
-            # Fallback to direct layout insertion (should rarely happen)
             wrapper = QWidget()
             layout = QHBoxLayout(wrapper)
             layout.setContentsMargins(48, 4, 16, 4)
             layout.addWidget(card)
             layout.addStretch()
-            self.chat_layout.insertWidget(self.chat_layout.count() - 1, wrapper)
-        
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
         QApplication.processEvents()
 
-    def update_tool_card(self, data):
+    def update_tool_card(self, data, session_id=None):
         tool_id = data['id']
         result = data['result']
-        if tool_id in self.tool_cards:
-            self.tool_cards[tool_id].set_result(result)
+        state = self.get_session(session_id)
+        if not state: return
+        if tool_id in state.tool_cards:
+            card = state.tool_cards[tool_id]
+            card.set_result(result)
+            
+            # [Optimization] Real-time refresh if currently viewing this tool
+            if (hasattr(self, 'current_selected_tool_id') and 
+                self.current_selected_tool_id == tool_id and 
+                self.right_sidebar.isVisible() and 
+                self.right_tabs.currentIndex() == 1):
+                
+                self.show_tool_details(tool_id, card.args, result, switch_tab=False)
 
     def add_chat_bubble(self, role, text, thinking=None, duration=None):
+        state = self.get_current_session()
+        if not state: return
         bubble = ChatBubble(role, text, thinking, duration)
-        # 插入到倒数第二个位置（stretch之前）
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
-        # 滚动到底部
+        state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         QApplication.processEvents() 
-        # (实际滚动逻辑略，PySide 自动处理较好)
+        # Scroll to bottom
+        if hasattr(state, 'chat_scroll') and state.chat_scroll:
+            state.chat_scroll.verticalScrollBar().setValue(
+                state.chat_scroll.verticalScrollBar().maximum()
+            )
 
-    def add_system_toast(self, text, type="info"):
+    def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None):
+        state = self.get_session(session_id)
+        if not state: return
         toast = SystemToast(text, type)
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, toast)
+        state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast)
         QApplication.processEvents()
+        if auto_close_ms: QTimer.singleShot(auto_close_ms, toast.deleteLater)
 
     def append_log(self, text):
         print(f"[Log] {text}")
-        # if text.startswith("System:"):
-        #      self.task_monitor.add_event("系统", text.replace("System: ", ""), "info")
-        # elif text.startswith("Error:"):
-        #      self.task_monitor.add_event("错误", text.replace("Error: ", ""), "error")
-        # elif text.startswith("Agent:"):
-        #      self.task_monitor.add_event("思考", text.replace("Agent: ", ""), "think")
-        # elif text.startswith("Reasoning:"):
-        #      # Display full reasoning in TaskMonitor
-        #      self.task_monitor.add_event("深度思考", text.replace("Reasoning: ", ""), "think")
-        # else:
-        #      self.task_monitor.add_event("信息", text, "info")
-
-    def handle_save_skill_request(self, code):
-        """Handle 'Save as Skill' request"""
-        # 1. Show Progress
-        progress = QDialog(self)
-        progress.setWindowTitle("正在生成技能")
-        progress.setFixedSize(300, 100)
-        p_layout = QVBoxLayout(progress)
-        p_layout.addWidget(QLabel("正在分析代码并生成通用技能...\n这可能需要几秒钟。"))
-        progress.setModal(True)
-        progress.show()
-        QApplication.processEvents()
-
-        # 2. Call Generator
-        result = self.skill_generator.refactor_code(code)
-        progress.close()
-
-        if "error" in result:
-            QMessageBox.critical(self, "生成失败", f"Error: {result['error']}")
-            return
-
-        # 3. Confirmation Dialog
-        dialog = QDialog(self)
-        dialog.setWindowTitle("确认新技能")
-        dialog.resize(500, 600)
-        d_layout = QVBoxLayout(dialog)
-        
-        # Form
-        form = QFormLayout()
-        name_input = QLineEdit(result.get("skill_name", ""))
-        desc_input = QLineEdit(result.get("description", ""))
-        desc_cn_input = QLineEdit(result.get("description_cn", ""))
-        tool_name_input = QLineEdit(result.get("tool_name", ""))
-        tool_desc_input = QLineEdit(result.get("description", "")) # reuse desc
-        
-        form.addRow("技能名称 (Skill Name):", name_input)
-        form.addRow("中文描述:", desc_cn_input)
-        form.addRow("英文描述:", desc_input)
-        form.addRow("函数名称 (Tool Name):", tool_name_input)
-        form.addRow("函数描述:", tool_desc_input)
-        d_layout.addLayout(form)
-        
-        # Code Editor
-        d_layout.addWidget(QLabel("代码实现:"))
-        code_edit = QTextEdit()
-        code_edit.setPlainText(result.get("code", ""))
-        d_layout.addWidget(code_edit)
-        
-        # Buttons
-        btns = QHBoxLayout()
-        save_btn = QPushButton("确认创建")
-        save_btn.setStyleSheet("background-color: #1a73e8; color: white; padding: 8px;")
-        cancel_btn = QPushButton("取消")
-        
-        btns.addWidget(save_btn)
-        btns.addWidget(cancel_btn)
-        d_layout.addLayout(btns)
-        
-        def on_save():
-            res = create_new_skill(
-                self.workspace_dir or os.getcwd(),
-                name_input.text(),
-                desc_input.text(),
-                tool_name_input.text(),
-                tool_desc_input.text(),
-                code_edit.toPlainText(),
-                desc_cn_input.text()
-            )
-            if "Success" in res:
-                QMessageBox.information(dialog, "成功", res)
-                dialog.accept()
-                # Reload skills
-                self.skill_manager.load_skills()
-            else:
-                QMessageBox.critical(dialog, "错误", res)
-
-        save_btn.clicked.connect(on_save)
-        cancel_btn.clicked.connect(dialog.reject)
-        
-        dialog.exec()
 
     def process_agent_logic(self, user_text):
-        """启动 LLM 线程获取响应"""
-        # self.task_monitor.set_status("thinking")
-        self.append_log(f"Agent: 正在深度思考 (DeepSeek CoT)...")
-        self.current_content_buffer = ""
+        state = self.get_current_session()
+        if not state: return
+        state.current_content_buffer = ""
         
-        # Insert a temporary "Thinking" bubble
-        self.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
-        self.chat_layout.insertWidget(self.chat_layout.count()-1, self.temp_thinking_bubble)
+        # Insert "Thinking" bubble
+        state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
+        state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         QApplication.processEvents()
 
-        self.llm_worker = LLMWorker(self.messages, self.config_manager, self.workspace_dir)
-        self.llm_worker.finished_signal.connect(self.handle_llm_response)
-        self.llm_worker.content_signal.connect(self.handle_content_signal)
-        self.llm_worker.step_signal.connect(self.append_log) # Use the unified handler
-        self.llm_worker.thinking_signal.connect(self.handle_thinking_signal) # Real-time thinking
-        self.llm_worker.skill_used_signal.connect(self.handle_skill_used)
-        self.llm_worker.tool_call_signal.connect(self.add_tool_card)
-        self.llm_worker.tool_result_signal.connect(self.update_tool_card)
-        self.llm_worker.start()
+        state.llm_worker = LLMWorker(state.messages, self.config_manager, self.workspace_dir)
+        if state.session_id == self.current_session_id:
+            self.llm_worker = state.llm_worker
+        session_id = state.session_id
+        state.llm_worker.finished_signal.connect(lambda result, sid=session_id: self.handle_llm_response(result, sid))
+        state.llm_worker.content_signal.connect(lambda text, sid=session_id: self.handle_content_signal(text, sid))
+        state.llm_worker.step_signal.connect(self.append_log)
+        state.llm_worker.thinking_signal.connect(lambda text, sid=session_id: self.handle_thinking_signal(text, sid))
+        state.llm_worker.skill_used_signal.connect(lambda name, sid=session_id: self.handle_skill_used(name, sid))
+        state.llm_worker.tool_call_signal.connect(lambda data, sid=session_id: self.add_tool_card(data, sid))
+        state.llm_worker.tool_result_signal.connect(lambda data, sid=session_id: self.update_tool_card(data, sid))
+        state.llm_worker.start()
         
-        # UI State Update
-        self.pause_btn.setVisible(True)
-        self.pause_btn.setText("⏸️ 暂停")
-        self.stop_btn.setVisible(True)
-        self.stop_btn.setEnabled(True)
-        self.loop_hint.setVisible(True)
+        if state.session_id == self.current_session_id:
+             self.normalize_session_ui(state)
 
-    def handle_content_signal(self, text):
-        """实时更新最终回复"""
-        self.current_content_buffer += text
-        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
-            self.temp_thinking_bubble.set_main_content(self.current_content_buffer)
-        elif hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
-            self.last_agent_bubble.set_main_content(self.current_content_buffer)
+    def handle_content_signal(self, text, session_id=None):
+        state = self.get_session(session_id)
+        if not state: return
+        state.current_content_buffer += text
+        if state.temp_thinking_bubble:
+            state.temp_thinking_bubble.set_main_content(state.current_content_buffer)
+        elif state.last_agent_bubble:
+            state.last_agent_bubble.set_main_content(state.current_content_buffer)
+        if state.session_id == self.current_session_id:
+            self.current_content_buffer = state.current_content_buffer
 
-    def handle_thinking_signal(self, text):
-        """实时更新思考过程"""
-        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
-            self.temp_thinking_bubble.update_thinking(text)
-        elif hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
-            self.last_agent_bubble.update_thinking(text)
+    def handle_thinking_signal(self, text, session_id=None):
+        state = self.get_session(session_id)
+        if not state: return
+        if state.temp_thinking_bubble:
+            state.temp_thinking_bubble.update_thinking(text)
+        elif state.last_agent_bubble:
+            state.last_agent_bubble.update_thinking(text)
 
-    def handle_llm_response(self, result):
-        # Retrieve the bubble to update
-        if hasattr(self, 'temp_thinking_bubble') and self.temp_thinking_bubble:
-            bubble = self.temp_thinking_bubble
-            del self.temp_thinking_bubble
+    def handle_llm_response(self, result, session_id=None):
+        state = self.get_session(session_id)
+        if not state: return
+        is_current = state.session_id == self.current_session_id
+        if state.temp_thinking_bubble:
+            bubble = state.temp_thinking_bubble
+            state.temp_thinking_bubble = None
         else:
             bubble = ChatBubble("agent", "", thinking=result.get("reasoning"))
-            self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         
-        self.last_agent_bubble = bubble
+        state.last_agent_bubble = bubble
+        if is_current:
+            self.last_agent_bubble = bubble
+            self.temp_thinking_bubble = state.temp_thinking_bubble
 
-        # UI State Reset
-        self.pause_btn.setVisible(False)
-        self.stop_btn.setVisible(False)
-        self.loop_hint.setVisible(False)
-        
         if "error" in result:
-            # self.task_monitor.set_status("idle")
             self.append_log(f"Error: {result['error']}")
-            self.add_system_toast(f"Error: {result['error']}", "error")
+            self.add_system_toast(f"Error: {result['error']}", "error", session_id=state.session_id)
             bubble.set_main_content(f"⚠️ Error: {result['error']}")
-            self.send_btn.setEnabled(True)
+            if is_current: self.normalize_session_ui(state)
             return
 
         reasoning = result.get("reasoning", "")
@@ -1928,120 +2025,86 @@ class MainWindow(QMainWindow):
         role = result.get("role", "assistant")
         duration = result.get("duration", None)
 
-        # 1. Update UI - Show content AND reasoning
-        # Update duration and state only. Reasoning text is already set via streaming or __init__.
         bubble.update_thinking(duration=duration, is_final=True)
         bubble.set_main_content(content)
 
-        # 2. Update History
-        self.messages.append({
+        state.messages.append({
             "role": role, 
             "content": content,
             "reasoning": reasoning
         })
         self.save_chat_history()
+        self.update_session_tab_title(state.session_id)
 
-        # 3. Extract and Execute Code
-        # Relaxed regex to catch ```python and ``` python
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
         if code_match:
             code_block = code_match.group(1).strip()
-            # self.task_monitor.add_event("即将执行的代码", code_block, "code_source")
-
-            # self.task_monitor.set_status("running", "正在执行代码...")
             self.append_log("System: 检测到代码块，准备执行...")
             god_mode = self.config_manager.get_god_mode()
             
             if god_mode:
-                 self.add_system_toast("⚠️ God Mode 已启用：正在执行高权限代码，请注意风险", "warning")
+                 self.add_system_toast("⚠️ God Mode 已启用：正在执行高权限代码，请注意风险", "warning", session_id=state.session_id)
 
-            self.code_worker = CodeWorker(code_block, self.workspace_dir, god_mode=god_mode)
-            self.code_worker.output_signal.connect(self.handle_code_output)
-            self.code_worker.finished_signal.connect(self.handle_code_finished)
-            self.code_worker.input_request_signal.connect(self.handle_code_input_request)
+            state.code_worker = CodeWorker(code_block, self.workspace_dir, god_mode=god_mode)
+            state.code_worker.output_signal.connect(lambda text, sid=state.session_id: self.handle_code_output(text, sid))
+            state.code_worker.finished_signal.connect(lambda sid=state.session_id: self.handle_code_finished(sid))
+            state.code_worker.input_request_signal.connect(self.handle_code_input_request)
             
-            # Show Stop Button for Code Execution
-            self.stop_btn.setVisible(True)
-            self.stop_btn.setEnabled(True)
-            self.stop_btn.setText("⏹️ 停止代码")
+            if is_current:
+                self.code_worker = state.code_worker
             
-            self.code_worker.start()
+            state.code_worker.start()
+            if is_current: self.normalize_session_ui(state)
         else:
-            # self.task_monitor.set_status("idle")
-            self.send_btn.setEnabled(True)
+            if is_current: self.normalize_session_ui(state)
 
-    def handle_code_output(self, text):
-        if hasattr(self, 'last_agent_bubble') and self.last_agent_bubble:
-            # Check if we already have a code output widget
-            if not hasattr(self.last_agent_bubble, 'code_output_edit'):
-                # Create one
+    def handle_code_output(self, text, session_id=None):
+        state = self.get_session(session_id)
+        if state and state.last_agent_bubble:
+            if not hasattr(state.last_agent_bubble, 'code_output_edit'):
                 label = QLabel("执行结果:")
                 label.setStyleSheet("font-weight: bold; color: #333; margin-top: 8px; margin-left: 4px;")
-                self.last_agent_bubble.layout().addWidget(label)
+                state.last_agent_bubble.layout().addWidget(label)
                 
-                self.last_agent_bubble.code_output_edit = AutoResizingTextEdit()
-                self.last_agent_bubble.code_output_edit.setStyleSheet("color: #444; font-family: Consolas; background: #f8f9fa; border: 1px solid #eee; padding: 8px; border-radius: 4px; margin-left: 4px;")
-                self.last_agent_bubble.code_output_edit.setReadOnly(True)
-                self.last_agent_bubble.layout().addWidget(self.last_agent_bubble.code_output_edit)
+                state.last_agent_bubble.code_output_edit = AutoResizingTextEdit()
+                state.last_agent_bubble.code_output_edit.setStyleSheet("color: #444; font-family: Consolas; background: #f8f9fa; border: 1px solid #eee; padding: 8px; border-radius: 4px; margin-left: 4px;")
+                state.last_agent_bubble.code_output_edit.setReadOnly(True)
+                state.last_agent_bubble.layout().addWidget(state.last_agent_bubble.code_output_edit)
             
-            self.last_agent_bubble.code_output_edit.append(text)
-            self.last_agent_bubble.code_output_edit.adjustHeight()
+            state.last_agent_bubble.code_output_edit.append(text)
+            state.last_agent_bubble.code_output_edit.adjustHeight()
             QApplication.processEvents()
 
-    def handle_code_finished(self):
-        # self.task_monitor.set_status("idle")
-        # self.task_monitor.add_event("系统", "代码执行完成", "success")
-        self.add_system_toast("代码执行完成", "success")
-        self.stop_btn.setVisible(False)
-        self.stop_btn.setText("⏹️ 停止") # Reset text
-        self.send_btn.setEnabled(True)
+    def handle_code_finished(self, session_id=None):
+        state = self.get_session(session_id)
+        if state: state.code_worker = None
+        if session_id == self.current_session_id:
+            self.code_worker = None
+            self.normalize_session_ui(state)
 
     def handle_code_input_request(self, prompt):
-        """Handle input() requests from python script"""
         if any(k in prompt.lower() for k in ["confirm", "yes/no", "是否"]):
              reply = QMessageBox.question(self, '需要确认', prompt, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
              response = "yes" if reply == QMessageBox.Yes else "no"
         else:
              text, ok = QInputDialog.getText(self, "输入请求", prompt)
              response = text if ok else ""
-        
         self.code_worker.provide_input(response)
 
 if __name__ == "__main__":
-    # 1. Enable High DPI Scaling
-    # Qt 6 automatically handles this, but setting the policy can help with fractional scaling (e.g. 150%)
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     
     app = QApplication(sys.argv)
     
-    # 2. Force Fusion Style for consistent look across Windows versions
-    # This avoids issues where system theme (Dark/Light) breaks hardcoded colors
+    # Use Fusion style as a base for cross-platform consistency
     app.setStyle("Fusion")
-    app.setStyleSheet("""
-        QTextEdit, QPlainTextEdit, QLineEdit, QLabel {
-            selection-background-color: #cfe3ff;
-            selection-color: #111111;
-        }
-        QMenu {
-            background-color: #ffffff;
-            color: #111111;
-            border: 1px solid #e5e7eb;
-        }
-        QMenu::item {
-            padding: 6px 12px;
-            background: transparent;
-        }
-        QMenu::item:selected {
-            background-color: #e8f0fe;
-            color: #111111;
-        }
-        QMenu::separator {
-            height: 1px;
-            background: #e5e7eb;
-            margin: 4px 8px;
-        }
-    """)
+    
+    # Global Font
+    font = app.font()
+    font.setFamily("Segoe UI")
+    font.setPointSize(10)
+    app.setFont(font)
     
     window = MainWindow()
     window.show()

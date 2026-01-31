@@ -199,24 +199,46 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 ### 7.1 历史记录增强 (Enhanced History)
 - [ ] **自定义存储路径**: 支持用户配置聊天记录的存放目录。
 - [ ] **全量还原**: 点击历史记录时，不仅还原对话内容，还能完整还原推理过程 (Reasoning Content) 和工具调用状态。
+- [ ] **思考过程修复**: 加载历史消息时确保思考过程不丢失并可回放。
 
 ### 7.2 长期记忆与 RAG (Long-term Memory)
 - [ ] **Chat as Memory**: 引入新的内置技能，将聊天记录作为大模型的“外挂记忆”。
-- [ ] **偏好学习**: 通过搜索历史记录，自动学习用户的长期偏好（如“总是使用 Python”、“喜欢深色主题”），长期放在一个markdown文件夹下，然后持续维护。
-- [ ] **存储升级**: 放弃纯 JSON 格式，迁移至更高效的存储方案（如基于markdown格式存储），以支持快速检索和大规模数据。
+- [ ] **文件系统存储**: 记忆采用独立文件夹管理，统一使用 Markdown 格式落盘。
+- [ ] **时间分层检索**: 越新的知识全量加载，越旧的知识采用关键词匹配 + 权重评分检索。
 
 ### 7.3 多模型兼容 (Multi-Model Support)
 - [ ] **Minimax**: 接入 Minimax API (兼容 Anthropic 协议) [Docs](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api)。
 - [ ] **GLM-4.7**: 接入智谱 AI GLM-4 API [Docs](https://open.bigmodel.cn/dev/api/normal-model/glm-4)。
 - [ ] **Kimi 2.5**: 接入 Moonshot AI Kimi k2.5 API [Docs](https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart)。
-- [ ] **千问max**: 接入千问max API。
-- [ ] **International Models**: 增加对主流国际模型的支持 (Gemini, GPT, Claude)。
+- [ ] **千问max**: 接入千问max API [Docs](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3-max。
+- [ ] **International Models**: 增加对主流国际模型的支持，支持自定义model名 (Gemini, GPT, Claude)。
 
 ### 7.4 体验与工作区增强 (UX & Workspace)
 - [x] **API Key 保存反馈**: 密钥输入后提示保存成功（如 SystemToast）。
 - [x] **工作区多类型预览**: 支持图片等常见格式的预览展示。
 - [x] **系统级文件操作**: 工作区文件支持复用操作系统的打开、复制、移动、删除等操作。
 - [x] **默认工作区路径**: 支持设置默认工作区，启动时自动加载。
+- [x] **多会话并行**: 同时开启并管理多个对话会话，互不干扰。
+- [x] **设置保存提示优化**: 点击设置保存后提示信息不再显示。
+- [x] **主题自动跟随系统**: 使用 pyqtdarktheme 统一样式并自动切换深色/浅色。
+
+### 7.5 常驻运行与企业消息接入 (Always-On & Enterprise Messaging)
+- [ ] **24 小时常驻模式**: 支持后台持续运行与守护，保持随时可用。
+- [ ] **后台进程挂起**: 支持进程低功耗挂起与快速恢复。
+- [ ] **飞书接口接入**: 通过飞书消息接口收发指令与回传结果。
+- [ ] **企业微信接口接入**: 通过企业微信消息接口收发指令与回传结果。
+- [ ] **钉钉接口接入**: 通过钉钉消息接口收发指令与回传结果。
+- [ ] **统一消息网关**: 支持多渠道路由、权限校验与审计记录。
+
+### 7.6 PPT 制作与多模态支持 (PPT & Multimodal)
+- [ ] **PPT 制作优化**: 参考 LandPPT 的“文档/主题 -> 提纲 -> 页面生成”流程，完善端到端生成链路。
+- [ ] **模板与样式体系**: 引入主题模板与版式库，支持 16:9 页面实时预览与样式切换。
+- [ ] **多格式导出**: 支持 PPTX/PDF/HTML 多格式导出，并可扩展标准 PPTX 兼容能力。
+- [ ] **多模态输入与图像处理**: 支持图片/截图/图表作为输入，结合智能图像处理生成配图与页面内容。
+
+### 7.7 技能即时可用 (Instant Skill Availability)
+- [ ] **自动发现与热加载**: AI 创建技能后自动扫描并注册，无需手动刷新。
+- [ ] **对话侧即时可用**: 新技能在当前会话中立刻可被调用。
 
 ---
 

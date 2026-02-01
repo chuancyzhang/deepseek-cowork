@@ -210,11 +210,12 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [ ] **时间分层检索**: 越新的知识全量加载，越旧的知识采用关键词匹配 + 权重评分检索。
 
 ### 7.3 多模型兼容 (Multi-Model Support)
-- [ ] **Minimax**: 接入 Minimax API (兼容 Anthropic 协议) [Docs](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api)。
-- [ ] **GLM-4.7**: 接入智谱 AI GLM-4 API [Docs](https://open.bigmodel.cn/dev/api/normal-model/glm-4)。
-- [ ] **Kimi 2.5**: 接入 Moonshot AI Kimi k2.5 API [Docs](https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart)。
-- [ ] **千问max**: 接入千问max API [Docs](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3-max。
-- [ ] **International Models**: 增加对主流国际模型的支持，支持自定义model名 (Gemini, GPT, Claude)。
+- [x] **Minimax**: 接入 Minimax API (兼容 Anthropic 协议) [Docs](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api)。
+- [x] **GLM-4.7**: 接入智谱 AI GLM-4 API [Docs](https://open.bigmodel.cn/dev/api/normal-model/glm-4)。
+- [x] **Kimi 2.5**: 接入 Moonshot AI Kimi k2.5 API [Docs](https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart)。
+- [x] **千问max**: 接入千问max API [Docs](https://modelstudio.console.alibabacloud.com/ap-southeast-1/?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3-max。
+- [x] **International Models**: 增加对主流国际模型的支持，支持自定义model名 (Gemini, GPT, Claude)。
+- [x] **Multi-modal**: 支持多模态读写 (图片/视频输入支持)。
 
 ### 7.4 体验与工作区增强 (UX & Workspace)
 - [x] **API Key 保存反馈**: 密钥输入后提示保存成功（如 SystemToast）。

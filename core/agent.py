@@ -301,18 +301,13 @@ class LLMWorker(QThread):
             # Reset reasoning for the current turn (for UI display)
             current_turn_reasoning = ""
 
-            if self.api_key and OPENAI_AVAILABLE:
+            if self.api_key:
                 try:
                     start_time = time.time()
-                    client = OpenAI(api_key=self.api_key, base_url="https://api.deepseek.com")
                     
-                    # Streaming Call
-                    stream = client.chat.completions.create(
-                        model="deepseek-reasoner",
-                        messages=current_messages,
-                        tools=self.tools,
-                        stream=True
-                    )
+                    # Create Provider via Factory
+                    provider = LLMFactory.create_provider(self.config_manager)
+                    stream = provider.chat_stream(current_messages, tools=self.tools)
                     
                     # Streaming Buffers
                     chunk_reasoning = ""
@@ -326,38 +321,43 @@ class LLMWorker(QThread):
                              self.msleep(100)
                         if self.is_stopped: break
                         
-                        delta = chunk.choices[0].delta
+                        type_ = chunk.get("type")
                         
                         # 1. Handle Reasoning
-                        if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                            r_content = delta.reasoning_content
+                        if type_ == "reasoning":
+                            r_content = chunk["content"]
                             current_turn_reasoning += r_content
                             full_reasoning += r_content
                             self.thinking_signal.emit(r_content)
                             
                         # 2. Handle Content
-                        if delta.content:
-                            chunk_content += delta.content
-                            self.content_signal.emit(delta.content)
+                        elif type_ == "content":
+                            c_content = chunk["content"]
+                            chunk_content += c_content
+                            self.content_signal.emit(c_content)
                         
                         # 3. Handle Tool Calls
-                        if delta.tool_calls:
-                            for tc in delta.tool_calls:
-                                index = tc.index
-                                if index not in tool_calls_buffer:
-                                    tool_calls_buffer[index] = {
-                                        "id": tc.id,
-                                        "type": tc.type,
-                                        "function": {
-                                            "name": tc.function.name,
-                                            "arguments": ""
-                                        }
+                        elif type_ == "tool_call":
+                            index = chunk.get("index", 0) # Default to 0 if not provided
+                            
+                            if index not in tool_calls_buffer:
+                                tool_calls_buffer[index] = {
+                                    "id": chunk.get("id"),
+                                    "type": "function",
+                                    "function": {
+                                        "name": chunk["function"].get("name", ""),
+                                        "arguments": ""
                                     }
-                                
-                                # Append arguments
-                                if tc.function and tc.function.arguments:
-                                    tool_calls_buffer[index]["function"]["arguments"] += tc.function.arguments
-                    
+                                }
+                            
+                            # Append arguments
+                            if "arguments" in chunk["function"]:
+                                tool_calls_buffer[index]["function"]["arguments"] += chunk["function"]["arguments"]
+                        
+                        # 4. Handle Error
+                        elif type_ == "error":
+                            self.output_signal.emit(f"Provider Error: {chunk['content']}")
+
                     end_time = time.time()
                     duration = end_time - start_time
                     total_duration += duration

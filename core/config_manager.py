@@ -29,6 +29,8 @@ class ConfigManager:
         self.config = {
             "api_key": "",
             "base_url": "https://api.deepseek.com",
+            "model_name": "deepseek-reasoner",
+            "llm_provider": "openai",
             "disabled_skills": [],
             "god_mode": False,
             "default_workspace": ""

@@ -11,3 +11,4 @@ trafilatura
 beautifulsoup4
 requests
 markdown
+anthropic>=0.3.0

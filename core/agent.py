@@ -290,6 +290,14 @@ class LLMWorker(QThread):
             turn_count += 1
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
 
+            # --- Hot Reload Skills ---
+            # Check if any new skills were added or modified
+            if self.skill_manager.check_for_updates():
+                self.step_signal.emit("System: Detecting skill updates... Reloading.")
+                self.skill_manager.load_skills()
+                self.tools = self.skill_manager.get_tool_definitions()
+            # -------------------------
+
             # Reset reasoning for the current turn (for UI display)
             current_turn_reasoning = ""
 

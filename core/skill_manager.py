@@ -62,6 +62,7 @@ class SkillManager:
         self.skill_prompts = [] # Markdown content from SKILL.md
         self.tool_to_skill_map = {} # tool_name -> skill_name
         self.loaded_skills_meta = {} # skill_name -> metadata dict
+        self.last_load_time = 0
         
         self.load_skills()
 
@@ -280,6 +281,39 @@ class SkillManager:
         except Exception as e:
             return False, f"Failed to update experience: {e}"
 
+    def check_for_updates(self):
+        """
+        Check if any skill files (SKILL.md or impl.py) have been modified since last load.
+        Returns True if updates are detected.
+        """
+        try:
+            for skills_dir in self.skills_dirs:
+                if not os.path.exists(skills_dir):
+                    continue
+                    
+                for skill_name in os.listdir(skills_dir):
+                    if skill_name.startswith('.'):
+                        continue
+                        
+                    skill_path = os.path.join(skills_dir, skill_name)
+                    if not os.path.isdir(skill_path):
+                        continue
+                        
+                    # Check SKILL.md
+                    md_path = os.path.join(skill_path, "SKILL.md")
+                    if os.path.exists(md_path):
+                        if os.path.getmtime(md_path) > self.last_load_time:
+                            return True
+                            
+                    # Check impl.py
+                    impl_path = os.path.join(skill_path, "impl.py")
+                    if os.path.exists(impl_path):
+                        if os.path.getmtime(impl_path) > self.last_load_time:
+                            return True
+        except Exception as e:
+            print(f"Error checking for updates: {e}")
+        return False
+
     def load_skills(self):
         """Scan skills directory and load SKILL.md + implementations for enabled skills"""
         self.tools = {}
@@ -287,6 +321,10 @@ class SkillManager:
         self.skill_prompts = []
         self.tool_to_skill_map = {}
         self.loaded_skills_meta = {}
+        
+        # Update timestamp before loading
+        import time
+        self.last_load_time = time.time()
         
         for skills_dir in self.skills_dirs:
             if not os.path.exists(skills_dir):

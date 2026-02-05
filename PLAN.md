@@ -204,10 +204,51 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [x] **全量还原**: 点击历史记录时，不仅还原对话内容，还能完整还原推理过程 (Reasoning Content) 和工具调用状态。
 - [x] **思考过程修复**: 加载历史消息时确保思考过程不丢失并可回放。
 
-### 7.2 长期记忆
-- [ ] **Chat as Memory**: 引入新的内置技能，将聊天记录作为大模型的“外挂记忆”。
-- [ ] **文件系统存储**: 记忆采用独立文件夹管理，统一使用 Markdown 格式落盘。
-- [ ] **时间分层检索**: 越新的知识全量加载，越旧的知识采用关键词匹配 + 权重评分检索。
+### 7.2 长期记忆与存储重构 (Long-term Memory & Storage Refactoring)
+**目标**: 采用 "SQLite (日志) + Markdown (记忆)" 的混合存储架构，兼顾高性能检索与人类可读性。
+
+#### 7.2.1 数据库架构设计 (Database Architecture)
+- [ ] **SQLite Schema (日志层)**:
+    - **`conversations`**: 会话容器
+        - `id` (PK, UUID): 会话唯一标识
+        - `title`: 会话标题 (支持自动生成)
+        - `created_at` / `updated_at`: 时间戳
+        - `status`: 会话状态 (active, archived, deleted)
+        - `meta`: JSON 字段，存储 context (如 IDE 环境信息, git branch)
+    - **`messages`**: 消息实体
+        - `id` (PK, UUID)
+        - `conversation_id` (FK)
+        - `role`: (user/assistant/system/tool)
+        - `content`: 消息正文
+        - `tool_calls`: JSON 存储工具调用详情
+        - `reasoning_content`: 存储思维链 (CoT) 数据
+        - `token_count`: 预估 Token 数 (用于上下文窗口计算)
+
+#### 7.2.2 检索与增强 (Retrieval & RAG)
+- [ ] **双层检索策略 (Two-Tier Retrieval Strategy)**:
+    - **L1 语义记忆 (`memories.md`)**:
+        - 每次会话启动时，自动加载 `memories.md` 内容至 System Context，提供全局记忆支持。
+    - **L2 历史回溯 (SQLite FTS5)**:
+        - 创建 `messages_fts` 虚拟表，对 `content` 和 `reasoning_content` 建立倒排索引，支持毫秒级全文搜索。
+        - **上下文注入**: User 发送消息 -> 提取关键词 -> FTS 检索 Top-K 相关历史片段 -> 注入 System Prompt 的 `Relevant History` 区块。
+        - **排序优化**: 结合 Time Decay (时间衰减) 算法，优先展示近期相关的历史记录。
+
+#### 7.2.3 迁移与兼容 (Migration & Compatibility)
+- [ ] **存量数据迁移**: 开发 `migrate_files_to_sqlite.py` 脚本，遍历 `history/` 目录下的 JSON/MD 文件并导入数据库。
+
+#### 7.2.4 语义记忆与自动提炼 (Semantic Memory & Auto-Refinement)
+- [ ] **混合存储架构 (Hybrid Storage)**:
+    - **`memories.md`**: 采用 Markdown 格式存储高层语义记忆（用户偏好、项目规则、核心知识），与 SQLite 数据库同级存放。
+    - **优势**: 保持人类可读性，便于用户手动微调；同时作为 System Prompt 的一部分直接注入 LLM 上下文。
+- [ ] **记忆更新机制 (Memory Update Mechanism)**:
+    - **后台任务**: 会话结束 (Session End) 或闲置 (Idle) 时触发后台任务。
+    - **核心提取**: AI 读取当前 `memories.md` 和最近会话记录，智能判断是**追加**新知识还是**修正**旧记忆，避免重复，形成自我进化的记忆闭环。
+
+#### 7.2.5 主动检索技能 (Active Retrieval Skill)
+- [ ] **History Query Skill**:
+    - **场景触发**: 当用户提及特定时间（"上周的讨论"）或话题（"之前关于数据库的方案"）时，AI 识别意图并调用工具。
+    - **能力**: 支持按 `keywords` (关键词) 和 `date_range` (时间范围) 组合过滤 SQLite 中的 `messages`。
+    - **交互**: 将检索到的关键历史片段作为 Tool Output 返回给 Agent，用于回答用户问题。
 
 ### 7.3 多模型兼容 (Multi-Model Support)
 - [x] **Minimax**: 接入 Minimax API (兼容 Anthropic 协议) [Docs](https://platform.minimaxi.com/docs/api-reference/text-anthropic-api)。
@@ -227,16 +268,75 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [x] **主题自动跟随系统**: 使用 pyqtdarktheme 统一样式并自动切换深色/浅色。
 
 ### 7.5 常驻运行与企业消息接入 (Always-On & Enterprise Messaging)
-- [ ] **24 小时常驻模式**: 支持后台持续运行与守护，保持随时可用。
-- [ ] **后台进程挂起**: 支持进程低功耗挂起与快速恢复。
-- [ ] **飞书接口接入**: 通过飞书消息接口收发指令与回传结果。
-- [ ] **企业微信接口接入**: 通过企业微信消息接口收发指令与回传结果。
-- [ ] **钉钉接口接入**: 通过钉钉消息接口收发指令与回传结果。
-- [ ] **统一消息网关**: 支持多渠道路由、权限校验与审计记录。
+**目标**: 实现 "Headless Daemon" 架构，使 Agent 能在后台静默运行，并通过企业 IM 随时响应指令。
+
+#### 7.5.1 守护进程与资源管理 (Daemon & Resource Mgmt)
+- [ ] **C/S 架构分离**:
+    - **Daemon (Server)**: 无头后台进程，负责 LLM 推理、工具执行和消息路由。
+    - **GUI (Client)**: 轻量级前端，仅负责渲染对话和配置，关闭窗口不影响后台运行。
+    - **System Tray**: 托盘图标支持“显示/隐藏”、“退出”、“查看状态”。
+- [ ] **智能休眠 (Smart Suspend)**:
+    - **Context Swapping**: 闲置超过 N 分钟后，将显存/内存中的 LLM 上下文序列化到磁盘，释放资源。
+    - **Wake-on-Request**: 收到新消息（API/IM）时自动热加载上下文恢复运行。
+
+#### 7.5.2 统一消息网关 (Unified Messaging Gateway)
+- [ ] **Provider Abstraction**:
+    - 定义 `IMProvider` 接口 (`send_message`, `parse_event`, `verify_signature`)。
+    - 内置轻量级 Webhook Server (FastAPI) 用于接收回调。
+- [ ] **多平台适配**:
+    - **飞书 (Feishu)**: 适配飞书开放平台 Event Callback V2，支持卡片消息 (Interactive Cards) 渲染工具调用结果。
+    - **企业微信 (WeCom)**: 适配接收消息 API，支持 XML 解密与被动响应。
+    - **钉钉 (DingTalk)**: 适配钉钉机器人 Webhook 与 Stream 模式（无需公网 IP）。
+- [ ] **会话映射 (Session Mapping)**:
+    - 建立 `IM_User_ID` <-> `Cowork_Conversation_ID` 的持久化映射表，确保在 IM 中的多轮对话上下文连续。
 
 ### 7.6 技能即时可用 (Instant Skill Availability)
 - [x] **自动发现与热加载**: AI 创建技能后自动扫描并注册，无需手动刷新。
 - [x] **对话侧即时可用**: 新技能在当前会话中立刻可被调用。
+
+### 7.7 系统工具增强 (System Tools Enhancement)
+- [ ] **Grep 升级 (Everything 集成)**:
+    - **全盘检索**: 集成 Everything (ES) 命令行工具 (`es.exe`)，实现对整个操作系统的文件和文件夹进行毫秒级即时检索。
+    - **突破限制**: 不再局限于当前工作区 (Workspace)，赋予 Agent 真正的全盘视野。
+    - **智能回退**: 若未检测到 Everything 服务，可以提醒用户是否安装Everything，然后自动降级为原有 Grep 模式。
+
+### 7.8 Gemini 3 深度集成与全能多模态 (Gemini 3 & Omni-Multimodal)
+基于 [Gemini 3 文档](https://ai.google.dev/gemini-api/docs/gemini-3?hl=zh-cn)，打造全能多模态体验。
+
+- [ ] **Gemini 3 模型接入**:
+    - **Core Models**: 接入 `gemini-3-pro-preview` (强推理) 和 `gemini-3-flash-preview` (高性价比)。
+    - **SDK 升级**: 迁移/兼容新的 `google.genai` Python SDK。
+- [ ] **视觉理解 (Visual Understanding)**:
+    - **Image Reading**: 利用 Gemini 3 的多模态能力，支持对上传图片的深度分析、OCR 和物体识别。
+    - **Video Reading**: 支持上传视频文件，通过 API (Video context) 读取视频内容并进行语义检索或总结。
+- [ ] **视觉生成 (Visual Generation)**:
+    - **Image Generation**: 接入 `gemini-3-pro-image-preview` (Nano Banana)，支持对话生成高质量图像。
+    - **Video Generation**: 探索 Veo 或相关 Video API，支持根据文本描述生成视频片段。
+- [ ] **多模态交互体验 (Multimodal UI)**:
+    - **Media Rendering**: 聊天气泡支持原生渲染 API 返回的 Image/Video 对象，而非仅显示链接。
+    - **Preview**: 在输入框支持粘贴/拖拽图片和视频进行预览与上传。
+
+### 7.9 定时任务与自动化 (Scheduled Tasks & Automation)
+- [ ] **任务调度引擎 (Scheduler Engine)**:
+    - 集成 `APScheduler`，支持 Cron 表达式、间隔执行 (Interval) 和一次性延时任务 (Date)。
+    - **持久化**: 任务配置存储于 SQLite，确保重启后自动恢复。
+- [ ] **定时技能 (Scheduled Skills)**:
+    - **Schedule Skill**: 允许 Agent 调用工具注册定时任务（例如：“每天早上 9 点帮我总结昨天的 Hacker News”）。
+    - **回调机制**: 任务触发时，自动唤醒 Agent 并注入特定的 Prompt context 执行后续操作。
+- [ ] **任务管理面板**:
+    - 提供 GUI 界面查看当前挂起的定时任务、下次执行时间及历史执行日志。
+
+### 7.10 应用管理与深度操控 (App Management & Deep Control)
+- [ ] **智能应用索引 (App Indexing)**:
+    - **自动扫描**: 启动时自动扫描开始菜单快捷方式、注册表卸载列表和 PATH 环境变量，构建 `App Name -> Exe Path` 映射表。
+    - **Everything 集成**: 利用 Everything 接口实现对未收录应用的模糊查找（如 "Find where Photoshop is installed"）。
+- [ ] **应用启动技能 (App Launcher Skill)**:
+    - **`launch_app(name, args)`**: 支持自然语言模糊匹配启动应用（如 "打开微信", "启动 VS Code 并打开当前项目"）。
+    - **`open_with(file, app)`**: 指定特定应用打开文件（如 "用 Chrome 打开这个 HTML"）。
+- [ ] **GUI 自动化与智能操控 (GUI Automation)**:
+    - **Browser-Use 集成**: 引入 `browser-use` 或 Playwright，赋予 Agent 操控浏览器的能力（点击、输入、滚动），实现网页任务自动化（如“帮我订一张去北京的票”）。
+    - **OS-Level Control**: 探索 `pywinauto` / `UIAutomation`，实现对非 Web 原生应用（如微信、飞书、系统设置）的点击与操作。
+    - **视觉反馈循环**: 结合 Gemini 3 的视觉能力，截屏 -> 分析 UI 布局 -> 规划点击坐标 -> 执行操作。
 
 ---
 

@@ -101,7 +101,7 @@ def run_python_code(workspace_dir, code, _context=None):
             cwd=workspace_dir,
             encoding='utf-8',
             errors='replace',
-            timeout=30 # 30s timeout
+            timeout=120 # 120s timeout
         )
         
         output = result.stdout
@@ -111,7 +111,7 @@ def run_python_code(workspace_dir, code, _context=None):
         return output if output.strip() else "(No output)"
         
     except subprocess.TimeoutExpired:
-        return "Error: Execution timed out (30s)."
+        return "Error: Execution timed out (120s)."
     except FileNotFoundError:
         return "Error: Executable not found. If you are trying to run a command (like 'ls', 'git'), ensure it is installed and in the system PATH."
     except Exception as e:

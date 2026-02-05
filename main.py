@@ -18,6 +18,7 @@ from core.skill_generator import SkillGenerator
 from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir
+from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
 import shutil
 import qtawesome as qta
@@ -1325,6 +1326,8 @@ class ChatBubble(QFrame):
         return new_widget
 
     def update_thinking(self, text=None, duration=None, is_final=False):
+        if text is not None or duration is not None:
+            self.thinking_widget.setVisible(True)
         if text is not None:
             # Simple streaming append for now
             widget = self.get_active_think_widget()
@@ -2497,6 +2500,7 @@ class MainWindow(QMainWindow):
         self.data_dir = get_app_data_dir()
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
+        self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
         
         self.create_new_session()
         self.refresh_history_list()
@@ -2664,15 +2668,19 @@ class MainWindow(QMainWindow):
             if widget is not None: widget.deleteLater()
         chat_layout.addStretch()
 
-    def update_session_tab_title(self, session_id):
-        state = self.sessions.get(session_id)
-        if not state: return
+    def _compute_session_title(self, messages):
         title = "新对话"
-        for msg in state.messages:
+        for msg in messages:
             if msg.get("role") == "user":
                 content = msg.get("content") or ""
                 if content: title = content[:15] + "..." if len(content) > 15 else content
                 break
+        return title
+
+    def update_session_tab_title(self, session_id):
+        state = self.sessions.get(session_id)
+        if not state: return
+        title = self._compute_session_title(state.messages)
         index = self.session_tabs.indexOf(state.session_widget)
         if index >= 0: self.session_tabs.setTabText(index, title)
 
@@ -2773,39 +2781,49 @@ class MainWindow(QMainWindow):
             item = self.history_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
         
+        conversations = self.chat_storage.list_conversations()
+        conversation_ids = {c["id"] for c in conversations}
+
+        for conv in conversations:
+            session_id = conv["id"]
+            title = conv["title"] or "新对话"
+            btn = QPushButton(title)
+            btn.setCursor(Qt.PointingHandCursor)
+            if session_id == self.current_session_id:
+                 btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
+            else:
+                 btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
+            
+            btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
+            self.history_layout.addWidget(btn)
+
         history_dir = self.chat_history_dir
-        if not os.path.exists(history_dir):
-            self.history_layout.addStretch()
-            return
+        if os.path.exists(history_dir):
+            files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
+            files.sort(key=os.path.getmtime, reverse=True)
 
-        files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
-        files.sort(key=os.path.getmtime, reverse=True)
-
-        for file_path in files:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if not data: continue
-                    title = "新对话"
-                    for msg in data:
-                        if msg['role'] == 'user':
-                            content = msg['content']
-                            title = content[:15] + "..." if len(content) > 15 else content
-                            break
+            for file_path in files:
+                try:
                     filename = os.path.basename(file_path)
                     session_id = filename.replace('chat_history_', '').replace('.json', '')
-                    
-                    btn = QPushButton(title)
-                    btn.setCursor(Qt.PointingHandCursor)
-                    if session_id == self.current_session_id:
-                         btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
-                    else:
-                         btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
-                    
-                    btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
-                    self.history_layout.addWidget(btn)
-            except Exception as e:
-                continue
+                    if session_id in conversation_ids:
+                        continue
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if not data: continue
+                        title = self._compute_session_title(data)
+                        
+                        btn = QPushButton(title)
+                        btn.setCursor(Qt.PointingHandCursor)
+                        if session_id == self.current_session_id:
+                             btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
+                        else:
+                             btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
+                        
+                        btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
+                        self.history_layout.addWidget(btn)
+                except Exception as e:
+                    continue
         self.history_layout.addStretch()
 
     def create_load_more_btn(self):
@@ -2870,6 +2888,18 @@ class MainWindow(QMainWindow):
         current_idx = insert_index
         backup_last_agent = state.last_agent_bubble
         state.last_agent_bubble = None 
+        active_agent_bubble = None
+        pending_content_parts = []
+
+        def finalize_active_bubble():
+            nonlocal active_agent_bubble, pending_content_parts
+            if not active_agent_bubble:
+                return
+            if pending_content_parts:
+                active_agent_bubble.set_main_content("\n\n".join(pending_content_parts))
+            active_agent_bubble.update_thinking(duration=None, is_final=True)
+            active_agent_bubble = None
+            pending_content_parts = []
         
         for msg in messages:
             role = msg.get('role')
@@ -2877,17 +2907,20 @@ class MainWindow(QMainWindow):
             reasoning = msg.get('reasoning')
             
             if role == 'user':
+                finalize_active_bubble()
                 self.add_chat_bubble('User', content, index=current_idx, animate=animate)
                 if current_idx is not None: current_idx += 1
                 state.last_agent_bubble = None
                 
             elif role == 'assistant':
-                bubble = None
-                if content or reasoning or msg.get('tool_calls'):
-                    bubble = self.add_chat_bubble('Agent', content, thinking=reasoning, index=current_idx, animate=animate)
+                if not active_agent_bubble and (content or reasoning or msg.get('tool_calls')):
+                    active_agent_bubble = self.add_chat_bubble('Agent', "", thinking=None, index=current_idx, animate=animate)
                     if current_idx is not None: current_idx += 1
-                
-                state.last_agent_bubble = bubble
+                    state.last_agent_bubble = active_agent_bubble
+                if reasoning:
+                    active_agent_bubble.update_thinking(reasoning)
+                if content:
+                    pending_content_parts.append(content)
                 
                 tool_calls = msg.get('tool_calls')
                 if tool_calls:
@@ -2901,9 +2934,8 @@ class MainWindow(QMainWindow):
                             'name': t_name,
                             'args': t_args
                         }, session_id=session_id, index=current_idx, animate=animate)
-                        
-                        if not bubble:
-                             if current_idx is not None: current_idx += 1
+                        if not active_agent_bubble and current_idx is not None:
+                            current_idx += 1
 
             elif role == 'tool':
                 t_id = msg.get('tool_call_id')
@@ -2914,6 +2946,7 @@ class MainWindow(QMainWindow):
                         'result': t_result
                     }, session_id=session_id)
                     
+        finalize_active_bubble()
         if insert_index is not None:
              state.last_agent_bubble = backup_last_agent
 
@@ -2945,30 +2978,32 @@ class MainWindow(QMainWindow):
         state.displayed_count = 0
         state.load_more_btn = None
 
-        history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
-        if os.path.exists(history_path):
-            try:
-                with open(history_path, 'r', encoding='utf-8') as f:
-                    state.messages = json.load(f)
-                
-                # Pagination: Load last 20 messages
-                PAGE_SIZE = 20
-                total = len(state.messages)
-                start_idx = max(0, total - PAGE_SIZE)
-                
-                display_msgs = state.messages[start_idx:]
-                state.displayed_count = len(display_msgs)
-                
-                # Add Load More button if needed
-                if start_idx > 0:
-                    btn = self.create_load_more_btn()
-                    state.load_more_btn = btn
-                    state.chat_layout.addWidget(btn) # Add to top (since layout is empty)
-                
-                self.render_message_batch(display_msgs, session_id, animate=False)
-                
-            except Exception as e:
-                print(f"Error loading session: {e}")
+        state.messages = self.chat_storage.get_messages(session_id)
+        if not state.messages:
+            history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
+            if os.path.exists(history_path):
+                try:
+                    with open(history_path, 'r', encoding='utf-8') as f:
+                        state.messages = json.load(f)
+                    title = self._compute_session_title(state.messages)
+                    self.chat_storage.save_conversation(session_id, state.messages, title=title)
+                except Exception as e:
+                    print(f"Error loading session: {e}")
+
+        if state.messages:
+            PAGE_SIZE = 20
+            total = len(state.messages)
+            start_idx = max(0, total - PAGE_SIZE)
+            
+            display_msgs = state.messages[start_idx:]
+            state.displayed_count = len(display_msgs)
+            
+            if start_idx > 0:
+                btn = self.create_load_more_btn()
+                state.load_more_btn = btn
+                state.chat_layout.addWidget(btn)
+            
+            self.render_message_batch(display_msgs, session_id, animate=False)
         
         # Restore Empty State if no messages
         if len(state.messages) == 0:
@@ -3021,11 +3056,12 @@ class MainWindow(QMainWindow):
     def save_chat_history(self):
         state = self.get_current_session()
         if not state or not state.messages: return
-        history_path = os.path.join(self.chat_history_dir, f'chat_history_{state.session_id}.json')
+        title = self._compute_session_title(state.messages)
+        meta = {"workspace_dir": self.workspace_dir} if self.workspace_dir else None
         try:
-            with open(history_path, 'w', encoding='utf-8') as f:
-                json.dump(state.messages, f, ensure_ascii=False, indent=2)
-        except Exception: pass
+            self.chat_storage.save_conversation(state.session_id, state.messages, title=title, meta=meta)
+        except Exception:
+            pass
 
     def load_default_workspace(self):
         default_dir = self.config_manager.get("default_workspace", "")

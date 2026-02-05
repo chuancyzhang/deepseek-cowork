@@ -208,7 +208,7 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 **目标**: 采用 "SQLite (日志) + Markdown (记忆)" 的混合存储架构，兼顾高性能检索与人类可读性。
 
 #### 7.2.1 数据库架构设计 (Database Architecture)
-- [ ] **SQLite Schema (日志层)**:
+- [x] **SQLite Schema (日志层)**:
     - **`conversations`**: 会话容器
         - `id` (PK, UUID): 会话唯一标识
         - `title`: 会话标题 (支持自动生成)
@@ -224,28 +224,31 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
         - `reasoning_content`: 存储思维链 (CoT) 数据
         - `token_count`: 预估 Token 数 (用于上下文窗口计算)
 
-#### 7.2.2 检索与增强 (Retrieval & RAG)
-- [ ] **双层检索策略 (Two-Tier Retrieval Strategy)**:
+#### 7.2.2 检索与增强
+- [x] **多层检索策略 (Multi-Tier Retrieval Strategy)**:
     - **L1 语义记忆 (`memories.md`)**:
         - 每次会话启动时，自动加载 `memories.md` 内容至 System Context，提供全局记忆支持。
     - **L2 历史回溯 (SQLite FTS5)**:
         - 创建 `messages_fts` 虚拟表，对 `content` 和 `reasoning_content` 建立倒排索引，支持毫秒级全文搜索。
         - **上下文注入**: User 发送消息 -> 提取关键词 -> FTS 检索 Top-K 相关历史片段 -> 注入 System Prompt 的 `Relevant History` 区块。
         - **排序优化**: 结合 Time Decay (时间衰减) 算法，优先展示近期相关的历史记录。
+    - **L3 向量检索 (SQLite-vec)**:
+        - 引入 `sqlite-vec` 插件，为 `messages` 表添加向量字段 (Embedding)，支持语义相似度搜索。
+        - **混合检索**: 结合 FTS5 (关键词匹配) 和 Vector Search (语义匹配) 提升召回准确率，弥补关键词匹配在语义理解上的不足。
 
 #### 7.2.3 迁移与兼容 (Migration & Compatibility)
-- [ ] **存量数据迁移**: 开发 `migrate_files_to_sqlite.py` 脚本，遍历 `history/` 目录下的 JSON/MD 文件并导入数据库。
+- [x] **存量数据迁移**: 开发 `migrate_files_to_sqlite.py` 脚本，遍历 `history/` 目录下的 JSON/MD 文件并导入数据库。
 
 #### 7.2.4 语义记忆与自动提炼 (Semantic Memory & Auto-Refinement)
-- [ ] **混合存储架构 (Hybrid Storage)**:
+- [x] **混合存储架构 (Hybrid Storage)**:
     - **`memories.md`**: 采用 Markdown 格式存储高层语义记忆（用户偏好、项目规则、核心知识），与 SQLite 数据库同级存放。
     - **优势**: 保持人类可读性，便于用户手动微调；同时作为 System Prompt 的一部分直接注入 LLM 上下文。
-- [ ] **记忆更新机制 (Memory Update Mechanism)**:
+- [x] **记忆更新机制 (Memory Update Mechanism)**:
     - **后台任务**: 会话结束 (Session End) 或闲置 (Idle) 时触发后台任务。
     - **核心提取**: AI 读取当前 `memories.md` 和最近会话记录，智能判断是**追加**新知识还是**修正**旧记忆，避免重复，形成自我进化的记忆闭环。
 
 #### 7.2.5 主动检索技能 (Active Retrieval Skill)
-- [ ] **History Query Skill**:
+- [x] **History Query Skill**:
     - **场景触发**: 当用户提及特定时间（"上周的讨论"）或话题（"之前关于数据库的方案"）时，AI 识别意图并调用工具。
     - **能力**: 支持按 `keywords` (关键词) 和 `date_range` (时间范围) 组合过滤 SQLite 中的 `messages`。
     - **交互**: 将检索到的关键历史片段作为 Tool Output 返回给 Agent，用于回答用户问题。

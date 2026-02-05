@@ -257,6 +257,11 @@ class LLMWorker(QThread):
             "2. 当你成功解决一个难题、发现某个工具的最佳实践或遇到并修复了错误时，请务必使用 'update_experience' 记录下来。",
             "3. 这些经验将在未来类似场景中自动注入，帮助你变得更聪明。",
             "",
+            "策略 [记忆]:",
+            "1. 你拥有 'read_memories' 与 'write_memories' 工具，用于读取/更新 memories.md（可能不存在或为空）。",
+            "2. 在每次对话结束后，若出现长期稳定偏好、重要背景、持续项目约定、用户身份/环境信息，才更新 memories.md；否则不要更新。",
+            "3. 避免写入敏感信息或临时细节；默认追加，只有在需要整体整理时才使用替换模式。",
+            "",
             "策略 [交互]: 如果你需要向用户提问或获取确认（例如：删除文件、澄清需求或下一步操作），你必须使用 'ask_user_confirmation' 工具。",
             "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。请使用工具来触发弹出对话框。",
             "",
@@ -267,6 +272,19 @@ class LLMWorker(QThread):
         ]
         if self.parent_agent_id:
             context_lines.append(f"Note: You are a sub-agent (ID: {self.parent_agent_id}). Perform your assigned task efficiently.")
+
+        memories_text = ""
+        if self.config_manager:
+            try:
+                history_dir = self.config_manager.get_chat_history_dir()
+                memories_path = os.path.join(history_dir, "memories.md")
+                if os.path.exists(memories_path):
+                    with open(memories_path, "r", encoding="utf-8") as f:
+                        memories_text = f.read().strip()
+            except Exception:
+                memories_text = ""
+        if memories_text:
+            context_lines.append("\n# Memories\n" + memories_text)
 
         # Append Skill-Specific Prompts (e.g. usage guidelines, learned experiences)
         if self.skill_manager.skill_prompts:

@@ -592,11 +592,17 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
 
     def adjustHeight(self):
+        """
+        根据文档内容调整文本框高度
+        添加最大高度限制防止初始渲染时高度异常
+        """
         doc_height = self.document().size().height()
         margins = self.contentsMargins()
         height = int(doc_height + margins.top() + margins.bottom())
-        # Ensure minimum height to avoid invisible widget
-        self.setFixedHeight(max(height, 24))
+        # 确保最小高度避免不可见，同时限制最大高度防止初始异常
+        height = max(height, 24)
+        height = min(height, 2000)  # 限制最大高度为2000像素
+        self.setFixedHeight(height)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -947,7 +953,7 @@ class ChatBubble(QFrame):
             avatar_layout.setContentsMargins(0, 5, 0, 0) # Top margin for alignment
             avatar_layout.setSpacing(0)
             avatar_layout.addWidget(avatar)
-            avatar_layout.addStretch()
+            # 不添加addStretch，让容器高度只由Avatar决定，避免气泡被撑高
             main_layout.addWidget(avatar_container)
 
         else: # Agent
@@ -1346,6 +1352,10 @@ class ChatBubble(QFrame):
             self.think_toggle_btn.setChecked(False) # Collapse by default when done
             
     def set_main_content(self, text):
+        """
+        设置对话气泡的主要内容
+        使用延迟调整高度确保文档渲染完成后再计算正确高度
+        """
         try:
             # GitHub-like CSS for Markdown
             style = """
@@ -1415,7 +1425,10 @@ class ChatBubble(QFrame):
             self.content_edit.setHtml(style + html_content)
         except Exception:
             self.content_edit.setPlainText(text)
-        self.content_edit.adjustHeight()
+        
+        # 延迟调整高度，确保文档已渲染完成
+        # 使用QTimer.singleShot(0, ...)在事件循环的下一个迭代执行
+        QTimer.singleShot(0, self.content_edit.adjustHeight)
         
     def add_tool_card(self, card_widget, session_id=None):
         # Tools inside thinking container? Or after?

@@ -7,7 +7,7 @@ metadata:
   author: cowork-team
   version: "1.0"
 security_level: high
-allowed-tools: ["bash", "grep"]
+allowed-tools: ["bash", "grep", "search_files"]
 ---
 
 # System Tools Skill
@@ -23,6 +23,9 @@ This skill provides powerful system utilities for the agent to interact with the
    - Supports regular expressions.
    - Can search recursively.
    - Returns file paths and matching lines with line numbers.
+3. **Search Files**: Find files and folders via Everything CLI on Windows.
+   - Searches across the entire system when Everything is available.
+   - Falls back to Grep within the workspace if Everything is unavailable.
 
 ## Usage Guidelines
 - **Bash**: Use when you need to run tools that are not available as built-in skills (e.g., `git`, `npm`, system info).

@@ -2,6 +2,7 @@ import os
 import subprocess
 import re
 import fnmatch
+import shutil
 
 def _is_god_mode(context):
     if context and 'config_manager' in context:
@@ -124,3 +125,57 @@ def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=
         
     except Exception as e:
         return f"Error: {str(e)}"
+
+def _run_everything_search(query, limit=200):
+    if os.name != "nt":
+        return None, "Everything is only supported on Windows."
+    exe_path = shutil.which("es.exe")
+    if not exe_path:
+        return None, "Everything CLI (es.exe) not found in PATH."
+    try:
+        result = subprocess.run(
+            [exe_path, "-n", str(limit), query],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace"
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            return None, err or "Everything CLI failed."
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return lines, None
+    except Exception as e:
+        return None, str(e)
+
+def search_files(workspace_dir, query, limit=200, fallback_path=".", use_grep_fallback=True, _context=None):
+    """
+    Search for files and folders using Everything CLI when available.
+    Falls back to grep in the workspace when Everything is unavailable.
+    
+    Args:
+        workspace_dir (str): Root workspace (used for fallback only).
+        query (str): Search query (Everything syntax supported).
+        limit (int): Maximum results to return (default 200).
+        fallback_path (str): Workspace-relative path for fallback grep.
+        use_grep_fallback (bool): Whether to fall back to grep (default True).
+    """
+    if not query or not str(query).strip():
+        return "Error: Query cannot be empty."
+    results, error = _run_everything_search(str(query), limit=limit)
+    if results is not None:
+        if not results:
+            return "No matches found."
+        return "\n".join(results)
+    if not use_grep_fallback:
+        return f"Everything unavailable: {error}"
+    fallback = grep(
+        workspace_dir,
+        pattern=query,
+        path=fallback_path,
+        include="*",
+        exclude=None,
+        recursive=True,
+        _context=_context
+    )
+    return f"Everything unavailable, fallback to grep in workspace.\n{fallback}"

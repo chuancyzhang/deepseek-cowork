@@ -298,7 +298,7 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [x] **对话侧即时可用**: 新技能在当前会话中立刻可被调用。
 
 ### 7.7 系统工具增强 (System Tools Enhancement)
-- [ ] **Grep 升级 (Everything 集成)**:
+- [x] **Grep 升级 (Everything 集成)**:
     - **全盘检索**: 集成 Everything (ES) 命令行工具 (`es.exe`)，实现对整个操作系统的文件和文件夹进行毫秒级即时检索。
     - **突破限制**: 不再局限于当前工作区 (Workspace)，赋予 Agent 真正的全盘视野。
     - **智能回退**: 若未检测到 Everything 服务，可以提醒用户是否安装Everything，然后自动降级为原有 Grep 模式。

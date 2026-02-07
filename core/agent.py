@@ -343,6 +343,7 @@ class LLMWorker(QThread):
                     chunk_reasoning = ""
                     chunk_content = ""
                     tool_calls_buffer = {} # Index -> ToolCall object (dict)
+                    provider_error_message = None
                     
                     for chunk in stream:
                         # Check Pause/Stop during stream
@@ -386,7 +387,8 @@ class LLMWorker(QThread):
                         
                         # 4. Handle Error
                         elif type_ == "error":
-                            self.output_signal.emit(f"Provider Error: {chunk['content']}")
+                            provider_error_message = chunk.get("content") or "Unknown error"
+                            self.output_signal.emit(f"Provider Error: {provider_error_message}")
 
                     end_time = time.time()
                     duration = end_time - start_time
@@ -408,6 +410,8 @@ class LLMWorker(QThread):
 
                     # Reconstruct final message object from buffers
                     content = chunk_content
+                    if provider_error_message and not content and not tool_calls_buffer:
+                        content = f"⚠️ Provider Error: {provider_error_message}"
                     
                     # Reconstruct tool_calls list
                     tool_calls = []

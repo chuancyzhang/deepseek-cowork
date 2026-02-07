@@ -27,8 +27,12 @@ By implementing an **Interleaved Chain-of-Thought (CoT)** architecture, the agen
 
 ### 🖥️ Modern Desktop Experience
 *   **Native UI**: Built with PySide6, featuring a clean, responsive **16:9** interface with a forced **Light Mode** for professional consistency.
-*   **Real-Time Feedback**: Watch the agent's thought process unfold in real-time via collapsible "Thinking" bubbles.
+*   **Real-Time Feedback**: Watch the agent's thought process and tool calls stream in real time via collapsible "Thinking" bubbles.
 *   **Workspace Sandbox**: Operations are confined to your chosen project folder by default for safety.
+
+### 🛰️ Headless Daemon
+*   **Background Inference**: Run LLM inference in a headless daemon so the UI can stay lightweight.
+*   **Streaming Events**: Stream reasoning and tool-call events back to the UI while the daemon is running.
 
 ## 📦 Installation
 
@@ -86,6 +90,7 @@ Type your request in natural language. Examples:
 *   **`skills/`**: Built-in system capabilities (File I/O, Python Runner, Web Search).
 *   **`ai_skills/`**: User/AI-created extensions.
 *   **`main.py`**: The PySide6 frontend.
+*   **`core/daemon.py`**: Headless daemon server for background inference.
 
 ## 🛠️ Extending
 To add a new capability, simply create a folder in `skills/` with:

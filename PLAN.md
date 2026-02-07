@@ -274,12 +274,11 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 **目标**: 实现 "Headless Daemon" 架构，使 Agent 能在后台静默运行，并通过企业 IM 随时响应指令。
 
 #### 7.5.1 守护进程与资源管理 (Daemon & Resource Mgmt)
-- [ ] **C/S 架构分离**:
+- [x] **C/S 架构分离**:
     - **Daemon (Server)**: 无头后台进程，负责 LLM 推理、工具执行和消息路由。
     - **GUI (Client)**: 轻量级前端，仅负责渲染对话和配置，关闭窗口不影响后台运行。
     - **System Tray**: 托盘图标支持“显示/隐藏”、“退出”、“查看状态”。
-- [ ] **智能休眠 (Smart Suspend)**:
-    - **Context Swapping**: 闲置超过 N 分钟后，将显存/内存中的 LLM 上下文序列化到磁盘，释放资源。
+- [x] **智能休眠 (Smart Suspend)**:
     - **Wake-on-Request**: 收到新消息（API/IM）时自动热加载上下文恢复运行。
 
 #### 7.5.2 统一消息网关 (Unified Messaging Gateway)

@@ -10,6 +10,7 @@ import platform
 import uuid
 import glob
 import markdown
+import socket
 from datetime import datetime
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
@@ -20,13 +21,14 @@ from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir
 from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
+from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT
 import shutil
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox)
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon)
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QVariantAnimation
 
 # Try importing OpenAI
@@ -675,8 +677,9 @@ class AutoResizingInputEdit(QTextEdit):
                 return
             elif os.path.isfile(path):
                 self.insertPlainText(path)
-                event.acceptProposedAction()
-                return
+
+            event.acceptProposedAction()
+            return
         super().dropEvent(event)
     
     def contextMenuEvent(self, event):
@@ -729,6 +732,113 @@ class AutoResizingInputEdit(QTextEdit):
         menu.addAction(action_select_all)
         
         menu.exec(event.globalPos())
+
+class DaemonRequestWorker(QThread):
+    finished_signal = Signal(object, str)
+
+    def __init__(self, client, session_id, content, workspace_dir=None, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.session_id = session_id
+        self.content = content
+        self.workspace_dir = workspace_dir
+        self._aborted = False
+
+    def abort(self):
+        self._aborted = True
+
+    def run(self):
+        try:
+            resp = self.client.send_message(self.session_id, self.content, self.workspace_dir)
+        except Exception:
+            resp = None
+        if self._aborted:
+            return
+        if not resp or resp.get("status") != "ok":
+            error_text = resp.get("error") if isinstance(resp, dict) else "Daemon offline"
+            result = {"error": error_text}
+        else:
+            result = resp.get("result") or {"error": "No response"}
+        if self._aborted:
+            return
+        self.finished_signal.emit(result, self.session_id)
+
+
+class DaemonStreamWorker(QThread):
+    finished_signal = Signal(object, str)
+    thinking_signal = Signal(str)
+    content_signal = Signal(str)
+    tool_call_signal = Signal(dict)
+    tool_result_signal = Signal(dict)
+    output_signal = Signal(str)
+
+    def __init__(self, client, session_id, content, workspace_dir=None, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.session_id = session_id
+        self.content = content
+        self.workspace_dir = workspace_dir
+        self._aborted = False
+
+    def abort(self):
+        self._aborted = True
+
+    def run(self):
+        try:
+            with socket.create_connection((self.client.host, self.client.port), timeout=self.client.send_timeout) as sock:
+                payload = {
+                    "action": "send_message_stream",
+                    "session_id": self.session_id,
+                    "content": self.content,
+                    "workspace_dir": self.workspace_dir
+                }
+                sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+                reader = sock.makefile("r", encoding="utf-8")
+                for line in reader:
+                    if self._aborted:
+                        return
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except Exception:
+                        continue
+                    if msg.get("type") == "thinking":
+                        self.thinking_signal.emit(msg.get("delta", ""))
+                    elif msg.get("type") == "content":
+                        self.content_signal.emit(msg.get("delta", ""))
+                    elif msg.get("type") == "tool_call":
+                        data = msg.get("data") or {}
+                        self.tool_call_signal.emit(data)
+                    elif msg.get("type") == "tool_result":
+                        data = msg.get("data") or {}
+                        self.tool_result_signal.emit(data)
+                    elif msg.get("type") == "final":
+                        result = msg.get("result") or {"error": "No response"}
+                        if isinstance(result, dict):
+                            result["_streamed"] = True
+                        self.finished_signal.emit(result, self.session_id)
+                        return
+                    elif msg.get("type") == "error":
+                        result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
+                        self.finished_signal.emit(result, self.session_id)
+                        return
+                    elif msg.get("status") == "error":
+                        result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
+                        self.finished_signal.emit(result, self.session_id)
+                        return
+                    elif msg.get("status") == "ok" and "result" in msg:
+                        result = msg.get("result") or {"error": "No response"}
+                        if isinstance(result, dict):
+                            result["_streamed"] = True
+                        self.finished_signal.emit(result, self.session_id)
+                        return
+                if not self._aborted:
+                    self.finished_signal.emit({"error": "Daemon stream closed", "_streamed": True}, self.session_id)
+        except Exception as e:
+            if not self._aborted:
+                self.finished_signal.emit({"error": str(e), "_streamed": True}, self.session_id)
 
 class EmptyStateWidget(QWidget):
     def __init__(self, main_window):
@@ -1893,6 +2003,8 @@ class SessionState:
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
         self.llm_worker = None
+        self.daemon_running = False
+        self.daemon_worker = None
         self.code_worker = None
         self.chat_layout = chat_layout
         self.active_skills_label = active_skills_label
@@ -2144,6 +2256,13 @@ class MainWindow(QMainWindow):
         self.config_manager = ConfigManager()
         self.skill_manager = SkillManager(None, self.config_manager)
         self.skill_generator = SkillGenerator(self.config_manager)
+        self.daemon_host = DEFAULT_HOST
+        self.daemon_port = self.config_manager.get("daemon_port", DEFAULT_PORT)
+        self.daemon_client = None
+        self.daemon_available = False
+        self.daemon_process = None
+        self.tray_icon = None
+        self.daemon_timer = None
         
         # Animation Throttling
         self.last_message_time = 0
@@ -2525,6 +2644,9 @@ class MainWindow(QMainWindow):
         
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
+        self.setup_daemon_client()
+        self.start_daemon_monitor()
+        self.setup_tray()
 
     def update_ui_state_for_workspace(self):
         if self.workspace_dir:
@@ -2545,6 +2667,134 @@ class MainWindow(QMainWindow):
             self.action_btn.setGraphicsEffect(opacity)
             
             self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
+
+    def setup_daemon_client(self):
+        self.daemon_client = DaemonClient(self.daemon_host, self.daemon_port)
+        self.try_connect_daemon(allow_start=True, retries=6)
+
+    def start_daemon_monitor(self):
+        self.daemon_timer = QTimer(self)
+        self.daemon_timer.setInterval(5000)
+        self.daemon_timer.timeout.connect(self.ensure_daemon_connection)
+        self.daemon_timer.start()
+
+    def ensure_daemon_connection(self):
+        self.try_connect_daemon(allow_start=True, retries=0)
+
+    def try_connect_daemon(self, allow_start=False, retries=0):
+        if not self.daemon_client:
+            self.daemon_client = DaemonClient(self.daemon_host, self.daemon_port)
+        connected = bool(self.daemon_client.ping())
+        if not connected and allow_start:
+            self.start_daemon_process()
+            for _ in range(max(retries, 0)):
+                time.sleep(0.2)
+                if self.daemon_client.ping():
+                    connected = True
+                    break
+        self.daemon_available = connected
+
+    def start_daemon_process(self):
+        try:
+            if self.daemon_process and self.daemon_process.poll() is None:
+                return
+            python_exe = sys.executable
+            script_path = os.path.abspath(__file__)
+            creationflags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+            self.daemon_process = subprocess.Popen(
+                [python_exe, script_path, "--daemon", f"--daemon-port={self.daemon_port}"],
+                cwd=os.path.dirname(script_path),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags
+            )
+        except Exception:
+            self.daemon_process = None
+
+    def setup_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon = QIcon()
+        self.tray_icon = QSystemTrayIcon(icon, self)
+        menu = QMenu()
+        toggle_action = QAction("显示/隐藏", self)
+        toggle_action.triggered.connect(self.toggle_window_visibility)
+        status_action = QAction("查看状态", self)
+        status_action.triggered.connect(self.show_tray_status)
+        quit_action = QAction("退出", self)
+        quit_action.triggered.connect(self.quit_app)
+        menu.addAction(toggle_action)
+        menu.addAction(status_action)
+        menu.addSeparator()
+        menu.addAction(quit_action)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self.on_tray_activated)
+        self.tray_icon.show()
+
+    def on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.Trigger:
+            self.toggle_window_visibility()
+
+    def toggle_window_visibility(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            self.activateWindow()
+            self.raise_()
+
+    def get_daemon_status_text(self):
+        if not self.daemon_client:
+            return "守护进程未初始化"
+        self.try_connect_daemon(allow_start=False, retries=0)
+        status = self.daemon_client.status()
+        if not status or status.get("status") != "ok":
+            return "守护进程未连接"
+        state_text = "已休眠" if status.get("suspended") else "运行中"
+        sessions = status.get("sessions", 0)
+        return f"守护进程: {state_text} | 会话缓存: {sessions}"
+
+    def show_tray_status(self):
+        self.try_connect_daemon(allow_start=True, retries=2)
+        status = self.get_daemon_status_text()
+        if self.tray_icon:
+            self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 3000)
+        else:
+            QMessageBox.information(self, "状态", status)
+
+    def quit_app(self):
+        if self.daemon_client:
+            self.daemon_client.shutdown()
+        self.stop_daemon_process()
+        if self.tray_icon:
+            self.tray_icon.hide()
+        QApplication.quit()
+
+    def stop_daemon_process(self):
+        if not self.daemon_process:
+            return
+        try:
+            if self.daemon_process.poll() is None:
+                self.daemon_process.terminate()
+                self.daemon_process.wait(timeout=2)
+        except Exception:
+            try:
+                if self.daemon_process.poll() is None:
+                    self.daemon_process.kill()
+            except Exception:
+                pass
+        self.daemon_process = None
+
+    def closeEvent(self, event):
+        if self.tray_icon:
+            event.ignore()
+            self.hide()
+            self.tray_icon.showMessage("DeepSeek Cowork", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
+        else:
+            self.stop_daemon_process()
+            event.accept()
             
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2627,8 +2877,9 @@ class MainWindow(QMainWindow):
         running = state.llm_worker and state.llm_worker.isRunning()
         paused = running and state.llm_worker.is_paused
         running_code = state.code_worker and state.code_worker.isRunning()
+        running_daemon = getattr(state, "daemon_running", False)
         
-        if running or running_code:
+        if running or running_code or running_daemon:
             self.action_btn.setText("停止")
             self.action_btn.setIcon(qta.icon('fa5s.stop', color='white'))
             self.action_btn.setStyleSheet("background-color: #ef4444; color: white; border-radius: 18px; font-weight: bold; border: none;")
@@ -3242,6 +3493,11 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state: return
         if state.llm_worker and state.llm_worker.isRunning(): state.llm_worker.stop()
+        if state.daemon_worker and state.daemon_worker.isRunning():
+            state.daemon_worker.abort()
+            state.daemon_worker.wait(100)
+        state.daemon_worker = None
+        state.daemon_running = False
         if state.code_worker and state.code_worker.isRunning(): state.code_worker.stop()
         state.code_worker = None
         self.code_worker = None
@@ -3254,7 +3510,8 @@ class MainWindow(QMainWindow):
         
         # Check if running
         is_running = (state.llm_worker and state.llm_worker.isRunning()) or \
-                     (state.code_worker and state.code_worker.isRunning())
+                     (state.code_worker and state.code_worker.isRunning()) or \
+                     state.daemon_running
         
         if is_running:
             self.stop_agent()
@@ -3276,7 +3533,11 @@ class MainWindow(QMainWindow):
         state.messages.append({"role": "user", "content": user_text})
         self.save_chat_history()
         self.update_session_tab_title(state.session_id)
-        self.process_agent_logic(user_text)
+        self.try_connect_daemon(allow_start=True, retries=4)
+        if self.daemon_available:
+            self.process_daemon_logic(user_text)
+        else:
+            self.process_agent_logic(user_text)
 
     def show_tool_details(self, tool_id, args, result, switch_tab=True):
         # 1. Update selection state in UI
@@ -3490,6 +3751,35 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
              self.normalize_session_ui(state)
 
+    def process_daemon_logic(self, user_text):
+        state = self.get_current_session()
+        if not state: return
+        state.current_content_buffer = ""
+        state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
+        state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
+        QApplication.processEvents()
+        state.daemon_running = True
+        state.daemon_worker = DaemonStreamWorker(self.daemon_client, state.session_id, user_text, self.workspace_dir)
+        state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id: self.handle_daemon_response(result, sid))
+        state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id: self.handle_thinking_signal(text, sid))
+        state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id: self.handle_content_signal(text, sid))
+        state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
+        state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
+        state.daemon_worker.start()
+        if state.session_id == self.current_session_id:
+            self.normalize_session_ui(state)
+
+    def handle_daemon_response(self, result, session_id=None):
+        state = self.get_session(session_id)
+        if not state: return
+        state.daemon_running = False
+        state.daemon_worker = None
+        if "error" in result and str(result.get("error", "")).lower().find("daemon") >= 0:
+            self.daemon_available = False
+        if isinstance(result, dict) and not result.get("_streamed"):
+            result["_from_daemon"] = True
+        self.handle_llm_response(result, session_id)
+
     def handle_worker_output(self, text, session_id=None):
         self.append_log(f"[Worker] {text}")
         # If it looks like an error, show a toast
@@ -3579,11 +3869,87 @@ class MainWindow(QMainWindow):
         content = result.get("content", "")
         role = result.get("role", "assistant")
         duration = result.get("duration", None)
-
-        bubble.update_thinking(duration=duration, is_final=True)
-        bubble.set_main_content(content)
-
         generated_messages = result.get("generated_messages", [])
+
+        if not (content or "").strip() and generated_messages:
+            for msg in reversed(generated_messages):
+                if msg.get("role") == "assistant":
+                    msg_content = msg.get("content") or ""
+                    if msg_content.strip():
+                        content = msg_content
+                        if not (reasoning or "").strip():
+                            reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
+                        break
+        if not (content or "").strip():
+            content = "⚠️ 未收到有效回复，请重试或查看守护进程状态。"
+
+        has_thinking_text = False
+        if bubble.think_container_layout.count() > 0:
+            item = bubble.think_container_layout.itemAt(bubble.think_container_layout.count() - 1)
+            widget = item.widget()
+            if isinstance(widget, AutoResizingLabel):
+                has_thinking_text = bool(widget.text().strip())
+
+        should_replay_thinking = (reasoning or "").strip() and not has_thinking_text
+        if should_replay_thinking and result.get("_from_daemon"):
+            replay_index = 0
+            interval_ms = 30
+            total_ms = int(max((duration or 0) * 1000, interval_ms))
+            chunk_size = max(1, int(len(reasoning) * interval_ms / total_ms))
+
+            timer = QTimer(bubble)
+            bubble._thinking_replay_timer = timer
+
+            def _tick():
+                nonlocal replay_index
+                next_index = min(len(reasoning), replay_index + chunk_size)
+                if next_index > replay_index:
+                    bubble.update_thinking(reasoning[replay_index:next_index])
+                    replay_index = next_index
+                if replay_index >= len(reasoning):
+                    timer.stop()
+                    bubble.update_thinking(duration=duration, is_final=True)
+                    bubble.set_main_content(content)
+
+            timer.timeout.connect(_tick)
+            timer.start(interval_ms)
+        elif should_replay_thinking:
+            bubble.update_thinking(reasoning, duration=duration, is_final=True)
+            bubble.set_main_content(content)
+        else:
+            bubble.update_thinking(duration=duration, is_final=True)
+            bubble.set_main_content(content)
+
+        tool_results = {}
+        if generated_messages:
+            for msg in generated_messages:
+                if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                    tool_results[msg["tool_call_id"]] = msg.get("content", "")
+
+        tool_calls = []
+        if result.get("tool_calls"):
+            tool_calls.extend(result.get("tool_calls") or [])
+        for msg in generated_messages or []:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                tool_calls.extend(msg.get("tool_calls") or [])
+
+        for tc in tool_calls:
+            t_id = tc.get("id")
+            func = tc.get("function", {})
+            t_name = func.get("name")
+            t_args = func.get("arguments")
+            if t_id and t_id not in state.tool_cards:
+                self.add_tool_card({
+                    "id": t_id,
+                    "name": t_name,
+                    "args": t_args
+                }, session_id=state.session_id)
+                if t_id in tool_results:
+                    self.update_tool_card({
+                        "id": t_id,
+                        "result": tool_results[t_id]
+                    }, session_id=state.session_id)
+
         if generated_messages:
             state.messages.extend(generated_messages)
         else:
@@ -3651,20 +4017,24 @@ class MainWindow(QMainWindow):
         self.code_worker.provide_input(response)
 
 if __name__ == "__main__":
+    if "--daemon" in sys.argv:
+        port = DEFAULT_PORT
+        for arg in sys.argv:
+            if arg.startswith("--daemon-port="):
+                try:
+                    port = int(arg.split("=", 1)[1])
+                except Exception:
+                    port = DEFAULT_PORT
+        run_daemon(DEFAULT_HOST, port)
+        sys.exit(0)
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    
     app = QApplication(sys.argv)
-    
-    # Use Fusion style as a base for cross-platform consistency
     app.setStyle("Fusion")
-    
-    # Global Font
     font = app.font()
     font.setFamily("Segoe UI")
     font.setPointSize(10)
     app.setFont(font)
-    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

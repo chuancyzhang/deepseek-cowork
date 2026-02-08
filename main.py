@@ -18,7 +18,7 @@ from core.agent import LLMWorker, CodeWorker
 from core.skill_generator import SkillGenerator
 from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
-from core.env_utils import get_app_data_dir, get_base_dir
+from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
 from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT
@@ -114,15 +114,19 @@ class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(450, 300)
+        self.resize(520, 360)
         self.config_manager = config_manager
+        self._main = parent
         
         layout = QVBoxLayout(self)
 
-        # API Key
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        base_tab = QWidget()
+        base_layout = QVBoxLayout(base_tab)
         form_layout = QFormLayout()
 
-        # LLM Provider
         self.provider_combo = QComboBox()
         self.provider_combo.addItem("OpenAI / DeepSeek / Compatible", "openai")
         self.provider_combo.addItem("Anthropic / Claude / Minimax", "anthropic")
@@ -205,7 +209,43 @@ class SettingsDialog(QDialog):
         form_layout.addRow("", self.god_mode_check)
         
 
-        layout.addLayout(form_layout)
+        base_layout.addLayout(form_layout)
+        self.tabs.addTab(base_tab, "基础设置")
+
+        im_tab = QWidget()
+        im_layout = QVBoxLayout(im_tab)
+        im_form = QFormLayout()
+
+        self.feishu_app_id_input = QLineEdit()
+        self.feishu_app_id_input.setText(self.config_manager.get("feishu_app_id", ""))
+        im_form.addRow("飞书 App ID:", self.feishu_app_id_input)
+
+        self.feishu_app_secret_input = QLineEdit()
+        self.feishu_app_secret_input.setText(self.config_manager.get("feishu_app_secret", ""))
+        im_form.addRow("飞书 App Secret:", self.feishu_app_secret_input)
+
+        im_layout.addLayout(im_form)
+        gateway_bar = QHBoxLayout()
+        gateway_info = QLabel("飞书长连接模式：无需配置 Webhook\n服务监听: 0.0.0.0:8001")
+        gateway_info.setStyleSheet("color: #5f6368; font-size: 11px;")
+        gateway_btn = QPushButton("启动网关")
+        gateway_btn.setIcon(qta.icon('fa5s.play', color='#374151'))
+        def start_gateway():
+            try:
+                self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
+                self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
+                if hasattr(self._main, "try_connect_daemon"):
+                    self._main.try_connect_daemon(allow_start=True, retries=6)
+                if hasattr(self._main, "start_gateway_process"):
+                    self._main.start_gateway_process()
+                QMessageBox.information(self, "统一消息网关", "已启动。\n飞书长连接模式已启用\n服务监听: 0.0.0.0:8001")
+            except Exception:
+                QMessageBox.warning(self, "统一消息网关", "启动失败，请检查环境和依赖。")
+        gateway_btn.clicked.connect(start_gateway)
+        gateway_bar.addWidget(gateway_info, 1)
+        gateway_bar.addWidget(gateway_btn)
+        im_layout.addLayout(gateway_bar)
+        self.tabs.addTab(im_tab, "企业消息")
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -237,7 +277,9 @@ class SettingsDialog(QDialog):
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         # Save God Mode
         self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-        
+
+        self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
+        self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
         self.accept()
 
 class SkillsCenterDialog(QDialog):
@@ -2261,6 +2303,8 @@ class MainWindow(QMainWindow):
         self.daemon_client = None
         self.daemon_available = False
         self.daemon_process = None
+        self.gateway_process = None
+        self.gateway_log_file = None
         self.tray_icon = None
         self.daemon_timer = None
         
@@ -2711,6 +2755,58 @@ class MainWindow(QMainWindow):
         except Exception:
             self.daemon_process = None
 
+    def start_gateway_process(self):
+        try:
+            if self.gateway_process and self.gateway_process.poll() is None:
+                return
+            creationflags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+            env = os.environ.copy()
+            if getattr(sys, 'frozen', False):
+                cmd = [sys.executable, "--im-gateway"]
+            else:
+                python_exe = get_python_executable()
+                script_path = os.path.abspath(__file__)
+                cmd = [python_exe, script_path, "--im-gateway"]
+            if self.gateway_log_file:
+                try:
+                    self.gateway_log_file.close()
+                except Exception:
+                    pass
+                self.gateway_log_file = None
+            log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
+            self.gateway_log_file = open(log_path, "a", encoding="utf-8")
+            self.gateway_process = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdout=subprocess.DEVNULL,
+                stderr=self.gateway_log_file,
+                creationflags=creationflags,
+                env=env
+            )
+        except Exception:
+            self.gateway_process = None
+
+    def stop_gateway_process(self):
+        if not self.gateway_process:
+            return
+        try:
+            if self.gateway_process.poll() is None:
+                self.gateway_process.terminate()
+                self.gateway_process.wait(timeout=2)
+        except Exception:
+            try:
+                if self.gateway_process.poll() is None:
+                    self.gateway_process.kill()
+            except Exception:
+                pass
+        self.gateway_process = None
+        if self.gateway_log_file:
+            try:
+                self.gateway_log_file.close()
+            except Exception:
+                pass
+            self.gateway_log_file = None
+
     def setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
@@ -2768,6 +2864,7 @@ class MainWindow(QMainWindow):
         if self.daemon_client:
             self.daemon_client.shutdown()
         self.stop_daemon_process()
+        self.stop_gateway_process()
         if self.tray_icon:
             self.tray_icon.hide()
         QApplication.quit()
@@ -2794,6 +2891,7 @@ class MainWindow(QMainWindow):
             self.tray_icon.showMessage("DeepSeek Cowork", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
         else:
             self.stop_daemon_process()
+            self.stop_gateway_process()
             event.accept()
             
     def resizeEvent(self, event):
@@ -3051,6 +3149,12 @@ class MainWindow(QMainWindow):
         for conv in conversations:
             session_id = conv["id"]
             title = conv["title"] or "新对话"
+            if conv.get("im_provider") == "feishu":
+                ts = conv.get("updated_at")
+                if ts:
+                    title = f"飞书对话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}"
+                else:
+                    title = "飞书对话"
             btn = QPushButton(title)
             btn.setCursor(Qt.PointingHandCursor)
             if session_id == self.current_session_id:
@@ -3136,7 +3240,10 @@ class MainWindow(QMainWindow):
         # Restore scroll position (adjust for new content height)
         QApplication.processEvents() # Ensure layout updates
         new_max = vbar.maximum()
-        vbar.setValue(old_val + (new_max - old_max))
+        if old_val <= 5:
+            vbar.setValue(0)
+        else:
+            vbar.setValue(old_val + (new_max - old_max))
         
         state.displayed_count += count_to_load
         
@@ -3265,7 +3372,7 @@ class MainWindow(QMainWindow):
             if start_idx > 0:
                 btn = self.create_load_more_btn()
                 state.load_more_btn = btn
-                state.chat_layout.addWidget(btn)
+                state.chat_layout.insertWidget(0, btn)
             
             self.render_message_batch(display_msgs, session_id, animate=False)
         
@@ -4026,6 +4133,10 @@ if __name__ == "__main__":
                 except Exception:
                     port = DEFAULT_PORT
         run_daemon(DEFAULT_HOST, port)
+        sys.exit(0)
+    if "--im-gateway" in sys.argv:
+        from core.im_gateway import run as run_im_gateway
+        run_im_gateway()
         sys.exit(0)
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)

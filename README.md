@@ -34,6 +34,12 @@ By implementing an **Interleaved Chain-of-Thought (CoT)** architecture, the agen
 *   **Background Inference**: Run LLM inference in a headless daemon so the UI can stay lightweight.
 *   **Streaming Events**: Stream reasoning and tool-call events back to the UI while the daemon is running.
 
+### 📨 Unified Messaging Gateway
+*   **Feishu Long Connection**: Receive events over long connection without a webhook server.
+*   **Command via IM**: Send commands from Feishu to trigger desktop agent workflows.
+*   **Daily Sessions**: IM conversations are split by date for clearer history tracking.
+*   **Workspace Guardrails**: IM tasks follow the same workspace restrictions unless God Mode is enabled.
+
 ## 📦 Installation
 
 ### Option 1: Run from Executable (Windows)
@@ -77,7 +83,10 @@ Type your request in natural language. Examples:
 *   *"Search for the latest stock prices of tech giants and plot a trend chart."*
 *   *"Create a new skill to download YouTube videos using yt-dlp."*
 
-### 4. Visual Monitoring
+### 4. Enterprise IM (Feishu)
+Open **⚙️ Settings → Enterprise Messaging** and fill in your **Feishu App ID / App Secret**, then start the gateway. IM conversations will follow the same workspace rules and rotate daily.
+
+### 5. Visual Monitoring
 *   **Chat Tab**: Main interaction interface.
 *   **Sub-Agent Monitor**: When the main agent spawns sub-workers for parallel tasks, watch their logs and status in real-time.
 

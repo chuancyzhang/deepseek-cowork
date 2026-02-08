@@ -28,7 +28,8 @@ a = Analysis(
         'markdown',
         'qtawesome',
         'anthropic',
-        'openai'
+        'openai',
+        'lark_oapi'
     ],
     hookspath=[],
     hooksconfig={},

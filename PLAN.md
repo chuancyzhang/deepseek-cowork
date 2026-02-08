@@ -282,14 +282,12 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
     - **Wake-on-Request**: 收到新消息（API/IM）时自动热加载上下文恢复运行。
 
 #### 7.5.2 统一消息网关 (Unified Messaging Gateway)
-- [ ] **Provider Abstraction**:
+- [x] **Provider Abstraction**:
     - 定义 `IMProvider` 接口 (`send_message`, `parse_event`, `verify_signature`)。
     - 内置轻量级 Webhook Server (FastAPI) 用于接收回调。
-- [ ] **多平台适配**:
-    - **飞书 (Feishu)**: 适配飞书开放平台 Event Callback V2，支持卡片消息 (Interactive Cards) 渲染工具调用结果。
-    - **企业微信 (WeCom)**: 适配接收消息 API，支持 XML 解密与被动响应。
-    - **钉钉 (DingTalk)**: 适配钉钉机器人 Webhook 与 Stream 模式（无需公网 IP）。
-- [ ] **会话映射 (Session Mapping)**:
+- [x] **飞书适配**:
+    - [x] **飞书 (Feishu)**: 适配飞书开放平台 Event Callback V2，支持卡片消息 (Interactive Cards) 渲染工具调用结果。
+- [x] **会话映射 (Session Mapping)**:
     - 建立 `IM_User_ID` <-> `Cowork_Conversation_ID` 的持久化映射表，确保在 IM 中的多轮对话上下文连续。
 
 ### 7.6 技能即时可用 (Instant Skill Availability)

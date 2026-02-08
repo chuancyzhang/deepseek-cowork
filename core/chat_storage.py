@@ -56,6 +56,24 @@ class ChatStorage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS im_sessions (
+                    provider TEXT NOT NULL,
+                    im_user_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    PRIMARY KEY (provider, im_user_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_im_sessions_conversation
+                ON im_sessions(conversation_id)
+                """
+            )
+            conn.execute(
+                """
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                     content,
                     reasoning_content,
@@ -157,10 +175,24 @@ class ChatStorage:
     def list_conversations(self):
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC"
+                """
+                SELECT c.id, c.title, c.updated_at, im.provider AS im_provider
+                FROM conversations c
+                LEFT JOIN (
+                    SELECT conversation_id, MIN(provider) AS provider
+                    FROM im_sessions
+                    GROUP BY conversation_id
+                ) im ON im.conversation_id = c.id
+                ORDER BY c.updated_at DESC
+                """
             ).fetchall()
         return [
-            {"id": row["id"], "title": row["title"], "updated_at": row["updated_at"]}
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "updated_at": row["updated_at"],
+                "im_provider": row["im_provider"],
+            }
             for row in rows
         ]
 
@@ -197,3 +229,46 @@ class ChatStorage:
                 (conversation_id,),
             ).fetchone()
         return row is not None
+
+    def get_im_session(self, provider, im_user_id):
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT conversation_id
+                FROM im_sessions
+                WHERE provider = ? AND im_user_id = ?
+                """,
+                (provider, im_user_id),
+            ).fetchone()
+        return row["conversation_id"] if row else None
+
+    def upsert_im_session(self, provider, im_user_id, conversation_id):
+        now = int(time.time())
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT conversation_id
+                FROM im_sessions
+                WHERE provider = ? AND im_user_id = ?
+                """,
+                (provider, im_user_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE im_sessions
+                    SET conversation_id = ?, updated_at = ?
+                    WHERE provider = ? AND im_user_id = ?
+                    """,
+                    (conversation_id, now, provider, im_user_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO im_sessions (
+                        provider, im_user_id, conversation_id, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (provider, im_user_id, conversation_id, now, now),
+                )

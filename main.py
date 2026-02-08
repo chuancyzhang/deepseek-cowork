@@ -785,6 +785,7 @@ class DaemonRequestWorker(QThread):
         self.content = content
         self.workspace_dir = workspace_dir
         self._aborted = False
+        self._sock = None
 
     def abort(self):
         self._aborted = True
@@ -813,6 +814,7 @@ class DaemonStreamWorker(QThread):
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
     output_signal = Signal(str)
+    confirmation_signal = Signal(str, str)
 
     def __init__(self, client, session_id, content, workspace_dir=None, parent=None):
         super().__init__(parent)
@@ -824,10 +826,20 @@ class DaemonStreamWorker(QThread):
 
     def abort(self):
         self._aborted = True
+        if self._sock:
+            try:
+                self._sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
     def run(self):
         try:
             with socket.create_connection((self.client.host, self.client.port), timeout=self.client.send_timeout) as sock:
+                self._sock = sock
                 payload = {
                     "action": "send_message_stream",
                     "session_id": self.session_id,
@@ -856,6 +868,12 @@ class DaemonStreamWorker(QThread):
                     elif msg.get("type") == "tool_result":
                         data = msg.get("data") or {}
                         self.tool_result_signal.emit(data)
+                    elif msg.get("type") == "confirm_request":
+                        data = msg.get("data") or {}
+                        confirm_id = data.get("id")
+                        message = data.get("message")
+                        if confirm_id and message:
+                            self.confirmation_signal.emit(confirm_id, message)
                     elif msg.get("type") == "final":
                         result = msg.get("result") or {"error": "No response"}
                         if isinstance(result, dict):
@@ -881,6 +899,8 @@ class DaemonStreamWorker(QThread):
         except Exception as e:
             if not self._aborted:
                 self.finished_signal.emit({"error": str(e), "_streamed": True}, self.session_id)
+        finally:
+            self._sock = None
 
 class EmptyStateWidget(QWidget):
     def __init__(self, main_window):
@@ -1502,6 +1522,18 @@ class ChatBubble(QFrame):
                 
             self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
             self.think_toggle_btn.setChecked(False) # Collapse by default when done
+
+    def stop_thinking_timers(self):
+        if self.think_timer.isActive():
+            self.think_timer.stop()
+            if self.think_start_time:
+                self.think_duration += time.time() - self.think_start_time
+                self.think_start_time = None
+        timer = getattr(self, "_thinking_replay_timer", None)
+        if timer and timer.isActive():
+            timer.stop()
+        self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
+        self.think_toggle_btn.setChecked(False)
             
     def set_main_content(self, text):
         """
@@ -2789,16 +2821,7 @@ class MainWindow(QMainWindow):
     def stop_gateway_process(self):
         if not self.gateway_process:
             return
-        try:
-            if self.gateway_process.poll() is None:
-                self.gateway_process.terminate()
-                self.gateway_process.wait(timeout=2)
-        except Exception:
-            try:
-                if self.gateway_process.poll() is None:
-                    self.gateway_process.kill()
-            except Exception:
-                pass
+        self._terminate_process(self.gateway_process)
         self.gateway_process = None
         if self.gateway_log_file:
             try:
@@ -2861,6 +2884,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "状态", status)
 
     def quit_app(self):
+        self.shutdown_workers()
         if self.daemon_client:
             self.daemon_client.shutdown()
         self.stop_daemon_process()
@@ -2872,17 +2896,51 @@ class MainWindow(QMainWindow):
     def stop_daemon_process(self):
         if not self.daemon_process:
             return
+        self._terminate_process(self.daemon_process)
+        self.daemon_process = None
+
+    def shutdown_workers(self):
+        for session_id, state in list(self.sessions.items()):
+            if self.daemon_client and state.daemon_running and state.session_id:
+                try:
+                    self.daemon_client.stop_session(state.session_id)
+                except Exception:
+                    pass
+            if state.daemon_worker and state.daemon_worker.isRunning():
+                state.daemon_worker.abort()
+                state.daemon_worker.wait(1000)
+            if state.llm_worker and state.llm_worker.isRunning():
+                state.llm_worker.stop()
+                state.llm_worker.wait(1000)
+            if state.code_worker and state.code_worker.isRunning():
+                state.code_worker.stop()
+                state.code_worker.wait(1000)
+            state.daemon_running = False
+            state.daemon_worker = None
+            state.llm_worker = None
+            state.code_worker = None
+        if self.daemon_timer:
+            self.daemon_timer.stop()
+
+    def _terminate_process(self, proc):
+        if not proc:
+            return
         try:
-            if self.daemon_process.poll() is None:
-                self.daemon_process.terminate()
-                self.daemon_process.wait(timeout=2)
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=2)
         except Exception:
+            pass
+        if proc.poll() is None and platform.system() == "Windows":
             try:
-                if self.daemon_process.poll() is None:
-                    self.daemon_process.kill()
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
-        self.daemon_process = None
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         if self.tray_icon:
@@ -2890,6 +2948,7 @@ class MainWindow(QMainWindow):
             self.hide()
             self.tray_icon.showMessage("DeepSeek Cowork", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
         else:
+            self.shutdown_workers()
             self.stop_daemon_process()
             self.stop_gateway_process()
             event.accept()
@@ -3082,7 +3141,7 @@ class MainWindow(QMainWindow):
         self.set_current_session(session_id)
         return session_id
 
-    def handle_confirmation_request(self, message):
+    def show_confirmation_dialog(self, message):
         dialog = QDialog(self)
         dialog.setWindowTitle("请再次确认")
         dialog.resize(500, 400)
@@ -3136,6 +3195,16 @@ class MainWindow(QMainWindow):
         yes_btn.clicked.connect(on_yes)
         no_btn.clicked.connect(on_no)
         dialog.exec()
+        return decision["value"]
+
+    def handle_confirmation_request(self, message):
+        result = self.show_confirmation_dialog(message)
+        bridge.respond(result)
+    
+    def handle_daemon_confirmation_request(self, confirm_id, message, session_id=None):
+        result = self.show_confirmation_dialog(message)
+        if self.daemon_client:
+            self.daemon_client.confirm_response(confirm_id, result)
         bridge.respond(decision["value"])
 
     def refresh_history_list(self):
@@ -3155,15 +3224,26 @@ class MainWindow(QMainWindow):
                     title = f"飞书对话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}"
                 else:
                     title = "飞书对话"
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
             btn = QPushButton(title)
             btn.setCursor(Qt.PointingHandCursor)
             if session_id == self.current_session_id:
                  btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
             else:
                  btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
-            
             btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
-            self.history_layout.addWidget(btn)
+            del_btn = QPushButton()
+            del_btn.setIcon(qta.icon('fa5s.trash-alt', color='#ef4444'))
+            del_btn.setCursor(Qt.PointingHandCursor)
+            del_btn.setFixedSize(28, 28)
+            del_btn.setStyleSheet("border: none; background: transparent;")
+            del_btn.clicked.connect(lambda checked=False, sid=session_id: self.delete_session(sid))
+            row_layout.addWidget(btn, 1)
+            row_layout.addWidget(del_btn)
+            self.history_layout.addWidget(row)
 
         history_dir = self.chat_history_dir
         if os.path.exists(history_dir):
@@ -3180,16 +3260,26 @@ class MainWindow(QMainWindow):
                         data = json.load(f)
                         if not data: continue
                         title = self._compute_session_title(data)
-                        
+                        row = QWidget()
+                        row_layout = QHBoxLayout(row)
+                        row_layout.setContentsMargins(0, 0, 0, 0)
+                        row_layout.setSpacing(8)
                         btn = QPushButton(title)
                         btn.setCursor(Qt.PointingHandCursor)
                         if session_id == self.current_session_id:
                              btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
                         else:
                              btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
-                        
                         btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
-                        self.history_layout.addWidget(btn)
+                        del_btn = QPushButton()
+                        del_btn.setIcon(qta.icon('fa5s.trash-alt', color='#ef4444'))
+                        del_btn.setCursor(Qt.PointingHandCursor)
+                        del_btn.setFixedSize(28, 28)
+                        del_btn.setStyleSheet("border: none; background: transparent;")
+                        del_btn.clicked.connect(lambda checked=False, sid=session_id: self.delete_session(sid))
+                        row_layout.addWidget(btn, 1)
+                        row_layout.addWidget(del_btn)
+                        self.history_layout.addWidget(row)
                 except Exception as e:
                     continue
         self.history_layout.addStretch()
@@ -3225,6 +3315,28 @@ class MainWindow(QMainWindow):
         count_to_load = min(PAGE_SIZE, remaining)
         start_idx = total - state.displayed_count - count_to_load
         end_idx = total - state.displayed_count
+
+    def delete_session(self, session_id):
+        confirm = QMessageBox.question(self, "确认删除", "确定要删除该会话吗？")
+        if confirm != QMessageBox.Yes:
+            return
+        state = self.sessions.get(session_id)
+        if state:
+            index = self.session_tabs.indexOf(state.session_widget)
+            if index >= 0:
+                self.close_session_tab(index)
+        try:
+            if self.chat_storage.has_conversation(session_id):
+                self.chat_storage.delete_conversation(session_id)
+        except Exception:
+            pass
+        try:
+            history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
+            if os.path.exists(history_path):
+                os.remove(history_path)
+        except Exception:
+            pass
+        self.refresh_history_list()
         
         msgs_to_load = state.messages[start_idx:end_idx]
         
@@ -3449,6 +3561,7 @@ class MainWindow(QMainWindow):
         display_path = font_metrics.elidedText(directory, Qt.ElideMiddle, 400)
         self.ws_label.setText(f"当前工作区: {display_path}")
         self.ws_label.setToolTip(directory)
+        self.config_manager.set("default_workspace", directory)
         self.update_recent_workspaces(directory)
         self.update_ui_state_for_workspace()
         
@@ -3599,13 +3712,36 @@ class MainWindow(QMainWindow):
     def stop_agent(self):
         state = self.get_current_session()
         if not state: return
-        if state.llm_worker and state.llm_worker.isRunning(): state.llm_worker.stop()
-        if state.daemon_worker and state.daemon_worker.isRunning():
+        if state.temp_thinking_bubble:
+            state.temp_thinking_bubble.stop_thinking_timers()
+        if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
+            state.last_agent_bubble.stop_thinking_timers()
+        if self.daemon_client and state.daemon_running and state.session_id:
+            try:
+                self.daemon_client.stop_session(state.session_id)
+            except Exception:
+                pass
+        if state.daemon_worker:
             state.daemon_worker.abort()
-            state.daemon_worker.wait(100)
+            state.daemon_worker.wait(2000)
+            if state.daemon_worker.isRunning():
+                state.daemon_worker.terminate()
+                state.daemon_worker.wait(1000)
+        if state.llm_worker and state.llm_worker.isRunning():
+            state.llm_worker.stop()
+            state.llm_worker.wait(2000)
+            if state.llm_worker.isRunning():
+                state.llm_worker.terminate()
+                state.llm_worker.wait(1000)
+        if state.code_worker and state.code_worker.isRunning():
+            state.code_worker.stop()
+            state.code_worker.wait(2000)
+            if state.code_worker.isRunning():
+                state.code_worker.terminate()
+                state.code_worker.wait(1000)
         state.daemon_worker = None
         state.daemon_running = False
-        if state.code_worker and state.code_worker.isRunning(): state.code_worker.stop()
+        state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
         self.add_system_toast("已强制停止当前任务", "warning", session_id=state.session_id)
@@ -3872,6 +4008,7 @@ class MainWindow(QMainWindow):
         state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id: self.handle_content_signal(text, sid))
         state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
         state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
+        state.daemon_worker.confirmation_signal.connect(lambda cid, msg, sid=state.session_id: self.handle_daemon_confirmation_request(cid, msg, sid))
         state.daemon_worker.start()
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)

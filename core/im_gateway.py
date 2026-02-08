@@ -268,6 +268,9 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         return None
     if not event.get("text"):
         return None
+    dedup_key = event.get("message_id") or event.get("event_id")
+    if _seen_message(dedup_key):
+        return None
     try:
         config_manager.load_config()
     except Exception:
@@ -276,8 +279,8 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     if not config_manager.get_god_mode() and not workspace_dir:
         provider.send_message("请先在桌面端选择默认工作区（未开启上帝模式，需在工作区内操作）。", event)
         return None
-    today = time.strftime("%Y-%m-%d")
-    session_key = f"{event['user_id']}:{event.get('chat_id') or ''}:{today}"
+    unique_key = event.get("message_id") or event.get("event_id") or event.get("create_time") or uuid.uuid4().hex
+    session_key = f"{event['user_id']}:{event.get('chat_id') or ''}:{unique_key}"
     conversation_id = session_mapper.get_or_create("feishu", session_key)
     provider.send_message("已收到消息，正在处理中。", event)
     resp = daemon_client.send_message(conversation_id, event["text"], workspace_dir)

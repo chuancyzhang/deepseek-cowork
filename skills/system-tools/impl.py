@@ -3,11 +3,30 @@ import subprocess
 import re
 import fnmatch
 import shutil
+from PySide6.QtCore import QObject, Qt
 
 def _is_god_mode(context):
     if context and 'config_manager' in context:
         return context['config_manager'].get_god_mode()
     return False
+ 
+def _init_abort_state(context):
+    state = {"aborted": False, "bridge": None}
+    if not context:
+        return state
+    abort_signal = context.get("abort_signal")
+    if not abort_signal:
+        return state
+    class SignalBridge(QObject):
+        def __init__(self, state_ref):
+            super().__init__()
+            self.state_ref = state_ref
+        def trigger(self):
+            self.state_ref["aborted"] = True
+    bridge = SignalBridge(state)
+    abort_signal.connect(bridge.trigger, Qt.DirectConnection)
+    state["bridge"] = bridge
+    return state
 
 def bash(workspace_dir, command, _context=None):
     """
@@ -25,21 +44,38 @@ def bash(workspace_dir, command, _context=None):
         
         # Use shell=True to allow shell syntax (pipes, redirects, etc.)
         # On Windows, this uses cmd.exe or powershell depending on the environment/comspec
-        result = subprocess.run(
-            command, 
-            shell=True, 
-            cwd=cwd, 
-            capture_output=True, 
+        abort_state = _init_abort_state(_context)
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding='utf-8',
             errors='replace'
         )
-        
-        output = result.stdout
-        if result.stderr:
+        while True:
+            if abort_state["aborted"]:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                return "Error: Command aborted by user."
+            try:
+                output, error = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        output = output or ""
+        if error:
             if output:
                 output += "\n"
-            output += f"STDERR:\n{result.stderr}"
+            output += f"STDERR:\n{error}"
             
         return output if output else "(No output)"
     except Exception as e:

@@ -5,7 +5,8 @@ import socketserver
 import threading
 import time
 import uuid
-from PySide6.QtCore import QCoreApplication, QEventLoop, QTimer, Qt
+from PySide6.QtCore import QEventLoop, QTimer, Qt, QThread
+from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
@@ -34,6 +35,8 @@ class DaemonState:
         db_path = os.path.join(history_dir, "chat_history.sqlite")
         self.chat_storage = ChatStorage(db_path)
         self.sessions = {}
+        self.active_workers = {}
+        self.pending_confirmations = {}
         self.lock = threading.Lock()
         self.suspended = False
         self.last_activity = time.time()
@@ -74,6 +77,58 @@ class DaemonState:
             messages = self.sessions.get(session_id, [])
         title = _compute_session_title(messages)
         self.chat_storage.save_conversation(session_id, messages, title=title)
+    
+    def set_active_worker(self, session_id, worker):
+        with self.lock:
+            self.active_workers[session_id] = worker
+    
+    def clear_active_worker(self, session_id):
+        with self.lock:
+            if session_id in self.active_workers:
+                del self.active_workers[session_id]
+    
+    def stop_session(self, session_id):
+        with self.lock:
+            worker = self.active_workers.get(session_id)
+            pending_ids = [cid for cid, entry in self.pending_confirmations.items() if entry.get("session_id") == session_id]
+        for cid in pending_ids:
+            self.resolve_confirmation(cid, False)
+        if worker:
+            try:
+                worker.stop()
+            except Exception:
+                pass
+            return True
+        return False
+    
+    def create_confirmation(self, confirm_id, session_id):
+        event = threading.Event()
+        with self.lock:
+            self.pending_confirmations[confirm_id] = {
+                "event": event,
+                "result": False,
+                "session_id": session_id
+            }
+        return event
+    
+    def resolve_confirmation(self, confirm_id, result):
+        with self.lock:
+            entry = self.pending_confirmations.get(confirm_id)
+        if not entry:
+            return False
+        entry["result"] = result
+        entry["event"].set()
+        return True
+    
+    def wait_for_confirmation(self, confirm_id, timeout=None):
+        with self.lock:
+            entry = self.pending_confirmations.get(confirm_id)
+        if not entry:
+            return False
+        entry["event"].wait(timeout)
+        with self.lock:
+            entry = self.pending_confirmations.pop(confirm_id, entry)
+        return entry.get("result", False)
 
     def run_llm_sync(self, session_id, user_text, workspace_dir=None):
         self.touch()
@@ -90,10 +145,12 @@ class DaemonState:
 
         def on_finished(result):
             result_holder["result"] = result
+            self.clear_active_worker(session_id)
             loop.quit()
 
         worker = LLMWorker(messages, self.config_manager, workspace_dir)
         worker.finished_signal.connect(on_finished)
+        self.set_active_worker(session_id, worker)
         worker.start()
         loop.exec()
         result = result_holder.get("result") or {"error": "No response"}
@@ -183,6 +240,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             def on_finished(result):
                 result_holder["result"] = result
                 send_stream({"type": "final", "result": result})
+                state.clear_active_worker(session_id)
                 done.set()
 
             worker = LLMWorker(messages, state.config_manager, workspace_dir)
@@ -192,9 +250,27 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.tool_result_signal.connect(lambda data: send_stream({"type": "tool_result", "data": data}), Qt.DirectConnection)
             worker.output_signal.connect(lambda text: send_stream({"type": "log", "data": text}), Qt.DirectConnection)
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
-            worker.start()
-            done.wait()
-            worker.wait(2000)
+
+            def handle_confirmation_request(message):
+                if QThread.currentThread() != worker:
+                    return
+                confirm_id = uuid.uuid4().hex
+                state.create_confirmation(confirm_id, session_id)
+                send_stream({"type": "confirm_request", "data": {"id": confirm_id, "message": message}})
+                result = state.wait_for_confirmation(confirm_id)
+                bridge.respond(result)
+
+            bridge.request_confirmation_signal.connect(handle_confirmation_request, Qt.DirectConnection)
+            state.set_active_worker(session_id, worker)
+            try:
+                worker.start()
+                done.wait()
+                worker.wait(2000)
+            finally:
+                try:
+                    bridge.request_confirmation_signal.disconnect(handle_confirmation_request)
+                except Exception:
+                    pass
             result = result_holder.get("result") or {"error": "No response"}
             if "error" not in result:
                 generated_messages = result.get("generated_messages", [])
@@ -210,6 +286,23 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     )
             state.save_session(session_id)
             state.touch()
+            return
+        if action == "stop_session":
+            session_id = data.get("session_id")
+            if not session_id:
+                self._send({"status": "error", "error": "Missing session_id"})
+                return
+            stopped = self.server.state.stop_session(session_id)
+            self._send({"status": "ok", "stopped": stopped})
+            return
+        if action == "confirm_response":
+            confirm_id = data.get("confirm_id")
+            result = data.get("result")
+            if not confirm_id:
+                self._send({"status": "error", "error": "Missing confirm_id"})
+                return
+            resolved = self.server.state.resolve_confirmation(confirm_id, result)
+            self._send({"status": "ok", "resolved": resolved})
             return
         if action == "shutdown":
             self._send({"status": "ok"})
@@ -275,6 +368,18 @@ class DaemonClient:
             },
             timeout=self.send_timeout
         )
+    
+    def stop_session(self, session_id):
+        try:
+            return self._request({"action": "stop_session", "session_id": session_id})
+        except Exception:
+            return None
+    
+    def confirm_response(self, confirm_id, result):
+        try:
+            return self._request({"action": "confirm_response", "confirm_id": confirm_id, "result": result})
+        except Exception:
+            return None
 
     def shutdown(self):
         try:
@@ -284,15 +389,11 @@ class DaemonClient:
 
 
 def run_daemon(host=DEFAULT_HOST, port=DEFAULT_PORT):
-    app = QCoreApplication([])
+    app = QApplication([])
+    app.setQuitOnLastWindowClosed(False)
     config_manager = ConfigManager()
     state = DaemonState(config_manager)
     server = DaemonServer((host, port), DaemonRequestHandler, state)
-
-    def auto_respond(_message):
-        bridge.respond(False)
-
-    bridge.request_confirmation_signal.connect(auto_respond)
 
     def serve():
         while not server.shutdown_requested:

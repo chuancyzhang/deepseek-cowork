@@ -4,6 +4,7 @@ import tempfile
 import os
 import ast
 import shutil
+from PySide6.QtCore import QObject, Qt
 from core.env_utils import get_python_executable, ensure_package_installed
 
 def install_package(package_name, import_name=None):
@@ -59,6 +60,24 @@ def validate_code_safety(code, allowed_dir, god_mode=False):
                 if not abs_val.startswith(allowed_dir):
                      raise SecurityError(f"Security Alert: Unauthorized absolute path access: '{val}'")
     return True
+ 
+def _init_abort_state(context):
+    state = {"aborted": False, "bridge": None}
+    if not context:
+        return state
+    abort_signal = context.get("abort_signal")
+    if not abort_signal:
+        return state
+    class SignalBridge(QObject):
+        def __init__(self, state_ref):
+            super().__init__()
+            self.state_ref = state_ref
+        def trigger(self):
+            self.state_ref["aborted"] = True
+    bridge = SignalBridge(state)
+    abort_signal.connect(bridge.trigger, Qt.DirectConnection)
+    state["bridge"] = bridge
+    return state
 
 def run_python_code(workspace_dir, code, _context=None):
     """
@@ -93,25 +112,37 @@ def run_python_code(workspace_dir, code, _context=None):
     python_exe = get_python_executable()
     
     try:
-        # Run subprocess
-        result = subprocess.run(
+        abort_state = _init_abort_state(_context)
+        process = subprocess.Popen(
             [python_exe, temp_path],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
             text=True,
             cwd=workspace_dir,
             encoding='utf-8',
-            errors='replace',
-            timeout=120 # 120s timeout
+            errors='replace'
         )
-        
-        output = result.stdout
-        if result.stderr:
-            output += f"\nStderr: {result.stderr}"
-            
+        while True:
+            if abort_state["aborted"]:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                return "Error: Execution aborted by user."
+            try:
+                output, error = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        output = output or ""
+        if error:
+            output += f"\nStderr: {error}"
         return output if output.strip() else "(No output)"
-        
-    except subprocess.TimeoutExpired:
-        return "Error: Execution timed out (120s)."
     except FileNotFoundError:
         return "Error: Executable not found. If you are trying to run a command (like 'ls', 'git'), ensure it is installed and in the system PATH."
     except Exception as e:

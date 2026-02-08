@@ -222,6 +222,11 @@ class ChatStorage:
             messages.append(msg)
         return messages
 
+    def delete_conversation(self, conversation_id):
+        with self._connect() as conn:
+            conn.execute("DELETE FROM im_sessions WHERE conversation_id = ?", (conversation_id,))
+            conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+
     def has_conversation(self, conversation_id):
         with self._connect() as conn:
             row = conn.execute(

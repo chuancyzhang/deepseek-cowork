@@ -75,6 +75,35 @@ def _safe_json_dump(value):
         except Exception:
             return "<unserializable>"
 
+def _strip_think_blocks(text, state):
+    if not text:
+        return "", state
+    combined = (state.get("buffer") or "") + text
+    state["buffer"] = ""
+    output = ""
+    i = 0
+    in_think = bool(state.get("in_think"))
+    while i < len(combined):
+        if in_think:
+            end = combined.find("</think>", i)
+            if end == -1:
+                state["in_think"] = True
+                state["buffer"] = combined[i:]
+                return output, state
+            i = end + len("</think>")
+            in_think = False
+            state["in_think"] = False
+            continue
+        start = combined.find("<think>", i)
+        if start == -1:
+            output += combined[i:]
+            break
+        output += combined[i:start]
+        i = start + len("<think>")
+        in_think = True
+    state["in_think"] = in_think
+    return output, state
+
 def _seen_message(message_id):
     if not message_id:
         return False
@@ -526,7 +555,10 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
     min_interval = 0.8
     card_message_id = None
     use_card = False
+    card_attempted = False
+    think_state = {"in_think": False, "buffer": ""}
     if hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
+        card_attempted = True
         card_message_id = provider.send_card_reply(event, card_content="正在处理...", title="🤖 AI 助手")
         if card_message_id:
             use_card = True
@@ -535,7 +567,8 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "content":
-                delta = msg.get("delta") or ""
+                raw_delta = msg.get("delta") or ""
+                delta, think_state = _strip_think_blocks(raw_delta, think_state)
                 if delta:
                     pending_text += delta
                     total_text += delta
@@ -543,9 +576,7 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                     if len(pending_text) >= min_chars or (now - last_send_time) >= min_interval:
                         if use_card and card_message_id:
                             content = total_text or "正在处理..."
-                            updated = provider.update_card_message(card_message_id, content)
-                            if not updated:
-                                use_card = False
+                            provider.update_card_message(card_message_id, content)
                         if use_card:
                             pending_text = ""
                             last_send_time = now
@@ -559,16 +590,16 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                 if confirm_id and message:
                     daemon_client.confirm_response(confirm_id, False)
             elif msg.get("type") == "final":
-                return msg.get("result") or {"error": "No response"}, total_text, pending_text, sent_any, card_message_id, use_card
+                return msg.get("result") or {"error": "No response"}, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("type") == "error":
-                return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, sent_any, card_message_id, use_card
+                return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("status") == "error":
-                return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, sent_any, card_message_id, use_card
+                return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("status") == "ok" and "result" in msg:
-                return msg.get("result") or {"error": "No response"}, total_text, pending_text, sent_any, card_message_id, use_card
+                return msg.get("result") or {"error": "No response"}, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted
     except Exception as e:
-        return {"error": str(e)}, total_text, pending_text, sent_any, card_message_id, use_card
-    return {"error": "Daemon stream closed"}, total_text, pending_text, sent_any, card_message_id, use_card
+        return {"error": str(e)}, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted
+    return {"error": "Daemon stream closed"}, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted
 
 
 def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_client):
@@ -610,12 +641,15 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     conversation_id = session_mapper.get_or_create("feishu", session_key)
     _log_gateway(f"feishu session mapped conversation_id={conversation_id} session_key={session_key}")
     _log_gateway(f"feishu daemon request conversation_id={conversation_id} text_len={len(event.get('text') or '')} workspace={workspace_dir}")
-    result, total_text, pending_text, sent_any, card_message_id, use_card = _stream_im_response(
+    result, total_text, pending_text, sent_any, card_message_id, use_card, card_attempted = _stream_im_response(
         conversation_id, event, provider, daemon_client, workspace_dir
     )
     if result.get("error"):
         _log_gateway(f"feishu daemon stream error response={_safe_json_dump(result)}")
-        provider.send_card_reply(event, card_content=f"⚠️ {result.get('error')}", title="🤖 AI 助手")
+        if card_message_id:
+            provider.update_card_message(card_message_id, f"⚠️ {result.get('error')}")
+        else:
+            provider.send_card_reply(event, card_content=f"⚠️ {result.get('error')}", title="🤖 AI 助手")
         return None
     if pending_text:
         if use_card and card_message_id:
@@ -630,6 +664,10 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     if (not sent_any and output) or ((not total_text.strip()) and output):
         _log_gateway(f"feishu daemon ok result={_safe_json_dump(result)} output_len={len(output or '')}")
         if hasattr(provider, "send_card_reply"):
+            if card_message_id:
+                return None
+            if card_attempted:
+                return None
             message_id = provider.send_card_reply(event, card_content=output, title="🤖 AI 助手")
             if message_id:
                 return None

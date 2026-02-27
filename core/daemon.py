@@ -368,6 +368,35 @@ class DaemonClient:
             },
             timeout=self.send_timeout
         )
+
+    def send_message_stream(self, session_id, content, workspace_dir=None):
+        sock = socket.create_connection((self.host, self.port), timeout=self.send_timeout)
+        try:
+            payload = {
+                "action": "send_message_stream",
+                "session_id": session_id,
+                "content": content,
+                "workspace_dir": workspace_dir
+            }
+            sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            reader = sock.makefile("r", encoding="utf-8")
+            for line in reader:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except Exception:
+                    continue
+        finally:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                sock.close()
+            except Exception:
+                pass
     
     def stop_session(self, session_id):
         try:

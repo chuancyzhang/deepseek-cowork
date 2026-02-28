@@ -66,12 +66,8 @@ class TestMetaTools(unittest.TestCase):
         self.sm.load_skills()
         
         # 3. Check skill_prompts
-        prompts = self.sm.skill_prompts
-        found = False
-        for p in prompts:
-            if "Always check errors." in p and "Learned Experience" in p:
-                found = True
-                break
+        prompt = self.sm.get_full_skill_prompt(self.skill_name) or ""
+        found = "Always check errors." in prompt and "Learned Experience" in prompt
         
         self.assertTrue(found, "Experience not injected into skill prompts")
 

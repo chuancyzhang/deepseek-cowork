@@ -191,6 +191,19 @@ def clear_reasoning_content(messages):
         cleaned.append(clean_msg)
     return cleaned
 
+def sanitize_llm_messages(messages):
+    cleaned = []
+    for msg in messages:
+        clean_msg = msg.copy()
+        if 'reasoning_content' in clean_msg:
+            clean_msg['reasoning_content'] = ""
+        if 'reasoning' in clean_msg:
+            del clean_msg['reasoning']
+        if clean_msg.get("tool_calls") and "reasoning_content" not in clean_msg:
+            clean_msg["reasoning_content"] = ""
+        cleaned.append(clean_msg)
+    return cleaned
+
 class LLMWorker(QThread):
     """后台调用 LLM API 的线程，支持 Tool Calls 和多轮思考"""
     finished_signal = Signal(dict)
@@ -234,16 +247,31 @@ class LLMWorker(QThread):
         self.step_signal.emit("System: Stopping...")
         self.abort_signal.emit()
 
+    def _append_skill_prompts(self, tool_calls, current_messages, disclosed_skills):
+        prompts = []
+        for tool in tool_calls or []:
+            skill_name = self.skill_manager.get_skill_of_tool(tool.function.name)
+            if skill_name and skill_name not in disclosed_skills:
+                prompt = self.skill_manager.get_full_skill_prompt(skill_name)
+                if prompt:
+                    prompts.append(prompt)
+                    disclosed_skills.add(skill_name)
+        if prompts:
+            current_messages.append({"role": "system", "content": "\n\n".join(prompts)})
+
     def run(self):
         # Work on a copy of messages to handle multi-turn locally
         # CRITICAL: Clear previous reasoning content to avoid duplication/confusion in new turn
         current_messages = clear_reasoning_content(self.messages)
+        python_exe = get_python_executable()
         
         # Construct System Context
         context_lines = [
             f"当前工作区: {self.workspace_dir}",
             f"操作系统: {platform.system()} {platform.release()}",
             f"Python 版本: {sys.version.split()[0]}",
+            "Python 环境: 系统已自带可用的 Python 运行环境，可直接调用，无需用户额外安装。",
+            f"Python 路径: {python_exe}",
             f"当前日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于此路径。",
             "能力: 你可以使用 'create_new_skill' 创建新的技能/工具。",
@@ -289,9 +317,10 @@ class LLMWorker(QThread):
             context_lines.append("\n# Memories\n" + memories_text)
 
         # Append Skill-Specific Prompts (e.g. usage guidelines, learned experiences)
-        if self.skill_manager.skill_prompts:
+        system_skills = self.skill_manager.get_system_prompts()
+        if system_skills:
             context_lines.append("\n# Skill Capabilities & Guidelines")
-            context_lines.extend(self.skill_manager.skill_prompts)
+            context_lines.append(system_skills)
 
         system_prompt = "\n".join(context_lines)
         
@@ -310,6 +339,7 @@ class LLMWorker(QThread):
         last_turn_reasoning = None
         reasoning_repetition_count = 0
         
+        disclosed_skills = set()
         while True:
             # Check Control Flags
             while self.is_paused:
@@ -339,7 +369,7 @@ class LLMWorker(QThread):
                     
                     # Create Provider via Factory
                     provider = LLMFactory.create_provider(self.config_manager)
-                    stream = provider.chat_stream(current_messages, tools=self.tools)
+                    stream = provider.chat_stream(sanitize_llm_messages(current_messages), tools=self.tools)
                     
                     # Streaming Buffers
                     chunk_reasoning = ""
@@ -436,6 +466,9 @@ class LLMWorker(QThread):
                             t_obj.function.arguments = t_data["function"]["arguments"]
                             
                             tool_calls.append(t_obj)
+
+                    if tool_calls:
+                        self._append_skill_prompts(tool_calls, current_messages, disclosed_skills)
 
                     # Append Assistant Message to History (Manual reconstruction)
                     assistant_msg = {

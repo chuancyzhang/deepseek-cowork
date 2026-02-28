@@ -347,6 +347,8 @@ class SkillManager:
         self.tools = {}
         self.tool_definitions = []
         self.skill_prompts = []
+        self.skill_prompts_brief = []
+        self.skill_prompts_full = {}
         self.tool_to_skill_map = {}
         self.loaded_skills_meta = {}
         
@@ -435,7 +437,27 @@ class SkillManager:
                     prompt_content += exp_text
             
             if prompt_content:
-                self.skill_prompts.append(prompt_content)
+                self.skill_prompts_full[skill_name] = prompt_content
+
+            brief_lines = []
+            brief_lines.append(f"[Skill] {meta.get('name') or skill_name}")
+            if meta.get("description"):
+                brief_lines.append(f"description: {meta.get('description')}")
+            if meta.get("description_cn"):
+                brief_lines.append(f"description_cn: {meta.get('description_cn')}")
+            if meta.get("license"):
+                brief_lines.append(f"license: {meta.get('license')}")
+            if meta.get("security_level"):
+                brief_lines.append(f"security_level: {meta.get('security_level')}")
+            allowed_tools = meta.get("allowed-tools")
+            if isinstance(allowed_tools, list):
+                brief_lines.append(f"allowed-tools: {', '.join(allowed_tools)}")
+            elif allowed_tools:
+                brief_lines.append(f"allowed-tools: {allowed_tools}")
+            brief_lines.append("完整说明会在需要该技能时提供。")
+            if brief_lines:
+                self.skill_prompts_brief.append("\n".join(brief_lines))
+                self.skill_prompts = self.skill_prompts_brief
         except Exception as e:
             print(f"Error parsing {md_path}: {e}")
 
@@ -561,7 +583,10 @@ class SkillManager:
         return self.tool_definitions
 
     def get_system_prompts(self):
-        return "\n\n".join(self.skill_prompts)
+        return "\n\n".join(self.skill_prompts_brief or self.skill_prompts)
+
+    def get_full_skill_prompt(self, skill_name):
+        return self.skill_prompts_full.get(skill_name)
 
     def call_tool(self, name, args, context=None):
         if name not in self.tools:

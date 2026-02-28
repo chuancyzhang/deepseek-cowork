@@ -3315,6 +3315,28 @@ class MainWindow(QMainWindow):
         count_to_load = min(PAGE_SIZE, remaining)
         start_idx = total - state.displayed_count - count_to_load
         end_idx = total - state.displayed_count
+        
+        msgs_to_load = state.messages[start_idx:end_idx]
+        
+        vbar = state.chat_scroll.verticalScrollBar()
+        old_max = vbar.maximum()
+        old_val = vbar.value()
+        
+        self.render_message_batch(msgs_to_load, state.session_id, insert_index=1, animate=False)
+        
+        QApplication.processEvents()
+        new_max = vbar.maximum()
+        if old_val <= 5:
+            vbar.setValue(0)
+        else:
+            vbar.setValue(old_val + (new_max - old_max))
+        
+        state.displayed_count += count_to_load
+        
+        if state.displayed_count >= total:
+            if state.load_more_btn:
+                state.load_more_btn.deleteLater()
+                state.load_more_btn = None
 
     def delete_session(self, session_id):
         confirm = QMessageBox.question(self, "确认删除", "确定要删除该会话吗？")
@@ -3337,32 +3359,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.refresh_history_list()
-        
-        msgs_to_load = state.messages[start_idx:end_idx]
-        
-        # Save scroll position
-        vbar = state.chat_scroll.verticalScrollBar()
-        old_max = vbar.maximum()
-        old_val = vbar.value()
-        
-        # Insert after the button (index 1)
-        # Use animate=False to prevent scroll jumping and ensure instant layout update
-        self.render_message_batch(msgs_to_load, state.session_id, insert_index=1, animate=False)
-        
-        # Restore scroll position (adjust for new content height)
-        QApplication.processEvents() # Ensure layout updates
-        new_max = vbar.maximum()
-        if old_val <= 5:
-            vbar.setValue(0)
-        else:
-            vbar.setValue(old_val + (new_max - old_max))
-        
-        state.displayed_count += count_to_load
-        
-        if state.displayed_count >= total:
-            if state.load_more_btn:
-                state.load_more_btn.deleteLater()
-                state.load_more_btn = None
 
     def render_message_batch(self, messages, session_id, insert_index=None, animate=True):
         state = self.get_session(session_id)

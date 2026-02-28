@@ -23,6 +23,7 @@ from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT
 import shutil
+import traceback
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
@@ -109,6 +110,23 @@ class Avatar(QLabel):
             x = (self.width() - self.pixmap.width()) // 2
             y = (self.height() - self.pixmap.height()) // 2
             painter.drawPixmap(x, y, self.pixmap)
+
+class SafeApplication(QApplication):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.main_window = None
+
+    def notify(self, receiver, event):
+        try:
+            return super().notify(receiver, event)
+        except Exception:
+            traceback.print_exc()
+            if self.main_window:
+                try:
+                    self.main_window.add_system_toast("发生异常，但程序将继续运行。", "error")
+                except Exception:
+                    pass
+            return False
 
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
@@ -4273,12 +4291,13 @@ if __name__ == "__main__":
         sys.exit(0)
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QApplication(sys.argv)
+    app = SafeApplication(sys.argv)
     app.setStyle("Fusion")
     font = app.font()
     font.setFamily("Segoe UI")
     font.setPointSize(10)
     app.setFont(font)
     window = MainWindow()
+    app.main_window = window
     window.show()
     sys.exit(app.exec())

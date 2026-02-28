@@ -300,23 +300,8 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
     - **突破限制**: 不再局限于当前工作区 (Workspace)，赋予 Agent 真正的全盘视野。
     - **智能回退**: 若未检测到 Everything 服务，可以提醒用户是否安装Everything，然后自动降级为原有 Grep 模式。
 
-### 7.8 Gemini 3 深度集成与全能多模态 (Gemini 3 & Omni-Multimodal)
-基于 [Gemini 3 文档](https://ai.google.dev/gemini-api/docs/gemini-3?hl=zh-cn)，打造全能多模态体验。
 
-- [ ] **Gemini 3 模型接入**:
-    - **Core Models**: 接入 `gemini-3-pro-preview` (强推理) 和 `gemini-3-flash-preview` (高性价比)。
-    - **SDK 升级**: 迁移/兼容新的 `google.genai` Python SDK。
-- [ ] **视觉理解 (Visual Understanding)**:
-    - **Image Reading**: 利用 Gemini 3 的多模态能力，支持对上传图片的深度分析、OCR 和物体识别。
-    - **Video Reading**: 支持上传视频文件，通过 API (Video context) 读取视频内容并进行语义检索或总结。
-- [ ] **视觉生成 (Visual Generation)**:
-    - **Image Generation**: 接入 `gemini-3-pro-image-preview` (Nano Banana)，支持对话生成高质量图像。
-    - **Video Generation**: 探索 Veo 或相关 Video API，支持根据文本描述生成视频片段。
-- [ ] **多模态交互体验 (Multimodal UI)**:
-    - **Media Rendering**: 聊天气泡支持原生渲染 API 返回的 Image/Video 对象，而非仅显示链接。
-    - **Preview**: 在输入框支持粘贴/拖拽图片和视频进行预览与上传。
-
-### 7.9 定时任务与自动化 (Scheduled Tasks & Automation)
+### 7.8 定时任务与自动化 (Scheduled Tasks & Automation)
 - [ ] **任务调度引擎 (Scheduler Engine)**:
     - 集成 `APScheduler`，支持 Cron 表达式、间隔执行 (Interval) 和一次性延时任务 (Date)。
     - **持久化**: 任务配置存储于 SQLite，确保重启后自动恢复。
@@ -326,7 +311,7 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [ ] **任务管理面板**:
     - 提供 GUI 界面查看当前挂起的定时任务、下次执行时间及历史执行日志。
 
-### 7.10 应用管理与深度操控 (App Management & Deep Control)
+### 7.9 应用管理与深度操控 (App Management & Deep Control)
 - [ ] **智能应用索引 (App Indexing)**:
     - **自动扫描**: 启动时自动扫描开始菜单快捷方式、注册表卸载列表和 PATH 环境变量，构建 `App Name -> Exe Path` 映射表。
     - **Everything 集成**: 利用 Everything 接口实现对未收录应用的模糊查找（如 "Find where Photoshop is installed"）。

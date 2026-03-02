@@ -4,7 +4,7 @@ description: Provides system-level capabilities like executing shell commands an
 description_cn: 提供系统级能力，如执行Shell命令和搜索文件内容。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: high
 allowed-tools: ["bash", "grep", "search_files"]

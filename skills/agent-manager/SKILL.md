@@ -4,7 +4,7 @@ description: Manage and spawn sub-agents to perform tasks in parallel.
 description_cn: 管理并生成子代理以并行执行任务。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: medium
 allowed-tools: dispatch_agents

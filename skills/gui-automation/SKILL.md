@@ -4,7 +4,7 @@ description: Automates browser steps and basic desktop UI actions. Invoke when u
 description_cn: 自动化浏览器步骤与基础桌面控件操作。用户需要网页/桌面点击、输入、滚动时使用。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: high
 allowed-tools: ["open_url", "screenshot_url", "run_browser_steps", "ui_focus_window", "ui_click", "ui_type", "ui_scroll"]

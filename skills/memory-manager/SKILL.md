@@ -4,7 +4,7 @@ description: Read and update memories.md in the history directory.
 description_cn: 读取与更新历史目录中的 memories.md。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: low
 allowed-tools: read_memories, write_memories

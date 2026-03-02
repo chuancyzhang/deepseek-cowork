@@ -4,7 +4,7 @@ description: Provides capabilities to search the web and read online articles.
 description_cn: 提供搜索互联网内容和读取网络文章的能力。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: medium
 allowed-tools: search_web read_article

@@ -4,7 +4,7 @@ description: Launches apps or opens files with a chosen app using the local app 
 description_cn: 启动应用或指定应用打开文件，依赖本地应用索引。用户要打开应用时使用。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: high
 allowed-tools: ["launch_app", "open_with"]

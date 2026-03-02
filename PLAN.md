@@ -301,27 +301,16 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
     - **智能回退**: 若未检测到 Everything 服务，可以提醒用户是否安装Everything，然后自动降级为原有 Grep 模式。
 
 
-### 7.8 定时任务与自动化 (Scheduled Tasks & Automation)
-- [ ] **任务调度引擎 (Scheduler Engine)**:
-    - 集成 `APScheduler`，支持 Cron 表达式、间隔执行 (Interval) 和一次性延时任务 (Date)。
-    - **持久化**: 任务配置存储于 SQLite，确保重启后自动恢复。
-- [ ] **定时技能 (Scheduled Skills)**:
-    - **Schedule Skill**: 允许 Agent 调用工具注册定时任务（例如：“每天早上 9 点帮我总结昨天的 Hacker News”）。
-    - **回调机制**: 任务触发时，自动唤醒 Agent 并注入特定的 Prompt context 执行后续操作。
-- [ ] **任务管理面板**:
-    - 提供 GUI 界面查看当前挂起的定时任务、下次执行时间及历史执行日志。
-
-### 7.9 应用管理与深度操控 (App Management & Deep Control)
-- [ ] **智能应用索引 (App Indexing)**:
+### 7.8 应用管理与深度操控 (App Management & Deep Control)
+- [x] **智能应用索引 (App Indexing)**:
     - **自动扫描**: 启动时自动扫描开始菜单快捷方式、注册表卸载列表和 PATH 环境变量，构建 `App Name -> Exe Path` 映射表。
     - **Everything 集成**: 利用 Everything 接口实现对未收录应用的模糊查找（如 "Find where Photoshop is installed"）。
-- [ ] **应用启动技能 (App Launcher Skill)**:
+- [x] **应用启动技能 (App Launcher Skill)**:
     - **`launch_app(name, args)`**: 支持自然语言模糊匹配启动应用（如 "打开微信", "启动 VS Code 并打开当前项目"）。
     - **`open_with(file, app)`**: 指定特定应用打开文件（如 "用 Chrome 打开这个 HTML"）。
-- [ ] **GUI 自动化与智能操控 (GUI Automation)**:
-    - **Browser-Use 集成**: 引入 `browser-use` 或 Playwright，赋予 Agent 操控浏览器的能力（点击、输入、滚动），实现网页任务自动化（如“帮我订一张去北京的票”）。
+- [x] **GUI 自动化与智能操控 (GUI Automation)**:
+    - **Browser-Use 集成**: 引入 `https://github.com/browserwing/browserwing/blob/main/README.zh-CN.md` 或 Playwright，赋予 Agent 操控浏览器的能力（点击、输入、滚动），实现网页任务自动化（如“帮我订一张去北京的票”）。
     - **OS-Level Control**: 探索 `pywinauto` / `UIAutomation`，实现对非 Web 原生应用（如微信、飞书、系统设置）的点击与操作。
-    - **视觉反馈循环**: 结合 Gemini 3 的视觉能力，截屏 -> 分析 UI 布局 -> 规划点击坐标 -> 执行操作。
 
 ---
 

@@ -14,7 +14,7 @@
     "agent",
     "file-processing"
   ],
-  "author": "",
+  "author": "deepseek-cowork team",
   "license": "ISC",
   "devDependencies": {
     "electron": "^28.0.0",

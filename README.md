@@ -2,9 +2,9 @@
 
 [中文文档](README_CN.md) | [English](README.md)
 
-**DeepSeek Cowork** is a next-generation desktop agent framework inspired by **DeepSeek-V3.2 Interleaved Chain-of-Thought**. It leverages the latest **Reasoning with Tool Use** capabilities to plan, execute, and evolve through complex workflows.
+**DeepSeek Cowork** is a Windows desktop agent framework built on **DeepSeek-V3.2 Interleaved Chain-of-Thought**. It combines reasoning with tool use to plan, execute, and refine tasks across files, apps, and workflows in a secure desktop environment.
 
-By implementing an **Interleaved Chain-of-Thought (CoT)** architecture, the agent doesn't just "chat"—it actively thinks, writes code, executes system commands, and analyzes results in a continuous loop, all within a secure and modern desktop environment.
+Built by **deepseek-cowork team**.
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
@@ -12,42 +12,32 @@ By implementing an **Interleaved Chain-of-Thought (CoT)** architecture, the agen
 
 ## 🚀 Key Features
 
-### 🧠 Dual-Engine Support
-*   **DeepSeek R1/V3**: Full support for DeepSeek's latest reasoning models, utilizing their powerful chain-of-thought capabilities for complex problem solving.
-*   **Moonshot AI (Kimi 2.5)**: Native integration with Kimi's API, optimized for long-context understanding and strict tool-call schema compliance.
+### 🧠 Reasoning with Tool Use
+*   **Interleaved CoT**: The agent thinks, calls tools, observes results, and continues reasoning in a single flow.
+*   **Tool-First Exploration**: Reads real files before acting, reducing hallucinations.
 
-### ⚡ Interleaved CoT & "God Mode"
-*   **Think-Call-Think**: The agent interleaves reasoning (`<think>`) with actual tool execution. It plans a step, runs a tool (e.g., searches the web, runs a Python script), reads the output, and then refines its plan—just like a human engineer.
-*   **God Mode**: For power users, enable "God Mode" to bypass safety sandboxes, granting the agent full access to system-level subprocesses, registry, and file systems for unrestricted automation.
+### 🔌 Skill System
+*   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
+*   **Self-Evolving Skills**: Success/failure signals update `SKILL.md` experience for better future runs.
 
-### 🔌 Self-Evolving Skill System
-*   **Hot-Reloadable Skills**: Drop new Python scripts into `skills/` or `ai_skills/` and they are instantly available to the agent without restarting.
-*   **AI-Generated Skills**: The agent can write its own tools (e.g., a `yt-dlp` wrapper or a specific data scraper) and save them for future use.
-*   **Experience Learning**: The system tracks tool usage success/failure and automatically updates `SKILL.md` documents to "teach" the agent how to use tools better next time.
+### 🖥️ Desktop Experience
+*   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
+*   **Workspace Sidebar**: File tree and previews without leaving the app.
+*   **Sub-Agent Monitor**: Observe parallel workers and their statuses.
 
-### 🖥️ Modern Desktop Experience
-*   **Native UI**: Built with PySide6, featuring a clean, responsive **16:9** interface with a forced **Light Mode** for professional consistency.
-*   **Real-Time Feedback**: Watch the agent's thought process and tool calls stream in real time via collapsible "Thinking" bubbles.
-*   **Workspace Sandbox**: Operations are confined to your chosen project folder by default for safety.
-
-### 🛰️ Headless Daemon
-*   **Background Inference**: Run LLM inference in a headless daemon so the UI can stay lightweight.
-*   **Streaming Events**: Stream reasoning and tool-call events back to the UI while the daemon is running.
-
-### 📨 Unified Messaging Gateway
-*   **Feishu Long Connection**: Receive events over long connection without a webhook server.
-*   **Command via IM**: Send commands from Feishu to trigger desktop agent workflows.
-*   **Daily Sessions**: IM conversations are split by date for clearer history tracking.
-*   **Workspace Guardrails**: IM tasks follow the same workspace restrictions unless God Mode is enabled.
+### 🛰️ Daemon & IM Gateway
+*   **Headless Daemon**: Background inference keeps UI responsive.
+*   **Enterprise IM (Feishu)**: Send commands via IM with daily session rotation.
+*   **Workspace Guardrails**: IM requests follow the same workspace limits unless God Mode is enabled.
 
 ## 📦 Installation
 
 ### Option 1: Run from Executable (Windows)
-1.  Go to the [Releases](../../releases) page to download the latest version.
+1.  Download the latest release from [Releases](../../releases).
 2.  Unzip and run `deepseek-cowork.exe`.
 3.  No Python installation required.
 
-### Option 2: Run from Source
+### Option 2: Run from Source (Windows)
 **Prerequisites**: Python 3.10+
 
 1.  Clone the repository:
@@ -56,57 +46,51 @@ By implementing an **Interleaved Chain-of-Thought (CoT)** architecture, the agen
     cd deepseek-cowork
     ```
 
-2.  Install dependencies:
+2.  Create and use the virtual environment:
     ```bash
-    pip install -r requirements.txt
+    python -m venv .venv
+    .venv\Scripts\python -m pip install -r requirements.txt
     ```
 
 3.  Run the application:
     ```bash
-    python main.py
+    .venv\Scripts\python main.py
     ```
 
 ## 📖 Usage Guide
 
 ### 1. Configuration
-Launch the app and click the **⚙️ Settings** icon:
-*   **API Key**: Enter your DeepSeek or other LLM provider API key.
-*   **Provider**: Select between `openai` (for DeepSeek) or `anthropic`.
-*   **God Mode**: Toggle this to enable/disable safety restrictions.
+Open **⚙️ Settings**:
+*   **API Key**: DeepSeek or other provider key.
+*   **Provider**: `openai` (DeepSeek compatible) or `anthropic`.
+*   **God Mode**: Toggle safety sandbox restrictions.
 
 ### 2. Select Workspace
-Click the folder icon to select your working directory. The agent treats this folder as its "world" and can read/write files freely within it.
+Pick your working directory. The agent treats it as the boundary for file access.
 
 ### 3. Start Automating
-Type your request in natural language. Examples:
+Examples:
 *   *"Scan this project for unused imports and remove them."*
-*   *"Search for the latest stock prices of tech giants and plot a trend chart."*
-*   *"Create a new skill to download YouTube videos using yt-dlp."*
+*   *"Summarize all PDFs in this folder into a single report."*
+*   *"Create a new skill to download videos using yt-dlp."*
 
 ### 4. Enterprise IM (Feishu)
-Open **⚙️ Settings → Enterprise Messaging** and fill in your **Feishu App ID / App Secret**, then start the gateway. IM conversations will follow the same workspace rules and rotate daily.
-
-### 5. Visual Monitoring
-*   **Chat Tab**: Main interaction interface.
-*   **Sub-Agent Monitor**: When the main agent spawns sub-workers for parallel tasks, watch their logs and status in real-time.
+Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App Secret**, then start the gateway.
 
 ## 🏗️ Architecture
 
-*   **`core/`**: The brain.
-    *   `agent.py`: Handles the main event loop, thread management, and CoT logic.
-    *   `llm/`: Adapter layer for OpenAI and Moonshot APIs.
-    *   `skill_manager.py`: Dynamic tool registration and prompt injection.
-*   **`skills/`**: Built-in system capabilities (File I/O, Python Runner, Web Search).
-*   **`ai_skills/`**: User/AI-created extensions.
-*   **`main.py`**: The PySide6 frontend.
-*   **`core/daemon.py`**: Headless daemon server for background inference.
+*   **`main.py`**: PySide6 desktop UI entry.
+*   **`core/agent.py`**: Reasoning loop and tool orchestration.
+*   **`core/daemon.py`**: Headless inference server.
+*   **`core/im_gateway.py`**: Feishu IM integration.
+*   **`core/skill_manager.py`**: Skill loading and prompt injection.
+*   **`skills/`**: Built-in system skills.
+*   **`ai_skills/`**: AI or user-created skills.
 
 ## 🛠️ Extending
-To add a new capability, simply create a folder in `skills/` with:
-1.  `impl.py`: Your Python functions.
-2.  `SKILL.md`: A description of when and how to use these functions.
-
-The system automagically bridges them to the LLM!
+Create a folder in `skills/` with:
+1.  `impl.py`: Python implementations.
+2.  `SKILL.md`: Usage guidance and metadata.
 
 ## 📄 License
 

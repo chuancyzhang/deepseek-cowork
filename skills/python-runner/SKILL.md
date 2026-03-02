@@ -4,7 +4,7 @@ description: Execute Python code to perform tasks that are not covered by other 
 description_cn: 执行 Python 代码以完成其他工具未涵盖的任务。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 allowed-tools: run_python_code, install_package
 ---

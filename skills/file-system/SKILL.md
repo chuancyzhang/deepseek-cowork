@@ -4,7 +4,7 @@ description: Provides capabilities to list, read, write and manipulate files in 
 description_cn: 提供在用户工作区中列出、读取、写入和操作文件的能力，包括常用的办公软件文件（DOCX, PPTX, XLSX, PDF）。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.1"
 security_level: high
 allowed-tools: ["list_files", "read_file", "rename_file", "delete_file", "read_docx", "write_docx", "read_pptx", "create_pptx", "read_excel", "write_excel", "read_pdf"]

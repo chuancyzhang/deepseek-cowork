@@ -4,7 +4,7 @@ description: Builds and queries a local index of installed apps and executables.
 description_cn: 构建并查询本地应用索引，用于定位应用或可执行文件。用户要找应用时使用。
 license: Apache-2.0
 metadata:
-  author: cowork-team
+  author: deepseek-cowork team
   version: "1.0"
 security_level: medium
 allowed-tools: ["build_app_index", "find_app"]

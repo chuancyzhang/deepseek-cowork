@@ -48,13 +48,12 @@ Built by **deepseek-cowork team**.
 
 2.  Create and use the virtual environment:
     ```bash
-    python -m venv .venv
-    .venv\Scripts\python -m pip install -r requirements.txt
+    python -m pip install -r requirements.txt
     ```
 
 3.  Run the application:
     ```bash
-    .venv\Scripts\python main.py
+    python main.py
     ```
 
 ## 📖 Usage Guide

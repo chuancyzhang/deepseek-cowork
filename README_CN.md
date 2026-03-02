@@ -47,13 +47,12 @@
 
 2.  创建并使用虚拟环境：
     ```bash
-    python -m venv .venv
-    .venv\Scripts\python -m pip install -r requirements.txt
+    python -m pip install -r requirements.txt
     ```
 
 3.  启动应用：
     ```bash
-    .venv\Scripts\python main.py
+    python main.py
     ```
 
 ## 📖 使用指南

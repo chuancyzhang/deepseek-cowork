@@ -48,7 +48,7 @@ Built by **deepseek-cowork team**.
 
 2.  Create and use the virtual environment:
     ```bash
-    python -m pip install -r requirements.txt
+    pip install -r requirements.txt
     ```
 
 3.  Run the application:

@@ -86,6 +86,24 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App
 *   **`skills/`**: Built-in system skills.
 *   **`ai_skills/`**: AI or user-created skills.
 
+## 🧩 Everything Is a Tool
+- Tools are plain Python functions discovered from SKILL folders (`impl.py`).
+- Each tool gets a JSON schema from its signature and becomes callable by the LLM.
+- SKILL.md provides usage guidelines and “learned experience” that auto-inject into prompts.
+- New skills are hot-loaded on the fly without restarting.
+
+## 🔄 Agentic Workflow
+- Interleaved CoT: think → tool-call → observe → continue thinking → final answer.
+- Streaming events: reasoning/content/tool_call/tool_result for live UI updates.
+- Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
+- Pause/Resume/Stop controls manage long operations safely.
+
+## 🧠 Layered Memory & Context
+- System context: workspace, OS, Python, date, and operational rules.
+- Memories: optional `memories.md` auto-injected when present.
+- Skill prompts: brief capabilities + full instructions injected on first use.
+- History hygiene: reasoning content deduplicated per turn to avoid clutter.
+
 ## 🛠️ Extending
 Create a folder in `skills/` with:
 1.  `impl.py`: Python implementations.

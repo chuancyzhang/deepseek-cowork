@@ -86,3 +86,36 @@ DeepSeek-V3.2 引入 **交错思维链 (Interleaved CoT)**，允许模型在思�
 | 工作区安全边界 | 支持 | 依赖外部约束 |
 | 桌面 UI 与可视化 | 内置 | 通常缺失 |
 | 技能自进化 | 支持 | 通常缺失 |
+
+---
+
+## 6. 万物皆工具 (Everything Is a Tool)
+- 工具即 `impl.py` 中的普通 Python 函数，系统基于函数签名自动生成 JSON Schema，使 LLM 可直接调用。
+- `SKILL.md` 作为技能说明与元数据入口，`allowed-tools` 标注工具清单；正文提供使用指引与最佳实践。
+- `experience` 字段承载“学到的经验”，在技能被使用前自动注入提示，帮助模型少走弯路。
+- 动态导入与依赖自修复：首次加载缺依赖时尝试自动安装并重试，提升首次成功率。
+- 工具到技能映射用于 UI 展示与提示注入，让调用链路清晰透明。
+
+## 7. Agentic Workflow（交错式 CoT）
+- 流程：思考 → 工具调用 → 观察 → 继续思考 → 最终回答。思考与执行在同一轮流式事件内完成。
+- 事件流：reasoning（思考）、content（答案）、tool_call（调用）、tool_result（结果）实时渲染到 UI。
+- 环路保护：检测重复思考与重复工具签名，触发自动停止，避免跑飞。
+- 控制能力：支持暂停/恢复/停止，安全管理长时任务与外部工具执行。
+- 技能提示注入：首次使用某技能时自动注入简版能力与完整说明（含经验），确保工具正确使用。
+
+## 8. 分层记忆与上下文处理
+- 系统层：工作区路径、操作系统、Python 路径、当前日期与操作规范注入 System Prompt。
+- 记忆层：`memories.md`（可选）承载用户长期偏好与稳定信息，在每轮推理前按需注入。
+- 技能层：按需注入技能能力简述与完整指南（包含经验），提升工具调用质量。
+- 历史层：每轮清理与折叠思考内容，仅保留必要字段，避免上下文污染与重复。
+
+## 9. 动态技能加载与自我进化
+- 更新检测：比较 `SKILL.md`/`impl.py` 的修改时间是否晚于上次加载；发现变更即热加载。
+- 热加载：重置工具注册与提示集合，重新解析技能文档，保证新增/修改技能即时可用。
+- 经验写回：通过 `update_skill_experience` 将运行经验追加到 `SKILL.md` 的 `experience`，形成“执行—学习—再执行”的持续闭环。
+
+## 10. 核心组件与状态机流转
+- 组件概览：UI（PySide6）、Daemon（无头推理）、Agent（推理与编排）、SkillManager（技能加载与执行）。
+- 状态机：Idle → Thinking → ToolCalling → Observing → Answering → Completed。
+- 信号：`thinking_signal`、`content_signal`、`tool_call_signal`、`tool_result_signal`、`agent_state_signal`。
+- 执行线程：代码任务由 CodeWorker 承载，具备 AST 安全校验与交互输入桥接，避免风险操作。

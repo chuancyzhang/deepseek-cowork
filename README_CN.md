@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md) | [English](README.md)
 
-**DeepSeek Cowork** 是基于 **DeepSeek-V3.2 交错思维链 (Interleaved CoT)** 的 Windows 桌面智能代理框架。它将推理与工具调用融合在一个连续流程中，面向文件、应用与工作流提供稳定可控的自动化能力。
+**DeepSeek Cowork** 是基于 **DeepSeek-V3.2 交错思维链 (Interleaved CoT)** 的 Windows 桌面智能代理框架。它将推理与工具调用融合在一个连续流程中，面向文件、应用与工作流提供稳定可控的自动化能力。（**本项目不是DeepSeek官方开发，纯个人探索和爱好**）
 
 项目团队：**deepseek-cowork team**。
 

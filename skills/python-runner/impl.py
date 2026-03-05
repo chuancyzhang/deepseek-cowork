@@ -4,6 +4,7 @@ import tempfile
 import os
 import ast
 import shutil
+import locale
 from PySide6.QtCore import QObject, Qt
 from core.env_utils import get_python_executable, ensure_package_installed
 
@@ -79,6 +80,37 @@ def _init_abort_state(context):
     state["bridge"] = bridge
     return state
 
+def _decode_output(raw):
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    candidates = ["utf-8", "utf-8-sig"]
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        candidates.append(preferred)
+    if os.name == "nt":
+        candidates.extend(["mbcs", "cp936", "gbk", "cp950", "cp932"])
+    best_text = None
+    best_score = -1
+    for enc in candidates:
+        try:
+            text = raw.decode(enc, errors="replace")
+        except Exception:
+            continue
+        score = -text.count("�")
+        if any("\u4e00" <= ch <= "\u9fff" for ch in text):
+            score += 5
+        if score > best_score:
+            best_score = score
+            best_text = text
+    if best_text is not None:
+        return best_text
+    try:
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return str(raw)
+
 def run_python_code(workspace_dir, code, _context=None):
     """
     Execute Python code in the workspace.
@@ -113,15 +145,17 @@ def run_python_code(workspace_dir, code, _context=None):
     
     try:
         abort_state = _init_abort_state(_context)
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         process = subprocess.Popen(
-            [python_exe, temp_path],
+            [python_exe, "-X", "utf8", temp_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE,
-            text=True,
+            text=False,
             cwd=workspace_dir,
-            encoding='utf-8',
-            errors='replace'
+            env=env
         )
         while True:
             if abort_state["aborted"]:
@@ -135,10 +169,12 @@ def run_python_code(workspace_dir, code, _context=None):
                         pass
                 return "Error: Execution aborted by user."
             try:
-                output, error = process.communicate(timeout=0.2)
+                output_raw, error_raw = process.communicate(timeout=0.2)
                 break
             except subprocess.TimeoutExpired:
                 continue
+        output = _decode_output(output_raw)
+        error = _decode_output(error_raw)
         output = output or ""
         if error:
             output += f"\nStderr: {error}"

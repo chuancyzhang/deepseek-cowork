@@ -1,6 +1,7 @@
 import json
 import requests
 import urllib.parse
+from urllib.parse import urlparse
 from core.env_utils import ensure_package_installed
 
 def get_bs4():
@@ -17,6 +18,96 @@ def get_trafilatura():
     ensure_package_installed("trafilatura")
     import trafilatura
     return trafilatura
+
+def _normalize_url(url):
+    u = (url or "").strip()
+    if not u:
+        return ""
+    parsed = urlparse(u)
+    if not parsed.scheme:
+        u = "https://" + u
+    return u
+
+def _build_markdown_proxy_urls(url):
+    normalized = _normalize_url(url)
+    if not normalized:
+        return []
+    parsed = urlparse(normalized)
+    host_path = parsed.netloc + parsed.path
+    if parsed.query:
+        host_path += "?" + parsed.query
+    http_variant = "http://" + host_path
+    candidates = [
+        f"https://markdown.new/{normalized}",
+        f"https://defuddle.md/{normalized}",
+        f"https://r.jina.ai/{normalized}",
+        f"https://r.jina.ai/{http_variant}"
+    ]
+    deduped = []
+    for item in candidates:
+        if item not in deduped:
+            deduped.append(item)
+    return deduped
+
+def _fetch_text_direct(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    resp = requests.get(url, headers=headers, timeout=20)
+    if resp.status_code != 200:
+        return None
+    text = resp.text or ""
+    cleaned = text.strip()
+    if len(cleaned) < 80:
+        return None
+    return cleaned
+
+def _extract_with_trafilatura(url):
+    trafilatura = get_trafilatura()
+    downloaded = trafilatura.fetch_url(url)
+    if downloaded is None:
+        return None
+    text = trafilatura.extract(downloaded)
+    return text.strip() if text else None
+
+def _extract_with_scrapling(url):
+    try:
+        ensure_package_installed("scrapling")
+    except Exception:
+        return None
+    import_attempts = [
+        ("scrapling.fetchers", "Fetcher"),
+        ("scrapling", "Fetcher"),
+        ("scrapling", "Scraper"),
+    ]
+    for mod_name, cls_name in import_attempts:
+        try:
+            module = __import__(mod_name, fromlist=[cls_name])
+            cls = getattr(module, cls_name, None)
+            if cls is None:
+                continue
+            instance = cls()
+            for method_name in ["get", "fetch", "request"]:
+                method = getattr(instance, method_name, None)
+                if not callable(method):
+                    continue
+                result = method(url)
+                text_candidates = [
+                    getattr(result, "text", None),
+                    getattr(result, "content", None),
+                    str(result) if result is not None else None
+                ]
+                for txt in text_candidates:
+                    if isinstance(txt, bytes):
+                        try:
+                            txt = txt.decode("utf-8", errors="replace")
+                        except Exception:
+                            txt = None
+                    if isinstance(txt, str) and len(txt.strip()) > 120:
+                        return txt.strip()
+        except Exception:
+            continue
+    return None
 
 def _search_bing_fallback(query, max_results=5):
     """
@@ -97,15 +188,27 @@ def read_article(url):
         url (str): The URL of the article to read.
     """
     try:
-        trafilatura = get_trafilatura()
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded is None:
-            return "Error: Could not fetch URL (404 or blocked)."
-            
-        text = trafilatura.extract(downloaded)
-        if text is None:
-            return "Error: Could not extract text content from the page."
-            
-        return text
+        normalized = _normalize_url(url)
+        if not normalized:
+            return "Error: Empty URL."
+
+        primary = _extract_with_trafilatura(normalized)
+        if primary:
+            return primary
+
+        for proxy_url in _build_markdown_proxy_urls(normalized):
+            proxied = _fetch_text_direct(proxy_url)
+            if proxied:
+                return proxied
+
+            proxied_extracted = _extract_with_trafilatura(proxy_url)
+            if proxied_extracted:
+                return proxied_extracted
+
+        scrapling_text = _extract_with_scrapling(normalized)
+        if scrapling_text:
+            return scrapling_text
+
+        return "Error: Could not extract text with direct fetch, markdown proxies, or Scrapling fallback."
     except Exception as e:
         return f"Error reading article: {str(e)}"

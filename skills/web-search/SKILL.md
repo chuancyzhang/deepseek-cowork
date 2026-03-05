@@ -17,8 +17,11 @@ This skill allows the agent to search the internet for information and extract c
 ## Capabilities
 1. **Search Web**: Search using DuckDuckGo to find relevant URLs and snippets.
 2. **Read Article**: Extract main text content from a given URL (removing ads/navbars).
+3. **Markdown Proxy Fallbacks**: If direct extraction fails, retry through `markdown.new/`, `defuddle.md/`, and `r.jina.ai/`.
+4. **Scrapling Fallback**: If all previous paths fail, attempt extraction via Scrapling.
 
 ## Usage Guidelines
 - **Privacy**: Searches are performed via DuckDuckGo (privacy-focused).
 - **Rate Limits**: Avoid making excessive requests in a short loop.
 - **Content**: Reading articles extracts text only; images and complex layouts are ignored.
+- **Fallback Order**: direct URL → markdown.new → defuddle.md → r.jina.ai → Scrapling.

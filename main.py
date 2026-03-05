@@ -1713,13 +1713,14 @@ class ChatBubble(QFrame):
             self.think_toggle_btn.setChecked(True)
 
 class ToolCallCard(QFrame):
-    clicked = Signal(str, str, str) # tool_id, args, result
+    clicked = Signal(str, str, str, dict) # tool_id, args, result, meta
 
-    def __init__(self, tool_name, args, tool_id):
+    def __init__(self, tool_name, args, tool_id, meta=None):
         super().__init__()
         self.tool_id = tool_id
         self.args = args
         self.result = ""
+        self.meta = meta or {}
         self.tool_name = tool_name
         self.is_selected = False
         
@@ -1822,7 +1823,7 @@ class ToolCallCard(QFrame):
                 background: {DesignTokens.bg_secondary};
             }}
         """)
-        self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result)))
+        self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result), self.meta))
 
         row_layout.addWidget(self.icon_label)
         row_layout.addWidget(text_container, 1) # Expand
@@ -2425,6 +2426,7 @@ class MainWindow(QMainWindow):
         
         # Animation Throttling
         self.last_message_time = 0
+        self.last_ui_update_time = 0
 
         # Connect to Interaction Bridge
         bridge.request_confirmation_signal.connect(self.handle_confirmation_request)
@@ -2627,6 +2629,10 @@ class MainWindow(QMainWindow):
         self.td_info_label.setStyleSheet("color: #6b7280; font-size: 12px;")
         td_layout.addWidget(self.td_info_label)
         
+        self.td_meta_label = QLabel("")
+        self.td_meta_label.setStyleSheet("color: #6b7280; font-size: 11px; margin-bottom: 4px;")
+        td_layout.addWidget(self.td_meta_label)
+        
         # Args
         td_args_label = QLabel("Arguments:")
         td_args_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
@@ -2708,7 +2714,15 @@ class MainWindow(QMainWindow):
         # Set Initial Sizes (Sidebar: 260, Main: Flexible, Right: 280)
         self.main_splitter.setSizes([260, 800, 280])
 
-        # Main Layout Construction
+    def process_ui_events(self, force=False):
+        """Throttled processEvents to prevent UI freezing without overwhelming the event loop"""
+        import time
+        now = time.time()
+        if force or (now - self.last_ui_update_time > 0.05): # 50ms throttle
+            QApplication.processEvents()
+            self.last_ui_update_time = now
+
+    # Main Layout Construction
         layout = QVBoxLayout(main_container)
         layout.setContentsMargins(40, 32, 40, 32)
         layout.setSpacing(20)
@@ -3433,7 +3447,7 @@ class MainWindow(QMainWindow):
         
         self.render_message_batch(msgs_to_load, state.session_id, insert_index=1, animate=False)
         
-        QApplication.processEvents()
+        self.process_ui_events(force=True)
         new_max = vbar.maximum()
         if old_val <= 5:
             vbar.setValue(0)
@@ -3502,8 +3516,25 @@ class MainWindow(QMainWindow):
             nonlocal active_agent_bubble, pending_content_parts
             if not active_agent_bubble:
                 return
+            
+            final_content = ""
             if pending_content_parts:
-                active_agent_bubble.set_main_content("\n\n".join(pending_content_parts))
+                final_content = "\n\n".join(pending_content_parts)
+                active_agent_bubble.set_main_content(final_content)
+            
+            # Intelligent Fallback: Check if content is empty
+            # If so, check if tools were executed
+            current_text = active_agent_bubble.content_label.text().strip()
+            if not final_content and not current_text:
+                has_tools = False
+                if hasattr(active_agent_bubble, 'think_container_layout'):
+                     has_tools = active_agent_bubble.think_container_layout.count() > 0
+                
+                if has_tools:
+                    active_agent_bubble.set_main_content("任务已执行，详情请查看上方工具调用卡片。")
+                else:
+                    active_agent_bubble.set_main_content("未生成有效内容。")
+
             active_agent_bubble.update_thinking(duration=None, is_final=True)
             active_agent_bubble = None
             pending_content_parts = []
@@ -3565,7 +3596,8 @@ class MainWindow(QMainWindow):
                     if t_id in state.tool_cards:
                         self.update_tool_card({
                             'id': t_id,
-                            'result': t_result
+                            'result': t_result,
+                            'meta': msg.get('meta')
                         }, session_id=session_id)
                     
         finalize_active_bubble()
@@ -3994,12 +4026,14 @@ class MainWindow(QMainWindow):
         else:
             self.process_agent_logic(user_text)
 
-    def show_tool_details(self, tool_id, args, result, switch_tab=True):
+    def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
         # 1. Update selection state in UI
         state = self.get_current_session()
         if state:
             for tid, card in state.tool_cards.items():
                 card.set_selected(tid == tool_id)
+                if meta is None and tid == tool_id:
+                    meta = card.meta
         
         self.current_selected_tool_id = tool_id
 
@@ -4012,6 +4046,20 @@ class MainWindow(QMainWindow):
         
         # 3. Update Content
         self.td_info_label.setText(f"工具 ID: {tool_id}")
+        
+        # Update Meta Label
+        meta_text = ""
+        if meta:
+             start_time = meta.get("start_time")
+             duration = meta.get("duration")
+             if start_time:
+                 import datetime
+                 st_str = datetime.datetime.fromtimestamp(start_time).strftime('%H:%M:%S')
+                 meta_text += f"Time: {st_str}  "
+             if duration is not None:
+                 meta_text += f"Duration: {duration:.2f}s"
+        self.td_meta_label.setText(meta_text)
+        self.td_meta_label.setVisible(bool(meta_text))
         
         # Format JSON if possible
         try:
@@ -4041,7 +4089,8 @@ class MainWindow(QMainWindow):
         self.td_result_edit.setPlainText(res_text)
 
     def add_tool_card(self, data, session_id=None, index=None, animate=True):
-        card = ToolCallCard(data['name'], data['args'], data['id'])
+        meta = data.get('meta') or {}
+        card = ToolCallCard(data['name'], data['args'], data['id'], meta=meta)
         card.clicked.connect(self.show_tool_details)
         
         state = self.get_session(session_id)
@@ -4068,7 +4117,7 @@ class MainWindow(QMainWindow):
             else:
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
             
-            QApplication.processEvents()
+            self.process_ui_events(force=animate)
             
             if animate:
                 opacity_effect.setOpacity(0)
@@ -4091,16 +4140,19 @@ class MainWindow(QMainWindow):
             else:
                 opacity_effect.setOpacity(1.0)
             
-        QApplication.processEvents()
+        self.process_ui_events(force=animate)
 
     def update_tool_card(self, data, session_id=None):
         tool_id = data['id']
         result = data['result']
+        meta = data.get('meta')
         state = self.get_session(session_id)
         if not state: return
         if tool_id in state.tool_cards:
             card = state.tool_cards[tool_id]
             card.set_result(result)
+            if meta:
+                card.meta.update(meta)
             
             # [Optimization] Real-time refresh if currently viewing this tool
             if (hasattr(self, 'current_selected_tool_id') and 
@@ -4108,7 +4160,7 @@ class MainWindow(QMainWindow):
                 self.right_sidebar.isVisible() and 
                 self.right_tabs.currentIndex() == 1):
                 
-                self.show_tool_details(tool_id, card.args, result, switch_tab=False)
+                self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
 
     def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True):
         state = self.get_current_session()
@@ -4136,7 +4188,7 @@ class MainWindow(QMainWindow):
         else:
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         
-        QApplication.processEvents() 
+        self.process_ui_events(force=animate)
         
         if animate:
             opacity_effect.setOpacity(0)
@@ -4172,7 +4224,7 @@ class MainWindow(QMainWindow):
         if not state: return
         toast = SystemToast(text, type)
         state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast)
-        QApplication.processEvents()
+        self.process_ui_events(force=True)
         if auto_close_ms: QTimer.singleShot(auto_close_ms, toast.deleteLater)
 
     def append_log(self, text):
@@ -4186,7 +4238,7 @@ class MainWindow(QMainWindow):
         # Insert "Thinking" bubble
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
-        QApplication.processEvents()
+        self.process_ui_events(force=True)
 
         state.llm_worker = LLMWorker(state.messages, self.config_manager, self.workspace_dir)
         if state.session_id == self.current_session_id:
@@ -4212,7 +4264,7 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
-        QApplication.processEvents()
+        self.process_ui_events(force=True)
         state.daemon_running = True
         state.daemon_worker = DaemonStreamWorker(self.daemon_client, state.session_id, user_text, self.workspace_dir)
         state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id: self.handle_daemon_response(result, sid))
@@ -4454,7 +4506,7 @@ class MainWindow(QMainWindow):
             
             state.last_agent_bubble.code_output_edit.append(text)
             state.last_agent_bubble.code_output_edit.adjustHeight()
-            QApplication.processEvents()
+            self.process_ui_events()
 
     def handle_code_finished(self, session_id=None):
         state = self.get_session(session_id)

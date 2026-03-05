@@ -286,6 +286,8 @@ def sanitize_llm_messages(messages):
             del clean_msg['reasoning']
         if clean_msg.get("tool_calls") and "reasoning_content" not in clean_msg:
             clean_msg["reasoning_content"] = ""
+        if 'meta' in clean_msg:
+            del clean_msg['meta']
         cleaned.append(clean_msg)
     return cleaned
 
@@ -650,6 +652,7 @@ class LLMWorker(QThread):
                             
                             # Execute via Skill Manager
                             # Pass step_signal as context to allow tools to log
+                            start_tool_time = time.time()
                             result = self.skill_manager.call_tool(
                                 name, 
                                 args, 
@@ -662,17 +665,29 @@ class LLMWorker(QThread):
                                     "abort_signal": self.abort_signal
                                 }
                             )
+                            end_tool_time = time.time()
+                            duration_tool = end_tool_time - start_tool_time
                             
                             # Emit Tool Result Signal
                             self.tool_result_signal.emit({
                                 "id": tool.id,
-                                "result": str(result)
+                                "result": str(result),
+                                "meta": {
+                                    "start_time": start_tool_time,
+                                    "end_time": end_tool_time,
+                                    "duration": duration_tool
+                                }
                             })
 
                             tool_msg = {
                                 "role": "tool",
                                 "tool_call_id": tool.id,
-                                "content": str(result) # Ensure content is string to avoid API errors
+                                "content": str(result),
+                                "meta": {
+                                    "start_time": start_tool_time,
+                                    "end_time": end_tool_time,
+                                    "duration": duration_tool
+                                }
                             }
                             current_messages.append(tool_msg)
                             generated_messages.append(tool_msg)

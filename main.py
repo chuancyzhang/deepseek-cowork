@@ -1926,7 +1926,7 @@ class ToolCallCard(QFrame):
             super().keyPressEvent(event)
 
     def on_card_clicked(self, event):
-        self.clicked.emit(self.tool_id, str(self.args), str(self.result))
+        self.clicked.emit(self.tool_id, str(self.args), str(self.result), self.meta)
 
     def set_selected(self, selected):
         self.is_selected = selected
@@ -4048,15 +4048,22 @@ class MainWindow(QMainWindow):
         
         # Update Meta Label
         meta_text = ""
-        if meta:
-             start_time = meta.get("start_time")
-             duration = meta.get("duration")
-             if start_time:
-                 import datetime
-                 st_str = datetime.datetime.fromtimestamp(start_time).strftime('%H:%M:%S')
-                 meta_text += f"Time: {st_str}  "
-             if duration is not None:
-                 meta_text += f"Duration: {duration:.2f}s"
+        if isinstance(meta, dict):
+            start_time = meta.get("start_time")
+            duration = meta.get("duration")
+            try:
+                if start_time is not None and start_time != "":
+                    start_ts = float(start_time)
+                    st_str = datetime.fromtimestamp(start_ts).strftime('%H:%M:%S')
+                    meta_text += f"Time: {st_str}  "
+            except Exception:
+                pass
+            try:
+                if duration is not None and duration != "":
+                    duration_sec = float(duration)
+                    meta_text += f"Duration: {duration_sec:.2f}s"
+            except Exception:
+                pass
         self.td_meta_label.setText(meta_text)
         self.td_meta_label.setVisible(bool(meta_text))
         

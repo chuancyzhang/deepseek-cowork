@@ -3426,6 +3426,11 @@ class MainWindow(QMainWindow):
                         func = tc.get('function', {})
                         t_name = func.get('name')
                         t_args = func.get('arguments')
+                        if isinstance(t_args, str):
+                            try:
+                                t_args = json.loads(t_args)
+                            except Exception:
+                                pass
                         self.add_tool_card({
                             'id': t_id,
                             'name': t_name,
@@ -3438,6 +3443,14 @@ class MainWindow(QMainWindow):
                 t_id = msg.get('tool_call_id')
                 t_result = content
                 if t_id:
+                    if t_id not in state.tool_cards:
+                        self.add_tool_card({
+                            'id': t_id,
+                            'name': 'tool_result',
+                            'args': {}
+                        }, session_id=session_id, index=current_idx, animate=animate)
+                        if current_idx is not None:
+                            current_idx += 1
                     self.update_tool_card({
                         'id': t_id,
                         'result': t_result

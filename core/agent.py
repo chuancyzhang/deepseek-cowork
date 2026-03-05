@@ -191,9 +191,94 @@ def clear_reasoning_content(messages):
         cleaned.append(clean_msg)
     return cleaned
 
-def sanitize_llm_messages(messages):
+def repair_tool_call_sequence(messages):
     cleaned = []
+    pending = {}
+
+    def drop_pending():
+        nonlocal pending, cleaned
+        if not pending:
+            return
+        grouped = {}
+        for call_id, idx in pending.items():
+            grouped.setdefault(idx, set()).add(call_id)
+        for idx, ids in grouped.items():
+            if idx < 0 or idx >= len(cleaned):
+                continue
+            msg = cleaned[idx]
+            calls = msg.get("tool_calls") or []
+            kept = [tc for tc in calls if tc.get("id") not in ids]
+            if kept:
+                msg["tool_calls"] = kept
+            else:
+                msg.pop("tool_calls", None)
+            cleaned[idx] = msg
+        pending = {}
+
     for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+
+        role = msg.get("role")
+
+        if role != "tool" and pending:
+            drop_pending()
+
+        if role == "assistant" and msg.get("tool_calls"):
+            normalized_calls = []
+            for tc in msg.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                call_id = tc.get("id")
+                func = tc.get("function")
+                if not call_id or not isinstance(func, dict) or not func.get("name"):
+                    continue
+                args = func.get("arguments", "")
+                if not isinstance(args, str):
+                    try:
+                        args = json.dumps(args, ensure_ascii=False)
+                    except Exception:
+                        args = str(args)
+                normalized_calls.append(
+                    {
+                        "id": call_id,
+                        "type": tc.get("type", "function"),
+                        "function": {
+                            "name": func.get("name"),
+                            "arguments": args
+                        }
+                    }
+                )
+            msg_copy = msg.copy()
+            if normalized_calls:
+                msg_copy["tool_calls"] = normalized_calls
+                cleaned.append(msg_copy)
+                idx = len(cleaned) - 1
+                for tc in normalized_calls:
+                    pending[tc["id"]] = idx
+            else:
+                msg_copy.pop("tool_calls", None)
+                cleaned.append(msg_copy)
+            continue
+
+        if role == "tool":
+            call_id = msg.get("tool_call_id")
+            if call_id and call_id in pending:
+                cleaned.append(msg.copy())
+                pending.pop(call_id, None)
+            continue
+
+        cleaned.append(msg.copy())
+
+    if pending:
+        drop_pending()
+
+    return cleaned
+
+def sanitize_llm_messages(messages):
+    repaired = repair_tool_call_sequence(messages)
+    cleaned = []
+    for msg in repaired:
         clean_msg = msg.copy()
         if 'reasoning_content' in clean_msg:
             clean_msg['reasoning_content'] = ""
@@ -262,7 +347,7 @@ class LLMWorker(QThread):
     def run(self):
         # Work on a copy of messages to handle multi-turn locally
         # CRITICAL: Clear previous reasoning content to avoid duplication/confusion in new turn
-        current_messages = clear_reasoning_content(self.messages)
+        current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
         python_exe = get_python_executable()
         
         # Construct System Context

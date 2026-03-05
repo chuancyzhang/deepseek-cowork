@@ -2714,15 +2714,7 @@ class MainWindow(QMainWindow):
         # Set Initial Sizes (Sidebar: 260, Main: Flexible, Right: 280)
         self.main_splitter.setSizes([260, 800, 280])
 
-    def process_ui_events(self, force=False):
-        """Throttled processEvents to prevent UI freezing without overwhelming the event loop"""
-        import time
-        now = time.time()
-        if force or (now - self.last_ui_update_time > 0.05): # 50ms throttle
-            QApplication.processEvents()
-            self.last_ui_update_time = now
-
-    # Main Layout Construction
+        # Main Layout Construction
         layout = QVBoxLayout(main_container)
         layout.setContentsMargins(40, 32, 40, 32)
         layout.setSpacing(20)
@@ -2846,6 +2838,13 @@ class MainWindow(QMainWindow):
         self.setup_daemon_client()
         self.start_daemon_monitor()
         self.setup_tray()
+
+    def process_ui_events(self, force=False):
+        import time
+        now = time.time()
+        if force or (now - self.last_ui_update_time > 0.05):
+            QApplication.processEvents()
+            self.last_ui_update_time = now
 
     def update_ui_state_for_workspace(self):
         if self.workspace_dir:

@@ -566,8 +566,8 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
     total_thinking = ""
     sent_any = False
     last_send_time = time.time()
-    min_chars = 200
-    min_interval = 0.8
+    min_chars = 800
+    min_interval = 1.5
     card_message_id = None
     use_card = False
     card_attempted = False
@@ -592,7 +592,9 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                         if use_card and card_message_id:
                             content = total_text or "正在处理..."
                             thinking = _truncate_text(total_thinking, limit=2000)
-                            provider.update_card_message(card_message_id, content, thinking=thinking)
+                            updated = provider.update_card_message(card_message_id, content, thinking=thinking)
+                            if updated:
+                                sent_any = True
                         if use_card:
                             pending_text = ""
                             pending_thinking = ""
@@ -611,7 +613,9 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                         if use_card and card_message_id:
                             content = total_text or "正在处理..."
                             thinking = _truncate_text(total_thinking, limit=2000)
-                            provider.update_card_message(card_message_id, content, thinking=thinking)
+                            updated = provider.update_card_message(card_message_id, content, thinking=thinking)
+                            if updated:
+                                sent_any = True
                         if use_card:
                             pending_thinking = ""
                             last_send_time = now
@@ -684,14 +688,23 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
             provider.send_card_reply(event, card_content=f"⚠️ {result.get('error')}", title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True)
         return None
     if pending_text:
-        if use_card and card_message_id:
-            provider.update_card_message(card_message_id, (total_text + pending_text) or "处理完成", thinking=_truncate_text(total_thinking, limit=2000))
-            pending_text = ""
-        if pending_text:
-            pending_text = ""
+        pending_text = ""
     output = _extract_content(result)
     if use_card and card_message_id:
-        provider.update_card_message(card_message_id, output or "处理完成", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True)
+        final_ok = provider.update_card_message(
+            card_message_id,
+            output or "处理完成",
+            thinking=_truncate_text(total_thinking, limit=2000),
+            collapse_thinking=True
+        )
+        if not final_ok:
+            provider.send_card_reply(
+                event,
+                card_content=output or "处理完成",
+                title="🤖 AI 助手",
+                thinking=_truncate_text(total_thinking, limit=2000),
+                collapse_thinking=True
+            )
         return None
     if (not sent_any and output) or ((not total_text.strip()) and output):
         _log_gateway(f"feishu daemon ok result={_safe_json_dump(result)} output_len={len(output or '')}")

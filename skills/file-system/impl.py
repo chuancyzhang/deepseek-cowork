@@ -30,8 +30,14 @@ def _validate_path(workspace_dir, path, context=None, must_exist=False):
     abs_workspace = os.path.abspath(workspace_dir)
     
     god_mode = _is_god_mode(context)
-    
-    if not god_mode and not abs_path.startswith(abs_workspace):
+
+    in_workspace = False
+    try:
+        in_workspace = os.path.commonpath([abs_workspace, abs_path]) == abs_workspace
+    except Exception:
+        in_workspace = False
+
+    if not god_mode and not in_workspace:
          raise PermissionError("Access denied (Path Traversal).")
     
     if must_exist and not os.path.exists(abs_path):

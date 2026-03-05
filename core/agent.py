@@ -624,7 +624,16 @@ class LLMWorker(QThread):
                             if self.is_stopped: break
                             
                             name = tool.function.name
-                            args = json.loads(tool.function.arguments)
+                            raw_args = tool.function.arguments
+                            args = {}
+                            if isinstance(raw_args, dict):
+                                args = raw_args
+                            elif isinstance(raw_args, str) and raw_args.strip():
+                                try:
+                                    args = json.loads(raw_args)
+                                except Exception:
+                                    args = {}
+                                    self.output_signal.emit(f"Tool Args Parse Fallback: {name} received invalid JSON arguments.")
                             self.step_signal.emit(f"Executing Tool: {name}({args})")
                             
                             # Emit Tool Call Signal

@@ -150,14 +150,17 @@ class AnthropicProvider(LLMProvider):
             with self.client.messages.stream(**kwargs) as stream:
                 for event in stream:
                     if event.type == "content_block_delta":
-                        if event.delta.type == "text_delta":
+                        delta_type = getattr(event.delta, "type", "")
+                        if delta_type == "text_delta":
                             yield {"type": "content", "content": event.delta.text}
-                        elif event.delta.type == "input_json_delta":
-                            # Streaming tool args
-                            # We need to track index manually or assume single tool call per block?
-                            # Anthropic SDK stream helper might be easier, but let's use raw events for fine control
-                            # actually 'index' is in content_block_start
-                            pass 
+                        elif delta_type == "input_json_delta":
+                            yield {
+                                "type": "tool_call",
+                                "index": event.index,
+                                "function": {
+                                    "arguments": getattr(event.delta, "partial_json", "") or ""
+                                }
+                            }
                             
                     elif event.type == "content_block_start":
                         if event.content_block.type == "tool_use":
@@ -170,15 +173,6 @@ class AnthropicProvider(LLMProvider):
                                     "arguments": "" # Start
                                 }
                             }
-                            
-                    elif event.type == "content_block_delta" and event.delta.type == "input_json_delta":
-                         yield {
-                            "type": "tool_call",
-                            "index": event.index, 
-                            "function": {
-                                "arguments": event.delta.partial_json
-                            }
-                        }
 
         except Exception as e:
             yield {"type": "error", "content": str(e)}

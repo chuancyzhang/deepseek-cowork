@@ -3,6 +3,7 @@ import subprocess
 import re
 import fnmatch
 import shutil
+import locale
 from PySide6.QtCore import QObject, Qt
 
 def _is_god_mode(context):
@@ -28,6 +29,37 @@ def _init_abort_state(context):
     state["bridge"] = bridge
     return state
 
+def _decode_bytes(raw):
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    candidates = ["utf-8", "utf-8-sig"]
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        candidates.append(preferred)
+    if os.name == "nt":
+        candidates.extend(["mbcs", "cp936", "gbk", "cp950", "cp932"])
+    best = None
+    best_score = -1
+    for enc in candidates:
+        try:
+            text = raw.decode(enc, errors="replace")
+        except Exception:
+            continue
+        score = -text.count("�")
+        if re.search(r"[\u4e00-\u9fff]", text):
+            score += 5
+        if score > best_score:
+            best_score = score
+            best = text
+    if best is not None:
+        return best
+    try:
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return str(raw)
+
 def bash(workspace_dir, command, _context=None):
     """
     Execute a shell command.
@@ -51,9 +83,7 @@ def bash(workspace_dir, command, _context=None):
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
+            text=False
         )
         while True:
             if abort_state["aborted"]:
@@ -67,10 +97,12 @@ def bash(workspace_dir, command, _context=None):
                         pass
                 return "Error: Command aborted by user."
             try:
-                output, error = process.communicate(timeout=0.2)
+                output_raw, error_raw = process.communicate(timeout=0.2)
                 break
             except subprocess.TimeoutExpired:
                 continue
+        output = _decode_bytes(output_raw)
+        error = _decode_bytes(error_raw)
         output = output or ""
         if error:
             if output:
@@ -171,15 +203,12 @@ def _run_everything_search(query, limit=200):
     try:
         result = subprocess.run(
             [exe_path, "-n", str(limit), query],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace"
+            capture_output=True
         )
         if result.returncode != 0:
-            err = result.stderr.strip() or result.stdout.strip()
+            err = _decode_bytes(result.stderr).strip() or _decode_bytes(result.stdout).strip()
             return None, err or "Everything CLI failed."
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        lines = [line.strip() for line in _decode_bytes(result.stdout).splitlines() if line.strip()]
         return lines, None
     except Exception as e:
         return None, str(e)

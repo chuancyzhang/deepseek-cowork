@@ -53,9 +53,12 @@ def list_files(workspace_dir, path=".", _context=None):
         items = os.listdir(abs_path)
         # Filter hidden files
         items = [i for i in items if not i.startswith('.')]
-        return json.dumps(items)
+        return json.dumps(items, ensure_ascii=False)
     except Exception as e:
         return f"Error: {str(e)}"
+
+def list_file(workspace_dir, path=".", _context=None):
+    return list_files(workspace_dir, path=path, _context=_context)
 
 def rename_file(workspace_dir, old_path, new_path, _context=None):
     """

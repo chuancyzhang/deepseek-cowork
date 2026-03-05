@@ -7,7 +7,7 @@ metadata:
   author: deepseek-cowork team
   version: "1.1"
 security_level: high
-allowed-tools: ["list_files", "read_file", "rename_file", "delete_file", "read_docx", "write_docx", "read_pptx", "create_pptx", "read_excel", "write_excel", "read_pdf"]
+allowed-tools: ["list_files", "list_file", "read_file", "rename_file", "delete_file", "read_docx", "write_docx", "read_pptx", "create_pptx", "read_excel", "write_excel", "read_pdf"]
 ---
 
 # File System Skill

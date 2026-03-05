@@ -14,7 +14,7 @@ import socket
 from datetime import datetime
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
-from core.agent import LLMWorker, CodeWorker
+from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
 from core.skill_generator import SkillGenerator
 from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
@@ -3460,6 +3460,29 @@ class MainWindow(QMainWindow):
         if insert_index is not None:
              state.last_agent_bubble = backup_last_agent
 
+    def _normalize_and_persist_session_messages(self, session_id, messages, force_persist=False):
+        source_messages = messages if isinstance(messages, list) else []
+        try:
+            normalized_messages = repair_tool_call_sequence(source_messages)
+        except Exception:
+            normalized_messages = source_messages
+
+        changed = False
+        try:
+            changed = json.dumps(source_messages, ensure_ascii=False, sort_keys=True) != json.dumps(normalized_messages, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            changed = normalized_messages != source_messages
+
+        if force_persist or changed:
+            title = self._compute_session_title(normalized_messages)
+            meta = {"workspace_dir": self.workspace_dir} if self.workspace_dir else None
+            try:
+                self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=meta)
+            except Exception as e:
+                print(f"Error migrating session messages: {e}")
+
+        return normalized_messages
+
     def load_session(self, session_id):
         if session_id in self.sessions:
             state = self.sessions[session_id]
@@ -3488,6 +3511,7 @@ class MainWindow(QMainWindow):
         state.displayed_count = 0
         state.load_more_btn = None
 
+        loaded_from_json = False
         state.messages = self.chat_storage.get_messages(session_id)
         if not state.messages:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
@@ -3495,10 +3519,16 @@ class MainWindow(QMainWindow):
                 try:
                     with open(history_path, 'r', encoding='utf-8') as f:
                         state.messages = json.load(f)
-                    title = self._compute_session_title(state.messages)
-                    self.chat_storage.save_conversation(session_id, state.messages, title=title)
+                    loaded_from_json = True
                 except Exception as e:
                     print(f"Error loading session: {e}")
+
+        if state.messages:
+            state.messages = self._normalize_and_persist_session_messages(
+                session_id,
+                state.messages,
+                force_persist=loaded_from_json
+            )
 
         if state.messages:
             PAGE_SIZE = 20

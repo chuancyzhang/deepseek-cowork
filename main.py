@@ -3476,6 +3476,25 @@ class MainWindow(QMainWindow):
         state.last_agent_bubble = None 
         active_agent_bubble = None
         pending_content_parts = []
+        tool_meta_by_id = {}
+        for full_msg in state.messages or []:
+            if full_msg.get("role") != "assistant":
+                continue
+            for tc in full_msg.get("tool_calls") or []:
+                call_id = tc.get("id")
+                func = tc.get("function") or {}
+                if not call_id:
+                    continue
+                args = func.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        pass
+                tool_meta_by_id[call_id] = {
+                    "name": func.get("name") or "unknown_tool",
+                    "args": args if args is not None else {}
+                }
 
         def finalize_active_bubble():
             nonlocal active_agent_bubble, pending_content_parts
@@ -3532,18 +3551,20 @@ class MainWindow(QMainWindow):
                 t_id = msg.get('tool_call_id')
                 t_result = content
                 if t_id:
-                    if t_id not in state.tool_cards:
+                    if t_id not in state.tool_cards and t_id in tool_meta_by_id:
+                        meta = tool_meta_by_id[t_id]
                         self.add_tool_card({
                             'id': t_id,
-                            'name': 'tool_result',
-                            'args': {}
+                            'name': meta.get('name') or 'unknown_tool',
+                            'args': meta.get('args') if meta.get('args') is not None else {}
                         }, session_id=session_id, index=current_idx, animate=animate)
                         if current_idx is not None:
                             current_idx += 1
-                    self.update_tool_card({
-                        'id': t_id,
-                        'result': t_result
-                    }, session_id=session_id)
+                    if t_id in state.tool_cards:
+                        self.update_tool_card({
+                            'id': t_id,
+                            'result': t_result
+                        }, session_id=session_id)
                     
         finalize_active_bubble()
         if insert_index is not None:

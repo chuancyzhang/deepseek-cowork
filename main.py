@@ -600,20 +600,33 @@ class AutoResizingLabel(QLabel):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_STYLESHEET)
-        
-        # 复制 (Copy)
-        action_copy = QAction("复制", self)
+
+        selected = self.selectedText() or ""
+        selected_len = len(selected)
+        status = QAction(f"已选中 {selected_len} 字符", self)
+        status.setEnabled(False)
+        menu.addAction(status)
+        menu.addSeparator()
+
+        action_copy = QAction("复制选中内容", self)
         action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
-        action_copy.triggered.connect(lambda: QApplication.clipboard().setText(self.selectedText()))
+        action_copy.setShortcut("Ctrl+C")
+        action_copy.setShortcutVisibleInContextMenu(True)
+        action_copy.triggered.connect(lambda: QApplication.clipboard().setText(selected))
         action_copy.setEnabled(self.hasSelectedText())
         menu.addAction(action_copy)
-        
-        # 全选 (Select All)
+
+        action_copy_all = QAction("复制全部内容", self)
+        action_copy_all.setIcon(qta.icon('fa5s.clone', color='#4b5563'))
+        action_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.text() or ""))
+        action_copy_all.setEnabled(bool((self.text() or "").strip()))
+        menu.addAction(action_copy_all)
+
         action_select_all = QAction("全选", self)
         action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
         action_select_all.triggered.connect(lambda: self.setSelection(0, len(self.text())))
         menu.addAction(action_select_all)
-        
+
         menu.exec(event.globalPos())
 
 class ReadOnlyTextEdit(QTextEdit):
@@ -624,20 +637,33 @@ class ReadOnlyTextEdit(QTextEdit):
     def contextMenuEvent(self, event):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_STYLESHEET)
-        
-        # 复制 (Copy)
-        action_copy = QAction("复制", self)
+
+        selected = self.textCursor().selectedText()
+        selected_len = len(selected or "")
+        status = QAction(f"已选中 {selected_len} 字符", self)
+        status.setEnabled(False)
+        menu.addAction(status)
+        menu.addSeparator()
+
+        action_copy = QAction("复制选中内容", self)
         action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+        action_copy.setShortcut("Ctrl+C")
+        action_copy.setShortcutVisibleInContextMenu(True)
         action_copy.triggered.connect(self.copy)
         action_copy.setEnabled(self.textCursor().hasSelection())
         menu.addAction(action_copy)
-        
-        # 全选 (Select All)
+
+        action_copy_all = QAction("复制全部内容", self)
+        action_copy_all.setIcon(qta.icon('fa5s.clone', color='#4b5563'))
+        action_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText() or ""))
+        action_copy_all.setEnabled(bool((self.toPlainText() or "").strip()))
+        menu.addAction(action_copy_all)
+
         action_select_all = QAction("全选", self)
         action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
         action_select_all.triggered.connect(self.selectAll)
         menu.addAction(action_select_all)
-        
+
         menu.exec(event.globalPos())
 
 class AutoResizingTextEdit(ReadOnlyTextEdit):

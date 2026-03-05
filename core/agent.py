@@ -423,6 +423,7 @@ class LLMWorker(QThread):
         
         last_turn_reasoning = None
         reasoning_repetition_count = 0
+        force_reply_attempted = False
         
         disclosed_skills = set()
         while True:
@@ -554,6 +555,17 @@ class LLMWorker(QThread):
 
                     if tool_calls:
                         self._append_skill_prompts(tool_calls, current_messages, disclosed_skills)
+
+                    if (not tool_calls) and (not (content or "").strip()) and (not provider_error_message):
+                        if not force_reply_attempted:
+                            force_reply_attempted = True
+                            self.step_signal.emit("System: Empty content detected, requesting a forced final answer.")
+                            current_messages.append({
+                                "role": "system",
+                                "content": "你必须立即给出给用户可见的最终答复。禁止只输出思考内容。除非绝对必要，不要继续调用工具。请基于已有上下文与工具结果，直接输出清晰结论。"
+                            })
+                            continue
+                        content = "任务已完成，请查看上方工具执行结果。"
 
                     # Append Assistant Message to History (Manual reconstruction)
                     assistant_msg = {

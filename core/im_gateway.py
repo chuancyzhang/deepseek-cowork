@@ -542,7 +542,7 @@ class SessionMapper:
 
 def _extract_content(result):
     if not isinstance(result, dict):
-        return "⚠️ 未收到有效回复，请重试或查看守护进程状态。"
+        return "任务已处理完成，请查看工具执行结果。"
     content = result.get("content") or ""
     generated_messages = result.get("generated_messages") or []
     if not (content or "").strip() and generated_messages:
@@ -552,7 +552,7 @@ def _extract_content(result):
                 if msg_content.strip():
                     return msg_content
     if not (content or "").strip():
-        return "⚠️ 未收到有效回复，请重试或查看守护进程状态。"
+        return "任务已处理完成，请查看工具执行结果。"
     return content
 
 

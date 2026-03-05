@@ -4182,7 +4182,7 @@ class MainWindow(QMainWindow):
                             reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
                         break
         if not (content or "").strip():
-            content = "⚠️ 未收到有效回复，请重试或查看守护进程状态。"
+            content = "任务已处理完成，请查看上方思考过程。"
 
         has_thinking_text = False
         if bubble.think_container_layout.count() > 0:

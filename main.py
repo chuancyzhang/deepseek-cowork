@@ -3466,6 +3466,19 @@ class MainWindow(QMainWindow):
             normalized_messages = repair_tool_call_sequence(source_messages)
         except Exception:
             normalized_messages = source_messages
+        deduped_messages = []
+        for msg in normalized_messages:
+            if (
+                deduped_messages
+                and isinstance(msg, dict)
+                and isinstance(deduped_messages[-1], dict)
+                and msg.get("role") == "user"
+                and deduped_messages[-1].get("role") == "user"
+                and (msg.get("content") or "") == (deduped_messages[-1].get("content") or "")
+            ):
+                continue
+            deduped_messages.append(msg)
+        normalized_messages = deduped_messages
 
         changed = False
         try:

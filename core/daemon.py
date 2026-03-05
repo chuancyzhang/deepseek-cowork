@@ -68,9 +68,43 @@ class DaemonState:
             messages = self.chat_storage.get_messages(session_id)
         else:
             messages = []
+        messages = self._dedupe_consecutive_user_messages(messages)
         with self.lock:
             self.sessions[session_id] = messages
         return messages
+
+    def _dedupe_consecutive_user_messages(self, messages):
+        if not isinstance(messages, list):
+            return []
+        deduped = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if (
+                deduped
+                and msg.get("role") == "user"
+                and deduped[-1].get("role") == "user"
+                and (msg.get("content") or "") == (deduped[-1].get("content") or "")
+            ):
+                continue
+            deduped.append(msg)
+        return deduped
+
+    def append_user_message_if_needed(self, messages, content):
+        if not isinstance(messages, list):
+            return
+        text = (content or "").strip()
+        if not text:
+            return
+        if messages:
+            last = messages[-1]
+            if (
+                isinstance(last, dict)
+                and last.get("role") == "user"
+                and (last.get("content") or "").strip() == text
+            ):
+                return
+        messages.append({"role": "user", "content": content})
 
     def save_session(self, session_id):
         with self.lock:
@@ -139,7 +173,7 @@ class DaemonState:
         idle_minutes = self.config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
         messages = self.get_session_messages(session_id)
-        messages.append({"role": "user", "content": user_text})
+        self.append_user_message_if_needed(messages, user_text)
         result_holder = {}
         loop = QEventLoop()
 
@@ -222,7 +256,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             idle_minutes = state.config_manager.get("daemon_idle_minutes", 10)
             state.idle_timeout = max(int(idle_minutes), 1) * 60
             messages = state.get_session_messages(session_id)
-            messages.append({"role": "user", "content": content})
+            state.append_user_message_if_needed(messages, content)
             stream_lock = threading.Lock()
 
             def send_stream(payload):

@@ -10,11 +10,25 @@ from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
+from core.env_utils import get_app_data_dir
 from core.interaction import bridge
 
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 23333
+
+def _log_daemon(message):
+    try:
+        log_dir = get_app_data_dir()
+        log_path = os.path.join(log_dir, "daemon.log")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {message}\n")
+    except Exception:
+        try:
+            print(f"[daemon] {message}")
+        except Exception:
+            return
 
 
 def _compute_session_title(messages):
@@ -130,8 +144,8 @@ class DaemonState:
         if worker:
             try:
                 worker.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
             return True
         return False
     
@@ -168,8 +182,8 @@ class DaemonState:
         self.touch()
         try:
             self.config_manager.load_config()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_daemon(f"run_llm_sync load_config failed session_id={session_id} error={e}")
         idle_minutes = self.config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
         messages = self.get_session_messages(session_id)
@@ -251,8 +265,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             state.touch()
             try:
                 state.config_manager.load_config()
-            except Exception:
-                pass
+            except Exception as e:
+                _log_daemon(f"send_message_stream load_config failed session_id={session_id} error={e}")
             idle_minutes = state.config_manager.get("daemon_idle_minutes", 10)
             state.idle_timeout = max(int(idle_minutes), 1) * 60
             messages = state.get_session_messages(session_id)
@@ -265,8 +279,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                         raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
                         self.wfile.write(raw)
                         self.wfile.flush()
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log_daemon(f"send_stream write failed session_id={session_id} payload_type={payload.get('type')} error={e}")
 
             result_holder = {}
             done = threading.Event()
@@ -303,8 +317,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             finally:
                 try:
                     bridge.request_confirmation_signal.disconnect(handle_confirmation_request)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log_daemon(f"disconnect confirmation bridge failed session_id={session_id} error={e}")
             result = result_holder.get("result") or {"error": "No response"}
             if "error" not in result:
                 generated_messages = result.get("generated_messages", [])
@@ -413,24 +427,25 @@ class DaemonClient:
                 "workspace_dir": workspace_dir
             }
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-            reader = sock.makefile("r", encoding="utf-8")
-            for line in reader:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except Exception:
-                    continue
+            with sock.makefile("r", encoding="utf-8") as reader:
+                for line in reader:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        yield json.loads(line)
+                    except Exception as e:
+                        _log_daemon(f"send_message_stream json decode failed session_id={session_id} line_len={len(line)} error={e}")
+                        continue
         finally:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
+            except Exception as e:
+                _log_daemon(f"send_message_stream socket shutdown failed session_id={session_id} error={e}")
             try:
                 sock.close()
-            except Exception:
-                pass
+            except Exception as e:
+                _log_daemon(f"send_message_stream socket close failed session_id={session_id} error={e}")
     
     def stop_session(self, session_id):
         try:

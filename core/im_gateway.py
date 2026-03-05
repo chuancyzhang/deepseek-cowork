@@ -25,7 +25,10 @@ def _log_gateway(message):
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {message}\n")
     except Exception:
-        pass
+        try:
+            print(f"[im_gateway] {message}", file=sys.stderr)
+        except Exception:
+            return
 
 def _truncate_text(value, limit=800):
     if value is None:
@@ -658,8 +661,8 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         return None
     try:
         config_manager.load_config()
-    except Exception:
-        pass
+    except Exception as e:
+        _log_gateway(f"feishu load_config failed error={e}")
     workspace_dir = config_manager.get("default_workspace", "")
     if not config_manager.get_god_mode() and not workspace_dir:
         _log_gateway("feishu handle_im_event blocked: workspace not configured")

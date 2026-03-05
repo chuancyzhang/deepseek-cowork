@@ -114,10 +114,12 @@ class ChatStorage:
         meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
         with self._connect() as conn:
             existing = conn.execute(
-                "SELECT id, created_at FROM conversations WHERE id = ?",
+                "SELECT id, created_at, meta FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
             if existing:
+                if meta is None:
+                    meta_json = existing["meta"]
                 conn.execute(
                     """
                     UPDATE conversations
@@ -134,6 +136,23 @@ class ChatStorage:
                     """,
                     (conversation_id, title, now, now, status, meta_json),
                 )
+
+    def get_conversation_meta(self, conversation_id):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT meta FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        raw_meta = row["meta"]
+        if not raw_meta:
+            return {}
+        try:
+            parsed = json.loads(raw_meta)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
 
     def replace_messages(self, conversation_id, messages):
         now = int(time.time())

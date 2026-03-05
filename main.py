@@ -70,6 +70,8 @@ QMenu::separator {
 }
 """
 
+HISTORY_MIGRATION_VERSION = 1
+
 # --- Helper Classes for UI ---
 
 class Avatar(QLabel):
@@ -3570,8 +3572,15 @@ class MainWindow(QMainWindow):
         if insert_index is not None:
              state.last_agent_bubble = backup_last_agent
 
-    def _normalize_and_persist_session_messages(self, session_id, messages, force_persist=False):
+    def _normalize_and_persist_session_messages(self, session_id, messages, force_persist=False, existing_meta=None):
         source_messages = messages if isinstance(messages, list) else []
+        meta = existing_meta if isinstance(existing_meta, dict) else {}
+        try:
+            current_version = int(meta.get("history_migration_version") or 0)
+        except Exception:
+            current_version = 0
+        if not force_persist and current_version >= HISTORY_MIGRATION_VERSION:
+            return source_messages
         try:
             normalized_messages = repair_tool_call_sequence(source_messages)
         except Exception:
@@ -3596,11 +3605,14 @@ class MainWindow(QMainWindow):
         except Exception:
             changed = normalized_messages != source_messages
 
-        if force_persist or changed:
+        if force_persist or changed or current_version < HISTORY_MIGRATION_VERSION:
             title = self._compute_session_title(normalized_messages)
-            meta = {"workspace_dir": self.workspace_dir} if self.workspace_dir else None
+            merged_meta = dict(meta)
+            if self.workspace_dir:
+                merged_meta["workspace_dir"] = self.workspace_dir
+            merged_meta["history_migration_version"] = HISTORY_MIGRATION_VERSION
             try:
-                self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=meta)
+                self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
                 print(f"Error migrating session messages: {e}")
 
@@ -3635,6 +3647,11 @@ class MainWindow(QMainWindow):
         state.load_more_btn = None
 
         loaded_from_json = False
+        conversation_meta = {}
+        try:
+            conversation_meta = self.chat_storage.get_conversation_meta(session_id)
+        except Exception:
+            conversation_meta = {}
         state.messages = self.chat_storage.get_messages(session_id)
         if not state.messages:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
@@ -3650,7 +3667,8 @@ class MainWindow(QMainWindow):
             state.messages = self._normalize_and_persist_session_messages(
                 session_id,
                 state.messages,
-                force_persist=loaded_from_json
+                force_persist=loaded_from_json,
+                existing_meta=conversation_meta
             )
 
         if state.messages:
@@ -3720,7 +3738,13 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state or not state.messages: return
         title = self._compute_session_title(state.messages)
-        meta = {"workspace_dir": self.workspace_dir} if self.workspace_dir else None
+        meta = {}
+        try:
+            meta = self.chat_storage.get_conversation_meta(state.session_id)
+        except Exception:
+            meta = {}
+        if self.workspace_dir:
+            meta["workspace_dir"] = self.workspace_dir
         try:
             self.chat_storage.save_conversation(state.session_id, state.messages, title=title, meta=meta)
         except Exception:

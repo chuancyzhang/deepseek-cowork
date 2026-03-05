@@ -1237,6 +1237,33 @@ class ChatBubble(QFrame):
             self.content_edit = AutoResizingTextEdit()
             self.content_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
             col_layout.addWidget(self.content_edit)
+            self.main_content_text = ""
+            self.copy_result_btn = QPushButton("复制结果")
+            self.copy_result_btn.setCursor(Qt.PointingHandCursor)
+            self.copy_result_btn.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+            self.copy_result_btn.setVisible(False)
+            self.copy_result_btn.setFixedHeight(26)
+            self.copy_result_btn.setStyleSheet(f"""
+                QPushButton {{
+                    border: 1px solid {DesignTokens.border};
+                    border-radius: 6px;
+                    padding: 2px 10px;
+                    background: {DesignTokens.bg_secondary};
+                    color: {DesignTokens.text_secondary};
+                    font-size: 12px;
+                }}
+                QPushButton:hover {{
+                    color: {DesignTokens.primary};
+                    border-color: {DesignTokens.primary};
+                    background: {DesignTokens.bg_main};
+                }}
+            """)
+            self.copy_result_btn.clicked.connect(self.copy_main_content)
+            copy_row = QHBoxLayout()
+            copy_row.setContentsMargins(0, 0, 0, 0)
+            copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
+            copy_row.addStretch()
+            col_layout.addLayout(copy_row)
             
             # 3. Sub-Agent Indicators
             self.sub_agent_indicators = QWidget()
@@ -1558,6 +1585,7 @@ class ChatBubble(QFrame):
         设置对话气泡的主要内容
         使用延迟调整高度确保文档渲染完成后再计算正确高度
         """
+        self.main_content_text = text or ""
         try:
             # GitHub-like CSS for Markdown
             style = """
@@ -1627,10 +1655,19 @@ class ChatBubble(QFrame):
             self.content_edit.setHtml(style + html_content)
         except Exception:
             self.content_edit.setPlainText(text)
+        self.copy_result_btn.setVisible(bool((text or "").strip()))
         
         # 延迟调整高度，确保文档已渲染完成
         # 使用QTimer.singleShot(0, ...)在事件循环的下一个迭代执行
         QTimer.singleShot(0, self.content_edit.adjustHeight)
+
+    def copy_main_content(self):
+        text = (self.main_content_text or "").strip() or self.content_edit.toPlainText().strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.copy_result_btn.setText("已复制")
+        QTimer.singleShot(1200, lambda: self.copy_result_btn.setText("复制结果"))
         
     def add_tool_card(self, card_widget, session_id=None):
         # Tools inside thinking container? Or after?
@@ -2582,10 +2619,36 @@ class MainWindow(QMainWindow):
         """)
         td_layout.addWidget(self.td_args_edit, 1)
         
-        # Result
+        td_result_header = QWidget()
+        td_result_header_layout = QHBoxLayout(td_result_header)
+        td_result_header_layout.setContentsMargins(0, 0, 0, 0)
+        td_result_header_layout.setSpacing(8)
         td_result_label = QLabel("Result:")
         td_result_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
-        td_layout.addWidget(td_result_label)
+        td_result_header_layout.addWidget(td_result_label)
+        td_result_header_layout.addStretch()
+        self.td_copy_result_btn = QPushButton("复制结果")
+        self.td_copy_result_btn.setCursor(Qt.PointingHandCursor)
+        self.td_copy_result_btn.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+        self.td_copy_result_btn.setFixedHeight(26)
+        self.td_copy_result_btn.setStyleSheet("""
+            QPushButton {
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                background: #f9fafb;
+                color: #6b7280;
+                padding: 2px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                color: #2563eb;
+                border-color: #2563eb;
+                background: #ffffff;
+            }
+        """)
+        self.td_copy_result_btn.clicked.connect(self.copy_tool_result)
+        td_result_header_layout.addWidget(self.td_copy_result_btn)
+        td_layout.addWidget(td_result_header)
         
         self.td_result_edit = ReadOnlyTextEdit()
         # self.td_result_edit.setReadOnly(True)
@@ -3712,6 +3775,14 @@ class MainWindow(QMainWindow):
 
     def copy_path_to_clipboard(self, path):
         QApplication.clipboard().setText(path)
+
+    def copy_tool_result(self):
+        text = self.td_result_edit.toPlainText().strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.td_copy_result_btn.setText("已复制")
+        QTimer.singleShot(1200, lambda: self.td_copy_result_btn.setText("复制结果"))
 
     def delete_path(self, path):
         confirm = QMessageBox.question(self, "确认删除", f"确定要删除该项目吗？\n{path}")

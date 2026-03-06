@@ -4,7 +4,7 @@ description: Meta-tools for the Agent to manage its own skills and experience.
 description_cn: Agent 自我管理工具，用于记录经验和优化技能。
 type: system
 created_by: system
-allowed-tools: update_experience
+allowed-tools: [list_ai_skills, update_experience, delete_ai_skill]
 ---
 
 # Meta Tools
@@ -12,6 +12,12 @@ allowed-tools: update_experience
 Tools for the Agent to self-evolve and manage the skill system.
 
 ## Tools
+
+### list_ai_skills
+Lists all AI-generated skills that can be managed by the agent.
+
+### delete_ai_skill
+Deletes an AI-generated skill by name.
 
 ### update_experience
 Records a successful "experience" or "lesson learned", or updates the description/instructions for a specific skill.
@@ -24,6 +30,9 @@ This allows the skill to evolve by refining its capabilities and usage guide.
 - When the usage instructions (body) need clarification or expansion (use `instructions`).
 
 **Parameters:**
+- `skill_name`: The name of the AI-generated skill to delete.
+
+### update_experience Parameters:
 - `skill_name`: The name of the skill to update.
 - `experience`: (Optional) A concise, actionable sentence describing the lesson learned (appended to existing).
 - `description`: (Optional) A new summary of what the skill does (replaces existing).

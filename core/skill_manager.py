@@ -118,7 +118,6 @@ class SkillManager:
 
         all_skills = []
         seen_skills = set()
-        
         for skills_dir in self.skills_dirs:
             if not os.path.exists(skills_dir):
                 continue
@@ -308,7 +307,6 @@ class SkillManager:
         """
         return self.update_skill(skill_name, experience=experience_text, replace_experience=False)
 
-
     def check_for_updates(self):
         """
         Check if any skill files (SKILL.md or impl.py) have been modified since last load.
@@ -351,7 +349,6 @@ class SkillManager:
         self.skill_prompts_full = {}
         self.tool_to_skill_map = {}
         self.loaded_skills_meta = {}
-        
         # Update timestamp before loading
         import time
         self.last_load_time = time.time()

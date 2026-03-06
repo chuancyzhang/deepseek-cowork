@@ -963,6 +963,7 @@ class HistoryTitleButton(QPushButton):
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self._full_title = title or ""
+        self._display_title = ""
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setToolTip(self._full_title)
@@ -981,7 +982,9 @@ class HistoryTitleButton(QPushButton):
         metrics = QFontMetrics(self.font())
         available = max(24, self.width() - 28)
         display = metrics.elidedText(self._full_title, Qt.ElideRight, available)
-        super().setText(display)
+        if display != self._display_title:
+            self._display_title = display
+            super().setText(display)
 
 class EmptyStateWidget(QWidget):
     def __init__(self, main_window):
@@ -3364,6 +3367,7 @@ class MainWindow(QMainWindow):
             self.daemon_client.confirm_response(confirm_id, result)
 
     def refresh_history_list(self):
+        self.history_container.setUpdatesEnabled(False)
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -3439,6 +3443,8 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     continue
         self.history_layout.addStretch()
+        self.history_container.setUpdatesEnabled(True)
+        self.history_container.update()
 
     def create_load_more_btn(self):
         btn = QPushButton("显示更多历史消息")

@@ -44,37 +44,41 @@ def get_app_data_dir():
     return data_dir
 
 def get_python_executable():
-    """
-    Get the path to the Python executable to use for subprocesses.
-    Prioritizes the bundled 'python_env' in frozen mode to ensure consistency.
-    """
-    # 1. If not frozen (Dev Mode), use the current interpreter
     if not getattr(sys, 'frozen', False):
-        return sys.executable
-
-    # 2. Frozen Mode: Search for bundled python
-    # We expect a 'python_env' folder to be bundled with the application.
-    # Locations to check:
-    # - sys._MEIPASS/python_env/python.exe (OneFile temp dir)
-    # - base_dir/python_env/python.exe (OneDir next to exe)
-    # - base_dir/_internal/python_env/python.exe (PyInstaller internal)
-    
+        return sys.executable if os.path.exists(sys.executable) else ""
+    candidates = []
+    env_python = os.getenv("COWORK_PYTHON_EXE")
+    if env_python:
+        candidates.append(env_python)
     base_dir = os.path.dirname(sys.executable)
-    possible_paths = [
+    candidates.extend([
         os.path.join(base_dir, "python_env", "python.exe"),
-        os.path.join(base_dir, "_internal", "python_env", "python.exe")
-    ]
-    
-    if hasattr(sys, '_MEIPASS'):
-        possible_paths.insert(0, os.path.join(sys._MEIPASS, "python_env", "python.exe"))
-        
-    for p in possible_paths:
-        if os.path.exists(p):
+        os.path.join(base_dir, "_internal", "python_env", "python.exe"),
+        os.path.join(get_base_dir(), "python_env", "python.exe"),
+        os.path.join(get_base_dir(), "_internal", "python_env", "python.exe"),
+        os.path.join(sys.exec_prefix, "python.exe"),
+        os.path.join(getattr(sys, "base_prefix", sys.exec_prefix), "python.exe"),
+    ])
+    if hasattr(sys, "_MEIPASS"):
+        candidates.extend([
+            os.path.join(sys._MEIPASS, "python_env", "python.exe"),
+            os.path.join(sys._MEIPASS, "_internal", "python_env", "python.exe"),
+        ])
+    seen = set()
+    for p in candidates:
+        if not p:
+            continue
+        norm = os.path.normcase(os.path.abspath(p))
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(p):
             return p
-            
-    # 3. Fallback: If no bundled python found
-    # We return 'python' to try the system PATH, but this implies the packaging was incomplete.
-    return "python"
+    for cmd in ("python", "py"):
+        resolved = shutil.which(cmd)
+        if resolved and os.path.isfile(resolved):
+            return resolved
+    return ""
 
 _INSTALL_SUCCESS = set()
 _INSTALL_FAILED = {}
@@ -147,10 +151,10 @@ def ensure_package_installed(package_name, import_name=None):
         
         # Determine the correct python executable
         python_exe = get_python_executable()
-        if python_exe == "python":
-            resolved = shutil.which("python")
-            if resolved:
-                python_exe = resolved
+        if not python_exe:
+            msg = f"Failed to install {package_name}: bundled Python runtime is missing. This package may be corrupted."
+            _INSTALL_FAILED[import_name] = msg
+            raise RuntimeError(msg)
 
         try:
             import subprocess

@@ -142,6 +142,8 @@ def run_python_code(workspace_dir, code, _context=None):
 
     # Determine python executable
     python_exe = get_python_executable()
+    if not python_exe:
+        return "Error: Bundled Python runtime is missing. This package may be corrupted. Please reinstall the application."
     
     try:
         abort_state = _init_abort_state(_context)

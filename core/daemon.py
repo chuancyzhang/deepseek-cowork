@@ -172,10 +172,12 @@ class DaemonState:
         with self.lock:
             entry = self.pending_confirmations.get(confirm_id)
         if not entry:
-            return False
-        entry["event"].wait(timeout)
+            return None
+        resolved = entry["event"].wait(timeout)
         with self.lock:
             entry = self.pending_confirmations.pop(confirm_id, entry)
+        if not resolved:
+            return None
         return entry.get("result", False)
 
     def run_llm_sync(self, session_id, user_text, workspace_dir=None):
@@ -305,7 +307,19 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 confirm_id = uuid.uuid4().hex
                 state.create_confirmation(confirm_id, session_id)
                 send_stream({"type": "confirm_request", "data": {"id": confirm_id, "message": message}})
-                result = state.wait_for_confirmation(confirm_id)
+                timeout_seconds = state.config_manager.get("confirmation_timeout_seconds", 120)
+                try:
+                    timeout_seconds = float(timeout_seconds)
+                except Exception:
+                    timeout_seconds = 120.0
+                if timeout_seconds <= 0:
+                    timeout_seconds = 120.0
+                result = state.wait_for_confirmation(confirm_id, timeout=timeout_seconds)
+                if result is None:
+                    send_stream({"type": "error", "error": "Confirmation timed out. Conversation interrupted."})
+                    state.stop_session(session_id)
+                    bridge.respond(False)
+                    return
                 bridge.respond(result)
 
             bridge.request_confirmation_signal.connect(handle_confirmation_request, Qt.DirectConnection)

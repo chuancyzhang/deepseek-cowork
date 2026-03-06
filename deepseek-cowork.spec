@@ -22,6 +22,7 @@ a = Analysis(
     hiddenimports=pyside6_hidden + [
         'docx',
         'pptx',
+        'openpyxl',
         'pypdf',
         'bs4',
         'requests',
@@ -37,7 +38,6 @@ a = Analysis(
     excludes=[
         'pandas', 
         'numpy', 
-        'openpyxl', 
         'yt_dlp', 
         'duckduckgo_search', 
         'trafilatura',

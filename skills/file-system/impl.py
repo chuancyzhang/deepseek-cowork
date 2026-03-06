@@ -9,9 +9,13 @@ from core.interaction import ask_user
 
 # Lazy import helpers
 def get_openpyxl():
-    ensure_package_installed("openpyxl")
-    import openpyxl
-    return openpyxl
+    try:
+        import openpyxl
+        return openpyxl
+    except ImportError:
+        ensure_package_installed("openpyxl")
+        import openpyxl
+        return openpyxl
 
 def _is_god_mode(context):
     if context and 'config_manager' in context:

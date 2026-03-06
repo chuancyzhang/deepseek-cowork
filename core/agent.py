@@ -351,14 +351,21 @@ class LLMWorker(QThread):
         # CRITICAL: Clear previous reasoning content to avoid duplication/confusion in new turn
         current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
         python_exe = get_python_executable()
+        if getattr(sys, 'frozen', False):
+            python_env_line = "Python 环境: 应用内置 Python 运行时（已打包，可直接调用）。"
+        else:
+            python_available = bool(python_exe and os.path.exists(python_exe))
+            python_env_line = "Python 环境: 系统已检测到可用的 Python 运行环境。"
+            if not python_available:
+                python_env_line = "Python 环境: 当前开发环境未检测到可用 Python 运行时。"
         
         # Construct System Context
         context_lines = [
             f"当前工作区: {self.workspace_dir}",
             f"操作系统: {platform.system()} {platform.release()}",
             f"Python 版本: {sys.version.split()[0]}",
-            "Python 环境: 系统已自带可用的 Python 运行环境，可直接调用，无需用户额外安装。",
-            f"Python 路径: {python_exe}",
+            python_env_line,
+            f"Python 路径: {python_exe or ('内置运行时路径解析失败' if getattr(sys, 'frozen', False) else '未检测到')}",
             f"当前日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于此路径。",
             "能力: 你可以使用 'create_new_skill' 创建新的技能/工具。",

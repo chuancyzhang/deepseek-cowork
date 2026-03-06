@@ -869,6 +869,13 @@ class DaemonStreamWorker(QThread):
         self.content = content
         self.workspace_dir = workspace_dir
         self._aborted = False
+        self._sock = None
+
+    def _abort_remote_session(self):
+        try:
+            self.client.stop_session(self.session_id)
+        except Exception:
+            pass
 
     def abort(self):
         self._aborted = True
@@ -944,7 +951,11 @@ class DaemonStreamWorker(QThread):
                     self.finished_signal.emit({"error": "Daemon stream closed", "_streamed": True}, self.session_id)
         except Exception as e:
             if not self._aborted:
-                self.finished_signal.emit({"error": str(e), "_streamed": True}, self.session_id)
+                text = str(e)
+                if "timed out" in text.lower() or "timeout" in text.lower():
+                    self._abort_remote_session()
+                    text = "Confirmation timed out. Conversation interrupted."
+                self.finished_signal.emit({"error": text, "_streamed": True}, self.session_id)
         finally:
             self._sock = None
 
@@ -3327,7 +3338,6 @@ class MainWindow(QMainWindow):
         result = self.show_confirmation_dialog(message)
         if self.daemon_client:
             self.daemon_client.confirm_response(confirm_id, result)
-        bridge.respond(decision["value"])
 
     def refresh_history_list(self):
         while self.history_layout.count():
@@ -4375,6 +4385,8 @@ class MainWindow(QMainWindow):
         if "error" in result:
             self.append_log(f"Error: {result['error']}")
             self.add_system_toast(f"Error: {result['error']}", "error", session_id=state.session_id)
+            bubble.stop_thinking_timers()
+            bubble.update_thinking(duration=None, is_final=True)
             bubble.set_main_content(f"⚠️ Error: {result['error']}")
             if is_current: self.normalize_session_ui(state)
             return

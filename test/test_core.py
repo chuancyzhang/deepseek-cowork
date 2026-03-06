@@ -14,6 +14,8 @@ from core.skill_manager import SkillManager
 from core.interaction import InteractionBridge
 from core import env_utils
 from core.daemon import DaemonState
+from core.chat_storage import ChatStorage
+from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
 
 class TestConfigManager(unittest.TestCase):
     def setUp(self):
@@ -124,6 +126,56 @@ class TestDaemonConfirmation(unittest.TestCase):
         finally:
             timer.cancel()
         self.assertTrue(result)
+    def test_is_context_overflow_error(self):
+        self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
+        self.assertFalse(self.state._is_context_overflow_error({"error": "network timeout"}))
+
+class TestImSessionKey(unittest.TestCase):
+    def test_build_and_parse_im_session_key(self):
+        key = build_im_session_key("u1", "c1", "2026-03-06")
+        parsed = parse_im_session_key(key)
+        self.assertEqual(parsed["im_user_id"], "u1")
+        self.assertEqual(parsed["chat_id"], "c1")
+        self.assertEqual(parsed["summary_date"], "2026-03-06")
+    def test_resolve_date_key_from_millis_timestamp(self):
+        date_key = resolve_date_key("1710000000000")
+        self.assertRegex(date_key, r"^\d{4}-\d{2}-\d{2}$")
+
+class TestImDailySummaryStorage(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "chat_history.sqlite")
+        self.storage = ChatStorage(self.db_path)
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    def test_upsert_and_get_im_daily_summary(self):
+        self.storage.upsert_im_daily_summary(
+            "feishu",
+            "user-a",
+            "chat-a",
+            "2026-03-06",
+            "conv-1",
+            "summary-a",
+            12,
+            token_estimate=30,
+        )
+        row = self.storage.get_im_daily_summary("feishu", "user-a", "chat-a", "2026-03-06")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["summary_text"], "summary-a")
+        self.assertEqual(row["source_message_upto_pos"], 12)
+        self.storage.upsert_im_daily_summary(
+            "feishu",
+            "user-a",
+            "chat-a",
+            "2026-03-06",
+            "conv-1",
+            "summary-b",
+            20,
+            token_estimate=42,
+        )
+        row2 = self.storage.get_im_daily_summary("feishu", "user-a", "chat-a", "2026-03-06")
+        self.assertEqual(row2["summary_text"], "summary-b")
+        self.assertEqual(row2["source_message_upto_pos"], 20)
 
 if __name__ == "__main__":
     unittest.main()

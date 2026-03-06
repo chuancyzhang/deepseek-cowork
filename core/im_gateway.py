@@ -12,6 +12,7 @@ from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.daemon import DaemonClient, DEFAULT_HOST, DEFAULT_PORT
 from core.env_utils import ensure_package_installed, get_app_data_dir, get_python_executable
+from core.im_session_key import build_im_session_key, resolve_date_key
 
 _RECENT_MESSAGE_IDS = {}
 _RECENT_LOCK = threading.Lock()
@@ -77,6 +78,20 @@ def _safe_json_dump(value):
             return str(_sanitize(value))
         except Exception:
             return "<unserializable>"
+
+
+def _is_context_overflow_error(error_text):
+    text = (error_text or "").lower()
+    if not text:
+        return False
+    markers = [
+        "context length",
+        "maximum context",
+        "too many tokens",
+        "context_window_exceeded",
+        "maximum context length",
+    ]
+    return any(marker in text for marker in markers)
 
 def _strip_think_blocks(text, state):
     if not text:
@@ -572,6 +587,7 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
     use_card = False
     card_attempted = False
     think_state = {"in_think": False, "buffer": ""}
+    recovered_once = False
     if hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
         card_attempted = True
         card_message_id = provider.send_card_reply(event, card_content="正在处理...", title="🤖 AI 助手", thinking="思考中...")
@@ -628,8 +644,22 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
             elif msg.get("type") == "final":
                 return msg.get("result") or {"error": "No response"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("type") == "error":
+                error_text = msg.get("error") or "Daemon error"
+                if (not recovered_once) and _is_context_overflow_error(error_text):
+                    recovered_once = True
+                    retry_resp = daemon_client.send_message(conversation_id, event["text"], workspace_dir)
+                    retry_result = (retry_resp or {}).get("result") if isinstance(retry_resp, dict) else None
+                    if retry_result:
+                        return retry_result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
                 return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("status") == "error":
+                error_text = msg.get("error") or "Daemon error"
+                if (not recovered_once) and _is_context_overflow_error(error_text):
+                    recovered_once = True
+                    retry_resp = daemon_client.send_message(conversation_id, event["text"], workspace_dir)
+                    retry_result = (retry_resp or {}).get("result") if isinstance(retry_resp, dict) else None
+                    if retry_result:
+                        return retry_result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
                 return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("status") == "ok" and "result" in msg:
                 return msg.get("result") or {"error": "No response"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
@@ -672,8 +702,8 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         _log_gateway("feishu handle_im_event blocked: workspace not configured")
         provider.send_card_reply(event, card_content="请先在桌面端选择默认工作区（未开启上帝模式，需在工作区内操作）。", title="🤖 AI 助手")
         return None
-    unique_key = event.get("message_id") or event.get("event_id") or event.get("create_time") or uuid.uuid4().hex
-    session_key = f"{event['user_id']}:{event.get('chat_id') or ''}:{unique_key}"
+    date_key = resolve_date_key(event.get("create_time"))
+    session_key = build_im_session_key(event["user_id"], event.get("chat_id") or "", date_key)
     conversation_id = session_mapper.get_or_create("feishu", session_key)
     _log_gateway(f"feishu session mapped conversation_id={conversation_id} session_key={session_key}")
     _log_gateway(f"feishu daemon request conversation_id={conversation_id} text_len={len(event.get('text') or '')} workspace={workspace_dir}")

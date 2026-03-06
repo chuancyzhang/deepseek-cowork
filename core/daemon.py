@@ -11,6 +11,7 @@ from core.agent import LLMWorker
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir
+from core.im_session_key import parse_im_session_key
 from core.interaction import bridge
 
 
@@ -180,6 +181,198 @@ class DaemonState:
             return None
         return entry.get("result", False)
 
+    def _run_worker_once(self, session_id, worker_messages, workspace_dir):
+        result_holder = {}
+        loop = QEventLoop()
+
+        def on_finished(result):
+            result_holder["result"] = result
+            self.clear_active_worker(session_id)
+            loop.quit()
+
+        worker = LLMWorker(worker_messages, self.config_manager, workspace_dir)
+        worker.finished_signal.connect(on_finished)
+        self.set_active_worker(session_id, worker)
+        worker.start()
+        loop.exec()
+        return result_holder.get("result") or {"error": "No response"}
+
+    def _is_context_overflow_error(self, result):
+        if not isinstance(result, dict):
+            return False
+        text = (result.get("error") or "").lower()
+        if not text:
+            return False
+        markers = [
+            "context length",
+            "maximum context",
+            "too many tokens",
+            "context_window_exceeded",
+            "maximum context length",
+        ]
+        return any(marker in text for marker in markers)
+
+    def _get_im_binding_for_session(self, session_id):
+        binding = self.chat_storage.get_im_session_binding_by_conversation(session_id)
+        if not binding:
+            return None
+        parsed = parse_im_session_key(binding.get("im_user_id"))
+        if not parsed:
+            return None
+        return {
+            "provider": binding.get("provider"),
+            "im_user_id": parsed.get("im_user_id"),
+            "chat_id": parsed.get("chat_id"),
+            "summary_date": parsed.get("summary_date"),
+        }
+
+    def _estimate_token_count(self, text):
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    def _snippet(self, value, limit=180):
+        text = (value or "").strip().replace("\r", " ").replace("\n", " ")
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "..."
+
+    def _build_increment_summary(self, messages_slice):
+        goals = []
+        actions = []
+        decisions = []
+        pending = []
+        preferences = []
+        for msg in messages_slice:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = self._snippet(msg.get("content") or "")
+            if not content:
+                continue
+            lower = content.lower()
+            if role == "user":
+                if len(goals) < 8:
+                    goals.append(content)
+                if any(k in lower for k in ["不要", "请用", "必须", "记住", "偏好", "风格", "格式"]) and len(preferences) < 6:
+                    preferences.append(content)
+                if any(k in lower for k in ["待确认", "确认", "是否", "吗", "?", "？"]) and len(pending) < 6:
+                    pending.append(content)
+            elif role == "assistant":
+                if len(actions) < 10:
+                    actions.append(content)
+                if any(k in lower for k in ["决定", "采用", "方案", "策略", "改为"]) and len(decisions) < 8:
+                    decisions.append(content)
+            elif role == "tool":
+                if len(actions) < 10:
+                    actions.append(f"工具结果: {content}")
+
+        def _section(title, items):
+            if not items:
+                return f"{title}:\n- 暂无"
+            return title + ":\n" + "\n".join([f"- {item}" for item in items[:10]])
+
+        blocks = [
+            _section("今日目标", goals),
+            _section("已完成动作", actions),
+            _section("关键决策与约束", decisions),
+            _section("未决问题与待确认项", pending),
+            _section("用户偏好与约定", preferences),
+        ]
+        return "\n\n".join(blocks).strip()
+
+    def _compress_summary_text(self, summary_text, max_chars):
+        text = (summary_text or "").strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars]
+
+    def _build_overflow_retry_messages(self, session_id, messages):
+        enabled = self.config_manager.get("im_context_compression_enabled", True)
+        if enabled is False:
+            return None
+        binding = self._get_im_binding_for_session(session_id)
+        if not binding:
+            return None
+        keep_turns = self.config_manager.get("im_summary_recent_keep_turns", 12)
+        try:
+            keep_turns = int(keep_turns)
+        except Exception:
+            keep_turns = 12
+        keep_turns = max(2, keep_turns)
+        if len(messages) <= keep_turns:
+            return None
+        compress_end = len(messages) - keep_turns - 1
+        if compress_end < 0:
+            return None
+        summary_row = self.chat_storage.get_im_daily_summary(
+            binding["provider"],
+            binding["im_user_id"],
+            binding["chat_id"],
+            binding["summary_date"],
+        )
+        old_summary = ""
+        covered_pos = -1
+        if summary_row:
+            old_summary = summary_row.get("summary_text") or ""
+            covered_pos = summary_row.get("source_message_upto_pos")
+            if covered_pos is None:
+                covered_pos = -1
+        if compress_end > covered_pos:
+            increment_slice = messages[covered_pos + 1 : compress_end + 1]
+            increment_summary = self._build_increment_summary(increment_slice)
+            if old_summary and increment_summary:
+                merged_summary = old_summary + "\n\n增量补充:\n" + increment_summary
+            else:
+                merged_summary = old_summary or increment_summary
+        else:
+            merged_summary = old_summary
+        if not merged_summary.strip():
+            return None
+        rewrite_threshold = self.config_manager.get("im_summary_rewrite_threshold_chars", 6000)
+        summary_max_chars = self.config_manager.get("im_summary_max_chars", 4000)
+        try:
+            rewrite_threshold = int(rewrite_threshold)
+        except Exception:
+            rewrite_threshold = 6000
+        try:
+            summary_max_chars = int(summary_max_chars)
+        except Exception:
+            summary_max_chars = 4000
+        if len(merged_summary) > max(rewrite_threshold, summary_max_chars):
+            merged_summary = self._compress_summary_text(merged_summary, summary_max_chars)
+        token_estimate = self._estimate_token_count(merged_summary)
+        self.chat_storage.upsert_im_daily_summary(
+            binding["provider"],
+            binding["im_user_id"],
+            binding["chat_id"],
+            binding["summary_date"],
+            session_id,
+            merged_summary,
+            compress_end,
+            token_estimate=token_estimate,
+        )
+        summary_message = {
+            "role": "system",
+            "content": f"Daily Summary ({binding['summary_date']}):\n{merged_summary}",
+        }
+        tail_messages = messages[compress_end + 1 :]
+        retry_messages = [summary_message] + tail_messages
+        _log_daemon(
+            "context_overflow_retry_prepare "
+            + json.dumps(
+                {
+                    "session_id": session_id,
+                    "hit_context_overflow": True,
+                    "compressed_message_count": compress_end + 1,
+                    "summary_date": binding["summary_date"],
+                    "source_message_upto_pos": compress_end,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return retry_messages
+
     def run_llm_sync(self, session_id, user_text, workspace_dir=None):
         self.touch()
         try:
@@ -190,20 +383,24 @@ class DaemonState:
         self.idle_timeout = max(int(idle_minutes), 1) * 60
         messages = self.get_session_messages(session_id)
         self.append_user_message_if_needed(messages, user_text)
-        result_holder = {}
-        loop = QEventLoop()
-
-        def on_finished(result):
-            result_holder["result"] = result
-            self.clear_active_worker(session_id)
-            loop.quit()
-
-        worker = LLMWorker(messages, self.config_manager, workspace_dir)
-        worker.finished_signal.connect(on_finished)
-        self.set_active_worker(session_id, worker)
-        worker.start()
-        loop.exec()
-        result = result_holder.get("result") or {"error": "No response"}
+        result = self._run_worker_once(session_id, messages, workspace_dir)
+        retry_once = self.config_manager.get("im_context_overflow_retry_once", True)
+        if retry_once is not False and self._is_context_overflow_error(result):
+            retry_messages = self._build_overflow_retry_messages(session_id, messages)
+            if retry_messages:
+                retry_result = self._run_worker_once(session_id, retry_messages, workspace_dir)
+                _log_daemon(
+                    "context_overflow_retry_result "
+                    + json.dumps(
+                        {
+                            "session_id": session_id,
+                            "retry_success": "error" not in retry_result,
+                            "final_fallback": "error" in retry_result,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                result = retry_result
         if "error" not in result:
             generated_messages = result.get("generated_messages", [])
             if generated_messages:
@@ -286,7 +483,6 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
 
             result_holder = {}
             done = threading.Event()
-
             def on_finished(result):
                 result_holder["result"] = result
                 send_stream({"type": "final", "result": result})

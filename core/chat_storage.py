@@ -74,6 +74,35 @@ class ChatStorage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS im_daily_summaries (
+                    provider TEXT NOT NULL,
+                    im_user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    summary_date TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    summary_text TEXT,
+                    source_message_upto_pos INTEGER,
+                    token_estimate INTEGER,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    PRIMARY KEY (provider, im_user_id, chat_id, summary_date)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_im_daily_summaries_conversation_date
+                ON im_daily_summaries(conversation_id, summary_date)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_im_daily_summaries_identity_date
+                ON im_daily_summaries(provider, im_user_id, chat_id, summary_date)
+                """
+            )
+            conn.execute(
+                """
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                     content,
                     reasoning_content,
@@ -295,4 +324,113 @@ class ChatStorage:
                     VALUES (?, ?, ?, ?, ?)
                     """,
                     (provider, im_user_id, conversation_id, now, now),
+                )
+
+    def get_im_session_binding_by_conversation(self, conversation_id):
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT provider, im_user_id
+                FROM im_sessions
+                WHERE conversation_id = ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "provider": row["provider"],
+            "im_user_id": row["im_user_id"],
+        }
+
+    def get_im_daily_summary(self, provider, im_user_id, chat_id, summary_date):
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT provider, im_user_id, chat_id, summary_date, conversation_id, summary_text,
+                       source_message_upto_pos, token_estimate, created_at, updated_at
+                FROM im_daily_summaries
+                WHERE provider = ? AND im_user_id = ? AND chat_id = ? AND summary_date = ?
+                """,
+                (provider, im_user_id, chat_id, summary_date),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "provider": row["provider"],
+            "im_user_id": row["im_user_id"],
+            "chat_id": row["chat_id"],
+            "summary_date": row["summary_date"],
+            "conversation_id": row["conversation_id"],
+            "summary_text": row["summary_text"] or "",
+            "source_message_upto_pos": row["source_message_upto_pos"],
+            "token_estimate": row["token_estimate"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_im_daily_summary(
+        self,
+        provider,
+        im_user_id,
+        chat_id,
+        summary_date,
+        conversation_id,
+        summary_text,
+        source_message_upto_pos,
+        token_estimate=None,
+    ):
+        now = int(time.time())
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT provider
+                FROM im_daily_summaries
+                WHERE provider = ? AND im_user_id = ? AND chat_id = ? AND summary_date = ?
+                """,
+                (provider, im_user_id, chat_id, summary_date),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE im_daily_summaries
+                    SET conversation_id = ?, summary_text = ?, source_message_upto_pos = ?,
+                        token_estimate = ?, updated_at = ?
+                    WHERE provider = ? AND im_user_id = ? AND chat_id = ? AND summary_date = ?
+                    """,
+                    (
+                        conversation_id,
+                        summary_text,
+                        source_message_upto_pos,
+                        token_estimate,
+                        now,
+                        provider,
+                        im_user_id,
+                        chat_id,
+                        summary_date,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO im_daily_summaries (
+                        provider, im_user_id, chat_id, summary_date, conversation_id, summary_text,
+                        source_message_upto_pos, token_estimate, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        provider,
+                        im_user_id,
+                        chat_id,
+                        summary_date,
+                        conversation_id,
+                        summary_text,
+                        source_message_upto_pos,
+                        token_estimate,
+                        now,
+                        now,
+                    ),
                 )

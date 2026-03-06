@@ -959,6 +959,30 @@ class DaemonStreamWorker(QThread):
         finally:
             self._sock = None
 
+class HistoryTitleButton(QPushButton):
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self._full_title = title or ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip(self._full_title)
+        self._apply_elide()
+
+    def set_full_title(self, title):
+        self._full_title = title or ""
+        self.setToolTip(self._full_title)
+        self._apply_elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        metrics = QFontMetrics(self.font())
+        available = max(24, self.width() - 28)
+        display = metrics.elidedText(self._full_title, Qt.ElideRight, available)
+        super().setText(display)
+
 class EmptyStateWidget(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -3360,7 +3384,7 @@ class MainWindow(QMainWindow):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(8)
-            btn = QPushButton(title)
+            btn = HistoryTitleButton(title)
             btn.setCursor(Qt.PointingHandCursor)
             if session_id == self.current_session_id:
                  btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
@@ -3374,7 +3398,7 @@ class MainWindow(QMainWindow):
             del_btn.setStyleSheet("border: none; background: transparent;")
             del_btn.clicked.connect(lambda checked=False, sid=session_id: self.delete_session(sid))
             row_layout.addWidget(btn, 1)
-            row_layout.addWidget(del_btn)
+            row_layout.addWidget(del_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
             self.history_layout.addWidget(row)
 
         history_dir = self.chat_history_dir
@@ -3396,7 +3420,7 @@ class MainWindow(QMainWindow):
                         row_layout = QHBoxLayout(row)
                         row_layout.setContentsMargins(0, 0, 0, 0)
                         row_layout.setSpacing(8)
-                        btn = QPushButton(title)
+                        btn = HistoryTitleButton(title)
                         btn.setCursor(Qt.PointingHandCursor)
                         if session_id == self.current_session_id:
                              btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
@@ -3410,7 +3434,7 @@ class MainWindow(QMainWindow):
                         del_btn.setStyleSheet("border: none; background: transparent;")
                         del_btn.clicked.connect(lambda checked=False, sid=session_id: self.delete_session(sid))
                         row_layout.addWidget(btn, 1)
-                        row_layout.addWidget(del_btn)
+                        row_layout.addWidget(del_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
                         self.history_layout.addWidget(row)
                 except Exception as e:
                     continue

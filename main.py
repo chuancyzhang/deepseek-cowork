@@ -491,11 +491,15 @@ class SkillsCenterDialog(QDialog):
              
              v_layout.addWidget(sec_container)
 
-        h_layout.addLayout(v_layout)
+        h_layout.addLayout(v_layout, 1)
+        h_layout.addStretch()
         
         # Controls
-        c_layout = QVBoxLayout()
-        c_layout.setAlignment(Qt.AlignCenter)
+        controls_container = QWidget()
+        controls_container.setFixedWidth(96)
+        c_layout = QVBoxLayout(controls_container)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
         is_enabled = skill['enabled']
         toggle_btn = QPushButton("已启用" if is_enabled else "已禁用")
@@ -517,8 +521,8 @@ class SkillsCenterDialog(QDialog):
 
         toggle_btn.clicked.connect(lambda: self.toggle_skill(skill['name'], not is_enabled))
         
-        c_layout.addWidget(toggle_btn)
-        h_layout.addLayout(c_layout)
+        c_layout.addWidget(toggle_btn, 0, Qt.AlignRight | Qt.AlignVCenter)
+        h_layout.addWidget(controls_container, 0, Qt.AlignRight | Qt.AlignVCenter)
         
         # Insert before stretch
         parent_layout.insertWidget(parent_layout.count()-1, card)

@@ -719,7 +719,7 @@ class LLMWorker(QThread):
                 
                 final_content = (
                     "⚠️ **未配置 API Key**\n\n"
-                    "请点击右上角的 **⚙️ 设置** 按钮配置您的 DeepSeek API Key。\n"
+                    "请点击左侧边栏的 **⚙️ 系统设置**，在其中配置您的 DeepSeek API Key。\n"
                     "配置完成后，我将能够为您执行复杂的文件操作和代码生成任务。"
                 )
                 

@@ -96,7 +96,7 @@ V3.0 将不再局限于“文件自动化工具”，而是升级为 **“可无
 - [x] **会话转技能 (Session to Skill)**:
     - [x] UI 支持：在代码执行卡片增加“保存为技能”按钮。
     - [x] 逻辑泛化：利用 LLM 将当前会话中的一次性代码重构为通用函数（参数提取、去硬编码）。
-    - [x] 自动注册：调用 `skill-creator` 生成持久化文件。
+    - [x] 自动注册：调用 `skill-builder` 生成持久化文件。
 - [x] 优化 `Skill Creator`，增强对 GitHub 仓库的分析能力（结合 Web Search Skill）。
 - [x] **GitHub 集成增强**:
     - [x] `clone_repository` 增加重试机制，提升网络不佳时的稳定性。

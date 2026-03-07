@@ -16,7 +16,6 @@ from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
 from core.skill_generator import SkillGenerator
-from skills.skill_creator.impl import create_new_skill
 from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
 from core.chat_storage import ChatStorage

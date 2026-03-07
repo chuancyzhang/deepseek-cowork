@@ -3321,16 +3321,34 @@ class MainWindow(QMainWindow):
         scroll_area.setWidget(content_widget)
         layout.addWidget(scroll_area)
 
-        hint_label = QLabel("如果不确定，可以先在下方输入问题问问 AI：")
+        hint_label = QLabel("请选择一种操作：补充给 AI、同意继续、或暂不执行。")
+        hint_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 13px;")
         layout.addWidget(hint_label)
         ai_input = QLineEdit()
-        ai_input.setPlaceholderText("例如：这一步会删除原文件吗？")
+        ai_input.setPlaceholderText("补充给AI（可写问题/新想法），例如：先做最小版本，不要删原文件")
         layout.addWidget(ai_input)
-        button_layout = QHBoxLayout()
+
+        feedback_label = QLabel("给 AI 补充信息")
+        feedback_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px;")
+        layout.addWidget(feedback_label)
+        feedback_layout = QHBoxLayout()
         ask_btn = QPushButton("发送给AI")
+        idea_btn = QPushButton("我有新想法")
+        ask_btn.setStyleSheet(f"background: {DesignTokens.primary}; color: white; border: none; border-radius: 6px; padding: 6px 14px;")
+        idea_btn.setStyleSheet(f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.primary}; border: 1px solid {DesignTokens.primary}; border-radius: 6px; padding: 6px 14px;")
+        feedback_layout.addWidget(ask_btn)
+        feedback_layout.addWidget(idea_btn)
+        feedback_layout.addStretch()
+        layout.addLayout(feedback_layout)
+
+        action_label = QLabel("对当前操作做决定")
+        action_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px;")
+        layout.addWidget(action_label)
+        button_layout = QHBoxLayout()
         yes_btn = QPushButton("是的，继续")
         no_btn = QPushButton("先不要")
-        button_layout.addWidget(ask_btn)
+        yes_btn.setStyleSheet(f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; padding: 6px 14px;")
+        no_btn.setStyleSheet(f"background: transparent; color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; padding: 6px 14px;")
         button_layout.addStretch()
         button_layout.addWidget(yes_btn)
         button_layout.addWidget(no_btn)
@@ -3339,7 +3357,10 @@ class MainWindow(QMainWindow):
 
         def send_to_ai():
             text = ai_input.text().strip()
-            if not text: return
+            if not text:
+                QMessageBox.information(dialog, "提示", "请先输入要告诉 AI 的问题或新想法。")
+                ai_input.setFocus()
+                return
             decision["value"] = text
             dialog.accept()
 
@@ -3352,8 +3373,11 @@ class MainWindow(QMainWindow):
             dialog.reject()
 
         ask_btn.clicked.connect(send_to_ai)
+        idea_btn.clicked.connect(send_to_ai)
         yes_btn.clicked.connect(on_yes)
         no_btn.clicked.connect(on_no)
+        ai_input.returnPressed.connect(send_to_ai)
+        ai_input.setFocus()
         dialog.exec()
         return decision["value"]
 

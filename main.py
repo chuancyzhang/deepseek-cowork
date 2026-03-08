@@ -240,6 +240,8 @@ class SettingsDialog(QDialog):
         im_form.addRow("飞书 App ID:", self.feishu_app_id_input)
 
         self.feishu_app_secret_input = QLineEdit()
+        self.feishu_app_secret_input.setEchoMode(QLineEdit.Password)
+        self.feishu_app_secret_input.setPlaceholderText("••••••••")
         self.feishu_app_secret_input.setText(self.config_manager.get("feishu_app_secret", ""))
         im_form.addRow("飞书 App Secret:", self.feishu_app_secret_input)
 
@@ -1649,7 +1651,7 @@ class ChatBubble(QFrame):
         self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
         self.think_toggle_btn.setChecked(False)
             
-    def set_main_content(self, text):
+    def set_main_content(self, text, content_parts=None):
         """
         设置对话气泡的主要内容
         使用延迟调整高度确保文档渲染完成后再计算正确高度
@@ -3558,6 +3560,7 @@ class MainWindow(QMainWindow):
         state.last_agent_bubble = None 
         active_agent_bubble = None
         pending_content_parts = []
+        pending_struct_parts = []
         tool_meta_by_id = {}
         for full_msg in state.messages or []:
             if full_msg.get("role") != "assistant":
@@ -3579,18 +3582,27 @@ class MainWindow(QMainWindow):
                 }
 
         def finalize_active_bubble():
-            nonlocal active_agent_bubble, pending_content_parts
+            nonlocal active_agent_bubble, pending_content_parts, pending_struct_parts
             if not active_agent_bubble:
                 return
             
             final_content = ""
             if pending_content_parts:
                 final_content = "\n\n".join(pending_content_parts)
-                active_agent_bubble.set_main_content(final_content)
+                active_agent_bubble.set_main_content(final_content, content_parts=pending_struct_parts)
+            elif pending_struct_parts:
+                text_parts = []
+                for part in pending_struct_parts:
+                    if isinstance(part, dict) and (part.get("type") or "").strip().lower() == "text":
+                        text_value = part.get("text") or ""
+                        if text_value.strip():
+                            text_parts.append(text_value.strip())
+                final_content = "\n\n".join(text_parts)
+                active_agent_bubble.set_main_content(final_content, content_parts=pending_struct_parts)
             
             # Intelligent Fallback: Check if content is empty
             # If so, check if tools were executed
-            current_text = active_agent_bubble.content_label.text().strip()
+            current_text = active_agent_bubble.content_edit.toPlainText().strip() if hasattr(active_agent_bubble, "content_edit") else ""
             if not final_content and not current_text:
                 has_tools = False
                 if hasattr(active_agent_bubble, 'think_container_layout'):
@@ -3604,6 +3616,7 @@ class MainWindow(QMainWindow):
             active_agent_bubble.update_thinking(duration=None, is_final=True)
             active_agent_bubble = None
             pending_content_parts = []
+            pending_struct_parts = []
         
         for msg in messages:
             role = msg.get('role')
@@ -3625,6 +3638,8 @@ class MainWindow(QMainWindow):
                     active_agent_bubble.update_thinking(reasoning)
                 if content:
                     pending_content_parts.append(content)
+                if isinstance(msg.get("content_parts"), list):
+                    pending_struct_parts.extend(msg.get("content_parts") or [])
                 
                 tool_calls = msg.get('tool_calls')
                 if tool_calls:
@@ -4450,6 +4465,7 @@ class MainWindow(QMainWindow):
 
         reasoning = result.get("reasoning", "")
         content = result.get("content", "")
+        content_parts = result.get("content_parts") if isinstance(result.get("content_parts"), list) else []
         role = result.get("role", "assistant")
         duration = result.get("duration", None)
         generated_messages = result.get("generated_messages", [])
@@ -4460,6 +4476,8 @@ class MainWindow(QMainWindow):
                     msg_content = msg.get("content") or ""
                     if msg_content.strip():
                         content = msg_content
+                        if isinstance(msg.get("content_parts"), list):
+                            content_parts = msg.get("content_parts") or content_parts
                         if not (reasoning or "").strip():
                             reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
                         break
@@ -4492,16 +4510,16 @@ class MainWindow(QMainWindow):
                 if replay_index >= len(reasoning):
                     timer.stop()
                     bubble.update_thinking(duration=duration, is_final=True)
-                    bubble.set_main_content(content)
+                    bubble.set_main_content(content, content_parts=content_parts)
 
             timer.timeout.connect(_tick)
             timer.start(interval_ms)
         elif should_replay_thinking:
             bubble.update_thinking(reasoning, duration=duration, is_final=True)
-            bubble.set_main_content(content)
+            bubble.set_main_content(content, content_parts=content_parts)
         else:
             bubble.update_thinking(duration=duration, is_final=True)
-            bubble.set_main_content(content)
+            bubble.set_main_content(content, content_parts=content_parts)
 
         tool_results = {}
         if generated_messages:
@@ -4539,7 +4557,8 @@ class MainWindow(QMainWindow):
             state.messages.append({
                 "role": role, 
                 "content": content,
-                "reasoning": reasoning
+                "reasoning": reasoning,
+                "content_parts": content_parts
             })
         self.save_chat_history()
         self.update_session_tab_title(state.session_id)

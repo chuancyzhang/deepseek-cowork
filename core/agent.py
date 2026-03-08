@@ -678,6 +678,8 @@ class LLMWorker(QThread):
                             # Emit Tool Result Signal
                             self.tool_result_signal.emit({
                                 "id": tool.id,
+                                "name": name,
+                                "args": args,
                                 "result": str(result),
                                 "meta": {
                                     "start_time": start_tool_time,

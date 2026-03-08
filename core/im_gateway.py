@@ -17,6 +17,11 @@ from core.im_session_key import build_im_session_key, resolve_date_key
 _RECENT_MESSAGE_IDS = {}
 _RECENT_LOCK = threading.Lock()
 _MESSAGE_ID_TTL = 30
+_RECENT_ACTION_IDS = {}
+_RECENT_ACTION_LOCK = threading.Lock()
+_ACTION_ID_TTL = 300
+_CARD_CONTEXT = {}
+_CARD_CONTEXT_LOCK = threading.Lock()
 
 def _log_gateway(message):
     try:
@@ -134,6 +139,55 @@ def _seen_message(message_id):
             return True
         _RECENT_MESSAGE_IDS[message_id] = now
     return False
+
+
+def _seen_action(action_key):
+    if not action_key:
+        return False
+    now = time.time()
+    with _RECENT_ACTION_LOCK:
+        expired = [aid for aid, ts in _RECENT_ACTION_IDS.items() if now - ts > _ACTION_ID_TTL]
+        for aid in expired:
+            _RECENT_ACTION_IDS.pop(aid, None)
+        if action_key in _RECENT_ACTION_IDS:
+            return True
+        _RECENT_ACTION_IDS[action_key] = now
+    return False
+
+
+def _extract_publish_feishu_artifact_payload(text):
+    if not isinstance(text, str):
+        return None
+    raw = text.strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if (obj.get("source_tool") or "").strip() != "publish_feishu_artifact":
+        return None
+    content_parts = obj.get("content_parts")
+    if not isinstance(content_parts, list):
+        return None
+    safe_parts = [p for p in content_parts if isinstance(p, dict)]
+    delivery_result = obj.get("delivery_result")
+    if not isinstance(delivery_result, dict):
+        delivery_result = {}
+    return {"content_parts": safe_parts, "delivery_result": delivery_result}
+
+
+def _build_feishu_model_input(event):
+    user_text = (event or {}).get("text") or ""
+    channel_hint = (
+        "[渠道上下文]\n"
+        "- 当前交互渠道: 飞书\n"
+        "- 你正在处理飞书会话消息，请优先使用适配飞书的交互方式。\n"
+        "- 若需要交付文件或图片，必须调用 publish_feishu_artifact，audience 固定为 'feishu'。\n"
+    )
+    return f"{channel_hint}\n[用户消息]\n{user_text}"
 
 
 LARK_AVAILABLE = False
@@ -343,12 +397,56 @@ class FeishuProvider(IMProvider):
         self._card_sequences[card_id] = seq
         return seq
 
-    def _build_card_json(self, content, title="🤖 AI 助手", thinking=None, collapse_thinking=False):
+    def _build_card_json(self, content, title="🤖 AI 助手", thinking=None, collapse_thinking=False, content_parts=None, interactive_actions=None):
         elements = []
         if thinking:
             thinking_display = "思考过程已折叠" if collapse_thinking else thinking
             elements.append({"tag": "markdown", "content": f"**思考过程**\n{thinking_display}"})
         elements.append({"tag": "markdown", "content": content})
+        file_lines = []
+        if isinstance(content_parts, list):
+            for part in content_parts:
+                if not isinstance(part, dict):
+                    continue
+                part_type = (part.get("type") or "").strip().lower()
+                if part_type == "file":
+                    file_name = part.get("name") or "file"
+                    file_link = part.get("url") or part.get("path") or ""
+                    caption = part.get("caption") or ""
+                    line = f"- {file_name}"
+                    if file_link:
+                        line += f": {file_link}"
+                    if caption:
+                        line += f" ({caption})"
+                    file_lines.append(line)
+        if file_lines:
+            file_block = "**文件输出**\n" + "\n".join(file_lines[-6:])
+            elements.append({"tag": "markdown", "content": file_block})
+        actions = interactive_actions or [
+            {"name": "stop", "label": "停止生成"},
+            {"name": "retry", "label": "重试"},
+            {"name": "detail", "label": "工具详情"},
+            {"name": "feedback", "label": "反馈"}
+        ]
+        action_buttons = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            action_name = action.get("name") or ""
+            action_label = action.get("label") or action_name
+            if not action_name:
+                continue
+            action_buttons.append(
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": action_label},
+                    "type": "default",
+                    "value": {"action": action_name}
+                }
+            )
+        if action_buttons:
+            for btn in action_buttons[:4]:
+                elements.append(btn)
         return {
             "schema": "2.0",
             "config": {"update_multi": True, "streaming_mode": True, "summary": {"content": "已完成" if collapse_thinking else "生成中"}},
@@ -421,7 +519,7 @@ class FeishuProvider(IMProvider):
             _log_gateway(f"feishu card_update failed: {e}")
         return False
 
-    def send_card_reply(self, event=None, card_content="正在处理...", title="🤖 AI 助手", thinking=None, collapse_thinking=False):
+    def send_card_reply(self, event=None, card_content="正在处理...", title="🤖 AI 助手", thinking=None, collapse_thinking=False, content_parts=None, interactive_actions=None):
         message_id = (event or {}).get("message_id")
         if not message_id:
             return None
@@ -429,7 +527,7 @@ class FeishuProvider(IMProvider):
         if not tenant_token:
             return None
         try:
-            card_data = self._build_card_json(card_content or "正在处理...", title=title, thinking=thinking, collapse_thinking=collapse_thinking)
+            card_data = self._build_card_json(card_content or "正在处理...", title=title, thinking=thinking, collapse_thinking=collapse_thinking, content_parts=content_parts, interactive_actions=interactive_actions)
             content = json.dumps(card_data, ensure_ascii=False)
             resp = requests.post(
                 f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply",
@@ -472,12 +570,12 @@ class FeishuProvider(IMProvider):
             _log_gateway(f"feishu card_reply failed: {e}")
         return None
 
-    def update_card_message(self, message_id, content, title="🤖 AI 助手", thinking=None, collapse_thinking=False):
+    def update_card_message(self, message_id, content, title="🤖 AI 助手", thinking=None, collapse_thinking=False, content_parts=None, interactive_actions=None):
         tenant_token = self._get_tenant_token()
         if not tenant_token:
             return False
         try:
-            card_data = self._build_card_json(content or "生成中", title=title, thinking=thinking, collapse_thinking=collapse_thinking)
+            card_data = self._build_card_json(content or "生成中", title=title, thinking=thinking, collapse_thinking=collapse_thinking, content_parts=content_parts, interactive_actions=interactive_actions)
             payload = {"msg_type": "interactive", "content": json.dumps(card_data, ensure_ascii=False)}
             resp = requests.patch(
                 f"https://open.feishu.cn/open-apis/im/v1/messages/{message_id}",
@@ -544,7 +642,6 @@ class FeishuProvider(IMProvider):
             return {"code": 0, "msg": "success"}
         return self.build_reply(text)
 
-
 class SessionMapper:
     def __init__(self, chat_storage):
         self.chat_storage = chat_storage
@@ -560,41 +657,218 @@ class SessionMapper:
 
 def _extract_content(result):
     if not isinstance(result, dict):
-        return "任务已处理完成，请查看工具执行结果。"
+        return ""
+    content_parts = result.get("content_parts")
+    if isinstance(content_parts, list) and content_parts:
+        lines = []
+        for part in content_parts:
+            if not isinstance(part, dict):
+                continue
+            part_type = (part.get("type") or "").strip().lower()
+            if part_type == "text":
+                text_value = part.get("text") or ""
+                if text_value.strip():
+                    lines.append(text_value.strip())
+            elif part_type == "file":
+                file_name = part.get("name") or ""
+                file_url = part.get("url") or ""
+                file_path = part.get("path") or ""
+                caption = part.get("caption") or ""
+                link_value = file_url or file_path
+                if file_name and link_value:
+                    line = f"[文件] {file_name}: {link_value}"
+                elif link_value:
+                    line = f"[文件] {link_value}"
+                elif file_name:
+                    line = f"[文件] {file_name}"
+                else:
+                    line = "[文件]"
+                if caption:
+                    line += f" ({caption})"
+                lines.append(line)
+        merged = "\n".join([line for line in lines if line.strip()]).strip()
+        if merged:
+            return merged
     content = result.get("content") or ""
     generated_messages = result.get("generated_messages") or []
     if not (content or "").strip() and generated_messages:
         for msg in reversed(generated_messages):
             if msg.get("role") == "assistant":
                 msg_content = msg.get("content") or ""
+                msg_parts = msg.get("content_parts")
+                if isinstance(msg_parts, list) and msg_parts:
+                    parts_lines = []
+                    for part in msg_parts:
+                        if isinstance(part, dict) and (part.get("type") or "").strip().lower() == "text":
+                            part_text = part.get("text") or ""
+                            if part_text.strip():
+                                parts_lines.append(part_text.strip())
+                    merged_parts = "\n".join(parts_lines).strip()
+                    if merged_parts:
+                        return merged_parts
                 if msg_content.strip():
                     return msg_content
     if not (content or "").strip():
-        return "任务已处理完成，请查看工具执行结果。"
+        return ""
     return content
 
 
-def _stream_im_response(conversation_id, event, provider, daemon_client, workspace_dir):
+def _has_effective_output(text):
+    value = (text or "").strip()
+    if not value:
+        return False
+    placeholders = {
+        "任务已处理完成，请查看工具执行结果。",
+        "处理完成",
+    }
+    return value not in placeholders
+
+
+def _resolve_streaming_config(config_manager):
+    cfg = {
+        "min_chars": 1200,
+        "min_interval": 2.0,
+        "answer_min_chars": 1000,
+        "answer_min_interval": 1.8,
+        "thinking_min_chars": 1400,
+        "thinking_min_interval": 2.2,
+        "backoff_min_interval": 2.8,
+    }
+    if not config_manager:
+        return cfg
+    raw_chars = config_manager.get("feishu_stream_min_chars", cfg["min_chars"])
+    raw_interval = config_manager.get("feishu_stream_min_interval", cfg["min_interval"])
+    raw_answer_chars = config_manager.get("feishu_stream_answer_min_chars", cfg["answer_min_chars"])
+    raw_answer_interval = config_manager.get("feishu_stream_answer_min_interval", cfg["answer_min_interval"])
+    raw_think_chars = config_manager.get("feishu_stream_thinking_min_chars", cfg["thinking_min_chars"])
+    raw_think_interval = config_manager.get("feishu_stream_thinking_min_interval", cfg["thinking_min_interval"])
+    raw_backoff_interval = config_manager.get("feishu_stream_backoff_min_interval", cfg["backoff_min_interval"])
+    try:
+        cfg["min_chars"] = int(raw_chars)
+    except Exception:
+        cfg["min_chars"] = 1200
+    try:
+        cfg["min_interval"] = float(raw_interval)
+    except Exception:
+        cfg["min_interval"] = 2.0
+    try:
+        cfg["answer_min_chars"] = int(raw_answer_chars)
+    except Exception:
+        cfg["answer_min_chars"] = cfg["min_chars"]
+    try:
+        cfg["answer_min_interval"] = float(raw_answer_interval)
+    except Exception:
+        cfg["answer_min_interval"] = cfg["min_interval"]
+    try:
+        cfg["thinking_min_chars"] = int(raw_think_chars)
+    except Exception:
+        cfg["thinking_min_chars"] = max(cfg["answer_min_chars"], cfg["min_chars"])
+    try:
+        cfg["thinking_min_interval"] = float(raw_think_interval)
+    except Exception:
+        cfg["thinking_min_interval"] = max(cfg["answer_min_interval"], cfg["min_interval"])
+    try:
+        cfg["backoff_min_interval"] = float(raw_backoff_interval)
+    except Exception:
+        cfg["backoff_min_interval"] = 2.8
+    cfg["min_chars"] = max(300, min(cfg["min_chars"], 5000))
+    cfg["answer_min_chars"] = max(300, min(cfg["answer_min_chars"], 5000))
+    cfg["thinking_min_chars"] = max(cfg["answer_min_chars"], min(cfg["thinking_min_chars"], 5000))
+    cfg["min_interval"] = max(0.8, min(cfg["min_interval"], 8.0))
+    cfg["answer_min_interval"] = max(0.8, min(cfg["answer_min_interval"], 8.0))
+    cfg["thinking_min_interval"] = max(cfg["answer_min_interval"], min(cfg["thinking_min_interval"], 8.0))
+    cfg["backoff_min_interval"] = max(cfg["thinking_min_interval"], min(cfg["backoff_min_interval"], 12.0))
+    return cfg
+
+
+def _stream_im_response(conversation_id, event, provider, daemon_client, workspace_dir, config_manager=None):
     pending_text = ""
     total_text = ""
     pending_thinking = ""
     total_thinking = ""
     sent_any = False
     last_send_time = time.time()
-    min_chars = 800
-    min_interval = 1.5
+    stream_cfg = _resolve_streaming_config(config_manager)
     card_message_id = None
     use_card = False
     card_attempted = False
     think_state = {"in_think": False, "buffer": ""}
     recovered_once = False
+    update_fail_count = 0
+    tool_events = []
+    file_parts = []
+    tool_call_index = {}
+    model_input_text = _build_feishu_model_input(event)
+    def _effective_interval(base_interval):
+        if update_fail_count >= 2:
+            return max(base_interval, stream_cfg["backoff_min_interval"])
+        return base_interval
+    def _append_file_parts(candidates):
+        if not isinstance(candidates, list):
+            return
+        existing_keys = set()
+        for item in file_parts:
+            key = (item.get("url") or item.get("path") or "").strip().lower()
+            if key:
+                existing_keys.add(key)
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            key = (item.get("url") or item.get("path") or "").strip().lower()
+            if not key or key in existing_keys:
+                continue
+            file_parts.append(item)
+            existing_keys.add(key)
+    def _compose_content_parts(content_text):
+        parts = []
+        if (content_text or "").strip():
+            parts.append({"type": "text", "text": content_text})
+        if tool_events:
+            parts.extend(tool_events[-16:])
+        if file_parts:
+            parts.extend(file_parts[-8:])
+        return parts
+    def _attach_result_parts(result_dict):
+        if not isinstance(result_dict, dict):
+            return result_dict
+        existing = result_dict.get("content_parts")
+        merged = []
+        if isinstance(existing, list):
+            merged.extend(existing)
+        merged.extend(_compose_content_parts(total_text or result_dict.get("content") or ""))
+        result_dict["content_parts"] = merged
+        return result_dict
+    def _flush_card(collapse_thinking=False):
+        nonlocal pending_text, pending_thinking, sent_any, last_send_time, update_fail_count
+        if not (use_card and card_message_id):
+            return False
+        content = total_text or "正在处理..."
+        thinking = _truncate_text(total_thinking, limit=2000)
+        content_parts = _compose_content_parts(content)
+        updated = provider.update_card_message(card_message_id, content, thinking=thinking, collapse_thinking=collapse_thinking, content_parts=content_parts)
+        if updated:
+            sent_any = True
+            update_fail_count = 0
+        else:
+            update_fail_count += 1
+        pending_text = ""
+        pending_thinking = ""
+        last_send_time = time.time()
+        return bool(updated)
     if hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
         card_attempted = True
-        card_message_id = provider.send_card_reply(event, card_content="正在处理...", title="🤖 AI 助手", thinking="思考中...")
+        card_message_id = provider.send_card_reply(event, card_content="正在处理...", title="🤖 AI 助手", thinking="思考中...", content_parts=[{"type": "text", "text": "正在处理..."}])
         if card_message_id:
             use_card = True
+            with _CARD_CONTEXT_LOCK:
+                _CARD_CONTEXT[card_message_id] = {
+                    "conversation_id": conversation_id,
+                    "event": event,
+                    "workspace_dir": workspace_dir,
+                    "updated_at": time.time()
+                }
     try:
-        for msg in daemon_client.send_message_stream(conversation_id, event["text"], workspace_dir):
+        for msg in daemon_client.send_message_stream(conversation_id, model_input_text, workspace_dir):
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "content":
@@ -604,17 +878,10 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                     pending_text += delta
                     total_text += delta
                     now = time.time()
-                    if len(pending_text) >= min_chars or len(pending_thinking) >= min_chars or (now - last_send_time) >= min_interval:
-                        if use_card and card_message_id:
-                            content = total_text or "正在处理..."
-                            thinking = _truncate_text(total_thinking, limit=2000)
-                            updated = provider.update_card_message(card_message_id, content, thinking=thinking)
-                            if updated:
-                                sent_any = True
+                    answer_interval = _effective_interval(stream_cfg["answer_min_interval"])
+                    if len(pending_text) >= stream_cfg["answer_min_chars"] or len(pending_thinking) >= stream_cfg["answer_min_chars"] or (now - last_send_time) >= answer_interval:
                         if use_card:
-                            pending_text = ""
-                            pending_thinking = ""
-                            last_send_time = now
+                            _flush_card(collapse_thinking=False)
                         else:
                             pending_text = ""
                             pending_thinking = ""
@@ -625,44 +892,118 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                     pending_thinking += thinking_delta
                     total_thinking += thinking_delta
                     now = time.time()
-                    if len(pending_thinking) >= min_chars or (now - last_send_time) >= min_interval:
-                        if use_card and card_message_id:
-                            content = total_text or "正在处理..."
-                            thinking = _truncate_text(total_thinking, limit=2000)
-                            updated = provider.update_card_message(card_message_id, content, thinking=thinking)
-                            if updated:
-                                sent_any = True
+                    think_interval = _effective_interval(stream_cfg["thinking_min_interval"])
+                    if len(pending_thinking) >= stream_cfg["thinking_min_chars"] or (now - last_send_time) >= think_interval:
                         if use_card:
-                            pending_thinking = ""
-                            last_send_time = now
+                            _flush_card(collapse_thinking=False)
             elif msg.get("type") == "confirm_request":
                 data = msg.get("data") or {}
                 confirm_id = data.get("id")
                 message = data.get("message")
                 if confirm_id and message:
                     daemon_client.confirm_response(confirm_id, False)
+            elif msg.get("type") == "tool_call":
+                data = msg.get("data") or {}
+                tool_id = data.get("id") or ""
+                tool_name = data.get("name") or "tool"
+                args = data.get("args") or {}
+                arg_preview = ""
+                try:
+                    arg_preview = json.dumps(args, ensure_ascii=False)[:240]
+                except Exception:
+                    arg_preview = str(args)[:240]
+                if tool_id:
+                    tool_call_index[tool_id] = {
+                        "tool_name": tool_name,
+                        "args_preview": arg_preview,
+                        "start_time": time.time(),
+                    }
+                tool_events.append(
+                    {
+                        "type": "tool_event",
+                        "tool_id": tool_id,
+                        "tool_name": tool_name,
+                        "status": "running",
+                        "summary": arg_preview
+                    }
+                )
+            elif msg.get("type") == "tool_result":
+                data = msg.get("data") or {}
+                tool_id = data.get("id") or ""
+                tool_meta = tool_call_index.get(tool_id, {})
+                tool_name = data.get("name") or tool_meta.get("tool_name") or "tool"
+                result_text = data.get("result") or ""
+                meta = data.get("meta") or {}
+                if not isinstance(result_text, str):
+                    try:
+                        result_text = json.dumps(result_text, ensure_ascii=False)
+                    except Exception:
+                        result_text = str(result_text)
+                duration_value = meta.get("duration")
+                duration_text = ""
+                try:
+                    if duration_value is not None:
+                        duration_text = f" ({float(duration_value):.2f}s)"
+                except Exception:
+                    duration_text = ""
+                args_preview = tool_meta.get("args_preview") or ""
+                summary_text = _truncate_text(result_text, limit=260)
+                if args_preview:
+                    summary_text = f"args={args_preview} | result={summary_text}"
+                if duration_text:
+                    summary_text = f"{summary_text}{duration_text}"
+                tool_events.append(
+                    {
+                        "type": "tool_event",
+                        "tool_id": tool_id,
+                        "tool_name": tool_name,
+                        "status": "completed",
+                        "summary": summary_text,
+                        "duration": meta.get("duration")
+                    }
+                )
+                if tool_name == "publish_feishu_artifact":
+                    payload = _extract_publish_feishu_artifact_payload(result_text)
+                    if payload:
+                        structured_files = []
+                        for part in payload.get("content_parts") or []:
+                            part_type = (part.get("type") or "").strip().lower()
+                            if part_type == "tool_event":
+                                tool_events.append(part)
+                            elif part_type == "file":
+                                structured_files.append(part)
+                        if structured_files:
+                            _append_file_parts(structured_files)
             elif msg.get("type") == "final":
-                return msg.get("result") or {"error": "No response"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
+                if pending_text or pending_thinking:
+                    _flush_card(collapse_thinking=False)
+                final_result = msg.get("result") or {"error": "No response"}
+                final_result = _attach_result_parts(final_result)
+                return final_result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("type") == "error":
                 error_text = msg.get("error") or "Daemon error"
                 if (not recovered_once) and _is_context_overflow_error(error_text):
                     recovered_once = True
-                    retry_resp = daemon_client.send_message(conversation_id, event["text"], workspace_dir)
+                    retry_resp = daemon_client.send_message(conversation_id, model_input_text, workspace_dir)
                     retry_result = (retry_resp or {}).get("result") if isinstance(retry_resp, dict) else None
                     if retry_result:
+                        retry_result = _attach_result_parts(retry_result)
                         return retry_result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
                 return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("status") == "error":
                 error_text = msg.get("error") or "Daemon error"
                 if (not recovered_once) and _is_context_overflow_error(error_text):
                     recovered_once = True
-                    retry_resp = daemon_client.send_message(conversation_id, event["text"], workspace_dir)
+                    retry_resp = daemon_client.send_message(conversation_id, model_input_text, workspace_dir)
                     retry_result = (retry_resp or {}).get("result") if isinstance(retry_resp, dict) else None
                     if retry_result:
+                        retry_result = _attach_result_parts(retry_result)
                         return retry_result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
                 return {"error": msg.get("error") or "Daemon error"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
             elif msg.get("status") == "ok" and "result" in msg:
-                return msg.get("result") or {"error": "No response"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
+                ok_result = msg.get("result") or {"error": "No response"}
+                ok_result = _attach_result_parts(ok_result)
+                return ok_result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
     except Exception as e:
         return {"error": str(e)}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
     return {"error": "Daemon stream closed"}, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted
@@ -677,7 +1018,86 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     if "challenge" in event:
         _log_gateway("feishu handle_im_event ignored: challenge")
         return None
-    if event.get("event_type") != "im.message.receive_v1":
+    event_type = event.get("event_type")
+    if event_type == "card.action.trigger" or event_type == "card.action.trigger_v1":
+        action_data = event.get("event") or {}
+        action_event_id = action_data.get("event_id") or (action_data.get("header") or {}).get("event_id") or event.get("event_id")
+        action_payload = action_data.get("action") or {}
+        action_value = action_payload.get("value") if isinstance(action_payload, dict) else {}
+        action_name = ""
+        if isinstance(action_value, dict):
+            action_name = action_value.get("action") or action_value.get("name") or ""
+        if not action_name:
+            action_name = action_data.get("action_name") or "unknown"
+        dedup_key = f"{action_event_id}:{action_name}"
+        if _seen_action(dedup_key):
+            _log_gateway(f"feishu card action ignored by dedup dedup_key={dedup_key}")
+            return None
+        open_message_id = None
+        if isinstance(action_data, dict):
+            open_message_id = action_data.get("open_message_id")
+            if not open_message_id:
+                operator = action_data.get("operator") or {}
+                open_message_id = operator.get("open_message_id")
+        if not open_message_id and isinstance(action_payload, dict):
+            open_message_id = action_payload.get("open_message_id")
+        _log_gateway(f"feishu card action received action={action_name} message_id={open_message_id} event_id={action_event_id}")
+        if open_message_id and hasattr(provider, "update_card_message"):
+            if action_name == "stop":
+                provider.update_card_message(open_message_id, "已收到停止请求，正在结束当前任务。", collapse_thinking=False)
+            elif action_name == "detail":
+                provider.update_card_message(open_message_id, "工具详情：可在桌面端右侧工具详情面板查看完整参数与结果。", collapse_thinking=False)
+            elif action_name == "feedback":
+                provider.update_card_message(open_message_id, "感谢反馈，已记录本次交互评价。", collapse_thinking=False)
+            elif action_name == "retry":
+                with _CARD_CONTEXT_LOCK:
+                    ctx = _CARD_CONTEXT.get(open_message_id) or {}
+                conversation_id = ctx.get("conversation_id")
+                retry_event = ctx.get("event")
+                workspace_dir = ctx.get("workspace_dir")
+                if conversation_id and retry_event and workspace_dir:
+                    provider.update_card_message(open_message_id, "正在重试处理中...", collapse_thinking=False)
+                    def _run_retry():
+                        retry_result, retry_total_text, _, retry_total_thinking, _, _, _, _ = _stream_im_response(
+                            conversation_id,
+                            retry_event,
+                            provider,
+                            daemon_client,
+                            workspace_dir,
+                            config_manager
+                        )
+                        if isinstance(retry_result, dict) and retry_result.get("error"):
+                            provider.update_card_message(
+                                open_message_id,
+                                f"⚠️ {retry_result.get('error')}",
+                                thinking=_truncate_text(retry_total_thinking, limit=2000),
+                                collapse_thinking=True,
+                                content_parts=[{"type": "text", "text": f"⚠️ {retry_result.get('error')}"}]
+                            )
+                            return
+                        retry_output = _extract_content(retry_result)
+                        retry_parts = retry_result.get("content_parts") if isinstance(retry_result, dict) else None
+                        if not isinstance(retry_parts, list):
+                            retry_parts = [{"type": "text", "text": retry_output or ""}]
+                        if (retry_total_text or "").strip():
+                            retry_output = retry_total_text
+                            retry_parts = [{"type": "text", "text": retry_output}] + [p for p in retry_parts if isinstance(p, dict) and (p.get("type") or "").lower() != "text"]
+                        display_retry = retry_output if _has_effective_output(retry_output) else " "
+                        provider.update_card_message(
+                            open_message_id,
+                            display_retry,
+                            thinking=_truncate_text(retry_total_thinking, limit=2000),
+                            collapse_thinking=True,
+                            content_parts=retry_parts
+                        )
+                    threading.Thread(
+                        target=_run_retry,
+                        daemon=True
+                    ).start()
+                else:
+                    provider.update_card_message(open_message_id, "当前上下文已过期，无法自动重试。请重新发送问题。", collapse_thinking=False)
+        return None
+    if event_type != "im.message.receive_v1":
         _log_gateway(f"feishu handle_im_event ignored: event_type={event.get('event_type')}")
         return None
     if event.get("sender_type") and event.get("sender_type") != "user":
@@ -702,13 +1122,24 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         _log_gateway("feishu handle_im_event blocked: workspace not configured")
         provider.send_card_reply(event, card_content="请先在桌面端选择默认工作区（未开启上帝模式，需在工作区内操作）。", title="🤖 AI 助手")
         return None
+    try:
+        chat_id = (event.get("chat_id") or "").strip()
+        user_id = (event.get("user_id") or "").strip()
+        if chat_id:
+            config_manager.set("feishu_receive_id_type", "chat_id")
+            config_manager.set("feishu_receive_id", chat_id)
+        elif user_id:
+            config_manager.set("feishu_receive_id_type", "open_id")
+            config_manager.set("feishu_receive_id", user_id)
+    except Exception:
+        pass
     date_key = resolve_date_key(event.get("create_time"))
     session_key = build_im_session_key(event["user_id"], event.get("chat_id") or "", date_key)
     conversation_id = session_mapper.get_or_create("feishu", session_key)
     _log_gateway(f"feishu session mapped conversation_id={conversation_id} session_key={session_key}")
     _log_gateway(f"feishu daemon request conversation_id={conversation_id} text_len={len(event.get('text') or '')} workspace={workspace_dir}")
     result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted = _stream_im_response(
-        conversation_id, event, provider, daemon_client, workspace_dir
+        conversation_id, event, provider, daemon_client, workspace_dir, config_manager=config_manager
     )
     if result.get("error"):
         _log_gateway(f"feishu daemon stream error response={_safe_json_dump(result)}")
@@ -720,33 +1151,43 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     if pending_text:
         pending_text = ""
     output = _extract_content(result)
+    output_parts = result.get("content_parts") if isinstance(result, dict) else None
+    if not isinstance(output_parts, list):
+        output_parts = [{"type": "text", "text": output or ""}]
+    if total_text.strip():
+        output = total_text
+        output_parts = [{"type": "text", "text": output}] + [p for p in output_parts if isinstance(p, dict) and (p.get("type") or "").lower() != "text"]
+    has_output = _has_effective_output(output)
+    display_output = output if has_output else " "
     if use_card and card_message_id:
         final_ok = provider.update_card_message(
             card_message_id,
-            output or "处理完成",
+            display_output,
             thinking=_truncate_text(total_thinking, limit=2000),
-            collapse_thinking=True
+            collapse_thinking=True,
+            content_parts=output_parts
         )
         if not final_ok:
             provider.send_card_reply(
                 event,
-                card_content=output or "处理完成",
+                card_content=display_output,
                 title="🤖 AI 助手",
                 thinking=_truncate_text(total_thinking, limit=2000),
-                collapse_thinking=True
+                collapse_thinking=True,
+                content_parts=output_parts
             )
         return None
-    if (not sent_any and output) or ((not total_text.strip()) and output):
+    if (not sent_any and has_output) or ((not total_text.strip()) and has_output):
         _log_gateway(f"feishu daemon ok result={_safe_json_dump(result)} output_len={len(output or '')}")
         if hasattr(provider, "send_card_reply"):
             if card_message_id:
                 return None
             if card_attempted:
                 return None
-            message_id = provider.send_card_reply(event, card_content=output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True)
+            message_id = provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts)
             if message_id:
                 return None
-        provider.send_card_reply(event, card_content=output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True)
+        provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts)
     return None
 
 
@@ -793,6 +1234,18 @@ def _start_feishu_long_connection(context):
 
     handler = EventDispatcherHandler.builder("", "", larkcore.LogLevel.INFO)
     handler = handler.register_p2_im_message_receive_v1(on_message_receive)
+    optional_registers = [
+        "register_p2_card_action_trigger",
+        "register_p2_card_action_trigger_v1",
+    ]
+    for method_name in optional_registers:
+        register_method = getattr(handler, method_name, None)
+        if callable(register_method):
+            try:
+                handler = register_method(on_message_receive)
+                _log_gateway(f"feishu callback registered: {method_name}")
+            except Exception as e:
+                _log_gateway(f"feishu callback register failed method={method_name} error={e}")
     handler = handler.build()
     client = larkws.Client(
         provider.app_id,

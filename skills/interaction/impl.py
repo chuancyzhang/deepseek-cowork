@@ -93,6 +93,31 @@ def _resolve_receive_target(_context):
         return "", "", "missing_receive_target"
     return receive_id_type_value, receive_id_value, ""
 
+def _resolve_local_path(path, _context):
+    raw = (path or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return raw
+    candidates = []
+    workspace_dir = ""
+    if isinstance(_context, dict):
+        workspace_dir = (_context.get("workspace_dir") or "").strip()
+        if not workspace_dir:
+            cfg = _context.get("config_manager")
+            if cfg:
+                try:
+                    workspace_dir = (cfg.get("default_workspace", "") or "").strip()
+                except Exception:
+                    workspace_dir = ""
+    if workspace_dir:
+        candidates.append(os.path.abspath(os.path.join(workspace_dir, raw)))
+    candidates.append(os.path.abspath(raw))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0] if candidates else raw
+
 
 def _upload_image(tenant_token, file_path):
     if not tenant_token or not file_path or not os.path.exists(file_path):
@@ -271,15 +296,16 @@ def publish_feishu_artifact(
     for idx, raw_item in enumerate(items):
         if not isinstance(raw_item, dict):
             return f"Error: items[{idx}] must be an object."
-        path = (raw_item.get("path") or "").strip()
+        path_input = (raw_item.get("path") or "").strip()
+        path = _resolve_local_path(path_input, _context) if path_input else ""
         url = (raw_item.get("url") or "").strip()
         name = (raw_item.get("name") or "").strip()
         mime = (raw_item.get("mime") or "").strip()
         subtype = (raw_item.get("subtype") or "").strip().lower()
         caption = (raw_item.get("caption") or "").strip()
         size = raw_item.get("size")
-        if path and not os.path.exists(path):
-            return f"Error: file not found: {path}. Please ensure the file exists before publish_feishu_artifact."
+        if path_input and not os.path.exists(path):
+            return f"Error: file not found: {path_input}. Please ensure the file exists before publish_feishu_artifact."
         if not path and not url:
             return f"Error: items[{idx}] requires path or url."
         if not name:

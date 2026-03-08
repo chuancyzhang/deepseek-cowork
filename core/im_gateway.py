@@ -154,6 +154,22 @@ def _seen_action(action_key):
         _RECENT_ACTION_IDS[action_key] = now
     return False
 
+def _consume_feedback_prefix(conversation_id, text):
+    if not conversation_id:
+        return text
+    with _CARD_CONTEXT_LOCK:
+        for _, ctx in _CARD_CONTEXT.items():
+            if not isinstance(ctx, dict):
+                continue
+            if ctx.get("conversation_id") != conversation_id:
+                continue
+            if not ctx.get("awaiting_feedback"):
+                continue
+            ctx["awaiting_feedback"] = False
+            feedback_text = (text or "").strip()
+            return f"[用户反馈]\n{feedback_text}\n\n请先确认收到反馈，并基于反馈给出修正后的答复。"
+    return text
+
 
 def _extract_publish_feishu_artifact_payload(text):
     if not isinstance(text, str):
@@ -422,31 +438,6 @@ class FeishuProvider(IMProvider):
         if file_lines:
             file_block = "**文件输出**\n" + "\n".join(file_lines[-6:])
             elements.append({"tag": "markdown", "content": file_block})
-        actions = interactive_actions or [
-            {"name": "stop", "label": "停止生成"},
-            {"name": "retry", "label": "重试"},
-            {"name": "detail", "label": "工具详情"},
-            {"name": "feedback", "label": "反馈"}
-        ]
-        action_buttons = []
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            action_name = action.get("name") or ""
-            action_label = action.get("label") or action_name
-            if not action_name:
-                continue
-            action_buttons.append(
-                {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": action_label},
-                    "type": "default",
-                    "value": {"action": action_name}
-                }
-            )
-        if action_buttons:
-            for btn in action_buttons[:4]:
-                elements.append(btn)
         return {
             "schema": "2.0",
             "config": {"update_multi": True, "streaming_mode": True, "summary": {"content": "已完成" if collapse_thinking else "生成中"}},
@@ -849,6 +840,14 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
         if updated:
             sent_any = True
             update_fail_count = 0
+            with _CARD_CONTEXT_LOCK:
+                ctx = _CARD_CONTEXT.get(card_message_id)
+                if isinstance(ctx, dict):
+                    ctx["last_content"] = content
+                    ctx["last_thinking"] = thinking
+                    ctx["content_parts"] = content_parts
+                    ctx["tool_events"] = [p for p in content_parts if isinstance(p, dict) and (p.get("type") or "").lower() == "tool_event"]
+                    ctx["updated_at"] = time.time()
         else:
             update_fail_count += 1
         pending_text = ""
@@ -865,7 +864,13 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                     "conversation_id": conversation_id,
                     "event": event,
                     "workspace_dir": workspace_dir,
-                    "updated_at": time.time()
+                    "updated_at": time.time(),
+                    "tool_events": [],
+                    "content_parts": [],
+                    "last_thinking": "",
+                    "last_content": "",
+                    "awaiting_feedback": False,
+                    "thinking_expanded": False
                 }
     try:
         for msg in daemon_client.send_message_stream(conversation_id, model_input_text, workspace_dir):
@@ -1043,59 +1048,51 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
             open_message_id = action_payload.get("open_message_id")
         _log_gateway(f"feishu card action received action={action_name} message_id={open_message_id} event_id={action_event_id}")
         if open_message_id and hasattr(provider, "update_card_message"):
+            with _CARD_CONTEXT_LOCK:
+                ctx = _CARD_CONTEXT.get(open_message_id) or {}
+            conversation_id = ctx.get("conversation_id")
+            thinking_text = ctx.get("last_thinking") or ""
+            last_content = ctx.get("last_content") or "处理中..."
+            content_parts = ctx.get("content_parts") if isinstance(ctx.get("content_parts"), list) else [{"type": "text", "text": last_content}]
+            actions_running = [
+                {"name": "toggle_thinking", "label": "收起思考过程"},
+                {"name": "stop", "label": "停止生成"},
+                {"name": "detail", "label": "工具详情"},
+                {"name": "feedback", "label": "反馈"},
+            ]
             if action_name == "stop":
-                provider.update_card_message(open_message_id, "已收到停止请求，正在结束当前任务。", collapse_thinking=False)
-            elif action_name == "detail":
-                provider.update_card_message(open_message_id, "工具详情：可在桌面端右侧工具详情面板查看完整参数与结果。", collapse_thinking=False)
-            elif action_name == "feedback":
-                provider.update_card_message(open_message_id, "感谢反馈，已记录本次交互评价。", collapse_thinking=False)
-            elif action_name == "retry":
+                if conversation_id:
+                    try:
+                        daemon_client.stop_session(conversation_id)
+                    except Exception:
+                        pass
+                provider.update_card_message(open_message_id, "已停止当前任务。", thinking=thinking_text, collapse_thinking=False, content_parts=content_parts, interactive_actions=actions_running)
+            elif action_name == "toggle_thinking":
+                collapse = bool(ctx.get("thinking_expanded"))
                 with _CARD_CONTEXT_LOCK:
-                    ctx = _CARD_CONTEXT.get(open_message_id) or {}
-                conversation_id = ctx.get("conversation_id")
-                retry_event = ctx.get("event")
-                workspace_dir = ctx.get("workspace_dir")
-                if conversation_id and retry_event and workspace_dir:
-                    provider.update_card_message(open_message_id, "正在重试处理中...", collapse_thinking=False)
-                    def _run_retry():
-                        retry_result, retry_total_text, _, retry_total_thinking, _, _, _, _ = _stream_im_response(
-                            conversation_id,
-                            retry_event,
-                            provider,
-                            daemon_client,
-                            workspace_dir,
-                            config_manager
-                        )
-                        if isinstance(retry_result, dict) and retry_result.get("error"):
-                            provider.update_card_message(
-                                open_message_id,
-                                f"⚠️ {retry_result.get('error')}",
-                                thinking=_truncate_text(retry_total_thinking, limit=2000),
-                                collapse_thinking=True,
-                                content_parts=[{"type": "text", "text": f"⚠️ {retry_result.get('error')}"}]
-                            )
-                            return
-                        retry_output = _extract_content(retry_result)
-                        retry_parts = retry_result.get("content_parts") if isinstance(retry_result, dict) else None
-                        if not isinstance(retry_parts, list):
-                            retry_parts = [{"type": "text", "text": retry_output or ""}]
-                        if (retry_total_text or "").strip():
-                            retry_output = retry_total_text
-                            retry_parts = [{"type": "text", "text": retry_output}] + [p for p in retry_parts if isinstance(p, dict) and (p.get("type") or "").lower() != "text"]
-                        display_retry = retry_output if _has_effective_output(retry_output) else " "
-                        provider.update_card_message(
-                            open_message_id,
-                            display_retry,
-                            thinking=_truncate_text(retry_total_thinking, limit=2000),
-                            collapse_thinking=True,
-                            content_parts=retry_parts
-                        )
-                    threading.Thread(
-                        target=_run_retry,
-                        daemon=True
-                    ).start()
-                else:
-                    provider.update_card_message(open_message_id, "当前上下文已过期，无法自动重试。请重新发送问题。", collapse_thinking=False)
+                    live_ctx = _CARD_CONTEXT.get(open_message_id)
+                    if isinstance(live_ctx, dict):
+                        live_ctx["thinking_expanded"] = not collapse
+                toggle_actions = [
+                    {"name": "toggle_thinking", "label": "收起思考过程" if not collapse else "展开思考过程"},
+                    {"name": "stop", "label": "停止生成"},
+                    {"name": "detail", "label": "工具详情"},
+                    {"name": "feedback", "label": "反馈"},
+                ]
+                provider.update_card_message(open_message_id, last_content, thinking=thinking_text, collapse_thinking=collapse, content_parts=content_parts, interactive_actions=toggle_actions)
+            elif action_name == "detail":
+                tool_events = [p for p in content_parts if isinstance(p, dict) and (p.get("type") or "").lower() == "tool_event"]
+                lines = []
+                for ev in tool_events[-10:]:
+                    lines.append(f"- {ev.get('tool_name') or 'tool'} [{ev.get('status') or 'unknown'}]: {_truncate_text(ev.get('summary') or '', 120)}")
+                detail_text = "工具详情暂无记录。" if not lines else ("工具详情\n" + "\n".join(lines))
+                provider.update_card_message(open_message_id, detail_text, thinking=thinking_text, collapse_thinking=False, content_parts=content_parts, interactive_actions=actions_running)
+            elif action_name == "feedback":
+                with _CARD_CONTEXT_LOCK:
+                    live_ctx = _CARD_CONTEXT.get(open_message_id)
+                    if isinstance(live_ctx, dict):
+                        live_ctx["awaiting_feedback"] = True
+                provider.update_card_message(open_message_id, "请直接回复你对当前结果的反馈内容，我会转给 AI 并继续优化。", thinking=thinking_text, collapse_thinking=False, content_parts=content_parts, interactive_actions=actions_running)
         return None
     if event_type != "im.message.receive_v1":
         _log_gateway(f"feishu handle_im_event ignored: event_type={event.get('event_type')}")
@@ -1136,6 +1133,8 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     date_key = resolve_date_key(event.get("create_time"))
     session_key = build_im_session_key(event["user_id"], event.get("chat_id") or "", date_key)
     conversation_id = session_mapper.get_or_create("feishu", session_key)
+    event = dict(event)
+    event["text"] = _consume_feedback_prefix(conversation_id, event.get("text") or "")
     _log_gateway(f"feishu session mapped conversation_id={conversation_id} session_key={session_key}")
     _log_gateway(f"feishu daemon request conversation_id={conversation_id} text_len={len(event.get('text') or '')} workspace={workspace_dir}")
     result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted = _stream_im_response(
@@ -1159,14 +1158,30 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         output_parts = [{"type": "text", "text": output}] + [p for p in output_parts if isinstance(p, dict) and (p.get("type") or "").lower() != "text"]
     has_output = _has_effective_output(output)
     display_output = output if has_output else " "
+    final_actions = [
+        {"name": "toggle_thinking", "label": "展开思考过程"},
+        {"name": "stop", "label": "停止生成"},
+        {"name": "detail", "label": "工具详情"},
+        {"name": "feedback", "label": "反馈"},
+    ]
     if use_card and card_message_id:
         final_ok = provider.update_card_message(
             card_message_id,
             display_output,
             thinking=_truncate_text(total_thinking, limit=2000),
             collapse_thinking=True,
-            content_parts=output_parts
+            content_parts=output_parts,
+            interactive_actions=final_actions
         )
+        with _CARD_CONTEXT_LOCK:
+            ctx = _CARD_CONTEXT.get(card_message_id)
+            if isinstance(ctx, dict):
+                ctx["last_content"] = display_output
+                ctx["last_thinking"] = _truncate_text(total_thinking, limit=2000)
+                ctx["content_parts"] = output_parts
+                ctx["tool_events"] = [p for p in output_parts if isinstance(p, dict) and (p.get("type") or "").lower() == "tool_event"]
+                ctx["updated_at"] = time.time()
+                ctx["thinking_expanded"] = False
         if not final_ok:
             provider.send_card_reply(
                 event,
@@ -1174,7 +1189,8 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
                 title="🤖 AI 助手",
                 thinking=_truncate_text(total_thinking, limit=2000),
                 collapse_thinking=True,
-                content_parts=output_parts
+                content_parts=output_parts,
+                interactive_actions=final_actions
             )
         return None
     if (not sent_any and has_output) or ((not total_text.strip()) and has_output):
@@ -1184,10 +1200,10 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
                 return None
             if card_attempted:
                 return None
-            message_id = provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts)
+            message_id = provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts, interactive_actions=final_actions)
             if message_id:
                 return None
-        provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts)
+        provider.send_card_reply(event, card_content=display_output, title="🤖 AI 助手", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True, content_parts=output_parts, interactive_actions=final_actions)
     return None
 
 

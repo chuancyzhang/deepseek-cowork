@@ -32,7 +32,7 @@ This skill provides system utilities for command execution, search, app manageme
    - Launch apps and open files with selected apps.
 5. **Browser & Desktop Automation**:
    - Prefer system default browser and desktop window automation by default.
-   - Playwright is only used when explicitly enabled by system config; no automatic downloads.
+   - Browser web automation uses native CDP (Chrome DevTools Protocol) with local browser.
    - Use `system_automate` for unified multi-step automation.
 
 ## Usage Guidelines

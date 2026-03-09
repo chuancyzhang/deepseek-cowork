@@ -9,6 +9,7 @@ pandas
 duckduckgo-search
 beautifulsoup4
 requests
+websocket-client
 markdown
 anthropic>=0.3.0
 qtawesome

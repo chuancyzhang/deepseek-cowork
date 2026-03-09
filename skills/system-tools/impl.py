@@ -9,10 +9,13 @@ import time
 import sys
 import difflib
 import shlex
+import base64
 import webbrowser
 import threading
 from collections import deque
-from core.env_utils import ensure_package_installed, get_app_data_dir, get_python_executable
+import urllib.request
+import urllib.parse
+from core.env_utils import ensure_package_installed, get_app_data_dir
 from PySide6.QtCore import QObject, Qt
 
 _ACTION_WINDOW_STATE = {}
@@ -430,85 +433,207 @@ def _open_url_impl(url):
     ok = webbrowser.open(url)
     return "OK" if ok else "Error: failed to open url."
 
+def _default_screenshot_path(prefix):
+    out_dir = os.path.join(get_app_data_dir(), "screenshots")
+    os.makedirs(out_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    return os.path.join(out_dir, f"{prefix}_{ts}.png")
+
+def _find_browser_executable():
+    candidates = [
+        _resolve_by_where("msedge.exe"),
+        _resolve_by_where("chrome.exe"),
+    ]
+    program_files = [os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")]
+    suffixes = [
+        os.path.join("Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join("Google", "Chrome", "Application", "chrome.exe"),
+    ]
+    for base in program_files:
+        if not base:
+            continue
+        for suffix in suffixes:
+            candidates.append(os.path.join(base, suffix))
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+def _cdp_http_json(url, timeout=3):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+    return json.loads(raw)
+
+def _cdp_request_new_page(port, url):
+    encoded = urllib.parse.quote(url or "about:blank", safe=":/?=&%#")
+    endpoint = f"http://127.0.0.1:{int(port)}/json/new?{encoded}"
+    methods = ["PUT", "GET"]
+    last_error = ""
+    for method in methods:
+        try:
+            req = urllib.request.Request(endpoint, method=method, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            body = json.loads(raw)
+            ws_url = body.get("webSocketDebuggerUrl") if isinstance(body, dict) else None
+            if ws_url:
+                return ws_url, ""
+        except Exception as e:
+            last_error = str(e)
+            continue
+    try:
+        tabs = _cdp_http_json(f"http://127.0.0.1:{int(port)}/json/list", timeout=3)
+        if isinstance(tabs, list):
+            for tab in tabs:
+                if isinstance(tab, dict) and tab.get("type") == "page" and tab.get("webSocketDebuggerUrl"):
+                    return tab.get("webSocketDebuggerUrl"), ""
+    except Exception as e:
+        last_error = str(e)
+    return "", last_error or "cdp_new_page_failed"
+
+def _ensure_cdp_ready(start_url, _context=None):
+    port = int(_cfg_value(_context, "browser_cdp_port", 9222) or 9222)
+    browser_exe = _find_browser_executable()
+    if not browser_exe:
+        return "", "browser_executable_not_found"
+    launched = False
+    try:
+        version = _cdp_http_json(f"http://127.0.0.1:{port}/json/version", timeout=1.2)
+        if not isinstance(version, dict):
+            raise RuntimeError("invalid_cdp_version")
+    except Exception:
+        profile_dir = os.path.join(get_app_data_dir(), "cdp_profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        args = [
+            browser_exe,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            start_url or "about:blank"
+        ]
+        try:
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            launched = True
+        except Exception as e:
+            return "", f"cdp_launch_failed:{e}"
+    deadline = time.time() + (8.0 if launched else 3.0)
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            version = _cdp_http_json(f"http://127.0.0.1:{port}/json/version", timeout=1.2)
+            if isinstance(version, dict):
+                ws_url, ws_err = _cdp_request_new_page(port, start_url or "about:blank")
+                if ws_url:
+                    return ws_url, ""
+                last_error = ws_err
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(0.3)
+    return "", last_error or "cdp_endpoint_unavailable"
+
+class _CDPSession:
+    def __init__(self, ws_url):
+        ensure_package_installed("websocket-client", "websocket")
+        from websocket import create_connection
+        self._ws = create_connection(ws_url, timeout=10)
+        self._next_id = 1
+        self._ws.settimeout(10)
+
+    def close(self):
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+    def call(self, method, params=None):
+        call_id = self._next_id
+        self._next_id += 1
+        payload = {"id": call_id, "method": method, "params": params or {}}
+        self._ws.send(json.dumps(payload, ensure_ascii=False))
+        while True:
+            message = self._ws.recv()
+            if not message:
+                continue
+            data = json.loads(message)
+            if data.get("id") != call_id:
+                continue
+            if data.get("error"):
+                raise RuntimeError(str(data.get("error")))
+            return data.get("result") or {}
+
+def _cdp_eval(session, expression):
+    result = session.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+    value_obj = (result.get("result") or {})
+    return value_obj.get("value")
+
+def _cdp_wait_document_ready(session, abort_state, timeout_seconds=15):
+    deadline = time.time() + max(float(timeout_seconds), 1.0)
+    while time.time() < deadline:
+        if abort_state["aborted"]:
+            return False
+        try:
+            ready = _cdp_eval(session, "document.readyState")
+            if ready in ("interactive", "complete"):
+                return True
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return False
+
+def _cdp_capture_png(session, output_path, full_page=True):
+    if full_page:
+        try:
+            session.call("Page.getLayoutMetrics")
+        except Exception:
+            pass
+    result = session.call("Page.captureScreenshot", {"format": "png", "fromSurface": True, "captureBeyondViewport": bool(full_page)})
+    raw = result.get("data")
+    if not raw:
+        raise RuntimeError("empty_screenshot_data")
+    with open(output_path, "wb") as f:
+        f.write(base64.b64decode(raw))
+
 def _screenshot_url_impl(url, output_path=None, _context=None):
     url = (url or "").strip()
     if not url:
         return "Error: url is required."
     start_ts = time.time()
-    allow_playwright = _cfg_bool(_context, "browser_allow_playwright", False)
-    sync_playwright, err = _try_playwright(_context, allow_download=allow_playwright)
-    if not sync_playwright:
+    if not output_path:
+        output_path = _default_screenshot_path("screenshot")
+    ws_url, err = _ensure_cdp_ready(url, _context=_context)
+    if not ws_url:
         _open_url_impl(url)
         time.sleep(1.2)
         fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(url))
         if fallback_path:
             end_ts = time.time()
-            return _standard_step_result(
-                "screenshot_url",
-                "OK",
-                ok=True,
-                chosen_strategy="default_window",
-                fallback_used=True,
-                capability_notes="browser_window_capture",
-                artifacts=[{"type": "screenshot", "path": fallback_path}],
-                timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-            )
+            return _standard_step_result("screenshot_url", "OK", ok=True, chosen_strategy="default_window", fallback_used=True, capability_notes="browser_window_capture", artifacts=[{"type": "screenshot", "path": fallback_path}], timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
         end_ts = time.time()
-        return _standard_step_result(
-            "screenshot_url",
-            f"Error: playwright_unavailable:{err};fallback_capture_failed:{fallback_err}",
-            ok=False,
-            chosen_strategy="default_window",
-            fallback_used=True,
-            capability_notes="opened_url_only",
-            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-        )
-    if not output_path:
-        out_dir = os.path.join(get_app_data_dir(), "screenshots")
-        os.makedirs(out_dir, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(out_dir, f"screenshot_{ts}.png")
+        return _standard_step_result("screenshot_url", f"Error: cdp_unavailable:{err};fallback_capture_failed:{fallback_err}", ok=False, chosen_strategy="default_window", fallback_used=True, capability_notes="opened_url_only", timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+    session = None
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(url, wait_until="networkidle")
-            page.screenshot(path=output_path, full_page=True)
-            browser.close()
+        session = _CDPSession(ws_url)
+        session.call("Page.enable")
+        session.call("Runtime.enable")
+        session.call("Page.navigate", {"url": url})
+        _cdp_wait_document_ready(session, {"aborted": False}, timeout_seconds=20)
+        _cdp_capture_png(session, output_path, full_page=True)
         end_ts = time.time()
-        return _standard_step_result(
-            "screenshot_url",
-            "OK",
-            chosen_strategy="playwright",
-            artifacts=[{"type": "screenshot", "path": output_path}],
-            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-        )
+        return _standard_step_result("screenshot_url", "OK", chosen_strategy="cdp_native", artifacts=[{"type": "screenshot", "path": output_path}], timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
     except Exception as e:
         _open_url_impl(url)
         time.sleep(1.2)
         fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(url))
         if fallback_path:
             end_ts = time.time()
-            return _standard_step_result(
-                "screenshot_url",
-                "OK",
-                ok=True,
-                chosen_strategy="default_window",
-                fallback_used=True,
-                capability_notes="browser_window_capture_after_playwright_failure",
-                artifacts=[{"type": "screenshot", "path": fallback_path}],
-                timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-            )
+            return _standard_step_result("screenshot_url", "OK", ok=True, chosen_strategy="default_window", fallback_used=True, capability_notes="browser_window_capture_after_cdp_failure", artifacts=[{"type": "screenshot", "path": fallback_path}], timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
         end_ts = time.time()
-        return _standard_step_result(
-            "screenshot_url",
-            f"Error: playwright_launch_failed:{str(e)};fallback_capture_failed:{fallback_err}",
-            ok=False,
-            chosen_strategy="default_window",
-            fallback_used=True,
-            capability_notes="opened_url_only",
-            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-        )
+        return _standard_step_result("screenshot_url", f"Error: cdp_failed:{str(e)};fallback_capture_failed:{fallback_err}", ok=False, chosen_strategy="default_window", fallback_used=True, capability_notes="opened_url_only", timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+    finally:
+        if session:
+            session.close()
 
 def _run_browser_steps_impl(url=None, steps=None, output_path=None, _context=None):
     if steps is None:
@@ -521,122 +646,23 @@ def _run_browser_steps_impl(url=None, steps=None, output_path=None, _context=Non
     if not isinstance(steps, list):
         return _standard_step_result("run_browser_steps", "Error: steps must be a list.", ok=False)
     start_ts = time.time()
-    allow_playwright = _cfg_bool(_context, "browser_allow_playwright", False)
-    sync_playwright, err = _try_playwright(_context, allow_download=allow_playwright)
-    if not sync_playwright:
-        goto_url = (url or "").strip()
-        screenshot_needed = False
-        if not goto_url:
-            for s in steps:
-                if isinstance(s, dict) and (s.get("action") or "").strip() == "goto":
-                    goto_url = (s.get("url") or "").strip()
-                    if goto_url:
-                        break
-        for s in steps:
-            if isinstance(s, dict) and (s.get("action") or "").strip() == "screenshot":
-                screenshot_needed = True
-                maybe_path = s.get("path") or s.get("output_path")
-                if maybe_path:
-                    output_path = maybe_path
-        if goto_url:
-            _open_url_impl(goto_url)
-        if screenshot_needed and goto_url:
-            time.sleep(1.2)
-            fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(goto_url))
-            if fallback_path:
-                end_ts = time.time()
-                return _standard_step_result(
-                    "run_browser_steps",
-                    "OK",
-                    ok=True,
-                    chosen_strategy="default_window",
-                    fallback_used=True,
-                    capability_notes="browser_window_capture",
-                    artifacts=[{"type": "screenshot", "path": fallback_path}],
-                    timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-                )
-        end_ts = time.time()
-        return _standard_step_result(
-            "run_browser_steps",
-            f"Error: playwright_unavailable:{err}",
-            ok=False,
-            chosen_strategy="default_window",
-            fallback_used=True,
-            capability_notes="opened_url_only" + (f";fallback_capture_failed:{fallback_err}" if screenshot_needed and goto_url else ""),
-            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-        )
+    abort_state = _init_abort_state(_context)
+    goto_url = (url or "").strip()
+    screenshot_needed = False
     if not output_path:
-        out_dir = os.path.join(get_app_data_dir(), "screenshots")
-        os.makedirs(out_dir, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(out_dir, f"automation_{ts}.png")
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            if url:
-                page.goto(url, wait_until="networkidle")
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
-                action = step.get("action")
-                if action == "goto":
-                    page.goto(step.get("url") or url, wait_until=step.get("wait_until") or "networkidle")
-                elif action == "click":
-                    selector = step.get("selector")
-                    if selector:
-                        page.click(selector)
-                elif action == "fill":
-                    selector = step.get("selector")
-                    text = step.get("text") or ""
-                    if selector:
-                        page.fill(selector, text)
-                elif action == "type":
-                    selector = step.get("selector")
-                    text = step.get("text") or ""
-                    if selector:
-                        page.type(selector, text)
-                elif action == "scroll":
-                    x = int(step.get("x") or 0)
-                    y = int(step.get("y") or 0)
-                    if y == 0:
-                        direction = (step.get("direction") or "down").lower()
-                        amount = int(step.get("amount") or 1)
-                        y = 800 * amount
-                        if direction == "up":
-                            y = -y
-                    page.mouse.wheel(x, y)
-                elif action == "wait":
-                    ms = int(step.get("ms") or 500)
-                    page.wait_for_timeout(ms)
-                elif action == "screenshot":
-                    path = step.get("path") or output_path
-                    page.screenshot(path=path, full_page=bool(step.get("full_page", True)))
-            page.screenshot(path=output_path, full_page=True)
-            browser.close()
-        end_ts = time.time()
-        return _standard_step_result(
-            "run_browser_steps",
-            "OK",
-            chosen_strategy="playwright",
-            artifacts=[{"type": "screenshot", "path": output_path}],
-            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-        )
-    except Exception as e:
-        goto_url = (url or "").strip()
-        screenshot_needed = False
-        if not goto_url:
-            for s in steps:
-                if isinstance(s, dict) and (s.get("action") or "").strip() == "goto":
-                    goto_url = (s.get("url") or "").strip()
-                    if goto_url:
-                        break
-        for s in steps:
-            if isinstance(s, dict) and (s.get("action") or "").strip() == "screenshot":
-                screenshot_needed = True
-                maybe_path = s.get("path") or s.get("output_path")
-                if maybe_path:
-                    output_path = maybe_path
+        output_path = _default_screenshot_path("automation")
+    for s in steps:
+        if isinstance(s, dict) and (s.get("action") or "").strip() == "goto":
+            maybe_url = (s.get("url") or "").strip()
+            if maybe_url:
+                goto_url = maybe_url
+        if isinstance(s, dict) and (s.get("action") or "").strip() == "screenshot":
+            screenshot_needed = True
+            maybe_path = s.get("path") or s.get("output_path")
+            if maybe_path:
+                output_path = maybe_path
+    ws_url, cdp_err = _ensure_cdp_ready(goto_url or "about:blank", _context=_context)
+    if not ws_url:
         if goto_url:
             _open_url_impl(goto_url)
         if screenshot_needed and goto_url:
@@ -644,26 +670,89 @@ def _run_browser_steps_impl(url=None, steps=None, output_path=None, _context=Non
             fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(goto_url))
             if fallback_path:
                 end_ts = time.time()
-                return _standard_step_result(
-                    "run_browser_steps",
-                    "OK",
-                    ok=True,
-                    chosen_strategy="default_window",
-                    fallback_used=True,
-                    capability_notes="browser_window_capture_after_playwright_failure",
-                    artifacts=[{"type": "screenshot", "path": fallback_path}],
-                    timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-                )
+                return _standard_step_result("run_browser_steps", "OK", ok=True, chosen_strategy="default_window", fallback_used=True, capability_notes="browser_window_capture", artifacts=[{"type": "screenshot", "path": fallback_path}], timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+            end_ts = time.time()
+            return _standard_step_result("run_browser_steps", f"Error: cdp_unavailable:{cdp_err};fallback_capture_failed:{fallback_err}", ok=False, chosen_strategy="default_window", fallback_used=True, capability_notes="opened_url_only", timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
         end_ts = time.time()
-        return _standard_step_result(
-            "run_browser_steps",
-            f"Error: playwright_launch_failed:{str(e)}",
-            ok=False,
-            chosen_strategy="default_window",
-            fallback_used=True,
-            capability_notes="opened_url_only" + (f";fallback_capture_failed:{fallback_err}" if screenshot_needed and goto_url else ""),
-            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
-        )
+        return _standard_step_result("run_browser_steps", f"Error: cdp_unavailable:{cdp_err}", ok=False, chosen_strategy="default_window", fallback_used=True, capability_notes="opened_url_only", timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+    session = None
+    artifacts = []
+    try:
+        session = _CDPSession(ws_url)
+        session.call("Page.enable")
+        session.call("Runtime.enable")
+        for step in steps:
+            if abort_state["aborted"]:
+                raise RuntimeError("Command aborted by user.")
+            if not isinstance(step, dict):
+                continue
+            action = (step.get("action") or "").strip()
+            if action == "goto":
+                target_url = (step.get("url") or goto_url or "").strip()
+                if not target_url:
+                    continue
+                session.call("Page.navigate", {"url": target_url})
+                _cdp_wait_document_ready(session, abort_state, timeout_seconds=20)
+            elif action == "click":
+                selector = step.get("selector")
+                if selector:
+                    js = f"""(function(){{var el=document.querySelector({json.dumps(selector)});if(!el)return false;el.click();return true;}})()"""
+                    _cdp_eval(session, js)
+            elif action == "fill":
+                selector = step.get("selector")
+                text_value = step.get("text") or ""
+                if selector:
+                    js = f"""(function(){{var el=document.querySelector({json.dumps(selector)});if(!el)return false;el.focus();el.value={json.dumps(text_value)};el.dispatchEvent(new Event('input',{{bubbles:true}}));el.dispatchEvent(new Event('change',{{bubbles:true}}));return true;}})()"""
+                    _cdp_eval(session, js)
+            elif action == "type":
+                selector = step.get("selector")
+                text_value = step.get("text") or ""
+                if selector:
+                    js = f"""(function(){{var el=document.querySelector({json.dumps(selector)});if(!el)return false;el.focus();el.value=(el.value||"")+{json.dumps(text_value)};el.dispatchEvent(new Event('input',{{bubbles:true}}));return true;}})()"""
+                    _cdp_eval(session, js)
+            elif action == "scroll":
+                x = int(step.get("x") or 0)
+                y = int(step.get("y") or 0)
+                if y == 0:
+                    direction = (step.get("direction") or "down").lower()
+                    amount = int(step.get("amount") or 1)
+                    y = 800 * amount
+                    if direction == "up":
+                        y = -y
+                _cdp_eval(session, f"window.scrollBy({int(x)}, {int(y)}); true;")
+            elif action == "wait":
+                ms = int(step.get("ms") or 500)
+                wait_until = time.time() + max(ms, 0) / 1000.0
+                while time.time() < wait_until:
+                    if abort_state["aborted"]:
+                        raise RuntimeError("Command aborted by user.")
+                    time.sleep(0.1)
+            elif action == "screenshot":
+                path = step.get("path") or step.get("output_path") or output_path
+                full_page = bool(step.get("full_page", True))
+                _cdp_capture_png(session, path, full_page=full_page)
+                artifacts.append({"type": "screenshot", "path": path})
+        if not artifacts:
+            _cdp_capture_png(session, output_path, full_page=True)
+            artifacts.append({"type": "screenshot", "path": output_path})
+        end_ts = time.time()
+        return _standard_step_result("run_browser_steps", "OK", chosen_strategy="cdp_native", artifacts=artifacts, timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+    except Exception as e:
+        if goto_url:
+            _open_url_impl(goto_url)
+        if screenshot_needed and goto_url:
+            time.sleep(1.2)
+            fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(goto_url))
+            if fallback_path:
+                end_ts = time.time()
+                return _standard_step_result("run_browser_steps", "OK", ok=True, chosen_strategy="default_window", fallback_used=True, capability_notes="browser_window_capture_after_cdp_failure", artifacts=[{"type": "screenshot", "path": fallback_path}], timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+            end_ts = time.time()
+            return _standard_step_result("run_browser_steps", f"Error: cdp_failed:{str(e)};fallback_capture_failed:{fallback_err}", ok=False, chosen_strategy="default_window", fallback_used=True, capability_notes="opened_url_only", timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+        end_ts = time.time()
+        return _standard_step_result("run_browser_steps", f"Error: cdp_failed:{str(e)}", ok=False, chosen_strategy="default_window", fallback_used=True, capability_notes="opened_url_only", timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)})
+    finally:
+        if session:
+            session.close()
 
 def _ui_focus_window_impl(window_title, backend="uia"):
     window_title = (window_title or "").strip()
@@ -1003,13 +1092,6 @@ def _launch(path, args):
     else:
         subprocess.Popen([path])
 
-def _try_playwright(_context=None, allow_download=False):
-    try:
-        from playwright.sync_api import sync_playwright
-        return sync_playwright, ""
-    except Exception as e:
-        return None, str(e)
-
 def system_automate(steps, workspace_dir=None, _context=None):
     if isinstance(steps, str):
         try:
@@ -1024,18 +1106,11 @@ def system_automate(steps, workspace_dir=None, _context=None):
     abort_state = _init_abort_state(_context)
     results = []
     ok = True
-    allow_playwright = _cfg_bool(_context, "browser_allow_playwright", False)
     web_actions = {"goto", "click", "fill", "type", "scroll", "wait", "screenshot"}
     web_buffer = []
     web_url = None
     web_output = None
     web_opened = False
-    def _web_needs_playwright(steps):
-        for s in steps:
-            action_name = (s.get("action") or "").strip()
-            if action_name and action_name != "goto":
-                return True
-        return False
     def flush_web():
         nonlocal web_buffer, web_url, web_output, ok, web_opened
         if not web_buffer:
@@ -1048,29 +1123,7 @@ def system_automate(steps, workspace_dir=None, _context=None):
             web_url = None
             web_output = None
             return
-        if not allow_playwright:
-            target_url = web_url or (web_buffer[-1].get("url") if web_buffer else "")
-            if target_url and not web_opened:
-                _open_url_impl(target_url)
-                web_opened = True
-            if _web_needs_playwright(web_buffer):
-                step_result = _standard_step_result(
-                    "web_steps",
-                    "Error: playwright_unavailable:Playwright is disabled or not installed.",
-                    ok=False,
-                    chosen_strategy="default_window",
-                    fallback_used=True,
-                    capability_notes="opened_url_only"
-                )
-            else:
-                step_result = _standard_step_result(
-                    "goto",
-                    "OK",
-                    ok=True,
-                    chosen_strategy="default_window",
-                    fallback_used=False
-                )
-        elif all((step.get("action") or "").strip() == "goto" for step in web_buffer):
+        if all((step.get("action") or "").strip() == "goto" for step in web_buffer):
             res = _open_url_impl(web_url or (web_buffer[-1].get("url") if web_buffer else ""))
             step_ok = not (isinstance(res, str) and res.startswith("Error:"))
             step_result = _standard_step_result("goto", res, ok=step_ok, chosen_strategy="default_window")
@@ -1080,7 +1133,7 @@ def system_automate(steps, workspace_dir=None, _context=None):
                 step_result = res
             else:
                 step_ok = not (isinstance(res, str) and res.startswith("Error:"))
-                step_result = _standard_step_result("web_steps", res, ok=step_ok, chosen_strategy="playwright")
+                step_result = _standard_step_result("web_steps", res, ok=step_ok, chosen_strategy="cdp_native")
         results.append(step_result)
         if not step_result.get("ok", False):
             ok = False
@@ -1103,7 +1156,7 @@ def system_automate(steps, workspace_dir=None, _context=None):
                 url_value = (step.get("url") or "").strip()
                 if url_value:
                     web_url = url_value
-                    if not allow_playwright and not web_opened:
+                    if not web_opened:
                         _open_url_impl(web_url)
                         web_opened = True
             if action == "screenshot":

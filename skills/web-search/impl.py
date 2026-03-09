@@ -14,11 +14,6 @@ def get_ddgs():
     from duckduckgo_search import DDGS
     return DDGS
 
-def get_trafilatura():
-    ensure_package_installed("trafilatura")
-    import trafilatura
-    return trafilatura
-
 def _normalize_url(url):
     u = (url or "").strip()
     if not u:
@@ -61,14 +56,6 @@ def _fetch_text_direct(url):
     if len(cleaned) < 80:
         return None
     return cleaned
-
-def _extract_with_trafilatura(url):
-    trafilatura = get_trafilatura()
-    downloaded = trafilatura.fetch_url(url)
-    if downloaded is None:
-        return None
-    text = trafilatura.extract(downloaded)
-    return text.strip() if text else None
 
 def _extract_with_scrapling(url):
     try:
@@ -192,23 +179,19 @@ def read_article(url):
         if not normalized:
             return "Error: Empty URL."
 
-        primary = _extract_with_trafilatura(normalized)
-        if primary:
-            return primary
+        direct = _fetch_text_direct(normalized)
+        if direct:
+            return direct
 
         for proxy_url in _build_markdown_proxy_urls(normalized):
             proxied = _fetch_text_direct(proxy_url)
             if proxied:
                 return proxied
 
-            proxied_extracted = _extract_with_trafilatura(proxy_url)
-            if proxied_extracted:
-                return proxied_extracted
-
         scrapling_text = _extract_with_scrapling(normalized)
         if scrapling_text:
             return scrapling_text
 
-        return "Error: Could not extract text with direct fetch, markdown proxies, or Scrapling fallback."
+        return "Error: Could not extract text with markdown proxies or Scrapling fallback."
     except Exception as e:
         return f"Error reading article: {str(e)}"

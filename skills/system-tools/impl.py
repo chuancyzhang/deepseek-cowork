@@ -10,8 +10,13 @@ import sys
 import difflib
 import shlex
 import webbrowser
+import threading
+from collections import deque
 from core.env_utils import ensure_package_installed, get_app_data_dir, get_python_executable
 from PySide6.QtCore import QObject, Qt
+
+_ACTION_WINDOW_STATE = {}
+_ACTION_WINDOW_LOCK = threading.Lock()
 
 def _is_god_mode(context):
     if context and 'config_manager' in context:
@@ -35,6 +40,59 @@ def _init_abort_state(context):
     abort_signal.connect(bridge.trigger, Qt.DirectConnection)
     state["bridge"] = bridge
     return state
+
+def _cfg_value(context, key, default=None):
+    if not context:
+        return default
+    cfg = context.get("config_manager") if isinstance(context, dict) else None
+    if not cfg:
+        return default
+    try:
+        value = cfg.get(key, default)
+        return value if value is not None else default
+    except Exception:
+        return default
+
+def _cfg_bool(context, key, default=False):
+    value = _cfg_value(context, key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("1", "true", "yes", "y", "on"):
+            return True
+        if lowered in ("0", "false", "no", "n", "off"):
+            return False
+    return default
+
+def _normalize_action_key(value):
+    text = (value or "").strip().lower()
+    if len(text) > 160:
+        text = text[:160]
+    return text
+
+def _hit_action_limit(action, key, context):
+    window_seconds = int(_cfg_value(context, "system_automate_action_window_seconds", 120) or 120)
+    max_hits = int(_cfg_value(context, "system_automate_action_max_hits", 5) or 5)
+    now = time.time()
+    bucket_key = f"{action}:{_normalize_action_key(key)}"
+    with _ACTION_WINDOW_LOCK:
+        q = _ACTION_WINDOW_STATE.get(bucket_key)
+        if q is None:
+            q = deque()
+            _ACTION_WINDOW_STATE[bucket_key] = q
+        while q and now - q[0] > window_seconds:
+            q.popleft()
+        if len(q) >= max_hits:
+            return True, max(0, int(window_seconds - (now - q[0])))
+        q.append(now)
+        if len(_ACTION_WINDOW_STATE) > 1000:
+            stale = [k for k, dq in _ACTION_WINDOW_STATE.items() if (not dq) or (now - dq[-1] > window_seconds * 2)]
+            for k in stale[:300]:
+                _ACTION_WINDOW_STATE.pop(k, None)
+    return False, 0
 
 def _decode_bytes(raw):
     if raw is None:
@@ -120,7 +178,19 @@ def bash(workspace_dir, command, _context=None):
     except Exception as e:
         return f"Error executing command: {str(e)}"
 
-def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
+def _standard_step_result(action, result, ok=True, chosen_strategy="", fallback_used=False, capability_notes="", artifacts=None, timings=None):
+    return {
+        "action": action,
+        "ok": bool(ok),
+        "result": result,
+        "chosen_strategy": chosen_strategy,
+        "fallback_used": bool(fallback_used),
+        "capability_notes": capability_notes or "",
+        "artifacts": artifacts or [],
+        "timings": timings or {}
+    }
+
+def _grep_impl(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
     """
     Search for a text pattern in files using regex.
     
@@ -220,7 +290,7 @@ def _run_everything_search(query, limit=200):
     except Exception as e:
         return None, str(e)
 
-def search_files(workspace_dir, query, limit=200, fallback_path=".", use_grep_fallback=True, _context=None):
+def _search_files_impl(workspace_dir, query, limit=200, fallback_path=".", use_grep_fallback=True, _context=None):
     """
     Search for files and folders using Everything CLI when available.
     Falls back to grep in the workspace when Everything is unavailable.
@@ -241,7 +311,7 @@ def search_files(workspace_dir, query, limit=200, fallback_path=".", use_grep_fa
         return "\n".join(results)
     if not use_grep_fallback:
         return f"Everything unavailable: {error}"
-    fallback = grep(
+    fallback = _grep_impl(
         workspace_dir,
         pattern=query,
         path=fallback_path,
@@ -252,7 +322,7 @@ def search_files(workspace_dir, query, limit=200, fallback_path=".", use_grep_fa
     )
     return f"Everything unavailable, fallback to grep in workspace.\n{fallback}"
 
-def build_app_index(refresh=False, limit=2000, refresh_min_interval=60):
+def _build_app_index_impl(refresh=False, limit=2000, refresh_min_interval=60):
     existing = _read_index()
     if not refresh and existing:
         return json.dumps(existing, ensure_ascii=False, indent=2)
@@ -283,15 +353,15 @@ def build_app_index(refresh=False, limit=2000, refresh_min_interval=60):
     _write_meta({"last_refresh_ts": int(time.time())})
     return json.dumps(result, ensure_ascii=False, indent=2)
 
-def find_app(query, limit=10, refresh=False, refresh_min_interval=60):
+def _find_app_impl(query, limit=10, refresh=False, refresh_min_interval=60):
     query = (query or "").strip()
     if not query:
         return "Error: query is required."
     if refresh:
-        build_app_index(refresh=True, refresh_min_interval=refresh_min_interval)
+        _build_app_index_impl(refresh=True, refresh_min_interval=refresh_min_interval)
     items = _read_index()
     if not items:
-        items = json.loads(build_app_index(refresh=True))
+        items = json.loads(_build_app_index_impl(refresh=True))
     q = query.lower()
     scored = []
     for item in items:
@@ -313,7 +383,7 @@ def find_app(query, limit=10, refresh=False, refresh_min_interval=60):
     result = [s[1] for s in scored][: int(limit)]
     return json.dumps(result, ensure_ascii=False, indent=2)
 
-def launch_app(name, args=None):
+def _launch_app_impl(name, args=None):
     name = (name or "").strip()
     if not name:
         return "Error: name is required."
@@ -331,7 +401,7 @@ def launch_app(name, args=None):
         return f"OK: launched {resolved}"
     return f"Error: app not found for '{name}'. Consider building app index first."
 
-def open_with(file, app):
+def _open_with_impl(file, app):
     file = (file or "").strip()
     app = (app or "").strip()
     if not file or not app:
@@ -353,95 +423,249 @@ def open_with(file, app):
     subprocess.Popen([app_path, file])
     return f"OK: opened {file} with {app_path}"
 
-def open_url(url):
+def _open_url_impl(url):
     url = (url or "").strip()
     if not url:
         return "Error: url is required."
     ok = webbrowser.open(url)
     return "OK" if ok else "Error: failed to open url."
 
-def screenshot_url(url, output_path=None):
+def _screenshot_url_impl(url, output_path=None, _context=None):
     url = (url or "").strip()
     if not url:
         return "Error: url is required."
-    _ensure_playwright()
+    start_ts = time.time()
+    allow_playwright = _cfg_bool(_context, "browser_allow_playwright", False)
+    sync_playwright, err = _try_playwright(_context, allow_download=allow_playwright)
+    if not sync_playwright:
+        _open_url_impl(url)
+        time.sleep(1.2)
+        fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(url))
+        if fallback_path:
+            end_ts = time.time()
+            return _standard_step_result(
+                "screenshot_url",
+                "OK",
+                ok=True,
+                chosen_strategy="default_window",
+                fallback_used=True,
+                capability_notes="browser_window_capture",
+                artifacts=[{"type": "screenshot", "path": fallback_path}],
+                timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+            )
+        end_ts = time.time()
+        return _standard_step_result(
+            "screenshot_url",
+            f"Error: playwright_unavailable:{err};fallback_capture_failed:{fallback_err}",
+            ok=False,
+            chosen_strategy="default_window",
+            fallback_used=True,
+            capability_notes="opened_url_only",
+            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+        )
     if not output_path:
         out_dir = os.path.join(get_app_data_dir(), "screenshots")
         os.makedirs(out_dir, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(out_dir, f"screenshot_{ts}.png")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle")
-        page.screenshot(path=output_path, full_page=True)
-        browser.close()
-    return f"OK: {output_path}"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle")
+            page.screenshot(path=output_path, full_page=True)
+            browser.close()
+        end_ts = time.time()
+        return _standard_step_result(
+            "screenshot_url",
+            "OK",
+            chosen_strategy="playwright",
+            artifacts=[{"type": "screenshot", "path": output_path}],
+            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+        )
+    except Exception as e:
+        _open_url_impl(url)
+        time.sleep(1.2)
+        fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(url))
+        if fallback_path:
+            end_ts = time.time()
+            return _standard_step_result(
+                "screenshot_url",
+                "OK",
+                ok=True,
+                chosen_strategy="default_window",
+                fallback_used=True,
+                capability_notes="browser_window_capture_after_playwright_failure",
+                artifacts=[{"type": "screenshot", "path": fallback_path}],
+                timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+            )
+        end_ts = time.time()
+        return _standard_step_result(
+            "screenshot_url",
+            f"Error: playwright_launch_failed:{str(e)};fallback_capture_failed:{fallback_err}",
+            ok=False,
+            chosen_strategy="default_window",
+            fallback_used=True,
+            capability_notes="opened_url_only",
+            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+        )
 
-def run_browser_steps(url=None, steps=None, output_path=None):
+def _run_browser_steps_impl(url=None, steps=None, output_path=None, _context=None):
     if steps is None:
-        return "Error: steps is required."
+        return _standard_step_result("run_browser_steps", "Error: steps is required.", ok=False)
     if isinstance(steps, str):
         try:
             steps = json.loads(steps)
         except Exception:
-            return "Error: steps must be a JSON array."
+            return _standard_step_result("run_browser_steps", "Error: steps must be a JSON array.", ok=False)
     if not isinstance(steps, list):
-        return "Error: steps must be a list."
-    _ensure_playwright()
+        return _standard_step_result("run_browser_steps", "Error: steps must be a list.", ok=False)
+    start_ts = time.time()
+    allow_playwright = _cfg_bool(_context, "browser_allow_playwright", False)
+    sync_playwright, err = _try_playwright(_context, allow_download=allow_playwright)
+    if not sync_playwright:
+        goto_url = (url or "").strip()
+        screenshot_needed = False
+        if not goto_url:
+            for s in steps:
+                if isinstance(s, dict) and (s.get("action") or "").strip() == "goto":
+                    goto_url = (s.get("url") or "").strip()
+                    if goto_url:
+                        break
+        for s in steps:
+            if isinstance(s, dict) and (s.get("action") or "").strip() == "screenshot":
+                screenshot_needed = True
+                maybe_path = s.get("path") or s.get("output_path")
+                if maybe_path:
+                    output_path = maybe_path
+        if goto_url:
+            _open_url_impl(goto_url)
+        if screenshot_needed and goto_url:
+            time.sleep(1.2)
+            fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(goto_url))
+            if fallback_path:
+                end_ts = time.time()
+                return _standard_step_result(
+                    "run_browser_steps",
+                    "OK",
+                    ok=True,
+                    chosen_strategy="default_window",
+                    fallback_used=True,
+                    capability_notes="browser_window_capture",
+                    artifacts=[{"type": "screenshot", "path": fallback_path}],
+                    timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+                )
+        end_ts = time.time()
+        return _standard_step_result(
+            "run_browser_steps",
+            f"Error: playwright_unavailable:{err}",
+            ok=False,
+            chosen_strategy="default_window",
+            fallback_used=True,
+            capability_notes="opened_url_only" + (f";fallback_capture_failed:{fallback_err}" if screenshot_needed and goto_url else ""),
+            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+        )
     if not output_path:
         out_dir = os.path.join(get_app_data_dir(), "screenshots")
         os.makedirs(out_dir, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(out_dir, f"automation_{ts}.png")
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
-        if url:
-            page.goto(url, wait_until="networkidle")
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            action = step.get("action")
-            if action == "goto":
-                page.goto(step.get("url") or url, wait_until=step.get("wait_until") or "networkidle")
-            elif action == "click":
-                selector = step.get("selector")
-                if selector:
-                    page.click(selector)
-            elif action == "fill":
-                selector = step.get("selector")
-                text = step.get("text") or ""
-                if selector:
-                    page.fill(selector, text)
-            elif action == "type":
-                selector = step.get("selector")
-                text = step.get("text") or ""
-                if selector:
-                    page.type(selector, text)
-            elif action == "scroll":
-                x = int(step.get("x") or 0)
-                y = int(step.get("y") or 0)
-                if y == 0:
-                    direction = (step.get("direction") or "down").lower()
-                    amount = int(step.get("amount") or 1)
-                    y = 800 * amount
-                    if direction == "up":
-                        y = -y
-                page.mouse.wheel(x, y)
-            elif action == "wait":
-                ms = int(step.get("ms") or 500)
-                page.wait_for_timeout(ms)
-            elif action == "screenshot":
-                path = step.get("path") or output_path
-                page.screenshot(path=path, full_page=bool(step.get("full_page", True)))
-        page.screenshot(path=output_path, full_page=True)
-        browser.close()
-    return f"OK: {output_path}"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            if url:
+                page.goto(url, wait_until="networkidle")
+            for step in steps:
+                if not isinstance(step, dict):
+                    continue
+                action = step.get("action")
+                if action == "goto":
+                    page.goto(step.get("url") or url, wait_until=step.get("wait_until") or "networkidle")
+                elif action == "click":
+                    selector = step.get("selector")
+                    if selector:
+                        page.click(selector)
+                elif action == "fill":
+                    selector = step.get("selector")
+                    text = step.get("text") or ""
+                    if selector:
+                        page.fill(selector, text)
+                elif action == "type":
+                    selector = step.get("selector")
+                    text = step.get("text") or ""
+                    if selector:
+                        page.type(selector, text)
+                elif action == "scroll":
+                    x = int(step.get("x") or 0)
+                    y = int(step.get("y") or 0)
+                    if y == 0:
+                        direction = (step.get("direction") or "down").lower()
+                        amount = int(step.get("amount") or 1)
+                        y = 800 * amount
+                        if direction == "up":
+                            y = -y
+                    page.mouse.wheel(x, y)
+                elif action == "wait":
+                    ms = int(step.get("ms") or 500)
+                    page.wait_for_timeout(ms)
+                elif action == "screenshot":
+                    path = step.get("path") or output_path
+                    page.screenshot(path=path, full_page=bool(step.get("full_page", True)))
+            page.screenshot(path=output_path, full_page=True)
+            browser.close()
+        end_ts = time.time()
+        return _standard_step_result(
+            "run_browser_steps",
+            "OK",
+            chosen_strategy="playwright",
+            artifacts=[{"type": "screenshot", "path": output_path}],
+            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+        )
+    except Exception as e:
+        goto_url = (url or "").strip()
+        screenshot_needed = False
+        if not goto_url:
+            for s in steps:
+                if isinstance(s, dict) and (s.get("action") or "").strip() == "goto":
+                    goto_url = (s.get("url") or "").strip()
+                    if goto_url:
+                        break
+        for s in steps:
+            if isinstance(s, dict) and (s.get("action") or "").strip() == "screenshot":
+                screenshot_needed = True
+                maybe_path = s.get("path") or s.get("output_path")
+                if maybe_path:
+                    output_path = maybe_path
+        if goto_url:
+            _open_url_impl(goto_url)
+        if screenshot_needed and goto_url:
+            time.sleep(1.2)
+            fallback_path, fallback_err = _capture_browser_window(output_path=output_path, title_hint=_extract_host_hint(goto_url))
+            if fallback_path:
+                end_ts = time.time()
+                return _standard_step_result(
+                    "run_browser_steps",
+                    "OK",
+                    ok=True,
+                    chosen_strategy="default_window",
+                    fallback_used=True,
+                    capability_notes="browser_window_capture_after_playwright_failure",
+                    artifacts=[{"type": "screenshot", "path": fallback_path}],
+                    timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+                )
+        end_ts = time.time()
+        return _standard_step_result(
+            "run_browser_steps",
+            f"Error: playwright_launch_failed:{str(e)}",
+            ok=False,
+            chosen_strategy="default_window",
+            fallback_used=True,
+            capability_notes="opened_url_only" + (f";fallback_capture_failed:{fallback_err}" if screenshot_needed and goto_url else ""),
+            timings={"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+        )
 
-def ui_focus_window(window_title, backend="uia"):
+def _ui_focus_window_impl(window_title, backend="uia"):
     window_title = (window_title or "").strip()
     if not window_title:
         return "Error: window_title is required."
@@ -449,7 +673,7 @@ def ui_focus_window(window_title, backend="uia"):
     wnd.set_focus()
     return "OK"
 
-def ui_click(window_title, control_title=None, control_type=None, backend="uia"):
+def _ui_click_impl(window_title, control_title=None, control_type=None, backend="uia"):
     window_title = (window_title or "").strip()
     if not window_title:
         return "Error: window_title is required."
@@ -463,7 +687,7 @@ def ui_click(window_title, control_title=None, control_type=None, backend="uia")
         wnd.click_input()
     return "OK"
 
-def ui_type(window_title, text, control_title=None, control_type=None, backend="uia"):
+def _ui_type_impl(window_title, text, control_title=None, control_type=None, backend="uia"):
     window_title = (window_title or "").strip()
     if not window_title:
         return "Error: window_title is required."
@@ -480,7 +704,7 @@ def ui_type(window_title, text, control_title=None, control_type=None, backend="
         wnd.type_keys(text, with_spaces=True, set_foreground=True)
     return "OK"
 
-def ui_scroll(window_title, direction="down", amount=1, backend="uia"):
+def _ui_scroll_impl(window_title, direction="down", amount=1, backend="uia"):
     window_title = (window_title or "").strip()
     if not window_title:
         return "Error: window_title is required."
@@ -493,6 +717,88 @@ def ui_scroll(window_title, direction="down", amount=1, backend="uia"):
         dist = -dist
     mouse.scroll(wheel_dist=dist)
     return "OK"
+
+def _screenshot_window_impl(window_title, output_path=None, backend="uia"):
+    window_title = (window_title or "").strip()
+    if not window_title:
+        return "Error: window_title is required."
+    if not output_path:
+        out_dir = os.path.join(get_app_data_dir(), "screenshots")
+        os.makedirs(out_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(out_dir, f"window_{ts}.png")
+    wnd = _connect_window(window_title, backend)
+    try:
+        image = wnd.capture_as_image()
+        image.save(output_path)
+    except Exception as e:
+        return f"Error: screenshot_window_failed:{str(e)}"
+    return f"OK: {output_path}"
+
+def _extract_host_hint(url):
+    text = (url or "").strip()
+    m = re.match(r"^https?://([^/]+)", text, re.IGNORECASE)
+    if not m:
+        return ""
+    host = m.group(1).split(":", 1)[0].lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+def _capture_browser_window(output_path=None, title_hint="", timeout_seconds=8):
+    if not output_path:
+        out_dir = os.path.join(get_app_data_dir(), "screenshots")
+        os.makedirs(out_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(out_dir, f"browser_{ts}.png")
+    ensure_package_installed("pywinauto")
+    from pywinauto import Desktop
+    hint = (title_hint or "").strip().lower()
+    hint_parts = [p for p in re.split(r"[\.\-_]+", hint) if p]
+    include = ["edge", "chrome", "firefox", "browser", "浏览器", "xiaohongshu", "小红书"] + hint_parts
+    exclude = ["powershell", "cmd", "terminal", "命令提示符", "trae", "code"]
+    deadline = time.time() + max(int(timeout_seconds), 1)
+    while time.time() < deadline:
+        try:
+            windows = Desktop(backend="uia").windows()
+        except Exception:
+            windows = []
+        candidates = []
+        for w in windows:
+            try:
+                title = (w.window_text() or "").strip()
+            except Exception:
+                continue
+            if not title:
+                continue
+            low = title.lower()
+            if any(token in low for token in exclude):
+                continue
+            score = 0
+            if any(token in low for token in include):
+                score += 3
+            try:
+                if w.is_visible():
+                    score += 1
+            except Exception:
+                pass
+            if score > 0:
+                candidates.append((score, w))
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            target = candidates[0][1]
+            try:
+                target.set_focus()
+            except Exception:
+                pass
+            try:
+                image = target.capture_as_image()
+                image.save(output_path)
+                return output_path, ""
+            except Exception as e:
+                return "", str(e)
+        time.sleep(0.5)
+    return "", "browser_window_not_found"
 
 def _index_path():
     return os.path.join(get_app_data_dir(), "app_index.json")
@@ -697,13 +1003,221 @@ def _launch(path, args):
     else:
         subprocess.Popen([path])
 
-def _ensure_playwright():
-    ensure_package_installed("playwright")
-    python_exe = get_python_executable()
+def _try_playwright(_context=None, allow_download=False):
     try:
-        subprocess.check_call([python_exe, "-m", "playwright", "install", "chromium"])
-    except Exception:
-        pass
+        from playwright.sync_api import sync_playwright
+        return sync_playwright, ""
+    except Exception as e:
+        return None, str(e)
+
+def system_automate(steps, workspace_dir=None, _context=None):
+    if isinstance(steps, str):
+        try:
+            steps = json.loads(steps)
+        except Exception:
+            return "Error: steps must be a list or valid JSON list."
+    if not isinstance(steps, list) or not steps:
+        return "Error: steps must be a non-empty list."
+    if not workspace_dir:
+        workspace_dir = _cfg_value(_context, "default_workspace", "") or ""
+    start_ts = time.time()
+    abort_state = _init_abort_state(_context)
+    results = []
+    ok = True
+    allow_playwright = _cfg_bool(_context, "browser_allow_playwright", False)
+    web_actions = {"goto", "click", "fill", "type", "scroll", "wait", "screenshot"}
+    web_buffer = []
+    web_url = None
+    web_output = None
+    web_opened = False
+    def _web_needs_playwright(steps):
+        for s in steps:
+            action_name = (s.get("action") or "").strip()
+            if action_name and action_name != "goto":
+                return True
+        return False
+    def flush_web():
+        nonlocal web_buffer, web_url, web_output, ok, web_opened
+        if not web_buffer:
+            return
+        if abort_state["aborted"]:
+            step_result = _standard_step_result("web_steps", "Error: Command aborted by user.", ok=False, chosen_strategy="default_window")
+            results.append(step_result)
+            ok = False
+            web_buffer = []
+            web_url = None
+            web_output = None
+            return
+        if not allow_playwright:
+            target_url = web_url or (web_buffer[-1].get("url") if web_buffer else "")
+            if target_url and not web_opened:
+                _open_url_impl(target_url)
+                web_opened = True
+            if _web_needs_playwright(web_buffer):
+                step_result = _standard_step_result(
+                    "web_steps",
+                    "Error: playwright_unavailable:Playwright is disabled or not installed.",
+                    ok=False,
+                    chosen_strategy="default_window",
+                    fallback_used=True,
+                    capability_notes="opened_url_only"
+                )
+            else:
+                step_result = _standard_step_result(
+                    "goto",
+                    "OK",
+                    ok=True,
+                    chosen_strategy="default_window",
+                    fallback_used=False
+                )
+        elif all((step.get("action") or "").strip() == "goto" for step in web_buffer):
+            res = _open_url_impl(web_url or (web_buffer[-1].get("url") if web_buffer else ""))
+            step_ok = not (isinstance(res, str) and res.startswith("Error:"))
+            step_result = _standard_step_result("goto", res, ok=step_ok, chosen_strategy="default_window")
+        else:
+            res = _run_browser_steps_impl(web_url, web_buffer, web_output, _context=_context)
+            if isinstance(res, dict) and "ok" in res and "result" in res:
+                step_result = res
+            else:
+                step_ok = not (isinstance(res, str) and res.startswith("Error:"))
+                step_result = _standard_step_result("web_steps", res, ok=step_ok, chosen_strategy="playwright")
+        results.append(step_result)
+        if not step_result.get("ok", False):
+            ok = False
+        web_buffer = []
+        web_url = None
+        web_output = None
+    for idx, step in enumerate(steps):
+        if abort_state["aborted"]:
+            step_result = _standard_step_result("system_automate", "Error: Command aborted by user.", ok=False)
+            results.append(step_result)
+            ok = False
+            break
+        if not isinstance(step, dict):
+            return f"Error: steps[{idx}] must be an object."
+        action = (step.get("action") or "").strip()
+        if not action:
+            return f"Error: steps[{idx}] action is required."
+        if action in web_actions:
+            if action == "goto":
+                url_value = (step.get("url") or "").strip()
+                if url_value:
+                    web_url = url_value
+                    if not allow_playwright and not web_opened:
+                        _open_url_impl(web_url)
+                        web_opened = True
+            if action == "screenshot":
+                web_output = step.get("output_path") or step.get("path") or web_output
+            web_buffer.append(step)
+            continue
+        flush_web()
+        if action in ("find", "find_app", "search", "index", "build_app_index"):
+            limit_key = step.get("query") or step.get("pattern") or step.get("name") or action
+            hit, wait_seconds = _hit_action_limit(action, str(limit_key), _context)
+            if hit:
+                step_result = _standard_step_result(
+                    action,
+                    f"Error: action_rate_limited:{action}; retry_after={wait_seconds}s",
+                    ok=False,
+                    fallback_used=True,
+                    capability_notes="rate_limit_protection"
+                )
+                results.append(step_result)
+                ok = False
+                continue
+        if action == "run_browser_steps":
+            step_result = _run_browser_steps_impl(step.get("url"), step.get("steps"), step.get("output_path"), _context=_context)
+        elif action in ("ui_focus_window", "focus_window"):
+            res = _ui_focus_window_impl(step.get("window_title"), step.get("backend", "uia"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")), chosen_strategy="desktop_window")
+        elif action in ("ui_click", "click_window"):
+            res = _ui_click_impl(step.get("window_title"), step.get("control_title"), step.get("control_type"), step.get("backend", "uia"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")), chosen_strategy="desktop_window")
+        elif action in ("ui_type", "type"):
+            res = _ui_type_impl(step.get("window_title"), step.get("text"), step.get("control_title"), step.get("control_type"), step.get("backend", "uia"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")), chosen_strategy="desktop_window")
+        elif action in ("ui_scroll", "scroll_window"):
+            res = _ui_scroll_impl(step.get("window_title"), step.get("direction", "down"), step.get("amount", 1), step.get("backend", "uia"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")), chosen_strategy="desktop_window")
+        elif action == "screenshot_window":
+            res = _screenshot_window_impl(step.get("window_title"), step.get("output_path"), step.get("backend", "uia"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")), chosen_strategy="desktop_window")
+        elif action in ("launch", "launch_app"):
+            res = _launch_app_impl(step.get("name"), step.get("args"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
+        elif action == "open_with":
+            res = _open_with_impl(step.get("file"), step.get("app"))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
+        elif action in ("find", "find_app"):
+            res = _find_app_impl(step.get("query"), step.get("limit", 10), step.get("refresh", False), step.get("refresh_min_interval", 60))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
+        elif action in ("index", "build_app_index"):
+            res = _build_app_index_impl(step.get("refresh", False), step.get("limit", 2000), step.get("refresh_min_interval", 60))
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
+        elif action == "search":
+            kind = (step.get("kind") or "everything").strip().lower()
+            if kind == "grep":
+                res = _grep_impl(workspace_dir, step.get("pattern") or step.get("query"), step.get("path", "."), step.get("include", "*"), step.get("exclude"), step.get("recursive", True), _context=_context)
+            else:
+                res = _search_files_impl(workspace_dir, step.get("query"), step.get("limit", 200), step.get("fallback_path", "."), step.get("use_grep_fallback", True), _context=_context)
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
+        elif action == "bash":
+            res = bash(workspace_dir, step.get("command"), _context=_context)
+            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
+        else:
+            step_result = _standard_step_result(action, f"Error: unsupported action {action}", ok=False)
+        results.append(step_result)
+        if not step_result.get("ok", False):
+            ok = False
+    flush_web()
+    end_ts = time.time()
+    return json.dumps({
+        "ok": ok,
+        "results": results,
+        "timings": {"start_ms": int(start_ts * 1000), "end_ms": int(end_ts * 1000), "elapsed_ms": int((end_ts - start_ts) * 1000)}
+    }, ensure_ascii=False)
+
+def _unwrap_single_result(payload):
+    if not isinstance(payload, (str, dict)):
+        return payload
+    data = payload
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except Exception:
+            return payload
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not results:
+        return payload
+    item = results[0]
+    result = item.get("result")
+    if isinstance(result, dict):
+        return json.dumps(result, ensure_ascii=False)
+    return result
+
+def build_app_index(refresh=False, limit=2000, refresh_min_interval=60, _context=None):
+    payload = system_automate([{"action": "index", "refresh": refresh, "limit": limit, "refresh_min_interval": refresh_min_interval}], _context=_context)
+    return _unwrap_single_result(payload)
+
+def find_app(query, limit=10, refresh=False, refresh_min_interval=60, _context=None):
+    payload = system_automate([{"action": "find", "query": query, "limit": limit, "refresh": refresh, "refresh_min_interval": refresh_min_interval}], _context=_context)
+    return _unwrap_single_result(payload)
+
+def launch_app(name, args=None, _context=None):
+    payload = system_automate([{"action": "launch", "name": name, "args": args}], _context=_context)
+    return _unwrap_single_result(payload)
+
+def open_with(file, app, _context=None):
+    payload = system_automate([{"action": "open_with", "file": file, "app": app}], _context=_context)
+    return _unwrap_single_result(payload)
+
+def search_files(workspace_dir, query, limit=200, fallback_path=".", use_grep_fallback=True, _context=None):
+    payload = system_automate([{"action": "search", "kind": "everything", "query": query, "limit": limit, "fallback_path": fallback_path, "use_grep_fallback": use_grep_fallback}], workspace_dir=workspace_dir, _context=_context)
+    return _unwrap_single_result(payload)
+
+def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
+    payload = system_automate([{"action": "search", "kind": "grep", "pattern": pattern, "path": path, "include": include, "exclude": exclude, "recursive": recursive}], workspace_dir=workspace_dir, _context=_context)
+    return _unwrap_single_result(payload)
 
 def _ensure_pywinauto():
     ensure_package_installed("pywinauto")

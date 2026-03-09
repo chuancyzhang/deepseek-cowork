@@ -38,12 +38,10 @@ a = Analysis(
     excludes=[
         'pandas', 
         'numpy', 
-        'yt_dlp', 
         'duckduckgo_search', 
-        'trafilatura',
         'matplotlib',
         'scipy',
-        'lxml' # trafilatura dep
+        'lxml'
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

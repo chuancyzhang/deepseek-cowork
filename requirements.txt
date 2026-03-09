@@ -7,7 +7,6 @@ openpyxl
 pypdf
 pandas
 duckduckgo-search
-trafilatura
 beautifulsoup4
 requests
 markdown

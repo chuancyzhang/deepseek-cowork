@@ -884,6 +884,7 @@ class DaemonStreamWorker(QThread):
 
     def abort(self):
         self._aborted = True
+        self._abort_remote_session()
         if self._sock:
             try:
                 self._sock.shutdown(socket.SHUT_RDWR)
@@ -2201,6 +2202,7 @@ class SessionState:
         self.messages = []
         self.tool_cards = {}
         self.current_content_buffer = ""
+        self.current_thinking_buffer = ""
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
         self.llm_worker = None
@@ -2444,6 +2446,7 @@ class MainWindow(QMainWindow):
         self.messages = []
         self.tool_cards = {}
         self.current_content_buffer = ""
+        self.current_thinking_buffer = ""
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
         self.llm_worker = None
@@ -3179,6 +3182,7 @@ class MainWindow(QMainWindow):
         state.messages = self.messages
         state.tool_cards = self.tool_cards
         state.current_content_buffer = self.current_content_buffer
+        state.current_thinking_buffer = self.current_thinking_buffer
 
     def set_current_session(self, session_id):
         state = self.sessions.get(session_id)
@@ -3187,6 +3191,7 @@ class MainWindow(QMainWindow):
         self.messages = state.messages
         self.tool_cards = state.tool_cards
         self.current_content_buffer = state.current_content_buffer
+        self.current_thinking_buffer = getattr(state, "current_thinking_buffer", "")
         self.temp_thinking_bubble = state.temp_thinking_bubble
         self.last_agent_bubble = state.last_agent_bubble
         self.llm_worker = state.llm_worker
@@ -3752,6 +3757,7 @@ class MainWindow(QMainWindow):
         state.messages = []
         state.tool_cards = {}
         state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
         state.llm_worker = None
@@ -4069,6 +4075,25 @@ class MainWindow(QMainWindow):
         state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
+        partial_content = (state.current_content_buffer or "").strip()
+        partial_thinking = (state.current_thinking_buffer or "").strip()
+        if partial_content or partial_thinking:
+            existing_content = ""
+            if state.messages and isinstance(state.messages[-1], dict) and state.messages[-1].get("role") == "assistant":
+                existing_content = (state.messages[-1].get("content") or "").strip()
+            stop_text = "⚠️ 任务已停止（保留未完成内容）"
+            if partial_content:
+                stop_text = f"{partial_content}\n\n{stop_text}"
+            if existing_content != stop_text:
+                state.messages.append({
+                    "role": "assistant",
+                    "content": stop_text,
+                    "reasoning": partial_thinking,
+                    "content_parts": [{"type": "text", "text": stop_text}]
+                })
+                self.save_chat_history()
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
         self.add_system_toast("已强制停止当前任务", "warning", session_id=state.session_id)
         self.normalize_session_ui(state)
 
@@ -4322,6 +4347,10 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state: return
         state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        if state.session_id == self.current_session_id:
+            self.current_content_buffer = ""
+            self.current_thinking_buffer = ""
         
         # Insert "Thinking" bubble
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
@@ -4350,6 +4379,10 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state: return
         state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        if state.session_id == self.current_session_id:
+            self.current_content_buffer = ""
+            self.current_thinking_buffer = ""
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.process_ui_events(force=True)
@@ -4433,6 +4466,9 @@ class MainWindow(QMainWindow):
     def handle_thinking_signal(self, text, session_id=None):
         state = self.get_session(session_id)
         if not state: return
+        state.current_thinking_buffer += text or ""
+        if state.session_id == self.current_session_id:
+            self.current_thinking_buffer = state.current_thinking_buffer
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.update_thinking(text)
         elif state.last_agent_bubble:
@@ -4460,6 +4496,8 @@ class MainWindow(QMainWindow):
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
             bubble.set_main_content(f"⚠️ Error: {result['error']}")
+            state.current_content_buffer = ""
+            state.current_thinking_buffer = ""
             if is_current: self.normalize_session_ui(state)
             return
 
@@ -4561,6 +4599,8 @@ class MainWindow(QMainWindow):
                 "content_parts": content_parts
             })
         self.save_chat_history()
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
         self.update_session_tab_title(state.session_id)
 
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)

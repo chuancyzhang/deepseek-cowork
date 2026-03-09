@@ -1217,10 +1217,26 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
             )
             return None
         try:
-            daemon_client.confirm_response(confirm_id, parsed_value)
-            _clear_pending_confirmation(conversation_id, confirm_id=confirm_id)
-            ack_text = "已收到确认：是" if parsed_value is True else ("已收到确认：否" if parsed_value is False else f"已收到补充：{parsed_value}")
-            provider.send_card_reply(event, card_content=ack_text, title="🤖 AI 助手")
+            response = None
+            for _ in range(3):
+                response = daemon_client.confirm_response(confirm_id, parsed_value)
+                if isinstance(response, dict):
+                    break
+                time.sleep(0.25)
+            resolved = isinstance(response, dict) and response.get("status") == "ok" and bool(response.get("resolved"))
+            if resolved:
+                _clear_pending_confirmation(conversation_id, confirm_id=confirm_id)
+                ack_text = "已收到确认：是" if parsed_value is True else ("已收到确认：否" if parsed_value is False else f"已收到补充：{parsed_value}")
+                provider.send_card_reply(event, card_content=f"{ack_text}\n继续处理中，请稍候…", title="🤖 AI 助手")
+            else:
+                status_text = ""
+                if isinstance(response, dict):
+                    status_text = response.get("error") or ("resolved=false" if response.get("status") == "ok" else response.get("status") or "")
+                provider.send_card_reply(
+                    event,
+                    card_content=f"确认回传未生效（{status_text or '通道异常'}）。请重新触发确认步骤。",
+                    title="🤖 AI 助手"
+                )
         except Exception as e:
             provider.send_card_reply(event, card_content=f"确认回传失败：{e}", title="🤖 AI 助手")
         return None

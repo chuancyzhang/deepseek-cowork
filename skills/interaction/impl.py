@@ -1,4 +1,4 @@
-from core.interaction import ask_user
+from core.interaction import ask_user as _bridge_ask_user
 import json
 import mimetypes
 import os
@@ -7,12 +7,15 @@ import uuid
 
 
 def ask_user_confirmation(message):
-    result = ask_user(message)
+    result = _bridge_ask_user(message)
     if result is True:
         return "User confirmed (Yes)."
     if result is False:
         return "User denied (No)."
     return f"User replied: {result}"
+
+def ask_user(message):
+    return ask_user_confirmation(message)
 
 
 def _cfg(_context, key, default=""):

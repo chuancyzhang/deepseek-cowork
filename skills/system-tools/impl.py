@@ -128,6 +128,15 @@ def _decode_bytes(raw):
     except Exception:
         return str(raw)
 
+def _no_window_kwargs():
+    if os.name != "nt":
+        return {}
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {"creationflags": creationflags, "startupinfo": startupinfo}
+
 def bash(workspace_dir, command, _context=None):
     """
     Execute a shell command.
@@ -281,10 +290,7 @@ def _run_everything_search(query, limit=200):
     if not exe_path:
         return None, "Everything CLI (es.exe) not found in PATH."
     try:
-        result = subprocess.run(
-            [exe_path, "-n", str(limit), query],
-            capture_output=True
-        )
+        result = subprocess.run([exe_path, "-n", str(limit), query], capture_output=True, **_no_window_kwargs())
         if result.returncode != 0:
             err = _decode_bytes(result.stderr).strip() or _decode_bytes(result.stdout).strip()
             return None, err or "Everything CLI failed."
@@ -954,7 +960,7 @@ def _resolve_lnk(path):
         f"$sh=New-Object -ComObject WScript.Shell;$lnk=$sh.CreateShortcut('{ps_path}');$lnk.TargetPath"
     ]
     try:
-        out = subprocess.check_output(cmd, text=True, encoding="utf-8", errors="replace").strip()
+        out = subprocess.check_output(cmd, text=True, encoding="utf-8", errors="replace", **_no_window_kwargs()).strip()
         return _normalize_path(out)
     except Exception:
         return None
@@ -1071,7 +1077,7 @@ def _find_best(query, items):
 
 def _resolve_by_where(name):
     try:
-        result = subprocess.run(["where", name], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(["where", name], capture_output=True, text=True, encoding="utf-8", errors="replace", **_no_window_kwargs())
         if result.returncode == 0:
             lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
             if lines:

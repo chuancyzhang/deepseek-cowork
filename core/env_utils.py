@@ -56,8 +56,6 @@ def get_python_executable():
         os.path.join(base_dir, "_internal", "python_env", "python.exe"),
         os.path.join(get_base_dir(), "python_env", "python.exe"),
         os.path.join(get_base_dir(), "_internal", "python_env", "python.exe"),
-        os.path.join(sys.exec_prefix, "python.exe"),
-        os.path.join(getattr(sys, "base_prefix", sys.exec_prefix), "python.exe"),
     ])
     if hasattr(sys, "_MEIPASS"):
         candidates.extend([
@@ -74,14 +72,64 @@ def get_python_executable():
         seen.add(norm)
         if os.path.isfile(p):
             return p
-    for cmd in ("python", "py"):
-        resolved = shutil.which(cmd)
-        if resolved and os.path.isfile(resolved):
-            return resolved
     return ""
+
+def get_python_runtime_snapshot():
+    python_exe = get_python_executable()
+    snapshot = {
+        "python_exe": python_exe,
+        "resolved_from": "bundled" if getattr(sys, "frozen", False) else "system",
+        "version": "",
+        "available_packages": [],
+        "missing_packages": [name for name, _ in _RUNTIME_IMPORT_CHECKS]
+    }
+    if not python_exe or not os.path.isfile(python_exe):
+        return snapshot
+    try:
+        import subprocess
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        checks = json.dumps(_RUNTIME_IMPORT_CHECKS, ensure_ascii=False)
+        code = (
+            "import json,sys,importlib.util;"
+            f"checks={checks};"
+            "available=[];missing=[];"
+            "for pkg,mod in checks:"
+            " (available if importlib.util.find_spec(mod) else missing).append(pkg);"
+            "print(json.dumps({'version':sys.version.split()[0],'available':available,'missing':missing},ensure_ascii=False))"
+        )
+        output = subprocess.check_output(
+            [python_exe, "-c", code],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            startupinfo=startupinfo
+        ).strip()
+        data = json.loads(output)
+        snapshot["version"] = data.get("version", "") or ""
+        snapshot["available_packages"] = data.get("available", []) or []
+        snapshot["missing_packages"] = data.get("missing", []) or []
+    except Exception:
+        pass
+    return snapshot
 
 _INSTALL_SUCCESS = set()
 _INSTALL_FAILED = {}
+_RUNTIME_IMPORT_CHECKS = [
+    ("openpyxl", "openpyxl"),
+    ("python-docx", "docx"),
+    ("python-pptx", "pptx"),
+    ("pypdf", "pypdf"),
+    ("beautifulsoup4", "bs4"),
+    ("requests", "requests"),
+    ("markdown", "markdown"),
+    ("qtawesome", "qtawesome"),
+    ("anthropic", "anthropic"),
+    ("openai", "openai"),
+    ("lark-oapi", "lark_oapi"),
+]
 
 def _refresh_sys_path():
     import site

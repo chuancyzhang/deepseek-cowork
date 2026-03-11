@@ -78,15 +78,22 @@ class OpenAIProvider(LLMProvider):
             # Remove internal keys
             m.pop("reasoning", None)
             
-            # DeepSeek Reasoner requires reasoning_content in some contexts (e.g. tool calls)
-            # Standard OpenAI does not support it.
-            # We preserve it only if the model name indicates DeepSeek.
-            if "deepseek" not in self.model_name.lower():
-                m.pop("reasoning_content", None)
+            # DeepSeek Reasoner sometimes returns reasoning_content, but most OpenAI-compatible
+            # servers reject empty or unknown fields in requests. Drop empty reasoning_content
+            # unconditionally, and only keep non-empty values for DeepSeek models.
+            if "reasoning_content" in m:
+                if not m.get("reasoning_content"):
+                    m.pop("reasoning_content", None)
+                elif "deepseek" not in self.model_name.lower():
+                    m.pop("reasoning_content", None)
             
             # Ensure tool_calls are correctly formatted if present
             if "tool_calls" in m and not m["tool_calls"]:
                 del m["tool_calls"]
+            
+            # When tool_calls exist, OpenAI-compatible APIs expect content to be null
+            if m.get("role") == "assistant" and "tool_calls" in m and not m.get("content"):
+                m["content"] = None
                 
             clean.append(m)
         return clean
@@ -139,7 +146,6 @@ class AnthropicProvider(LLMProvider):
             kwargs = {
                 "model": self.model_name,
                 "messages": api_messages,
-                "stream": True,
                 "max_tokens": 8192 # Required by Anthropic
             }
             if system_prompt:
@@ -187,8 +193,8 @@ class AnthropicProvider(LLMProvider):
         api_messages = []
         
         for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
+            role = msg.get("role")
+            content = msg.get("content")
             
             if role == "system":
                 system_prompt += content + "\n"
@@ -226,14 +232,17 @@ class AnthropicProvider(LLMProvider):
             
             # Tool results
             if role == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if not tool_call_id:
+                    continue
                 # OpenAI: role="tool", tool_call_id="..."
                 # Anthropic: role="user", content=[{"type": "tool_result", "tool_use_id": ..., "content": ...}]
                 api_messages.append({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
-                        "tool_use_id": msg.get("tool_call_id"),
-                        "content": content
+                        "tool_use_id": tool_call_id,
+                        "content": content if content is not None else ""
                     }]
                 })
                 continue
@@ -246,11 +255,23 @@ class AnthropicProvider(LLMProvider):
                      anthropic_content.append({"type": "text", "text": msg["content"]})
                 
                 for tc in msg["tool_calls"]:
+                    args = tc["function"].get("arguments")
+                    if isinstance(args, str):
+                        args = args.strip()
+                        if args:
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                args = {}
+                        else:
+                            args = {}
+                    elif not isinstance(args, dict):
+                        args = {}
                     anthropic_content.append({
                         "type": "tool_use",
                         "id": tc["id"],
                         "name": tc["function"]["name"],
-                        "input": json.loads(tc["function"]["arguments"])
+                        "input": args
                     })
                 
                 api_messages.append({

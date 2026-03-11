@@ -87,6 +87,16 @@ class TestEnvUtils(unittest.TestCase):
              patch("core.env_utils.os.getenv", return_value=""):
             self.assertEqual(env_utils.get_python_executable(), "")
 
+    def test_get_python_executable_frozen_does_not_fallback_to_system_python(self):
+        with patch.object(env_utils.sys, "frozen", True, create=True), \
+             patch.object(env_utils.sys, "executable", r"C:\app\deepseek-cowork.exe"), \
+             patch.object(env_utils.sys, "exec_prefix", r"C:\Python311"), \
+             patch.object(env_utils.sys, "base_prefix", r"C:\Python311", create=True), \
+             patch("core.env_utils.os.path.isfile", return_value=False), \
+             patch("core.env_utils.shutil.which", return_value=r"C:\Python311\python.exe"), \
+             patch("core.env_utils.os.getenv", return_value=""):
+            self.assertEqual(env_utils.get_python_executable(), "")
+
     def test_ensure_package_installed_reports_missing_runtime(self):
         env_utils._INSTALL_FAILED.clear()
         with patch.object(env_utils, "get_python_executable", return_value=""), \

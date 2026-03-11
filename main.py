@@ -2216,6 +2216,10 @@ class SessionState:
         self.empty_state = None
         self.displayed_count = 0
         self.load_more_btn = None
+        self.auto_loading_history = False
+        self.content_flush_timer = None
+        self.thinking_flush_timer = None
+        self.pending_thinking_delta = ""
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -3305,6 +3309,15 @@ class MainWindow(QMainWindow):
         tab_index = self.session_tabs.addTab(session_widget, tab_title)
 
         state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
+        state.content_flush_timer = QTimer(self)
+        state.content_flush_timer.setSingleShot(True)
+        state.content_flush_timer.setInterval(40)
+        state.content_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_content(sid))
+        state.thinking_flush_timer = QTimer(self)
+        state.thinking_flush_timer.setSingleShot(True)
+        state.thinking_flush_timer.setInterval(40)
+        state.thinking_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_thinking(sid))
+        chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
         self.sessions[session_id] = state
         self.session_tabs.setCurrentIndex(tab_index)
@@ -3480,59 +3493,54 @@ class MainWindow(QMainWindow):
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
 
-    def create_load_more_btn(self):
-        btn = QPushButton("显示更多历史消息")
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                border: none;
-                background: transparent;
-                color: {DesignTokens.text_secondary};
-                font-size: 12px;
-                padding: 8px;
-                margin-bottom: 8px;
-            }}
-            QPushButton:hover {{
-                color: {DesignTokens.primary};
-            }}
-        """)
-        btn.clicked.connect(self.load_more_history)
-        return btn
+    def on_chat_scroll_value_changed(self, value, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        if value > 8:
+            return
+        if state.auto_loading_history:
+            return
+        if state.displayed_count >= len(state.messages):
+            return
+        self.load_more_history(session_id=session_id)
 
-    def load_more_history(self):
-        state = self.get_current_session()
+    def load_more_history(self, session_id=None):
+        state = self.get_session(session_id)
+        if state is None:
+            state = self.get_current_session()
         if not state: return
+        if state.auto_loading_history:
+            return
         
         PAGE_SIZE = 20
         total = len(state.messages)
         remaining = total - state.displayed_count
         if remaining <= 0: return
-        
-        count_to_load = min(PAGE_SIZE, remaining)
-        start_idx = total - state.displayed_count - count_to_load
-        end_idx = total - state.displayed_count
-        
-        msgs_to_load = state.messages[start_idx:end_idx]
-        
-        vbar = state.chat_scroll.verticalScrollBar()
-        old_max = vbar.maximum()
-        old_val = vbar.value()
-        
-        self.render_message_batch(msgs_to_load, state.session_id, insert_index=1, animate=False)
-        
-        self.process_ui_events(force=True)
-        new_max = vbar.maximum()
-        if old_val <= 5:
-            vbar.setValue(0)
-        else:
-            vbar.setValue(old_val + (new_max - old_max))
-        
-        state.displayed_count += count_to_load
-        
-        if state.displayed_count >= total:
-            if state.load_more_btn:
-                state.load_more_btn.deleteLater()
-                state.load_more_btn = None
+        state.auto_loading_history = True
+        try:
+            count_to_load = min(PAGE_SIZE, remaining)
+            start_idx = total - state.displayed_count - count_to_load
+            end_idx = total - state.displayed_count
+            
+            msgs_to_load = state.messages[start_idx:end_idx]
+            
+            vbar = state.chat_scroll.verticalScrollBar()
+            old_max = vbar.maximum()
+            old_val = vbar.value()
+            
+            self.render_message_batch(msgs_to_load, state.session_id, insert_index=0, animate=False)
+            
+            self.process_ui_events(force=True)
+            new_max = vbar.maximum()
+            if old_val <= 5:
+                vbar.setValue(0)
+            else:
+                vbar.setValue(old_val + (new_max - old_max))
+            
+            state.displayed_count += count_to_load
+        finally:
+            state.auto_loading_history = False
 
     def delete_session(self, session_id):
         confirm = QMessageBox.question(self, "确认删除", "确定要删除该会话吗？")
@@ -3614,9 +3622,7 @@ class MainWindow(QMainWindow):
                      has_tools = active_agent_bubble.think_container_layout.count() > 0
                 
                 if has_tools:
-                    active_agent_bubble.set_main_content("任务已执行，详情请查看上方工具调用卡片。")
-                else:
-                    active_agent_bubble.set_main_content("未生成有效内容。")
+                    active_agent_bubble.set_main_content("任务已处理完成，请查看上方思考过程")
 
             active_agent_bubble.update_thinking(duration=None, is_final=True)
             active_agent_bubble = None
@@ -3758,6 +3764,7 @@ class MainWindow(QMainWindow):
         state.tool_cards = {}
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.pending_thinking_delta = ""
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
         state.llm_worker = None
@@ -3797,11 +3804,6 @@ class MainWindow(QMainWindow):
             
             display_msgs = state.messages[start_idx:]
             state.displayed_count = len(display_msgs)
-            
-            if start_idx > 0:
-                btn = self.create_load_more_btn()
-                state.load_more_btn = btn
-                state.chat_layout.insertWidget(0, btn)
             
             self.render_message_batch(display_msgs, session_id, animate=False)
         
@@ -4456,27 +4458,53 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state: return
         state.current_content_buffer += text
-        if state.temp_thinking_bubble:
-            state.temp_thinking_bubble.set_main_content(state.current_content_buffer)
-        elif state.last_agent_bubble:
-            state.last_agent_bubble.set_main_content(state.current_content_buffer)
+        if state.content_flush_timer and not state.content_flush_timer.isActive():
+            state.content_flush_timer.start()
         if state.session_id == self.current_session_id:
             self.current_content_buffer = state.current_content_buffer
 
     def handle_thinking_signal(self, text, session_id=None):
         state = self.get_session(session_id)
         if not state: return
-        state.current_thinking_buffer += text or ""
+        delta = text or ""
+        state.current_thinking_buffer += delta
+        state.pending_thinking_delta += delta
+        if state.thinking_flush_timer and not state.thinking_flush_timer.isActive():
+            state.thinking_flush_timer.start()
         if state.session_id == self.current_session_id:
             self.current_thinking_buffer = state.current_thinking_buffer
+
+    def flush_session_content(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
         if state.temp_thinking_bubble:
-            state.temp_thinking_bubble.update_thinking(text)
+            state.temp_thinking_bubble.set_main_content(state.current_content_buffer)
         elif state.last_agent_bubble:
-            state.last_agent_bubble.update_thinking(text)
+            state.last_agent_bubble.set_main_content(state.current_content_buffer)
+
+    def flush_session_thinking(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        delta = state.pending_thinking_delta
+        state.pending_thinking_delta = ""
+        if not delta:
+            return
+        if state.temp_thinking_bubble:
+            state.temp_thinking_bubble.update_thinking(delta)
+        elif state.last_agent_bubble:
+            state.last_agent_bubble.update_thinking(delta)
 
     def handle_llm_response(self, result, session_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if state.content_flush_timer and state.content_flush_timer.isActive():
+            state.content_flush_timer.stop()
+        if state.thinking_flush_timer and state.thinking_flush_timer.isActive():
+            state.thinking_flush_timer.stop()
+        self.flush_session_content(state.session_id)
+        self.flush_session_thinking(state.session_id)
         is_current = state.session_id == self.current_session_id
         if state.temp_thinking_bubble:
             bubble = state.temp_thinking_bubble
@@ -4519,7 +4547,19 @@ class MainWindow(QMainWindow):
                         if not (reasoning or "").strip():
                             reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
                         break
-        if not (content or "").strip():
+        tool_results = {}
+        if generated_messages:
+            for msg in generated_messages:
+                if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                    tool_results[msg["tool_call_id"]] = msg.get("content", "")
+        tool_calls = []
+        if result.get("tool_calls"):
+            tool_calls.extend(result.get("tool_calls") or [])
+        for msg in generated_messages or []:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                tool_calls.extend(msg.get("tool_calls") or [])
+
+        if not (content or "").strip() and not tool_calls:
             content = "任务已处理完成，请查看上方思考过程。"
 
         has_thinking_text = False
@@ -4558,19 +4598,6 @@ class MainWindow(QMainWindow):
         else:
             bubble.update_thinking(duration=duration, is_final=True)
             bubble.set_main_content(content, content_parts=content_parts)
-
-        tool_results = {}
-        if generated_messages:
-            for msg in generated_messages:
-                if msg.get("role") == "tool" and msg.get("tool_call_id"):
-                    tool_results[msg["tool_call_id"]] = msg.get("content", "")
-
-        tool_calls = []
-        if result.get("tool_calls"):
-            tool_calls.extend(result.get("tool_calls") or [])
-        for msg in generated_messages or []:
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                tool_calls.extend(msg.get("tool_calls") or [])
 
         for tc in tool_calls:
             t_id = tc.get("id")

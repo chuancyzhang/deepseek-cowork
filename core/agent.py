@@ -346,6 +346,15 @@ class LLMWorker(QThread):
         if prompts:
             current_messages.append({"role": "system", "content": "\n\n".join(prompts)})
 
+    def _build_skill_query(self, messages):
+        parts = []
+        for msg in messages[-8:]:
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    parts.append(content.strip())
+        return "\n".join(parts)
+
     def run(self):
         # Work on a copy of messages to handle multi-turn locally
         # CRITICAL: Clear previous reasoning content to avoid duplication/confusion in new turn
@@ -421,7 +430,7 @@ class LLMWorker(QThread):
             context_lines.append("\n# Memories\n" + memories_text)
 
         # Append Skill-Specific Prompts (e.g. usage guidelines, learned experiences)
-        system_skills = self.skill_manager.get_system_prompts()
+        system_skills = self.skill_manager.get_system_prompts(query_text=self._build_skill_query(current_messages))
         if system_skills:
             context_lines.append("\n# Skill Capabilities & Guidelines")
             context_lines.append(system_skills)

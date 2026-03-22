@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "name": "skill-builder",
+  "kind": "system",
+  "description": "Create or update reusable skills, with metadata-first generation for knowledge skills that reference lightweight tools.",
+  "tags": [
+    "skill",
+    "builder",
+    "metadata",
+    "knowledge"
+  ],
+  "triggers": [
+    "create skill",
+    "update skill",
+    "new skill",
+    "skill metadata"
+  ],
+  "anti_triggers": [
+    "simple file edit"
+  ],
+  "references": [],
+  "tool_refs": [
+    "create_new_skill",
+    "update_skill",
+    "convert_claude_skill"
+  ],
+  "workflow": [
+    "Draft skill metadata first.",
+    "Reference existing lightweight tools when possible.",
+    "Only create new impl.py tool sources when the user explicitly wants them."
+  ]
+}

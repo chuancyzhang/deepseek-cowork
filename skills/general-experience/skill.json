@@ -1,0 +1,35 @@
+﻿{
+  "version": 2,
+  "name": "general-experience",
+  "kind": "knowledge",
+  "capability_group": "memory-meta",
+  "description": "Cross-task runtime lessons, execution patterns, and reusable operational experience.",
+  "tags": [
+    "experience",
+    "runtime",
+    "lessons"
+  ],
+  "triggers": [
+    "lesson learned",
+    "runtime issue",
+    "execution pattern"
+  ],
+  "anti_triggers": [],
+  "tool_refs": [
+    "record_general_experience"
+  ],
+  "references": [],
+  "experience_policy": {
+    "entry_storage": "experience/entries.jsonl",
+    "summary_sync": "frontmatter_experience"
+  },
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "Record reusable lessons as structured experience entries.",
+    "Promote repeated patterns into the summary."
+  ]
+}

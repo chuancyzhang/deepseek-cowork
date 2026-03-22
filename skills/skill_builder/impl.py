@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shutil
+
 from core.env_utils import get_app_data_dir
 
 
@@ -10,6 +11,8 @@ def _is_valid_skill_name(skill_name):
 
 
 def _normalize_tools_list(tools_list):
+    if tools_list is None:
+        return []
     if isinstance(tools_list, str):
         tools_list = json.loads(tools_list)
     if not isinstance(tools_list, list):
@@ -17,35 +20,110 @@ def _normalize_tools_list(tools_list):
     return tools_list
 
 
-def _build_skill_md(skill_name, description, tools_list, usage_guidelines, description_cn=None, created_by="ai", skill_type="ai_generated"):
-    tool_names = [t.get("name") for t in tools_list if isinstance(t, dict) and t.get("name")]
-    allowed_tools_str = ", ".join(tool_names)
-    desc_cn_line = f"description_cn: {description_cn}\n" if description_cn else ""
-    md_content = f"""---
-name: {skill_name}
-description: {description}
-{desc_cn_line}license: Apache-2.0
-type: {skill_type}
-created_by: {created_by}
-allowed-tools: [{allowed_tools_str}]
----
+def _normalize_json_value(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
 
-# {skill_name.capitalize()} Skill
 
-{description}
+def _resolve_skill_dir(skill_name, target_scope="auto"):
+    if not _is_valid_skill_name(skill_name):
+        return None, "Error: Skill name must be alphanumeric (hyphens allowed)."
+    app_data_dir = get_app_data_dir()
+    ai_skills_dir = os.path.join(app_data_dir, "ai_skills")
+    os.makedirs(ai_skills_dir, exist_ok=True)
+    builtin_skills_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ai_path = os.path.join(ai_skills_dir, skill_name)
+    builtin_path = os.path.join(builtin_skills_dir, skill_name)
+    scope = (target_scope or "auto").lower()
+    if scope == "ai_only":
+        return ai_path, None
+    if scope == "builtin_only":
+        return builtin_path, None
+    if os.path.isdir(ai_path):
+        return ai_path, None
+    if os.path.isdir(builtin_path):
+        return builtin_path, None
+    return ai_path, None
 
-{usage_guidelines}
 
-## Tools
+def _build_sections(description, usage_guidelines, interface_details=None):
+    sections = []
+    sections.append("# Skill Purpose\n" + (description or "Describe the purpose of this skill."))
+    sections.append("## When to Use\n" + (usage_guidelines or "Describe when this skill should be used."))
+    sections.append("## When Not to Use\nDescribe cases where this skill is not a good fit.")
+    sections.append("## Common Pitfalls\nRecord common mistakes, hidden assumptions, and troubleshooting notes.")
+    sections.append("## Experience / Lessons Learned\nAdd reusable lessons here as the skill evolves.")
+    sections.append("## Recommended Workflow\nDocument the recommended sequence of steps and decision points.")
+    sections.append("## Recommended Tools\nList the lightweight tools that usually work best for this skill.")
+    sections.append("## Interface Details\n" + (interface_details or "Document interfaces, relevant tools, parameters, outputs, and caveats."))
+    sections.append("## Constraints and Safety Rules\nDocument important safety boundaries and operational constraints.")
+    sections.append("## References\nLink to supporting references or leave notes about what should live in references/.")
+    return "\n\n".join(sections)
 
-"""
-    for tool in tools_list:
-        if not isinstance(tool, dict):
-            continue
-        t_name = tool.get("name", "unknown")
-        t_desc = tool.get("description", "No description.")
-        md_content += f"### {t_name}\n{t_desc}\n\n"
-    return md_content
+
+def _frontmatter_value(value):
+    if isinstance(value, list):
+        return "[" + ", ".join([json.dumps(item, ensure_ascii=False) for item in value]) + "]"
+    return str(value)
+
+
+def _build_skill_md(skill_name, description, tool_refs, usage_guidelines, description_cn=None, kind="knowledge", created_by="ai", capability_group=None):
+    frontmatter = {
+        "name": skill_name,
+        "description": description or "No description provided.",
+        "license": "Apache-2.0",
+        "type": "ai_generated",
+        "created_by": created_by,
+        "kind": kind,
+        "capability_group": capability_group or "knowledge",
+        "experience": [],
+    }
+    if description_cn:
+        frontmatter["description_cn"] = description_cn
+    if tool_refs:
+        frontmatter["allowed-tools"] = tool_refs
+    body = _build_sections(description, usage_guidelines)
+    front_lines = [f"{key}: {_frontmatter_value(value)}" for key, value in frontmatter.items()]
+    return f"---\n{chr(10).join(front_lines)}\n---\n\n{body}\n"
+
+
+def _default_skill_json(
+    skill_name,
+    description,
+    kind,
+    tags=None,
+    triggers=None,
+    anti_triggers=None,
+    references=None,
+    tool_refs=None,
+    workflow=None,
+    creation_hints=None,
+    capability_group=None,
+    experience_policy=None,
+    disclosure_level_defaults=None,
+):
+    return {
+        "version": 2,
+        "name": skill_name,
+        "kind": kind,
+        "capability_group": capability_group or "knowledge",
+        "description": description or "No description provided.",
+        "tags": tags or [],
+        "triggers": triggers or [],
+        "anti_triggers": anti_triggers or [],
+        "references": references or [],
+        "tool_refs": tool_refs or [],
+        "experience_policy": experience_policy or {"entry_storage": "experience/entries.jsonl", "summary_sync": "frontmatter_experience"},
+        "disclosure_level_defaults": disclosure_level_defaults or {"default_prompt_level": "brief", "include_references": False, "include_experience_entries": False},
+        "workflow": workflow or [],
+        "creation_hints": creation_hints or {},
+    }
 
 
 def _extract_frontmatter(content):
@@ -77,30 +155,26 @@ def _join_frontmatter(values, preferred_order=None):
     return "\n".join([f"{k}: {values[k]}" for k in ordered_keys])
 
 
-def _resolve_skill_dir(skill_name, target_scope="auto"):
-    if not _is_valid_skill_name(skill_name):
-        return None, "Error: Skill name must be alphanumeric (hyphens allowed)."
-    app_data_dir = get_app_data_dir()
-    ai_skills_dir = os.path.join(app_data_dir, "ai_skills")
-    os.makedirs(ai_skills_dir, exist_ok=True)
-    builtin_skills_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    ai_path = os.path.join(ai_skills_dir, skill_name)
-    builtin_path = os.path.join(builtin_skills_dir, skill_name)
-
-    scope = (target_scope or "auto").lower()
-    if scope == "ai_only":
-        return ai_path, None
-    if scope == "builtin_only":
-        return builtin_path, None
-
-    if os.path.isdir(ai_path):
-        return ai_path, None
-    if os.path.isdir(builtin_path):
-        return builtin_path, None
-    return ai_path, None
-
-
-def create_new_skill(workspace_dir, skill_name, description, tools_list, tool_code, usage_guidelines, description_cn=None):
+def create_new_skill(
+    workspace_dir,
+    skill_name,
+    description,
+    tools_list=None,
+    tool_code=None,
+    usage_guidelines="",
+    description_cn=None,
+    skill_kind="knowledge",
+    tags=None,
+    triggers=None,
+    anti_triggers=None,
+    references=None,
+    tool_refs=None,
+    workflow=None,
+    creation_hints=None,
+    capability_group=None,
+    experience_policy=None,
+    disclosure_level_defaults=None,
+):
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope="ai_only")
         if error:
@@ -112,12 +186,50 @@ def create_new_skill(workspace_dir, skill_name, description, tools_list, tool_co
             os.makedirs(target_dir, exist_ok=True)
 
         parsed_tools = _normalize_tools_list(tools_list)
-        md_content = _build_skill_md(skill_name, description, parsed_tools, usage_guidelines, description_cn=description_cn)
+        kind = (skill_kind or "knowledge").lower()
+        if kind not in {"knowledge", "system"}:
+            kind = "knowledge"
+
+        referenced_tools = _normalize_json_value(tool_refs)
+        if not isinstance(referenced_tools, list):
+            referenced_tools = []
+        if not referenced_tools:
+            referenced_tools = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
+
+        skill_json = _default_skill_json(
+            skill_name,
+            description,
+            kind,
+            tags=_normalize_json_value(tags) or [],
+            triggers=_normalize_json_value(triggers) or [],
+            anti_triggers=_normalize_json_value(anti_triggers) or [],
+            references=_normalize_json_value(references) or [],
+            tool_refs=referenced_tools,
+            workflow=_normalize_json_value(workflow) or [],
+            creation_hints=_normalize_json_value(creation_hints) or {},
+            capability_group=capability_group,
+            experience_policy=_normalize_json_value(experience_policy),
+            disclosure_level_defaults=_normalize_json_value(disclosure_level_defaults),
+        )
+
+        md_content = _build_skill_md(
+            skill_name,
+            description,
+            referenced_tools,
+            usage_guidelines,
+            description_cn=description_cn,
+            kind=kind,
+            capability_group=capability_group,
+        )
         with open(os.path.join(target_dir, "SKILL.md"), "w", encoding="utf-8") as f:
             f.write(md_content)
-        with open(os.path.join(target_dir, "impl.py"), "w", encoding="utf-8") as f:
-            f.write(tool_code)
-        return f"Success: {action} skill '{skill_name}' at '{target_dir}' with {len(parsed_tools)} tools."
+        with open(os.path.join(target_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(skill_json, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
+        if tool_code is not None:
+            with open(os.path.join(target_dir, "impl.py"), "w", encoding="utf-8") as f:
+                f.write(tool_code)
+        return f"Success: {action} skill '{skill_name}' at '{target_dir}' as kind '{kind}'."
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -130,7 +242,18 @@ def update_skill(
     tools_list=None,
     tool_code=None,
     usage_guidelines=None,
-    description_cn=None
+    description_cn=None,
+    skill_kind=None,
+    tags=None,
+    triggers=None,
+    anti_triggers=None,
+    references=None,
+    tool_refs=None,
+    workflow=None,
+    creation_hints=None,
+    capability_group=None,
+    experience_policy=None,
+    disclosure_level_defaults=None,
 ):
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope=target_scope)
@@ -140,51 +263,86 @@ def update_skill(
             return f"Error: Skill '{skill_name}' not found in scope '{target_scope}'."
 
         md_path = os.path.join(target_dir, "SKILL.md")
+        skill_json_path = os.path.join(target_dir, "skill.json")
         impl_path = os.path.join(target_dir, "impl.py")
         if not os.path.exists(md_path):
             return f"Error: SKILL.md not found for '{skill_name}'."
 
         with open(md_path, "r", encoding="utf-8") as f:
             md_content = f.read()
-
         frontmatter_raw, body = _extract_frontmatter(md_content)
         if frontmatter_raw is None:
             return "Error: Invalid SKILL.md format (missing frontmatter)."
 
         frontmatter_map = _parse_frontmatter_map(frontmatter_raw)
         changed = []
-
         if description is not None:
             frontmatter_map["description"] = description
             changed.append("description")
         if description_cn is not None:
             frontmatter_map["description_cn"] = description_cn
             changed.append("description_cn")
-        if tools_list is not None:
+        if skill_kind is not None:
+            frontmatter_map["kind"] = skill_kind
+            changed.append("kind")
+        if capability_group is not None:
+            frontmatter_map["capability_group"] = capability_group
+            changed.append("capability_group")
+
+        if tools_list is not None or tool_refs is not None:
             parsed_tools = _normalize_tools_list(tools_list)
-            tool_names = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
-            frontmatter_map["allowed-tools"] = "[" + ", ".join(tool_names) + "]"
+            refs = _normalize_json_value(tool_refs)
+            if not isinstance(refs, list):
+                refs = []
+            if not refs:
+                refs = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
+            frontmatter_map["allowed-tools"] = "[" + ", ".join(refs) + "]"
             changed.append("allowed-tools")
-            if description is None and body:
-                body = body.split("\n## Tools\n", 1)[0].rstrip() + "\n\n## Tools\n\n"
-                for tool in parsed_tools:
-                    t_name = tool.get("name", "unknown")
-                    t_desc = tool.get("description", "No description.")
-                    body += f"### {t_name}\n{t_desc}\n\n"
-                changed.append("tools-section")
 
         if usage_guidelines is not None:
-            if "\n## Tools\n" in body:
-                _, tools_section = body.split("\n## Tools\n", 1)
-                body = usage_guidelines.rstrip() + "\n\n## Tools\n" + tools_section
-            else:
-                body = usage_guidelines
+            body = _build_sections(description or frontmatter_map.get("description", ""), usage_guidelines)
             changed.append("usage_guidelines")
 
-        preferred_order = ["name", "description", "description_cn", "license", "type", "created_by", "allowed-tools"]
+        preferred_order = ["name", "description", "description_cn", "license", "type", "created_by", "kind", "allowed-tools"]
         rebuilt_frontmatter = _join_frontmatter(frontmatter_map, preferred_order=preferred_order)
         with open(md_path, "w", encoding="utf-8") as f:
-            f.write(f"---\n{rebuilt_frontmatter}\n---\n{body}")
+            f.write(f"---\n{rebuilt_frontmatter}\n---\n\n{body}")
+
+        skill_json = {}
+        if os.path.exists(skill_json_path):
+            with open(skill_json_path, "r", encoding="utf-8") as f:
+                try:
+                    skill_json = json.load(f)
+                except Exception:
+                    skill_json = {}
+        if description is not None:
+            skill_json["description"] = description
+        if skill_kind is not None:
+            skill_json["kind"] = skill_kind
+        for key, value in {
+            "tags": tags,
+            "triggers": triggers,
+            "anti_triggers": anti_triggers,
+            "references": references,
+            "tool_refs": tool_refs,
+            "workflow": workflow,
+            "creation_hints": creation_hints,
+            "capability_group": capability_group,
+            "experience_policy": experience_policy,
+            "disclosure_level_defaults": disclosure_level_defaults,
+        }.items():
+            if value is not None:
+                skill_json[key] = _normalize_json_value(value)
+                changed.append(key)
+        if tools_list is not None and skill_json.get("tool_refs") in (None, []):
+            parsed_tools = _normalize_tools_list(tools_list)
+            skill_json["tool_refs"] = [t.get("name") for t in parsed_tools if isinstance(t, dict) and t.get("name")]
+        if skill_json:
+            skill_json.setdefault("version", 2)
+            skill_json.setdefault("name", skill_name)
+            with open(skill_json_path, "w", encoding="utf-8") as f:
+                json.dump(skill_json, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
 
         if tool_code is not None:
             with open(impl_path, "w", encoding="utf-8") as f:
@@ -201,94 +359,35 @@ def convert_claude_skill(source_path, skill_name=None):
     try:
         if not os.path.exists(source_path):
             return f"Error: Source path '{source_path}' does not exist."
-
         source_name = os.path.basename(os.path.normpath(source_path))
         if not skill_name:
             skill_name = source_name
         if not _is_valid_skill_name(skill_name):
             return "Error: Skill name must be alphanumeric (hyphens allowed)."
-
         target_dir, error = _resolve_skill_dir(skill_name, target_scope="ai_only")
         if error:
             return error
         if os.path.exists(target_dir):
             return f"Error: Target skill directory '{target_dir}' already exists. Please delete it or choose a different name."
-
         shutil.copytree(source_path, target_dir)
         scripts_dir = os.path.join(target_dir, "scripts")
         generated_tools = []
-        impl_code_lines = [
-            "import subprocess",
-            "import sys",
-            "import os",
-            "import shlex",
-            "",
-            "def _run_script(script_name, args_str):",
-            "    base_dir = os.path.dirname(__file__)",
-            "    script_path = os.path.join(base_dir, 'scripts', script_name)",
-            "    cmd = []",
-            "    if script_name.endswith('.py'):",
-            "        cmd = [sys.executable, script_path]",
-            "    elif script_name.endswith('.sh'):",
-            "        cmd = ['bash', script_path]",
-            "    elif script_name.endswith('.js'):",
-            "        cmd = ['node', script_path]",
-            "    else:",
-            "        cmd = [script_path]",
-            "    if args_str:",
-            "        cmd.extend(shlex.split(args_str))",
-            "    try:",
-            "        result = subprocess.run(cmd, capture_output=True, text=True, cwd=base_dir)",
-            "        output = result.stdout",
-            "        if result.stderr:",
-            "            output += '\\n[STDERR]\\n' + result.stderr",
-            "        return output",
-            "    except Exception as e:",
-            "        return f'Execution failed: {str(e)}'",
-            ""
-        ]
         if os.path.exists(scripts_dir):
             for file in os.listdir(scripts_dir):
                 if file.startswith(".") or file.startswith("__"):
                     continue
                 file_path = os.path.join(scripts_dir, file)
-                if not os.path.isfile(file_path):
-                    continue
-                base_name = os.path.splitext(file)[0]
-                tool_name = f"run_{base_name.replace('-', '_')}"
-                impl_code_lines.append(f"def {tool_name}(args=''):")
-                impl_code_lines.append("    \"\"\"Executes a converted script.\"\"\"")
-                impl_code_lines.append(f"    return _run_script('{file}', args)")
-                impl_code_lines.append("")
-                generated_tools.append(tool_name)
-
-        with open(os.path.join(target_dir, "impl.py"), "w", encoding="utf-8") as f:
-            f.write("\n".join(impl_code_lines))
-
-        md_path = os.path.join(target_dir, "SKILL.md")
-        if os.path.exists(md_path):
-            with open(md_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            frontmatter_raw, body = _extract_frontmatter(content)
-            tools_str = ", ".join(generated_tools)
-            if frontmatter_raw is not None:
-                frontmatter_map = _parse_frontmatter_map(frontmatter_raw)
-                frontmatter_map["allowed-tools"] = "[" + tools_str + "]"
-                if "type" not in frontmatter_map:
-                    frontmatter_map["type"] = "ai_generated"
-                if "created_by" not in frontmatter_map:
-                    frontmatter_map["created_by"] = "ai"
-                body += "\n\n## Cowork Integration\nThis skill has been adapted from a Claude Skill.\n"
-                for t in generated_tools:
-                    body += f"- `{t}(args)`\n"
-                rebuilt_frontmatter = _join_frontmatter(frontmatter_map, preferred_order=["name", "description", "description_cn", "license", "type", "created_by", "allowed-tools"])
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(f"---\n{rebuilt_frontmatter}\n---\n{body}")
-            else:
-                header = f"---\nname: {skill_name}\ndescription: Auto-converted Claude Skill.\ntype: ai_generated\ncreated_by: ai\nallowed-tools: [{tools_str}]\n---\n\n"
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(header + content)
-
-        return f"Success: Converted '{source_path}' to '{target_dir}'. Generated {len(generated_tools)} wrapper tools."
+                if os.path.isfile(file_path):
+                    generated_tools.append(f"run_{os.path.splitext(file)[0].replace('-', '_')}")
+        skill_json = _default_skill_json(
+            skill_name,
+            "Imported Claude-style skill.",
+            "knowledge",
+            tool_refs=generated_tools,
+            workflow=["Review the imported scripts before running any generated helper tools."],
+        )
+        with open(os.path.join(target_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(skill_json, f, ensure_ascii=False, indent=2)
+        return f"Success: Converted '{source_path}' to '{target_dir}'. Generated metadata for {len(generated_tools)} referenced tools."
     except Exception as e:
         return f"Error converting skill: {str(e)}"

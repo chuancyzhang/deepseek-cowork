@@ -39,11 +39,16 @@ class TestSkillBuilder(unittest.TestCase):
             )
             self.assertIn("Success", update_result)
             md_path = os.path.join(self.ai_dir, "builder-test", "SKILL.md")
+            skill_json_path = os.path.join(self.ai_dir, "builder-test", "skill.json")
             self.assertTrue(os.path.exists(md_path))
+            self.assertTrue(os.path.exists(skill_json_path))
             with open(md_path, "r", encoding="utf-8") as f:
                 content = f.read()
             self.assertIn("description: updated desc", content)
             self.assertIn("Updated usage.", content)
+            with open(skill_json_path, "r", encoding="utf-8") as f:
+                payload = f.read()
+            self.assertIn("\"version\": 2", payload)
 
     def test_update_not_found_in_scope(self):
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):

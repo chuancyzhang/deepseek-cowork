@@ -1,0 +1,33 @@
+﻿{
+  "version": 2,
+  "name": "skill-importer",
+  "kind": "system",
+  "description": "Analyze a source folder with LLM assistance and generate a reusable explanatory skill package.",
+  "tags": [
+    "skill",
+    "import",
+    "folder",
+    "knowledge",
+    "tools"
+  ],
+  "triggers": [
+    "import skill",
+    "generate skill from folder",
+    "convert folder to skill",
+    "analyze project as skill"
+  ],
+  "anti_triggers": [
+    "simple file edit",
+    "rename only"
+  ],
+  "references": [],
+  "tool_refs": [
+    "analyze_skill_source_folder",
+    "generate_skill_from_folder"
+  ],
+  "workflow": [
+    "Scan the source folder and collect explanatory references.",
+    "Use LLM assistance to draft metadata and guidance.",
+    "Write SKILL.md and skill.json after confirmation."
+  ]
+}

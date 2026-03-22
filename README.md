@@ -17,8 +17,9 @@ Built by **deepseek-cowork team**.
 *   **Tool-First Exploration**: Reads real files before acting, reducing hallucinations.
 
 ### 🔌 Skill System
+*   **Experience-First Skills**: Skills are treated as structured experience packages rather than a second execution protocol.
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
-*   **Self-Evolving Skills**: Success/failure signals update `SKILL.md` experience for better future runs.
+*   **Structured Experience Capture**: Runtime lessons can be stored as structured entries and synced back into `SKILL.md`.
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
@@ -82,15 +83,16 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App
 *   **`core/agent.py`**: Reasoning loop and tool orchestration.
 *   **`core/daemon.py`**: Headless inference server.
 *   **`core/im_gateway.py`**: Feishu IM integration.
-*   **`core/skill_manager.py`**: Skill loading and prompt injection.
+*   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
 *   **`skills/`**: Built-in system skills.
 *   **`ai_skills/`**: AI or user-created skills.
 
-## 🧩 Everything Is a Tool
-- Tools are plain Python functions discovered from SKILL folders (`impl.py`).
-- Each tool gets a JSON schema from its signature and becomes callable by the LLM.
-- SKILL.md provides usage guidelines and “learned experience” that auto-inject into prompts.
-- New skills are hot-loaded on the fly without restarting.
+## 🧩 Tool + Experience Model
+- Tools are the only directly callable execution surface for the LLM.
+- Tools are plain Python functions discovered from skill folders (`impl.py`) and converted into JSON-schema function calls.
+- Skills are structured experience packages: guidance, boundaries, lessons learned, recommended workflows, and recommended tools.
+- New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
+- Skills remain hot-reloadable without restarting.
 
 ## 🔄 Agentic Workflow
 - Interleaved CoT: think → tool-call → observe → continue thinking → final answer.
@@ -101,13 +103,22 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App
 ## 🧠 Layered Memory & Context
 - System context: workspace, OS, Python, date, and operational rules.
 - Memories: optional `memories.md` auto-injected when present.
-- Skill prompts: brief capabilities + full instructions injected on first use.
+- Skill prompts: minimal experience briefs first, then fuller guidance only when needed.
+- Progressive disclosure: references, structured experience entries, and larger directory context expand only when required.
 - History hygiene: reasoning content deduplicated per turn to avoid clutter.
 
 ## 🛠️ Extending
 Create a folder in `skills/` with:
-1.  `impl.py`: Python implementations.
-2.  `SKILL.md`: Usage guidance and metadata.
+1.  `SKILL.md`: the experience package body.
+2.  `skill.json`: metadata such as capability group, tool refs, workflow, and disclosure defaults.
+3.  Optional `impl.py`: tool source if the skill needs new callable tools.
+4.  Optional `experience/entries.jsonl`: structured runtime lessons.
+
+Mental model:
+- `tool` = executor
+- `skill` = experience package
+
+See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the full architecture.
 
 ## 📄 License
 

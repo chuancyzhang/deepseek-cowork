@@ -16,8 +16,9 @@
 *   **工具先探测**：先读取真实文件与环境，再做执行决策。
 
 ### 🔌 技能系统
+*   **经验优先的技能**：技能被视为结构化经验包，而不是第二套执行协议。
 *   **热重载技能**：将新技能放入 `skills/` 或 `ai_skills/`，无需重启即可使用。
-*   **自进化机制**：失败与成功经验自动回写 `SKILL.md`，下次执行更稳。
+*   **结构化经验沉淀**：运行中的 lessons learned 可以先写入结构化 entry，再同步回 `SKILL.md` 摘要。
 
 ### 🖥️ 桌面体验
 *   **PySide6 UI**：气泡对话、Markdown 渲染与工具调用卡片。
@@ -81,14 +82,16 @@
 *   **`core/agent.py`**：推理循环与工具调度。
 *   **`core/daemon.py`**：无头推理服务。
 *   **`core/im_gateway.py`**：飞书 IM 集成。
-*   **`core/skill_manager.py`**：技能加载与 Prompt 注入。
+*   **`core/skill_manager.py`**：工具注册、经验包加载、相关性匹配与 Prompt 注入。
 *   **`skills/`**：内置系统技能。
 *   **`ai_skills/`**：AI 或用户创建的技能。
 
-## 🧩 万物皆工具 (Everything Is a Tool)
-- 工具源于 `impl.py` 中的普通 Python 函数，自动生成 JSON Schema 并被模型调用。
-- 技能文档 `SKILL.md` 提供使用指引与“经验 (experience)”并在调用前注入提示。
-- 新技能可热加载，无需重启；`skills/` 与 `ai_skills/` 双轨并存。
+## 🧩 Tool + Experience 模型
+- `tool` 是模型唯一直接调用的执行面。
+- 工具源于技能目录中的公开 Python 函数（`impl.py`），自动生成 JSON Schema 并被模型调用。
+- `skill` 是结构化经验包，承载边界、坑点、经验、推荐流程与推荐工具。
+- 新经验默认可先写入结构化 entry，再回写到 `SKILL.md` 摘要。
+- 新技能仍然支持热加载，无需重启。
 
 ## 🔄 Agentic Workflow
 - 交错式 CoT：思考 → 工具调用 → 观察 → 继续思考 → 最终回答。
@@ -99,13 +102,22 @@
 ## 🧠 分层记忆与上下文
 - 系统上下文：工作区、操作系统、Python、日期与操作规则。
 - 记忆层：可选 `memories.md` 自动注入，承载稳定偏好与长期信息。
-- 技能提示：首次使用技能时注入简版能力与完整版说明。
+- 技能提示：先注入最小经验摘要，需要时再展开完整说明。
+- 渐进式披露：references、结构化经验 entry 和更大的目录上下文只在必要时展开。
 - 历史清洁：每轮清理/折叠思考内容，避免上下文污染。
 
 ## 🛠️ 扩展开发
 在 `skills/` 新建文件夹：
-1.  `impl.py`：Python 实现。
-2.  `SKILL.md`：使用说明与元数据。
+1.  `SKILL.md`：经验包正文。
+2.  `skill.json`：能力分组、tool refs、workflow、披露默认值等元数据。
+3.  可选 `impl.py`：当技能需要新增可调用工具时使用。
+4.  可选 `experience/entries.jsonl`：结构化运行经验。
+
+推荐心智模型：
+- `tool` = 执行器
+- `skill` = 经验包
+
+完整说明见 [SKILL_SYSTEM.md](SKILL_SYSTEM.md)。
 
 ## 📄 许可证
 

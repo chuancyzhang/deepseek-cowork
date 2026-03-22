@@ -1,8 +1,9 @@
 ---
 name: skill-builder
-description: Build-focused skill for creating, updating, and converting skills. Invoke when changing skill code, structure, or documentation.
+description: Build-focused skill for creating and updating knowledge-first skills that reference lightweight tools.
 type: system
 created_by: system
+kind: system
 allowed-tools: [create_new_skill, update_skill, convert_claude_skill]
 ---
 
@@ -18,7 +19,7 @@ This skill is dedicated to skill engineering tasks only.
 
 ## Responsibilities
 
-- **Create Skills**: generate `SKILL.md` and `impl.py`.
+- **Create Skills**: generate `SKILL.md` and `skill.json`, plus `impl.py` only when the user explicitly wants new lightweight tools.
 - **Update Skills**: patch existing AI-generated or built-in skills.
 - **Convert Skills**: convert script-based Claude skills into callable Cowork tools.
 

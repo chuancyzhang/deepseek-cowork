@@ -53,14 +53,20 @@ def get_python_executable():
     base_dir = os.path.dirname(sys.executable)
     candidates.extend([
         os.path.join(base_dir, "python_env", "python.exe"),
+        os.path.join(base_dir, "python_env", "Scripts", "python.exe"),
         os.path.join(base_dir, "_internal", "python_env", "python.exe"),
+        os.path.join(base_dir, "_internal", "python_env", "Scripts", "python.exe"),
         os.path.join(get_base_dir(), "python_env", "python.exe"),
+        os.path.join(get_base_dir(), "python_env", "Scripts", "python.exe"),
         os.path.join(get_base_dir(), "_internal", "python_env", "python.exe"),
+        os.path.join(get_base_dir(), "_internal", "python_env", "Scripts", "python.exe"),
     ])
     if hasattr(sys, "_MEIPASS"):
         candidates.extend([
             os.path.join(sys._MEIPASS, "python_env", "python.exe"),
+            os.path.join(sys._MEIPASS, "python_env", "Scripts", "python.exe"),
             os.path.join(sys._MEIPASS, "_internal", "python_env", "python.exe"),
+            os.path.join(sys._MEIPASS, "_internal", "python_env", "Scripts", "python.exe"),
         ])
     seen = set()
     for p in candidates:

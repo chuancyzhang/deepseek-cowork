@@ -349,9 +349,11 @@ class SkillManager:
         self.skill_prompts_full = {}
         self.tool_to_skill_map = {}
         self.loaded_skills_meta = {}
+        self.loaded_skill_sources = {}
         # Update timestamp before loading
         import time
         self.last_load_time = time.time()
+        seen_skills = set()
         
         for skills_dir in self.skills_dirs:
             if not os.path.exists(skills_dir):
@@ -368,6 +370,12 @@ class SkillManager:
                 skill_path = os.path.join(skills_dir, skill_name)
                 if not os.path.isdir(skill_path):
                     continue
+
+                # Earlier directories have higher priority. Skip duplicate skill folders.
+                if skill_name in seen_skills:
+                    continue
+                seen_skills.add(skill_name)
+                self.loaded_skill_sources[skill_name] = skill_path
                 
                 # 1. Parse SKILL.md
                 md_path = os.path.join(skill_path, "SKILL.md")
@@ -504,6 +512,14 @@ class SkillManager:
             # Inspect functions to generate Tool Definitions
             for name, func in inspect.getmembers(module, inspect.isfunction):
                 if name.startswith('_'): continue
+
+                if name in self.tools:
+                    print(
+                        f"[SkillManager] Duplicate tool '{name}' from skill '{skill_name}' "
+                        f"at '{impl_path}' skipped; already provided by "
+                        f"'{self.tool_to_skill_map.get(name)}'."
+                    )
+                    continue
                 
                 # Register tool
                 # Note: We bind workspace_dir later during execution or partial

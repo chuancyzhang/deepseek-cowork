@@ -748,6 +748,7 @@ class AutoResizingInputEdit(QTextEdit):
                 super().keyPressEvent(event)
             else:
                 self.returnPressed.emit()
+                event.accept()
         else:
             super().keyPressEvent(event)
 
@@ -2843,6 +2844,8 @@ class MainWindow(QMainWindow):
         self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
         self.action_btn.setCursor(Qt.PointingHandCursor)
         self.action_btn.setFixedSize(60, 36)
+        self.action_btn.setAutoDefault(False)
+        self.action_btn.setDefault(False)
         self.action_btn.setStyleSheet("background-color: #4d6bfe; color: white; border-radius: 18px; font-weight: bold; border: none;")
         self.action_btn.clicked.connect(self.on_action_clicked)
         
@@ -4125,13 +4128,13 @@ class MainWindow(QMainWindow):
         
         state = self.get_current_session()
         if not state: return
-        state.messages.append({"role": "user", "content": user_text})
-        self.save_chat_history()
-        self.update_session_tab_title(state.session_id)
         self.try_connect_daemon(allow_start=True, retries=4)
         if self.daemon_available:
             self.process_daemon_logic(user_text)
         else:
+            state.messages.append({"role": "user", "content": user_text})
+            self.save_chat_history()
+            self.update_session_tab_title(state.session_id)
             self.process_agent_logic(user_text)
 
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):

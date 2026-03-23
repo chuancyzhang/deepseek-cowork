@@ -1765,6 +1765,7 @@ class ToolCallCard(QFrame):
         self.tool_id = tool_id
         self.args = args
         self.result = ""
+        self.is_finished = False
         self.meta = meta or {}
         self.tool_name = tool_name
         self.is_selected = False
@@ -2005,6 +2006,7 @@ class ToolCallCard(QFrame):
     def set_result(self, result_text):
         self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
         self.result = result_text
+        self.is_finished = True
         
         # Update style to show success (Green left border)
         if not self.is_selected:
@@ -2202,6 +2204,7 @@ class SessionState:
         self.session_id = session_id
         self.messages = []
         self.tool_cards = {}
+        self.pending_tool_results = {}
         self.current_content_buffer = ""
         self.current_thinking_buffer = ""
         self.temp_thinking_bubble = None
@@ -2346,27 +2349,32 @@ class SmartSplitter(QSplitter):
                     sizes[2] = 0
                     self.setSizes(sizes)
 
+def resolve_app_icon_path():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, 'images', 'logo.ico'),
+        os.path.join(base_dir, 'images', 'logo.png'),
+        os.path.join(base_dir, '_internal', 'images', 'logo.ico'),
+        os.path.join(base_dir, '_internal', 'images', 'logo.png'),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return ""
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSeek Cowork")
         
         # Set Window Icon
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images', 'logo.png')
-        if not os.path.exists(icon_path):
-             # Try _internal/images for one-dir mode
-             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_internal', 'images', 'logo.png')
+        icon_path = resolve_app_icon_path()
         
         if os.path.exists(icon_path):
             app_icon = QIcon(icon_path)
             self.setWindowIcon(app_icon)
-            # Ensure taskbar icon is set for Windows
-            if platform.system() == 'Windows':
-                import ctypes
-                myappid = f'deepseek.cowork.v3.2.{uuid.getnode()}' # arbitrary string
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
-            
+             
         self.resize(1280, 720)
         self.setAcceptDrops(True)
         self.workspace_dir = None
@@ -2450,6 +2458,7 @@ class MainWindow(QMainWindow):
         self.current_session_id = None
         self.messages = []
         self.tool_cards = {}
+        self.pending_tool_results = {}
         self.current_content_buffer = ""
         self.current_thinking_buffer = ""
         self.temp_thinking_bubble = None
@@ -3188,6 +3197,7 @@ class MainWindow(QMainWindow):
         if not state: return
         state.messages = self.messages
         state.tool_cards = self.tool_cards
+        state.pending_tool_results = self.pending_tool_results
         state.current_content_buffer = self.current_content_buffer
         state.current_thinking_buffer = self.current_thinking_buffer
 
@@ -3197,6 +3207,7 @@ class MainWindow(QMainWindow):
         self.current_session_id = session_id
         self.messages = state.messages
         self.tool_cards = state.tool_cards
+        self.pending_tool_results = getattr(state, "pending_tool_results", {})
         self.current_content_buffer = state.current_content_buffer
         self.current_thinking_buffer = getattr(state, "current_thinking_buffer", "")
         self.temp_thinking_bubble = state.temp_thinking_bubble
@@ -3765,6 +3776,7 @@ class MainWindow(QMainWindow):
         
         state.messages = []
         state.tool_cards = {}
+        state.pending_tool_results = {}
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.pending_thinking_delta = ""
@@ -4140,12 +4152,15 @@ class MainWindow(QMainWindow):
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
         # 1. Update selection state in UI
         state = self.get_current_session()
+        selected_card = None
         if state:
             for tid, card in state.tool_cards.items():
                 card.set_selected(tid == tool_id)
                 if meta is None and tid == tool_id:
                     meta = card.meta
-        
+                if tid == tool_id:
+                    selected_card = card
+
         self.current_selected_tool_id = tool_id
 
         # 2. Open Sidebar & Switch Tab
@@ -4203,7 +4218,10 @@ class MainWindow(QMainWindow):
                 res_text = json.dumps(result, indent=2, ensure_ascii=False)
         except:
             res_text = str(result)
-            
+
+        if not (res_text or "").strip() and selected_card and not getattr(selected_card, "is_finished", False):
+            res_text = "(Running...)"
+             
         self.td_result_edit.setPlainText(res_text)
 
     def add_tool_card(self, data, session_id=None, index=None, animate=True):
@@ -4214,6 +4232,8 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state: return
         state.tool_cards[data['id']] = card
+        has_pending_result = data['id'] in state.pending_tool_results
+        pending_result = state.pending_tool_results.pop(data['id'], None)
         
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.add_tool_card(card)
@@ -4258,6 +4278,13 @@ class MainWindow(QMainWindow):
             else:
                 opacity_effect.setOpacity(1.0)
             
+        if has_pending_result:
+            self.update_tool_card({
+                "id": data["id"],
+                "result": pending_result.get("result", ""),
+                "meta": pending_result.get("meta")
+            }, session_id=session_id)
+
         self.process_ui_events(force=animate)
 
     def update_tool_card(self, data, session_id=None):
@@ -4266,19 +4293,26 @@ class MainWindow(QMainWindow):
         meta = data.get('meta')
         state = self.get_session(session_id)
         if not state: return
-        if tool_id in state.tool_cards:
-            card = state.tool_cards[tool_id]
-            card.set_result(result)
-            if meta:
-                card.meta.update(meta)
+        if tool_id not in state.tool_cards:
+            state.pending_tool_results[tool_id] = {
+                "result": result,
+                "meta": meta
+            }
+            return
+
+        card = state.tool_cards[tool_id]
+        card.set_result(result)
+        if meta:
+            card.meta.update(meta)
+        
+        # [Optimization] Real-time refresh if currently viewing this tool
+        if (hasattr(self, 'current_selected_tool_id') and 
+            self.current_selected_tool_id == tool_id and 
+            self.right_sidebar.isVisible() and 
+            self.right_tabs.currentIndex() == 1):
             
-            # [Optimization] Real-time refresh if currently viewing this tool
-            if (hasattr(self, 'current_selected_tool_id') and 
-                self.current_selected_tool_id == tool_id and 
-                self.right_sidebar.isVisible() and 
-                self.right_tabs.currentIndex() == 1):
-                
-                self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
+            self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
+        self.process_ui_events(force=True)
 
     def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True):
         state = self.get_current_session()
@@ -4613,11 +4647,11 @@ class MainWindow(QMainWindow):
                     "name": t_name,
                     "args": t_args
                 }, session_id=state.session_id)
-                if t_id in tool_results:
-                    self.update_tool_card({
-                        "id": t_id,
-                        "result": tool_results[t_id]
-                    }, session_id=state.session_id)
+            if t_id in tool_results:
+                self.update_tool_card({
+                    "id": t_id,
+                    "result": tool_results[t_id]
+                }, session_id=state.session_id)
 
         if generated_messages:
             state.messages.extend(generated_messages)
@@ -4703,9 +4737,19 @@ if __name__ == "__main__":
         from core.im_gateway import run as run_im_gateway
         run_im_gateway()
         sys.exit(0)
+    if platform.system() == 'Windows':
+        try:
+            import ctypes
+            myappid = f'deepseek.cowork.v3.5.{uuid.getnode()}'
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = SafeApplication(sys.argv)
+    icon_path = resolve_app_icon_path()
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
     app.setStyle("Fusion")
     font = app.font()
     font.setFamily("Segoe UI")

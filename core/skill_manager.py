@@ -24,6 +24,25 @@ def _json_copy(value, fallback):
         return fallback
 
 
+def _humanize_skill_name(skill_name):
+    text = (skill_name or "").replace("_", "-")
+    mapping = {
+        "agent-manager": "协作代理",
+        "file-system": "文件整理与读写",
+        "general-experience": "通用经验增强",
+        "history-query": "历史记录查询",
+        "interaction": "用户确认与交付",
+        "memory-manager": "长期记忆",
+        "meta-tools": "任务辅助工具",
+        "python-runner": "Python 执行",
+        "skill-importer": "能力导入",
+        "skill_builder": "能力创建",
+        "system-tools": "系统与命令工具",
+        "web-search": "网页搜索",
+    }
+    return mapping.get(text, text.replace("-", " ").title())
+
+
 class SkillManager:
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
@@ -667,13 +686,17 @@ class SkillManager:
                 record = self.skill_records.get(skill_name) or self._load_skill_record(skill_name, skill_path)
                 info = {
                     "name": skill_name,
+                    "display_name": record["meta"].get("display_name") or _humanize_skill_name(skill_name),
                     "path": skill_path,
                     "description": record["spec"].get("description") or record["meta"].get("description") or "No description available.",
+                    "user_description": record["meta"].get("description_cn") or record["spec"].get("description_cn") or record["spec"].get("description") or record["meta"].get("description") or "暂无说明。",
                     "enabled": True,
                     "tools": list(record.get("tool_refs") or []),
                     "kind": record["kind"],
                     "capability_group": record["spec"].get("capability_group"),
                     "experience_count": len(record.get("experience_entries") or []),
+                    "use_cases": record["spec"].get("triggers") or record["spec"].get("tags") or [],
+                    "risk_level": record["meta"].get("security_level") or record["spec"].get("security_level") or "medium",
                 }
                 if is_ai_dir:
                     info["type"] = "ai_generated"

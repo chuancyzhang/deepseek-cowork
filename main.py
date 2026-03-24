@@ -28,7 +28,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon)
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem)
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QVariantAnimation
 
 # Try importing OpenAI
@@ -70,6 +70,127 @@ QMenu::separator {
 """
 
 HISTORY_MIGRATION_VERSION = 1
+
+
+def readable_skill_name(skill):
+    if not isinstance(skill, dict):
+        return ""
+    return skill.get("display_name") or skill.get("description_cn") or skill.get("name", "")
+
+
+def readable_risk_level(value):
+    text = (value or "").strip().lower()
+    if text == "high":
+        return ("高风险", DesignTokens.error_text)
+    if text == "medium":
+        return ("中风险", DesignTokens.warning_text)
+    if text == "low":
+        return ("低风险", DesignTokens.info_text)
+    return ("常规", DesignTokens.text_secondary)
+
+
+def session_status_text(status, im_provider=None):
+    if im_provider == "feishu":
+        return ("来自飞书", DesignTokens.info_text, DesignTokens.info_bg)
+    mapping = {
+        "running": ("进行中", DesignTokens.info_text, DesignTokens.info_bg),
+        "completed": ("已完成", DesignTokens.success_text, DesignTokens.success_bg),
+        "interrupted": ("中断", DesignTokens.warning_text, DesignTokens.warning_bg),
+        "error": ("异常", DesignTokens.error_text, DesignTokens.error_bg),
+        "draft": ("新任务", DesignTokens.text_secondary, DesignTokens.bg_secondary),
+    }
+    return mapping.get(status or "draft", ("新任务", DesignTokens.text_secondary, DesignTokens.bg_secondary))
+
+
+def summarize_tool_action(tool_name, args):
+    args = args or {}
+    name = tool_name or "tool"
+    path = ""
+    for key in ("path", "file_path", "src", "source", "target", "dst", "directory"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            path = value.strip()
+            break
+    if name in {"read_file", "read_docx", "read_pptx", "read_excel", "read_pdf"}:
+        return "查看文件", path or "读取内容"
+    if name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx"}:
+        return "更新文件", path or "写入结果"
+    if name in {"rename_file"}:
+        return "整理文件", path or "移动或重命名"
+    if name in {"delete_file"}:
+        return "删除文件", path or "删除项目"
+    if name in {"list_files", "search_files", "glob", "grep", "search_codebase"}:
+        return "扫描工作区", path or "查找相关文件"
+    if name in {"bash", "run_command"}:
+        cmd = args.get("command") or args.get("cmd") or ""
+        return "执行命令", cmd[:48] if cmd else "运行系统命令"
+    if name in {"ask_user_confirmation", "ask_user"}:
+        return "等待确认", "需要你决定下一步"
+    return name.replace("_", " ").title(), path or "执行步骤"
+
+
+def extract_related_paths(tool_name, args):
+    if not isinstance(args, dict):
+        return []
+    paths = []
+    for key in ("path", "file_path", "src", "source", "target", "dst", "directory"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            paths.append(value.strip())
+    if tool_name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx", "rename_file", "delete_file"}:
+        return paths
+    return []
+
+def readable_risk_level(value):
+    text = (value or "").strip().lower()
+    if text == "high":
+        return ("High Risk", DesignTokens.error_text)
+    if text == "medium":
+        return ("Medium Risk", DesignTokens.warning_text)
+    if text == "low":
+        return ("Low Risk", DesignTokens.info_text)
+    return ("Standard", DesignTokens.text_secondary)
+
+
+def session_status_text(status, im_provider=None):
+    if im_provider == "feishu":
+        return ("Feishu", DesignTokens.info_text, DesignTokens.info_bg)
+    mapping = {
+        "running": ("In Progress", DesignTokens.info_text, DesignTokens.info_bg),
+        "completed": ("Completed", DesignTokens.success_text, DesignTokens.success_bg),
+        "interrupted": ("Interrupted", DesignTokens.warning_text, DesignTokens.warning_bg),
+        "error": ("Error", DesignTokens.error_text, DesignTokens.error_bg),
+        "draft": ("New", DesignTokens.text_secondary, DesignTokens.bg_secondary),
+    }
+    return mapping.get(status or "draft", ("New", DesignTokens.text_secondary, DesignTokens.bg_secondary))
+
+
+def summarize_tool_action(tool_name, args):
+    args = args or {}
+    name = tool_name or "tool"
+    path = ""
+    for key in ("path", "file_path", "src", "source", "target", "dst", "directory"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            path = value.strip()
+            break
+    if name in {"read_file", "read_docx", "read_pptx", "read_excel", "read_pdf"}:
+        return "Read File", path or "Read file contents"
+    if name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx"}:
+        return "Update File", path or "Write output to disk"
+    if name in {"rename_file"}:
+        return "Rename File", path or "Move or rename item"
+    if name in {"delete_file"}:
+        return "Delete File", path or "Remove item"
+    if name in {"list_files", "search_files", "glob", "grep", "search_codebase"}:
+        return "Scan Workspace", path or "Search related files"
+    if name in {"bash", "run_command"}:
+        cmd = args.get("command") or args.get("cmd") or ""
+        return "Run Command", cmd[:48] if cmd else "Execute a shell command"
+    if name in {"ask_user_confirmation", "ask_user"}:
+        return "Await Approval", "Need user confirmation for the next step"
+    return name.replace("_", " ").title(), path or "Execution step"
+
 
 # --- Helper Classes for UI ---
 
@@ -542,6 +663,445 @@ class SkillsCenterDialog(QDialog):
                 self.refresh_list()
             else:
                 QMessageBox.warning(self, "失败", msg)
+
+class SettingsDialog(QDialog):
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("设置")
+        self.resize(720, 560)
+        self.config_manager = config_manager
+        self._main = parent
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(18)
+
+        group_style = (
+            "QGroupBox { font-weight: 600; border: 1px solid #dbe3ee; border-radius: 14px; "
+            "margin-top: 10px; padding: 18px 16px 16px 16px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+        )
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        base_tab = QWidget()
+        base_layout = QVBoxLayout(base_tab)
+        base_layout.setContentsMargins(12, 16, 12, 16)
+        base_layout.setSpacing(18)
+
+        model_group = QGroupBox("模型与连接")
+        model_group.setStyleSheet(group_style)
+        model_layout = QFormLayout(model_group)
+        model_layout.setSpacing(12)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem("OpenAI 兼容服务（含 DeepSeek）", "openai")
+        self.provider_combo.addItem("Anthropic / Claude 系列", "anthropic")
+        current_provider = self.config_manager.get("llm_provider", "openai")
+        index = self.provider_combo.findData(current_provider)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+        model_layout.addRow("模型供应商", self.provider_combo)
+
+        provider_hint = QLabel("常用场景直接选择默认供应商即可，接口地址与模型名称可在高级配置里调整。")
+        provider_hint.setWordWrap(True)
+        provider_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        model_layout.addRow("", provider_hint)
+
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("粘贴你的 API Key")
+        self.api_key_input.setText(self.config_manager.get("api_key", ""))
+        model_layout.addRow("API Key", self.api_key_input)
+
+        guide_label = QLabel('获取方式：<a href="https://platform.deepseek.com/">DeepSeek 开发者平台</a>')
+        guide_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        guide_label.setOpenExternalLinks(True)
+        guide_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        model_layout.addRow("", guide_label)
+
+        self.advanced_model_toggle = QCheckBox("显示高级模型配置")
+        self.advanced_model_toggle.setChecked(True)
+        model_layout.addRow("", self.advanced_model_toggle)
+
+        self.advanced_model_container = QWidget()
+        advanced_model_layout = QFormLayout(self.advanced_model_container)
+        advanced_model_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_model_layout.setSpacing(12)
+        self.base_url_input = QLineEdit()
+        self.base_url_input.setPlaceholderText("https://api.deepseek.com")
+        self.base_url_input.setText(self.config_manager.get("base_url", "https://api.deepseek.com"))
+        advanced_model_layout.addRow("自定义接口地址", self.base_url_input)
+
+        self.model_name_input = QLineEdit()
+        self.model_name_input.setPlaceholderText("deepseek-reasoner")
+        self.model_name_input.setText(self.config_manager.get("model_name", "deepseek-reasoner"))
+        advanced_model_layout.addRow("模型名称", self.model_name_input)
+        model_layout.addRow("", self.advanced_model_container)
+        self.advanced_model_toggle.toggled.connect(self.advanced_model_container.setVisible)
+
+        storage_group = QGroupBox("工作区与存储")
+        storage_group.setStyleSheet(group_style)
+        storage_layout = QFormLayout(storage_group)
+        storage_layout.setSpacing(12)
+
+        self.default_ws_input = QLineEdit()
+        self.default_ws_input.setPlaceholderText("未设置")
+        self.default_ws_input.setText(self.config_manager.get("default_workspace", ""))
+        default_ws_container = QWidget()
+        default_ws_layout = QHBoxLayout(default_ws_container)
+        default_ws_layout.setContentsMargins(0, 0, 0, 0)
+        default_ws_layout.setSpacing(8)
+        default_ws_layout.addWidget(self.default_ws_input, 1)
+        default_ws_btn = QPushButton("选择")
+        default_ws_btn.setObjectName("SecondaryBtn")
+        default_ws_btn.setFixedWidth(88)
+        default_ws_layout.addWidget(default_ws_btn)
+        storage_layout.addRow("默认工作区", default_ws_container)
+
+        ws_desc = QLabel("默认工作区决定你首次打开应用时的任务范围。")
+        ws_desc.setWordWrap(True)
+        ws_desc.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        storage_layout.addRow("", ws_desc)
+
+        def choose_default_workspace():
+            directory = QFileDialog.getExistingDirectory(self, "选择默认工作区")
+            if directory:
+                self.default_ws_input.setText(directory)
+
+        default_ws_btn.clicked.connect(choose_default_workspace)
+
+        self.history_dir_input = QLineEdit()
+        self.history_dir_input.setText(self.config_manager.get_chat_history_dir())
+        history_dir_container = QWidget()
+        history_dir_layout = QHBoxLayout(history_dir_container)
+        history_dir_layout.setContentsMargins(0, 0, 0, 0)
+        history_dir_layout.setSpacing(8)
+        history_dir_layout.addWidget(self.history_dir_input, 1)
+        history_dir_btn = QPushButton("选择")
+        history_dir_btn.setObjectName("SecondaryBtn")
+        history_dir_btn.setFixedWidth(88)
+        history_dir_layout.addWidget(history_dir_btn)
+        storage_layout.addRow("聊天记录目录", history_dir_container)
+
+        history_desc = QLabel("聊天历史与长期记忆会保存在这个目录中。")
+        history_desc.setWordWrap(True)
+        history_desc.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        storage_layout.addRow("", history_desc)
+
+        def choose_history_dir():
+            directory = QFileDialog.getExistingDirectory(self, "选择聊天记录目录")
+            if directory:
+                self.history_dir_input.setText(directory)
+
+        history_dir_btn.clicked.connect(choose_history_dir)
+
+        advanced_group = QGroupBox("高级权限与企业消息")
+        advanced_group.setStyleSheet(group_style)
+        advanced_layout = QVBoxLayout(advanced_group)
+        advanced_layout.setSpacing(14)
+
+        permission_panel = QFrame()
+        permission_panel.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.warning_panel_bg}; border: 1px solid {DesignTokens.warning_panel_border}; border-radius: 14px; }}"
+        )
+        permission_layout = QVBoxLayout(permission_panel)
+        permission_layout.setContentsMargins(14, 14, 14, 14)
+        permission_title = QLabel("扩展权限模式")
+        permission_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.warning_panel_text};")
+        permission_desc = QLabel("开启后，助手可以突破工作区限制并执行更高风险的代码操作。仅在完全信任任务时使用。")
+        permission_desc.setWordWrap(True)
+        permission_desc.setStyleSheet(f"color: {DesignTokens.warning_panel_text}; font-size: 12px;")
+        self.god_mode_check = QCheckBox("允许高风险操作")
+        self.god_mode_check.setChecked(self.config_manager.get_god_mode())
+        permission_layout.addWidget(permission_title)
+        permission_layout.addWidget(permission_desc)
+        permission_layout.addWidget(self.god_mode_check)
+        advanced_layout.addWidget(permission_panel)
+
+        base_layout.addWidget(model_group)
+        base_layout.addWidget(storage_group)
+        base_layout.addWidget(advanced_group)
+        base_layout.addStretch()
+        self.tabs.addTab(base_tab, "基础设置")
+
+        im_tab = QWidget()
+        im_layout = QVBoxLayout(im_tab)
+        im_layout.setContentsMargins(12, 16, 12, 16)
+        im_layout.setSpacing(18)
+
+        im_header = QLabel("企业消息")
+        im_header.setProperty("roleTitle", True)
+        im_intro = QLabel("将助手接入飞书后，你可以直接在企业消息中下发任务，并复用同一套工作区约束。")
+        im_intro.setProperty("roleSubtitle", True)
+        im_intro.setWordWrap(True)
+        im_layout.addWidget(im_header)
+        im_layout.addWidget(im_intro)
+
+        im_group = QGroupBox("飞书接入")
+        im_group.setStyleSheet(group_style)
+        im_form = QFormLayout(im_group)
+        im_form.setSpacing(12)
+        self.feishu_app_id_input = QLineEdit()
+        self.feishu_app_id_input.setText(self.config_manager.get("feishu_app_id", ""))
+        im_form.addRow("App ID", self.feishu_app_id_input)
+
+        self.feishu_app_secret_input = QLineEdit()
+        self.feishu_app_secret_input.setEchoMode(QLineEdit.Password)
+        self.feishu_app_secret_input.setText(self.config_manager.get("feishu_app_secret", ""))
+        im_form.addRow("App Secret", self.feishu_app_secret_input)
+        im_layout.addWidget(im_group)
+
+        gateway_bar = QHBoxLayout()
+        gateway_info = QLabel("采用长连接模式，无需单独配置 Webhook。\n监听地址：0.0.0.0:8001")
+        gateway_info.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        gateway_btn = QPushButton("启动企业消息网关")
+        gateway_btn.setObjectName("PrimaryBtn")
+        gateway_btn.setIcon(qta.icon('fa5s.play', color='white'))
+
+        def start_gateway():
+            try:
+                self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
+                self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
+                if hasattr(self._main, "try_connect_daemon"):
+                    self._main.try_connect_daemon(allow_start=True, retries=6)
+                if hasattr(self._main, "start_gateway_process"):
+                    self._main.start_gateway_process()
+                QMessageBox.information(self, "企业消息网关", "已启动企业消息网关，飞书长连接接入已可使用。")
+            except Exception:
+                QMessageBox.warning(self, "企业消息网关", "启动失败，请检查环境与依赖是否完整。")
+
+        gateway_btn.clicked.connect(start_gateway)
+        gateway_bar.addWidget(gateway_info, 1)
+        gateway_bar.addWidget(gateway_btn)
+        im_layout.addLayout(gateway_bar)
+        im_layout.addStretch()
+        self.tabs.addTab(im_tab, "企业消息")
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        save_btn = QPushButton("保存设置")
+        save_btn.setObjectName("PrimaryBtn")
+        save_btn.clicked.connect(self.save_settings)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(save_btn)
+        layout.addLayout(btn_layout)
+
+    def save_settings(self):
+        self.config_manager.set("llm_provider", self.provider_combo.currentData())
+        self.config_manager.set("api_key", self.api_key_input.text().strip())
+        base_url = self.base_url_input.text().strip() or "https://api.deepseek.com"
+        self.config_manager.set("base_url", base_url)
+        model_name = self.model_name_input.text().strip() or "deepseek-reasoner"
+        self.config_manager.set("model_name", model_name)
+        self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
+        self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
+        if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
+            reply = QMessageBox.question(
+                self,
+                "确认开启扩展权限",
+                "扩展权限模式会突破工作区限制，并允许更高风险的执行操作。确定要开启吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self.god_mode_check.setChecked(False)
+        self.config_manager.set_god_mode(self.god_mode_check.isChecked())
+        self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
+        self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
+        self.accept()
+
+
+class SkillsCenterDialog(QDialog):
+    def __init__(self, skill_manager, config_manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("能力中心")
+        self.resize(820, 620)
+        self.skill_manager = skill_manager
+        self.config_manager = config_manager
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("能力中心")
+        title.setProperty("roleTitle", True)
+        subtitle = QLabel("查看助手当前可用的能力、适用场景与风险级别，并按需启用或关闭。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addLayout(title_box, 1)
+        self.import_btn = QPushButton("导入自定义能力")
+        self.import_btn.setObjectName("SecondaryBtn")
+        self.import_btn.setIcon(qta.icon('fa5s.box-open', color='#334155'))
+        self.import_btn.clicked.connect(self.import_skill)
+        self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn.setObjectName("SecondaryBtn")
+        self.refresh_btn.setIcon(qta.icon('fa5s.sync', color='#334155'))
+        self.refresh_btn.clicked.connect(self.manual_refresh)
+        header.addWidget(self.import_btn)
+        header.addWidget(self.refresh_btn)
+        layout.addLayout(header)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self.tab_standard = QWidget()
+        self.layout_standard = QVBoxLayout(self.tab_standard)
+        self.layout_standard.setContentsMargins(0, 0, 0, 0)
+        self.scroll_standard = QScrollArea()
+        self.scroll_standard.setWidgetResizable(True)
+        self.content_standard = QWidget()
+        self.layout_content_standard = QVBoxLayout(self.content_standard)
+        self.layout_content_standard.setContentsMargins(0, 0, 0, 0)
+        self.layout_content_standard.setSpacing(14)
+        self.layout_content_standard.addStretch()
+        self.scroll_standard.setWidget(self.content_standard)
+        self.layout_standard.addWidget(self.scroll_standard)
+        self.tabs.addTab(self.tab_standard, "内置能力")
+
+        self.tab_ai = QWidget()
+        self.layout_ai = QVBoxLayout(self.tab_ai)
+        self.layout_ai.setContentsMargins(0, 0, 0, 0)
+        self.scroll_ai = QScrollArea()
+        self.scroll_ai.setWidgetResizable(True)
+        self.content_ai = QWidget()
+        self.layout_content_ai = QVBoxLayout(self.content_ai)
+        self.layout_content_ai.setContentsMargins(0, 0, 0, 0)
+        self.layout_content_ai.setSpacing(14)
+        self.layout_content_ai.addStretch()
+        self.scroll_ai.setWidget(self.content_ai)
+        self.layout_ai.addWidget(self.scroll_ai)
+        self.tabs.addTab(self.tab_ai, "自定义能力")
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setObjectName("PrimaryBtn")
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(close_btn)
+        layout.addLayout(footer)
+
+        self.refresh_list()
+
+    def manual_refresh(self):
+        self.skill_manager.load_skills()
+        self.refresh_list()
+        QMessageBox.information(self, "能力中心", "已重新扫描并加载全部能力。")
+
+    def refresh_list(self):
+        self._clear_layout(self.layout_content_standard)
+        self._clear_layout(self.layout_content_ai)
+        skills = self.skill_manager.get_all_skills()
+        for skill in skills:
+            is_ai = skill.get("type") == "ai_generated" or skill.get("created_by") == "ai"
+            if is_ai:
+                self.add_skill_card(skill, self.layout_content_ai)
+            else:
+                self.add_skill_card(skill, self.layout_content_standard)
+
+    def _clear_layout(self, layout):
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def add_skill_card(self, skill, parent_layout):
+        card = QFrame()
+        card.setObjectName("SkillCard")
+        card.setStyleSheet(
+            f"QFrame#SkillCard {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 18px; }}"
+        )
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 18)
+        card_layout.setSpacing(16)
+
+        info_col = QVBoxLayout()
+        info_col.setSpacing(8)
+        title = QLabel(skill.get("display_name") or skill.get("name", ""))
+        title.setStyleSheet(f"font-size: 17px; font-weight: 700; color: {DesignTokens.text_primary};")
+        desc = QLabel(skill.get("user_description") or skill.get("description") or "暂无说明。")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary};")
+        info_col.addWidget(title)
+        info_col.addWidget(desc)
+
+        use_cases = skill.get("use_cases") or []
+        if use_cases:
+            use_text = "、".join([str(item) for item in use_cases[:3]])
+            use_label = QLabel(f"适用场景：{use_text}")
+            use_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+            info_col.addWidget(use_label)
+
+        risk_text, risk_color = readable_risk_level(skill.get("risk_level") or skill.get("security_level"))
+        risk_label = QLabel(f"风险级别：{risk_text}")
+        risk_label.setStyleSheet(f"font-size: 12px; color: {risk_color}; font-weight: 600;")
+        info_col.addWidget(risk_label)
+
+        tools = skill.get("tools") or []
+        if tools:
+            tool_label = QLabel("关联能力：" + "、".join([str(item) for item in tools[:4]]))
+            tool_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_tertiary};")
+            info_col.addWidget(tool_label)
+
+        card_layout.addLayout(info_col, 1)
+
+        controls_col = QVBoxLayout()
+        controls_col.setSpacing(10)
+        controls_col.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        enabled = bool(skill.get("enabled"))
+        status_chip = QLabel("已启用" if enabled else "已关闭")
+        status_chip.setAlignment(Qt.AlignCenter)
+        status_bg = DesignTokens.success_bg if enabled else DesignTokens.bg_secondary
+        status_fg = DesignTokens.success_text if enabled else DesignTokens.text_secondary
+        status_chip.setStyleSheet(
+            f"background: {status_bg}; color: {status_fg}; border-radius: 12px; padding: 6px 12px; font-weight: 600;"
+        )
+        controls_col.addWidget(status_chip)
+
+        toggle_btn = QPushButton("关闭" if enabled else "启用")
+        toggle_btn.setObjectName("SecondaryBtn")
+        toggle_btn.setFixedWidth(90)
+        toggle_btn.clicked.connect(lambda checked=False, n=skill["name"], e=not enabled: self.toggle_skill(n, e))
+        controls_col.addWidget(toggle_btn)
+
+        if str(skill.get("risk_level") or skill.get("security_level") or "").lower() == "high":
+            explain_btn = QPushButton("查看风险")
+            explain_btn.setObjectName("GhostBtn")
+            explain_btn.clicked.connect(
+                lambda checked=False, s=skill: QMessageBox.information(
+                    self,
+                    "风险说明",
+                    f"{s.get('display_name') or s.get('name')} 可能会访问或修改工作区中的重要内容，请在确认用途后再启用。",
+                )
+            )
+            controls_col.addWidget(explain_btn)
+
+        controls_col.addStretch()
+        card_layout.addLayout(controls_col)
+        parent_layout.insertWidget(parent_layout.count() - 1, card)
+
+    def toggle_skill(self, name, enabled):
+        self.config_manager.set_skill_enabled(name, enabled)
+        self.refresh_list()
+
+    def import_skill(self):
+        path = QFileDialog.getExistingDirectory(self, "选择能力目录（包含 SKILL.md）")
+        if path:
+            success, msg = self.skill_manager.import_skill(path)
+            if success:
+                QMessageBox.information(self, "能力中心", msg)
+                self.refresh_list()
+            else:
+                QMessageBox.warning(self, "能力中心", msg)
+
 
 class DragOverlay(QWidget):
     def __init__(self, parent=None):
@@ -2204,6 +2764,7 @@ class SessionState:
         self.session_id = session_id
         self.messages = []
         self.tool_cards = {}
+        self.step_records = []
         self.pending_tool_results = {}
         self.current_content_buffer = ""
         self.current_thinking_buffer = ""
@@ -2224,6 +2785,12 @@ class SessionState:
         self.content_flush_timer = None
         self.thinking_flush_timer = None
         self.pending_thinking_delta = ""
+        self.run_phase = "待开始"
+        self.right_panel_mode = "files"
+        self.right_panel_visible = False
+        self.session_status = "draft"
+        self.has_file_changes = False
+        self.changed_files = []
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -2374,84 +2941,83 @@ class MainWindow(QMainWindow):
             app_icon = QIcon(icon_path)
             self.setWindowIcon(app_icon)
 
-             
         self.resize(1280, 720)
         self.setAcceptDrops(True)
         self.workspace_dir = None
         
         # Apply Clean Light Theme manually for optimized components
-        self.setStyleSheet("""
-            QMainWindow { background-color: #ffffff; }
-            QLabel[roleTitle="true"] { font-size: 18px; font-weight: 600; color: #111827; }
-            QLabel[roleSubtitle="true"] { font-size: 13px; color: #6b7280; }
-            QTextEdit#MainInput {
+        self.setStyleSheet(f"""
+            QMainWindow {{ background-color: {DesignTokens.bg_app}; }}
+            QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 700; color: {DesignTokens.text_primary}; }}
+            QLabel[roleSubtitle="true"] {{ font-size: 13px; color: {DesignTokens.text_secondary}; }}
+            QTextEdit#MainInput {{
                 padding: 12px 16px;
                 border-radius: 24px;
-                border: 1px solid #e2e8f0;
-                background: #ffffff;
+                border: 1px solid {DesignTokens.border};
+                background: {DesignTokens.bg_main};
                 font-size: 14px;
-                color: #1e293b;
-            }
-            QTextEdit#MainInput:focus {
-                border: 1px solid #3b82f6;
-                background: #ffffff;
-            }
-            QScrollArea { border: none; background: transparent; }
-            QTabWidget::pane { border: none; }
-            QTabBar::tab {
+                color: {DesignTokens.text_primary};
+            }}
+            QTextEdit#MainInput:focus {{
+                border: 1px solid {DesignTokens.primary};
+                background: {DesignTokens.bg_main};
+            }}
+            QScrollArea {{ border: none; background: transparent; }}
+            QTabWidget::pane {{ border: none; }}
+            QTabBar::tab {{
                 background: transparent;
                 padding: 8px 16px;
                 margin-right: 4px;
                 border-radius: 6px;
-                color: #6b7280;
-            }
-            QTabBar::tab:selected {
-                background: #eff6ff;
-                color: #2563eb;
+                color: {DesignTokens.text_secondary};
+            }}
+            QTabBar::tab:selected {{
+                background: {DesignTokens.primary_soft};
+                color: {DesignTokens.primary};
                 font-weight: bold;
-            }
+            }}
 
             /* Global Scrollbar Beautification */
-            QScrollBar:vertical {
+            QScrollBar:vertical {{
                 border: none;
                 background: transparent;
                 width: 6px;
                 margin: 0px;
-            }
-            QScrollBar::handle:vertical {
-                background: #e5e7eb;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {DesignTokens.border};
                 min-height: 20px;
                 border-radius: 3px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #d1d5db;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {DesignTokens.border_strong};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
                 background: transparent;
-            }
-            QScrollBar:horizontal {
+            }}
+            QScrollBar:horizontal {{
                 border: none;
                 background: transparent;
                 height: 6px;
                 margin: 0px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #e5e7eb;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {DesignTokens.border};
                 min-width: 20px;
                 border-radius: 3px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #d1d5db;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {DesignTokens.border_strong};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
                 background: transparent;
-            }
+            }}
         """)
         
         self.sessions = {}
@@ -2470,6 +3036,8 @@ class MainWindow(QMainWindow):
         self.chat_layout = None
         self.active_skills_label = None
         self.current_selected_tool_id = None
+        self._last_submit_text = ""
+        self._last_submit_ts = 0.0
         
         self.config_manager = ConfigManager()
         self.skill_manager = SkillManager(None, self.config_manager)
@@ -2505,7 +3073,7 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("Sidebar")
         # sidebar.setMinimumWidth(200) # Removed to allow collapsing
         # sidebar.setStyleSheet("background-color: #f9fafb; border-right: 1px solid #e5e7eb;")
-        sidebar.setStyleSheet(f"background-color: {DesignTokens.bg_secondary}; border-right: 1px solid {DesignTokens.border};")
+        sidebar.setStyleSheet(f"background-color: {DesignTokens.bg_sidebar}; border-right: 1px solid {DesignTokens.border};")
         
         # Lower sidebar weight: Removed shadow
         # sidebar.setGraphicsEffect(None) 
@@ -2519,29 +3087,32 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(app_title)
         
         app_subtitle = QLabel("智能文件助手")
+        app_subtitle.setText("文件协作助手")
         app_subtitle.setProperty("roleSubtitle", True)
         sidebar_layout.addWidget(app_subtitle)
 
         new_chat_btn = QPushButton(" 新建对话")
+        new_chat_btn.setText(" 新任务")
         new_chat_btn.setIcon(qta.icon('fa5s.plus', color='#ffffff'))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
         new_chat_btn.setStyleSheet("""
             QPushButton {
-                background-color: #3b82f6; 
+                background-color: #2f6fed; 
                 color: white; 
-                border-radius: 8px; 
-                padding: 10px 16px;
-                font-weight: bold;
+                border-radius: 14px; 
+                padding: 12px 16px;
+                font-weight: 700;
                 border: none;
             }
-            QPushButton:hover { background-color: #2563eb; }
+            QPushButton:hover { background-color: #245fce; }
         """)
         new_chat_btn.clicked.connect(self.new_conversation)
         sidebar_layout.addWidget(new_chat_btn)
 
         # History List
         history_label = QLabel("历史会话")
-        history_label.setStyleSheet("color: #6b7280; font-size: 12px; font-weight: 600; margin-top: 12px;")
+        history_label.setText("最近任务")
+        history_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; font-weight: 600; margin-top: 12px;")
         sidebar_layout.addWidget(history_label)
 
         self.history_scroll = QScrollArea()
@@ -2554,6 +3125,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.history_scroll, 1)
 
         sidebar_footer_label = QLabel("设置")
+        sidebar_footer_label.setText("系统入口")
         sidebar_footer_label.setProperty("roleSubtitle", True)
         sidebar_layout.addWidget(sidebar_footer_label)
         
@@ -2563,6 +3135,7 @@ class MainWindow(QMainWindow):
         """
         
         sidebar_settings_btn = QPushButton(" 系统设置")
+        sidebar_settings_btn.setText(" 系统设置")
         sidebar_settings_btn.setIcon(qta.icon('fa5s.cog', color='#4b5563'))
         sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
         sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
@@ -2570,6 +3143,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(sidebar_settings_btn)
         
         sidebar_skills_btn = QPushButton(" 功能中心")
+        sidebar_skills_btn.setText(" 能力中心")
         sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color='#4b5563'))
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
@@ -2584,17 +3158,33 @@ class MainWindow(QMainWindow):
         main_container.setMinimumWidth(400) # Protect main content
         self.main_splitter.addWidget(main_container)
 
-        # Right Sidebar (Workspace File Tree)
+        # Right Sidebar (Context Drawer)
         self.right_sidebar = QWidget()
-        # self.right_sidebar.setMinimumWidth(200) # Removed to allow collapsing
-        self.right_sidebar.setStyleSheet("background-color: #ffffff; border-left: 1px solid #e5e7eb;")
+        self.right_sidebar.setObjectName("RightSidebar")
+        self.right_sidebar.setStyleSheet(f"background-color: {DesignTokens.bg_main}; border-left: 1px solid {DesignTokens.border};")
         self.right_sidebar.setVisible(False)
         
         right_layout = QVBoxLayout(self.right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
         
-        # Right Sidebar Tabs (Workspace / Tool Details)
+        right_header = QFrame()
+        right_header.setStyleSheet(f"background: {DesignTokens.bg_card}; border-bottom: 1px solid {DesignTokens.border};")
+        right_header_layout = QHBoxLayout(right_header)
+        right_header_layout.setContentsMargins(16, 14, 16, 14)
+        self.right_title_label = QLabel("任务上下文")
+        self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
+        self.right_desc_label = QLabel("查看文件、变更与执行步骤")
+        self.right_desc_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        right_title_box = QVBoxLayout()
+        right_title_box.setContentsMargins(0, 0, 0, 0)
+        right_title_box.setSpacing(2)
+        right_title_box.addWidget(self.right_title_label)
+        right_title_box.addWidget(self.right_desc_label)
+        right_header_layout.addLayout(right_title_box, 1)
+        right_layout.addWidget(right_header)
+
+        # Right Sidebar Tabs
         self.right_tabs = QTabWidget()
         self.right_tabs.setStyleSheet("""
             QTabWidget::pane { border: none; }
@@ -2674,11 +3264,30 @@ class MainWindow(QMainWindow):
         
         self.right_tabs.addTab(self.workspace_tab, "工作区文件")
         
+        self.change_tab = QWidget()
+        change_layout = QVBoxLayout(self.change_tab)
+        change_layout.setContentsMargins(12, 12, 12, 12)
+        change_layout.setSpacing(10)
+        self.change_intro_label = QLabel("本次任务涉及的文件变更会在这里汇总显示。")
+        self.change_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        change_layout.addWidget(self.change_intro_label)
+        self.change_list = QListWidget()
+        self.change_list.setStyleSheet(f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card};")
+        change_layout.addWidget(self.change_list, 1)
+        self.right_tabs.addTab(self.change_tab, "变更")
+
         # Tab 2: Tool Details
         self.tool_details_tab = QWidget()
         td_layout = QVBoxLayout(self.tool_details_tab)
         td_layout.setContentsMargins(12, 12, 12, 12)
         td_layout.setSpacing(12)
+        self.step_intro_label = QLabel("执行步骤会按顺序汇总，点击步骤查看详细参数与输出。")
+        self.step_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        td_layout.addWidget(self.step_intro_label)
+        self.step_list = QListWidget()
+        self.step_list.setStyleSheet(f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card};")
+        self.step_list.itemClicked.connect(self.on_step_item_clicked)
+        td_layout.addWidget(self.step_list, 1)
         
         td_header = QLabel("工具调用详情")
         td_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
@@ -2765,6 +3374,12 @@ class MainWindow(QMainWindow):
         self.sub_agent_monitor_window = None
         
         right_layout.addWidget(self.right_tabs)
+        try:
+            self.right_tabs.setTabText(0, "文件")
+            self.right_tabs.setTabText(1, "变更")
+            self.right_tabs.setTabText(2, "步骤")
+        except Exception:
+            pass
         
         self.main_splitter.addWidget(self.right_sidebar)
         self.main_splitter.setStretchFactor(0, 0)
@@ -2783,8 +3398,10 @@ class MainWindow(QMainWindow):
         top_bar = QHBoxLayout()
         title_box = QVBoxLayout()
         title_label = QLabel("你好，需要我为你做些什么？")
+        title_label.setText("在工作区里完成一个任务")
         title_label.setProperty("roleTitle", True)
         subtitle_label = QLabel("选择工作区，描述你的需求，我会帮你完成文件操作。")
+        subtitle_label.setText("先确认当前工作区，再描述你要处理的文件、报告或整理任务。")
         subtitle_label.setProperty("roleSubtitle", True)
         title_box.addWidget(title_label)
         title_box.addWidget(subtitle_label)
@@ -2793,12 +3410,23 @@ class MainWindow(QMainWindow):
         
         # Workspace Selector
         ws_container = QFrame()
-        ws_container.setStyleSheet("background: #f3f4f6; border-radius: 8px; padding: 4px;")
+        ws_container.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 16px; padding: 4px;")
         ws_layout = QHBoxLayout(ws_container)
-        ws_layout.setContentsMargins(8, 4, 8, 4)
+        ws_layout.setContentsMargins(12, 10, 12, 10)
+        ws_layout.setSpacing(10)
         
         self.ws_label = QLabel("当前文件夹: 未选择")
-        self.ws_label.setStyleSheet("color: #6b7280; font-weight: 500;")
+        self.ws_label.setText("当前工作区：未选择")
+        self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 600;")
+        self.security_badge = QLabel("安全范围：仅工作区")
+        self.security_badge.setStyleSheet(f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
+        self.security_badge.hide()
+        self.model_badge = QLabel("模型：连接中")
+        self.model_badge.setStyleSheet(f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
+        self.model_badge.hide()
+        self.phase_badge = QLabel("状态：待开始")
+        self.phase_badge.setStyleSheet(f"background: {DesignTokens.bg_main}; color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
+        self.phase_badge.hide()
         
         self.recent_btn = QPushButton()
         self.recent_btn.setIcon(qta.icon('fa5s.history', color='#6b7280'))
@@ -2807,15 +3435,17 @@ class MainWindow(QMainWindow):
         self.recent_btn.setCursor(Qt.PointingHandCursor)
         self.recent_btn.setStyleSheet("border: none; background: transparent;")
         self.recent_btn.clicked.connect(self.show_recent_menu)
+        self.recent_btn.hide()
         
         self.ws_btn = QPushButton(" 切换")
+        self.ws_btn.setText(" 切换工作区")
         self.ws_btn.setIcon(qta.icon('fa5s.folder-open', color='#374151'))
         self.ws_btn.setCursor(Qt.PointingHandCursor)
-        self.ws_btn.setStyleSheet("background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 4px 12px; color: #374151;")
+        self.ws_btn.setStyleSheet(f"background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 6px 14px; color: {DesignTokens.text_primary};")
         self.ws_btn.clicked.connect(self.select_workspace)
         
         ws_layout.addWidget(self.ws_label)
-        ws_layout.addWidget(self.recent_btn)
+        ws_layout.addStretch()
         ws_layout.addWidget(self.ws_btn)
         top_bar.addWidget(ws_container)
         
@@ -2841,27 +3471,31 @@ class MainWindow(QMainWindow):
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
         self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
+        self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
         self.input_field.returnPressed.connect(self.handle_send)
 
         self.pause_btn = QPushButton()
         self.pause_btn.setIcon(qta.icon('fa5s.pause', color='#4b5563'))
         self.pause_btn.clicked.connect(self.toggle_pause)
         self.pause_btn.setVisible(False)
-        self.pause_btn.setStyleSheet("border: none; font-size: 16px;")
+        self.pause_btn.setObjectName("SecondaryBtn")
+        self.pause_btn.setFixedHeight(38)
         
         self.action_btn = QPushButton("发送")
+        self.action_btn.setText("开始")
         self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
         self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setFixedSize(60, 36)
+        self.action_btn.setFixedSize(96, 40)
         self.action_btn.setAutoDefault(False)
         self.action_btn.setDefault(False)
-        self.action_btn.setStyleSheet("background-color: #4d6bfe; color: white; border-radius: 18px; font-weight: bold; border: none;")
+        self.action_btn.setStyleSheet(f"background-color: {DesignTokens.primary}; color: white; border-radius: 20px; font-weight: 700; border: none;")
         self.action_btn.clicked.connect(self.on_action_clicked)
         
         self.loop_hint = QPushButton(" 循环中")
+        self.loop_hint.setText(" 处理中")
         self.loop_hint.setIcon(qta.icon('fa5s.exclamation-circle', color='#ef4444'))
         self.loop_hint.setFlat(True)
-        self.loop_hint.setStyleSheet("color: #ef4444; font-size: 11px; margin-right: 8px; border: none; text-align: left;")
+        self.loop_hint.setStyleSheet(f"color: {DesignTokens.warning_text}; font-size: 11px; margin-right: 8px; border: none; text-align: left;")
         self.loop_hint.setVisible(False)
 
         # Input Layout
@@ -2928,6 +3562,144 @@ class MainWindow(QMainWindow):
             
             self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
 
+        self.refresh_context_badges()
+
+    def update_ui_state_for_workspace(self):
+        if self.workspace_dir:
+            self.input_field.setEnabled(True)
+            self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
+            self.action_btn.setEnabled(True)
+            self.action_btn.setGraphicsEffect(None)
+            self.ws_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-weight: 600;")
+        else:
+            self.input_field.setEnabled(True)
+            self.input_field.setPlaceholderText("先选择一个工作区，再开始描述你要处理的任务")
+            self.action_btn.setEnabled(False)
+            opacity = QGraphicsOpacityEffect(self.action_btn)
+            opacity.setOpacity(0.5)
+            self.action_btn.setGraphicsEffect(opacity)
+            self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
+        self.refresh_context_badges()
+
+    def refresh_context_badges(self, session_id=None):
+        state = self.get_session(session_id)
+        provider_map = {
+            "openai": "OpenAI Compatible",
+            "anthropic": "Anthropic",
+        }
+        provider = self.config_manager.get("llm_provider", "openai")
+        model_name = self.config_manager.get("model_name", "deepseek-reasoner")
+        provider_text = provider_map.get(provider, provider)
+        connection_text = "Daemon Ready" if getattr(self, "daemon_available", False) else "Local Agent"
+        self.model_badge.setText(f"{provider_text} | {model_name} | {connection_text}")
+
+        if self.config_manager.get_god_mode():
+            self.security_badge.setText("Extended Access")
+            self.security_badge.setStyleSheet(
+                f"background: {DesignTokens.warning_bg}; color: {DesignTokens.warning_text}; "
+                f"border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;"
+            )
+        else:
+            self.security_badge.setText("Workspace Only")
+            self.security_badge.setStyleSheet(
+                f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; "
+                f"border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;"
+            )
+
+        phase = "Idle"
+        if state:
+            phase = getattr(state, "run_phase", "Idle") or "Idle"
+        self.phase_badge.setText(f"Phase: {phase}")
+
+        has_workspace = bool(self.workspace_dir)
+        has_context = bool(state and (state.step_records or state.has_file_changes))
+        self.right_panel_visible = has_workspace or has_context
+        self.right_sidebar.setVisible(self.right_panel_visible)
+
+    def set_session_phase(self, phase, session_id=None):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        state.run_phase = phase
+        if state.session_id == self.current_session_id:
+            self.refresh_context_badges(state.session_id)
+
+    def set_session_status(self, status, session_id=None, save=False):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        state.session_status = status
+        if save and state.messages:
+            self.save_chat_history(session_id=state.session_id)
+        if state.session_id == self.current_session_id:
+            self.refresh_context_badges(state.session_id)
+            self.refresh_history_list()
+
+    def refresh_change_list(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        if session_id is None or state.session_id == self.current_session_id:
+            self.change_list.clear()
+            if not state.changed_files:
+                item = QListWidgetItem("No file changes yet in this task.")
+                item.setFlags(Qt.NoItemFlags)
+                self.change_list.addItem(item)
+            else:
+                seen = set()
+                for entry in state.changed_files:
+                    if not isinstance(entry, dict):
+                        continue
+                    path = entry.get("path") or ""
+                    if path in seen:
+                        continue
+                    seen.add(path)
+                    change_type = entry.get("type") or "updated"
+                    label = path
+                    if self.workspace_dir and path.startswith(self.workspace_dir):
+                        label = os.path.relpath(path, self.workspace_dir)
+                    summary = entry.get("summary") or change_type
+                    item = QListWidgetItem(f"{change_type} | {label}\n{summary}")
+                    item.setData(Qt.UserRole, entry)
+                    self.change_list.addItem(item)
+            self.change_intro_label.setText(
+                "Files touched by the current task." if state.changed_files else "File changes will appear here."
+            )
+            self.refresh_context_badges(state.session_id)
+
+    def refresh_step_list(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        if session_id is None or state.session_id == self.current_session_id:
+            self.step_list.clear()
+            if not state.step_records:
+                item = QListWidgetItem("Execution steps will appear here.")
+                item.setFlags(Qt.NoItemFlags)
+                self.step_list.addItem(item)
+            else:
+                for record in state.step_records:
+                    status = record.get("status") or "running"
+                    title = record.get("display_title") or record.get("tool_name") or "Step"
+                    summary = record.get("summary") or "Waiting for more output"
+                    duration = record.get("duration")
+                    duration_text = f" | {duration:.1f}s" if isinstance(duration, (int, float)) else ""
+                    item = QListWidgetItem(f"{title} | {status}{duration_text}\n{summary}")
+                    item.setData(Qt.UserRole, record.get("tool_id"))
+                    self.step_list.addItem(item)
+                self.step_intro_label.setText(f"{len(state.step_records)} execution steps")
+            self.refresh_context_badges(state.session_id)
+
+    def on_step_item_clicked(self, item):
+        tool_id = item.data(Qt.UserRole)
+        if not tool_id:
+            return
+        state = self.get_current_session()
+        if not state or tool_id not in state.tool_cards:
+            return
+        card = state.tool_cards[tool_id]
+        self.show_tool_details(tool_id, card.args, card.result, meta=card.meta, switch_tab=True)
+
     def setup_daemon_client(self):
         self.daemon_client = DaemonClient(self.daemon_host, self.daemon_port)
         self.try_connect_daemon(allow_start=True, retries=6)
@@ -2953,6 +3725,7 @@ class MainWindow(QMainWindow):
                     connected = True
                     break
         self.daemon_available = connected
+        self.refresh_context_badges()
 
     def start_daemon_process(self):
         try:
@@ -3216,6 +3989,9 @@ class MainWindow(QMainWindow):
         self.code_worker = state.code_worker
         self.chat_layout = state.chat_layout
         self.active_skills_label = state.active_skills_label
+        self.refresh_change_list(session_id)
+        self.refresh_step_list(session_id)
+        self.refresh_context_badges(session_id)
 
     def normalize_session_ui(self, state):
         if not state: return
@@ -3244,6 +4020,42 @@ class MainWindow(QMainWindow):
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
 
+    def normalize_session_ui(self, state):
+        if not state:
+            return
+        running = state.llm_worker and state.llm_worker.isRunning()
+        paused = running and state.llm_worker.is_paused
+        running_code = state.code_worker and state.code_worker.isRunning()
+        running_daemon = getattr(state, "daemon_running", False)
+
+        if running or running_code or running_daemon:
+            self.action_btn.setText("停止")
+            self.action_btn.setIcon(qta.icon('fa5s.stop', color='white'))
+            self.action_btn.setStyleSheet(
+                f"background-color: {DesignTokens.error_text}; color: white; border-radius: 20px; font-weight: 700; border: none;"
+            )
+            self.action_btn.setEnabled(True)
+            self.input_field.setEnabled(False)
+            self.pause_btn.setVisible(bool(running))
+            self.loop_hint.setVisible(bool(running_daemon or running_code))
+            if paused:
+                self.pause_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.success_text))
+                self.pause_btn.setToolTip("继续")
+            else:
+                self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
+                self.pause_btn.setToolTip("暂停")
+        else:
+            self.action_btn.setText("开始")
+            self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
+            self.action_btn.setStyleSheet(
+                f"background-color: {DesignTokens.primary}; color: white; border-radius: 20px; font-weight: 700; border: none;"
+            )
+            self.action_btn.setEnabled(bool(self.workspace_dir))
+            self.input_field.setEnabled(bool(self.workspace_dir))
+            self.pause_btn.setVisible(False)
+            self.loop_hint.setVisible(False)
+        self.refresh_context_badges(state.session_id)
+
     def get_session_id_for_tab(self, index):
         widget = self.session_tabs.widget(index)
         if not widget: return None
@@ -3268,6 +4080,8 @@ class MainWindow(QMainWindow):
         if session_id:
             self.set_current_session(session_id)
             self.refresh_history_list()
+            self.refresh_change_list(session_id)
+            self.refresh_step_list(session_id)
             self.normalize_session_ui(self.get_current_session())
 
     def clear_chat_layout(self, chat_layout):
@@ -3336,6 +4150,9 @@ class MainWindow(QMainWindow):
         self.sessions[session_id] = state
         self.session_tabs.setCurrentIndex(tab_index)
         self.set_current_session(session_id)
+        self.refresh_change_list(session_id)
+        self.refresh_step_list(session_id)
+        self.refresh_context_badges(session_id)
         return session_id
 
     def show_confirmation_dialog(self, message):
@@ -3419,10 +4236,14 @@ class MainWindow(QMainWindow):
         return decision["value"]
 
     def handle_confirmation_request(self, message):
+        state = self.get_current_session()
+        if state:
+            self.set_session_phase("Awaiting approval", state.session_id)
         result = self.show_confirmation_dialog(message)
         bridge.respond(result)
     
     def handle_daemon_confirmation_request(self, confirm_id, message, session_id=None):
+        self.set_session_phase("Awaiting approval", session_id)
         result = self.show_confirmation_dialog(message)
         if self.daemon_client:
             self.daemon_client.confirm_response(confirm_id, result)
@@ -3506,6 +4327,175 @@ class MainWindow(QMainWindow):
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
+
+    def refresh_history_list(self):
+        self.history_container.setUpdatesEnabled(False)
+        while self.history_layout.count():
+            item = self.history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        conversations = self.chat_storage.list_conversations()
+        conversation_ids = {c["id"] for c in conversations}
+
+        for conv in conversations:
+            meta = conv.get("meta") or {}
+            if meta.get("archived"):
+                continue
+
+            session_id = conv["id"]
+            title = conv["title"] or "新任务"
+            if conv.get("im_provider") == "feishu":
+                ts = conv.get("updated_at")
+                title = f"飞书会话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}" if ts else "飞书会话"
+
+            status_text, status_color, status_bg = session_status_text(
+                conv.get("status") or "draft",
+                conv.get("im_provider"),
+            )
+            updated_at = conv.get("updated_at")
+            time_text = datetime.fromtimestamp(updated_at).strftime("%m-%d %H:%M") if updated_at else ""
+
+            row = QFrame()
+            row.setObjectName("HistoryRow")
+            row.setStyleSheet(
+                f"QFrame#HistoryRow {{ background: transparent; border-radius: 12px; }}"
+                f"QFrame#HistoryRow:hover {{ background: {DesignTokens.bg_secondary}; }}"
+            )
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(6, 4, 6, 4)
+            row_layout.setSpacing(8)
+
+            content = QWidget()
+            content_layout = QVBoxLayout(content)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(4)
+
+            btn = HistoryTitleButton(title)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setStyleSheet(
+                "text-align: left; padding: 6px 8px; border: none; background: transparent; "
+                f"color: {DesignTokens.text_primary}; font-weight: 600;"
+            )
+            if session_id == self.current_session_id:
+                row.setStyleSheet(
+                    f"QFrame#HistoryRow {{ background: {DesignTokens.primary_soft}; border-radius: 12px; }}"
+                )
+            btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
+
+            meta_row = QHBoxLayout()
+            meta_row.setContentsMargins(8, 0, 8, 0)
+            meta_row.setSpacing(6)
+
+            status_label = QLabel(status_text)
+            status_label.setStyleSheet(
+                f"background: {status_bg}; color: {status_color}; border-radius: 10px; "
+                "padding: 2px 8px; font-size: 11px; font-weight: 600;"
+            )
+            time_label = QLabel(time_text)
+            time_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px;")
+
+            meta_row.addWidget(status_label)
+            meta_row.addWidget(time_label)
+            meta_row.addStretch()
+
+            content_layout.addWidget(btn)
+            content_layout.addLayout(meta_row)
+
+            menu_btn = QToolButton()
+            menu_btn.setText("⋯")
+            menu_btn.setCursor(Qt.PointingHandCursor)
+            menu_btn.setAutoRaise(True)
+            menu_btn.setStyleSheet(
+                f"QToolButton {{ border: none; color: {DesignTokens.text_secondary}; padding: 4px 8px; }}"
+                f"QToolButton:hover {{ background: {DesignTokens.bg_card}; border-radius: 10px; }}"
+            )
+            menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))
+
+            row_layout.addWidget(content, 1)
+            row_layout.addWidget(menu_btn, 0, Qt.AlignTop)
+            self.history_layout.addWidget(row)
+
+        history_dir = self.chat_history_dir
+        if os.path.exists(history_dir):
+            files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
+            files.sort(key=os.path.getmtime, reverse=True)
+
+            for file_path in files:
+                try:
+                    filename = os.path.basename(file_path)
+                    session_id = filename.replace('chat_history_', '').replace('.json', '')
+                    if session_id in conversation_ids:
+                        continue
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if not data:
+                            continue
+                        title = self._compute_session_title(data)
+                        row = QFrame()
+                        row_layout = QHBoxLayout(row)
+                        row_layout.setContentsMargins(6, 4, 6, 4)
+                        btn = HistoryTitleButton(title)
+                        btn.setCursor(Qt.PointingHandCursor)
+                        btn.setStyleSheet(
+                            "text-align: left; padding: 10px 8px; border: none; background: transparent; "
+                            f"color: {DesignTokens.text_primary}; font-weight: 600;"
+                        )
+                        btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
+                        row_layout.addWidget(btn, 1)
+                        self.history_layout.addWidget(row)
+                except Exception:
+                    continue
+        self.history_layout.addStretch()
+        self.history_container.setUpdatesEnabled(True)
+        self.history_container.update()
+
+    def show_session_menu(self, session_id, anchor):
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_STYLESHEET)
+        rename_action = QAction("重命名", self)
+        archive_action = QAction("归档", self)
+        delete_action = QAction("删除", self)
+        delete_action.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_text))
+
+        rename_action.triggered.connect(lambda: self.rename_session(session_id))
+        archive_action.triggered.connect(lambda: self.archive_session(session_id))
+        delete_action.triggered.connect(lambda: self.delete_session(session_id))
+
+        menu.addAction(rename_action)
+        menu.addAction(archive_action)
+        menu.addSeparator()
+        menu.addAction(delete_action)
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def rename_session(self, session_id):
+        record = self.chat_storage.get_conversation_record(session_id) or {}
+        current_title = record.get("title") or "新任务"
+        new_title, ok = QInputDialog.getText(self, "重命名任务", "新的任务标题", text=current_title)
+        new_title = (new_title or "").strip()
+        if not ok or not new_title:
+            return
+        meta = record.get("meta") or {}
+        status = record.get("status") or "draft"
+        self.chat_storage.upsert_conversation(session_id, title=new_title, status=status, meta=meta)
+        state = self.sessions.get(session_id)
+        if state:
+            index = self.session_tabs.indexOf(state.session_widget)
+            if index >= 0:
+                self.session_tabs.setTabText(index, new_title)
+        self.refresh_history_list()
+
+    def archive_session(self, session_id):
+        record = self.chat_storage.get_conversation_record(session_id) or {}
+        meta = record.get("meta") or {}
+        meta["archived"] = True
+        self.chat_storage.upsert_conversation(
+            session_id,
+            title=record.get("title") or "新任务",
+            status=record.get("status") or "completed",
+            meta=meta,
+        )
+        self.refresh_history_list()
 
     def on_chat_scroll_value_changed(self, value, session_id):
         state = self.get_session(session_id)
@@ -3789,10 +4779,24 @@ class MainWindow(QMainWindow):
 
         loaded_from_json = False
         conversation_meta = {}
+        conversation_record = None
         try:
             conversation_meta = self.chat_storage.get_conversation_meta(session_id)
         except Exception:
             conversation_meta = {}
+        try:
+            conversation_record = self.chat_storage.get_conversation_record(session_id)
+        except Exception:
+            conversation_record = None
+        state.session_status = (
+            (conversation_record or {}).get("status")
+            or conversation_meta.get("session_status")
+            or "draft"
+        )
+        state.run_phase = conversation_meta.get("run_phase") or "Idle"
+        state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
+        state.changed_files = []
+        state.step_records = []
         state.messages = self.chat_storage.get_messages(session_id)
         if not state.messages:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
@@ -3830,6 +4834,8 @@ class MainWindow(QMainWindow):
 
         self.update_session_tab_title(session_id)
         self.refresh_history_list()
+        self.refresh_change_list(session_id)
+        self.refresh_step_list(session_id)
         self.normalize_session_ui(self.get_current_session())
 
     def dragEnterEvent(self, event):
@@ -3870,9 +4876,10 @@ class MainWindow(QMainWindow):
         self.create_new_session()
         self.refresh_history_list()
 
-    def save_chat_history(self):
-        state = self.get_current_session()
-        if not state or not state.messages: return
+    def save_chat_history(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state or not state.messages:
+            return
         title = self._compute_session_title(state.messages)
         meta = {}
         try:
@@ -3881,8 +4888,17 @@ class MainWindow(QMainWindow):
             meta = {}
         if self.workspace_dir:
             meta["workspace_dir"] = self.workspace_dir
+        meta["run_phase"] = getattr(state, "run_phase", "Idle")
+        meta["session_status"] = getattr(state, "session_status", "draft")
+        meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
         try:
-            self.chat_storage.save_conversation(state.session_id, state.messages, title=title, meta=meta)
+            self.chat_storage.save_conversation(
+                state.session_id,
+                state.messages,
+                title=title,
+                status=getattr(state, "session_status", "draft"),
+                meta=meta,
+            )
         except Exception:
             pass
 
@@ -3909,6 +4925,7 @@ class MainWindow(QMainWindow):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
             self.right_sidebar.setVisible(True)
+            self.right_tabs.setCurrentIndex(0)
 
     def update_recent_workspaces(self, path):
         if path in self.recent_workspaces: self.recent_workspaces.remove(path)
@@ -4032,6 +5049,8 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         SettingsDialog(self.config_manager, self).exec()
+        self.refresh_context_badges()
+        self.update_ui_state_for_workspace()
 
     def open_skills_center(self):
         SkillsCenterDialog(self.skill_manager, self.config_manager, self).exec()
@@ -4112,6 +5131,10 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         self.add_system_toast("已强制停止当前任务", "warning", session_id=state.session_id)
+        self.set_session_phase("Interrupted", state.session_id)
+        self.set_session_status("interrupted", state.session_id, save=True)
+        self.refresh_step_list(state.session_id)
+        self.refresh_change_list(state.session_id)
         self.normalize_session_ui(state)
 
     def on_action_clicked(self):
@@ -4134,19 +5157,32 @@ class MainWindow(QMainWindow):
             return
         user_text = self.input_field.toPlainText().strip()
         if not user_text: return
+        now = time.time()
+        if user_text == self._last_submit_text and (now - self._last_submit_ts) < 0.8:
+            return
+        self._last_submit_text = user_text
+        self._last_submit_ts = now
 
         self.add_chat_bubble("User", user_text)
         self.input_field.clear()
         
         state = self.get_current_session()
         if not state: return
+        state.step_records = []
+        state.changed_files = []
+        state.has_file_changes = False
+        state.pending_tool_results = {}
+        self.refresh_change_list(state.session_id)
+        self.refresh_step_list(state.session_id)
+        self.set_session_phase("Preparing", state.session_id)
+        self.set_session_status("running", state.session_id)
+        state.messages.append({"role": "user", "content": user_text})
+        self.save_chat_history(session_id=state.session_id)
+        self.update_session_tab_title(state.session_id)
         self.try_connect_daemon(allow_start=True, retries=4)
         if self.daemon_available:
             self.process_daemon_logic(user_text)
         else:
-            state.messages.append({"role": "user", "content": user_text})
-            self.save_chat_history()
-            self.update_session_tab_title(state.session_id)
             self.process_agent_logic(user_text)
 
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
@@ -4168,7 +5204,7 @@ class MainWindow(QMainWindow):
             self.right_sidebar.setVisible(True)
             
         if switch_tab:
-            self.right_tabs.setCurrentIndex(1) # Switch to Tool Details tab
+            self.right_tabs.setCurrentIndex(2)
         
         # 3. Update Content
         self.td_info_label.setText(f"工具 ID: {tool_id}")
@@ -4231,6 +5267,28 @@ class MainWindow(QMainWindow):
         
         state = self.get_session(session_id)
         if not state: return
+        args_obj = data.get("args")
+        if isinstance(args_obj, str):
+            try:
+                args_obj = json.loads(args_obj)
+            except Exception:
+                args_obj = {"raw": data.get("args")}
+        title, summary = summarize_tool_action(data.get("name"), args_obj if isinstance(args_obj, dict) else {})
+        related_files = extract_related_paths(data.get("name"), args_obj if isinstance(args_obj, dict) else {})
+        record = {
+            "tool_id": data["id"],
+            "tool_name": data.get("name"),
+            "display_title": title,
+            "summary": summary,
+            "status": "running",
+            "duration": meta.get("duration"),
+            "related_files": related_files,
+        }
+        state.step_records = [r for r in state.step_records if r.get("tool_id") != data["id"]]
+        state.step_records.append(record)
+        if related_files:
+            for path in related_files:
+                state.changed_files.append({"path": path, "type": "related", "summary": summary})
         state.tool_cards[data['id']] = card
         has_pending_result = data['id'] in state.pending_tool_results
         pending_result = state.pending_tool_results.pop(data['id'], None)
@@ -4285,6 +5343,8 @@ class MainWindow(QMainWindow):
                 "meta": pending_result.get("meta")
             }, session_id=session_id)
 
+        self.set_session_phase("Executing", state.session_id)
+        self.refresh_step_list(state.session_id)
         self.process_ui_events(force=animate)
 
     def update_tool_card(self, data, session_id=None):
@@ -4304,12 +5364,34 @@ class MainWindow(QMainWindow):
         card.set_result(result)
         if meta:
             card.meta.update(meta)
+        for record in state.step_records:
+            if record.get("tool_id") != tool_id:
+                continue
+            record["status"] = "done" if (result or "").strip() else "running"
+            duration = (meta or {}).get("duration") if isinstance(meta, dict) else None
+            if isinstance(duration, (int, float)):
+                record["duration"] = duration
+            if (result or "").strip():
+                preview = str(result).strip().replace("\n", " ")
+                record["summary"] = preview[:120]
+            for path in record.get("related_files") or []:
+                state.changed_files.append(
+                    {
+                        "path": path,
+                        "type": "updated",
+                        "summary": record.get("display_title") or record.get("summary") or "Updated by task",
+                    }
+                )
+                state.has_file_changes = True
+            break
+        self.refresh_step_list(state.session_id)
+        self.refresh_change_list(state.session_id)
         
         # [Optimization] Real-time refresh if currently viewing this tool
         if (hasattr(self, 'current_selected_tool_id') and 
             self.current_selected_tool_id == tool_id and 
             self.right_sidebar.isVisible() and 
-            self.right_tabs.currentIndex() == 1):
+            self.right_tabs.currentIndex() == 2):
             
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
         self.process_ui_events(force=True)
@@ -4387,6 +5469,7 @@ class MainWindow(QMainWindow):
         if not state: return
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        self.set_session_phase("Preparing", state.session_id)
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
@@ -4419,6 +5502,7 @@ class MainWindow(QMainWindow):
         if not state: return
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        self.set_session_phase("Preparing", state.session_id)
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
@@ -4457,6 +5541,11 @@ class MainWindow(QMainWindow):
     def handle_agent_state(self, data, session_id=None):
         state = self.get_session(session_id)
         if not state: return
+        status = data.get("status")
+        if status in {"thinking", "pending"}:
+            self.set_session_phase("Analyzing", state.session_id)
+        elif status == "tool_use":
+            self.set_session_phase("Executing", state.session_id)
         
         # Update Tool Card
         tool_call_id = data.get("tool_call_id")
@@ -4467,7 +5556,6 @@ class MainWindow(QMainWindow):
         # Update Sub-Agent Monitor (PiP in ChatBubble)
         if session_id == self.current_session_id:
             agent_id = data.get("agent_id")
-            status = data.get("status")
             
             if agent_id and state.last_agent_bubble:
                 content = None
@@ -4504,6 +5592,8 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state: return
         delta = text or ""
+        if delta.strip():
+            self.set_session_phase("Analyzing", state.session_id)
         state.current_thinking_buffer += delta
         state.pending_thinking_delta += delta
         if state.thinking_flush_timer and not state.thinking_flush_timer.isActive():
@@ -4563,6 +5653,8 @@ class MainWindow(QMainWindow):
             bubble.set_main_content(f"⚠️ Error: {result['error']}")
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
+            self.set_session_phase("Error", state.session_id)
+            self.set_session_status("error", state.session_id, save=True)
             if is_current: self.normalize_session_ui(state)
             return
 
@@ -4654,7 +5746,17 @@ class MainWindow(QMainWindow):
                 }, session_id=state.session_id)
 
         if generated_messages:
-            state.messages.extend(generated_messages)
+            deduped_generated_messages = []
+            for msg in generated_messages:
+                if (
+                    msg.get("role") == "user"
+                    and state.messages
+                    and state.messages[-1].get("role") == "user"
+                    and (msg.get("content") or "") == (state.messages[-1].get("content") or "")
+                ):
+                    continue
+                deduped_generated_messages.append(msg)
+            state.messages.extend(deduped_generated_messages)
         else:
             state.messages.append({
                 "role": role, 
@@ -4666,11 +5768,13 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         self.update_session_tab_title(state.session_id)
+        self.set_session_phase("Wrapping up", state.session_id)
 
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
         if code_match:
             code_block = code_match.group(1).strip()
             self.append_log("System: 检测到代码块，准备执行...")
+            self.set_session_phase("Executing", state.session_id)
             god_mode = self.config_manager.get_god_mode()
             
             if god_mode:
@@ -4687,6 +5791,10 @@ class MainWindow(QMainWindow):
             state.code_worker.start()
             if is_current: self.normalize_session_ui(state)
         else:
+            self.set_session_phase("Completed", state.session_id)
+            self.set_session_status("completed", state.session_id, save=True)
+            self.refresh_step_list(state.session_id)
+            self.refresh_change_list(state.session_id)
             if is_current: self.normalize_session_ui(state)
 
     def handle_code_output(self, text, session_id=None):
@@ -4709,6 +5817,11 @@ class MainWindow(QMainWindow):
     def handle_code_finished(self, session_id=None):
         state = self.get_session(session_id)
         if state: state.code_worker = None
+        if state:
+            self.set_session_phase("Completed", state.session_id)
+            self.set_session_status("completed", state.session_id, save=True)
+            self.refresh_step_list(state.session_id)
+            self.refresh_change_list(state.session_id)
         if session_id == self.current_session_id:
             self.code_worker = None
             self.normalize_session_ui(state)
@@ -4757,5 +5870,5 @@ if __name__ == "__main__":
     app.setFont(font)
     window = MainWindow()
     app.main_window = window
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec())

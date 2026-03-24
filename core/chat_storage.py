@@ -183,6 +183,30 @@ class ChatStorage:
         except Exception:
             return {}
 
+    def get_conversation_record(self, conversation_id):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, title, updated_at, status, meta FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+        if not row:
+            return None
+        meta = {}
+        if row["meta"]:
+            try:
+                meta = json.loads(row["meta"])
+                if not isinstance(meta, dict):
+                    meta = {}
+            except Exception:
+                meta = {}
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "updated_at": row["updated_at"],
+            "status": row["status"] or "active",
+            "meta": meta,
+        }
+
     def replace_messages(self, conversation_id, messages):
         now = int(time.time())
         with self._connect() as conn:
@@ -224,7 +248,7 @@ class ChatStorage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT c.id, c.title, c.updated_at, im.provider AS im_provider
+                SELECT c.id, c.title, c.updated_at, c.status, c.meta, im.provider AS im_provider
                 FROM conversations c
                 LEFT JOIN (
                     SELECT conversation_id, MIN(provider) AS provider
@@ -234,15 +258,27 @@ class ChatStorage:
                 ORDER BY c.updated_at DESC
                 """
             ).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "updated_at": row["updated_at"],
-                "im_provider": row["im_provider"],
-            }
-            for row in rows
-        ]
+        conversations = []
+        for row in rows:
+            meta = {}
+            if row["meta"]:
+                try:
+                    parsed = json.loads(row["meta"])
+                    if isinstance(parsed, dict):
+                        meta = parsed
+                except Exception:
+                    meta = {}
+            conversations.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "updated_at": row["updated_at"],
+                    "status": row["status"] or "active",
+                    "meta": meta,
+                    "im_provider": row["im_provider"],
+                }
+            )
+        return conversations
 
     def get_messages(self, conversation_id):
         with self._connect() as conn:

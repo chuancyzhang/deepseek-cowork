@@ -1,171 +1,158 @@
 import qdarktheme
-from PySide6.QtGui import QColor
-from PySide6.QtCore import Qt
+
 
 class DesignTokens:
-    # Core Colors
-    primary = "#2563eb"  # Blue 600
-    primary_hover = "#1d4ed8" # Blue 700
-    
-    # Gradient for User Bubble
-    primary_gradient_start = "#4d6bfe" 
-    primary_gradient_end = "#3d5ce5"
-    
-    # Text
-    text_primary = "#111827" # Gray 900
-    text_secondary = "#6b7280" # Gray 500
-    text_tertiary = "#9ca3af" # Gray 400
-    
-    # Borders & Backgrounds
-    border = "#e5e7eb" # Gray 200
+    primary = "#2f6fed"
+    primary_hover = "#245fce"
+    primary_soft = "#eef4ff"
+    primary_gradient_start = "#5384f7"
+    primary_gradient_end = "#3f67df"
+
+    accent_ai = "#4f7cf3"
+    accent_user = "#4b5563"
+    accent_success = "#10b981"
+    accent_tool = "#d97706"
+
+    text_primary = "#0f172a"
+    text_secondary = "#475569"
+    text_tertiary = "#94a3b8"
+    text_inverse = "#ffffff"
+
+    bg_app = "#f4f7fb"
     bg_main = "#ffffff"
-    bg_secondary = "#f6f8fa" # GitHub Sidebar Gray
-    
-    # Shadows
-    shadow_sidebar = "2px 0 8px rgba(0,0,0,0.04)"
-    shadow_card = "0 1px 3px rgba(0,0,0,0.1)"
+    bg_secondary = "#f8fafc"
+    bg_tertiary = "#eef2f7"
+    bg_sidebar = "#f6f8fc"
+    bg_card = "#ffffff"
+    bg_card_subtle = "#fbfcfe"
 
-    # Semantic Colors (Success, Error, Warning, Info)
-    # Functional Accents
-    accent_ai = "#4d6bfe"      # AI 相关的强调色（思考气泡、AI头像）
-    accent_user = "#4b5563"    # 用户标识色
-    accent_success = "#10b981" # 成功/完成
-    accent_tool = "#f59e0b"    # 工具调用高亮
+    border = "#dbe3ee"
+    border_strong = "#c7d2e3"
 
-    # Success
+    radius_sm = 8
+    radius_md = 12
+    radius_lg = 18
+    radius_xl = 24
+
+    spacing_xs = 6
+    spacing_sm = 10
+    spacing_md = 16
+    spacing_lg = 24
+    spacing_xl = 32
+
+    shadow_sidebar = "0 10px 30px rgba(15, 23, 42, 0.04)"
+    shadow_card = "0 8px 24px rgba(15, 23, 42, 0.06)"
+    shadow_soft = "0 2px 8px rgba(15, 23, 42, 0.06)"
+
     success_bg = "#f0fdf4"
     success_text = "#166534"
     success_border = "#bbf7d0"
     success_icon = "#166534"
-    success_accent = "#10b981" # Emerald 500
-    
-    # Error
+    success_accent = "#10b981"
+
     error_bg = "#fef2f2"
     error_text = "#991b1b"
     error_border = "#fecaca"
     error_icon = "#991b1b"
-    
-    # Warning
+
     warning_bg = "#fffbeb"
     warning_text = "#92400e"
     warning_border = "#fde68a"
     warning_icon = "#92400e"
-    
-    # Info
+    warning_panel_bg = "#fff7ed"
+    warning_panel_border = "#fdba74"
+    warning_panel_text = "#9a3412"
+
     info_bg = "#eff6ff"
     info_text = "#1e40af"
     info_border = "#bfdbfe"
     info_icon = "#1e40af"
 
-def get_tech_stylesheet(theme="dark"):
+    muted_chip_bg = "#eef2f7"
+    muted_chip_text = "#475569"
+
+
+def get_tech_stylesheet(theme="light"):
     is_dark = theme == "dark"
-    
-    # Tech Palette
-    # Dark: GitHub Dark Dimmed / VS Code Dark inspired
-    # Light: Clean White / Google Material inspired
-    
+
     if is_dark:
-        c_bg_main = "#0d1117"      # Main window background
-        c_bg_sidebar = "#010409"   # Sidebar background
-        c_bg_card = "#161b22"      # Card/Container background
-        c_bg_input = "#0d1117"     # Input field background
-        
+        c_bg_main = "#0d1117"
+        c_bg_sidebar = "#010409"
+        c_bg_card = "#161b22"
+        c_bg_input = "#0d1117"
         c_text_primary = "#e6edf3"
         c_text_secondary = "#8b949e"
         c_text_tertiary = "#484f58"
-        
-        c_accent = "#2f81f7"       # Tech Blue
+        c_accent = "#2f81f7"
         c_accent_hover = "#58a6ff"
-        
-        c_border = "#30363d"       # Subtle border
-        c_border_active = "#8b949e"
-        
-        c_success = "#238636"
-        c_error = "#da3633"
-        
-        c_selection = "#1f6feb" # Selection background
+        c_border = "#30363d"
+        c_selection = "#1f6feb"
     else:
-        c_bg_main = "#ffffff"
-        c_bg_sidebar = "#f6f8fa"
-        c_bg_card = "#ffffff"
-        c_bg_input = "#f6f8fa"
-        
-        c_text_primary = "#24292f"
-        c_text_secondary = "#57606a"
-        c_text_tertiary = "#8c959f"
-        
-        c_accent = "#0969da"
-        c_accent_hover = "#2188ff"
-        
-        c_border = "#d0d7de"
-        c_border_active = "#0969da"
-        
-        c_success = "#1a7f37"
-        c_error = "#cf222e"
-        
-        c_selection = "#b3d7ff"
+        c_bg_main = DesignTokens.bg_main
+        c_bg_sidebar = DesignTokens.bg_sidebar
+        c_bg_card = DesignTokens.bg_card
+        c_bg_input = DesignTokens.bg_secondary
+        c_text_primary = DesignTokens.text_primary
+        c_text_secondary = DesignTokens.text_secondary
+        c_text_tertiary = DesignTokens.text_tertiary
+        c_accent = DesignTokens.primary
+        c_accent_hover = DesignTokens.primary_hover
+        c_border = DesignTokens.border
+        c_selection = "#cfe0ff"
 
     css = f"""
-    /* Global Font & Reset */
     QWidget {{
-        font-family: 'Segoe UI', 'Microsoft YaHei', 'Roboto', sans-serif;
+        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
         font-size: 14px;
         color: {c_text_primary};
         selection-background-color: {c_selection};
         selection-color: {c_text_primary};
     }}
-    
-    /* Main Layout Areas */
+
     QMainWindow, QWidget#MainContainer {{
         background-color: {c_bg_main};
     }}
-    
+
     QWidget#Sidebar, QWidget#RightSidebar {{
         background-color: {c_bg_sidebar};
-        border-right: 1px solid {c_border};
-    }}
-    QWidget#RightSidebar {{
-        border-right: none;
-        border-left: 1px solid {c_border};
     }}
 
-    /* Card Containers */
-    QFrame#ContentCard, QFrame#SkillCard {{
+    QFrame#ContentCard, QFrame#SkillCard, QFrame#PanelCard {{
         background-color: {c_bg_card};
         border: 1px solid {c_border};
-        border-radius: 8px;
+        border-radius: {DesignTokens.radius_lg}px;
     }}
-    
-    /* Buttons */
+
     QPushButton {{
         background-color: {c_bg_card};
         border: 1px solid {c_border};
-        border-radius: 6px;
-        padding: 6px 12px;
+        border-radius: {DesignTokens.radius_md}px;
+        padding: 8px 14px;
         color: {c_text_primary};
         text-align: center;
     }}
     QPushButton:hover {{
-        border-color: {c_text_secondary};
-        background-color: {c_bg_sidebar};
+        border-color: {DesignTokens.border_strong};
+        background-color: {DesignTokens.bg_secondary};
     }}
-    QPushButton:pressed {{
-        background-color: {c_border};
-    }}
-    
-    /* Primary Action Button (Solid Accent) */
+
     QPushButton#PrimaryBtn {{
         background-color: {c_accent};
         color: #ffffff;
         border: 1px solid {c_accent};
-        font-weight: bold;
+        font-weight: 600;
     }}
     QPushButton#PrimaryBtn:hover {{
         background-color: {c_accent_hover};
         border-color: {c_accent_hover};
     }}
-    
-    /* Ghost/Text Button */
+
+    QPushButton#SecondaryBtn {{
+        background-color: {DesignTokens.bg_main};
+        color: {c_text_primary};
+        border: 1px solid {c_border};
+    }}
+
     QPushButton#GhostBtn {{
         background-color: transparent;
         border: none;
@@ -173,79 +160,64 @@ def get_tech_stylesheet(theme="dark"):
     }}
     QPushButton#GhostBtn:hover {{
         color: {c_accent};
-        background-color: {c_bg_sidebar};
+        background-color: {DesignTokens.bg_secondary};
     }}
 
-    /* Input Fields */
-    QLineEdit, QTextEdit, QPlainTextEdit {{
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
         background-color: {c_bg_input};
         border: 1px solid {c_border};
-        border-radius: 6px;
-        padding: 8px;
+        border-radius: {DesignTokens.radius_md}px;
+        padding: 8px 10px;
         color: {c_text_primary};
     }}
-    QLineEdit:focus, QTextEdit:focus {{
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
         border: 1px solid {c_accent};
         background-color: {c_bg_card};
     }}
-    
-    /* Search Box / Chips */
+
     QTextEdit#MainInput {{
         font-size: 15px;
-        border: 1px solid {c_border};
-        border-radius: 20px; /* Pill shape */
-        padding: 10px 16px;
+        border-radius: {DesignTokens.radius_xl}px;
+        padding: 12px 16px;
         background-color: {c_bg_card};
     }}
-    QTextEdit#MainInput:focus {{
-        border: 2px solid {c_accent};
-    }}
 
-    /* Lists & Trees */
-    QTreeView, QListView {{
-        background-color: {c_bg_sidebar};
+    QTreeView, QListView, QListWidget {{
+        background-color: {DesignTokens.bg_main};
         border: none;
         outline: none;
     }}
-    QTreeView::item {{
-        padding: 4px;
-        border-radius: 4px;
-        margin: 1px 4px;
+    QTreeView::item, QListWidget::item {{
+        padding: 5px;
+        border-radius: {DesignTokens.radius_sm}px;
+        margin: 2px 4px;
     }}
-    QTreeView::item:hover {{
-        background-color: {c_bg_card};
-        border: 1px solid {c_border};
-    }}
-    QTreeView::item:selected {{
-        background-color: {c_accent}22; /* Transparent accent */
+    QTreeView::item:selected, QListWidget::item:selected {{
+        background-color: {DesignTokens.primary_soft};
         color: {c_text_primary};
         border: 1px solid {c_accent};
     }}
-    
-    /* Tab Widget */
+
     QTabWidget::pane {{
         border: none;
-        background: {c_bg_main};
+        background: transparent;
     }}
     QTabBar::tab {{
         background: transparent;
-        padding: 8px 16px;
-        margin-bottom: 2px;
+        padding: 10px 16px;
+        margin-right: 4px;
         color: {c_text_secondary};
         font-weight: 500;
         border-bottom: 2px solid transparent;
     }}
     QTabBar::tab:hover {{
         color: {c_text_primary};
-        background-color: {c_bg_sidebar};
-        border-radius: 4px;
     }}
     QTabBar::tab:selected {{
         color: {c_accent};
         border-bottom: 2px solid {c_accent};
     }}
 
-    /* Scrollbars */
     QScrollBar:vertical {{
         border: none;
         background: transparent;
@@ -253,8 +225,8 @@ def get_tech_stylesheet(theme="dark"):
         margin: 0;
     }}
     QScrollBar::handle:vertical {{
-        background: {c_text_tertiary}44;
-        min-height: 30px;
+        background: {c_text_tertiary}55;
+        min-height: 28px;
         border-radius: 5px;
         margin: 2px;
     }}
@@ -262,61 +234,62 @@ def get_tech_stylesheet(theme="dark"):
         background: {c_text_tertiary}88;
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-        height: 0px;
+        height: 0;
     }}
-    
-    /* Specific Labels */
+    QScrollBar:horizontal {{
+        border: none;
+        background: transparent;
+        height: 10px;
+        margin: 0;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: {c_text_tertiary}55;
+        min-width: 28px;
+        border-radius: 5px;
+        margin: 2px;
+    }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        width: 0;
+    }}
+
     QLabel[roleTitle="true"] {{
-        font-size: 20px;
-        font-weight: 600;
+        font-size: 18px;
+        font-weight: 700;
         color: {c_text_primary};
     }}
     QLabel[roleSubtitle="true"] {{
         font-size: 13px;
         color: {c_text_secondary};
     }}
-    
-    /* Menus */
+
     QMenu {{
         background-color: {c_bg_card};
         border: 1px solid {c_border};
-        padding: 4px;
-        border-radius: 6px;
+        padding: 6px;
+        border-radius: {DesignTokens.radius_md}px;
     }}
     QMenu::item {{
-        padding: 6px 24px 6px 12px;
-        border-radius: 4px;
+        padding: 7px 24px 7px 12px;
+        border-radius: {DesignTokens.radius_sm}px;
     }}
     QMenu::item:selected {{
         background-color: {c_accent};
         color: #ffffff;
     }}
-    QMenu::separator {{
-        height: 1px;
-        background: {c_border};
-        margin: 4px 0;
-    }}
-    
-    /* Tooltips */
+
     QToolTip {{
         background-color: {c_bg_card};
         color: {c_text_primary};
         border: 1px solid {c_border};
-        padding: 4px;
-        border-radius: 4px;
+        padding: 4px 8px;
+        border-radius: {DesignTokens.radius_sm}px;
     }}
     """
     return css
 
+
 def apply_theme(app, theme="auto"):
-    # Determine mode for our palette
-    mode = "light" # User requested to completely disable dark mode, independent of system settings
-    
-    # 1. Load qdarktheme base
+    mode = "light"
     base_sheet = qdarktheme.load_stylesheet(mode)
-    
-    # 2. Append our tech overrides
     tech_sheet = get_tech_stylesheet(mode)
-    
-    # Combine
     app.setStyleSheet(base_sheet + "\n" + tech_sheet)

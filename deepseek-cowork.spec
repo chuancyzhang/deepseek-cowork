@@ -5,7 +5,12 @@ import sys
 
 block_cipher = None
 
+_spec_arg = next((arg for arg in sys.argv[1:] if str(arg).lower().endswith(".spec")), None)
+SPEC_DIR = os.path.dirname(os.path.abspath(_spec_arg)) if _spec_arg else os.getcwd()
+ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
+
 python_prefix = sys.exec_prefix
+PYSIDE6_ROOT = os.path.join(python_prefix, "Lib", "site-packages", "PySide6")
 
 
 def _add_data_file(store, src, dest):
@@ -36,6 +41,37 @@ def _collect_tree(src_root, dest_root, exclude_dirs=None, exclude_globs=None):
             src = os.path.join(current_root, name)
             dest = os.path.join(dest_root, rel_path).replace("\\", "/")
             collected.append((dest, src, "DATA"))
+    return collected
+
+
+def _add_analysis_data_file(store, src, dest):
+    if not src or not os.path.isfile(src):
+        return
+    normalized = (os.path.abspath(src), dest.replace("\\", "/"))
+    if normalized not in store:
+        store.append(normalized)
+
+
+def _collect_tree_for_analysis(src_root, dest_root, exclude_dirs=None, exclude_globs=None):
+    exclude_dirs = set(exclude_dirs or [])
+    exclude_globs = exclude_globs or []
+    collected = []
+    if not os.path.isdir(src_root):
+        return collected
+    for current_root, dirs, files in os.walk(src_root):
+        dirs[:] = [
+            d for d in dirs
+            if d not in exclude_dirs and d != "__pycache__"
+        ]
+        rel_root = os.path.relpath(current_root, src_root)
+        rel_root = "" if rel_root == "." else rel_root
+        for name in files:
+            rel_path = os.path.normpath(os.path.join(rel_root, name))
+            if any(fnmatch.fnmatch(rel_path, pattern) for pattern in exclude_globs):
+                continue
+            src = os.path.join(current_root, name)
+            dest_dir = os.path.join(dest_root, rel_root).replace("\\", "/")
+            collected.append((src, dest_dir))
     return collected
 
 
@@ -95,6 +131,45 @@ def _collect_minimal_python_env(prefix):
 
 python_env = _collect_minimal_python_env(python_prefix)
 
+
+def _collect_minimal_pyside6():
+    datas = []
+    if not os.path.isdir(PYSIDE6_ROOT):
+        return datas
+
+    plugin_dirs = [
+        "platforms",
+        "styles",
+        "imageformats",
+        "iconengines",
+        "platforminputcontexts",
+    ]
+    for plugin_dir in plugin_dirs:
+        datas.extend(
+            _collect_tree_for_analysis(
+                os.path.join(PYSIDE6_ROOT, "plugins", plugin_dir),
+                f"PySide6/plugins/{plugin_dir}",
+            )
+        )
+
+    translation_files = [
+        "qtbase_zh_CN.qm",
+        "qtbase_en.qm",
+        "qt_zh_CN.qm",
+        "qt_en.qm",
+    ]
+    for name in translation_files:
+        _add_analysis_data_file(
+            datas,
+            os.path.join(PYSIDE6_ROOT, "translations", name),
+            "PySide6/translations",
+        )
+
+    return datas
+
+
+qt_minimal_datas = _collect_minimal_pyside6()
+
 pyside6_hidden = [
     "PySide6.QtCore",
     "PySide6.QtGui",
@@ -105,7 +180,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('skills', 'skills'), ('config.json', '.'), ('images', 'images')],
+    datas=[('skills', 'skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas,
     hiddenimports=pyside6_hidden + [
         'docx',
         'pptx',
@@ -213,7 +288,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='images/logo.ico',
+    icon=ICON_PATH,
 )
 coll = COLLECT(
     exe,

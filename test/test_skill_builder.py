@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import shutil
@@ -59,6 +60,32 @@ class TestSkillBuilder(unittest.TestCase):
                 description="x",
             )
             self.assertIn("not found", update_result.lower())
+
+    def test_convert_openclaw_skill_adapts_to_cowork_format(self):
+        source_dir = os.path.join(self.temp_dir, "openclaw-sample")
+        os.makedirs(os.path.join(source_dir, "prompts"), exist_ok=True)
+        with open(os.path.join(source_dir, "openclaw.json"), "w", encoding="utf-8") as f:
+            f.write("{\"name\": \"openclaw-sample\"}")
+        with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Original OpenClaw Skill\n\nExternal instructions.\n")
+
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.convert_openclaw_skill(source_dir, skill_name="openclaw-sample")
+            self.assertIn("Success", result)
+
+        target_dir = os.path.join(self.ai_dir, "openclaw-sample")
+        self.assertTrue(os.path.exists(os.path.join(target_dir, "skill.json")))
+        self.assertTrue(os.path.exists(os.path.join(target_dir, "SKILL.md")))
+        self.assertTrue(os.path.exists(os.path.join(target_dir, "references", "source-SKILL.md")))
+
+        with open(os.path.join(target_dir, "skill.json"), "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        self.assertEqual(payload["creation_hints"]["source_format"], "openclaw")
+        self.assertEqual(payload["tool_refs"], [])
+
+        with open(os.path.join(target_dir, "SKILL.md"), "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Cowork skill system", content)
 
 
 if __name__ == "__main__":

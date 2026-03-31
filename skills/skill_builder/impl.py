@@ -1,9 +1,9 @@
 import json
 import os
 import re
-import shutil
 
 from core.env_utils import get_app_data_dir
+from core.skill_adapter import adapt_skill_directory, detect_external_skill_format
 
 
 def _is_valid_skill_name(skill_name):
@@ -356,6 +356,14 @@ def update_skill(
 
 
 def convert_claude_skill(source_path, skill_name=None):
+    return convert_external_skill(source_path, skill_name=skill_name, source_format="claude")
+
+
+def convert_openclaw_skill(source_path, skill_name=None):
+    return convert_external_skill(source_path, skill_name=skill_name, source_format="openclaw")
+
+
+def convert_external_skill(source_path, skill_name=None, source_format="auto"):
     try:
         if not os.path.exists(source_path):
             return f"Error: Source path '{source_path}' does not exist."
@@ -369,25 +377,8 @@ def convert_claude_skill(source_path, skill_name=None):
             return error
         if os.path.exists(target_dir):
             return f"Error: Target skill directory '{target_dir}' already exists. Please delete it or choose a different name."
-        shutil.copytree(source_path, target_dir)
-        scripts_dir = os.path.join(target_dir, "scripts")
-        generated_tools = []
-        if os.path.exists(scripts_dir):
-            for file in os.listdir(scripts_dir):
-                if file.startswith(".") or file.startswith("__"):
-                    continue
-                file_path = os.path.join(scripts_dir, file)
-                if os.path.isfile(file_path):
-                    generated_tools.append(f"run_{os.path.splitext(file)[0].replace('-', '_')}")
-        skill_json = _default_skill_json(
-            skill_name,
-            "Imported Claude-style skill.",
-            "knowledge",
-            tool_refs=generated_tools,
-            workflow=["Review the imported scripts before running any generated helper tools."],
-        )
-        with open(os.path.join(target_dir, "skill.json"), "w", encoding="utf-8") as f:
-            json.dump(skill_json, f, ensure_ascii=False, indent=2)
-        return f"Success: Converted '{source_path}' to '{target_dir}'. Generated metadata for {len(generated_tools)} referenced tools."
+        result = adapt_skill_directory(source_path, target_dir, skill_name=skill_name, source_format=source_format)
+        detected = result.get("source_format") or detect_external_skill_format(source_path)
+        return f"Success: Adapted '{source_path}' to '{target_dir}' as Cowork skill format from source '{detected}'."
     except Exception as e:
         return f"Error converting skill: {str(e)}"

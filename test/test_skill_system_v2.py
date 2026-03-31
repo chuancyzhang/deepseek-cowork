@@ -164,6 +164,82 @@ class TestSkillSystemV2(unittest.TestCase):
         tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
         self.assertIn("record_general_experience", tool_names)
 
+    def test_import_skill_without_impl_accepts_legacy_string_metadata(self):
+        source_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            source_dir = os.path.join(source_root, "portable-guide")
+            os.makedirs(source_dir, exist_ok=True)
+            with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: portable-guide\n"
+                    "description: Portable shell notes\n"
+                    "kind: knowledge\n"
+                    "allowed-tools: bash\n"
+                    "---\n"
+                    "# Skill Purpose\nUse this skill for shell portability notes.\n"
+                )
+            with open(os.path.join(source_dir, "skill.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 2,
+                        "name": "portable-guide",
+                        "kind": "knowledge",
+                        "description": "Portable shell notes",
+                        "tool_refs": "bash",
+                        "tags": "shell, portability",
+                        "triggers": "shell compatibility",
+                        "references": "notes.md",
+                        "experience_policy": "experience/entries.jsonl",
+                        "disclosure_level_defaults": "brief",
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            with open(os.path.join(source_dir, "notes.md"), "w", encoding="utf-8") as f:
+                f.write("Use POSIX-safe syntax when scripts run across environments.\n")
+
+            sm = self._build_manager()
+            success, message = sm.import_skill(source_dir)
+            self.assertTrue(success, message)
+
+            sm.load_skills()
+            self.assertIn("portable-guide", sm.skill_records)
+            record = sm.skill_records["portable-guide"]
+            self.assertEqual(record["tool_refs"], ["bash"])
+            self.assertEqual(record["spec"]["tags"], ["shell", "portability"])
+            self.assertEqual(record["spec"]["triggers"], ["shell compatibility"])
+            self.assertEqual(record["spec"]["references"], ["notes.md"])
+            self.assertEqual(record["spec"]["experience_policy"]["entry_storage"], "experience/entries.jsonl")
+            self.assertEqual(record["spec"]["disclosure_level_defaults"]["default_prompt_level"], "brief")
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+
+    def test_import_skill_adapts_openclaw_folder_into_experience_package(self):
+        source_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            source_dir = os.path.join(source_root, "openclaw-guide")
+            os.makedirs(os.path.join(source_dir, "prompts"), exist_ok=True)
+            with open(os.path.join(source_dir, "openclaw.json"), "w", encoding="utf-8") as f:
+                json.dump({"name": "openclaw-guide"}, f)
+            with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("# External Skill\n\nOriginal OpenClaw instructions.\n")
+
+            sm = self._build_manager()
+            success, message = sm.import_skill(source_dir)
+            self.assertTrue(success, message)
+
+            sm.load_skills()
+            self.assertIn("openclaw-guide", sm.skill_records)
+            record = sm.skill_records["openclaw-guide"]
+            self.assertEqual(record["spec"]["creation_hints"]["source_format"], "openclaw")
+            self.assertEqual(record["tool_refs"], [])
+            self.assertIn("openclaw", record["spec"]["tags"])
+            self.assertTrue(os.path.exists(os.path.join(self.ai_skills_dir, "openclaw-guide", "references", "source-SKILL.md")))
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

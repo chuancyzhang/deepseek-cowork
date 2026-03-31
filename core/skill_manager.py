@@ -9,6 +9,7 @@ import time
 import uuid
 
 from .env_utils import ensure_package_installed, get_app_data_dir
+from .skill_adapter import adapt_skill_directory
 
 
 def _tokenize(text):
@@ -195,37 +196,109 @@ class SkillManager:
             print(f"[SkillManager] Failed to parse skill.json at {skill_json_path}: {e}")
             return {}
 
+    def _coerce_string_list(self, value):
+        if isinstance(value, list):
+            return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return [item.strip() for item in parsed if isinstance(item, str) and item.strip()]
+            except Exception:
+                pass
+            return [item.strip().strip("\"'") for item in re.split(r"[\r\n,]+", text) if item.strip().strip("\"'")]
+        return []
+
+    def _coerce_bool(self, value, default=False):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        return default
+
     def _normalize_skill_kind(self, meta, spec):
-        kind = (spec.get("kind") or meta.get("kind") or "").strip().lower()
+        kind = spec.get("kind") or meta.get("kind") or ""
+        if not isinstance(kind, str):
+            kind = ""
+        kind = kind.strip().lower()
         if kind in {"knowledge", "system"}:
             return kind
         return "knowledge"
 
     def _infer_capability_group(self, skill_name, meta, spec):
-        return (
+        group = (
             spec.get("capability_group")
             or meta.get("capability_group")
             or self.GROUP_DEFAULTS.get(skill_name, "knowledge")
         )
+        if isinstance(group, str) and group.strip():
+            return group.strip()
+        return self.GROUP_DEFAULTS.get(skill_name, "knowledge")
 
     def _normalize_disclosure_defaults(self, spec):
-        defaults = spec.get("disclosure_level_defaults")
-        if isinstance(defaults, dict):
-            return defaults
+        defaults = spec.get("disclosure_level_defaults") if isinstance(spec, dict) else spec
+        normalized = defaults if isinstance(defaults, dict) else {}
+        prompt_level = normalized.get("default_prompt_level")
+        if not isinstance(prompt_level, str) or not prompt_level.strip():
+            if isinstance(defaults, str) and defaults.strip():
+                prompt_level = defaults.strip()
+            else:
+                prompt_level = "brief"
         return {
-            "default_prompt_level": "brief",
-            "include_references": False,
-            "include_experience_entries": False,
+            "default_prompt_level": prompt_level,
+            "include_references": self._coerce_bool(normalized.get("include_references"), default=False),
+            "include_experience_entries": self._coerce_bool(normalized.get("include_experience_entries"), default=False),
         }
 
     def _normalize_experience_policy(self, spec):
-        policy = spec.get("experience_policy")
-        if isinstance(policy, dict):
-            return policy
+        policy = spec.get("experience_policy") if isinstance(spec, dict) else spec
+        normalized = policy if isinstance(policy, dict) else {}
+        entry_storage = normalized.get("entry_storage")
+        summary_sync = normalized.get("summary_sync")
+        if isinstance(policy, str) and policy.strip():
+            if not entry_storage and ("/" in policy or "\\" in policy or policy.endswith(".jsonl")):
+                entry_storage = policy.strip()
+            elif not summary_sync:
+                summary_sync = policy.strip()
+        if not isinstance(entry_storage, str) or not entry_storage.strip():
+            entry_storage = "experience/entries.jsonl"
+        if not isinstance(summary_sync, str) or not summary_sync.strip():
+            summary_sync = "frontmatter_experience"
         return {
-            "entry_storage": "experience/entries.jsonl",
-            "summary_sync": "frontmatter_experience",
+            "entry_storage": entry_storage,
+            "summary_sync": summary_sync,
         }
+
+    def _normalize_skill_spec(self, skill_name, meta, spec, tool_refs, kind):
+        spec = spec if isinstance(spec, dict) else {}
+        spec["version"] = spec.get("version") if isinstance(spec.get("version"), int) else 2
+        spec["name"] = spec.get("name") if isinstance(spec.get("name"), str) and spec.get("name").strip() else (meta.get("name") or skill_name)
+        spec["kind"] = kind
+        description = spec.get("description") if isinstance(spec.get("description"), str) else ""
+        if not description:
+            description = meta.get("description") or ""
+        spec["description"] = description
+        spec["capability_group"] = self._infer_capability_group(skill_name, meta, spec)
+        spec["tool_refs"] = self._coerce_string_list(spec.get("tool_refs")) or list(tool_refs)
+        spec["tags"] = self._coerce_string_list(spec.get("tags"))
+        spec["triggers"] = self._coerce_string_list(spec.get("triggers"))
+        spec["anti_triggers"] = self._coerce_string_list(spec.get("anti_triggers"))
+        spec["references"] = self._coerce_string_list(spec.get("references"))
+        workflow = spec.get("workflow")
+        if workflow is None:
+            spec["workflow"] = []
+        elif not isinstance(workflow, (str, list, dict)):
+            spec["workflow"] = [str(workflow)]
+        spec["experience_policy"] = self._normalize_experience_policy(spec)
+        spec["disclosure_level_defaults"] = self._normalize_disclosure_defaults(spec)
+        return spec
 
     def _safe_read_reference(self, base_path, ref):
         if not isinstance(ref, str):
@@ -368,11 +441,13 @@ class SkillManager:
         raw = spec.get("tool_refs")
         if isinstance(raw, list):
             refs.extend([item for item in raw if isinstance(item, str) and item])
+        elif isinstance(raw, str) and raw:
+            refs.extend(self._coerce_string_list(raw))
         allowed = meta.get("allowed-tools")
         if isinstance(allowed, list):
             refs.extend([item for item in allowed if isinstance(item, str) and item])
         elif isinstance(allowed, str) and allowed:
-            refs.append(allowed)
+            refs.extend(self._coerce_string_list(allowed) or [allowed])
         deduped = []
         seen = set()
         for item in refs:
@@ -511,14 +586,8 @@ class SkillManager:
         kind = self._normalize_skill_kind(meta, spec)
         if not meta and not spec:
             return self._build_minimal_skill_record(skill_name, skill_path, tool_refs)
-        spec.setdefault("version", 2)
-        spec.setdefault("name", meta.get("name") or skill_name)
-        spec.setdefault("kind", kind)
-        spec.setdefault("description", spec.get("description") or meta.get("description") or "")
-        spec.setdefault("capability_group", self._infer_capability_group(skill_name, meta, spec))
-        spec.setdefault("tool_refs", tool_refs)
-        spec.setdefault("experience_policy", self._normalize_experience_policy(spec))
-        spec.setdefault("disclosure_level_defaults", self._normalize_disclosure_defaults(spec))
+        spec = self._normalize_skill_spec(skill_name, meta, spec, tool_refs, kind)
+        tool_refs = list(spec.get("tool_refs") or [])
         experience_entries = self._load_experience_entries(skill_path, spec=spec)
         record = {
             "name": skill_name,
@@ -709,19 +778,17 @@ class SkillManager:
                 seen.add(skill_name)
         return all_skills
 
-    def import_skill(self, source_path):
+    def import_skill(self, source_path, source_format="auto"):
         if not os.path.isdir(source_path):
             return False, "Source is not a directory"
         skill_name = os.path.basename(source_path)
-        if not os.path.exists(os.path.join(source_path, "SKILL.md")):
-            return False, "SKILL.md not found in source directory"
         target_dir = self._default_writable_skill_root()
         target_path = os.path.join(target_dir, skill_name)
         if os.path.exists(target_path):
             return False, f"Skill '{skill_name}' already exists"
         try:
-            shutil.copytree(source_path, target_path)
-            return True, f"Skill '{skill_name}' imported successfully"
+            result = adapt_skill_directory(source_path, target_path, skill_name=skill_name, source_format=source_format)
+            return True, result.get("message") or f"Skill '{skill_name}' imported successfully"
         except Exception as e:
             return False, f"Import failed: {e}"
 
@@ -886,7 +953,11 @@ class SkillManager:
                 pending_records.append((skill_name, skill_path))
 
         for skill_name, skill_path in pending_records:
-            record = self._load_skill_record(skill_name, skill_path)
+            try:
+                record = self._load_skill_record(skill_name, skill_path)
+            except Exception as e:
+                print(f"[SkillManager] Failed to load skill '{skill_name}' from {skill_path}: {e}")
+                continue
             if not record.get("tool_refs") and self.skill_to_tools.get(skill_name):
                 record["tool_refs"] = list(self.skill_to_tools.get(skill_name) or [])
                 record["spec"]["tool_refs"] = list(record["tool_refs"])

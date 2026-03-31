@@ -4,7 +4,7 @@ description: Build-focused skill for creating and updating knowledge-first skill
 type: system
 created_by: system
 kind: system
-allowed-tools: [create_new_skill, update_skill, convert_claude_skill]
+allowed-tools: [create_new_skill, update_skill, convert_claude_skill, convert_openclaw_skill, convert_external_skill]
 ---
 
 # Skill Builder
@@ -15,13 +15,13 @@ This skill is dedicated to skill engineering tasks only.
 
 - Create a new skill from scratch.
 - Update an existing skill's code or documentation.
-- Convert a Claude skill folder into a Cowork skill.
+- Convert a Claude or OpenClaw skill folder into a Cowork skill.
 
 ## Responsibilities
 
 - **Create Skills**: generate `SKILL.md` and `skill.json`, plus `impl.py` only when the user explicitly wants new lightweight tools.
 - **Update Skills**: patch existing AI-generated or built-in skills.
-- **Convert Skills**: convert script-based Claude skills into callable Cowork tools.
+- **Convert Skills**: adapt external skills into Cowork's tool-plus-experience model.
 
 ## Tools
 
@@ -35,4 +35,10 @@ Updates an existing skill with optional scope resolution:
 - `target_scope="auto"`: prefer AI-generated one, fallback to built-in
 
 ### convert_claude_skill
-Converts a Claude skill folder (with `scripts/` and `SKILL.md`) into a Cowork skill in `ai_skills`.
+Converts a Claude skill folder into a Cowork skill in `ai_skills`.
+
+### convert_openclaw_skill
+Converts an OpenClaw skill folder into a Cowork skill in `ai_skills`.
+
+### convert_external_skill
+Auto-detects an external skill format and adapts it into the Cowork skill system.

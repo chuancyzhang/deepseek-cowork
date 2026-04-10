@@ -3,6 +3,7 @@ import os
 import shutil
 
 from core.env_utils import get_app_data_dir
+from core.sandbox_runtime import install_skill_dependencies
 from core.llm.factory import LLMFactory
 
 
@@ -76,6 +77,8 @@ def _default_preview(source_path, skill_name, summary):
         "anti_triggers": [],
         "references": summary["reference_candidates"][:5],
         "tool_refs": tool_refs,
+        "python_dependencies": [],
+        "node_dependencies": [],
         "experience_policy": {
             "entry_storage": "experience/entries.jsonl",
             "summary_sync": "frontmatter_experience",
@@ -110,7 +113,7 @@ def analyze_skill_source_folder(workspace_dir, path, skill_name=None, _context=N
     fallback = _default_preview(abs_path, inferred_name, summary)
     prompt = (
         "You are importing a source folder into a reusable AI skill.\n"
-        "Return JSON with keys: skill_name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, experience_policy, disclosure_level_defaults, workflow, creation_hints, risks.\n"
+        "Return JSON with keys: skill_name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, python_dependencies, node_dependencies, experience_policy, disclosure_level_defaults, workflow, creation_hints, risks.\n"
         "Prefer kind='knowledge' unless the folder clearly defines system-level importing behavior.\n"
         "Treat tools as lightweight atomic actions, not high-level workflows.\n"
         f"Requested skill name: {inferred_name}\n"
@@ -126,6 +129,8 @@ def analyze_skill_source_folder(workspace_dir, path, skill_name=None, _context=N
     preview.setdefault("description", fallback["description"])
     preview.setdefault("references", fallback["references"])
     preview.setdefault("tool_refs", fallback["tool_refs"])
+    preview.setdefault("python_dependencies", fallback["python_dependencies"])
+    preview.setdefault("node_dependencies", fallback["node_dependencies"])
     preview.setdefault("experience_policy", fallback["experience_policy"])
     preview.setdefault("disclosure_level_defaults", fallback["disclosure_level_defaults"])
     preview.setdefault("workflow", fallback["workflow"])
@@ -168,7 +173,7 @@ def generate_skill_from_folder(workspace_dir, path, skill_name, approved_spec, _
     )
     prompt = (
         "Return JSON only with keys 'skill_json' and 'skill_md'. "
-        "skill_json must be a valid Cowork skill metadata object with: version, name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, experience_policy, disclosure_level_defaults, workflow, creation_hints. "
+        "skill_json must be a valid Cowork skill metadata object with: version, name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, python_dependencies, node_dependencies, experience_policy, disclosure_level_defaults, workflow, creation_hints. "
         "skill_md must be markdown text.\n"
         f"Approved spec:\n{json.dumps(spec, ensure_ascii=False, indent=2)}\n"
     )
@@ -184,6 +189,8 @@ def generate_skill_from_folder(workspace_dir, path, skill_name, approved_spec, _
             "anti_triggers": spec.get("anti_triggers", []),
             "references": spec.get("references", []),
             "tool_refs": spec.get("tool_refs", []),
+            "python_dependencies": spec.get("python_dependencies", []),
+            "node_dependencies": spec.get("node_dependencies", []),
             "experience_policy": spec.get(
                 "experience_policy",
                 {"entry_storage": "experience/entries.jsonl", "summary_sync": "frontmatter_experience"},
@@ -208,4 +215,11 @@ def generate_skill_from_folder(workspace_dir, path, skill_name, approved_spec, _
     with open(os.path.join(target_dir, "SKILL.md"), "w", encoding="utf-8") as f:
         f.write(skill_md)
     os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
+    dependency_status = install_skill_dependencies(
+        skill_name,
+        skill_json.get("python_dependencies") or [],
+        skill_json.get("node_dependencies") or [],
+    )
+    if not dependency_status.get("ok"):
+        return f"Success: Generated skill '{skill_name}' at '{target_dir}', but dependency setup is incomplete: {dependency_status.get('message')}"
     return f"Success: Generated skill '{skill_name}' at '{target_dir}'."

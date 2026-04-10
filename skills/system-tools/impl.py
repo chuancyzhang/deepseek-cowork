@@ -16,6 +16,7 @@ from collections import deque
 import urllib.request
 import urllib.parse
 from core.env_utils import ensure_package_installed, get_app_data_dir
+from core.sandbox_runtime import run_in_sandbox
 from PySide6.QtCore import QObject, Qt
 
 _ACTION_WINDOW_STATE = {}
@@ -151,16 +152,13 @@ def bash(workspace_dir, command, _context=None):
         
         cwd = workspace_dir if workspace_dir else os.getcwd()
         
-        # Use shell=True to allow shell syntax (pipes, redirects, etc.)
-        # On Windows, this uses cmd.exe or powershell depending on the environment/comspec
         abort_state = _init_abort_state(_context)
-        process = subprocess.Popen(
+        process = run_in_sandbox(
             command,
-            shell=True,
             cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False
+            skill_id="system-tools",
+            shell_kind="bash",
+            text=False,
         )
         while True:
             if abort_state["aborted"]:
@@ -541,7 +539,7 @@ def _ensure_cdp_ready(start_url, _context=None):
 
 class _CDPSession:
     def __init__(self, ws_url):
-        ensure_package_installed("websocket-client", "websocket")
+        ensure_package_installed("websocket-client", "websocket", skill_id="system-tools")
         from websocket import create_connection
         self._ws = create_connection(ws_url, timeout=10)
         self._next_id = 1
@@ -846,7 +844,7 @@ def _capture_browser_window(output_path=None, title_hint="", timeout_seconds=8):
         os.makedirs(out_dir, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(out_dir, f"browser_{ts}.png")
-    ensure_package_installed("pywinauto")
+    ensure_package_installed("pywinauto", skill_id="system-tools")
     from pywinauto import Desktop
     hint = (title_hint or "").strip().lower()
     hint_parts = [p for p in re.split(r"[\.\-_]+", hint) if p]
@@ -1279,7 +1277,7 @@ def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=
     return _unwrap_single_result(payload)
 
 def _ensure_pywinauto():
-    ensure_package_installed("pywinauto")
+    ensure_package_installed("pywinauto", skill_id="system-tools")
     from pywinauto import Application
     from pywinauto import mouse
     return Application, mouse

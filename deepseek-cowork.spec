@@ -36,7 +36,11 @@ def _collect_tree(src_root, dest_root, exclude_dirs=None, exclude_globs=None):
         rel_root = "" if rel_root == "." else rel_root
         for name in files:
             rel_path = os.path.normpath(os.path.join(rel_root, name))
-            if any(fnmatch.fnmatch(rel_path, pattern) for pattern in exclude_globs):
+            rel_path_unix = rel_path.replace("\\", "/")
+            if any(
+                fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(rel_path_unix, pattern)
+                for pattern in exclude_globs
+            ):
                 continue
             src = os.path.join(current_root, name)
             dest = os.path.join(dest_root, rel_path).replace("\\", "/")
@@ -130,6 +134,102 @@ def _collect_minimal_python_env(prefix):
 
 
 python_env = _collect_minimal_python_env(python_prefix)
+
+
+def _env_flag(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+ALLOW_MISSING_RUNTIMES = _env_flag("COWORK_ALLOW_MISSING_RUNTIMES", False)
+RUNTIME_SLIM = _env_flag("COWORK_RUNTIME_SLIM", True)
+
+def _collect_required_runtime_env(env_var, local_folder, dest_root, runtime_name, required_files=None, exclude_globs=None):
+    src_root = os.environ.get(env_var) or os.path.join(SPEC_DIR, local_folder)
+    if not os.path.isdir(src_root):
+        if ALLOW_MISSING_RUNTIMES:
+            print(
+                f"[WARN] Missing {runtime_name} runtime directory: {src_root}. "
+                f"Continuing because COWORK_ALLOW_MISSING_RUNTIMES=1."
+            )
+            return []
+        raise FileNotFoundError(
+            f"Missing required runtime '{runtime_name}' at: {src_root}. "
+            f"Set {env_var} to a valid directory, or place runtime under '{local_folder}'. "
+            f"Temporary bypass: set COWORK_ALLOW_MISSING_RUNTIMES=1 for this build."
+        )
+    required_files = required_files or []
+    missing_files = [rel for rel in required_files if not os.path.isfile(os.path.join(src_root, rel))]
+    if missing_files:
+        if ALLOW_MISSING_RUNTIMES:
+            print(
+                f"[WARN] Runtime '{runtime_name}' is incomplete at {src_root}, "
+                f"missing files: {missing_files}. Continuing because COWORK_ALLOW_MISSING_RUNTIMES=1."
+            )
+            return []
+        raise FileNotFoundError(
+            f"Runtime '{runtime_name}' is incomplete at: {src_root}. "
+            f"Missing required files: {missing_files}. "
+            f"Temporary bypass: set COWORK_ALLOW_MISSING_RUNTIMES=1 for this build."
+        )
+    return _collect_tree(
+        src_root,
+        dest_root,
+        exclude_dirs={"__pycache__"},
+        exclude_globs=exclude_globs or [],
+    )
+
+
+NODE_SLIM_EXCLUDES = [
+    "CHANGELOG.md",
+    "README.md",
+    "LICENSE",
+    "install_tools.bat",
+    "*.ps1",
+]
+
+GIT_BASH_SLIM_EXCLUDES = [
+    "usr/share/doc/*",
+    "usr/share/man/*",
+    "usr/share/info/*",
+    "usr/share/gtk-doc/*",
+    "usr/share/vim/*",
+    "usr/share/nano/*",
+    "mingw64/share/doc/*",
+    "mingw64/share/man/*",
+    "mingw64/share/info/*",
+    "mingw64/share/locale/*",
+    "usr/bin/vim*",
+    "usr/bin/view.exe",
+    "usr/bin/vimdiff.exe",
+    "usr/bin/rvim.exe",
+    "usr/bin/rview.exe",
+    "usr/bin/xxd.exe",
+    "mingw64/bin/git-lfs*",
+    "mingw64/libexec/git-core/git-lfs*",
+    "mingw64/bin/libSkiaSharp.dll",
+    "mingw64/libexec/git-core/libSkiaSharp.dll",
+]
+
+
+node_env = _collect_required_runtime_env(
+    "COWORK_NODE_DIR",
+    "node_env",
+    "node_env",
+    "Node.js",
+    required_files=["node.exe"],
+    exclude_globs=NODE_SLIM_EXCLUDES if RUNTIME_SLIM else [],
+)
+git_bash_env = _collect_required_runtime_env(
+    "COWORK_GIT_BASH_DIR",
+    "git_bash_env",
+    "git_bash_env",
+    "Git Bash",
+    required_files=[os.path.join("bin", "bash.exe")],
+    exclude_globs=GIT_BASH_SLIM_EXCLUDES if RUNTIME_SLIM else [],
+)
 
 
 def _collect_minimal_pyside6():
@@ -270,6 +370,9 @@ a = Analysis(
     noarchive=False,
 )
 print(f"Bundled minimal python env entries: {len(python_env)}")
+print(f"Runtime slim mode: {'ON' if RUNTIME_SLIM else 'OFF'}")
+print(f"Bundled node env entries: {len(node_env)}")
+print(f"Bundled git bash env entries: {len(git_bash_env)}")
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -294,7 +397,7 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
-    a.datas + python_env,
+    a.datas + python_env + node_env + git_bash_env,
     strip=False,
     upx=True,
     upx_exclude=[],

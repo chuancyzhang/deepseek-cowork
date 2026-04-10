@@ -3,6 +3,7 @@ import os
 import re
 
 from core.env_utils import get_app_data_dir
+from core.sandbox_runtime import install_skill_dependencies
 from core.skill_adapter import adapt_skill_directory, detect_external_skill_format
 
 
@@ -107,6 +108,8 @@ def _default_skill_json(
     capability_group=None,
     experience_policy=None,
     disclosure_level_defaults=None,
+    python_dependencies=None,
+    node_dependencies=None,
 ):
     return {
         "version": 2,
@@ -123,6 +126,8 @@ def _default_skill_json(
         "disclosure_level_defaults": disclosure_level_defaults or {"default_prompt_level": "brief", "include_references": False, "include_experience_entries": False},
         "workflow": workflow or [],
         "creation_hints": creation_hints or {},
+        "python_dependencies": python_dependencies or [],
+        "node_dependencies": node_dependencies or [],
     }
 
 
@@ -174,6 +179,8 @@ def create_new_skill(
     capability_group=None,
     experience_policy=None,
     disclosure_level_defaults=None,
+    python_dependencies=None,
+    node_dependencies=None,
 ):
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope="ai_only")
@@ -210,6 +217,8 @@ def create_new_skill(
             capability_group=capability_group,
             experience_policy=_normalize_json_value(experience_policy),
             disclosure_level_defaults=_normalize_json_value(disclosure_level_defaults),
+            python_dependencies=_normalize_json_value(python_dependencies) or [],
+            node_dependencies=_normalize_json_value(node_dependencies) or [],
         )
 
         md_content = _build_skill_md(
@@ -226,9 +235,16 @@ def create_new_skill(
         with open(os.path.join(target_dir, "skill.json"), "w", encoding="utf-8") as f:
             json.dump(skill_json, f, ensure_ascii=False, indent=2)
         os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
+        dependency_status = install_skill_dependencies(
+            skill_name,
+            skill_json.get("python_dependencies") or [],
+            skill_json.get("node_dependencies") or [],
+        )
         if tool_code is not None:
             with open(os.path.join(target_dir, "impl.py"), "w", encoding="utf-8") as f:
                 f.write(tool_code)
+        if not dependency_status.get("ok"):
+            return f"Success: {action} skill '{skill_name}' at '{target_dir}', but dependency setup is incomplete: {dependency_status.get('message')}"
         return f"Success: {action} skill '{skill_name}' at '{target_dir}' as kind '{kind}'."
     except Exception as e:
         return f"Error: {str(e)}"
@@ -254,6 +270,8 @@ def update_skill(
     capability_group=None,
     experience_policy=None,
     disclosure_level_defaults=None,
+    python_dependencies=None,
+    node_dependencies=None,
 ):
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope=target_scope)
@@ -330,6 +348,8 @@ def update_skill(
             "capability_group": capability_group,
             "experience_policy": experience_policy,
             "disclosure_level_defaults": disclosure_level_defaults,
+            "python_dependencies": python_dependencies,
+            "node_dependencies": node_dependencies,
         }.items():
             if value is not None:
                 skill_json[key] = _normalize_json_value(value)
@@ -342,6 +362,13 @@ def update_skill(
             skill_json.setdefault("name", skill_name)
             with open(skill_json_path, "w", encoding="utf-8") as f:
                 json.dump(skill_json, f, ensure_ascii=False, indent=2)
+            dependency_status = install_skill_dependencies(
+                skill_name,
+                skill_json.get("python_dependencies") or [],
+                skill_json.get("node_dependencies") or [],
+            )
+            if not dependency_status.get("ok"):
+                changed.append("dependencies_not_ready")
         os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
 
         if tool_code is not None:

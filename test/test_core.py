@@ -13,6 +13,7 @@ from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.interaction import InteractionBridge
 from core import env_utils
+from core import sandbox_runtime
 from core.daemon import DaemonState
 from core.chat_storage import ChatStorage
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
@@ -77,6 +78,9 @@ class TestInteractionBridge(unittest.TestCase):
         self.assertIsInstance(bridge, InteractionBridge)
 
 class TestEnvUtils(unittest.TestCase):
+    def tearDown(self):
+        sandbox_runtime._RUNTIME_CACHE = None
+
     def test_get_python_executable_returns_empty_when_unavailable(self):
         with patch.object(env_utils.sys, "frozen", True, create=True), \
              patch.object(env_utils.sys, "executable", r"C:\app\deepseek-cowork.exe"), \
@@ -96,6 +100,50 @@ class TestEnvUtils(unittest.TestCase):
              patch("core.env_utils.shutil.which", return_value=r"C:\Python311\python.exe"), \
              patch("core.env_utils.os.getenv", return_value=""):
             self.assertEqual(env_utils.get_python_executable(), "")
+
+    def test_runtime_snapshot_resolves_bundled_python_node_and_bash(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            python_dir = os.path.join(temp_dir, "python_env")
+            node_dir = os.path.join(temp_dir, "node_env")
+            bash_dir = os.path.join(temp_dir, "git_bash_env", "bin")
+            os.makedirs(python_dir, exist_ok=True)
+            os.makedirs(node_dir, exist_ok=True)
+            os.makedirs(bash_dir, exist_ok=True)
+            python_exe = os.path.join(python_dir, "python.exe")
+            node_exe = os.path.join(node_dir, "node.exe")
+            bash_exe = os.path.join(bash_dir, "bash.exe")
+            for path in (python_exe, node_exe, bash_exe):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("")
+            sandbox_runtime._RUNTIME_CACHE = None
+            with patch("core.sandbox_runtime.get_base_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=os.path.join(temp_dir, "data")), \
+                 patch("core.sandbox_runtime._copy_runtime_dir", side_effect=lambda source, _name: source), \
+                 patch.object(sandbox_runtime.sys, "frozen", True, create=True), \
+                 patch.object(env_utils.sys, "frozen", True, create=True):
+                snapshot = env_utils.get_runtime_snapshot()
+            self.assertEqual(snapshot["python"]["path"], python_exe)
+            self.assertEqual(snapshot["node"]["path"], node_exe)
+            self.assertEqual(snapshot["bash"]["path"], bash_exe)
+            self.assertTrue(snapshot["python"]["available"])
+            self.assertTrue(snapshot["node"]["available"])
+            self.assertTrue(snapshot["bash"]["available"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_build_sandbox_env_adds_skill_dependency_paths(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            sandbox_runtime._RUNTIME_CACHE = None
+            with patch("core.sandbox_runtime.get_base_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=os.path.join(temp_dir, "data")):
+                env = sandbox_runtime.build_sandbox_env(workspace_dir=temp_dir, skill_id="demo-skill")
+            self.assertIn(os.path.join("demo-skill", "python", "site-packages"), env["PYTHONPATH"])
+            self.assertIn(os.path.join("demo-skill", "node", "node_modules"), env["NODE_PATH"])
+            self.assertEqual(env["COWORK_WORKSPACE_DIR"], os.path.abspath(temp_dir))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_ensure_package_installed_reports_missing_runtime(self):
         env_utils._INSTALL_FAILED.clear()

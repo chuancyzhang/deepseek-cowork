@@ -11,7 +11,8 @@ import shutil
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
-from core.env_utils import get_python_executable, get_python_runtime_snapshot
+from core.env_utils import get_python_executable, get_python_runtime_snapshot, get_runtime_snapshot
+from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 
 try:
@@ -110,32 +111,20 @@ def input(prompt=""):
                 temp_path = f.name
 
             # Determine python executable
-            python_exe = get_python_executable()
+            python_exe = get_runtime_executable("python")
+            if not python_exe:
+                self.output_signal.emit("Execution Error: Sandbox Python runtime is missing.")
+                return
 
             if self.is_stopped: return
 
-            # Force environment variables for UTF-8 encoding
-            env = os.environ.copy()
-            env["PYTHONIOENCODING"] = "utf-8"
-            
-            # In frozen mode, we might need to adjust PATH to include the bundled python dir
-            # so that subprocesses can find DLLs etc. (optional but good practice)
-            if getattr(sys, 'frozen', False):
-                 python_dir = os.path.dirname(python_exe)
-                 env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
-
             self.output_signal.emit(f"Running with {python_exe} in: {self.cwd}...")
-            self.process = subprocess.Popen(
-                [python_exe, temp_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE, # Enable stdin for input()
-                text=True,
+            self.process = run_in_sandbox(
+                [python_exe, "-X", "utf8", temp_path],
                 cwd=self.cwd,
-                encoding='utf-8', # 强制 UTF-8 避免中文乱码
-                errors='replace',
-                bufsize=0, # Unbuffered for real-time
-                env=env # Apply environment variables
+                skill_id="python-runner",
+                shell_kind="exec",
+                text=True,
             )
             
             # Real-time output reading
@@ -360,16 +349,26 @@ class LLMWorker(QThread):
         # CRITICAL: Clear previous reasoning content to avoid duplication/confusion in new turn
         current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
         runtime_snapshot = get_python_runtime_snapshot()
+        sandbox_snapshot = get_runtime_snapshot()
         python_exe = runtime_snapshot.get("python_exe") or get_python_executable()
-        if getattr(sys, 'frozen', False):
-            python_env_line = "Python 环境: 应用内置 Python 运行时（已打包，可直接调用）。"
-            if not python_exe:
-                python_env_line = "Python 环境: 未找到应用内置 Python 运行时。"
-        else:
-            python_available = bool(python_exe and os.path.exists(python_exe))
-            python_env_line = "Python 环境: 系统已检测到可用的 Python 运行环境。"
-            if not python_available:
-                python_env_line = "Python 环境: 当前开发环境未检测到可用 Python 运行时。"
+        python_info = sandbox_snapshot.get("python") or {}
+        node_info = sandbox_snapshot.get("node") or {}
+        bash_info = sandbox_snapshot.get("bash") or {}
+        available_runtimes = [
+            name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
+            if info.get("available")
+        ]
+        missing_runtimes = [
+            name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
+            if not info.get("available")
+        ]
+        sandbox_env_line = (
+            f"沙盒运行时: 已内置/检测到 {', '.join(available_runtimes)}，可直接调用，无需要求用户安装。"
+            if available_runtimes
+            else "沙盒运行时: 未检测到可用 Python/Node.js/Bash。"
+        )
+        if missing_runtimes:
+            sandbox_env_line += f" 缺失: {', '.join(missing_runtimes)}。"
         available_packages = runtime_snapshot.get("available_packages", [])
         missing_packages = runtime_snapshot.get("missing_packages", [])
         package_line = f"运行时库检测(可用): {', '.join(available_packages[:10])}" if available_packages else "运行时库检测(可用): 未检测到"
@@ -381,8 +380,14 @@ class LLMWorker(QThread):
             f"操作系统: {platform.system()} {platform.release()}",
             f"Python 版本: {sys.version.split()[0]}",
             f"运行时 Python 版本: {runtime_snapshot.get('version') or '未知'}",
-            python_env_line,
-            f"Python 路径: {python_exe or ('内置运行时路径解析失败' if getattr(sys, 'frozen', False) else '未检测到')}",
+            sandbox_env_line,
+            f"Python 路径: {python_exe or '沙盒 Python 路径解析失败'}",
+            f"Node.js 版本: {node_info.get('version') or '未知'}",
+            f"Node.js 路径: {node_info.get('path') or '沙盒 Node.js 路径解析失败'}",
+            f"Bash 版本: {bash_info.get('version') or '未知'}",
+            f"Bash 路径: {bash_info.get('path') or '沙盒 Bash 路径解析失败'}",
+            "命令策略: 需要运行 python/node/npm/npx/bash 时，优先使用 bash/run_command 工具在沙盒命令环境中执行。",
+            "判定策略: 不要仅依赖系统 PATH 或常见安装目录猜测 Node/Python 可用性，应先在沙盒中直接执行版本命令验证。",
             package_line,
             missing_line,
             f"当前日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",

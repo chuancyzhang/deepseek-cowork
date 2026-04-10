@@ -5,12 +5,12 @@ from urllib.parse import urlparse
 from core.env_utils import ensure_package_installed
 
 def get_bs4():
-    ensure_package_installed("beautifulsoup4", "bs4")
+    ensure_package_installed("beautifulsoup4", "bs4", skill_id="web-search")
     from bs4 import BeautifulSoup
     return BeautifulSoup
 
 def get_ddgs():
-    ensure_package_installed("duckduckgo-search", "duckduckgo_search")
+    ensure_package_installed("duckduckgo-search", "duckduckgo_search", skill_id="web-search")
     from duckduckgo_search import DDGS
     return DDGS
 
@@ -59,7 +59,7 @@ def _fetch_text_direct(url):
 
 def _extract_with_scrapling(url):
     try:
-        ensure_package_installed("scrapling")
+        ensure_package_installed("scrapling", skill_id="web-search")
     except Exception:
         return None
     import_attempts = [

@@ -46,7 +46,7 @@ def _normalize_keywords(keywords):
 
 def _load_sqlite_vec(conn):
     conn.enable_load_extension(True)
-    ensure_package_installed("sqlite-vec", "sqlite_vec")
+    ensure_package_installed("sqlite-vec", "sqlite_vec", skill_id="history-query")
     import sqlite_vec
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)

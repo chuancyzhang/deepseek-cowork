@@ -6,7 +6,8 @@ import ast
 import shutil
 import locale
 from PySide6.QtCore import QObject, Qt
-from core.env_utils import get_python_executable, ensure_package_installed
+from core.env_utils import ensure_package_installed
+from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 
 def install_package(package_name, import_name=None):
     """
@@ -17,7 +18,7 @@ def install_package(package_name, import_name=None):
         import_name (str, optional): The import module name.
     """
     try:
-        ensure_package_installed(package_name, import_name)
+        ensure_package_installed(package_name, import_name, skill_id="python-runner")
         return f"Successfully installed and loaded '{package_name}'."
     except Exception as e:
         return f"Failed to install '{package_name}': {e}"
@@ -141,23 +142,18 @@ def run_python_code(workspace_dir, code, _context=None):
         return f"Error creating temp file: {e}"
 
     # Determine python executable
-    python_exe = get_python_executable()
+    python_exe = get_runtime_executable("python")
     if not python_exe:
         return "Error: Bundled Python runtime is missing. This package may be corrupted. Please reinstall the application."
     
     try:
         abort_state = _init_abort_state(_context)
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        process = subprocess.Popen(
+        process = run_in_sandbox(
             [python_exe, "-X", "utf8", temp_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE,
-            text=False,
             cwd=workspace_dir,
-            env=env
+            skill_id="python-runner",
+            shell_kind="exec",
+            text=False,
         )
         while True:
             if abort_state["aborted"]:

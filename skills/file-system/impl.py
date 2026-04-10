@@ -13,7 +13,7 @@ def get_openpyxl():
         import openpyxl
         return openpyxl
     except ImportError:
-        ensure_package_installed("openpyxl")
+        ensure_package_installed("openpyxl", skill_id="file-system")
         import openpyxl
         return openpyxl
 

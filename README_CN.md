@@ -56,6 +56,15 @@
     python main.py
     ```
 
+### 打包前运行时准备（Windows）
+在执行 `pyinstaller deepseek-cowork.spec` 之前，先拉取固定版本的运行时包（Node.js + Git Bash），并进行 SHA256 校验：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
+```
+
+下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
+
 ## 📖 使用指南
 
 ### 1. 配置

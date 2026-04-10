@@ -4,6 +4,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -215,6 +216,41 @@ class TestSkillSystemV2(unittest.TestCase):
             self.assertEqual(record["spec"]["disclosure_level_defaults"]["default_prompt_level"], "brief")
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
+
+    def test_skill_dependencies_are_preserved_and_prepared(self):
+        skill_dir = os.path.join(self.skills_dir, "dependency-skill")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: dependency-skill\ndescription: Dependency skill\nkind: knowledge\n---\n"
+                "# Skill Purpose\nUse this skill to test dependency metadata.\n"
+            )
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "dependency-skill",
+                    "kind": "knowledge",
+                    "description": "Dependency skill",
+                    "python_dependencies": ["requests"],
+                    "node_dependencies": ["lodash"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        with patch("core.skill_manager.install_skill_dependencies", return_value={"ok": True, "message": "ready"}) as installer:
+            sm = self._build_manager()
+
+        installer.assert_called_with(
+            "dependency-skill",
+            python_dependencies=["requests"],
+            node_dependencies=["lodash"],
+        )
+        record = sm.skill_records["dependency-skill"]
+        self.assertEqual(record["spec"]["python_dependencies"], ["requests"])
+        self.assertEqual(record["spec"]["node_dependencies"], ["lodash"])
 
     def test_import_skill_adapts_openclaw_folder_into_experience_package(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)

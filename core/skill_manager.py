@@ -9,6 +9,7 @@ import time
 import uuid
 
 from .env_utils import ensure_package_installed, get_app_data_dir
+from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
 from .skill_adapter import adapt_skill_directory
 
 
@@ -291,6 +292,8 @@ class SkillManager:
         spec["triggers"] = self._coerce_string_list(spec.get("triggers"))
         spec["anti_triggers"] = self._coerce_string_list(spec.get("anti_triggers"))
         spec["references"] = self._coerce_string_list(spec.get("references"))
+        spec["python_dependencies"] = self._coerce_string_list(spec.get("python_dependencies"))
+        spec["node_dependencies"] = self._coerce_string_list(spec.get("node_dependencies"))
         workflow = spec.get("workflow")
         if workflow is None:
             spec["workflow"] = []
@@ -517,14 +520,20 @@ class SkillManager:
 
     def _load_legacy_implementation(self, skill_name, impl_path):
         try:
+            skill_spec = self._load_skill_json(os.path.dirname(impl_path))
+            declared_python_dependencies = self._coerce_string_list(skill_spec.get("python_dependencies"))
+            python_path = build_sandbox_env(skill_id=skill_name).get("PYTHONPATH", "")
+            for path in reversed([item for item in python_path.split(os.pathsep) if item]):
+                if os.path.isdir(path) and path not in sys.path:
+                    sys.path.insert(0, path)
             spec = importlib.util.spec_from_file_location(f"skills.{skill_name}", impl_path)
             module = importlib.util.module_from_spec(spec)
             try:
                 spec.loader.exec_module(module)
             except ImportError as e:
                 missing_pkg = getattr(e, "name", None)
-                if missing_pkg:
-                    ensure_package_installed(missing_pkg)
+                if missing_pkg and not declared_python_dependencies:
+                    ensure_package_installed(missing_pkg, skill_id=skill_name)
                     spec.loader.exec_module(module)
                 else:
                     raise e
@@ -622,6 +631,23 @@ class SkillManager:
             ]
         )
         return record
+
+    def _prepare_skill_dependencies(self, skill_name, skill_path):
+        spec = self._load_skill_json(skill_path)
+        if not isinstance(spec, dict):
+            return {"ok": True, "message": "No dependency metadata."}
+        python_dependencies = self._coerce_string_list(spec.get("python_dependencies"))
+        node_dependencies = self._coerce_string_list(spec.get("node_dependencies"))
+        if not python_dependencies and not node_dependencies:
+            return {"ok": True, "message": "No dependencies declared."}
+        status = install_skill_dependencies(
+            skill_name,
+            python_dependencies=python_dependencies,
+            node_dependencies=node_dependencies,
+        )
+        if not status.get("ok"):
+            print(f"[SkillManager] Dependencies for '{skill_name}' are not ready: {status.get('message')}")
+        return status
 
     def _default_writable_skill_root(self):
         for candidate in self.skills_dirs:
@@ -766,6 +792,7 @@ class SkillManager:
                     "experience_count": len(record.get("experience_entries") or []),
                     "use_cases": record["spec"].get("triggers") or record["spec"].get("tags") or [],
                     "risk_level": record["meta"].get("security_level") or record["spec"].get("security_level") or "medium",
+                    "dependency_status": record.get("dependency_status") or {"ok": True},
                 }
                 if is_ai_dir:
                     info["type"] = "ai_generated"
@@ -788,6 +815,10 @@ class SkillManager:
             return False, f"Skill '{skill_name}' already exists"
         try:
             result = adapt_skill_directory(source_path, target_path, skill_name=skill_name, source_format=source_format)
+            dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
+            if not dependency_status.get("ok"):
+                message = result.get("message") or f"Skill '{skill_name}' imported successfully"
+                return True, f"{message}\nDependency setup incomplete: {dependency_status.get('message')}"
             return True, result.get("message") or f"Skill '{skill_name}' imported successfully"
         except Exception as e:
             return False, f"Import failed: {e}"
@@ -839,6 +870,9 @@ class SkillManager:
                 spec.setdefault("name", skill_name)
                 with open(os.path.join(skill_path, "skill.json"), "w", encoding="utf-8") as f:
                     json.dump(spec, f, ensure_ascii=False, indent=2)
+                dependency_status = self._prepare_skill_dependencies(skill_name, skill_path)
+                if not dependency_status.get("ok"):
+                    return True, f"Skill '{skill_name}' updated, but dependency setup is incomplete: {dependency_status.get('message')}"
             return True, f"Skill '{skill_name}' updated successfully."
         except Exception as e:
             return False, f"Failed to update skill: {e}"
@@ -947,12 +981,13 @@ class SkillManager:
                     continue
                 seen.add(skill_name)
                 self.loaded_skill_sources[skill_name] = skill_path
+                dependency_status = self._prepare_skill_dependencies(skill_name, skill_path)
                 impl_path = os.path.join(skill_path, "impl.py")
                 if os.path.exists(impl_path):
                     self._load_legacy_implementation(skill_name, impl_path)
-                pending_records.append((skill_name, skill_path))
+                pending_records.append((skill_name, skill_path, dependency_status))
 
-        for skill_name, skill_path in pending_records:
+        for skill_name, skill_path, dependency_status in pending_records:
             try:
                 record = self._load_skill_record(skill_name, skill_path)
             except Exception as e:
@@ -978,6 +1013,7 @@ class SkillManager:
                 ]
             ).strip()
             self.loaded_skills_meta[skill_name] = record["meta"]
+            record["dependency_status"] = dependency_status
             self.skill_prompts_brief.append(record["brief"])
             self.skill_prompts_full[skill_name] = record["prompt"]
             self.skill_records[skill_name] = record
@@ -1058,6 +1094,15 @@ class SkillManager:
     def call_tool(self, name, args, context=None):
         if name not in self.tools:
             return f"Error: Tool '{name}' not found."
+        skill_name = self.tool_to_skill_map.get(name)
+        if skill_name:
+            record = self.skill_records.get(skill_name)
+            dependency_status = (record or {}).get("dependency_status") or {"ok": True}
+            if not dependency_status.get("ok") and record:
+                dependency_status = self._prepare_skill_dependencies(skill_name, record["path"])
+                record["dependency_status"] = dependency_status
+                if not dependency_status.get("ok"):
+                    return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
         func = self.tools[name]
         sig = inspect.signature(func)
         if "workspace_dir" in sig.parameters:

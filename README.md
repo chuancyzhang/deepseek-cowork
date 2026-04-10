@@ -57,6 +57,15 @@ Built by **deepseek-cowork team**.
     python main.py
     ```
 
+### Build Runtime Bootstrap (Windows Packaging)
+Before running `pyinstaller deepseek-cowork.spec`, fetch pinned runtime bundles (Node.js + Git Bash) with SHA256 verification:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
+```
+
+Artifacts are downloaded into `.runtime_downloads/` and extracted to `node_env/` and `git_bash_env/`.
+
 ## 📖 Usage Guide
 
 ### 1. Configuration

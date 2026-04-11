@@ -16,7 +16,7 @@ from collections import deque
 import urllib.request
 import urllib.parse
 from core.env_utils import ensure_package_installed, get_app_data_dir
-from core.sandbox_runtime import run_in_sandbox
+from core.sandbox_runtime import run_in_sandbox, run_skill_script_in_sandbox
 from PySide6.QtCore import QObject, Qt
 
 _ACTION_WINDOW_STATE = {}
@@ -187,6 +187,93 @@ def bash(workspace_dir, command, _context=None):
         return output if output else "(No output)"
     except Exception as e:
         return f"Error executing command: {str(e)}"
+
+
+def run_skill_script(skill_name, script_name, args=None, input_text=None, timeout_seconds=120, _context=None):
+    """
+    Execute a script declared by an imported skill using the sandbox runtime.
+    """
+    skill_name = (skill_name or "").strip()
+    script_name = (script_name or "").strip()
+    if not skill_name:
+        return "Error: skill_name is required."
+    if not script_name:
+        return "Error: script_name is required."
+
+    skill_manager = (_context or {}).get("skill_manager") if isinstance(_context, dict) else None
+    if not skill_manager:
+        return "Error: skill manager context is unavailable."
+
+    record = skill_manager.skill_records.get(skill_name)
+    if not record:
+        return f"Error: Skill '{skill_name}' not found."
+
+    dependency_status = record.get("dependency_status") or {"ok": True}
+    if not dependency_status.get("ok"):
+        dependency_status = skill_manager._prepare_skill_dependencies(skill_name, record["path"])
+        record["dependency_status"] = dependency_status
+        if not dependency_status.get("ok"):
+            return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
+
+    args_list = []
+    if isinstance(args, str) and args.strip():
+        try:
+            parsed = json.loads(args)
+            args = parsed
+        except Exception:
+            args = [args]
+    if isinstance(args, list):
+        args_list = [str(item) for item in args if item is not None]
+    elif args is not None:
+        return "Error: args must be a list or JSON list string."
+
+    entries = list((record.get("spec") or {}).get("script_entries") or [])
+    target = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_name = str(entry.get("name") or "").strip()
+        entry_path = os.path.normpath(str(entry.get("path") or "").strip()) if entry.get("path") else ""
+        if script_name == entry_name or script_name == entry_path or script_name == os.path.basename(entry_path):
+            target = entry
+            break
+    if not target:
+        return f"Error: Script '{script_name}' not found in skill '{skill_name}'."
+
+    script_rel_path = os.path.normpath(target.get("path") or "")
+    script_abs_path = os.path.abspath(os.path.join(record["path"], script_rel_path))
+    if not os.path.isfile(script_abs_path):
+        return f"Error: Script path '{script_rel_path}' not found for skill '{skill_name}'."
+
+    default_args = target.get("default_args") if isinstance(target.get("default_args"), list) else []
+    runtime = str(target.get("runtime") or "bash").strip().lower() or "bash"
+    try:
+        result = run_skill_script_in_sandbox(
+            skill_name,
+            script_abs_path,
+            runtime,
+            args=list(default_args) + args_list,
+            cwd=record["path"],
+            input_text=input_text,
+            timeout_seconds=int(timeout_seconds) if timeout_seconds is not None else 120,
+        )
+        payload = {
+            "skill_name": skill_name,
+            "script_name": target.get("name") or script_name,
+            "script_path": script_rel_path,
+            "runtime": runtime,
+            "ok": bool(result.get("ok")),
+            "exit_code": result.get("exit_code"),
+            "stdout": result.get("stdout", ""),
+            "stderr": result.get("stderr", ""),
+            "command": result.get("command", ""),
+            "cwd": result.get("cwd", record["path"]),
+        }
+        return json.dumps(payload, ensure_ascii=False)
+    except subprocess.TimeoutExpired:
+        return f"Error: Script '{script_name}' timed out after {timeout_seconds} seconds."
+    except Exception as e:
+        return f"Error executing skill script '{script_name}': {str(e)}"
 
 def _standard_step_result(action, result, ok=True, chosen_strategy="", fallback_used=False, capability_notes="", artifacts=None, timings=None):
     return {

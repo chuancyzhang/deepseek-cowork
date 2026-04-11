@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import shutil
@@ -217,6 +218,28 @@ class TestSkillSystemV2(unittest.TestCase):
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
 
+    def test_agent_skill_directory_exposes_script_entries_without_registering_script_tools(self):
+        skill_dir = os.path.join(self.skills_dir, "native-agent-skill")
+        os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: native-agent-skill\ndescription: Native skill package\nkind: knowledge\n---\n"
+                "# Skill Purpose\nUse this imported skill.\n"
+            )
+        with open(os.path.join(skill_dir, "scripts", "hello.py"), "w", encoding="utf-8") as f:
+            f.write("print('hello')\n")
+
+        sm = self._build_manager()
+        record = sm.skill_records["native-agent-skill"]
+        self.assertEqual(record["spec"]["script_refs"], [os.path.normpath("scripts\\hello.py")])
+        self.assertEqual(record["spec"]["script_entries"][0]["runtime"], "python")
+        self.assertEqual(record["spec"]["script_entries"][0]["name"], "hello")
+        tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
+        self.assertNotIn("hello", tool_names)
+        full_prompt = sm.get_full_skill_prompt("native-agent-skill") or ""
+        self.assertIn("## Skill Scripts", full_prompt)
+        self.assertIn("scripts\\hello.py", full_prompt)
+
     def test_skill_dependencies_are_preserved_and_prepared(self):
         skill_dir = os.path.join(self.skills_dir, "dependency-skill")
         os.makedirs(skill_dir, exist_ok=True)
@@ -251,6 +274,72 @@ class TestSkillSystemV2(unittest.TestCase):
         record = sm.skill_records["dependency-skill"]
         self.assertEqual(record["spec"]["python_dependencies"], ["requests"])
         self.assertEqual(record["spec"]["node_dependencies"], ["lodash"])
+
+    def test_run_skill_script_uses_skill_dependency_flow_and_sandbox_runner(self):
+        skill_dir = os.path.join(self.skills_dir, "scripted-skill")
+        os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: scripted-skill\ndescription: Scripted skill\nkind: knowledge\n---\n"
+                "# Skill Purpose\nExecute scripts.\n"
+            )
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "scripted-skill",
+                    "kind": "knowledge",
+                    "description": "Scripted skill",
+                    "python_dependencies": ["requests"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        with open(os.path.join(skill_dir, "scripts", "hello.py"), "w", encoding="utf-8") as f:
+            f.write("print('hello')\n")
+
+        sm = self._build_manager()
+        sm.skill_records["scripted-skill"]["dependency_status"] = {"ok": False, "message": "missing"}
+
+        module_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "system-tools", "impl.py")
+        spec = importlib.util.spec_from_file_location("system_tools_impl_test", module_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with patch.object(sm, "_prepare_skill_dependencies", return_value={"ok": True, "message": "ready"}) as prepare_mock:
+            with patch.object(
+                module,
+                "run_skill_script_in_sandbox",
+                return_value={
+                    "ok": True,
+                    "exit_code": 0,
+                    "stdout": "hello\n",
+                    "stderr": "",
+                    "runtime": "python",
+                    "command": "python hello.py",
+                    "cwd": skill_dir,
+                },
+            ) as run_mock:
+                payload = module.run_skill_script(
+                    "scripted-skill",
+                    "hello",
+                    args=["--flag"],
+                    _context={"skill_manager": sm},
+                )
+
+        result = json.loads(payload)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["runtime"], "python")
+        self.assertEqual(result["script_path"], os.path.normpath("scripts\\hello.py"))
+        prepare_mock.assert_called_once_with("scripted-skill", skill_dir)
+        run_mock.assert_called_once()
+        called_args, called_kwargs = run_mock.call_args
+        self.assertEqual(called_args[0], "scripted-skill")
+        self.assertTrue(called_args[1].endswith(os.path.normpath("scripts\\hello.py")))
+        self.assertEqual(called_args[2], "python")
+        self.assertEqual(called_kwargs["args"], ["--flag"])
+        self.assertEqual(called_kwargs["cwd"], skill_dir)
 
     def test_import_skill_adapts_openclaw_folder_into_experience_package(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)

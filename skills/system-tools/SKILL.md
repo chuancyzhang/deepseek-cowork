@@ -7,7 +7,7 @@ metadata:
   author: deepseek-cowork team
   version: "1.0"
 security_level: high
-allowed-tools: ["system_automate", "bash", "grep", "search_files", "build_app_index", "find_app", "launch_app", "open_with"]
+allowed-tools: ["system_automate", "bash", "grep", "search_files", "build_app_index", "find_app", "launch_app", "open_with", "run_skill_script"]
 ---
 
 # System Tools Skill
@@ -34,12 +34,16 @@ This skill provides system utilities for command execution, search, app manageme
    - Prefer system default browser and desktop window automation by default.
    - Browser web automation uses native CDP (Chrome DevTools Protocol) with local browser.
    - Use `system_automate` for unified multi-step automation.
+6. **Skill Script Execution**:
+   - Use `run_skill_script` to execute scripts declared by an imported skill.
+   - Scripts run inside the skill-scoped sandbox runtime using `bash`, `python`, or `node`.
 
 ## Usage Guidelines
 - **Bash**: Use when you need to run tools that are not available as built-in skills (e.g., `git`, `npm`, system info).
 - **Grep**: Use when you need to find code usage, TODOs, or specific text patterns across the codebase.
 - **App Tools**: Use when user asks to find/open applications or open files in target apps.
 - **Browser/Desktop Tools**: Use when user asks to automate browser pages or desktop windows via `system_automate`.
+- **Skill Scripts**: Use `run_skill_script` when the selected skill exposes `scripts/` entries and the task should follow that imported skill's native script semantics.
 
 ## Unified Automation
 ### system_automate

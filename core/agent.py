@@ -8,6 +8,7 @@ import json
 import platform
 import time
 import shutil
+import uuid
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
@@ -602,6 +603,7 @@ class LLMWorker(QThread):
 
                     # Append Assistant Message to History (Manual reconstruction)
                     assistant_msg = {
+                        "id": uuid.uuid4().hex,
                         "role": "assistant",
                         "content": content
                     }
@@ -713,6 +715,7 @@ class LLMWorker(QThread):
                             })
 
                             tool_msg = {
+                                "id": uuid.uuid4().hex,
                                 "role": "tool",
                                 "tool_call_id": tool.id,
                                 "content": str(result),

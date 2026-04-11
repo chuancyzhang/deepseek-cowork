@@ -349,6 +349,69 @@ def run_in_sandbox(command, cwd=None, skill_id=None, shell_kind="bash", stdin=No
     )
 
 
+def _shell_quote(value):
+    text = str(value or "")
+    return "'" + text.replace("'", "'\"'\"'") + "'"
+
+
+def build_skill_script_command(runtime, script_path, args=None):
+    runtime_key = (runtime or "").strip().lower()
+    script_path = os.path.abspath(script_path)
+    arg_list = [str(item) for item in (args or [])]
+    ext = os.path.splitext(script_path.lower())[1]
+
+    if runtime_key == "python":
+        python_exe = get_runtime_executable("python")
+        if not python_exe:
+            raise FileNotFoundError("Sandbox Python runtime is missing.")
+        return [python_exe, "-X", "utf8", script_path] + arg_list, "exec"
+
+    if runtime_key == "node":
+        node_exe = get_runtime_executable("node")
+        if not node_exe:
+            raise FileNotFoundError("Sandbox Node runtime is missing.")
+        return [node_exe, script_path] + arg_list, "exec"
+
+    if runtime_key == "bash":
+        if ext == ".ps1":
+            command = "powershell.exe -ExecutionPolicy Bypass -File " + " ".join([_shell_quote(script_path)] + [_shell_quote(arg) for arg in arg_list])
+            return command, "bash"
+        if ext in {".bat", ".cmd"}:
+            quoted = subprocess.list2cmdline([script_path] + arg_list)
+            command = f"cmd.exe /c {quoted}"
+            return command, "bash"
+        bash_exe = get_runtime_executable("bash")
+        if not bash_exe:
+            raise FileNotFoundError("Sandbox Bash runtime is missing.")
+        return [bash_exe, script_path] + arg_list, "exec"
+
+    raise ValueError(f"Unsupported script runtime: {runtime}")
+
+
+def run_skill_script_in_sandbox(skill_id, script_path, runtime, args=None, cwd=None, input_text=None, timeout_seconds=120):
+    command, shell_kind = build_skill_script_command(runtime, script_path, args=args)
+    process = run_in_sandbox(
+        command,
+        cwd=cwd or os.path.dirname(os.path.abspath(script_path)),
+        skill_id=skill_id,
+        shell_kind=shell_kind,
+        text=False,
+    )
+    input_bytes = None if input_text is None else str(input_text).encode("utf-8")
+    output_raw, error_raw = process.communicate(input=input_bytes, timeout=timeout_seconds)
+    stdout = output_raw.decode("utf-8", errors="replace") if isinstance(output_raw, (bytes, bytearray)) else (output_raw or "")
+    stderr = error_raw.decode("utf-8", errors="replace") if isinstance(error_raw, (bytes, bytearray)) else (error_raw or "")
+    return {
+        "ok": process.returncode == 0,
+        "exit_code": process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "runtime": (runtime or "").strip().lower(),
+        "command": command if isinstance(command, str) else subprocess.list2cmdline(command),
+        "cwd": cwd or os.path.dirname(os.path.abspath(script_path)),
+    }
+
+
 def _run_version(executable, args):
     if not executable:
         return ""

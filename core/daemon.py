@@ -78,12 +78,16 @@ class DaemonState:
     def get_session_messages(self, session_id):
         with self.lock:
             if session_id in self.sessions:
-                return self.sessions[session_id]
+                messages = self.chat_storage.normalize_messages(self.sessions[session_id])
+                self.sessions[session_id] = messages
+                return messages
         if self.chat_storage.has_conversation(session_id):
             messages = self.chat_storage.get_messages(session_id)
         else:
             messages = []
-        messages = self._dedupe_consecutive_user_messages(messages)
+        messages = self.chat_storage.normalize_messages(
+            self._dedupe_consecutive_user_messages(messages)
+        )
         with self.lock:
             self.sessions[session_id] = messages
         return messages
@@ -123,7 +127,8 @@ class DaemonState:
 
     def save_session(self, session_id):
         with self.lock:
-            messages = self.sessions.get(session_id, [])
+            messages = self.chat_storage.normalize_messages(self.sessions.get(session_id, []))
+            self.sessions[session_id] = messages
         title = _compute_session_title(messages)
         self.chat_storage.save_conversation(session_id, messages, title=title)
     
@@ -413,6 +418,7 @@ class DaemonState:
                         "reasoning": result.get("reasoning", "")
                     }
                 )
+        messages[:] = self.chat_storage.normalize_messages(messages)
         self.save_session(session_id)
         self.touch()
         return result
@@ -542,6 +548,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                             "reasoning": result.get("reasoning", "")
                         }
                     )
+            messages[:] = state.chat_storage.normalize_messages(messages)
             state.save_session(session_id)
             state.touch()
             return

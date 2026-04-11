@@ -138,6 +138,114 @@ class ChatStorage:
                 """
             )
 
+    def _message_signature(self, message):
+        if not isinstance(message, dict):
+            return None
+        signature = {
+            "role": message.get("role") or "",
+            "content": message.get("content") or "",
+            "tool_call_id": message.get("tool_call_id") or "",
+            "reasoning_content": message.get("reasoning_content") or message.get("reasoning") or "",
+        }
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            normalized_calls = []
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                arguments = function.get("arguments")
+                if isinstance(arguments, (dict, list)):
+                    try:
+                        arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+                    except Exception:
+                        arguments = str(arguments)
+                elif arguments is None:
+                    arguments = ""
+                normalized_calls.append(
+                    {
+                        "id": tool_call.get("id") or "",
+                        "type": tool_call.get("type") or "function",
+                        "name": function.get("name") or "",
+                        "arguments": arguments,
+                    }
+                )
+            signature["tool_calls"] = normalized_calls
+        try:
+            return json.dumps(signature, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return None
+
+    def normalize_messages(self, messages):
+        if not isinstance(messages, list):
+            return []
+
+        filtered = []
+        seen_ids = set()
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            msg_copy = dict(msg)
+            msg_id = msg_copy.get("id")
+            if msg_id:
+                if msg_id in seen_ids:
+                    continue
+                seen_ids.add(msg_id)
+            filtered.append(msg_copy)
+
+        changed = True
+        normalized = filtered
+        while changed:
+            changed = False
+
+            deduped = []
+            for msg in normalized:
+                role = msg.get("role")
+                if deduped:
+                    prev = deduped[-1]
+                    if (
+                        role == "user"
+                        and prev.get("role") == "user"
+                        and (msg.get("content") or "") == (prev.get("content") or "")
+                    ):
+                        changed = True
+                        continue
+                    if role != "user":
+                        if self._message_signature(msg) == self._message_signature(prev):
+                            changed = True
+                            continue
+                deduped.append(msg)
+            normalized = deduped
+
+            collapsed = []
+            i = 0
+            while i < len(normalized):
+                matched = False
+                max_block = (len(normalized) - i) // 2
+                for block_size in range(max_block, 0, -1):
+                    left = normalized[i:i + block_size]
+                    right = normalized[i + block_size:i + (2 * block_size)]
+                    if not left or not right:
+                        continue
+                    roles = {msg.get("role") for msg in left + right}
+                    if "user" in roles:
+                        continue
+                    left_signatures = [self._message_signature(msg) for msg in left]
+                    right_signatures = [self._message_signature(msg) for msg in right]
+                    if left_signatures == right_signatures:
+                        collapsed.extend(left)
+                        i += block_size * 2
+                        changed = True
+                        matched = True
+                        break
+                if matched:
+                    continue
+                collapsed.append(normalized[i])
+                i += 1
+            normalized = collapsed
+
+        return normalized
+
     def upsert_conversation(self, conversation_id, title=None, status="active", meta=None):
         now = int(time.time())
         meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
@@ -208,10 +316,11 @@ class ChatStorage:
         }
 
     def replace_messages(self, conversation_id, messages):
+        normalized_messages = self.normalize_messages(messages)
         now = int(time.time())
         with self._connect() as conn:
             conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
-            for index, msg in enumerate(messages):
+            for index, msg in enumerate(normalized_messages):
                 msg_id = msg.get("id") or uuid.uuid4().hex
                 tool_calls = msg.get("tool_calls")
                 tool_calls_json = (
@@ -242,7 +351,7 @@ class ChatStorage:
 
     def save_conversation(self, conversation_id, messages, title=None, status="active", meta=None):
         self.upsert_conversation(conversation_id, title=title, status=status, meta=meta)
-        self.replace_messages(conversation_id, messages)
+        self.replace_messages(conversation_id, self.normalize_messages(messages))
 
     def list_conversations(self):
         with self._connect() as conn:
@@ -284,7 +393,7 @@ class ChatStorage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT role, content, tool_calls, reasoning_content, token_count, tool_call_id
+                SELECT id, role, content, tool_calls, reasoning_content, token_count, tool_call_id
                 FROM messages
                 WHERE conversation_id = ?
                 ORDER BY position ASC
@@ -293,7 +402,7 @@ class ChatStorage:
             ).fetchall()
         messages = []
         for row in rows:
-            msg = {"role": row["role"], "content": row["content"]}
+            msg = {"id": row["id"], "role": row["role"], "content": row["content"]}
             if row["tool_calls"]:
                 msg["tool_calls"] = json.loads(row["tool_calls"])
             if row["reasoning_content"] is not None:
@@ -304,7 +413,18 @@ class ChatStorage:
             if row["tool_call_id"] is not None:
                 msg["tool_call_id"] = row["tool_call_id"]
             messages.append(msg)
-        return messages
+        normalized_messages = self.normalize_messages(messages)
+        try:
+            changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(
+                normalized_messages,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        except Exception:
+            changed = messages != normalized_messages
+        if changed:
+            self.replace_messages(conversation_id, normalized_messages)
+        return normalized_messages
 
     def delete_conversation(self, conversation_id):
         with self._connect() as conn:

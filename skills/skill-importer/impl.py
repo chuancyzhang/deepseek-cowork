@@ -5,6 +5,7 @@ import shutil
 from core.env_utils import get_app_data_dir
 from core.sandbox_runtime import install_skill_dependencies
 from core.llm.factory import LLMFactory
+from core.skill_adapter import discover_skill_artifacts
 
 
 def _safe_read(path, limit=6000):
@@ -16,12 +17,16 @@ def _safe_read(path, limit=6000):
 
 
 def _collect_folder_summary(abs_path):
+    artifacts = discover_skill_artifacts(abs_path)
     summary = {
         "root": abs_path,
         "files": [],
         "readme": "",
         "tool_candidates": [],
         "reference_candidates": [],
+        "script_refs": artifacts["script_refs"][:30],
+        "script_entries": artifacts["script_entries"][:30],
+        "asset_refs": artifacts["asset_refs"][:30],
     }
     for root, dirs, files in os.walk(abs_path):
         dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", ".venv", "node_modules", "dist", "build"}]
@@ -77,6 +82,9 @@ def _default_preview(source_path, skill_name, summary):
         "anti_triggers": [],
         "references": summary["reference_candidates"][:5],
         "tool_refs": tool_refs,
+        "script_refs": summary.get("script_refs", [])[:10],
+        "script_entries": summary.get("script_entries", [])[:10],
+        "asset_refs": summary.get("asset_refs", [])[:10],
         "python_dependencies": [],
         "node_dependencies": [],
         "experience_policy": {
@@ -96,6 +104,7 @@ def _default_preview(source_path, skill_name, summary):
         "creation_hints": {
             "source_folder": source_path,
             "needs_manual_review": True,
+            "source_format": "generic",
         },
         "risks": [],
     }
@@ -113,7 +122,7 @@ def analyze_skill_source_folder(workspace_dir, path, skill_name=None, _context=N
     fallback = _default_preview(abs_path, inferred_name, summary)
     prompt = (
         "You are importing a source folder into a reusable AI skill.\n"
-        "Return JSON with keys: skill_name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, python_dependencies, node_dependencies, experience_policy, disclosure_level_defaults, workflow, creation_hints, risks.\n"
+        "Return JSON with keys: skill_name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, script_refs, script_entries, asset_refs, python_dependencies, node_dependencies, experience_policy, disclosure_level_defaults, workflow, creation_hints, risks.\n"
         "Prefer kind='knowledge' unless the folder clearly defines system-level importing behavior.\n"
         "Treat tools as lightweight atomic actions, not high-level workflows.\n"
         f"Requested skill name: {inferred_name}\n"
@@ -129,6 +138,9 @@ def analyze_skill_source_folder(workspace_dir, path, skill_name=None, _context=N
     preview.setdefault("description", fallback["description"])
     preview.setdefault("references", fallback["references"])
     preview.setdefault("tool_refs", fallback["tool_refs"])
+    preview.setdefault("script_refs", fallback["script_refs"])
+    preview.setdefault("script_entries", fallback["script_entries"])
+    preview.setdefault("asset_refs", fallback["asset_refs"])
     preview.setdefault("python_dependencies", fallback["python_dependencies"])
     preview.setdefault("node_dependencies", fallback["node_dependencies"])
     preview.setdefault("experience_policy", fallback["experience_policy"])
@@ -173,7 +185,7 @@ def generate_skill_from_folder(workspace_dir, path, skill_name, approved_spec, _
     )
     prompt = (
         "Return JSON only with keys 'skill_json' and 'skill_md'. "
-        "skill_json must be a valid Cowork skill metadata object with: version, name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, python_dependencies, node_dependencies, experience_policy, disclosure_level_defaults, workflow, creation_hints. "
+        "skill_json must be a valid Cowork skill metadata object with: version, name, kind, capability_group, description, tags, triggers, anti_triggers, references, tool_refs, script_refs, script_entries, asset_refs, python_dependencies, node_dependencies, experience_policy, disclosure_level_defaults, workflow, creation_hints. "
         "skill_md must be markdown text.\n"
         f"Approved spec:\n{json.dumps(spec, ensure_ascii=False, indent=2)}\n"
     )
@@ -189,6 +201,9 @@ def generate_skill_from_folder(workspace_dir, path, skill_name, approved_spec, _
             "anti_triggers": spec.get("anti_triggers", []),
             "references": spec.get("references", []),
             "tool_refs": spec.get("tool_refs", []),
+            "script_refs": spec.get("script_refs", []),
+            "script_entries": spec.get("script_entries", []),
+            "asset_refs": spec.get("asset_refs", []),
             "python_dependencies": spec.get("python_dependencies", []),
             "node_dependencies": spec.get("node_dependencies", []),
             "experience_policy": spec.get(

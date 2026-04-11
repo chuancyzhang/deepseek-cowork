@@ -10,7 +10,7 @@ import uuid
 
 from .env_utils import ensure_package_installed, get_app_data_dir
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
-from .skill_adapter import adapt_skill_directory
+from .skill_adapter import adapt_skill_directory, discover_skill_artifacts
 
 
 def _tokenize(text):
@@ -224,6 +224,21 @@ class SkillManager:
                 return False
         return default
 
+    def _coerce_dict_list(self, value):
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return [item for item in parsed if isinstance(item, dict)]
+            except Exception:
+                return []
+        return []
+
     def _normalize_skill_kind(self, meta, spec):
         kind = spec.get("kind") or meta.get("kind") or ""
         if not isinstance(kind, str):
@@ -232,6 +247,31 @@ class SkillManager:
         if kind in {"knowledge", "system"}:
             return kind
         return "knowledge"
+
+    def _normalize_script_entries(self, entries):
+        normalized = []
+        seen = set()
+        for item in self._coerce_dict_list(entries):
+            path = item.get("path")
+            name = item.get("name")
+            runtime = item.get("runtime")
+            if not isinstance(path, str) or not path.strip():
+                continue
+            normalized_item = {
+                "name": name.strip() if isinstance(name, str) and name.strip() else os.path.splitext(os.path.basename(path))[0],
+                "path": os.path.normpath(path.strip()),
+                "runtime": runtime.strip().lower() if isinstance(runtime, str) and runtime.strip() else "bash",
+                "description": item.get("description") if isinstance(item.get("description"), str) else "",
+                "args_schema": item.get("args_schema") if isinstance(item.get("args_schema"), dict) else {},
+                "default_args": [str(arg) for arg in item.get("default_args", [])] if isinstance(item.get("default_args"), list) else [],
+                "entrypoint_style": item.get("entrypoint_style") if isinstance(item.get("entrypoint_style"), str) and item.get("entrypoint_style").strip() else "script",
+            }
+            key = (normalized_item["path"].lower(), normalized_item["name"].lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(normalized_item)
+        return normalized
 
     def _infer_capability_group(self, skill_name, meta, spec):
         group = (
@@ -292,8 +332,16 @@ class SkillManager:
         spec["triggers"] = self._coerce_string_list(spec.get("triggers"))
         spec["anti_triggers"] = self._coerce_string_list(spec.get("anti_triggers"))
         spec["references"] = self._coerce_string_list(spec.get("references"))
+        spec["script_refs"] = self._coerce_string_list(spec.get("script_refs"))
+        spec["asset_refs"] = self._coerce_string_list(spec.get("asset_refs"))
+        spec["script_entries"] = self._normalize_script_entries(spec.get("script_entries"))
         spec["python_dependencies"] = self._coerce_string_list(spec.get("python_dependencies"))
         spec["node_dependencies"] = self._coerce_string_list(spec.get("node_dependencies"))
+        source_format = spec.get("source_format")
+        if not isinstance(source_format, str) or not source_format.strip():
+            creation_hints = spec.get("creation_hints") if isinstance(spec.get("creation_hints"), dict) else {}
+            source_format = creation_hints.get("source_format") if isinstance(creation_hints.get("source_format"), str) else ""
+        spec["source_format"] = source_format.strip() if isinstance(source_format, str) and source_format.strip() else "cowork"
         workflow = spec.get("workflow")
         if workflow is None:
             spec["workflow"] = []
@@ -403,6 +451,26 @@ class SkillManager:
         if tool_refs:
             sections.append("## Recommended Tools\n" + "\n".join(f"- `{name}`" for name in tool_refs))
 
+        script_entries = spec.get("script_entries") or []
+        if script_entries:
+            sections.append(
+                "## Skill Scripts\n"
+                + "\n".join(
+                    f"- `{item['name']}` -> `{item['path']}` ({item['runtime']})"
+                    + (f": {item['description']}" if item.get("description") else "")
+                    for item in script_entries[:12]
+                )
+                + "\nUse `run_skill_script` to execute these scripts inside the sandbox runtime."
+            )
+
+        dependency_lines = []
+        if spec.get("python_dependencies"):
+            dependency_lines.append("python: " + ", ".join(spec.get("python_dependencies")[:12]))
+        if spec.get("node_dependencies"):
+            dependency_lines.append("node: " + ", ".join(spec.get("node_dependencies")[:12]))
+        if dependency_lines:
+            sections.append("## Runtime Dependencies\n" + "\n".join(f"- {line}" for line in dependency_lines))
+
         if include_references:
             for ref in spec.get("references") or []:
                 ref_content = self._safe_read_reference(self.loaded_skill_sources.get(skill_name, ""), ref)
@@ -433,6 +501,9 @@ class SkillManager:
             lines.append(f"triggers: {', '.join(triggers[:6])}")
         if tool_refs:
             lines.append(f"tool-refs: {', '.join(tool_refs[:8])}")
+        script_entries = spec.get("script_entries") or []
+        if script_entries:
+            lines.append(f"scripts: {', '.join(item.get('name') for item in script_entries[:6] if item.get('name'))}")
         frontmatter_exp = meta.get("experience")
         if isinstance(frontmatter_exp, list) and frontmatter_exp:
             lines.append(f"experience-highlights: {', '.join(frontmatter_exp[:3])}")
@@ -596,6 +667,18 @@ class SkillManager:
         if not meta and not spec:
             return self._build_minimal_skill_record(skill_name, skill_path, tool_refs)
         spec = self._normalize_skill_spec(skill_name, meta, spec, tool_refs, kind)
+        explicit_references = list(spec.get("references") or [])
+        artifact_info = discover_skill_artifacts(
+            skill_path,
+            declared_script_entries=spec.get("script_entries"),
+            declared_script_refs=spec.get("script_refs"),
+            declared_asset_refs=spec.get("asset_refs"),
+            declared_references=spec.get("references"),
+        )
+        spec["script_refs"] = artifact_info.get("script_refs") or list(spec.get("script_refs") or [])
+        spec["script_entries"] = artifact_info.get("script_entries") or list(spec.get("script_entries") or [])
+        spec["asset_refs"] = artifact_info.get("asset_refs") or list(spec.get("asset_refs") or [])
+        spec["references"] = explicit_references or artifact_info.get("references") or []
         tool_refs = list(spec.get("tool_refs") or [])
         experience_entries = self._load_experience_entries(skill_path, spec=spec)
         record = {
@@ -627,6 +710,11 @@ class SkillManager:
                 " ".join(spec.get("tags") or []),
                 " ".join(spec.get("triggers") or []),
                 " ".join(tool_refs),
+                " ".join(spec.get("script_refs") or []),
+                " ".join(item.get("name", "") for item in spec.get("script_entries") or []),
+                " ".join(item.get("runtime", "") for item in spec.get("script_entries") or []),
+                " ".join(spec.get("python_dependencies") or []),
+                " ".join(spec.get("node_dependencies") or []),
                 self._summarize_experience_entries(experience_entries, limit=10),
             ]
         )
@@ -793,6 +881,9 @@ class SkillManager:
                     "use_cases": record["spec"].get("triggers") or record["spec"].get("tags") or [],
                     "risk_level": record["meta"].get("security_level") or record["spec"].get("security_level") or "medium",
                     "dependency_status": record.get("dependency_status") or {"ok": True},
+                    "script_refs": list(record["spec"].get("script_refs") or []),
+                    "script_entries": list(record["spec"].get("script_entries") or []),
+                    "source_format": record["spec"].get("source_format"),
                 }
                 if is_ai_dir:
                     info["type"] = "ai_generated"

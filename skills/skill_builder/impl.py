@@ -110,6 +110,10 @@ def _default_skill_json(
     disclosure_level_defaults=None,
     python_dependencies=None,
     node_dependencies=None,
+    script_refs=None,
+    script_entries=None,
+    asset_refs=None,
+    source_format=None,
 ):
     return {
         "version": 2,
@@ -128,6 +132,10 @@ def _default_skill_json(
         "creation_hints": creation_hints or {},
         "python_dependencies": python_dependencies or [],
         "node_dependencies": node_dependencies or [],
+        "script_refs": script_refs or [],
+        "script_entries": script_entries or [],
+        "asset_refs": asset_refs or [],
+        "source_format": source_format or "cowork",
     }
 
 
@@ -181,6 +189,9 @@ def create_new_skill(
     disclosure_level_defaults=None,
     python_dependencies=None,
     node_dependencies=None,
+    script_refs=None,
+    script_entries=None,
+    asset_refs=None,
 ):
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope="ai_only")
@@ -219,6 +230,10 @@ def create_new_skill(
             disclosure_level_defaults=_normalize_json_value(disclosure_level_defaults),
             python_dependencies=_normalize_json_value(python_dependencies) or [],
             node_dependencies=_normalize_json_value(node_dependencies) or [],
+            script_refs=_normalize_json_value(script_refs) or [],
+            script_entries=_normalize_json_value(script_entries) or [],
+            asset_refs=_normalize_json_value(asset_refs) or [],
+            source_format="cowork",
         )
 
         md_content = _build_skill_md(
@@ -272,6 +287,9 @@ def update_skill(
     disclosure_level_defaults=None,
     python_dependencies=None,
     node_dependencies=None,
+    script_refs=None,
+    script_entries=None,
+    asset_refs=None,
 ):
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope=target_scope)
@@ -350,6 +368,9 @@ def update_skill(
             "disclosure_level_defaults": disclosure_level_defaults,
             "python_dependencies": python_dependencies,
             "node_dependencies": node_dependencies,
+            "script_refs": script_refs,
+            "script_entries": script_entries,
+            "asset_refs": asset_refs,
         }.items():
             if value is not None:
                 skill_json[key] = _normalize_json_value(value)

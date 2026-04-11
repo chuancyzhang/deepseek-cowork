@@ -2791,6 +2791,11 @@ class SessionState:
         self.session_status = "draft"
         self.has_file_changes = False
         self.changed_files = []
+        self.auto_scroll_enabled = True
+        self.scroll_flush_timer = None
+        self.pending_scroll_force = False
+        self.active_turn_id = 0
+        self.completed_turn_id = 0
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -4145,6 +4150,10 @@ class MainWindow(QMainWindow):
         state.thinking_flush_timer.setSingleShot(True)
         state.thinking_flush_timer.setInterval(40)
         state.thinking_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_thinking(sid))
+        state.scroll_flush_timer = QTimer(self)
+        state.scroll_flush_timer.setSingleShot(True)
+        state.scroll_flush_timer.setInterval(24)
+        state.scroll_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_scroll(sid))
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
         self.sessions[session_id] = state
@@ -4501,6 +4510,13 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
+        vbar = state.chat_scroll.verticalScrollBar() if getattr(state, "chat_scroll", None) else None
+        if vbar is not None:
+            distance_to_bottom = max(0, vbar.maximum() - value)
+            if distance_to_bottom <= 36:
+                state.auto_scroll_enabled = True
+            elif not state.auto_loading_history:
+                state.auto_scroll_enabled = False
         if value > 8:
             return
         if state.auto_loading_history:
@@ -4508,6 +4524,44 @@ class MainWindow(QMainWindow):
         if state.displayed_count >= len(state.messages):
             return
         self.load_more_history(session_id=session_id)
+
+    def request_session_scroll_to_bottom(self, session_id=None, force=False):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        if force:
+            state.auto_scroll_enabled = True
+            state.pending_scroll_force = True
+        if not force and not state.auto_scroll_enabled:
+            return
+        timer = getattr(state, "scroll_flush_timer", None)
+        if timer:
+            if not timer.isActive():
+                timer.start()
+        else:
+            self.flush_session_scroll(state.session_id)
+
+    def _finalize_session_scroll(self, session_id, force=False):
+        state = self.get_session(session_id)
+        if not state or not getattr(state, "chat_scroll", None):
+            return
+        if not force and not state.auto_scroll_enabled:
+            return
+        vbar = state.chat_scroll.verticalScrollBar()
+        vbar.setValue(vbar.maximum())
+
+    def flush_session_scroll(self, session_id):
+        state = self.get_session(session_id)
+        if not state or not getattr(state, "chat_scroll", None):
+            return
+        force = bool(getattr(state, "pending_scroll_force", False))
+        state.pending_scroll_force = False
+        if not force and not state.auto_scroll_enabled:
+            return
+        vbar = state.chat_scroll.verticalScrollBar()
+        vbar.setValue(vbar.maximum())
+        QTimer.singleShot(0, lambda sid=session_id, must=force: self._finalize_session_scroll(sid, must))
+        QTimer.singleShot(32, lambda sid=session_id, must=force: self._finalize_session_scroll(sid, must))
 
     def load_more_history(self, session_id=None):
         state = self.get_session(session_id)
@@ -4773,6 +4827,10 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
         state.llm_worker = None
+        state.auto_scroll_enabled = True
+        state.pending_scroll_force = False
+        state.active_turn_id = 0
+        state.completed_turn_id = 0
         state.active_skills_label.setText("本次会话使用的功能: ")
         state.displayed_count = 0
         state.load_more_btn = None
@@ -5106,6 +5164,8 @@ class MainWindow(QMainWindow):
             if state.code_worker.isRunning():
                 state.code_worker.terminate()
                 state.code_worker.wait(1000)
+        state.active_turn_id += 1
+        state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id)
         state.daemon_worker = None
         state.daemon_running = False
         state.llm_worker = None
@@ -5163,7 +5223,7 @@ class MainWindow(QMainWindow):
         self._last_submit_text = user_text
         self._last_submit_ts = now
 
-        self.add_chat_bubble("User", user_text)
+        self.add_chat_bubble("User", user_text, animate=False, force_scroll=True)
         self.input_field.clear()
         
         state = self.get_current_session()
@@ -5176,14 +5236,16 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(state.session_id)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
+        state.active_turn_id += 1
+        current_turn_id = state.active_turn_id
         state.messages.append({"role": "user", "content": user_text})
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
         self.try_connect_daemon(allow_start=True, retries=4)
         if self.daemon_available:
-            self.process_daemon_logic(user_text)
+            self.process_daemon_logic(user_text, turn_id=current_turn_id)
         else:
-            self.process_agent_logic(user_text)
+            self.process_agent_logic(user_text, turn_id=current_turn_id)
 
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
         # 1. Update selection state in UI
@@ -5346,6 +5408,7 @@ class MainWindow(QMainWindow):
         self.set_session_phase("Executing", state.session_id)
         self.refresh_step_list(state.session_id)
         self.process_ui_events(force=animate)
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def update_tool_card(self, data, session_id=None):
         tool_id = data['id']
@@ -5396,7 +5459,7 @@ class MainWindow(QMainWindow):
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
         self.process_ui_events(force=True)
 
-    def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True):
+    def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True, force_scroll=False):
         state = self.get_current_session()
         if not state: return
         
@@ -5445,11 +5508,9 @@ class MainWindow(QMainWindow):
         else:
             opacity_effect.setOpacity(1.0)
         
-        # Scroll to bottom only if appending
-        if index is None and hasattr(state, 'chat_scroll') and state.chat_scroll:
-            state.chat_scroll.verticalScrollBar().setValue(
-                state.chat_scroll.verticalScrollBar().maximum()
-            )
+        # Keep latest message in view when appending.
+        if index is None:
+            self.request_session_scroll_to_bottom(state.session_id, force=force_scroll)
             
         return bubble
 
@@ -5458,15 +5519,18 @@ class MainWindow(QMainWindow):
         if not state: return
         toast = SystemToast(text, type)
         state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast)
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
         self.process_ui_events(force=True)
         if auto_close_ms: QTimer.singleShot(auto_close_ms, toast.deleteLater)
 
     def append_log(self, text):
         print(f"[Log] {text}")
 
-    def process_agent_logic(self, user_text):
+    def process_agent_logic(self, user_text, turn_id=None):
         state = self.get_current_session()
         if not state: return
+        if turn_id is None:
+            turn_id = state.active_turn_id
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         self.set_session_phase("Preparing", state.session_id)
@@ -5477,16 +5541,17 @@ class MainWindow(QMainWindow):
         # Insert "Thinking" bubble
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
+        self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
 
         state.llm_worker = LLMWorker(state.messages, self.config_manager, self.workspace_dir)
         if state.session_id == self.current_session_id:
             self.llm_worker = state.llm_worker
         session_id = state.session_id
-        state.llm_worker.finished_signal.connect(lambda result, sid=session_id: self.handle_llm_response(result, sid))
-        state.llm_worker.content_signal.connect(lambda text, sid=session_id: self.handle_content_signal(text, sid))
+        state.llm_worker.finished_signal.connect(lambda result, sid=session_id, tid=turn_id: self.handle_llm_response(result, sid, tid))
+        state.llm_worker.content_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
         state.llm_worker.step_signal.connect(self.append_log)
-        state.llm_worker.thinking_signal.connect(lambda text, sid=session_id: self.handle_thinking_signal(text, sid))
+        state.llm_worker.thinking_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid))
         state.llm_worker.skill_used_signal.connect(lambda name, sid=session_id: self.handle_skill_used(name, sid))
         state.llm_worker.tool_call_signal.connect(lambda data, sid=session_id: self.add_tool_card(data, sid))
         state.llm_worker.tool_result_signal.connect(lambda data, sid=session_id: self.update_tool_card(data, sid))
@@ -5497,9 +5562,11 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
              self.normalize_session_ui(state)
 
-    def process_daemon_logic(self, user_text):
+    def process_daemon_logic(self, user_text, turn_id=None):
         state = self.get_current_session()
         if not state: return
+        if turn_id is None:
+            turn_id = state.active_turn_id
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         self.set_session_phase("Preparing", state.session_id)
@@ -5508,12 +5575,13 @@ class MainWindow(QMainWindow):
             self.current_thinking_buffer = ""
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
+        self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
         state.daemon_running = True
         state.daemon_worker = DaemonStreamWorker(self.daemon_client, state.session_id, user_text, self.workspace_dir)
-        state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id: self.handle_daemon_response(result, sid))
-        state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id: self.handle_thinking_signal(text, sid))
-        state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id: self.handle_content_signal(text, sid))
+        state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid))
+        state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid))
+        state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
         state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
         state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
         state.daemon_worker.confirmation_signal.connect(lambda cid, msg, sid=state.session_id: self.handle_daemon_confirmation_request(cid, msg, sid))
@@ -5521,16 +5589,18 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
-    def handle_daemon_response(self, result, session_id=None):
+    def handle_daemon_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if turn_id is not None and turn_id != state.active_turn_id:
+            return
         state.daemon_running = False
         state.daemon_worker = None
         if "error" in result and str(result.get("error", "")).lower().find("daemon") >= 0:
             self.daemon_available = False
         if isinstance(result, dict) and not result.get("_streamed"):
             result["_from_daemon"] = True
-        self.handle_llm_response(result, session_id)
+        self.handle_llm_response(result, session_id, turn_id)
 
     def handle_worker_output(self, text, session_id=None):
         self.append_log(f"[Worker] {text}")
@@ -5579,18 +5649,26 @@ class MainWindow(QMainWindow):
                 if hasattr(state.last_agent_bubble, 'add_sub_agent_indicator'):
                     state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
 
-    def handle_content_signal(self, text, session_id=None):
+    def handle_content_signal(self, text, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if turn_id is not None and turn_id != state.active_turn_id:
+            return
+        if turn_id is not None and turn_id <= state.completed_turn_id:
+            return
         state.current_content_buffer += text
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
         if state.session_id == self.current_session_id:
             self.current_content_buffer = state.current_content_buffer
 
-    def handle_thinking_signal(self, text, session_id=None):
+    def handle_thinking_signal(self, text, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if turn_id is not None and turn_id != state.active_turn_id:
+            return
+        if turn_id is not None and turn_id <= state.completed_turn_id:
+            return
         delta = text or ""
         if delta.strip():
             self.set_session_phase("Analyzing", state.session_id)
@@ -5609,6 +5687,7 @@ class MainWindow(QMainWindow):
             state.temp_thinking_bubble.set_main_content(state.current_content_buffer)
         elif state.last_agent_bubble:
             state.last_agent_bubble.set_main_content(state.current_content_buffer)
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def flush_session_thinking(self, session_id):
         state = self.get_session(session_id)
@@ -5622,10 +5701,109 @@ class MainWindow(QMainWindow):
             state.temp_thinking_bubble.update_thinking(delta)
         elif state.last_agent_bubble:
             state.last_agent_bubble.update_thinking(delta)
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
 
-    def handle_llm_response(self, result, session_id=None):
+    def _message_signature_for_merge(self, message):
+        if not isinstance(message, dict):
+            return None
+        role = message.get("role") or ""
+        signature = {
+            "role": role,
+            "content": message.get("content") or "",
+            "tool_call_id": message.get("tool_call_id") or "",
+        }
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            normalized_calls = []
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                arguments = function.get("arguments")
+                if isinstance(arguments, dict):
+                    try:
+                        arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+                    except Exception:
+                        arguments = str(arguments)
+                elif arguments is None:
+                    arguments = ""
+                normalized_calls.append(
+                    {
+                        "id": tool_call.get("id") or "",
+                        "type": tool_call.get("type") or "function",
+                        "name": function.get("name") or "",
+                        "arguments": arguments,
+                    }
+                )
+            signature["tool_calls"] = normalized_calls
+        try:
+            return json.dumps(signature, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return f"{role}:{signature.get('content', '')}"
+
+    def _merge_generated_messages(self, existing_messages, generated_messages):
+        if not isinstance(generated_messages, list):
+            return []
+        new_messages = [msg for msg in generated_messages if isinstance(msg, dict)]
+        if not new_messages:
+            return []
+
+        existing_ids = {
+            msg.get("id")
+            for msg in (existing_messages or [])
+            if isinstance(msg, dict) and msg.get("id")
+        }
+        if existing_ids:
+            new_messages = [
+                msg for msg in new_messages
+                if not msg.get("id") or msg.get("id") not in existing_ids
+            ]
+            if not new_messages:
+                return []
+
+        existing_signatures = [
+            sig
+            for sig in (self._message_signature_for_merge(msg) for msg in (existing_messages or []))
+            if sig is not None
+        ]
+        new_signatures = [
+            sig
+            for sig in (self._message_signature_for_merge(msg) for msg in new_messages)
+            if sig is not None
+        ]
+
+        overlap = 0
+        max_overlap = min(len(existing_signatures), len(new_signatures))
+        for size in range(max_overlap, 0, -1):
+            if existing_signatures[-size:] == new_signatures[:size]:
+                overlap = size
+                break
+
+        delta_messages = new_messages[overlap:]
+        if not delta_messages:
+            return []
+
+        deduped_delta = []
+        tail_signature = existing_signatures[-1] if existing_signatures else None
+        for msg in delta_messages:
+            msg_signature = self._message_signature_for_merge(msg)
+            if msg_signature is None:
+                continue
+            if msg_signature == tail_signature:
+                continue
+            deduped_delta.append(msg)
+            tail_signature = msg_signature
+        return deduped_delta
+
+    def handle_llm_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state: return
+        if turn_id is not None:
+            if turn_id != state.active_turn_id:
+                return
+            if turn_id <= state.completed_turn_id:
+                return
+            state.completed_turn_id = turn_id
         if state.content_flush_timer and state.content_flush_timer.isActive():
             state.content_flush_timer.stop()
         if state.thinking_flush_timer and state.thinking_flush_timer.isActive():
@@ -5651,6 +5829,7 @@ class MainWindow(QMainWindow):
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
             bubble.set_main_content(f"⚠️ Error: {result['error']}")
+            self.request_session_scroll_to_bottom(state.session_id, force=False)
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
             self.set_session_phase("Error", state.session_id)
@@ -5663,7 +5842,11 @@ class MainWindow(QMainWindow):
         content_parts = result.get("content_parts") if isinstance(result.get("content_parts"), list) else []
         role = result.get("role", "assistant")
         duration = result.get("duration", None)
-        generated_messages = result.get("generated_messages", [])
+        generated_messages_raw = result.get("generated_messages", [])
+        generated_messages = self._merge_generated_messages(
+            state.messages,
+            generated_messages_raw,
+        )
 
         if not (content or "").strip() and generated_messages:
             for msg in reversed(generated_messages):
@@ -5727,6 +5910,7 @@ class MainWindow(QMainWindow):
         else:
             bubble.update_thinking(duration=duration, is_final=True)
             bubble.set_main_content(content, content_parts=content_parts)
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:
             t_id = tc.get("id")
@@ -5746,17 +5930,9 @@ class MainWindow(QMainWindow):
                 }, session_id=state.session_id)
 
         if generated_messages:
-            deduped_generated_messages = []
-            for msg in generated_messages:
-                if (
-                    msg.get("role") == "user"
-                    and state.messages
-                    and state.messages[-1].get("role") == "user"
-                    and (msg.get("content") or "") == (state.messages[-1].get("content") or "")
-                ):
-                    continue
-                deduped_generated_messages.append(msg)
-            state.messages.extend(deduped_generated_messages)
+            state.messages.extend(generated_messages)
+        elif isinstance(generated_messages_raw, list) and generated_messages_raw:
+            pass
         else:
             state.messages.append({
                 "role": role, 
@@ -5764,6 +5940,7 @@ class MainWindow(QMainWindow):
                 "reasoning": reasoning,
                 "content_parts": content_parts
             })
+        state.messages = self.chat_storage.normalize_messages(state.messages)
         self.save_chat_history()
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
@@ -5813,6 +5990,7 @@ class MainWindow(QMainWindow):
             state.last_agent_bubble.code_output_edit.append(text)
             state.last_agent_bubble.code_output_edit.adjustHeight()
             self.process_ui_events()
+            self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def handle_code_finished(self, session_id=None):
         state = self.get_session(session_id)

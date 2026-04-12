@@ -12,7 +12,7 @@ from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir
 from core.im_session_key import parse_im_session_key
-from core.interaction import bridge
+from core.interaction import interaction_service
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -51,7 +51,6 @@ class DaemonState:
         self.chat_storage = ChatStorage(db_path)
         self.sessions = {}
         self.active_workers = {}
-        self.pending_confirmations = {}
         self.lock = threading.Lock()
         self.suspended = False
         self.last_activity = time.time()
@@ -144,9 +143,7 @@ class DaemonState:
     def stop_session(self, session_id):
         with self.lock:
             worker = self.active_workers.get(session_id)
-            pending_ids = [cid for cid, entry in self.pending_confirmations.items() if entry.get("session_id") == session_id]
-        for cid in pending_ids:
-            self.resolve_confirmation(cid, False)
+        interaction_service.cancel_session_requests(session_id, reason="cancelled")
         if worker:
             try:
                 worker.stop()
@@ -154,37 +151,6 @@ class DaemonState:
                 _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
             return True
         return False
-    
-    def create_confirmation(self, confirm_id, session_id):
-        event = threading.Event()
-        with self.lock:
-            self.pending_confirmations[confirm_id] = {
-                "event": event,
-                "result": False,
-                "session_id": session_id
-            }
-        return event
-    
-    def resolve_confirmation(self, confirm_id, result):
-        with self.lock:
-            entry = self.pending_confirmations.get(confirm_id)
-        if not entry:
-            return False
-        entry["result"] = result
-        entry["event"].set()
-        return True
-    
-    def wait_for_confirmation(self, confirm_id, timeout=None):
-        with self.lock:
-            entry = self.pending_confirmations.get(confirm_id)
-        if not entry:
-            return None
-        resolved = entry["event"].wait(timeout)
-        with self.lock:
-            entry = self.pending_confirmations.pop(confirm_id, entry)
-        if not resolved:
-            return None
-        return entry.get("result", False)
 
     def _run_worker_once(self, session_id, worker_messages, workspace_dir):
         result_holder = {}
@@ -195,7 +161,7 @@ class DaemonState:
             self.clear_active_worker(session_id)
             loop.quit()
 
-        worker = LLMWorker(worker_messages, self.config_manager, workspace_dir)
+        worker = LLMWorker(worker_messages, self.config_manager, workspace_dir, session_id=session_id)
         worker.finished_signal.connect(on_finished)
         self.set_active_worker(session_id, worker)
         worker.start()
@@ -495,7 +461,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 state.clear_active_worker(session_id)
                 done.set()
 
-            worker = LLMWorker(messages, state.config_manager, workspace_dir)
+            worker = LLMWorker(messages, state.config_manager, workspace_dir, session_id=session_id)
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
             worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
             worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
@@ -503,28 +469,14 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.output_signal.connect(lambda text: send_stream({"type": "log", "data": text}), Qt.DirectConnection)
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
 
-            def handle_confirmation_request(message):
+            def handle_interaction_request(payload):
                 if QThread.currentThread() != worker:
                     return
-                confirm_id = uuid.uuid4().hex
-                state.create_confirmation(confirm_id, session_id)
-                send_stream({"type": "confirm_request", "data": {"id": confirm_id, "message": message}})
-                timeout_seconds = state.config_manager.get("confirmation_timeout_seconds", 120)
-                try:
-                    timeout_seconds = float(timeout_seconds)
-                except Exception:
-                    timeout_seconds = 120.0
-                if timeout_seconds <= 0:
-                    timeout_seconds = 120.0
-                result = state.wait_for_confirmation(confirm_id, timeout=timeout_seconds)
-                if result is None:
-                    send_stream({"type": "error", "error": "Confirmation timed out. Conversation interrupted."})
-                    state.stop_session(session_id)
-                    bridge.respond(False)
-                    return
-                bridge.respond(result)
+                request_payload = dict(payload or {})
+                request_payload["session_id"] = session_id
+                send_stream({"type": "interaction_request", "data": request_payload})
 
-            bridge.request_confirmation_signal.connect(handle_confirmation_request, Qt.DirectConnection)
+            interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
             state.set_active_worker(session_id, worker)
             try:
                 worker.start()
@@ -532,9 +484,9 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 worker.wait(2000)
             finally:
                 try:
-                    bridge.request_confirmation_signal.disconnect(handle_confirmation_request)
+                    interaction_service.interaction_requested.disconnect(handle_interaction_request)
                 except Exception as e:
-                    _log_daemon(f"disconnect confirmation bridge failed session_id={session_id} error={e}")
+                    _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
             result = result_holder.get("result") or {"error": "No response"}
             if "error" not in result:
                 generated_messages = result.get("generated_messages", [])
@@ -560,14 +512,22 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             stopped = self.server.state.stop_session(session_id)
             self._send({"status": "ok", "stopped": stopped})
             return
-        if action == "confirm_response":
-            confirm_id = data.get("confirm_id")
+        if action == "respond_interaction":
+            request_id = data.get("request_id")
             result = data.get("result")
-            if not confirm_id:
-                self._send({"status": "error", "error": "Missing confirm_id"})
+            if not request_id:
+                self._send({"status": "error", "error": "Missing request_id"})
                 return
-            resolved = self.server.state.resolve_confirmation(confirm_id, result)
+            resolved = interaction_service.resolve_request(request_id, result)
             self._send({"status": "ok", "resolved": resolved})
+            return
+        if action == "get_pending_interaction":
+            session_id = data.get("session_id")
+            if not session_id:
+                self._send({"status": "error", "error": "Missing session_id"})
+                return
+            pending = interaction_service.get_pending_request(session_id)
+            self._send({"status": "ok", "pending": pending})
             return
         if action == "shutdown":
             self._send({"status": "ok"})
@@ -670,9 +630,15 @@ class DaemonClient:
         except Exception:
             return None
     
-    def confirm_response(self, confirm_id, result):
+    def respond_interaction(self, request_id, result):
         try:
-            return self._request({"action": "confirm_response", "confirm_id": confirm_id, "result": result})
+            return self._request({"action": "respond_interaction", "request_id": request_id, "result": result})
+        except Exception:
+            return None
+
+    def get_pending_interaction(self, session_id):
+        try:
+            return self._request({"action": "get_pending_interaction", "session_id": session_id})
         except Exception:
             return None
 

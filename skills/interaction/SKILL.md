@@ -3,7 +3,7 @@ name: interaction
 description: Provides interaction capabilities with the user.
 description_cn: 提供与用户进行交互（提问、确认）的能力。
 license: Apache-2.0
-allowed-tools: ask_user_confirmation, ask_user, publish_feishu_artifact
+allowed-tools: request_user_approval, request_user_input, publish_artifacts
 ---
 
 # Interaction Skill
@@ -12,24 +12,31 @@ This skill provides interaction capabilities with the user.
 
 ## Tools
 
-### ask_user_confirmation
-Ask the user for confirmation (Yes/No) or input about a specific action or question.
-If the user provides text input, it will be returned as "User replied: ...".
+### request_user_approval
+Ask the user to approve or reject a potentially important action.
 
 - **message** (string, required): The message to display to the user.
+- **title** (string, optional): dialog title.
+- **severity** (string, optional): risk level hint (`low` / `medium` / `high`).
+- **timeout_seconds** (number, optional): timeout before the request is cancelled.
+- **details** (string, optional): extra context for the approval dialog.
 
-### ask_user
-Alias of `ask_user_confirmation` for compatibility with model-generated tool names.
+### request_user_input
+Ask the user for text, a single choice, or multiple choices.
 
 - **message** (string, required): The message to display to the user.
+- **title** (string, optional): dialog title.
+- **input_mode** (string, optional): `text`, `choice`, or `multi_choice`.
+- **options** (array, optional): list of selectable options.
+- **allow_free_text** (boolean, optional): allow arbitrary free-text input.
+- **timeout_seconds** (number, optional): timeout before the request is cancelled.
 
-### publish_feishu_artifact
-Publish generated files/images for user delivery and rendering.
+### publish_artifacts
+Publish generated files/images for transcript rendering and optional IM delivery.
 Use this tool when:
 - A task produced files and user needs them delivered or displayed.
 - User asks to view image output or receive downloadable files.
 - This tool is the only supported delivery entry for file/image handoff.
-- This tool is Feishu-specific and should only be used for Feishu interactions.
 
 - **items** (array, required): list of artifacts. Each item supports:
   - `path` or `url`
@@ -37,13 +44,13 @@ Use this tool when:
   - `mime`
   - `subtype` (`image` recommended for images)
   - `caption`
-- **audience** (string, optional): `feishu` only (default: `feishu`)
-- **tool_summary** (string, optional): summary text for timeline display
-- **card_title** (string, optional): title used when sending post link messages
+- **audience** (string, optional): `auto`, `desktop`, or `feishu`
+- **summary** (string, optional): summary text for timeline display
+- **title** (string, optional): title used when sending IM post link messages
 
-接收目标由系统内置配置与运行时渠道上下文自动解析（优先 `feishu_receive_id_type` / `feishu_receive_id`，其次当前 IM 事件上下文），不允许通过工具参数传入。
+飞书接收目标由系统内置配置与运行时渠道上下文自动解析（优先 `feishu_receive_id_type` / `feishu_receive_id`，其次当前 IM 事件上下文），不允许通过工具参数传入。
 
 Output contract:
-- Must return JSON string with `source_tool="publish_feishu_artifact"`.
+- Must return a structured object with `source_tool="publish_artifacts"`.
 - Must include `content_parts` (file/tool_event) and `delivery_result`.
-- This tool is Feishu-only and does not target desktop delivery.
+- Desktop transcript always records artifacts even when no IM delivery target is available.

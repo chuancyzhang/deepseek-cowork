@@ -1,21 +1,10 @@
-from core.interaction import ask_user as _bridge_ask_user
 import json
 import mimetypes
 import os
 import requests
 import uuid
 
-
-def ask_user_confirmation(message):
-    result = _bridge_ask_user(message)
-    if result is True:
-        return "User confirmed (Yes)."
-    if result is False:
-        return "User denied (No)."
-    return f"User replied: {result}"
-
-def ask_user(message):
-    return ask_user_confirmation(message)
+from core.interaction import interaction_service
 
 
 def _cfg(_context, key, default=""):
@@ -31,6 +20,17 @@ def _cfg(_context, key, default=""):
         return default
 
 
+def _session_id(_context):
+    if not isinstance(_context, dict):
+        return ""
+    return (
+        _context.get("session_id")
+        or _context.get("conversation_id")
+        or _context.get("workspace_session_id")
+        or ""
+    )
+
+
 def _truncate_text(value, limit=800):
     if value is None:
         return value
@@ -44,6 +44,127 @@ def _safe_json(value):
         return json.dumps(value, ensure_ascii=False)
     except Exception:
         return str(value)
+
+
+def _result_preview(result):
+    if not isinstance(result, dict):
+        return str(result)
+    content = (result.get("content") or "").strip()
+    if content:
+        return content
+    selected = result.get("selected_options") or []
+    if selected:
+        return f"selected={', '.join(str(item) for item in selected)}"
+    text = (result.get("text") or "").strip()
+    if text:
+        return text
+    return _safe_json(result)
+
+
+def request_user_approval(
+    message,
+    title="",
+    severity="medium",
+    timeout_seconds=120,
+    details="",
+    _context=None,
+):
+    response = interaction_service.create_request(
+        _session_id(_context),
+        "approval",
+        message,
+        title=title or "请确认",
+        allow_free_text=False,
+        timeout_seconds=timeout_seconds,
+        source_tool="request_user_approval",
+        metadata={
+            "severity": (severity or "medium").strip().lower(),
+            "details": (details or "").strip(),
+        },
+    )
+    return {
+        "source_tool": "request_user_approval",
+        "content": "用户已批准操作。" if response.get("approved") else f"用户未批准操作（{response.get('status') or 'unknown'}）。",
+        "content_parts": [
+            {
+                "type": "tool_event",
+                "tool_name": "request_user_approval",
+                "status": response.get("status") or "completed",
+                "summary": _result_preview(response),
+            }
+        ],
+        "interaction_request": {
+            "kind": "approval",
+            "message": message,
+            "title": title or "请确认",
+            "severity": (severity or "medium").strip().lower(),
+            "details": (details or "").strip(),
+            "timeout_seconds": timeout_seconds,
+        },
+        "interaction_response": response,
+    }
+
+
+def request_user_input(
+    message,
+    title="",
+    input_mode="text",
+    options=None,
+    allow_free_text=True,
+    timeout_seconds=120,
+    _context=None,
+):
+    mode = (input_mode or "text").strip().lower()
+    if mode not in {"text", "choice", "multi_choice"}:
+        mode = "text"
+    normalized_options = []
+    for item in options or []:
+        if isinstance(item, dict):
+            normalized_options.append(
+                {
+                    "label": str(item.get("label") or item.get("value") or "").strip(),
+                    "value": str(item.get("value") or item.get("label") or "").strip(),
+                    "description": str(item.get("description") or "").strip(),
+                }
+            )
+        elif isinstance(item, str) and item.strip():
+            normalized_options.append({"label": item.strip(), "value": item.strip(), "description": ""})
+    response = interaction_service.create_request(
+        _session_id(_context),
+        mode,
+        message,
+        title=title or "需要你的输入",
+        options=normalized_options,
+        allow_free_text=bool(allow_free_text),
+        timeout_seconds=timeout_seconds,
+        source_tool="request_user_input",
+        metadata={"input_mode": mode},
+    )
+    selection_preview = response.get("selected_options") or []
+    response_summary = _result_preview(response)
+    if selection_preview:
+        response_summary = f"{response_summary} | options={', '.join(str(item) for item in selection_preview)}"
+    return {
+        "source_tool": "request_user_input",
+        "content": f"已收到用户输入：{response_summary}" if response.get("approved") else f"未收到有效输入（{response.get('status') or 'unknown'}）。",
+        "content_parts": [
+            {
+                "type": "tool_event",
+                "tool_name": "request_user_input",
+                "status": response.get("status") or "completed",
+                "summary": response_summary,
+            }
+        ],
+        "interaction_request": {
+            "kind": mode,
+            "message": message,
+            "title": title or "需要你的输入",
+            "options": normalized_options,
+            "allow_free_text": bool(allow_free_text),
+            "timeout_seconds": timeout_seconds,
+        },
+        "interaction_response": response,
+    }
 
 
 def _get_tenant_token(app_id, app_secret):
@@ -77,6 +198,7 @@ def _validate_receive(receive_id_type, receive_id):
         return "", "", "missing_receive_id"
     return rid_type, rid, ""
 
+
 def _resolve_receive_target(_context):
     receive_id_type_value = (_cfg(_context, "feishu_receive_id_type", "") or "").strip()
     receive_id_value = (_cfg(_context, "feishu_receive_id", "") or "").strip()
@@ -95,6 +217,7 @@ def _resolve_receive_target(_context):
     if not receive_id_type_value or not receive_id_value:
         return "", "", "missing_receive_target"
     return receive_id_type_value, receive_id_value, ""
+
 
 def _resolve_local_path(path, _context):
     raw = (path or "").strip()
@@ -116,9 +239,9 @@ def _resolve_local_path(path, _context):
     if workspace_dir:
         candidates.append(os.path.abspath(os.path.join(workspace_dir, raw)))
     candidates.append(os.path.abspath(raw))
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
     return candidates[0] if candidates else raw
 
 
@@ -155,6 +278,20 @@ def _upload_image(tenant_token, file_path):
         return None, _safe_json(body)
     except Exception as e:
         return None, str(e)
+
+
+def _guess_file_type(file_name):
+    ext = os.path.splitext(file_name or "")[1].lower()
+    mapping = {
+        ".mp4": "mp4",
+        ".pdf": "pdf",
+        ".doc": "doc",
+        ".docx": "doc",
+        ".xls": "xls",
+        ".xlsx": "xls",
+        ".opus": "opus",
+    }
+    return mapping.get(ext, "stream")
 
 
 def _upload_file(tenant_token, file_path):
@@ -220,18 +357,6 @@ def _is_image_item(subtype, mime, name):
     ext = os.path.splitext(name or "")[1].lower()
     return ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
 
-def _guess_file_type(file_name):
-    ext = os.path.splitext(file_name or "")[1].lower()
-    mapping = {
-        ".mp4": "mp4",
-        ".pdf": "pdf",
-        ".doc": "doc",
-        ".docx": "doc",
-        ".xls": "xls",
-        ".xlsx": "xls",
-        ".opus": "opus",
-    }
-    return mapping.get(ext, "stream")
 
 def _send_feishu_message(tenant_token, receive_id_type, receive_id, msg_type, content):
     if not tenant_token:
@@ -264,41 +389,47 @@ def _send_feishu_message(tenant_token, receive_id_type, receive_id, msg_type, co
         return False, str(e)
 
 
-def publish_feishu_artifact(
+def publish_artifacts(
     items,
-    audience="feishu",
-    tool_summary="",
-    card_title="AI 助手交付物",
-    _context=None
+    audience="auto",
+    summary="",
+    title="AI 助手交付物",
+    _context=None,
 ):
     if isinstance(items, str):
         try:
             items = json.loads(items)
         except Exception:
-            return "Error: items must be a list or valid JSON list."
+            return {"error": "items must be a list or valid JSON list."}
     if not isinstance(items, list) or not items:
-        return "Error: items must be a non-empty list."
-    audience_value = (audience or "feishu").strip().lower()
-    if audience_value != "feishu":
-        return "Error: audience must be feishu."
+        return {"error": "items must be a non-empty list."}
+
+    audience_value = (audience or "auto").strip().lower()
+    if audience_value not in {"auto", "desktop", "feishu"}:
+        return {"error": "audience must be auto, desktop, or feishu."}
+
     app_id = (_cfg(_context, "feishu_app_id", "") or "").strip()
     app_secret = (_cfg(_context, "feishu_app_secret", "") or "").strip()
     receive_id_type_value, receive_id_value, receive_error = _resolve_receive_target(_context)
     if not receive_error:
         receive_id_type_value, receive_id_value, receive_error = _validate_receive(receive_id_type_value, receive_id_value)
+
+    should_try_feishu = audience_value in {"auto", "feishu"}
     tenant_token = None
     token_reason = ""
-    if app_id and app_secret and not receive_error:
+    if should_try_feishu and app_id and app_secret and not receive_error:
         tenant_token, token_reason = _get_tenant_token(app_id, app_secret)
-    delivery_enabled = bool(tenant_token and not receive_error)
+    feishu_enabled = bool(should_try_feishu and tenant_token and not receive_error)
+
     content_parts = []
     normalized_items = []
     failed = []
     success = []
     skipped = []
+
     for idx, raw_item in enumerate(items):
         if not isinstance(raw_item, dict):
-            return f"Error: items[{idx}] must be an object."
+            return {"error": f"items[{idx}] must be an object."}
         path_input = (raw_item.get("path") or "").strip()
         path = _resolve_local_path(path_input, _context) if path_input else ""
         url = (raw_item.get("url") or "").strip()
@@ -307,10 +438,11 @@ def publish_feishu_artifact(
         subtype = (raw_item.get("subtype") or "").strip().lower()
         caption = (raw_item.get("caption") or "").strip()
         size = raw_item.get("size")
+
         if path_input and not os.path.exists(path):
-            return f"Error: file not found: {path_input}. Please ensure the file exists before publish_feishu_artifact."
+            return {"error": f"file not found: {path_input}. Please ensure the file exists before publish_artifacts."}
         if not path and not url:
-            return f"Error: items[{idx}] requires path or url."
+            return {"error": f"items[{idx}] requires path or url."}
         if not name:
             if path:
                 name = os.path.basename(path)
@@ -325,6 +457,7 @@ def publish_feishu_artifact(
                 size = os.path.getsize(path)
             except Exception:
                 size = None
+
         normalized = {
             "type": "file",
             "subtype": subtype,
@@ -335,13 +468,14 @@ def publish_feishu_artifact(
             "size": size,
             "caption": caption,
             "audience": audience_value,
-            "artifact_source": "publish_feishu_artifact",
+            "artifact_source": "publish_artifacts",
         }
         normalized_items.append(normalized)
+
         is_image = _is_image_item(subtype, mime, name)
         delivered = False
         reason = ""
-        if delivery_enabled and path and os.path.exists(path):
+        if feishu_enabled and path and os.path.exists(path):
             if is_image:
                 image_key, upload_reason = _upload_image(tenant_token, path)
                 if image_key:
@@ -376,13 +510,13 @@ def publish_feishu_artifact(
                         reason = f"send_file_failed:{send_reason}"
                 else:
                     reason = f"upload_file_failed:{upload_reason}"
-        if delivery_enabled and (not delivered) and url:
+        if feishu_enabled and (not delivered) and url:
             ok, send_reason = _send_feishu_message(
                 tenant_token,
                 receive_id_type_value,
                 receive_id_value,
                 "post",
-                _as_post_link(card_title, name, url, caption=caption)
+                _as_post_link(title, name, url, caption=caption)
             )
             if ok:
                 delivered = True
@@ -390,42 +524,142 @@ def publish_feishu_artifact(
             else:
                 reason = f"send_post_failed:{send_reason}"
         if not delivered:
-            if not reason:
-                if not delivery_enabled:
+            if audience_value == "desktop":
+                reason = "desktop_only"
+                skipped.append({"name": name, "reason": reason})
+            elif not reason:
+                if should_try_feishu and not feishu_enabled:
                     reason = "delivery_skipped_missing_runtime_target_or_credentials"
                     skipped.append({"name": name, "reason": reason})
-                else:
+                elif should_try_feishu:
                     reason = "delivery_failed"
                     failed.append({"name": name, "reason": reason})
-            elif delivery_enabled:
+                else:
+                    reason = "desktop_only"
+                    skipped.append({"name": name, "reason": reason})
+            elif feishu_enabled:
                 failed.append({"name": name, "reason": reason})
+            else:
+                skipped.append({"name": name, "reason": reason})
         normalized["delivered"] = delivered
         normalized["delivery_reason"] = reason
-    summary = (tool_summary or "").strip() or f"Prepared {len(normalized_items)} artifact(s) for delivery."
+
+    summary_text = (summary or "").strip() or f"Prepared {len(normalized_items)} artifact(s) for delivery."
     content_parts.append(
         {
             "type": "tool_event",
-            "tool_name": "publish_feishu_artifact",
+            "tool_name": "publish_artifacts",
             "status": "completed",
-            "summary": summary,
-            "source_tool": "publish_feishu_artifact",
+            "summary": summary_text,
+            "source_tool": "publish_artifacts",
         }
     )
     content_parts.extend(normalized_items)
-    ok_flag = len(failed) == 0
+
     delivery_result = {
+        "desktop": {
+            "ok": True,
+            "reason": "artifacts recorded in transcript",
+            "count": len(normalized_items),
+        },
         "feishu": {
-            "ok": ok_flag,
+            "ok": len(failed) == 0,
+            "enabled": feishu_enabled,
             "reason": f"success={len(success)} failed={len(failed)} skipped={len(skipped)} receive_error={receive_error or 'none'} token_error={token_reason or 'none'}",
             "success": success,
             "failed": failed,
-            "skipped": skipped
-        }
+            "skipped": skipped,
+        },
     }
-    payload = {
-        "source_tool": "publish_feishu_artifact",
-        "content": f"已处理 {len(normalized_items)} 个文件输出，成功 {len(success)}，失败 {len(failed)}，跳过 {len(skipped)}。",
+    return {
+        "source_tool": "publish_artifacts",
+        "content": f"已处理 {len(normalized_items)} 个文件输出，飞书成功 {len(success)}，失败 {len(failed)}，跳过 {len(skipped)}。",
         "content_parts": content_parts,
         "delivery_result": delivery_result,
     }
-    return json.dumps(payload, ensure_ascii=False)
+
+
+TOOL_EXPORTS = [
+    {
+        "name": "request_user_approval",
+        "handler": request_user_approval,
+        "description": "Ask the user to approve or reject a potentially important action.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The approval message shown to the user."},
+                "title": {"type": "string", "description": "Optional short dialog title."},
+                "severity": {"type": "string", "description": "Risk level hint: low, medium, or high."},
+                "timeout_seconds": {"type": "number", "description": "How long to wait before timing out."},
+                "details": {"type": "string", "description": "Optional extra context shown with the approval request."},
+            },
+            "required": ["message"],
+        },
+        "kind": "interaction_request",
+        "requires_user_interaction": True,
+        "result_format": "structured_json",
+    },
+    {
+        "name": "request_user_input",
+        "handler": request_user_input,
+        "description": "Ask the user for text, a single choice, or multiple choices.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The prompt shown to the user."},
+                "title": {"type": "string", "description": "Optional short dialog title."},
+                "input_mode": {"type": "string", "description": "One of text, choice, or multi_choice."},
+                "options": {
+                    "type": "array",
+                    "description": "Optional list of choices.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "value": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["label"],
+                    },
+                },
+                "allow_free_text": {"type": "boolean", "description": "Whether arbitrary text is allowed besides listed options."},
+                "timeout_seconds": {"type": "number", "description": "How long to wait before timing out."},
+            },
+            "required": ["message"],
+        },
+        "kind": "interaction_request",
+        "requires_user_interaction": True,
+        "result_format": "structured_json",
+    },
+    {
+        "name": "publish_artifacts",
+        "handler": publish_artifacts,
+        "description": "Publish generated files, images, or links to transcript and optional IM delivery channels.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "Artifacts to publish.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "url": {"type": "string"},
+                            "name": {"type": "string"},
+                            "mime": {"type": "string"},
+                            "subtype": {"type": "string"},
+                            "caption": {"type": "string"},
+                        },
+                    },
+                },
+                "audience": {"type": "string", "description": "One of auto, desktop, or feishu."},
+                "summary": {"type": "string", "description": "Summary text for timeline display."},
+                "title": {"type": "string", "description": "Title used for IM post link messages."},
+            },
+            "required": ["items"],
+        },
+        "kind": "artifact_delivery",
+        "result_format": "structured_json",
+    },
+]

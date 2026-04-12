@@ -5,7 +5,7 @@ from pptx import Presentation
 from pptx.util import Inches
 from pypdf import PdfReader
 from core.env_utils import ensure_package_installed
-from core.interaction import ask_user
+from skills.interaction.impl import request_user_approval
 
 # Lazy import helpers
 def get_openpyxl():
@@ -140,7 +140,14 @@ def delete_file(workspace_dir, path, _context=None):
             
         # Ask for confirmation
         # Strict check for True (Yes button). Any text response or False counts as cancellation for safety.
-        if ask_user(f"⚠️ DANGER: Are you sure you want to delete '{path}'?") is not True:
+        approval = request_user_approval(
+            f"⚠️ DANGER: Are you sure you want to delete '{path}'?",
+            title="删除确认",
+            severity="high",
+            details=f"目标路径: {path}",
+            _context=_context,
+        )
+        if not isinstance(approval, dict) or not bool((approval.get("interaction_response") or {}).get("approved")):
             return "Error: Deletion cancelled by user."
 
         if os.path.isfile(abs_path):

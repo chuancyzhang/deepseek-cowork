@@ -96,6 +96,78 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(sm.call_tool("echo", {"message": "hello"}, context={}), "ECHO:hello")
         self.assertEqual(sm.get_skill_of_tool("echo"), "echo-tools")
 
+    def test_explicit_tool_exports_are_registered_before_legacy_reflection(self):
+        skill_dir = os.path.join(self.skills_dir, "interaction-tools")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: interaction-tools\ndescription: Explicit tool exports\nkind: knowledge\nallowed-tools: [structured_echo, legacy_echo]\n---\n"
+                "# Skill Purpose\nUse this skill for explicit tool export coverage.\n"
+            )
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "interaction-tools",
+                    "kind": "knowledge",
+                    "description": "Explicit tool exports",
+                    "tool_refs": ["structured_echo", "legacy_echo"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        with open(os.path.join(skill_dir, "impl.py"), "w", encoding="utf-8") as f:
+            f.write(
+                "def _structured_echo_impl(message, _context=None):\n"
+                "    return {'echo': message, 'session_id': (_context or {}).get('session_id', '')}\n\n"
+                "def legacy_echo(message):\n"
+                "    return f'LEGACY:{message}'\n\n"
+                "TOOL_EXPORTS = [\n"
+                "    {\n"
+                "        'name': 'structured_echo',\n"
+                "        'handler': _structured_echo_impl,\n"
+                "        'description': 'Structured echo',\n"
+                "        'parameters': {\n"
+                "            'type': 'object',\n"
+                "            'properties': {\n"
+                "                'message': {'type': 'string'},\n"
+                "                'options': {\n"
+                "                    'type': 'array',\n"
+                "                    'items': {\n"
+                "                        'type': 'object',\n"
+                "                        'properties': {'label': {'type': 'string'}},\n"
+                "                    },\n"
+                "                },\n"
+                "            },\n"
+                "            'required': ['message'],\n"
+                "        },\n"
+                "        'requires_user_interaction': True,\n"
+                "        'result_format': 'structured_json',\n"
+                "    }\n"
+                "]\n"
+            )
+
+        sm = self._build_manager()
+
+        tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
+        self.assertIn("structured_echo", tool_names)
+        self.assertIn("legacy_echo", tool_names)
+
+        structured_record = sm.tool_records["structured_echo"]
+        self.assertTrue(structured_record["requires_user_interaction"])
+        self.assertEqual(structured_record["result_format"], "structured_json")
+        self.assertIn("options", structured_record["parameters_schema"]["properties"])
+
+        structured_result = sm.call_tool(
+            "structured_echo",
+            {"message": "hello"},
+            context={"session_id": "session-9"},
+        )
+        self.assertEqual(structured_result["echo"], "hello")
+        self.assertEqual(structured_result["session_id"], "session-9")
+        self.assertEqual(sm.call_tool("legacy_echo", {"message": "hi"}, context={}), "LEGACY:hi")
+
     def test_record_experience_creates_structured_entry_and_summary(self):
         skill_dir = os.path.join(self.skills_dir, "ops-guide")
         os.makedirs(skill_dir, exist_ok=True)

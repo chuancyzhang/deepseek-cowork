@@ -4,6 +4,7 @@ import sys
 import tempfile
 import shutil
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
@@ -11,10 +12,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
-from core.interaction import InteractionBridge
+from core.interaction import InteractionBridge, interaction_service, parse_interaction_reply
 from core import env_utils
 from core import sandbox_runtime
-from core.daemon import DaemonState
+from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.chat_storage import ChatStorage
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
 
@@ -162,31 +163,180 @@ class _DaemonConfigStub:
     def get(self, key, default=None):
         return default
 
-class TestDaemonConfirmation(unittest.TestCase):
+class TestInteractionService(unittest.TestCase):
+    def setUp(self):
+        self.service = InteractionBridge()
+
+    def _wait_for_pending(self, session_id, timeout=1.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            pending = self.service.get_pending_request(session_id)
+            if pending:
+                return pending
+            time.sleep(0.01)
+        self.fail(f"Pending interaction for {session_id} was not created in time.")
+
+    def test_request_resolve_roundtrip(self):
+        result_holder = {}
+
+        def worker():
+            result_holder["result"] = self.service.create_request(
+                "session-a",
+                "approval",
+                "continue?",
+                timeout_seconds=1,
+            )
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        pending = self._wait_for_pending("session-a")
+        self.assertTrue(self.service.resolve_request(pending["request_id"], True))
+        thread.join(1)
+
+        result = result_holder["result"]
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(result["approved"])
+
+    def test_sessions_are_isolated(self):
+        results = {}
+
+        def worker(session_id):
+            results[session_id] = self.service.create_request(
+                session_id,
+                "text",
+                f"input for {session_id}",
+                timeout_seconds=1,
+            )
+
+        thread_a = threading.Thread(target=worker, args=("session-a",))
+        thread_b = threading.Thread(target=worker, args=("session-b",))
+        thread_a.start()
+        thread_b.start()
+
+        pending_a = self._wait_for_pending("session-a")
+        pending_b = self._wait_for_pending("session-b")
+        self.assertEqual(pending_a["session_id"], "session-a")
+        self.assertEqual(pending_b["session_id"], "session-b")
+        self.assertNotEqual(pending_a["request_id"], pending_b["request_id"])
+
+        self.service.resolve_request(pending_a["request_id"], "alpha")
+        self.service.resolve_request(pending_b["request_id"], "beta")
+        thread_a.join(1)
+        thread_b.join(1)
+
+        self.assertEqual(results["session-a"]["text"], "alpha")
+        self.assertEqual(results["session-b"]["text"], "beta")
+
+    def test_timeout_returns_timeout_payload(self):
+        result = self.service.create_request(
+            "session-timeout",
+            "approval",
+            "continue?",
+            timeout_seconds=0.05,
+        )
+        self.assertEqual(result["status"], "timeout")
+        self.assertFalse(result["approved"])
+
+    def test_cancel_session_requests_unblocks_waiter(self):
+        result_holder = {}
+
+        def worker():
+            result_holder["result"] = self.service.create_request(
+                "session-cancel",
+                "choice",
+                "pick one",
+                options=[{"label": "Alpha", "value": "alpha"}],
+                timeout_seconds=1,
+            )
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self._wait_for_pending("session-cancel")
+        self.assertEqual(self.service.cancel_session_requests("session-cancel"), 1)
+        thread.join(1)
+
+        result = result_holder["result"]
+        self.assertEqual(result["status"], "cancelled")
+        self.assertFalse(result["approved"])
+
+    def test_invalid_request_id_is_rejected(self):
+        self.assertFalse(self.service.resolve_request("missing-request", True))
+
+    def test_parse_interaction_reply_rejects_invalid_choice(self):
+        payload, valid, error = parse_interaction_reply(
+            {
+                "request_id": "req-choice",
+                "kind": "choice",
+                "options": [{"label": "Alpha", "value": "alpha"}],
+                "allow_free_text": False,
+            },
+            "unknown",
+        )
+        self.assertFalse(valid)
+        self.assertEqual(payload["status"], "invalid")
+        self.assertIn("choice", error)
+
+
+class TestDaemonState(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.state = DaemonState(_DaemonConfigStub(self.temp_dir))
+
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-    def test_wait_for_confirmation_timeout_returns_none(self):
-        confirm_id = "c-timeout"
-        self.state.create_confirmation(confirm_id, "s1")
-        result = self.state.wait_for_confirmation(confirm_id, timeout=0.01)
-        self.assertIsNone(result)
-        self.assertNotIn(confirm_id, self.state.pending_confirmations)
-    def test_wait_for_confirmation_resolved_returns_value(self):
-        confirm_id = "c-ok"
-        self.state.create_confirmation(confirm_id, "s1")
-        timer = threading.Timer(0.01, lambda: self.state.resolve_confirmation(confirm_id, True))
-        timer.start()
-        try:
-            result = self.state.wait_for_confirmation(confirm_id, timeout=1)
-        finally:
-            timer.cancel()
-        self.assertTrue(result)
+
     def test_is_context_overflow_error(self):
         self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
         self.assertFalse(self.state._is_context_overflow_error({"error": "network timeout"}))
+
+
+class TestDaemonInteractionRoundtrip(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.state = DaemonState(_DaemonConfigStub(self.temp_dir))
+        self.server = DaemonServer(("127.0.0.1", 0), DaemonRequestHandler, self.state)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address
+        self.client = DaemonClient(host=host, port=port, timeout=1)
+
+    def tearDown(self):
+        interaction_service.cancel_session_requests("daemon-session-test", reason="cancelled")
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=1)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_get_pending_interaction_and_respond_roundtrip(self):
+        result_holder = {}
+
+        def worker():
+            result_holder["result"] = interaction_service.create_request(
+                "daemon-session-test",
+                "approval",
+                "continue?",
+                timeout_seconds=1,
+            )
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        pending = None
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            response = self.client.get_pending_interaction("daemon-session-test")
+            pending = (response or {}).get("pending") if isinstance(response, dict) else None
+            if pending:
+                break
+            time.sleep(0.01)
+        self.assertIsNotNone(pending)
+
+        ack = self.client.respond_interaction(pending["request_id"], True)
+        thread.join(1)
+
+        self.assertEqual(ack["status"], "ok")
+        self.assertTrue(ack["resolved"])
+        self.assertTrue(result_holder["result"]["approved"])
+        self.assertEqual(result_holder["result"]["status"], "completed")
 
 class TestImSessionKey(unittest.TestCase):
     def test_build_and_parse_im_session_key(self):

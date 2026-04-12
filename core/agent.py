@@ -294,13 +294,14 @@ class LLMWorker(QThread):
     agent_state_signal = Signal(dict) # Signal to report sub-agent status
     abort_signal = Signal() # Signal emitted when the worker is stopped
 
-    def __init__(self, messages, config_manager, workspace_dir=None, parent_agent_id=None):
+    def __init__(self, messages, config_manager, workspace_dir=None, parent_agent_id=None, session_id=None):
         super().__init__()
         self.messages = messages
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
         self.workspace_dir = workspace_dir
         self.parent_agent_id = parent_agent_id
+        self.session_id = session_id or ""
         
         # Flags for control
         self.is_paused = False
@@ -411,8 +412,8 @@ class LLMWorker(QThread):
             "",
             "策略 [历史检索]: 当用户需要回忆之前讨论内容时，优先使用 'query_history' 工具进行检索。",
             "",
-            "策略 [交互]: 如果你需要向用户提问或获取确认（例如：删除文件、澄清需求或下一步操作），你必须使用 'ask_user_confirmation' 工具。",
-            "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。请使用工具来触发弹出对话框。",
+            "策略 [交互]: 如果你需要向用户获取确认，请使用 'request_user_approval'。如果你需要向用户提问、收集文本或选项，请使用 'request_user_input'。",
+            "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。若需要交付文件、图片或链接，请使用 'publish_artifacts'。",
             "",
             "策略 [思考规范]:",
             "1. 你的思考过程 (Reasoning) 仅用于分析问题、规划步骤和反思结果。",
@@ -690,6 +691,7 @@ class LLMWorker(QThread):
                                 name, 
                                 args, 
                                 context={
+                                    "session_id": self.session_id,
                                     "step_signal": self.step_signal, 
                                     "config_manager": self.config_manager,
                                     "skill_manager": self.skill_manager,
@@ -700,13 +702,23 @@ class LLMWorker(QThread):
                             )
                             end_tool_time = time.time()
                             duration_tool = end_tool_time - start_tool_time
+
+                            result_obj = result if isinstance(result, dict) else None
+                            if isinstance(result, dict):
+                                try:
+                                    result_text = json.dumps(result, ensure_ascii=False)
+                                except Exception:
+                                    result_text = str(result)
+                            else:
+                                result_text = str(result)
                             
                             # Emit Tool Result Signal
                             self.tool_result_signal.emit({
                                 "id": tool.id,
                                 "name": name,
                                 "args": args,
-                                "result": str(result),
+                                "result": result_text,
+                                "result_obj": result_obj,
                                 "meta": {
                                     "start_time": start_tool_time,
                                     "end_time": end_tool_time,
@@ -718,7 +730,8 @@ class LLMWorker(QThread):
                                 "id": uuid.uuid4().hex,
                                 "role": "tool",
                                 "tool_call_id": tool.id,
-                                "content": str(result),
+                                "content": result_text,
+                                "result_obj": result_obj,
                                 "meta": {
                                     "start_time": start_tool_time,
                                     "end_time": end_tool_time,
@@ -727,7 +740,7 @@ class LLMWorker(QThread):
                             }
                             current_messages.append(tool_msg)
                             generated_messages.append(tool_msg)
-                            self.step_signal.emit(f"Tool Result: {result}")
+                            self.step_signal.emit(f"Tool Result: {result_text}")
                         # Loop continues to let LLM see tool results
                         continue
                     else:

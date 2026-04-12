@@ -591,6 +591,55 @@ class SkillManager:
             "skill_refs": [skill_name],
         }
 
+    def _register_explicit_tool_export(self, skill_name, export):
+        if not isinstance(export, dict):
+            return
+        tool_name = str(export.get("name") or "").strip()
+        func = export.get("handler")
+        if not tool_name or not callable(func):
+            return
+        if tool_name in self.tools:
+            print(
+                f"[SkillManager] Duplicate explicit tool '{tool_name}' from skill '{skill_name}' skipped; already provided by '{self.tool_to_skill_map.get(tool_name)}'."
+            )
+            return
+
+        description = str(export.get("description") or f"Tool {tool_name}").strip()
+        parameters_schema = export.get("parameters")
+        if not isinstance(parameters_schema, dict):
+            parameters_schema = {"type": "object", "properties": {}, "required": []}
+        parameters_schema.setdefault("type", "object")
+        parameters_schema.setdefault("properties", {})
+        parameters_schema.setdefault("required", [])
+
+        self.tools[tool_name] = func
+        self.tool_to_skill_map[tool_name] = skill_name
+        self.skill_to_tools.setdefault(skill_name, []).append(tool_name)
+        self.tool_definitions.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": description,
+                    "parameters": parameters_schema,
+                },
+            }
+        )
+        self.tool_records[tool_name] = {
+            "name": tool_name,
+            "description": description,
+            "kind": str(export.get("kind") or "explicit_tool"),
+            "parameters_schema": parameters_schema,
+            "runtime_binding": {
+                "type": "python_function",
+                "skill_name": skill_name,
+                "export_name": tool_name,
+            },
+            "skill_refs": [skill_name],
+            "requires_user_interaction": bool(export.get("requires_user_interaction")),
+            "result_format": str(export.get("result_format") or ""),
+        }
+
     def _load_legacy_implementation(self, skill_name, impl_path):
         try:
             skill_spec = self._load_skill_json(os.path.dirname(impl_path))
@@ -600,6 +649,8 @@ class SkillManager:
                 if os.path.isdir(path) and path not in sys.path:
                     sys.path.insert(0, path)
             spec = importlib.util.spec_from_file_location(f"skills.{skill_name}", impl_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Unable to load module spec for {impl_path}")
             module = importlib.util.module_from_spec(spec)
             try:
                 spec.loader.exec_module(module)
@@ -610,10 +661,23 @@ class SkillManager:
                     spec.loader.exec_module(module)
                 else:
                     raise e
+            explicit_exports = getattr(module, "TOOL_EXPORTS", None)
+            if explicit_exports is None:
+                explicit_exports = getattr(module, "TOOLS", None)
+            exported_handler_names = set()
+            if isinstance(explicit_exports, list):
+                for export in explicit_exports:
+                    self._register_explicit_tool_export(skill_name, export)
+                    handler = export.get("handler") if isinstance(export, dict) else None
+                    handler_name = getattr(handler, "__name__", None)
+                    if isinstance(handler_name, str) and handler_name:
+                        exported_handler_names.add(handler_name)
             for name, func in inspect.getmembers(module, inspect.isfunction):
                 if name.startswith("_"):
                     continue
                 if getattr(func, "__module__", None) != getattr(module, "__name__", None):
+                    continue
+                if name in exported_handler_names:
                     continue
                 tool_kind = "system_entry" if skill_name in self.SYSTEM_SKILLS else "legacy_function"
                 self._register_tool(skill_name, name, func, tool_kind=tool_kind)

@@ -12,6 +12,7 @@ from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.daemon import DaemonClient, DEFAULT_HOST, DEFAULT_PORT
 from core.env_utils import ensure_package_installed, get_app_data_dir, get_python_executable
+from core.interaction import parse_interaction_reply
 from core.im_session_key import build_im_session_key, resolve_date_key
 
 _RECENT_MESSAGE_IDS = {}
@@ -22,9 +23,6 @@ _RECENT_ACTION_LOCK = threading.Lock()
 _ACTION_ID_TTL = 300
 _CARD_CONTEXT = {}
 _CARD_CONTEXT_LOCK = threading.Lock()
-_PENDING_CONFIRMATIONS = {}
-_PENDING_CONFIRM_LOCK = threading.Lock()
-_PENDING_CONFIRM_TTL = 1800
 
 def _log_gateway(message):
     try:
@@ -173,77 +171,21 @@ def _consume_feedback_prefix(conversation_id, text):
             return f"[用户反馈]\n{feedback_text}\n\n请先确认收到反馈，并基于反馈给出修正后的答复。"
     return text
 
-def _cleanup_pending_confirmations():
-    now = time.time()
-    with _PENDING_CONFIRM_LOCK:
-        expired = [k for k, v in _PENDING_CONFIRMATIONS.items() if now > float(v.get("expires_at") or 0)]
-        for k in expired:
-            _PENDING_CONFIRMATIONS.pop(k, None)
-
-def _set_pending_confirmation(conversation_id, confirm_id, message, timeout_seconds):
-    _cleanup_pending_confirmations()
-    timeout_value = 120.0
-    try:
-        timeout_value = float(timeout_seconds)
-    except Exception:
-        timeout_value = 120.0
-    if timeout_value <= 0:
-        timeout_value = 120.0
-    timeout_value = min(timeout_value, _PENDING_CONFIRM_TTL)
-    expires_at = time.time() + timeout_value
-    with _PENDING_CONFIRM_LOCK:
-        _PENDING_CONFIRMATIONS[conversation_id] = {
-            "confirm_id": confirm_id,
-            "message": message,
-            "expires_at": expires_at,
-            "timeout_seconds": timeout_value
-        }
-    return timeout_value
-
-def _get_pending_confirmation(conversation_id):
-    _cleanup_pending_confirmations()
-    with _PENDING_CONFIRM_LOCK:
-        entry = _PENDING_CONFIRMATIONS.get(conversation_id)
-        if not isinstance(entry, dict):
+def _extract_publish_artifacts_payload(value):
+    obj = None
+    if isinstance(value, dict):
+        obj = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw.startswith("{"):
             return None
-        return dict(entry)
-
-def _clear_pending_confirmation(conversation_id, confirm_id=None):
-    with _PENDING_CONFIRM_LOCK:
-        entry = _PENDING_CONFIRMATIONS.get(conversation_id)
-        if not isinstance(entry, dict):
-            return
-        if confirm_id and entry.get("confirm_id") != confirm_id:
-            return
-        _PENDING_CONFIRMATIONS.pop(conversation_id, None)
-
-def _parse_confirmation_reply(text):
-    raw = (text or "").strip()
-    normalized = raw.lower()
-    yes_set = {"y", "yes", "ok", "true", "1", "是", "确认", "同意", "继续"}
-    no_set = {"n", "no", "false", "0", "否", "取消", "不同意", "拒绝"}
-    if normalized in yes_set:
-        return True, True
-    if normalized in no_set:
-        return False, True
-    if raw:
-        return raw, True
-    return None, False
-
-
-def _extract_publish_feishu_artifact_payload(text):
-    if not isinstance(text, str):
-        return None
-    raw = text.strip()
-    if not raw.startswith("{"):
-        return None
-    try:
-        obj = json.loads(raw)
-    except Exception:
-        return None
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            return None
     if not isinstance(obj, dict):
         return None
-    if (obj.get("source_tool") or "").strip() != "publish_feishu_artifact":
+    if (obj.get("source_tool") or "").strip() != "publish_artifacts":
         return None
     content_parts = obj.get("content_parts")
     if not isinstance(content_parts, list):
@@ -255,13 +197,48 @@ def _extract_publish_feishu_artifact_payload(text):
     return {"content_parts": safe_parts, "delivery_result": delivery_result}
 
 
+def _build_interaction_hint(request):
+    if not isinstance(request, dict):
+        return "需要你的输入。"
+    kind = (request.get("kind") or "text").strip().lower()
+    title = (request.get("title") or "需要你的输入").strip()
+    message = (request.get("message") or "").strip()
+    options = request.get("options") if isinstance(request.get("options"), list) else []
+    timeout_seconds = request.get("timeout_seconds") or 120
+    lines = [title]
+    if message:
+        lines.append(message)
+    if kind == "approval":
+        lines.append("")
+        lines.append("请回复：是 / 否")
+    elif kind == "choice":
+        lines.append("")
+        lines.append("请回复以下任一编号或选项文本：")
+        for idx, option in enumerate(options, start=1):
+            label = (option.get("label") or option.get("value") or "").strip()
+            description = (option.get("description") or "").strip()
+            lines.append(f"{idx}. {label}" + (f" - {description}" if description else ""))
+    elif kind == "multi_choice":
+        lines.append("")
+        lines.append("请回复一个或多个编号/选项文本，可用逗号分隔：")
+        for idx, option in enumerate(options, start=1):
+            label = (option.get("label") or option.get("value") or "").strip()
+            description = (option.get("description") or "").strip()
+            lines.append(f"{idx}. {label}" + (f" - {description}" if description else ""))
+    else:
+        lines.append("")
+        lines.append("请直接回复你的文本输入。")
+    lines.append(f"超时约 {int(float(timeout_seconds))} 秒后将自动取消。")
+    return "\n".join(line for line in lines if line is not None)
+
+
 def _build_feishu_model_input(event):
     user_text = (event or {}).get("text") or ""
     channel_hint = (
         "[渠道上下文]\n"
         "- 当前交互渠道: 飞书\n"
         "- 你正在处理飞书会话消息，请优先使用适配飞书的交互方式。\n"
-        "- 若需要交付文件或图片，必须调用 publish_feishu_artifact，audience 固定为 'feishu'。\n"
+        "- 若需要交付文件或图片，请调用 publish_artifacts；需要触达飞书时将 audience 设为 'feishu' 或 'auto'。\n"
     )
     return f"{channel_hint}\n[用户消息]\n{user_text}"
 
@@ -961,14 +938,11 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                     if len(pending_thinking) >= stream_cfg["thinking_min_chars"] or (now - last_send_time) >= think_interval:
                         if use_card:
                             _flush_card(collapse_thinking=False)
-            elif msg.get("type") == "confirm_request":
+            elif msg.get("type") == "interaction_request":
                 data = msg.get("data") or {}
-                confirm_id = data.get("id")
-                message = data.get("message")
-                if confirm_id and message:
-                    timeout_seconds = config_manager.get("confirmation_timeout_seconds", 120)
-                    timeout_value = _set_pending_confirmation(conversation_id, confirm_id, message, timeout_seconds)
-                    hint = f"需要你的确认：\n{message}\n\n请直接回复：是 / 否（也可回复补充文本）。\n超时约 {int(timeout_value)} 秒后将自动取消。"
+                request_id = data.get("request_id")
+                if request_id:
+                    hint = _build_interaction_hint(data)
                     if use_card and card_message_id and hasattr(provider, "update_card_message"):
                         provider.update_card_message(
                             card_message_id,
@@ -1039,8 +1013,9 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                         "duration": meta.get("duration")
                     }
                 )
-                if tool_name == "publish_feishu_artifact":
-                    payload = _extract_publish_feishu_artifact_payload(result_text)
+                payload = data.get("result_obj")
+                if tool_name == "publish_artifacts":
+                    payload = _extract_publish_artifacts_payload(payload or result_text)
                     if payload:
                         structured_files = []
                         for part in payload.get("content_parts") or []:
@@ -1205,40 +1180,46 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
     date_key = resolve_date_key(event.get("create_time"))
     session_key = build_im_session_key(event["user_id"], event.get("chat_id") or "", date_key)
     conversation_id = session_mapper.get_or_create("feishu", session_key)
-    pending_confirm = _get_pending_confirmation(conversation_id)
-    if pending_confirm:
-        parsed_value, valid = _parse_confirmation_reply(event.get("text") or "")
-        confirm_id = pending_confirm.get("confirm_id")
+    pending_resp = daemon_client.get_pending_interaction(conversation_id)
+    pending_interaction = (pending_resp or {}).get("pending") if isinstance(pending_resp, dict) else None
+    if pending_interaction:
+        parsed_payload, valid, _ = parse_interaction_reply(pending_interaction, event.get("text") or "")
+        request_id = pending_interaction.get("request_id")
         if not valid:
             provider.send_card_reply(
                 event,
-                card_content=f"仍在等待确认：\n{pending_confirm.get('message') or ''}\n\n请回复：是 / 否（或补充文本）。",
+                card_content=_build_interaction_hint(pending_interaction),
                 title="🤖 AI 助手"
             )
             return None
         try:
             response = None
             for _ in range(3):
-                response = daemon_client.confirm_response(confirm_id, parsed_value)
+                response = daemon_client.respond_interaction(request_id, parsed_payload)
                 if isinstance(response, dict):
                     break
                 time.sleep(0.25)
             resolved = isinstance(response, dict) and response.get("status") == "ok" and bool(response.get("resolved"))
             if resolved:
-                _clear_pending_confirmation(conversation_id, confirm_id=confirm_id)
-                ack_text = "已收到确认：是" if parsed_value is True else ("已收到确认：否" if parsed_value is False else f"已收到补充：{parsed_value}")
-                provider.send_card_reply(event, card_content=f"{ack_text}\n继续处理中，请稍候…", title="🤖 AI 助手")
+                ack_text = "已收到输入，继续处理中，请稍候…"
+                if pending_interaction.get("kind") == "approval":
+                    ack_text = "已收到确认：是，继续处理中，请稍候…" if parsed_payload.get("approved") else "已收到确认：否，继续处理中，请稍候…"
+                elif pending_interaction.get("kind") == "text":
+                    ack_text = f"已收到输入：{parsed_payload.get('text') or ''}\n继续处理中，请稍候…"
+                elif parsed_payload.get("selected_options"):
+                    ack_text = f"已收到选择：{', '.join(parsed_payload.get('selected_options') or [])}\n继续处理中，请稍候…"
+                provider.send_card_reply(event, card_content=ack_text, title="🤖 AI 助手")
             else:
                 status_text = ""
                 if isinstance(response, dict):
                     status_text = response.get("error") or ("resolved=false" if response.get("status") == "ok" else response.get("status") or "")
                 provider.send_card_reply(
                     event,
-                    card_content=f"确认回传未生效（{status_text or '通道异常'}）。请重新触发确认步骤。",
+                    card_content=f"交互回传未生效（{status_text or '通道异常'}）。请重新回复。",
                     title="🤖 AI 助手"
                 )
         except Exception as e:
-            provider.send_card_reply(event, card_content=f"确认回传失败：{e}", title="🤖 AI 助手")
+            provider.send_card_reply(event, card_content=f"交互回传失败：{e}", title="🤖 AI 助手")
         return None
     event = dict(event)
     event["text"] = _consume_feedback_prefix(conversation_id, event.get("text") or "")

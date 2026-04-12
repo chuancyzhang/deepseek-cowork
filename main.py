@@ -124,8 +124,12 @@ def summarize_tool_action(tool_name, args):
     if name in {"bash", "run_command"}:
         cmd = args.get("command") or args.get("cmd") or ""
         return "执行命令", cmd[:48] if cmd else "运行系统命令"
-    if name in {"ask_user_confirmation", "ask_user"}:
+    if name in {"request_user_approval"}:
         return "等待确认", "需要你决定下一步"
+    if name in {"request_user_input"}:
+        return "等待输入", "需要你补充信息"
+    if name in {"publish_artifacts"}:
+        return "交付产物", "准备交付文件或图片"
     return name.replace("_", " ").title(), path or "执行步骤"
 
 
@@ -187,8 +191,12 @@ def summarize_tool_action(tool_name, args):
     if name in {"bash", "run_command"}:
         cmd = args.get("command") or args.get("cmd") or ""
         return "Run Command", cmd[:48] if cmd else "Execute a shell command"
-    if name in {"ask_user_confirmation", "ask_user"}:
+    if name in {"request_user_approval"}:
         return "Await Approval", "Need user confirmation for the next step"
+    if name in {"request_user_input"}:
+        return "Await Input", "Need user input before continuing"
+    if name in {"publish_artifacts"}:
+        return "Deliver Artifacts", "Prepare files or images for delivery"
     return name.replace("_", " ").title(), path or "Execution step"
 
 
@@ -1426,7 +1434,7 @@ class DaemonStreamWorker(QThread):
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
     output_signal = Signal(str)
-    confirmation_signal = Signal(str, str)
+    interaction_signal = Signal(dict)
 
     def __init__(self, client, session_id, content, workspace_dir=None, parent=None):
         super().__init__(parent)
@@ -1488,12 +1496,10 @@ class DaemonStreamWorker(QThread):
                     elif msg.get("type") == "tool_result":
                         data = msg.get("data") or {}
                         self.tool_result_signal.emit(data)
-                    elif msg.get("type") == "confirm_request":
+                    elif msg.get("type") == "interaction_request":
                         data = msg.get("data") or {}
-                        confirm_id = data.get("id")
-                        message = data.get("message")
-                        if confirm_id and message:
-                            self.confirmation_signal.emit(confirm_id, message)
+                        if isinstance(data, dict) and data.get("request_id"):
+                            self.interaction_signal.emit(data)
                     elif msg.get("type") == "final":
                         result = msg.get("result") or {"error": "No response"}
                         if isinstance(result, dict):
@@ -2325,6 +2331,7 @@ class ToolCallCard(QFrame):
         self.tool_id = tool_id
         self.args = args
         self.result = ""
+        self.result_obj = None
         self.is_finished = False
         self.meta = meta or {}
         self.tool_name = tool_name
@@ -2564,9 +2571,10 @@ class ToolCallCard(QFrame):
                 }}
             """)
 
-    def set_result(self, result_text):
+    def set_result(self, result_text, result_obj=None):
         self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
         self.result = result_text
+        self.result_obj = result_obj
         self.is_finished = True
         
         # Update style to show success (Green left border)
@@ -3063,7 +3071,7 @@ class MainWindow(QMainWindow):
         self.last_ui_update_time = 0
 
         # Connect to Interaction Bridge
-        bridge.request_confirmation_signal.connect(self.handle_confirmation_request)
+        bridge.interaction_requested.connect(self.handle_interaction_request)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -4165,10 +4173,18 @@ class MainWindow(QMainWindow):
         self.refresh_context_badges(session_id)
         return session_id
 
-    def show_confirmation_dialog(self, message):
+    def show_interaction_dialog(self, request):
+        request = dict(request or {})
+        kind = (request.get("kind") or "approval").strip().lower()
+        title = (request.get("title") or "需要你的输入").strip()
+        message = request.get("message") or ""
+        metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+        options = request.get("options") if isinstance(request.get("options"), list) else []
+        allow_free_text = bool(request.get("allow_free_text"))
+
         dialog = QDialog(self)
-        dialog.setWindowTitle("请再次确认")
-        dialog.resize(500, 400)
+        dialog.setWindowTitle(title or "需要你的输入")
+        dialog.resize(520, 420)
         layout = QVBoxLayout(dialog)
 
         scroll_area = QScrollArea()
@@ -4181,52 +4197,128 @@ class MainWindow(QMainWindow):
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         label.setStyleSheet("font-size: 14px; line-height: 1.4;")
         content_layout.addWidget(label)
+
+        details = (metadata.get("details") or "").strip()
+        if details:
+            details_label = QLabel(details)
+            details_label.setWordWrap(True)
+            details_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            details_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+            content_layout.addWidget(details_label)
         content_layout.addStretch()
         scroll_area.setWidget(content_widget)
         layout.addWidget(scroll_area)
 
-        hint_label = QLabel("请选择一种操作：补充给 AI、同意继续、或暂不执行。")
+        hint_text = "请完成这一步操作。"
+        if kind == "approval":
+            severity = (metadata.get("severity") or "medium").strip().lower()
+            hint_text = {
+                "high": "这是高风险操作，请明确选择继续或取消。",
+                "low": "请确认是否继续执行。",
+            }.get(severity, "请确认是否继续执行。")
+        elif kind == "choice":
+            hint_text = "请选择一个选项，必要时可以补充自由文本。"
+        elif kind == "multi_choice":
+            hint_text = "请选择一个或多个选项，必要时可以补充自由文本。"
+        elif kind == "text":
+            hint_text = "请输入你要补充给 AI 的信息。"
+        hint_label = QLabel(hint_text)
         hint_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 13px;")
         layout.addWidget(hint_label)
-        ai_input = QLineEdit()
-        ai_input.setPlaceholderText("补充给AI（可写问题/新想法），例如：先做最小版本，不要删原文件")
-        layout.addWidget(ai_input)
 
-        feedback_label = QLabel("给 AI 补充信息")
-        feedback_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px;")
-        layout.addWidget(feedback_label)
-        feedback_layout = QHBoxLayout()
-        ask_btn = QPushButton("发送给AI")
-        idea_btn = QPushButton("我有新想法")
-        ask_btn.setStyleSheet(f"background: {DesignTokens.primary}; color: white; border: none; border-radius: 6px; padding: 6px 14px;")
-        idea_btn.setStyleSheet(f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.primary}; border: 1px solid {DesignTokens.primary}; border-radius: 6px; padding: 6px 14px;")
-        feedback_layout.addWidget(ask_btn)
-        feedback_layout.addWidget(idea_btn)
-        feedback_layout.addStretch()
-        layout.addLayout(feedback_layout)
+        input_field = QLineEdit()
+        input_field.setPlaceholderText("输入补充内容…")
+        input_field.setVisible(kind == "text" or allow_free_text)
+        layout.addWidget(input_field)
 
-        action_label = QLabel("对当前操作做决定")
-        action_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px;")
-        layout.addWidget(action_label)
+        option_combo = None
+        option_checks = []
+        if kind == "choice" and options:
+            option_combo = QComboBox()
+            option_combo.addItem("请选择…", "")
+            for idx, option in enumerate(options, start=1):
+                label_text = (option.get("label") or option.get("value") or f"Option {idx}").strip()
+                value = (option.get("value") or label_text).strip()
+                option_combo.addItem(f"{idx}. {label_text}", value)
+            layout.addWidget(option_combo)
+        elif kind == "multi_choice" and options:
+            option_group = QGroupBox("选项")
+            option_layout = QVBoxLayout(option_group)
+            for idx, option in enumerate(options, start=1):
+                label_text = (option.get("label") or option.get("value") or f"Option {idx}").strip()
+                value = (option.get("value") or label_text).strip()
+                description = (option.get("description") or "").strip()
+                checkbox = QCheckBox(f"{idx}. {label_text}" + (f" - {description}" if description else ""))
+                checkbox.setProperty("option_value", value)
+                option_checks.append(checkbox)
+                option_layout.addWidget(checkbox)
+            layout.addWidget(option_group)
+
         button_layout = QHBoxLayout()
-        yes_btn = QPushButton("是的，继续")
-        no_btn = QPushButton("先不要")
+        button_layout.addStretch()
+        submit_btn = QPushButton("提交")
+        yes_btn = QPushButton("继续")
+        no_btn = QPushButton("取消")
+        submit_btn.setStyleSheet(f"background: {DesignTokens.primary}; color: white; border: none; border-radius: 6px; padding: 6px 14px;")
         yes_btn.setStyleSheet(f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; padding: 6px 14px;")
         no_btn.setStyleSheet(f"background: transparent; color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; padding: 6px 14px;")
-        button_layout.addStretch()
-        button_layout.addWidget(yes_btn)
-        button_layout.addWidget(no_btn)
+        if kind == "approval":
+            button_layout.addWidget(yes_btn)
+            button_layout.addWidget(no_btn)
+        else:
+            button_layout.addWidget(submit_btn)
+            button_layout.addWidget(no_btn)
         layout.addLayout(button_layout)
         decision = {"value": False}
 
-        def send_to_ai():
-            text = ai_input.text().strip()
-            if not text:
-                QMessageBox.information(dialog, "提示", "请先输入要告诉 AI 的问题或新想法。")
-                ai_input.setFocus()
+        def selected_values():
+            values = []
+            if option_combo is not None:
+                combo_value = (option_combo.currentData() or "").strip()
+                if combo_value:
+                    values.append(combo_value)
+            for checkbox in option_checks:
+                if checkbox.isChecked():
+                    option_value = (checkbox.property("option_value") or "").strip()
+                    if option_value:
+                        values.append(option_value)
+            return values
+
+        def on_submit():
+            text = input_field.text().strip()
+            picked = selected_values()
+            if kind == "text":
+                if not text:
+                    QMessageBox.information(dialog, "提示", "请先输入内容。")
+                    input_field.setFocus()
+                    return
+                decision["value"] = text
+                dialog.accept()
                 return
-            decision["value"] = text
-            dialog.accept()
+            if kind == "choice":
+                if picked:
+                    decision["value"] = picked[0]
+                    dialog.accept()
+                    return
+                if allow_free_text and text:
+                    decision["value"] = text
+                    dialog.accept()
+                    return
+                QMessageBox.information(dialog, "提示", "请先选择一个选项或输入内容。")
+                return
+            if kind == "multi_choice":
+                if picked:
+                    if allow_free_text and text:
+                        picked = picked + [text]
+                    decision["value"] = picked
+                    dialog.accept()
+                    return
+                if allow_free_text and text:
+                    decision["value"] = [text]
+                    dialog.accept()
+                    return
+                QMessageBox.information(dialog, "提示", "请先选择至少一个选项或输入内容。")
+                return
 
         def on_yes():
             decision["value"] = True
@@ -4236,27 +4328,27 @@ class MainWindow(QMainWindow):
             decision["value"] = False
             dialog.reject()
 
-        ask_btn.clicked.connect(send_to_ai)
-        idea_btn.clicked.connect(send_to_ai)
+        submit_btn.clicked.connect(on_submit)
         yes_btn.clicked.connect(on_yes)
         no_btn.clicked.connect(on_no)
-        ai_input.returnPressed.connect(send_to_ai)
-        ai_input.setFocus()
+        input_field.returnPressed.connect(on_submit)
+        if input_field.isVisible():
+            input_field.setFocus()
         dialog.exec()
         return decision["value"]
 
-    def handle_confirmation_request(self, message):
+    def handle_interaction_request(self, request):
         state = self.get_current_session()
         if state:
             self.set_session_phase("Awaiting approval", state.session_id)
-        result = self.show_confirmation_dialog(message)
-        bridge.respond(result)
+        result = self.show_interaction_dialog(request)
+        bridge.resolve_request((request or {}).get("request_id"), result)
     
-    def handle_daemon_confirmation_request(self, confirm_id, message, session_id=None):
+    def handle_daemon_interaction_request(self, request, session_id=None):
         self.set_session_phase("Awaiting approval", session_id)
-        result = self.show_confirmation_dialog(message)
+        result = self.show_interaction_dialog(request)
         if self.daemon_client:
-            self.daemon_client.confirm_response(confirm_id, result)
+            self.daemon_client.respond_interaction((request or {}).get("request_id"), result)
 
     def refresh_history_list(self):
         self.history_container.setUpdatesEnabled(False)
@@ -5306,7 +5398,9 @@ class MainWindow(QMainWindow):
         self.td_args_edit.setPlainText(args_text)
         
         try:
-            if isinstance(result, str):
+            if selected_card and getattr(selected_card, "result_obj", None) is not None:
+                res_text = json.dumps(selected_card.result_obj, indent=2, ensure_ascii=False)
+            elif isinstance(result, str):
                 # Try to parse result if it looks like JSON
                 if result.strip().startswith("{") or result.strip().startswith("["):
                     res_obj = json.loads(result)
@@ -5403,7 +5497,8 @@ class MainWindow(QMainWindow):
             self.update_tool_card({
                 "id": data["id"],
                 "result": pending_result.get("result", ""),
-                "meta": pending_result.get("meta")
+                "meta": pending_result.get("meta"),
+                "result_obj": pending_result.get("result_obj"),
             }, session_id=session_id)
 
         self.set_session_phase("Executing", state.session_id)
@@ -5420,22 +5515,28 @@ class MainWindow(QMainWindow):
         if tool_id not in state.tool_cards:
             state.pending_tool_results[tool_id] = {
                 "result": result,
-                "meta": meta
+                "meta": meta,
+                "result_obj": data.get("result_obj"),
             }
             return
 
         card = state.tool_cards[tool_id]
-        card.set_result(result)
+        card.set_result(result, result_obj=data.get("result_obj"))
         if meta:
             card.meta.update(meta)
         for record in state.step_records:
             if record.get("tool_id") != tool_id:
                 continue
-            record["status"] = "done" if (result or "").strip() else "running"
+            result_obj = data.get("result_obj")
+            has_result = bool((result or "").strip()) or result_obj is not None
+            record["status"] = "done" if has_result else "running"
             duration = (meta or {}).get("duration") if isinstance(meta, dict) else None
             if isinstance(duration, (int, float)):
                 record["duration"] = duration
-            if (result or "").strip():
+            if result_obj is not None:
+                preview = str(result_obj.get("content") or json.dumps(result_obj, ensure_ascii=False)).strip().replace("\n", " ")
+                record["summary"] = preview[:120]
+            elif (result or "").strip():
                 preview = str(result).strip().replace("\n", " ")
                 record["summary"] = preview[:120]
             for path in record.get("related_files") or []:
@@ -5545,7 +5646,7 @@ class MainWindow(QMainWindow):
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
 
-        state.llm_worker = LLMWorker(state.messages, self.config_manager, self.workspace_dir)
+        state.llm_worker = LLMWorker(state.messages, self.config_manager, self.workspace_dir, session_id=state.session_id)
         if state.session_id == self.current_session_id:
             self.llm_worker = state.llm_worker
         session_id = state.session_id
@@ -5585,7 +5686,7 @@ class MainWindow(QMainWindow):
         state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
         state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
         state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
-        state.daemon_worker.confirmation_signal.connect(lambda cid, msg, sid=state.session_id: self.handle_daemon_confirmation_request(cid, msg, sid))
+        state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid))
         state.daemon_worker.start()
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
@@ -5864,7 +5965,10 @@ class MainWindow(QMainWindow):
         if generated_messages:
             for msg in generated_messages:
                 if msg.get("role") == "tool" and msg.get("tool_call_id"):
-                    tool_results[msg["tool_call_id"]] = msg.get("content", "")
+                    tool_results[msg["tool_call_id"]] = {
+                        "result": msg.get("content", ""),
+                        "result_obj": msg.get("result_obj"),
+                    }
         tool_calls = []
         if result.get("tool_calls"):
             tool_calls.extend(result.get("tool_calls") or [])
@@ -5927,7 +6031,8 @@ class MainWindow(QMainWindow):
             if t_id in tool_results:
                 self.update_tool_card({
                     "id": t_id,
-                    "result": tool_results[t_id]
+                    "result": tool_results[t_id].get("result", ""),
+                    "result_obj": tool_results[t_id].get("result_obj"),
                 }, session_id=state.session_id)
 
         if generated_messages:

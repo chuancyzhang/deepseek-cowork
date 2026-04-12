@@ -1,374 +1,444 @@
-import os
 import json
+import os
+
 from docx import Document
 from pptx import Presentation
-from pptx.util import Inches
 from pypdf import PdfReader
-from core.env_utils import ensure_package_installed
-from skills.interaction.impl import request_user_approval
 
-# Lazy import helpers
-def get_openpyxl():
+from core.env_utils import ensure_package_installed
+from core.filesystem_ops import (
+    _build_error,
+    _build_ok,
+    delete_path,
+    ensure_existing_file_write_allowed,
+    glob_paths,
+    grep_contents,
+    list_files as list_files_core,
+    mark_file_written,
+    read_text_file,
+    record_full_read_state,
+    rename_path,
+    resolve_path,
+    update_text_file,
+    write_text_file,
+)
+from core.interaction import ask_user
+
+
+def _get_openpyxl():
     try:
         import openpyxl
+
         return openpyxl
     except ImportError:
         ensure_package_installed("openpyxl", skill_id="file-system")
         import openpyxl
+
         return openpyxl
 
-def _is_god_mode(context):
-    if context and 'config_manager' in context:
-        return context['config_manager'].get_god_mode()
-    return False
 
-def _validate_path(workspace_dir, path, context=None, must_exist=False):
-    """
-    Validate path security and existence.
-    Returns absolute path if valid, raises exception otherwise.
-    """
-    if not workspace_dir:
-        raise ValueError("Workspace not selected.")
-    
-    abs_path = os.path.abspath(os.path.join(workspace_dir, path))
-    abs_workspace = os.path.abspath(workspace_dir)
-    
-    god_mode = _is_god_mode(context)
+def _build_read_payload(action, rel_path, content):
+    lines = content.splitlines()
+    return _build_ok(
+        action,
+        {
+            "path": rel_path,
+            "content": content,
+            "encoding": "utf-8",
+            "truncated": False,
+            "start_line": 1,
+            "returned_lines": len(lines),
+            "total_lines": len(lines),
+        },
+    )
 
-    in_workspace = False
+
+def _parse_pdf_pages(pages, total_pages, action, rel_path):
+    if pages is None:
+        return list(range(total_pages)), None
+
+    text = str(pages).strip()
+    if not text:
+        return list(range(total_pages)), None
+
+    if "-" in text:
+        start_raw, end_raw = text.split("-", 1)
+        try:
+            start_page = int(start_raw)
+            end_page = int(end_raw)
+        except Exception:
+            return None, _build_error(action, "invalid_pages", "pages must be in 'N' or 'N-M' format.", path=rel_path)
+        if start_page <= 0 or end_page <= 0 or start_page > end_page:
+            return None, _build_error(action, "invalid_pages", "Invalid page range.", path=rel_path)
+        first = start_page - 1
+        last = min(end_page, total_pages)
+        if first >= total_pages:
+            return None, _build_error(action, "invalid_pages", "Page range exceeds PDF page count.", path=rel_path)
+        return list(range(first, last)), None
+
     try:
-        in_workspace = os.path.commonpath([abs_workspace, abs_path]) == abs_workspace
+        single = int(text)
     except Exception:
-        in_workspace = False
+        return None, _build_error(action, "invalid_pages", "pages must be in 'N' or 'N-M' format.", path=rel_path)
+    if single <= 0 or single > total_pages:
+        return None, _build_error(action, "invalid_pages", "Requested page is out of range.", path=rel_path)
+    return [single - 1], None
 
-    if not god_mode and not in_workspace:
-         raise PermissionError("Access denied (Path Traversal).")
-    
-    if must_exist and not os.path.exists(abs_path):
-        raise FileNotFoundError(f"Path '{path}' does not exist.")
-        
-    return abs_path
 
-def list_files(workspace_dir, path=".", _context=None):
-    """
-    List files in the current workspace directory.
-    
-    Args:
-        workspace_dir (str): The root workspace directory (injected by system).
-        path (str): Relative path to list, default is '.'.
-    """
-    try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-        
-        items = os.listdir(abs_path)
-        # Filter hidden files
-        items = [i for i in items if not i.startswith('.')]
-        return json.dumps(items, ensure_ascii=False)
-    except Exception as e:
-        return f"Error: {str(e)}"
+def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, limit=200, _context=None):
+    return list_files_core(
+        workspace_dir,
+        path=path,
+        recursive=recursive,
+        include_hidden=include_hidden,
+        limit=limit,
+        context=_context,
+    )
 
-def list_file(workspace_dir, path=".", _context=None):
-    return list_files(workspace_dir, path=path, _context=_context)
+
+def read_file(workspace_dir, path, offset=1, limit=None, sheet_name=None, pages=None, _context=None):
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext == ".docx":
+        return read_docx(workspace_dir, path, _context=_context)
+    if ext == ".pptx":
+        return read_pptx(workspace_dir, path, _context=_context)
+    if ext == ".xlsx":
+        return read_excel(workspace_dir, path, sheet_name=sheet_name, _context=_context)
+    if ext == ".pdf":
+        return read_pdf(workspace_dir, path, pages=pages, _context=_context)
+    return read_text_file(workspace_dir, path, offset=offset, limit=limit, context=_context, action="read_file")
+
+
+def write_file(workspace_dir, path, content, mode="overwrite", _context=None):
+    return write_text_file(
+        workspace_dir,
+        path,
+        content,
+        mode=mode,
+        context=_context,
+        action="write_file",
+    )
+
+
+def update_file(workspace_dir, path, old_string, new_string, replace_all=False, _context=None):
+    return update_text_file(
+        workspace_dir,
+        path,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+        context=_context,
+        action="update_file",
+    )
+
 
 def rename_file(workspace_dir, old_path, new_path, _context=None):
-    """
-    Rename a file or directory.
-    
-    Args:
-        workspace_dir (str): The root workspace directory (injected by system).
-        old_path (str): The current relative path of the file/directory.
-        new_path (str): The new relative path of the file/directory.
-    """
-    try:
-        # Validate source
-        abs_old_path = _validate_path(workspace_dir, old_path, _context, must_exist=True)
-        # Validate dest (don't require existence, but check security)
-        abs_new_path = _validate_path(workspace_dir, new_path, _context, must_exist=False)
-        
-        if os.path.exists(abs_new_path):
-            return f"Error: Destination '{new_path}' already exists."
+    return rename_path(
+        workspace_dir,
+        old_path,
+        new_path,
+        context=_context,
+        action="rename_file",
+    )
 
-        os.rename(abs_old_path, abs_new_path)
-        return f"Success: Renamed '{old_path}' to '{new_path}'."
-            
-    except Exception as e:
-        return f"Error: {str(e)}"
 
-def read_file(workspace_dir, path, _context=None):
-    """
-    Read the content of a file. Automatically detects file type based on extension.
-    
-    Args:
-        workspace_dir (str): The root workspace directory (injected by system).
-        path (str): Relative path to the file.
-    """
-    try:
-        # Check extension first to dispatch to specific readers
-        _, ext = os.path.splitext(path)
-        ext = ext.lower()
-        
-        if ext == '.docx':
-            return read_docx(workspace_dir, path, _context)
-        elif ext == '.pptx':
-            return read_pptx(workspace_dir, path, _context)
-        elif ext == '.xlsx':
-            return read_excel(workspace_dir, path, None, _context)
-        elif ext == '.pdf':
-            return read_pdf(workspace_dir, path, _context)
-
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-        
-        if not os.path.isfile(abs_path):
-            return f"Error: '{path}' is not a file."
-            
-        with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
-            return f.read(100 * 1024)
-            
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def delete_file(workspace_dir, path, _context=None):
-    """
-    Delete a file or empty directory.
-    
-    Args:
-        workspace_dir (str): The root workspace directory (injected by system).
-        path (str): Relative path to the file.
-    """
-    try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-            
-        # Ask for confirmation
-        # Strict check for True (Yes button). Any text response or False counts as cancellation for safety.
-        approval = request_user_approval(
-            f"⚠️ DANGER: Are you sure you want to delete '{path}'?",
-            title="删除确认",
-            severity="high",
-            details=f"目标路径: {path}",
-            _context=_context,
-        )
-        if not isinstance(approval, dict) or not bool((approval.get("interaction_response") or {}).get("approved")):
-            return "Error: Deletion cancelled by user."
-
-        if os.path.isfile(abs_path):
-            os.remove(abs_path)
-        elif os.path.isdir(abs_path):
-            os.rmdir(abs_path) # Only empty directories
+def delete_file(workspace_dir, path, recursive=False, _context=None):
+    def _confirm(rel_path, recursive_flag):
+        if recursive_flag:
+            prompt = f"Confirm delete recursively: '{rel_path}'?"
         else:
-            return f"Error: Unknown file type for '{path}'."
-            
-        return f"Success: Deleted '{path}'."
-            
-    except Exception as e:
-        return f"Error: {str(e)}"
+            prompt = f"Confirm delete: '{rel_path}'?"
+        return ask_user(prompt)
 
-# --- Office Suite Functions ---
+    return delete_path(
+        workspace_dir,
+        path,
+        recursive=recursive,
+        confirm_callback=_confirm,
+        context=_context,
+        action="delete_file",
+    )
+
+
+def glob(workspace_dir, pattern="*", path=".", limit=200, include_hidden=False, _context=None):
+    return glob_paths(
+        workspace_dir,
+        pattern=pattern,
+        path=path,
+        limit=limit,
+        include_hidden=include_hidden,
+        context=_context,
+    )
+
+
+def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, limit=200, _context=None):
+    return grep_contents(
+        workspace_dir,
+        pattern=pattern,
+        path=path,
+        include=include,
+        exclude=exclude,
+        recursive=recursive,
+        limit=limit,
+        context=_context,
+    )
+
 
 def read_docx(workspace_dir, path, _context=None):
-    """
-    Read text content from a DOCX file.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the DOCX file.
-    """
-    try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-            
-        doc = Document(abs_path)
-        full_text = []
-        for para in doc.paragraphs:
-            full_text.append(para.text)
-        return '\n'.join(full_text)
-    except Exception as e:
-        return f"Error reading DOCX: {str(e)}"
+    action = "read_docx"
+    abs_path, rel_path, error = resolve_path(workspace_dir, path, context=_context, action=action, must_exist=True)
+    if error:
+        return error
+    if not os.path.isfile(abs_path):
+        return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
 
-def write_docx(workspace_dir, path, content, mode='w', _context=None):
-    """
-    Write content to a DOCX file.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the DOCX file.
-        content (str): Text content to write.
-        mode (str): 'w' to overwrite/create, 'a' to append.
-    """
     try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=False)
-        
-        if mode == 'a' and os.path.exists(abs_path):
+        doc = Document(abs_path)
+        content = "\n".join(paragraph.text for paragraph in doc.paragraphs)
+        record_full_read_state(abs_path, _context)
+        return _build_read_payload(action, rel_path, content)
+    except Exception as exc:
+        return _build_error(action, "read_failed", str(exc), path=rel_path)
+
+
+def write_docx(workspace_dir, path, content, mode="w", _context=None):
+    action = "write_docx"
+    abs_path, rel_path, error = resolve_path(
+        workspace_dir,
+        path,
+        context=_context,
+        action=action,
+        must_exist=False,
+        reject_glob_for_write=True,
+    )
+    if error:
+        return error
+
+    mode_value = str(mode or "w").strip().lower() or "w"
+    if mode_value not in {"w", "a"}:
+        return _build_error(action, "invalid_mode", "mode must be 'w' or 'a'.", path=rel_path)
+
+    existed_before = os.path.exists(abs_path)
+    if existed_before:
+        error = ensure_existing_file_write_allowed(abs_path, rel_path, _context, action)
+        if error:
+            return error
+
+    parent = os.path.dirname(abs_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    text = content if isinstance(content, str) else str(content)
+    try:
+        if mode_value == "a" and existed_before:
             doc = Document(abs_path)
         else:
             doc = Document()
-            
-        # Split by newlines and add as paragraphs
-        for line in content.split('\n'):
+        for line in text.split("\n"):
             doc.add_paragraph(line)
-            
         doc.save(abs_path)
-        return f"Success: Written to '{path}'."
-    except Exception as e:
-        return f"Error writing DOCX: {str(e)}"
+        mark_file_written(abs_path, _context)
+        change_type = "create" if not existed_before else ("append" if mode_value == "a" else "update")
+        return _build_ok(
+            action,
+            {"path": rel_path, "change_type": change_type, "bytes_written": len(text.encode("utf-8"))},
+        )
+    except Exception as exc:
+        return _build_error(action, "write_failed", str(exc), path=rel_path)
+
 
 def read_pptx(workspace_dir, path, _context=None):
-    """
-    Read text content from a PPTX file.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the PPTX file.
-    """
+    action = "read_pptx"
+    abs_path, rel_path, error = resolve_path(workspace_dir, path, context=_context, action=action, must_exist=True)
+    if error:
+        return error
+    if not os.path.isfile(abs_path):
+        return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
+
     try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-            
-        prs = Presentation(abs_path)
-        text_content = []
-        
-        for i, slide in enumerate(prs.slides):
-            slide_text = []
+        presentation = Presentation(abs_path)
+        chunks = []
+        for index, slide in enumerate(presentation.slides, start=1):
+            texts = []
             for shape in slide.shapes:
-                if hasattr(shape, "text"):
-                    slide_text.append(shape.text)
-            text_content.append(f"Slide {i+1}:\n" + "\n".join(slide_text))
-            
-        return "\n\n".join(text_content)
-    except Exception as e:
-        return f"Error reading PPTX: {str(e)}"
+                if hasattr(shape, "text") and shape.text:
+                    texts.append(shape.text)
+            chunks.append(f"Slide {index}:\n" + "\n".join(texts))
+        content = "\n\n".join(chunks)
+        record_full_read_state(abs_path, _context)
+        return _build_read_payload(action, rel_path, content)
+    except Exception as exc:
+        return _build_error(action, "read_failed", str(exc), path=rel_path)
+
 
 def create_pptx(workspace_dir, path, slides_data, _context=None):
-    """
-    Create a PPTX file with given slides.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the output PPTX file.
-        slides_data (list): List of dicts, each with 'title' and 'content'.
-                            Example: [{"title": "Slide 1", "content": "Hello World"}]
-    """
-    try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=False)
-        prs = Presentation()
-        
-        # Ensure slides_data is a list
-        if isinstance(slides_data, str):
-            try:
-                slides_data = json.loads(slides_data)
-            except:
-                return "Error: slides_data must be a JSON list or valid list object."
+    action = "create_pptx"
+    abs_path, rel_path, error = resolve_path(
+        workspace_dir,
+        path,
+        context=_context,
+        action=action,
+        must_exist=False,
+        reject_glob_for_write=True,
+    )
+    if error:
+        return error
 
+    existed_before = os.path.exists(abs_path)
+    if existed_before:
+        error = ensure_existing_file_write_allowed(abs_path, rel_path, _context, action)
+        if error:
+            return error
+
+    parent = os.path.dirname(abs_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    if isinstance(slides_data, str):
+        try:
+            slides_data = json.loads(slides_data)
+        except Exception:
+            return _build_error(action, "invalid_argument", "slides_data must be a JSON list or list object.", path=rel_path)
+    if not isinstance(slides_data, list):
+        return _build_error(action, "invalid_argument", "slides_data must be a list.", path=rel_path)
+
+    try:
+        presentation = Presentation()
         for slide_info in slides_data:
-            title_text = slide_info.get('title', '')
-            content_text = slide_info.get('content', '')
-            
-            # Use a standard layout (Title and Content)
-            slide_layout = prs.slide_layouts[1] 
-            slide = prs.slides.add_slide(slide_layout)
-            
-            title = slide.shapes.title
-            content = slide.placeholders[1]
-            
-            title.text = title_text
-            content.text = content_text
-            
-        prs.save(abs_path)
-        return f"Success: Created presentation at '{path}'."
-    except Exception as e:
-        return f"Error creating PPTX: {str(e)}"
+            if not isinstance(slide_info, dict):
+                continue
+            title_text = str(slide_info.get("title") or "")
+            content_text = str(slide_info.get("content") or "")
+            layout = presentation.slide_layouts[1]
+            slide = presentation.slides.add_slide(layout)
+            slide.shapes.title.text = title_text
+            slide.placeholders[1].text = content_text
+        presentation.save(abs_path)
+        serialized = json.dumps(slides_data, ensure_ascii=False)
+        mark_file_written(abs_path, _context)
+        change_type = "create" if not existed_before else "update"
+        return _build_ok(
+            action,
+            {"path": rel_path, "change_type": change_type, "bytes_written": len(serialized.encode("utf-8"))},
+        )
+    except Exception as exc:
+        return _build_error(action, "write_failed", str(exc), path=rel_path)
+
 
 def read_excel(workspace_dir, path, sheet_name=None, _context=None):
-    """
-    Read data from an Excel file.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the XLSX file.
-        sheet_name (str): Optional sheet name to read.
-    """
+    action = "read_excel"
+    abs_path, rel_path, error = resolve_path(workspace_dir, path, context=_context, action=action, must_exist=True)
+    if error:
+        return error
+    if not os.path.isfile(abs_path):
+        return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
+
     try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-            
-        # Use openpyxl for lightweight reading
-        openpyxl = get_openpyxl()
-        wb = openpyxl.load_workbook(abs_path, data_only=True)
-        
+        openpyxl = _get_openpyxl()
+        workbook = openpyxl.load_workbook(abs_path, data_only=True)
         if sheet_name:
-            if sheet_name not in wb.sheetnames:
-                 return f"Error: Sheet '{sheet_name}' not found. Available: {wb.sheetnames}"
-            sheet = wb[sheet_name]
+            if sheet_name not in workbook.sheetnames:
+                return _build_error(action, "sheet_not_found", f"Sheet '{sheet_name}' not found.", path=rel_path)
+            worksheet = workbook[sheet_name]
         else:
-            sheet = wb.active
-            
+            worksheet = workbook.active
+
         rows = []
-        for row in sheet.iter_rows(values_only=True):
-            # Convert None to empty string for better display
-            cleaned_row = [str(cell) if cell is not None else "" for cell in row]
-            rows.append("\t".join(cleaned_row))
-            
-        return "\n".join(rows)
-    except Exception as e:
-        return f"Error reading Excel: {str(e)}"
+        for row in worksheet.iter_rows(values_only=True):
+            rows.append("\t".join("" if cell is None else str(cell) for cell in row))
+        content = "\n".join(rows)
+        record_full_read_state(abs_path, _context)
+        return _build_read_payload(action, rel_path, content)
+    except Exception as exc:
+        return _build_error(action, "read_failed", str(exc), path=rel_path)
 
-def write_excel(workspace_dir, path, data, sheet_name='Sheet1', _context=None):
-    """
-    Write data to an Excel file.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the XLSX file.
-        data (list): List of lists representing rows.
-        sheet_name (str): Name of the sheet.
-    """
+
+def write_excel(workspace_dir, path, data, sheet_name="Sheet1", _context=None):
+    action = "write_excel"
+    abs_path, rel_path, error = resolve_path(
+        workspace_dir,
+        path,
+        context=_context,
+        action=action,
+        must_exist=False,
+        reject_glob_for_write=True,
+    )
+    if error:
+        return error
+
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return _build_error(action, "invalid_argument", "data must be a JSON list of rows.", path=rel_path)
+    if not isinstance(data, list):
+        return _build_error(action, "invalid_argument", "data must be a list of rows.", path=rel_path)
+
+    existed_before = os.path.exists(abs_path)
+    if existed_before:
+        error = ensure_existing_file_write_allowed(abs_path, rel_path, _context, action)
+        if error:
+            return error
+
+    parent = os.path.dirname(abs_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
     try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=False)
-        
-        # Ensure data is a list
-        if isinstance(data, str):
-            try:
-                data = json.loads(data)
-            except:
-                return "Error: data must be a JSON list of lists."
-        
-        openpyxl = get_openpyxl()
-        
-        # Check if file exists to append or create
-        if os.path.exists(abs_path):
-             wb = openpyxl.load_workbook(abs_path)
-             if sheet_name in wb.sheetnames:
-                 # If sheet exists, maybe we should clear it or append?
-                 # For simplicity, let's create a new sheet if it exists or overwrite?
-                 # Let's remove the old sheet and create new one to match 'overwrite' behavior
-                 del wb[sheet_name]
-             ws = wb.create_sheet(sheet_name)
+        openpyxl = _get_openpyxl()
+        if existed_before:
+            workbook = openpyxl.load_workbook(abs_path)
+            if sheet_name in workbook.sheetnames:
+                del workbook[sheet_name]
+            worksheet = workbook.create_sheet(sheet_name)
         else:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = sheet_name
-        
-        for row in data:
-            ws.append(row)
-            
-        wb.save(abs_path)
-        return f"Success: Written to '{path}'."
-    except Exception as e:
-        return f"Error writing Excel: {str(e)}"
+            workbook = openpyxl.Workbook()
+            worksheet = workbook.active
+            worksheet.title = sheet_name
 
-def read_pdf(workspace_dir, path, _context=None):
-    """
-    Read text from a PDF file.
-    
-    Args:
-        workspace_dir (str): Root workspace directory.
-        path (str): Relative path to the PDF file.
-    """
+        for row in data:
+            worksheet.append(row if isinstance(row, list) else [row])
+        workbook.save(abs_path)
+        serialized = json.dumps(data, ensure_ascii=False)
+        mark_file_written(abs_path, _context)
+        change_type = "create" if not existed_before else "update"
+        return _build_ok(
+            action,
+            {"path": rel_path, "change_type": change_type, "bytes_written": len(serialized.encode("utf-8"))},
+        )
+    except Exception as exc:
+        return _build_error(action, "write_failed", str(exc), path=rel_path)
+
+
+def read_pdf(workspace_dir, path, pages=None, _context=None):
+    action = "read_pdf"
+    abs_path, rel_path, error = resolve_path(workspace_dir, path, context=_context, action=action, must_exist=True)
+    if error:
+        return error
+    if not os.path.isfile(abs_path):
+        return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
+
     try:
-        abs_path = _validate_path(workspace_dir, path, _context, must_exist=True)
-            
         reader = PdfReader(abs_path)
-        text_content = []
-        
-        for i, page in enumerate(reader.pages):
-            text_content.append(f"--- Page {i+1} ---\n" + page.extract_text())
-            
-        return "\n".join(text_content)
-    except Exception as e:
-        return f"Error reading PDF: {str(e)}"
+        page_indices, error = _parse_pdf_pages(pages, len(reader.pages), action, rel_path)
+        if error:
+            return error
+        blocks = []
+        for page_index in page_indices:
+            text = reader.pages[page_index].extract_text() or ""
+            blocks.append(f"--- Page {page_index + 1} ---\n{text}")
+        content = "\n\n".join(blocks)
+        record_full_read_state(abs_path, _context)
+        payload = {
+            "path": rel_path,
+            "content": content,
+            "encoding": "utf-8",
+            "truncated": False,
+            "start_line": 1,
+            "returned_lines": len(content.splitlines()),
+            "total_lines": len(content.splitlines()),
+            "page_count": len(page_indices),
+        }
+        return _build_ok(action, payload)
+    except Exception as exc:
+        return _build_error(action, "read_failed", str(exc), path=rel_path)

@@ -1,13 +1,13 @@
 ---
 name: file-system
-description: Provides capabilities to list, read, write and manipulate files in the user's workspace, including Office documents (DOCX, PPTX, XLSX, PDF).
-description_cn: 提供在用户工作区中列出、读取、写入和操作文件的能力，包括常用的办公软件文件（DOCX, PPTX, XLSX, PDF）。
+description: Provides unified file discovery, read, write, edit and search capabilities in the workspace, including Office documents (DOCX, PPTX, XLSX, PDF).
+description_cn: 提供工作区内统一的文件发现、读取、写入、编辑与搜索能力，并支持常用办公文档（DOCX, PPTX, XLSX, PDF）。
 license: Apache-2.0
 metadata:
   author: deepseek-cowork team
   version: "1.1"
 security_level: high
-allowed-tools: ["list_files", "list_file", "read_file", "rename_file", "delete_file", "read_docx", "write_docx", "read_pptx", "create_pptx", "read_excel", "write_excel", "read_pdf"]
+allowed-tools: ["list_files", "read_file", "write_file", "update_file", "rename_file", "delete_file", "glob", "grep", "read_docx", "write_docx", "read_pptx", "create_pptx", "read_excel", "write_excel", "read_pdf"]
 ---
 
 # File System Skill
@@ -18,10 +18,14 @@ It handles both standard file operations and Office document processing.
 ## Capabilities
 
 ### General File Operations
-1. **List Files**: Explore the directory structure.
-2. **Read Files**: Read content of files. Automatically detects and reads text, DOCX, PPTX, XLSX, and PDF files.
-3. **Rename Files**: Rename or move files.
-4. **Delete Files**: Delete files or empty directories (requires confirmation).
+1. **List Files**: Explore directory structure with recursive and hidden-file controls.
+2. **Read Files**: Read file content with optional range parameters. Automatically dispatches DOCX, PPTX, XLSX, and PDF.
+3. **Write Files**: Create or overwrite files with structured write results.
+4. **Update Files**: Replace text with strict matching rules.
+5. **Rename Files**: Rename or move files and directories.
+6. **Delete Files**: Delete files or directories (requires confirmation, optional recursive mode).
+7. **Glob Search**: Path/name pattern search.
+8. **Grep Search**: Content search with regex support.
 
 ### Office Suite Operations
 1. **Word (DOCX)**: Read text from documents and create/write new documents.
@@ -30,7 +34,9 @@ It handles both standard file operations and Office document processing.
 4. **PDF**: Read text from PDF files.
 
 ## Usage Guidelines
-- **Safety First**: Always check if a file exists using `list_files` before trying to read it.
-- **Sandboxed**: You can only access files within the user-selected workspace (unless God Mode is active).
-- **Pathing**: Use relative paths (e.g., `data.csv` or `subdir/config.json`).
+- **Unified JSON Output**: All tools return structured JSON strings.
+- **Safety First**: Existing files must be fully read before `write_file`/`update_file` modifications.
+- **Sandboxed**: Access is restricted to the selected workspace unless God Mode is enabled.
+- **Pathing**: Prefer relative paths (e.g., `data.csv`, `subdir/config.json`).
+- **Search Split**: Use `glob` for path matching and `grep` for content matching.
 - **Dependencies**: Office operations require `python-docx`, `python-pptx`, `openpyxl`, `pypdf`.

@@ -310,6 +310,8 @@ class LLMWorker(QThread):
         # Initialize Skill Manager
         self.skill_manager = SkillManager(workspace_dir, config_manager)
         self.tools = self.skill_manager.get_tool_definitions()
+        # Per-run filesystem read/write state used by filesystem tools.
+        self.file_state_cache = {"reads": {}}
 
     def pause(self):
         self.is_paused = True
@@ -695,6 +697,7 @@ class LLMWorker(QThread):
                                     "step_signal": self.step_signal, 
                                     "config_manager": self.config_manager,
                                     "skill_manager": self.skill_manager,
+                                    "file_state": self.file_state_cache,
                                     "agent_state_signal": self.agent_state_signal,
                                     "tool_call_id": tool.id,
                                     "abort_signal": self.abort_signal

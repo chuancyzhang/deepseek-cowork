@@ -150,7 +150,7 @@ def bash(workspace_dir, command, _context=None):
         return f"Error executing command: {str(e)}"
 
 
-def glob(workspace_dir, pattern="*", path=".", limit=200, _context=None):
+def _glob_internal(workspace_dir, pattern="*", path=".", limit=200, _context=None):
     """
     在工作区内按路径/文件名模式搜索文件。
     """
@@ -191,7 +191,7 @@ def glob(workspace_dir, pattern="*", path=".", limit=200, _context=None):
         return f"Error: {str(e)}"
 
 
-def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
+def _grep_internal(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
     """
     在工作区内搜索文件内容。
     """

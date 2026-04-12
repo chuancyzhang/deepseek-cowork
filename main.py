@@ -2371,6 +2371,7 @@ class ToolCallCard(QFrame):
         tool_icons = {
             "list_files": "fa5s.folder", "read_file": "fa5s.book-open", "write_file": "fa5s.pen-alt",
             "update_file": "fa5s.pen", "delete_file": "fa5s.trash-alt", "run_command": "fa5s.terminal",
+            "bash": "fa5s.terminal",
             "open_preview": "fa5s.compass", "search_codebase": "fa5s.search", "grep": "fa5s.filter",
             "glob": "fa5s.globe", "web_search": "fa5s.globe-americas", "get_diagnostics": "fa5s.stethoscope",
         }

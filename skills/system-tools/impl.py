@@ -1,7 +1,6 @@
 import os
 import subprocess
 import re
-import fnmatch
 import shutil
 import locale
 import json
@@ -16,7 +15,6 @@ from collections import deque
 import urllib.request
 import urllib.parse
 from core.env_utils import ensure_package_installed, get_app_data_dir
-from core.sandbox_runtime import run_in_sandbox, run_skill_script_in_sandbox
 from PySide6.QtCore import QObject, Qt
 
 _ACTION_WINDOW_STATE = {}
@@ -56,20 +54,6 @@ def _cfg_value(context, key, default=None):
         return value if value is not None else default
     except Exception:
         return default
-
-def _cfg_bool(context, key, default=False):
-    value = _cfg_value(context, key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("1", "true", "yes", "y", "on"):
-            return True
-        if lowered in ("0", "false", "no", "n", "off"):
-            return False
-    return default
 
 def _normalize_action_key(value):
     text = (value or "").strip().lower()
@@ -138,143 +122,6 @@ def _no_window_kwargs():
     startupinfo.wShowWindow = 0
     return {"creationflags": creationflags, "startupinfo": startupinfo}
 
-def bash(workspace_dir, command, _context=None):
-    """
-    Execute a shell command.
-    
-    Args:
-        workspace_dir (str): The current workspace directory.
-        command (str): The command to execute.
-    """
-    try:
-        # Check God Mode if strict security is needed, but user requested these as built-in skills.
-        # We will assume they are allowed but should be used responsibly.
-        
-        cwd = workspace_dir if workspace_dir else os.getcwd()
-        
-        abort_state = _init_abort_state(_context)
-        process = run_in_sandbox(
-            command,
-            cwd=cwd,
-            skill_id="system-tools",
-            shell_kind="bash",
-            text=False,
-        )
-        while True:
-            if abort_state["aborted"]:
-                try:
-                    process.terminate()
-                    process.wait(timeout=2)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-                return "Error: Command aborted by user."
-            try:
-                output_raw, error_raw = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        output = _decode_bytes(output_raw)
-        error = _decode_bytes(error_raw)
-        output = output or ""
-        if error:
-            if output:
-                output += "\n"
-            output += f"STDERR:\n{error}"
-            
-        return output if output else "(No output)"
-    except Exception as e:
-        return f"Error executing command: {str(e)}"
-
-
-def run_skill_script(skill_name, script_name, args=None, input_text=None, timeout_seconds=120, _context=None):
-    """
-    Execute a script declared by an imported skill using the sandbox runtime.
-    """
-    skill_name = (skill_name or "").strip()
-    script_name = (script_name or "").strip()
-    if not skill_name:
-        return "Error: skill_name is required."
-    if not script_name:
-        return "Error: script_name is required."
-
-    skill_manager = (_context or {}).get("skill_manager") if isinstance(_context, dict) else None
-    if not skill_manager:
-        return "Error: skill manager context is unavailable."
-
-    record = skill_manager.skill_records.get(skill_name)
-    if not record:
-        return f"Error: Skill '{skill_name}' not found."
-
-    dependency_status = record.get("dependency_status") or {"ok": True}
-    if not dependency_status.get("ok"):
-        dependency_status = skill_manager._prepare_skill_dependencies(skill_name, record["path"])
-        record["dependency_status"] = dependency_status
-        if not dependency_status.get("ok"):
-            return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
-
-    args_list = []
-    if isinstance(args, str) and args.strip():
-        try:
-            parsed = json.loads(args)
-            args = parsed
-        except Exception:
-            args = [args]
-    if isinstance(args, list):
-        args_list = [str(item) for item in args if item is not None]
-    elif args is not None:
-        return "Error: args must be a list or JSON list string."
-
-    entries = list((record.get("spec") or {}).get("script_entries") or [])
-    target = None
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        entry_name = str(entry.get("name") or "").strip()
-        entry_path = os.path.normpath(str(entry.get("path") or "").strip()) if entry.get("path") else ""
-        if script_name == entry_name or script_name == entry_path or script_name == os.path.basename(entry_path):
-            target = entry
-            break
-    if not target:
-        return f"Error: Script '{script_name}' not found in skill '{skill_name}'."
-
-    script_rel_path = os.path.normpath(target.get("path") or "")
-    script_abs_path = os.path.abspath(os.path.join(record["path"], script_rel_path))
-    if not os.path.isfile(script_abs_path):
-        return f"Error: Script path '{script_rel_path}' not found for skill '{skill_name}'."
-
-    default_args = target.get("default_args") if isinstance(target.get("default_args"), list) else []
-    runtime = str(target.get("runtime") or "bash").strip().lower() or "bash"
-    try:
-        result = run_skill_script_in_sandbox(
-            skill_name,
-            script_abs_path,
-            runtime,
-            args=list(default_args) + args_list,
-            cwd=record["path"],
-            input_text=input_text,
-            timeout_seconds=int(timeout_seconds) if timeout_seconds is not None else 120,
-        )
-        payload = {
-            "skill_name": skill_name,
-            "script_name": target.get("name") or script_name,
-            "script_path": script_rel_path,
-            "runtime": runtime,
-            "ok": bool(result.get("ok")),
-            "exit_code": result.get("exit_code"),
-            "stdout": result.get("stdout", ""),
-            "stderr": result.get("stderr", ""),
-            "command": result.get("command", ""),
-            "cwd": result.get("cwd", record["path"]),
-        }
-        return json.dumps(payload, ensure_ascii=False)
-    except subprocess.TimeoutExpired:
-        return f"Error: Script '{script_name}' timed out after {timeout_seconds} seconds."
-    except Exception as e:
-        return f"Error executing skill script '{script_name}': {str(e)}"
-
 def _standard_step_result(action, result, ok=True, chosen_strategy="", fallback_used=False, capability_notes="", artifacts=None, timings=None):
     return {
         "action": action,
@@ -286,135 +133,6 @@ def _standard_step_result(action, result, ok=True, chosen_strategy="", fallback_
         "artifacts": artifacts or [],
         "timings": timings or {}
     }
-
-def _grep_impl(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
-    """
-    Search for a text pattern in files using regex.
-    
-    Args:
-        workspace_dir (str): Root workspace.
-        pattern (str): Regex pattern to search.
-        path (str): Relative path to start search (default: ".").
-        include (str): Glob pattern for files to include (default: "*").
-        exclude (str): Glob pattern for files to exclude.
-        recursive (bool): Whether to search recursively (default: True).
-    """
-    if not workspace_dir:
-        return "Error: Workspace not selected."
-        
-    start_dir = os.path.abspath(os.path.join(workspace_dir, path))
-    results = []
-    
-    # Common ignore patterns
-    default_excludes = {'.git', '.idea', '__pycache__', 'node_modules', '.venv', 'venv', 'dist', 'build'}
-    if exclude:
-        exclude_patterns = set(exclude.split(',')) | default_excludes
-    else:
-        exclude_patterns = default_excludes
-
-    try:
-        regex = re.compile(pattern)
-    except re.error as e:
-        return f"Error: Invalid regex pattern - {str(e)}"
-
-    match_count = 0
-    max_matches = 1000
-
-    try:
-        for root, dirs, files in os.walk(start_dir):
-            # Prune excluded directories
-            dirs[:] = [d for d in dirs if d not in exclude_patterns]
-            
-            for file in files:
-                if file in exclude_patterns:
-                    continue
-                
-                # Check include pattern
-                if not fnmatch.fnmatch(file, include):
-                    continue
-                    
-                file_path = os.path.join(root, file)
-                
-                # Check binary
-                try:
-                    # Quick check for binary
-                    with open(file_path, 'rb') as f:
-                        is_binary = b'\0' in f.read(1024)
-                    if is_binary:
-                        continue
-                        
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = f.readlines()
-                        for i, line in enumerate(lines):
-                            if regex.search(line):
-                                rel_path = os.path.relpath(file_path, workspace_dir)
-                                results.append(f"{rel_path}:{i+1}: {line.strip()}")
-                                match_count += 1
-                                if match_count >= max_matches:
-                                    results.append("... (Truncated due to match limit)")
-                                    return "\n".join(results)
-                                    
-                except Exception:
-                    continue
-            
-            if not recursive:
-                break
-                
-        if not results:
-            return "No matches found."
-            
-        return "\n".join(results)
-        
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def _run_everything_search(query, limit=200):
-    if os.name != "nt":
-        return None, "Everything is only supported on Windows."
-    exe_path = shutil.which("es.exe")
-    if not exe_path:
-        return None, "Everything CLI (es.exe) not found in PATH."
-    try:
-        result = subprocess.run([exe_path, "-n", str(limit), query], capture_output=True, **_no_window_kwargs())
-        if result.returncode != 0:
-            err = _decode_bytes(result.stderr).strip() or _decode_bytes(result.stdout).strip()
-            return None, err or "Everything CLI failed."
-        lines = [line.strip() for line in _decode_bytes(result.stdout).splitlines() if line.strip()]
-        return lines, None
-    except Exception as e:
-        return None, str(e)
-
-def _search_files_impl(workspace_dir, query, limit=200, fallback_path=".", use_grep_fallback=True, _context=None):
-    """
-    Search for files and folders using Everything CLI when available.
-    Falls back to grep in the workspace when Everything is unavailable.
-    
-    Args:
-        workspace_dir (str): Root workspace (used for fallback only).
-        query (str): Search query (Everything syntax supported).
-        limit (int): Maximum results to return (default 200).
-        fallback_path (str): Workspace-relative path for fallback grep.
-        use_grep_fallback (bool): Whether to fall back to grep (default True).
-    """
-    if not query or not str(query).strip():
-        return "Error: Query cannot be empty."
-    results, error = _run_everything_search(str(query), limit=limit)
-    if results is not None:
-        if not results:
-            return "No matches found."
-        return "\n".join(results)
-    if not use_grep_fallback:
-        return f"Everything unavailable: {error}"
-    fallback = _grep_impl(
-        workspace_dir,
-        pattern=query,
-        path=fallback_path,
-        include="*",
-        exclude=None,
-        recursive=True,
-        _context=_context
-    )
-    return f"Everything unavailable, fallback to grep in workspace.\n{fallback}"
 
 def _build_app_index_impl(refresh=False, limit=2000, refresh_min_interval=60):
     existing = _read_index()
@@ -1255,7 +973,7 @@ def system_automate(steps, workspace_dir=None, _context=None):
             web_buffer.append(step)
             continue
         flush_web()
-        if action in ("find", "find_app", "search", "index", "build_app_index"):
+        if action in ("find", "find_app", "index", "build_app_index"):
             limit_key = step.get("query") or step.get("pattern") or step.get("name") or action
             hit, wait_seconds = _hit_action_limit(action, str(limit_key), _context)
             if hit:
@@ -1297,16 +1015,6 @@ def system_automate(steps, workspace_dir=None, _context=None):
             step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
         elif action in ("index", "build_app_index"):
             res = _build_app_index_impl(step.get("refresh", False), step.get("limit", 2000), step.get("refresh_min_interval", 60))
-            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
-        elif action == "search":
-            kind = (step.get("kind") or "everything").strip().lower()
-            if kind == "grep":
-                res = _grep_impl(workspace_dir, step.get("pattern") or step.get("query"), step.get("path", "."), step.get("include", "*"), step.get("exclude"), step.get("recursive", True), _context=_context)
-            else:
-                res = _search_files_impl(workspace_dir, step.get("query"), step.get("limit", 200), step.get("fallback_path", "."), step.get("use_grep_fallback", True), _context=_context)
-            step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
-        elif action == "bash":
-            res = bash(workspace_dir, step.get("command"), _context=_context)
             step_result = _standard_step_result(action, res, ok=not (isinstance(res, str) and res.startswith("Error:")))
         else:
             step_result = _standard_step_result(action, f"Error: unsupported action {action}", ok=False)
@@ -1353,14 +1061,6 @@ def launch_app(name, args=None, _context=None):
 
 def open_with(file, app, _context=None):
     payload = system_automate([{"action": "open_with", "file": file, "app": app}], _context=_context)
-    return _unwrap_single_result(payload)
-
-def search_files(workspace_dir, query, limit=200, fallback_path=".", use_grep_fallback=True, _context=None):
-    payload = system_automate([{"action": "search", "kind": "everything", "query": query, "limit": limit, "fallback_path": fallback_path, "use_grep_fallback": use_grep_fallback}], workspace_dir=workspace_dir, _context=_context)
-    return _unwrap_single_result(payload)
-
-def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
-    payload = system_automate([{"action": "search", "kind": "grep", "pattern": pattern, "path": path, "include": include, "exclude": exclude, "recursive": recursive}], workspace_dir=workspace_dir, _context=_context)
     return _unwrap_single_result(payload)
 
 def _ensure_pywinauto():

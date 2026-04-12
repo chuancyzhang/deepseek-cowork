@@ -387,7 +387,7 @@ class LLMWorker(QThread):
             f"Node.js 路径: {node_info.get('path') or '沙盒 Node.js 路径解析失败'}",
             f"Bash 版本: {bash_info.get('version') or '未知'}",
             f"Bash 路径: {bash_info.get('path') or '沙盒 Bash 路径解析失败'}",
-            "命令策略: 需要运行 python/node/npm/npx/bash 时，优先使用 bash/run_command 工具在沙盒命令环境中执行。",
+            "命令策略: 需要运行 python/node/npm/npx/bash 时，优先使用 command-tools 中的 bash 工具在沙盒命令环境中执行。",
             "判定策略: 不要仅依赖系统 PATH 或常见安装目录猜测 Node/Python 可用性，应先在沙盒中直接执行版本命令验证。",
             package_line,
             missing_line,

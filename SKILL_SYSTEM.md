@@ -254,8 +254,12 @@ File and information interaction:
 - `web-search`
 
 Code and command execution:
+- `command-tools`
 - `system-tools`
 - `python-runner`
+
+`command-tools` owns shell execution, workspace glob/grep search, and declared skill scripts.
+`system-tools` owns environment/app automation such as browser, desktop, and app launch flows.
 
 AI and human interaction:
 - `interaction`

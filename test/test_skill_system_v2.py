@@ -29,6 +29,13 @@ class TestSkillSystemV2(unittest.TestCase):
         sm.load_skills()
         return sm
 
+    def _copy_repo_skill(self, skill_name):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source_dir = os.path.join(repo_root, "skills", skill_name)
+        target_dir = os.path.join(self.skills_dir, skill_name)
+        shutil.copytree(source_dir, target_dir)
+        return target_dir
+
     def test_knowledge_skill_is_discoverable_without_registering_new_tools(self):
         skill_dir = os.path.join(self.skills_dir, "http-guide")
         os.makedirs(skill_dir, exist_ok=True)
@@ -275,6 +282,34 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(record["spec"]["python_dependencies"], ["requests"])
         self.assertEqual(record["spec"]["node_dependencies"], ["lodash"])
 
+    def test_command_tools_skill_is_discoverable_and_registers_expected_tools(self):
+        self._copy_repo_skill("command-tools")
+
+        sm = self._build_manager()
+
+        self.assertIn("command-tools", sm.skill_records)
+        record = sm.skill_records["command-tools"]
+        self.assertEqual(record["tool_refs"], ["bash", "glob", "grep", "run_skill_script"])
+        tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
+        self.assertIn("bash", tool_names)
+        self.assertIn("glob", tool_names)
+        self.assertIn("grep", tool_names)
+        self.assertIn("run_skill_script", tool_names)
+
+    def test_system_tools_skill_only_exposes_environment_automation_tools(self):
+        self._copy_repo_skill("command-tools")
+        self._copy_repo_skill("system-tools")
+
+        sm = self._build_manager()
+
+        self.assertIn("system-tools", sm.skill_records)
+        self.assertCountEqual(
+            sm.get_tools_for_skill("system-tools"),
+            ["system_automate", "build_app_index", "find_app", "launch_app", "open_with"],
+        )
+        record = sm.skill_records["system-tools"]
+        self.assertEqual(record["tool_refs"], ["system_automate", "build_app_index", "find_app", "launch_app", "open_with"])
+
     def test_run_skill_script_uses_skill_dependency_flow_and_sandbox_runner(self):
         skill_dir = os.path.join(self.skills_dir, "scripted-skill")
         os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)
@@ -302,8 +337,8 @@ class TestSkillSystemV2(unittest.TestCase):
         sm = self._build_manager()
         sm.skill_records["scripted-skill"]["dependency_status"] = {"ok": False, "message": "missing"}
 
-        module_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "system-tools", "impl.py")
-        spec = importlib.util.spec_from_file_location("system_tools_impl_test", module_path)
+        module_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "command-tools", "impl.py")
+        spec = importlib.util.spec_from_file_location("command_tools_impl_test", module_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 

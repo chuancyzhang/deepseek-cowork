@@ -36,10 +36,11 @@ def _humanize_skill_name(skill_name):
         "interaction": "用户确认与交付",
         "memory-manager": "长期记忆",
         "meta-tools": "任务辅助工具",
+        "command-tools": "命令与搜索工具",
         "python-runner": "Python 执行",
         "skill-importer": "能力导入",
         "skill_builder": "能力创建",
-        "system-tools": "系统与命令工具",
+        "system-tools": "环境与应用自动化",
         "web-search": "网页搜索",
     }
     return mapping.get(text, text.replace("-", " ").title())
@@ -49,6 +50,7 @@ class SkillManager:
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
         "web-search": "file-information-interaction",
+        "command-tools": "code-command-execution",
         "system-tools": "code-command-execution",
         "python-runner": "code-command-execution",
         "interaction": "ai-human-interaction",
@@ -460,7 +462,7 @@ class SkillManager:
                     + (f": {item['description']}" if item.get("description") else "")
                     for item in script_entries[:12]
                 )
-                + "\nUse `run_skill_script` to execute these scripts inside the sandbox runtime."
+                + "\nUse `command-tools.run_skill_script` to execute these scripts inside the sandbox runtime."
             )
 
         dependency_lines = []
@@ -860,7 +862,7 @@ class SkillManager:
             if not os.path.exists(skills_dir):
                 continue
             is_ai_dir = os.path.basename(skills_dir) == "ai_skills"
-            for skill_name in os.listdir(skills_dir):
+            for skill_name in sorted(os.listdir(skills_dir)):
                 if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
@@ -1062,7 +1064,7 @@ class SkillManager:
         for skills_dir in self.skills_dirs:
             if not os.path.exists(skills_dir):
                 continue
-            for skill_name in os.listdir(skills_dir):
+            for skill_name in sorted(os.listdir(skills_dir)):
                 if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
                     continue
                 if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):

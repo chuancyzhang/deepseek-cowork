@@ -8,6 +8,7 @@ import uuid
 from PySide6.QtCore import QEventLoop, QTimer, Qt, QThread
 from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
+from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir
@@ -144,6 +145,7 @@ class DaemonState:
         with self.lock:
             worker = self.active_workers.get(session_id)
         interaction_service.cancel_session_requests(session_id, reason="cancelled")
+        self._close_live_subagents(session_id, force=True)
         if worker:
             try:
                 worker.stop()
@@ -151,6 +153,29 @@ class DaemonState:
                 _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
             return True
         return False
+
+    def _close_live_subagents(self, session_id, force=False):
+        try:
+            manager = get_agent_manager_registry().get_session_manager(
+                session_id,
+                chat_storage=self.chat_storage,
+                config_manager=self.config_manager,
+            )
+            manager.step_signal = None
+            manager.agent_state_signal = None
+            live_items = manager.list_agent_summaries(status_filter=list(AGENT_LIVE_STATUSES))
+            for item in live_items:
+                agent_id = item.get("id")
+                if not agent_id:
+                    continue
+                try:
+                    manager.close_agent(agent_id, force=bool(force))
+                except Exception as close_err:
+                    _log_daemon(
+                        f"close sub-agent failed session_id={session_id} agent_id={agent_id} error={close_err}"
+                    )
+        except Exception as e:
+            _log_daemon(f"_close_live_subagents failed session_id={session_id} error={e}")
 
     def _run_worker_once(self, session_id, worker_messages, workspace_dir):
         result_holder = {}
@@ -466,6 +491,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
             worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
             worker.tool_result_signal.connect(lambda data: send_stream({"type": "tool_result", "data": data}), Qt.DirectConnection)
+            worker.agent_state_signal.connect(lambda data: send_stream({"type": "agent_state", "data": data}), Qt.DirectConnection)
             worker.output_signal.connect(lambda text: send_stream({"type": "log", "data": text}), Qt.DirectConnection)
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
 

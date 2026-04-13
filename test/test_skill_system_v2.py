@@ -368,6 +368,24 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("grep", tool_names)
         self.assertIn("run_skill_script", tool_names)
 
+    def test_agent_manager_skill_exports_tool_first_surface(self):
+        self._copy_repo_skill("agent-manager")
+
+        sm = self._build_manager()
+
+        self.assertIn("agent-manager", sm.skill_records)
+        self.assertCountEqual(
+            sm.get_tools_for_skill("agent-manager"),
+            ["spawn_agent", "send_input", "wait_agent", "close_agent", "list_agents"],
+        )
+        tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
+        self.assertIn("spawn_agent", tool_names)
+        self.assertIn("send_input", tool_names)
+        self.assertIn("wait_agent", tool_names)
+        self.assertIn("close_agent", tool_names)
+        self.assertIn("list_agents", tool_names)
+        self.assertNotIn("dispatch_agents", tool_names)
+
     def test_system_tools_skill_only_exposes_environment_automation_tools(self):
         self._copy_repo_skill("command-tools")
         self._copy_repo_skill("system-tools")

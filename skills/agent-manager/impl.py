@@ -1,188 +1,212 @@
-import json
-from PySide6.QtCore import QEventLoop, QObject
-from core.agent import LLMWorker
+import os
 
-def dispatch_agents(workspace_dir, tasks, _context=None):
-    """
-    Spawn multiple sub-agents to execute tasks in parallel.
-    
-    Args:
-        workspace_dir (str): The workspace directory.
-        tasks (list): A list of task descriptions (strings).
-        _context (dict, optional): System context containing signal emitters and config.
-    
-    Returns:
-        str: Aggregated results from all agents.
-    """
-    if not tasks:
-        return "No tasks provided."
-    
-    if not _context:
-        return "Error: System context not provided (cannot access config/signals)."
-    
-    config_manager = _context.get('config_manager')
-    step_signal = _context.get('step_signal')
-    agent_state_signal = _context.get('agent_state_signal')
-    tool_call_id = _context.get('tool_call_id')
-    abort_signal = _context.get('abort_signal')
-    
-    if not config_manager:
-        return "Error: ConfigManager not found in context."
+from core.agent_manager import get_agent_manager_registry
+from core.chat_storage import ChatStorage
 
-    results = {}
-    workers = []
-    
-    # Helper QObject to handle signals in the current thread context if needed
-    # But since we are inside a function called by LLMWorker (QThread), 
-    # we can create sub-threads (LLMWorkers) and wait for them.
-    # Note: QThread.wait() blocks the calling thread (the Manager Agent), which is what we want.
-    
-    step_signal.emit(f"Manager: Spawning {len(tasks)} sub-agents...")
-    
-    for i, task in enumerate(tasks):
-        agent_id = f"Agent-{i+1}"
-        messages = [{"role": "user", "content": task}]
-        
-        # Report initial status
-        if agent_state_signal:
-             agent_state_signal.emit({
-                 "agent_id": agent_id,
-                 "status": "pending",
-                 "task": task,
-                 "tool_call_id": tool_call_id
-             })
 
-        # Create Worker
-        worker = LLMWorker(messages, config_manager, workspace_dir, parent_agent_id=agent_id)
-        
-        # Connect signals to a local handler to capture output
-        # We use a closure to capture agent_id
-        def make_logger(aid):
-            def logger(msg):
-                step_signal.emit(f"[{aid}]: {msg}")
-                # Also forward to agent_state_signal for the UI Monitor
-                if agent_state_signal:
-                    agent_state_signal.emit({
-                        "agent_id": aid,
-                        "status": "log",
-                        "log_content": msg,
-                        "tool_call_id": tool_call_id
-                    })
-            return logger
-            
-        worker.step_signal.connect(make_logger(agent_id))
-        
-        # Forward agent state signals
-        if agent_state_signal:
-             # State tracker for this agent to avoid spamming signals
-             state_tracker = {"last_status": None}
+def _ensure_main_agent(_context):
+    if isinstance(_context, dict) and _context.get("is_subagent"):
+        raise PermissionError("sub-agents cannot manage other agents")
 
-             def make_state_forwarder(aid):
-                def forwarder(state):
-                    # Inject tool_call_id if present so UI knows which card to update
-                    if tool_call_id:
-                        state["tool_call_id"] = tool_call_id
-                    agent_state_signal.emit(state)
-                return forwarder
-             worker.agent_state_signal.connect(make_state_forwarder(agent_id))
 
-             # Forward thinking status (throttled)
-             def make_think_forwarder(aid, tracker):
-                def forwarder(msg):
-                    # Always emit delta for UI update
-                    agent_state_signal.emit({
-                        "agent_id": aid,
-                        "status": "thinking",
-                        "reasoning_delta": msg,
-                        "tool_call_id": tool_call_id
-                    })
-                    tracker["last_status"] = "thinking"
-                return forwarder
-             worker.thinking_signal.connect(make_think_forwarder(agent_id, state_tracker))
+def _resolve_conversation_id(_context):
+    if not isinstance(_context, dict):
+        return ""
+    return str(
+        _context.get("conversation_id")
+        or _context.get("session_id")
+        or ""
+    ).strip()
 
-             # Forward tool usage status
-             def make_tool_forwarder(aid, tracker):
-                def forwarder(tool_info):
-                    tool_name = tool_info.get("name", "unknown")
-                    agent_state_signal.emit({
-                        "agent_id": aid,
-                        "status": "tool_use",
-                        "task": f"Tool: {tool_name}",
-                        "tool_call_id": tool_call_id
-                    })
-                    tracker["last_status"] = "tool_use"
-                return forwarder
-             worker.tool_call_signal.connect(make_tool_forwarder(agent_id, state_tracker))
 
-        # We need to capture the result. 
-        # Since LLMWorker.finished_signal emits a dict, we need a slot.
-        # But we can't easily define slots in a function.
-        # We'll attach a custom attribute to the worker to store the result?
-        # No, signals don't work like that.
-        # We can use a container list/dict and a lambda.
-        
-        def make_finisher(aid, container):
-            def finisher(res):
-                container[aid] = res.get("content", "No content")
-                if "error" in res:
-                    container[aid] += f" (Error: {res['error']})"
-            return finisher
+def _resolve_chat_storage(_context):
+    if isinstance(_context, dict):
+        existing = _context.get("chat_storage")
+        if existing:
+            return existing
+        cfg = _context.get("config_manager")
+        if cfg:
+            history_dir = cfg.get_chat_history_dir()
+            db_path = os.path.join(history_dir, "chat_history.sqlite")
+            return ChatStorage(db_path)
+    return None
 
-        worker.finished_signal.connect(make_finisher(agent_id, results))
-        
-        worker.start()
-        workers.append(worker)
-        step_signal.emit(f"Manager: Started {agent_id} on task: {task[:30]}...")
 
-    # Wait for all workers to finish using an event loop to allow signal processing
-    # This ensures that signals (logs, results) from sub-agents are processed by the current thread.
-    loop = QEventLoop()
-    active_count = len(workers)
-    
-    def on_finished(res):
-        nonlocal active_count
-        active_count -= 1
-        if active_count <= 0:
-            loop.quit()
-            
-    for worker in workers:
-        worker.finished_signal.connect(on_finished)
+def _resolve_manager(_context):
+    _ensure_main_agent(_context)
+    if not isinstance(_context, dict):
+        raise ValueError("system context is required")
+    manager = _context.get("agent_manager")
+    conversation_id = _resolve_conversation_id(_context)
+    if not conversation_id:
+        raise ValueError("conversation_id is required")
+    if manager and getattr(manager, "conversation_id", "") == conversation_id:
+        return manager
+    cfg = _context.get("config_manager")
+    if not cfg:
+        raise ValueError("config_manager is required")
+    storage = _resolve_chat_storage(_context)
+    if not storage:
+        raise ValueError("chat storage is required")
+    registry = get_agent_manager_registry()
+    return registry.get_session_manager(
+        conversation_id,
+        chat_storage=storage,
+        config_manager=cfg,
+        workspace_dir=_context.get("workspace_dir"),
+        step_signal=_context.get("step_signal"),
+        agent_state_signal=_context.get("agent_state_signal"),
+    )
 
-    # Handle Abort Signal from Parent
-    def on_abort():
-        step_signal.emit("Manager: Received stop signal. Terminating sub-agents...")
-        for w in workers:
-            if w.isRunning():
-                w.stop() # Set flags
-                w.quit() # Request thread exit
-                w.wait(100) # Wait briefly
-                if w.isRunning():
-                    w.terminate() # Force kill if needed
-        loop.quit()
-        
-    if abort_signal:
-        # We need to connect signal. 
-        # Since abort_signal is a bound signal from another thread, direct connection is fine.
-        # But we need a QObject slot.
-        # Using a helper object to bridge.
-        class SignalBridge(QObject):
-            def __init__(self, callback):
-                super().__init__()
-                self.callback = callback
-            def trigger(self):
-                self.callback()
-        
-        bridge = SignalBridge(on_abort)
-        abort_signal.connect(bridge.trigger)
 
-    if active_count > 0:
-        loop.exec()
-        
-    step_signal.emit("Manager: All sub-agents finished.")
-    
-    # Format Output
-    output = "## Sub-Agent Results\n\n"
-    for agent_id, result in results.items():
-        output += f"### {agent_id}\n{result}\n\n"
-        
-    return output
+def _normalize_targets(targets):
+    if isinstance(targets, str):
+        text = targets.strip()
+        return [text] if text else []
+    if isinstance(targets, (list, tuple, set)):
+        return [str(item).strip() for item in targets if str(item).strip()]
+    return []
+
+
+def spawn_agent(message, name="", fork_context=False, _context=None):
+    manager = _resolve_manager(_context)
+    result = manager.spawn_agent(
+        message=message,
+        name=(name or "").strip() or None,
+        fork_context=bool(fork_context),
+        current_messages_snapshot=(_context or {}).get("current_messages_snapshot"),
+        parent_message_id=(_context or {}).get("current_agent_id") or "",
+        source_tool_call_id=(_context or {}).get("tool_call_id") or "",
+    )
+    return {
+        "status": "spawned",
+        "agent_id": result.get("agent_id"),
+        "name": result.get("name") or "",
+    }
+
+
+def send_input(target, message, _context=None):
+    manager = _resolve_manager(_context)
+    result = manager.send_input(target=target, message=message)
+    return {
+        "status": result.get("status") or "queued",
+        "agent_id": result.get("agent_id"),
+        "pending_inputs": result.get("pending_inputs", 0),
+    }
+
+
+def wait_agent(targets=None, timeout_ms=30000, return_when="any", _context=None):
+    manager = _resolve_manager(_context)
+    result = manager.wait_agent(
+        targets=_normalize_targets(targets),
+        timeout_ms=int(timeout_ms or 0),
+        return_when=return_when,
+    )
+    return {
+        "status": "wait_complete",
+        "timed_out": bool(result.get("timed_out")),
+        "completed": result.get("completed") or [],
+        "pending": result.get("pending") or [],
+    }
+
+
+def close_agent(target, force=False, _context=None):
+    manager = _resolve_manager(_context)
+    result = manager.close_agent(target=target, force=bool(force))
+    return {
+        "status": "closed",
+        "agent": result,
+    }
+
+
+def list_agents(status_filter=None, _context=None):
+    manager = _resolve_manager(_context)
+    if isinstance(status_filter, str) and status_filter.strip():
+        normalized_filter = status_filter.strip()
+    elif isinstance(status_filter, (list, tuple, set)):
+        normalized_filter = [str(item).strip() for item in status_filter if str(item).strip()]
+    else:
+        normalized_filter = None
+    items = manager.list_agent_summaries(status_filter=normalized_filter)
+    return {
+        "status": "ok",
+        "count": len(items),
+        "agents": items,
+    }
+
+
+TOOL_EXPORTS = [
+    {
+        "name": "spawn_agent",
+        "handler": spawn_agent,
+        "description": "Spawn a sub-agent in the current conversation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "Task message for the spawned agent."},
+                "name": {"type": "string", "description": "Optional unique display name."},
+                "fork_context": {"type": "boolean", "description": "Whether to fork current conversation snapshot."},
+            },
+            "required": ["message"],
+        },
+    },
+    {
+        "name": "send_input",
+        "handler": send_input,
+        "description": "Send another user message to an existing agent.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Agent id or unique name."},
+                "message": {"type": "string", "description": "Message to enqueue for the agent."},
+            },
+            "required": ["target", "message"],
+        },
+    },
+    {
+        "name": "wait_agent",
+        "handler": wait_agent,
+        "description": "Wait for one or more agents to reach a terminal status.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "description": "List of agent ids/names. Empty means all known agents in conversation.",
+                    "items": {"type": "string"},
+                },
+                "timeout_ms": {"type": "integer", "description": "Wait timeout in milliseconds."},
+                "return_when": {"type": "string", "description": "Use 'any' or 'all'."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "close_agent",
+        "handler": close_agent,
+        "description": "Close an agent and stop accepting follow-up input.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Agent id or unique name."},
+                "force": {"type": "boolean", "description": "Force terminate if still running."},
+            },
+            "required": ["target"],
+        },
+    },
+    {
+        "name": "list_agents",
+        "handler": list_agents,
+        "description": "List persisted agents for the current conversation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status_filter": {
+                    "type": "string",
+                    "description": "Optional status filter (e.g. running, completed).",
+                }
+            },
+            "required": [],
+        },
+    },
+]

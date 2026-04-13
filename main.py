@@ -21,6 +21,7 @@ from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
 from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT
+from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 import shutil
 import traceback
 import qtawesome as qta
@@ -69,7 +70,7 @@ QMenu::separator {
 }
 """
 
-HISTORY_MIGRATION_VERSION = 1
+HISTORY_MIGRATION_VERSION = 2
 
 
 def readable_skill_name(skill):
@@ -1433,6 +1434,7 @@ class DaemonStreamWorker(QThread):
     content_signal = Signal(str)
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
+    agent_state_signal = Signal(dict)
     output_signal = Signal(str)
     interaction_signal = Signal(dict)
 
@@ -1496,6 +1498,10 @@ class DaemonStreamWorker(QThread):
                     elif msg.get("type") == "tool_result":
                         data = msg.get("data") or {}
                         self.tool_result_signal.emit(data)
+                    elif msg.get("type") == "agent_state":
+                        data = msg.get("data") or {}
+                        if isinstance(data, dict):
+                            self.agent_state_signal.emit(data)
                     elif msg.get("type") == "interaction_request":
                         data = msg.get("data") or {}
                         if isinstance(data, dict) and data.get("request_id"):
@@ -2082,6 +2088,12 @@ class ChatBubble(QFrame):
             if status == "thinking":
                 fmt.setForeground(QColor(DesignTokens.accent_ai))
                 fmt.setFontItalic(True)
+            elif status == "provider_log":
+                fmt.setForeground(QColor("#0f766e"))
+                fmt.setFontWeight(QFont.Bold)
+            elif status == "provider_error":
+                fmt.setForeground(QColor("#b91c1c"))
+                fmt.setFontWeight(QFont.Bold)
             elif status == "tool_use":
                 fmt.setForeground(QColor(DesignTokens.accent_tool))
             elif status == "completed":
@@ -2119,9 +2131,13 @@ class ChatBubble(QFrame):
             indicator.setToolTip(f"Agent: {agent_id} ({status})")
 
     def _get_status_color(self, status):
-        if status in ["active", "thinking"]: return DesignTokens.accent_ai
+        if status in ["active", "running", "thinking", "waiting_input", "pending"]:
+            return DesignTokens.accent_ai
         if status == "completed": return DesignTokens.success_text
-        if status == "error": return DesignTokens.error_text
+        if status in ["error", "failed", "failed_recovered", "killed"]:
+            return DesignTokens.error_text
+        if status == "closed":
+            return DesignTokens.text_secondary
         if status == "tool_use": return DesignTokens.accent_tool
         return DesignTokens.text_tertiary
 
@@ -2458,6 +2474,7 @@ class ToolCallCard(QFrame):
 
     def update_agent_state(self, state):
         agent_id = state.get("agent_id")
+        agent_name = state.get("agent_name") or ""
         status = state.get("status")
         task = state.get("task", "")
         
@@ -2469,53 +2486,141 @@ class ToolCallCard(QFrame):
         if agent_id not in self.sub_agent_widgets:
             # Create new row for agent
             row_widget = QWidget()
-            row_layout = QHBoxLayout(row_widget)
+            row_layout = QVBoxLayout(row_widget)
             row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(2)
+
+            head_layout = QHBoxLayout()
+            head_layout.setContentsMargins(0, 0, 0, 0)
+            head_layout.setSpacing(6)
             
             icon = QLabel()
             icon.setPixmap(qta.icon('fa5s.robot', color='#6b7280').pixmap(12, 12))
             
-            name = QLabel(agent_id)
+            display_name = agent_name or agent_id
+            if agent_name and agent_name != agent_id:
+                display_name = f"{agent_name} ({agent_id[:8]})"
+            name = QLabel(display_name)
             name.setStyleSheet("font-weight: bold; color: #4b5563; font-size: 11px;")
             
             status_label = QLabel(status)
             status_label.setStyleSheet("color: #6b7280; font-size: 11px;")
+
+            detail_label = QLabel("")
+            detail_label.setWordWrap(True)
+            detail_label.setStyleSheet("color: #6b7280; font-size: 10px;")
             
-            row_layout.addWidget(icon)
-            row_layout.addWidget(name)
-            row_layout.addWidget(status_label, 1) # Expand
+            head_layout.addWidget(icon)
+            head_layout.addWidget(name)
+            head_layout.addWidget(status_label, 1) # Expand
+            row_layout.addLayout(head_layout)
+            row_layout.addWidget(detail_label)
             
             self.sub_agents_layout.addWidget(row_widget)
             self.sub_agent_widgets[agent_id] = {
                 "widget": row_widget,
-                "status_label": status_label
+                "status_label": status_label,
+                "name_label": name,
+                "detail_label": detail_label,
+                "detail_text": "",
             }
         
         # Update status
         widgets = self.sub_agent_widgets[agent_id]
+        if agent_name:
+            display_name = agent_name if agent_name == agent_id else f"{agent_name} ({agent_id[:8]})"
+            widgets["name_label"].setText(display_name)
         status_text = f"{status}"
+        detail_text = ""
         
         # Default style
         style = "color: #6b7280; font-size: 11px;"
+        detail_style = "color: #6b7280; font-size: 10px;"
+        detail_cache = widgets.get("detail_text", "")
+
+        def _trim(text, limit=180):
+            text = (text or "").replace("\r", " ").replace("\n", " ").strip()
+            if len(text) <= limit:
+                return text
+            return text[: limit - 3] + "..."
         
         if status == "pending":
             status_text = f"Pending: {task[:30]}..." if task else "Pending"
+            detail_text = _trim(task)
         elif status == "completed":
             status_text = "Completed"
             style = "color: #10b981; font-size: 11px; font-weight: bold;"
-        elif status == "active":
+            detail_text = _trim(state.get("content") or state.get("last_result") or "")
+        elif status in {"active", "running"}:
              status_text = "Running..."
              style = "color: #3b82f6; font-size: 11px;"
+             detail_text = _trim(task or detail_cache)
+        elif status == "waiting_input":
+            status_text = "Waiting input..."
+            style = "color: #0ea5e9; font-size: 11px;"
+            detail_text = "等待新的 send_input..."
         elif status == "thinking":
             status_text = "Thinking..." 
             style = "color: #6366f1; font-size: 11px; font-style: italic;"
+            chunk = _trim(state.get("reasoning_delta") or "")
+            if chunk:
+                detail_text = _trim((detail_cache + " " + chunk).strip(), limit=200)
+                detail_style = "color: #6366f1; font-size: 10px; font-style: italic;"
+            else:
+                detail_text = detail_cache
+        elif status == "content":
+            status_text = "Writing..."
+            style = "color: #16a34a; font-size: 11px;"
+            chunk = _trim(state.get("content_delta") or "")
+            if chunk:
+                detail_text = _trim((detail_cache + " " + chunk).strip(), limit=220)
+                detail_style = "color: #166534; font-size: 10px;"
+            else:
+                detail_text = detail_cache
+        elif status == "provider_log":
+            status_text = "Provider..."
+            style = "color: #0f766e; font-size: 11px; font-weight: bold;"
+            detail_text = _trim(state.get("provider_message") or "")
+            detail_style = "color: #0f766e; font-size: 10px;"
+        elif status == "provider_error":
+            status_text = "Provider error"
+            style = "color: #b91c1c; font-size: 11px; font-weight: bold;"
+            detail_text = _trim(state.get("provider_message") or state.get("error") or "")
+            detail_style = "color: #b91c1c; font-size: 10px;"
         elif status == "tool_use":
             # task contains "Tool: <name>"
             status_text = f"Action: {task}"
             style = "color: #f59e0b; font-size: 11px; font-weight: bold;"
+            detail_text = _trim(task)
+            detail_style = "color: #f59e0b; font-size: 10px;"
+        elif status == "log":
+            status_text = "Running..."
+            style = "color: #3b82f6; font-size: 11px;"
+            chunk = _trim(state.get("log_content") or "")
+            if chunk:
+                detail_text = _trim((detail_cache + " " + chunk).strip(), limit=200)
+            else:
+                detail_text = detail_cache
+        elif status in {"failed", "failed_recovered"}:
+            status_text = "Failed"
+            style = "color: #ef4444; font-size: 11px; font-weight: bold;"
+            detail_text = _trim(state.get("error") or state.get("content") or "")
+            detail_style = "color: #ef4444; font-size: 10px;"
+        elif status == "closed":
+            status_text = "Closed"
+            style = "color: #6b7280; font-size: 11px;"
+            detail_text = "已关闭"
+        elif status == "killed":
+            status_text = "Killed"
+            style = "color: #dc2626; font-size: 11px; font-weight: bold;"
+            detail_text = "已强制终止"
+            detail_style = "color: #dc2626; font-size: 10px;"
         
         widgets["status_label"].setText(status_text)
         widgets["status_label"].setStyleSheet(style)
+        widgets["detail_text"] = detail_text or detail_cache
+        widgets["detail_label"].setText(widgets["detail_text"])
+        widgets["detail_label"].setStyleSheet(detail_style)
 
     def focusInEvent(self, event):
         if not self.is_selected:
@@ -2621,9 +2726,15 @@ class SubAgentMonitor(QWidget):
         
         self.agents = {} # {agent_id: {"text_edit": QTextEdit}}
 
-    def update_log(self, agent_id, content, status):
+    def reset(self):
+        self.tabs.clear()
+        self.agents = {}
+
+    def update_log(self, agent_id, content, status, agent_name=""):
         if agent_id not in self.agents:
-            self._create_agent_tab(agent_id)
+            self._create_agent_tab(agent_id, agent_name=agent_name)
+        elif agent_name:
+            self._set_agent_tab_title(agent_id, agent_name)
             
         widgets = self.agents[agent_id]
         text_edit = widgets["text_edit"]
@@ -2663,6 +2774,21 @@ class SubAgentMonitor(QWidget):
             text_edit.ensureCursorVisible()
             
             self._update_tab_status(agent_id, "thinking")
+        elif status == "content" and content:
+            cursor = text_edit.textCursor()
+            cursor.movePosition(QTextCursor.End)
+
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#166534"))
+            fmt.setFontItalic(False)
+            fmt.setFontWeight(QFont.Normal)
+            fmt.setFontPointSize(11)
+
+            cursor.insertText(content, fmt)
+            text_edit.setTextCursor(cursor)
+            text_edit.ensureCursorVisible()
+
+            self._update_tab_status(agent_id, "running")
             
         elif status == "log" and content:
             cursor = text_edit.textCursor()
@@ -2679,6 +2805,35 @@ class SubAgentMonitor(QWidget):
             cursor.insertText(f"[{ts}] {content}\n", fmt)
             text_edit.setTextCursor(cursor)
             text_edit.ensureCursorVisible()
+        elif status == "provider_log" and content:
+            cursor = text_edit.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
+                cursor.insertText("\n")
+
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#0f766e"))
+            fmt.setFontWeight(QFont.Bold)
+            fmt.setFontPointSize(10)
+
+            cursor.insertText(f"[{ts}] {content}\n", fmt)
+            text_edit.setTextCursor(cursor)
+            text_edit.ensureCursorVisible()
+        elif status == "provider_error" and content:
+            cursor = text_edit.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
+                cursor.insertText("\n")
+
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#b91c1c"))
+            fmt.setFontWeight(QFont.Bold)
+            fmt.setFontPointSize(10)
+
+            cursor.insertText(f"[{ts}] {content}\n", fmt)
+            text_edit.setTextCursor(cursor)
+            text_edit.ensureCursorVisible()
+            self._update_tab_status(agent_id, "failed")
             
         elif status == "tool_use" and content:
             cursor = text_edit.textCursor()
@@ -2698,6 +2853,21 @@ class SubAgentMonitor(QWidget):
             
             self._update_tab_status(agent_id, "tool")
             
+        elif status in {"active", "running"}:
+            self._update_tab_status(agent_id, "running")
+
+        elif status == "waiting_input":
+            cursor = text_edit.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor("#0ea5e9"))
+            fmt.setFontWeight(QFont.Bold)
+            fmt.setFontPointSize(11)
+            cursor.insertText(f"\n[{ts}] ⏸ Waiting input\n", fmt)
+            text_edit.setTextCursor(cursor)
+            text_edit.ensureCursorVisible()
+            self._update_tab_status(agent_id, "running")
+
         elif status == "completed":
              cursor = text_edit.textCursor()
              cursor.movePosition(QTextCursor.End)
@@ -2711,14 +2881,46 @@ class SubAgentMonitor(QWidget):
              fmt.setFontPointSize(12)
              
              cursor.insertText(f"\n✅ Completed at {ts}.\n", fmt)
+             final_text = (content or "").strip()
+             if final_text:
+                 body_fmt = QTextCharFormat()
+                 body_fmt.setForeground(QColor("#166534"))
+                 body_fmt.setFontPointSize(11)
+                 cursor.insertText(final_text + "\n", body_fmt)
              text_edit.setTextCursor(cursor)
              text_edit.ensureCursorVisible()
              
              self._update_tab_status(agent_id, "completed")
+        elif status in {"failed", "failed_recovered", "killed"}:
+             cursor = text_edit.textCursor()
+             cursor.movePosition(QTextCursor.End)
+             fmt = QTextCharFormat()
+             fmt.setForeground(QColor("#ef4444"))
+             fmt.setFontWeight(QFont.Bold)
+             fmt.setFontPointSize(11)
+             detail = (content or "").strip()
+             if detail:
+                 cursor.insertText(f"\n❌ Failed at {ts}: {detail}\n", fmt)
+             else:
+                 cursor.insertText(f"\n❌ Failed at {ts}\n", fmt)
+             text_edit.setTextCursor(cursor)
+             text_edit.ensureCursorVisible()
+             self._update_tab_status(agent_id, "failed")
+        elif status == "closed":
+             cursor = text_edit.textCursor()
+             cursor.movePosition(QTextCursor.End)
+             fmt = QTextCharFormat()
+             fmt.setForeground(QColor("#6b7280"))
+             fmt.setFontPointSize(11)
+             cursor.insertText(f"\n■ Closed at {ts}\n", fmt)
+             text_edit.setTextCursor(cursor)
+             text_edit.ensureCursorVisible()
+             self._update_tab_status(agent_id, "closed")
 
     def _update_tab_status(self, agent_id, state):
+        tab_bar = self.tabs.tabBar()
         for i in range(self.tabs.count()):
-            if self.tabs.tabText(i).startswith(agent_id):
+            if tab_bar.tabData(i) == agent_id:
                 icon = None
                 if state == "running":
                     icon = qta.icon('fa5s.play-circle', color='#3b82f6')
@@ -2728,12 +2930,24 @@ class SubAgentMonitor(QWidget):
                     icon = qta.icon('fa5s.tools', color='#f59e0b')
                 elif state == "completed":
                     icon = qta.icon('fa5s.check-circle', color='#10b981')
+                elif state == "failed":
+                    icon = qta.icon('fa5s.exclamation-circle', color='#ef4444')
+                elif state == "closed":
+                    icon = qta.icon('fa5s.stop-circle', color='#6b7280')
                 
                 if icon:
                     self.tabs.setTabIcon(i, icon)
                 break
 
-    def _create_agent_tab(self, agent_id):
+    def _set_agent_tab_title(self, agent_id, agent_name=""):
+        tab_bar = self.tabs.tabBar()
+        title = agent_id if not agent_name else f"{agent_name}"
+        for i in range(self.tabs.count()):
+            if tab_bar.tabData(i) == agent_id:
+                self.tabs.setTabText(i, title)
+                return
+
+    def _create_agent_tab(self, agent_id, agent_name=""):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2750,7 +2964,9 @@ class SubAgentMonitor(QWidget):
         """)
         layout.addWidget(text_edit)
         
-        index = self.tabs.addTab(tab, agent_id)
+        title = agent_id if not agent_name else f"{agent_name}"
+        index = self.tabs.addTab(tab, title)
+        self.tabs.tabBar().setTabData(index, agent_id)
         self.agents[agent_id] = {"text_edit": text_edit}
         if self.tabs.count() == 1:
             self.tabs.setCurrentIndex(index)
@@ -2805,6 +3021,8 @@ class SessionState:
         self.pending_scroll_force = False
         self.active_turn_id = 0
         self.completed_turn_id = 0
+        self.persisted_agents = []
+        self.sub_agent_events = []
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -3052,6 +3270,7 @@ class MainWindow(QMainWindow):
         self.current_selected_tool_id = None
         self._last_submit_text = ""
         self._last_submit_ts = 0.0
+        self._detached_workers = []
         
         self.config_manager = ConfigManager()
         self.skill_manager = SkillManager(None, self.config_manager)
@@ -3383,8 +3602,20 @@ class MainWindow(QMainWindow):
         td_layout.addWidget(self.td_result_edit, 2)
         
         self.right_tabs.addTab(self.tool_details_tab, "工具详情")
-        
-        # Sub-Agent Monitor (Now as independent window, initialized later)
+
+        # Tab 4: Sub-Agent Monitor
+        self.sub_agent_tab = QWidget()
+        sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
+        sub_agent_layout.setContentsMargins(12, 12, 12, 12)
+        sub_agent_layout.setSpacing(8)
+        self.sub_agent_intro_label = QLabel("子 Agent 的实时状态和执行日志（仅 UI 展示，不写入主对话上下文）。")
+        self.sub_agent_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        sub_agent_layout.addWidget(self.sub_agent_intro_label)
+        self.sub_agent_monitor = SubAgentMonitor()
+        sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
+        self.right_tabs.addTab(self.sub_agent_tab, "子Agent")
+
+        # Sub-Agent Monitor (legacy independent window entry)
         self.sub_agent_monitor_window = None
         
         right_layout.addWidget(self.right_tabs)
@@ -3392,6 +3623,7 @@ class MainWindow(QMainWindow):
             self.right_tabs.setTabText(0, "文件")
             self.right_tabs.setTabText(1, "变更")
             self.right_tabs.setTabText(2, "步骤")
+            self.right_tabs.setTabText(3, "子Agent")
         except Exception:
             pass
         
@@ -3872,18 +4104,22 @@ class MainWindow(QMainWindow):
 
     def shutdown_workers(self):
         for session_id, state in list(self.sessions.items()):
+            self._stop_live_subagents(state, force=True)
             if self.daemon_client and state.daemon_running and state.session_id:
                 try:
                     self.daemon_client.stop_session(state.session_id)
                 except Exception:
                     pass
             if state.daemon_worker and state.daemon_worker.isRunning():
+                self._disconnect_worker_signals(state.daemon_worker)
                 state.daemon_worker.abort()
                 state.daemon_worker.wait(1000)
             if state.llm_worker and state.llm_worker.isRunning():
+                self._disconnect_worker_signals(state.llm_worker)
                 state.llm_worker.stop()
                 state.llm_worker.wait(1000)
             if state.code_worker and state.code_worker.isRunning():
+                self._disconnect_worker_signals(state.code_worker)
                 state.code_worker.stop()
                 state.code_worker.wait(1000)
             state.daemon_running = False
@@ -4006,6 +4242,7 @@ class MainWindow(QMainWindow):
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.refresh_context_badges(session_id)
+        self._render_sub_agent_monitor_for_state(state)
 
     def normalize_session_ui(self, state):
         if not state: return
@@ -4082,8 +4319,25 @@ class MainWindow(QMainWindow):
         if not session_id: return
         state = self.sessions.get(session_id)
         if state:
-            if state.llm_worker: state.llm_worker.stop()
-            if state.code_worker: state.code_worker.stop()
+            self._stop_live_subagents(state, force=True)
+            if state.daemon_worker:
+                self._disconnect_worker_signals(state.daemon_worker)
+                try:
+                    state.daemon_worker.abort()
+                except Exception:
+                    pass
+            if state.llm_worker:
+                self._disconnect_worker_signals(state.llm_worker)
+                try:
+                    state.llm_worker.stop()
+                except Exception:
+                    pass
+            if state.code_worker:
+                self._disconnect_worker_signals(state.code_worker)
+                try:
+                    state.code_worker.stop()
+                except Exception:
+                    pass
             del self.sessions[session_id]
         self.session_tabs.removeTab(index)
         if self.session_tabs.count() == 0: self.create_new_session()
@@ -4096,7 +4350,9 @@ class MainWindow(QMainWindow):
             self.refresh_history_list()
             self.refresh_change_list(session_id)
             self.refresh_step_list(session_id)
-            self.normalize_session_ui(self.get_current_session())
+            current_state = self.get_current_session()
+            self.normalize_session_ui(current_state)
+            self._render_sub_agent_monitor_for_state(current_state)
 
     def clear_chat_layout(self, chat_layout):
         while chat_layout.count():
@@ -4948,7 +5204,30 @@ class MainWindow(QMainWindow):
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
         state.changed_files = []
         state.step_records = []
+        state.persisted_agents = []
+        state.sub_agent_events = []
         state.messages = self.chat_storage.get_messages(session_id)
+        try:
+            state.persisted_agents = self.chat_storage.list_agents(session_id)
+        except Exception:
+            state.persisted_agents = []
+        for item in state.persisted_agents or []:
+            if not isinstance(item, dict):
+                continue
+            agent_id = item.get("id") or ""
+            if not agent_id:
+                continue
+            status = item.get("status") or "closed"
+            summary = item.get("last_result") or item.get("last_error") or ""
+            state.sub_agent_events.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_name": item.get("name") or "",
+                    "status": status,
+                    "content": summary,
+                    "ts": int(item.get("updated_at") or time.time()),
+                }
+            )
         if not state.messages:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
             if os.path.exists(history_path):
@@ -4988,6 +5267,8 @@ class MainWindow(QMainWindow):
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.normalize_session_ui(self.get_current_session())
+        if session_id == self.current_session_id:
+            self._render_sub_agent_monitor_for_state(state)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -5227,6 +5508,80 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.play', color='#10b981'))
                 self.pause_btn.setToolTip("继续")
 
+    def _disconnect_worker_signals(self, worker):
+        if not worker:
+            return
+        for signal_name in (
+            "finished_signal",
+            "thinking_signal",
+            "content_signal",
+            "tool_call_signal",
+            "tool_result_signal",
+            "output_signal",
+            "interaction_signal",
+            "agent_state_signal",
+            "step_signal",
+            "skill_used_signal",
+            "input_request_signal",
+        ):
+            signal = getattr(worker, signal_name, None)
+            if signal is None:
+                continue
+            try:
+                signal.disconnect()
+            except Exception:
+                pass
+
+    def _keep_detached_worker(self, worker):
+        if not worker:
+            return
+        self._detached_workers.append(worker)
+
+        def _cleanup():
+            try:
+                if worker in self._detached_workers:
+                    self._detached_workers.remove(worker)
+            except Exception:
+                pass
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+
+        try:
+            worker.finished.connect(_cleanup)
+        except Exception:
+            QTimer.singleShot(3000, _cleanup)
+
+    def _stop_live_subagents(self, state, force=True):
+        manager = None
+        try:
+            if state.llm_worker and getattr(state.llm_worker, "agent_manager", None):
+                manager = state.llm_worker.agent_manager
+            elif state.session_id:
+                manager = get_agent_manager_registry().get_session_manager(
+                    state.session_id,
+                    chat_storage=self.chat_storage,
+                    config_manager=self.config_manager,
+                    workspace_dir=self.workspace_dir,
+                )
+        except Exception:
+            manager = None
+        if not manager:
+            return
+        try:
+            live_agents = manager.list_agent_summaries(status_filter=list(AGENT_LIVE_STATUSES))
+        except Exception:
+            live_agents = []
+        for item in live_agents:
+            agent_id = item.get("id")
+            if not agent_id:
+                continue
+            try:
+                manager.close_agent(agent_id, force=bool(force))
+            except Exception:
+                continue
+
     def stop_agent(self):
         state = self.get_current_session()
         if not state: return
@@ -5234,29 +5589,43 @@ class MainWindow(QMainWindow):
             state.temp_thinking_bubble.stop_thinking_timers()
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
             state.last_agent_bubble.stop_thinking_timers()
+        if not state.daemon_running:
+            self._stop_live_subagents(state, force=True)
         if self.daemon_client and state.daemon_running and state.session_id:
             try:
                 self.daemon_client.stop_session(state.session_id)
             except Exception:
                 pass
         if state.daemon_worker:
-            state.daemon_worker.abort()
-            state.daemon_worker.wait(2000)
-            if state.daemon_worker.isRunning():
-                state.daemon_worker.terminate()
-                state.daemon_worker.wait(1000)
-        if state.llm_worker and state.llm_worker.isRunning():
-            state.llm_worker.stop()
-            state.llm_worker.wait(2000)
-            if state.llm_worker.isRunning():
-                state.llm_worker.terminate()
-                state.llm_worker.wait(1000)
-        if state.code_worker and state.code_worker.isRunning():
-            state.code_worker.stop()
-            state.code_worker.wait(2000)
-            if state.code_worker.isRunning():
-                state.code_worker.terminate()
-                state.code_worker.wait(1000)
+            daemon_worker = state.daemon_worker
+            self._disconnect_worker_signals(daemon_worker)
+            try:
+                daemon_worker.abort()
+            except Exception:
+                pass
+            daemon_worker.wait(1200)
+            if daemon_worker.isRunning():
+                self._keep_detached_worker(daemon_worker)
+        if state.llm_worker:
+            llm_worker = state.llm_worker
+            self._disconnect_worker_signals(llm_worker)
+            try:
+                llm_worker.stop()
+            except Exception:
+                pass
+            llm_worker.wait(1200)
+            if llm_worker.isRunning():
+                self._keep_detached_worker(llm_worker)
+        if state.code_worker:
+            code_worker = state.code_worker
+            self._disconnect_worker_signals(code_worker)
+            try:
+                code_worker.stop()
+            except Exception:
+                pass
+            code_worker.wait(1200)
+            if code_worker.isRunning():
+                self._keep_detached_worker(code_worker)
         state.active_turn_id += 1
         state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id)
         state.daemon_worker = None
@@ -5332,6 +5701,9 @@ class MainWindow(QMainWindow):
         state.active_turn_id += 1
         current_turn_id = state.active_turn_id
         state.messages.append({"role": "user", "content": user_text})
+        # Keep rendered-count in sync for live messages; otherwise load-more
+        # may re-render freshly added items as if they were unseen history.
+        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
         self.try_connect_daemon(allow_start=True, retries=4)
@@ -5686,6 +6058,7 @@ class MainWindow(QMainWindow):
         state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
         state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
         state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
+        state.daemon_worker.agent_state_signal.connect(lambda data, sid=state.session_id: self.handle_agent_state(data, sid))
         state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid))
         state.daemon_worker.start()
         if state.session_id == self.current_session_id:
@@ -5710,20 +6083,97 @@ class MainWindow(QMainWindow):
         if "error" in text.lower() or "exception" in text.lower() or "fail" in text.lower():
             self.add_system_toast(text, "error", session_id=session_id)
 
+    def _record_sub_agent_event(self, state, data, content):
+        if not state or not isinstance(data, dict):
+            return
+        status = data.get("status") or ""
+        text = content or ""
+        if status in {"thinking", "content"} and len((text or "").strip()) <= 1:
+            return
+        event = {
+            "agent_id": data.get("agent_id") or "",
+            "agent_name": data.get("agent_name") or "",
+            "status": status,
+            "content": text,
+            "ts": int(time.time()),
+        }
+        if not event["agent_id"]:
+            return
+        if state.sub_agent_events:
+            last = state.sub_agent_events[-1]
+            if (
+                isinstance(last, dict)
+                and last.get("agent_id") == event["agent_id"]
+                and last.get("status") == event["status"]
+            ):
+                merged_text = (last.get("content") or "") + (event.get("content") or "")
+                last["content"] = merged_text[-240:]
+                last["ts"] = event["ts"]
+                return
+        state.sub_agent_events.append(event)
+        if len(state.sub_agent_events) > 800:
+            state.sub_agent_events = state.sub_agent_events[-800:]
+
+    def _render_sub_agent_monitor_for_state(self, state):
+        if not state or not hasattr(self, "sub_agent_monitor") or self.sub_agent_monitor is None:
+            return
+        self.sub_agent_monitor.reset()
+        for event in state.sub_agent_events:
+            if not isinstance(event, dict):
+                continue
+            agent_id = event.get("agent_id")
+            if not agent_id:
+                continue
+            status = event.get("status") or "running"
+            content = event.get("content") or ""
+            self.sub_agent_monitor.update_log(agent_id, content, status, agent_name=event.get("agent_name") or "")
+
     def handle_agent_state(self, data, session_id=None):
         state = self.get_session(session_id)
         if not state: return
         status = data.get("status")
-        if status in {"thinking", "pending"}:
+        if status in {"thinking", "pending", "content", "provider_log"}:
             self.set_session_phase("Analyzing", state.session_id)
         elif status == "tool_use":
             self.set_session_phase("Executing", state.session_id)
+        elif status == "provider_error":
+            self.set_session_phase("Error", state.session_id)
         
         # Update Tool Card
         tool_call_id = data.get("tool_call_id")
         if tool_call_id and tool_call_id in state.tool_cards:
             card = state.tool_cards[tool_call_id]
             card.update_agent_state(data)
+
+        monitor_content = ""
+        if status == "thinking":
+            monitor_content = data.get("reasoning_delta") or ""
+        elif status == "content":
+            monitor_content = data.get("content_delta") or ""
+        elif status == "log":
+            monitor_content = data.get("log_content") or ""
+        elif status == "provider_log":
+            monitor_content = data.get("provider_message") or ""
+        elif status == "provider_error":
+            monitor_content = data.get("provider_message") or data.get("error") or ""
+        elif status == "tool_use":
+            monitor_content = data.get("task") or ""
+        elif status == "pending":
+            monitor_content = data.get("task") or ""
+        elif status in {"failed", "failed_recovered", "killed"}:
+            monitor_content = data.get("error") or data.get("content") or ""
+        elif status == "completed":
+            monitor_content = data.get("content") or ""
+        self._record_sub_agent_event(state, data, monitor_content)
+        if session_id == self.current_session_id and hasattr(self, "sub_agent_monitor") and self.sub_agent_monitor:
+            agent_id = data.get("agent_id")
+            if agent_id:
+                self.sub_agent_monitor.update_log(
+                    agent_id,
+                    monitor_content,
+                    status,
+                    agent_name=data.get("agent_name") or "",
+                )
 
         # Update Sub-Agent Monitor (PiP in ChatBubble)
         if session_id == self.current_session_id:
@@ -5733,16 +6183,32 @@ class MainWindow(QMainWindow):
                 content = None
                 if status == "thinking":
                     content = data.get("reasoning_delta")
+                elif status == "content":
+                    content = data.get("content_delta")
                 elif status == "log":
                     content = data.get("log_content")
+                elif status == "provider_log":
+                    content = data.get("provider_message")
+                elif status == "provider_error":
+                    content = data.get("provider_message") or data.get("error")
                 elif status == "tool_use":
                     content = data.get("task")
                 elif status == "pending":
                     content = f"Task: {data.get('task')}\n"
+                elif status in {"running", "active"}:
+                    content = "Running...\n"
+                elif status == "waiting_input":
+                    content = "Waiting for input...\n"
                 elif status == "completed":
                     content = "\nDone."
+                elif status in {"failed", "failed_recovered"}:
+                    content = f"\nFailed: {data.get('content') or data.get('error') or ''}"
+                elif status == "closed":
+                    content = "\nClosed."
+                elif status == "killed":
+                    content = "\nKilled."
                     
-                if content or status in ["completed", "pending"]:
+                if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error"]:
                     # Update log in bubble
                     if hasattr(state.last_agent_bubble, 'update_sub_agent_log'):
                         state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)
@@ -5900,6 +6366,7 @@ class MainWindow(QMainWindow):
     def handle_llm_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state: return
+        previous_message_count = len(state.messages)
         if turn_id is not None:
             if turn_id != state.active_turn_id:
                 return
@@ -6047,6 +6514,9 @@ class MainWindow(QMainWindow):
                 "content_parts": content_parts
             })
         state.messages = self.chat_storage.normalize_messages(state.messages)
+        if len(state.messages) > previous_message_count:
+            newly_rendered = len(state.messages) - previous_message_count
+            state.displayed_count = min(len(state.messages), state.displayed_count + newly_rendered)
         self.save_chat_history()
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""

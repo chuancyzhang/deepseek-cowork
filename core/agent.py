@@ -10,11 +10,13 @@ import time
 import shutil
 import uuid
 from datetime import datetime
-from PySide6.QtCore import QThread, Signal, QObject, QMutex, QWaitCondition
+from PySide6.QtCore import QThread, Signal, Slot, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
 from core.env_utils import get_python_executable, get_python_runtime_snapshot, get_runtime_snapshot
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
+from core.chat_storage import ChatStorage
+from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 
 try:
     from openai import OpenAI
@@ -294,7 +296,17 @@ class LLMWorker(QThread):
     agent_state_signal = Signal(dict) # Signal to report sub-agent status
     abort_signal = Signal() # Signal emitted when the worker is stopped
 
-    def __init__(self, messages, config_manager, workspace_dir=None, parent_agent_id=None, session_id=None):
+    def __init__(
+        self,
+        messages,
+        config_manager,
+        workspace_dir=None,
+        parent_agent_id=None,
+        session_id=None,
+        conversation_id=None,
+        agent_id=None,
+        is_subagent=False,
+    ):
         super().__init__()
         self.messages = messages
         self.config_manager = config_manager
@@ -302,6 +314,9 @@ class LLMWorker(QThread):
         self.workspace_dir = workspace_dir
         self.parent_agent_id = parent_agent_id
         self.session_id = session_id or ""
+        self.conversation_id = conversation_id or self.session_id
+        self.agent_id = agent_id or parent_agent_id or ""
+        self.is_subagent = bool(is_subagent or parent_agent_id)
         
         # Flags for control
         self.is_paused = False
@@ -309,9 +324,69 @@ class LLMWorker(QThread):
         
         # Initialize Skill Manager
         self.skill_manager = SkillManager(workspace_dir, config_manager)
-        self.tools = self.skill_manager.get_tool_definitions()
+        self.tools = []
+        self._refresh_tool_definitions()
         # Per-run filesystem read/write state used by filesystem tools.
         self.file_state_cache = {"reads": {}}
+        self.chat_storage = None
+        self.agent_manager = None
+        try:
+            history_dir = self.config_manager.get_chat_history_dir()
+            db_path = os.path.join(history_dir, "chat_history.sqlite")
+            self.chat_storage = ChatStorage(db_path)
+        except Exception:
+            self.chat_storage = None
+        self._bind_agent_manager()
+
+    def _refresh_tool_definitions(self):
+        tools = self.skill_manager.get_tool_definitions()
+        if self.is_subagent:
+            filtered = []
+            for item in tools:
+                func = item.get("function") if isinstance(item, dict) else None
+                name = func.get("name") if isinstance(func, dict) else ""
+                if name in AGENT_MANAGEMENT_TOOLS:
+                    continue
+                filtered.append(item)
+            self.tools = filtered
+            return
+        self.tools = tools
+
+    def _bind_agent_manager(self):
+        if self.is_subagent:
+            self.agent_manager = None
+            return
+        if not (self.chat_storage and self.config_manager and self.conversation_id):
+            self.agent_manager = None
+            return
+        try:
+            registry = get_agent_manager_registry()
+            self.agent_manager = registry.get_session_manager(
+                self.conversation_id,
+                chat_storage=self.chat_storage,
+                config_manager=self.config_manager,
+                workspace_dir=self.workspace_dir,
+                step_signal=self.step_signal,
+                agent_state_signal=self.agent_state_signal,
+                owner_worker=self,
+            )
+        except Exception:
+            self.agent_manager = None
+
+    @Slot(str)
+    def relay_agent_step(self, text):
+        try:
+            self.step_signal.emit(str(text))
+        except Exception:
+            pass
+
+    @Slot(dict)
+    def relay_agent_state(self, payload):
+        try:
+            if isinstance(payload, dict):
+                self.agent_state_signal.emit(payload)
+        except Exception:
+            pass
 
     def pause(self):
         self.is_paused = True
@@ -480,7 +555,7 @@ class LLMWorker(QThread):
             if self.skill_manager.check_for_updates():
                 self.step_signal.emit("System: Detecting skill updates... Reloading.")
                 self.skill_manager.load_skills()
-                self.tools = self.skill_manager.get_tool_definitions()
+                self._refresh_tool_definitions()
             # -------------------------
 
             # Reset reasoning for the current turn (for UI display)
@@ -492,6 +567,8 @@ class LLMWorker(QThread):
                     
                     # Create Provider via Factory
                     provider = LLMFactory.create_provider(self.config_manager)
+                    provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
+                    self.step_signal.emit(f"Provider Start: {provider_name}")
                     stream = provider.chat_stream(sanitize_llm_messages(current_messages), tools=self.tools)
                     
                     # Streaming Buffers
@@ -543,11 +620,13 @@ class LLMWorker(QThread):
                         # 4. Handle Error
                         elif type_ == "error":
                             provider_error_message = chunk.get("content") or "Unknown error"
+                            self.step_signal.emit(f"Provider Error: {provider_error_message}")
                             self.output_signal.emit(f"Provider Error: {provider_error_message}")
 
                     end_time = time.time()
                     duration = end_time - start_time
                     total_duration += duration
+                    self.step_signal.emit(f"Provider End: {provider_name} ({duration:.2f}s)")
                     
                     # --- Reasoning Loop Detection ---
                     if current_turn_reasoning and len(current_turn_reasoning) > 10: # Ignore very short reasonings
@@ -689,20 +768,43 @@ class LLMWorker(QThread):
                             # Execute via Skill Manager
                             # Pass step_signal as context to allow tools to log
                             start_tool_time = time.time()
-                            result = self.skill_manager.call_tool(
-                                name, 
-                                args, 
-                                context={
-                                    "session_id": self.session_id,
-                                    "step_signal": self.step_signal, 
-                                    "config_manager": self.config_manager,
-                                    "skill_manager": self.skill_manager,
-                                    "file_state": self.file_state_cache,
-                                    "agent_state_signal": self.agent_state_signal,
-                                    "tool_call_id": tool.id,
-                                    "abort_signal": self.abort_signal
+                            current_snapshot = []
+                            for msg in current_messages:
+                                if not isinstance(msg, dict):
+                                    continue
+                                if msg.get("role") == "system":
+                                    continue
+                                current_snapshot.append(msg.copy())
+                            tool_context = {
+                                "session_id": self.session_id,
+                                "conversation_id": self.conversation_id,
+                                "workspace_dir": self.workspace_dir,
+                                "step_signal": self.step_signal,
+                                "config_manager": self.config_manager,
+                                "skill_manager": self.skill_manager,
+                                "chat_storage": self.chat_storage,
+                                "agent_manager": self.agent_manager,
+                                "file_state": self.file_state_cache,
+                                "agent_state_signal": self.agent_state_signal,
+                                "tool_call_id": tool.id,
+                                "abort_signal": self.abort_signal,
+                                "current_agent_id": self.agent_id or (self.parent_agent_id or ""),
+                                "parent_agent_id": self.parent_agent_id or "",
+                                "is_subagent": self.is_subagent,
+                                "current_messages_snapshot": current_snapshot,
+                            }
+                            if self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
+                                result = {
+                                    "error": "sub-agents cannot manage other agents",
+                                    "blocked_tool": name,
+                                    "status": "denied",
                                 }
-                            )
+                            else:
+                                result = self.skill_manager.call_tool(
+                                    name,
+                                    args,
+                                    context=tool_context,
+                                )
                             end_tool_time = time.time()
                             duration_tool = end_tool_time - start_tool_time
 
@@ -752,6 +854,7 @@ class LLMWorker(QThread):
                         break
                         
                 except Exception as e:
+                    self.output_signal.emit(f"Provider Exception: {e}")
                     self.finished_signal.emit({"error": str(e)})
                     return
             else:
@@ -779,7 +882,7 @@ class LLMWorker(QThread):
         })
 
         self.agent_state_signal.emit({
-            "agent_id": self.parent_agent_id or "Main", 
+            "agent_id": self.agent_id or self.parent_agent_id or "Main",
             "status": "completed", 
             "content": final_content
         })

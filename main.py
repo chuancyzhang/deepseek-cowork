@@ -2609,11 +2609,11 @@ class ToolCallCard(QFrame):
         elif status == "closed":
             status_text = "Closed"
             style = "color: #6b7280; font-size: 11px;"
-            detail_text = "已关闭"
+            detail_text = _trim(state.get("error") or "已关闭")
         elif status == "killed":
             status_text = "Killed"
             style = "color: #dc2626; font-size: 11px; font-weight: bold;"
-            detail_text = "已强制终止"
+            detail_text = _trim(state.get("error") or "已强制终止")
             detail_style = "color: #dc2626; font-size: 10px;"
         
         widgets["status_label"].setText(status_text)
@@ -5555,6 +5555,7 @@ class MainWindow(QMainWindow):
 
     def _stop_live_subagents(self, state, force=True):
         manager = None
+        reason = "当前任务已停止，子 Agent 被终止。" if force else "当前任务已结束，子 Agent 已关闭。"
         try:
             if state.llm_worker and getattr(state.llm_worker, "agent_manager", None):
                 manager = state.llm_worker.agent_manager
@@ -5578,7 +5579,7 @@ class MainWindow(QMainWindow):
             if not agent_id:
                 continue
             try:
-                manager.close_agent(agent_id, force=bool(force))
+                manager.close_agent(agent_id, force=bool(force), reason=reason)
             except Exception:
                 continue
 
@@ -6204,9 +6205,11 @@ class MainWindow(QMainWindow):
                 elif status in {"failed", "failed_recovered"}:
                     content = f"\nFailed: {data.get('content') or data.get('error') or ''}"
                 elif status == "closed":
-                    content = "\nClosed."
+                    detail = (data.get("error") or "").strip()
+                    content = f"\nClosed: {detail}" if detail else "\nClosed."
                 elif status == "killed":
-                    content = "\nKilled."
+                    detail = (data.get("error") or "").strip()
+                    content = f"\nKilled: {detail}" if detail else "\nKilled."
                     
                 if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error"]:
                     # Update log in bubble

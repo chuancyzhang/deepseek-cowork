@@ -307,17 +307,17 @@ class SessionAgentManager:
             self._on_worker_finished(agent_id, result if isinstance(result, dict) else {})
 
         if getattr(worker, "step_signal", None):
-            worker.step_signal.connect(_on_step)
+            worker.step_signal.connect(_on_step, Qt.DirectConnection)
         if getattr(worker, "thinking_signal", None):
-            worker.thinking_signal.connect(_on_thinking)
+            worker.thinking_signal.connect(_on_thinking, Qt.DirectConnection)
         if getattr(worker, "content_signal", None):
-            worker.content_signal.connect(_on_content)
+            worker.content_signal.connect(_on_content, Qt.DirectConnection)
         if getattr(worker, "output_signal", None):
-            worker.output_signal.connect(_on_output)
+            worker.output_signal.connect(_on_output, Qt.DirectConnection)
         if getattr(worker, "tool_call_signal", None):
-            worker.tool_call_signal.connect(_on_tool_call)
+            worker.tool_call_signal.connect(_on_tool_call, Qt.DirectConnection)
         if getattr(worker, "finished_signal", None):
-            worker.finished_signal.connect(_on_finished)
+            worker.finished_signal.connect(_on_finished, Qt.DirectConnection)
 
     def _persist_record_unlocked(self, record):
         now = int(time.time())
@@ -624,7 +624,7 @@ class SessionAgentManager:
                 "timed_out": timed_out,
             }
 
-    def close_agent(self, target, force=False):
+    def close_agent(self, target, force=False, reason=None):
         with self._lock:
             self._load_from_storage_unlocked()
             resolved = self.chat_storage.resolve_agent_target(self.conversation_id, target)
@@ -645,10 +645,14 @@ class SessionAgentManager:
                 )
                 self._agents[record.agent_id] = record
 
+            close_reason = str(reason or "").strip()
             worker = record.worker
             if worker is not None:
                 record.closing_requested = True
                 record.force_close = bool(force)
+                if close_reason:
+                    record.last_error = close_reason
+                    self._emit_agent_state(record, "log", log_content=close_reason)
                 try:
                     worker.stop()
                 except Exception:
@@ -669,12 +673,19 @@ class SessionAgentManager:
                     record.worker = None
                     record.status = "killed" if force else "closed"
                     record.finished_at = int(time.time())
+                    if close_reason:
+                        record.last_error = close_reason
                     self._persist_record_unlocked(record)
             else:
-                record.status = "closed"
+                record.status = "killed" if force else "closed"
                 record.finished_at = int(time.time())
+                if close_reason:
+                    record.last_error = close_reason
                 self._persist_record_unlocked(record)
-            self._emit_agent_state(record, record.status)
+            payload = {}
+            if close_reason:
+                payload["error"] = close_reason
+            self._emit_agent_state(record, record.status, **payload)
             self._condition.notify_all()
             return self._build_summary(record)
 

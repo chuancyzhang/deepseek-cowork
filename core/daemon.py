@@ -156,6 +156,7 @@ class DaemonState:
 
     def _close_live_subagents(self, session_id, force=False):
         try:
+            close_reason = "Daemon 会话已停止，子 Agent 被终止。" if force else "Daemon 会话已结束，子 Agent 已关闭。"
             manager = get_agent_manager_registry().get_session_manager(
                 session_id,
                 chat_storage=self.chat_storage,
@@ -169,7 +170,20 @@ class DaemonState:
                 if not agent_id:
                     continue
                 try:
-                    manager.close_agent(agent_id, force=bool(force))
+                    summary = manager.close_agent(agent_id, force=bool(force), reason=close_reason)
+                    _log_daemon(
+                        "close sub-agent "
+                        + json.dumps(
+                            {
+                                "session_id": session_id,
+                                "agent_id": agent_id,
+                                "force": bool(force),
+                                "status": summary.get("status"),
+                                "reason": close_reason,
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
                 except Exception as close_err:
                     _log_daemon(
                         f"close sub-agent failed session_id={session_id} agent_id={agent_id} error={close_err}"

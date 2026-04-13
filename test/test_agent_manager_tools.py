@@ -7,6 +7,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from PySide6.QtCore import QObject, QCoreApplication, Signal
+
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, SessionAgentManager
 from core.chat_storage import ChatStorage
 
@@ -15,7 +17,7 @@ class _Signal:
     def __init__(self):
         self._handlers = []
 
-    def connect(self, handler):
+    def connect(self, handler, *_args, **_kwargs):
         self._handlers.append(handler)
 
     def emit(self, payload):
@@ -98,8 +100,83 @@ class _Factory:
         return _FakeWorker(messages, result_delay=self.delay)
 
 
+class _AgentStateCapture:
+    def __init__(self):
+        self.items = []
+        self.lock = threading.Lock()
+
+    def emit(self, payload):
+        with self.lock:
+            self.items.append(payload)
+
+
+class _QtEmitter(QObject):
+    finished_signal = Signal(dict)
+    step_signal = Signal(str)
+    thinking_signal = Signal(str)
+    content_signal = Signal(str)
+    output_signal = Signal(str)
+    tool_call_signal = Signal(dict)
+
+
+class _QtWorker:
+    def __init__(self, messages):
+        self.messages = messages
+        self._running = False
+        self._thread = None
+        self._emitter = _QtEmitter()
+        self.finished_signal = self._emitter.finished_signal
+        self.step_signal = self._emitter.step_signal
+        self.thinking_signal = self._emitter.thinking_signal
+        self.content_signal = self._emitter.content_signal
+        self.output_signal = self._emitter.output_signal
+        self.tool_call_signal = self._emitter.tool_call_signal
+
+    def start(self):
+        self._running = True
+
+        def _run():
+            self.step_signal.emit("Turn 1: Requesting LLM...")
+            self.output_signal.emit("Provider Start: test-provider")
+            self.content_signal.emit("partial-output")
+            self.finished_signal.emit(
+                {
+                    "content": "done",
+                    "generated_messages": [
+                        {
+                            "id": f"qt-{int(time.time() * 1000)}",
+                            "role": "assistant",
+                            "content": "done",
+                        }
+                    ],
+                }
+            )
+            self._running = False
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        return None
+
+    def quit(self):
+        return None
+
+    def wait(self, _timeout=0):
+        if self._thread:
+            self._thread.join(timeout=max((_timeout or 0) / 1000.0, 0.01))
+        return not self._running
+
+    def terminate(self):
+        self._running = False
+
+    def isRunning(self):
+        return self._running
+
+
 class TestAgentManagerTools(unittest.TestCase):
     def setUp(self):
+        self.app = QCoreApplication.instance() or QCoreApplication([])
         self.temp_dir = tempfile.mkdtemp()
         self.db_path = os.path.join(self.temp_dir, "chat_history.sqlite")
         self.storage = ChatStorage(self.db_path)
@@ -166,8 +243,11 @@ class TestAgentManagerTools(unittest.TestCase):
     def test_close_agent_blocks_future_input(self):
         self.factory.delay = 0.4
         spawned = self.manager.spawn_agent(message="close me")
-        closed = self.manager.close_agent(spawned["agent_id"], force=True)
+        close_reason = "user requested stop"
+        closed = self.manager.close_agent(spawned["agent_id"], force=True, reason=close_reason)
         self.assertIn(closed["status"], {"closed", "killed"})
+        stored = self.storage.get_agent(spawned["agent_id"])
+        self.assertEqual(stored["last_error"], close_reason)
         with self.assertRaises(ValueError):
             self.manager.send_input(spawned["agent_id"], "after close")
 
@@ -227,6 +307,31 @@ class TestAgentManagerTools(unittest.TestCase):
         )
         with self.assertRaises(PermissionError):
             module.spawn_agent("x", _context={"is_subagent": True})
+
+    def test_qt_worker_logs_and_completion_are_relayed(self):
+        capture = _AgentStateCapture()
+
+        def _factory(messages, *_args, **_kwargs):
+            return _QtWorker(messages)
+
+        manager = SessionAgentManager(
+            self.conversation_id,
+            chat_storage=self.storage,
+            config_manager=self.config,
+            workspace_dir=self.temp_dir,
+            worker_factory=_factory,
+            agent_state_signal=capture,
+            max_live_agents=8,
+        )
+
+        spawned = manager.spawn_agent(message="qt task", name="qt-agent")
+        waited = manager.wait_agent([spawned["agent_id"]], timeout_ms=3000, return_when="all")
+        self.assertFalse(waited["timed_out"])
+
+        statuses = [item.get("status") for item in capture.items]
+        self.assertIn("log", statuses)
+        self.assertIn("content", statuses)
+        self.assertIn("completed", statuses)
 
 
 if __name__ == "__main__":

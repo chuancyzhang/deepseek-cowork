@@ -474,7 +474,7 @@ def search_web(query, max_results=8, allowed_domains=None, blocked_domains=None,
     return _json_response(payload)
 
 
-def read_article(url, max_chars=12000):
+def read_web_article(url, max_chars=12000):
     started_at = _now_ms()
     normalized = _normalize_url(url)
     if not normalized:
@@ -536,3 +536,4 @@ def read_article(url, max_chars=12000):
             duration_ms=_now_ms() - started_at,
         )
         return _json_response(payload)
+

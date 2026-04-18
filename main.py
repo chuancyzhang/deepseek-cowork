@@ -20,7 +20,7 @@ from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
 from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
-from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT
+from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.plan_mode import (
     DEFAULT_PLAN_CONFIG,
@@ -3354,6 +3354,7 @@ class MainWindow(QMainWindow):
         self.daemon_client = None
         self.daemon_available = False
         self.daemon_process = None
+        self.daemon_runtime_signature = get_runtime_signature()
         self.gateway_process = None
         self.gateway_log_file = None
         self.tray_icon = None
@@ -4240,15 +4241,31 @@ class MainWindow(QMainWindow):
     def ensure_daemon_connection(self):
         self.try_connect_daemon(allow_start=True, retries=0)
 
+    def _daemon_signature_matches(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        remote = str(payload.get("signature") or "").strip()
+        local = str(getattr(self, "daemon_runtime_signature", "") or "").strip()
+        return bool(remote and local and remote == local)
+
     def try_connect_daemon(self, allow_start=False, retries=0):
         if not self.daemon_client:
             self.daemon_client = DaemonClient(self.daemon_host, self.daemon_port)
-        connected = bool(self.daemon_client.ping())
+        ping_payload = self.daemon_client.ping()
+        connected = bool(ping_payload)
+        if connected and not self._daemon_signature_matches(ping_payload):
+            try:
+                self.daemon_client.shutdown()
+            except Exception:
+                pass
+            time.sleep(0.2)
+            connected = False
         if not connected and allow_start:
             self.start_daemon_process()
             for _ in range(max(retries, 0)):
                 time.sleep(0.2)
-                if self.daemon_client.ping():
+                retry_ping = self.daemon_client.ping()
+                if retry_ping and self._daemon_signature_matches(retry_ping):
                     connected = True
                     break
         self.daemon_available = connected

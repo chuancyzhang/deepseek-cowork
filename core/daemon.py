@@ -5,13 +5,14 @@ import socketserver
 import threading
 import time
 import uuid
+import hashlib
 from PySide6.QtCore import QEventLoop, QTimer, Qt, QThread
 from PySide6.QtWidgets import QApplication
 from core.agent import LLMWorker
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
-from core.env_utils import get_app_data_dir
+from core.env_utils import get_app_data_dir, get_base_dir
 from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
 from core.plan_mode import RUN_MODE_EXECUTION, normalize_run_context
@@ -19,6 +20,33 @@ from core.plan_mode import RUN_MODE_EXECUTION, normalize_run_context
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 23333
+
+
+def get_runtime_signature():
+    try:
+        if getattr(__import__("sys"), "frozen", False):
+            exe_path = os.path.abspath(__import__("sys").executable)
+            stat = os.stat(exe_path)
+            payload = f"frozen|{exe_path}|{int(stat.st_mtime)}|{stat.st_size}"
+            return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:16]
+        base_dir = get_base_dir()
+        candidates = [
+            os.path.join(base_dir, "main.py"),
+            os.path.join(base_dir, "core", "agent.py"),
+            os.path.join(base_dir, "core", "daemon.py"),
+            os.path.join(base_dir, "core", "plan_mode.py"),
+            os.path.join(base_dir, "skills", "file-system", "impl.py"),
+        ]
+        parts = []
+        for path in candidates:
+            if not os.path.isfile(path):
+                continue
+            stat = os.stat(path)
+            parts.append(f"{os.path.relpath(path, base_dir)}|{int(stat.st_mtime)}|{stat.st_size}")
+        payload = "\n".join(parts) if parts else str(time.time())
+        return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:16]
+    except Exception:
+        return "unknown"
 
 def _log_daemon(message):
     try:
@@ -459,7 +487,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             return
         action = data.get("action")
         if action == "ping":
-            self._send({"status": "ok", "pid": os.getpid()})
+            self._send({"status": "ok", "pid": os.getpid(), "signature": get_runtime_signature()})
             return
         if action == "status":
             state = self.server.state
@@ -468,7 +496,9 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     "status": "ok",
                     "suspended": state.suspended,
                     "last_activity": state.last_activity,
-                    "sessions": len(state.sessions)
+                    "sessions": len(state.sessions),
+                    "pid": os.getpid(),
+                    "signature": get_runtime_signature(),
                 }
             )
             return

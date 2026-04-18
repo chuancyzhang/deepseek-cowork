@@ -1,10 +1,6 @@
 import json
 import os
 
-from docx import Document
-from pptx import Presentation
-from pypdf import PdfReader
-
 from core.env_utils import ensure_package_installed
 from core.filesystem_ops import (
     _build_error,
@@ -35,6 +31,42 @@ def _get_openpyxl():
         import openpyxl
 
         return openpyxl
+
+
+def _get_docx_document():
+    try:
+        from docx import Document
+
+        return Document
+    except ImportError:
+        ensure_package_installed("python-docx", import_name="docx", skill_id="file-system")
+        from docx import Document
+
+        return Document
+
+
+def _get_presentation():
+    try:
+        from pptx import Presentation
+
+        return Presentation
+    except ImportError:
+        ensure_package_installed("python-pptx", import_name="pptx", skill_id="file-system")
+        from pptx import Presentation
+
+        return Presentation
+
+
+def _get_pdf_reader():
+    try:
+        from pypdf import PdfReader
+
+        return PdfReader
+    except ImportError:
+        ensure_package_installed("pypdf", import_name="pypdf", skill_id="file-system")
+        from pypdf import PdfReader
+
+        return PdfReader
 
 
 def _build_read_payload(action, rel_path, content):
@@ -193,6 +225,7 @@ def read_docx(workspace_dir, path, _context=None):
         return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
 
     try:
+        Document = _get_docx_document()
         doc = Document(abs_path)
         content = "\n".join(paragraph.text for paragraph in doc.paragraphs)
         record_full_read_state(abs_path, _context)
@@ -230,6 +263,7 @@ def write_docx(workspace_dir, path, content, mode="w", _context=None):
 
     text = content if isinstance(content, str) else str(content)
     try:
+        Document = _get_docx_document()
         if mode_value == "a" and existed_before:
             doc = Document(abs_path)
         else:
@@ -256,6 +290,7 @@ def read_pptx(workspace_dir, path, _context=None):
         return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
 
     try:
+        Presentation = _get_presentation()
         presentation = Presentation(abs_path)
         chunks = []
         for index, slide in enumerate(presentation.slides, start=1):
@@ -300,9 +335,10 @@ def create_pptx(workspace_dir, path, slides_data, _context=None):
         except Exception:
             return _build_error(action, "invalid_argument", "slides_data must be a JSON list or list object.", path=rel_path)
     if not isinstance(slides_data, list):
-        return _build_error(action, "invalid_argument", "slides_data must be a list.", path=rel_path)
+            return _build_error(action, "invalid_argument", "slides_data must be a list.", path=rel_path)
 
     try:
+        Presentation = _get_presentation()
         presentation = Presentation()
         for slide_info in slides_data:
             if not isinstance(slide_info, dict):
@@ -419,6 +455,7 @@ def read_pdf(workspace_dir, path, pages=None, _context=None):
         return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
 
     try:
+        PdfReader = _get_pdf_reader()
         reader = PdfReader(abs_path)
         page_indices, error = _parse_pdf_pages(pages, len(reader.pages), action, rel_path)
         if error:

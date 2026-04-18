@@ -14,6 +14,7 @@ from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir
 from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
+from core.plan_mode import RUN_MODE_EXECUTION, normalize_run_context
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -191,7 +192,7 @@ class DaemonState:
         except Exception as e:
             _log_daemon(f"_close_live_subagents failed session_id={session_id} error={e}")
 
-    def _run_worker_once(self, session_id, worker_messages, workspace_dir):
+    def _run_worker_once(self, session_id, worker_messages, workspace_dir, run_context=None):
         result_holder = {}
         loop = QEventLoop()
 
@@ -200,7 +201,13 @@ class DaemonState:
             self.clear_active_worker(session_id)
             loop.quit()
 
-        worker = LLMWorker(worker_messages, self.config_manager, workspace_dir, session_id=session_id)
+        worker = LLMWorker(
+            worker_messages,
+            self.config_manager,
+            workspace_dir,
+            session_id=session_id,
+            run_context=run_context,
+        )
         worker.finished_signal.connect(on_finished)
         self.set_active_worker(session_id, worker)
         worker.start()
@@ -383,7 +390,7 @@ class DaemonState:
         )
         return retry_messages
 
-    def run_llm_sync(self, session_id, user_text, workspace_dir=None):
+    def run_llm_sync(self, session_id, user_text, workspace_dir=None, run_context=None):
         self.touch()
         try:
             self.config_manager.load_config()
@@ -392,13 +399,24 @@ class DaemonState:
         idle_minutes = self.config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
         messages = self.get_session_messages(session_id)
+        normalized_run_context = normalize_run_context(run_context)
         self.append_user_message_if_needed(messages, user_text)
-        result = self._run_worker_once(session_id, messages, workspace_dir)
+        result = self._run_worker_once(
+            session_id,
+            messages,
+            workspace_dir,
+            run_context=normalized_run_context,
+        )
         retry_once = self.config_manager.get("im_context_overflow_retry_once", True)
         if retry_once is not False and self._is_context_overflow_error(result):
             retry_messages = self._build_overflow_retry_messages(session_id, messages)
             if retry_messages:
-                retry_result = self._run_worker_once(session_id, retry_messages, workspace_dir)
+                retry_result = self._run_worker_once(
+                    session_id,
+                    retry_messages,
+                    workspace_dir,
+                    run_context=normalized_run_context,
+                )
                 _log_daemon(
                     "context_overflow_retry_result "
                     + json.dumps(
@@ -458,17 +476,24 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             session_id = data.get("session_id") or uuid.uuid4().hex
             content = data.get("content") or ""
             workspace_dir = data.get("workspace_dir")
-            if not content:
+            run_context = normalize_run_context(data.get("run_context"))
+            if not content and run_context.get("mode") != RUN_MODE_EXECUTION:
                 self._send({"status": "error", "error": "Empty content"})
                 return
-            result = self.server.state.run_llm_sync(session_id, content, workspace_dir)
+            result = self.server.state.run_llm_sync(
+                session_id,
+                content,
+                workspace_dir,
+                run_context=run_context,
+            )
             self._send({"status": "ok", "session_id": session_id, "result": result})
             return
         if action == "send_message_stream":
             session_id = data.get("session_id") or uuid.uuid4().hex
             content = data.get("content") or ""
             workspace_dir = data.get("workspace_dir")
-            if not content:
+            run_context = normalize_run_context(data.get("run_context"))
+            if not content and run_context.get("mode") != RUN_MODE_EXECUTION:
                 self._send({"type": "error", "error": "Empty content"})
                 return
             state = self.server.state
@@ -500,7 +525,13 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 state.clear_active_worker(session_id)
                 done.set()
 
-            worker = LLMWorker(messages, state.config_manager, workspace_dir, session_id=session_id)
+            worker = LLMWorker(
+                messages,
+                state.config_manager,
+                workspace_dir,
+                session_id=session_id,
+                run_context=run_context,
+            )
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
             worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
             worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
@@ -623,25 +654,27 @@ class DaemonClient:
         except Exception:
             return None
 
-    def send_message(self, session_id, content, workspace_dir=None):
+    def send_message(self, session_id, content, workspace_dir=None, run_context=None):
         return self._request(
             {
                 "action": "send_message",
                 "session_id": session_id,
                 "content": content,
-                "workspace_dir": workspace_dir
+                "workspace_dir": workspace_dir,
+                "run_context": normalize_run_context(run_context),
             },
             timeout=self.send_timeout
         )
 
-    def send_message_stream(self, session_id, content, workspace_dir=None):
+    def send_message_stream(self, session_id, content, workspace_dir=None, run_context=None):
         sock = socket.create_connection((self.host, self.port), timeout=self.send_timeout)
         try:
             payload = {
                 "action": "send_message_stream",
                 "session_id": session_id,
                 "content": content,
-                "workspace_dir": workspace_dir
+                "workspace_dir": workspace_dir,
+                "run_context": normalize_run_context(run_context),
             }
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
             with sock.makefile("r", encoding="utf-8") as reader:

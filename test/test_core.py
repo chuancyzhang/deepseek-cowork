@@ -5,6 +5,7 @@ import tempfile
 import shutil
 import threading
 import time
+import json
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
@@ -18,6 +19,11 @@ from core import sandbox_runtime
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.chat_storage import ChatStorage
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
+from core.llm.deepseek import (
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    DEFAULT_DEEPSEEK_THINKING_ENABLED,
+)
 
 class TestConfigManager(unittest.TestCase):
     def setUp(self):
@@ -30,12 +36,37 @@ class TestConfigManager(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
+    def _create_config_manager(self, payload=None):
+        if payload is not None:
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+        with patch("core.config_manager.get_app_data_dir", return_value=self.temp_dir), \
+             patch("core.config_manager.get_base_dir", return_value=self.temp_dir):
+            return ConfigManager()
+
     def test_set_get_config(self):
         # We need to patch where ConfigManager looks for files or just test the dict logic
-        cm = ConfigManager()
+        cm = self._create_config_manager()
         cm.config = {} # Reset
         cm.set("api_key", "sk-test")
         self.assertEqual(cm.get("api_key"), "sk-test")
+
+    def test_defaults_include_new_deepseek_settings(self):
+        cm = self._create_config_manager()
+        self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)
+        self.assertEqual(cm.get("deepseek_reasoning_effort"), DEFAULT_DEEPSEEK_REASONING_EFFORT)
+        self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
+
+    def test_migrates_legacy_deepseek_model_name(self):
+        cm = self._create_config_manager({"model_name": "deepseek-reasoner"})
+        self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)
+        with open(self.config_file, "r", encoding="utf-8") as f:
+            stored = json.load(f)
+        self.assertEqual(stored["model_name"], DEFAULT_DEEPSEEK_MODEL)
+
+    def test_preserves_custom_model_name(self):
+        cm = self._create_config_manager({"model_name": "deepseek-r1-custom"})
+        self.assertEqual(cm.get("model_name"), "deepseek-r1-custom")
 
 class TestSkillManager(unittest.TestCase):
     def setUp(self):

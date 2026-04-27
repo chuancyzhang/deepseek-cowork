@@ -180,13 +180,14 @@ def input(prompt=""):
 
 def clear_reasoning_content(messages):
     """
-    Helper to clear reasoning content from messages list to prevent repetition.
-    Returns a new list of cleaned messages (shallow copy of dicts with keys removed).
+    Drop stale reasoning for plain assistant replies, but preserve it for tool-call
+    turns because DeepSeek requires reasoning_content to be replayed after tool use.
     """
     cleaned = []
     for msg in messages:
         clean_msg = msg.copy()
-        if 'reasoning_content' in clean_msg:
+        has_tool_calls = bool(clean_msg.get("tool_calls"))
+        if 'reasoning_content' in clean_msg and not has_tool_calls:
             del clean_msg['reasoning_content']
         if 'reasoning' in clean_msg: # Also clear our internal key
             del clean_msg['reasoning']
@@ -282,11 +283,14 @@ def sanitize_llm_messages(messages):
     cleaned = []
     for msg in repaired:
         clean_msg = msg.copy()
-        if 'reasoning_content' in clean_msg:
-            clean_msg['reasoning_content'] = ""
+        has_tool_calls = bool(clean_msg.get("tool_calls"))
+        if 'reasoning_content' in clean_msg and not has_tool_calls:
+            clean_msg.pop('reasoning_content', None)
         if 'reasoning' in clean_msg:
             del clean_msg['reasoning']
-        if clean_msg.get("tool_calls") and "reasoning_content" not in clean_msg:
+        # DeepSeek multi-round tool calls require the original reasoning_content to
+        # remain attached to the assistant message that issued the tool calls.
+        if has_tool_calls and "reasoning_content" not in clean_msg:
             clean_msg["reasoning_content"] = ""
         if 'meta' in clean_msg:
             del clean_msg['meta']
@@ -445,7 +449,8 @@ class LLMWorker(QThread):
 
     def run(self):
         # Work on a copy of messages to handle multi-turn locally
-        # CRITICAL: Clear previous reasoning content to avoid duplication/confusion in new turn
+        # Keep reasoning_content only on prior assistant tool-call turns so DeepSeek
+        # can continue the same multi-round exchange without 400 errors.
         current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
         runtime_snapshot = get_python_runtime_snapshot()
         sandbox_snapshot = get_runtime_snapshot()

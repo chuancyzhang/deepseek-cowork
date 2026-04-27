@@ -22,6 +22,14 @@ from core.chat_storage import ChatStorage
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
+from core.llm.deepseek import (
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    SUPPORTED_DEEPSEEK_REASONING_EFFORTS,
+    normalize_deepseek_reasoning_effort,
+)
 from core.plan_mode import (
     DEFAULT_PLAN_CONFIG,
     PLAN_MODE_COMPLETED,
@@ -360,14 +368,14 @@ class SettingsDialog(QDialog):
         
         # Base URL
         self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText("https://api.deepseek.com")
-        self.base_url_input.setText(self.config_manager.get("base_url", "https://api.deepseek.com"))
+        self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL)
+        self.base_url_input.setText(self.config_manager.get("base_url", DEFAULT_DEEPSEEK_BASE_URL))
         form_layout.addRow("API Base URL (可选):", self.base_url_input)
 
         # Model Name
         self.model_name_input = QLineEdit()
-        self.model_name_input.setPlaceholderText("deepseek-reasoner")
-        self.model_name_input.setText(self.config_manager.get("model_name", "deepseek-reasoner"))
+        self.model_name_input.setPlaceholderText(DEFAULT_DEEPSEEK_MODEL)
+        self.model_name_input.setText(self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL))
         form_layout.addRow("Model Name:", self.model_name_input)
 
         self.default_ws_input = QLineEdit()
@@ -474,12 +482,12 @@ class SettingsDialog(QDialog):
         # Save Base URL
         base_url = self.base_url_input.text().strip()
         if not base_url:
-            base_url = "https://api.deepseek.com"
+            base_url = DEFAULT_DEEPSEEK_BASE_URL
         self.config_manager.set("base_url", base_url)
         # Save Model Name
         model_name = self.model_name_input.text().strip()
         if not model_name:
-            model_name = "deepseek-reasoner"
+            model_name = DEFAULT_DEEPSEEK_MODEL
         self.config_manager.set("model_name", model_name)
 
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
@@ -797,14 +805,36 @@ class SettingsDialog(QDialog):
         advanced_model_layout.setContentsMargins(0, 0, 0, 0)
         advanced_model_layout.setSpacing(12)
         self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText("https://api.deepseek.com")
-        self.base_url_input.setText(self.config_manager.get("base_url", "https://api.deepseek.com"))
+        self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL)
+        self.base_url_input.setText(self.config_manager.get("base_url", DEFAULT_DEEPSEEK_BASE_URL))
         advanced_model_layout.addRow("自定义接口地址", self.base_url_input)
 
         self.model_name_input = QLineEdit()
-        self.model_name_input.setPlaceholderText("deepseek-reasoner")
-        self.model_name_input.setText(self.config_manager.get("model_name", "deepseek-reasoner"))
+        self.model_name_input.setPlaceholderText(DEFAULT_DEEPSEEK_MODEL)
+        self.model_name_input.setText(self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL))
         advanced_model_layout.addRow("模型名称", self.model_name_input)
+
+        self.deepseek_thinking_check = QCheckBox("启用 Thinking 模式")
+        self.deepseek_thinking_check.setChecked(
+            bool(self.config_manager.get("deepseek_thinking_enabled", DEFAULT_DEEPSEEK_THINKING_ENABLED))
+        )
+        advanced_model_layout.addRow("DeepSeek 思考模式", self.deepseek_thinking_check)
+
+        self.deepseek_reasoning_effort_combo = QComboBox()
+        for effort in SUPPORTED_DEEPSEEK_REASONING_EFFORTS:
+            self.deepseek_reasoning_effort_combo.addItem(effort, effort)
+        current_effort = normalize_deepseek_reasoning_effort(
+            self.config_manager.get("deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT)
+        )
+        effort_index = self.deepseek_reasoning_effort_combo.findData(current_effort)
+        if effort_index >= 0:
+            self.deepseek_reasoning_effort_combo.setCurrentIndex(effort_index)
+        advanced_model_layout.addRow("DeepSeek 思考强度", self.deepseek_reasoning_effort_combo)
+
+        deepseek_hint = QLabel("以上两项仅在使用 DeepSeek 接口时生效，其他 OpenAI 兼容服务不会下发这些参数。")
+        deepseek_hint.setWordWrap(True)
+        deepseek_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        advanced_model_layout.addRow("", deepseek_hint)
         model_layout.addRow("", self.advanced_model_container)
         self.advanced_model_toggle.toggled.connect(self.advanced_model_container.setVisible)
 
@@ -961,10 +991,15 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         self.config_manager.set("llm_provider", self.provider_combo.currentData())
         self.config_manager.set("api_key", self.api_key_input.text().strip())
-        base_url = self.base_url_input.text().strip() or "https://api.deepseek.com"
+        base_url = self.base_url_input.text().strip() or DEFAULT_DEEPSEEK_BASE_URL
         self.config_manager.set("base_url", base_url)
-        model_name = self.model_name_input.text().strip() or "deepseek-reasoner"
+        model_name = self.model_name_input.text().strip() or DEFAULT_DEEPSEEK_MODEL
         self.config_manager.set("model_name", model_name)
+        self.config_manager.set("deepseek_thinking_enabled", self.deepseek_thinking_check.isChecked())
+        self.config_manager.set(
+            "deepseek_reasoning_effort",
+            self.deepseek_reasoning_effort_combo.currentData() or DEFAULT_DEEPSEEK_REASONING_EFFORT,
+        )
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -3946,7 +3981,7 @@ class MainWindow(QMainWindow):
             "anthropic": "Anthropic",
         }
         provider = self.config_manager.get("llm_provider", "openai")
-        model_name = self.config_manager.get("model_name", "deepseek-reasoner")
+        model_name = self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
         provider_text = provider_map.get(provider, provider)
         connection_text = "Daemon Ready" if getattr(self, "daemon_available", False) else "Local Agent"
         self.model_badge.setText(f"{provider_text} | {model_name} | {connection_text}")

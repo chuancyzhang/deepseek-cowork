@@ -3,6 +3,13 @@ import os
 import sys
 import shutil
 from .env_utils import get_app_data_dir, get_base_dir
+from .llm.deepseek import (
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    should_migrate_legacy_model,
+)
 
 class ConfigManager:
     def __init__(self):
@@ -28,14 +35,17 @@ class ConfigManager:
 
         self.config = {
             "api_key": "",
-            "base_url": "https://api.deepseek.com",
-            "model_name": "deepseek-reasoner",
+            "base_url": DEFAULT_DEEPSEEK_BASE_URL,
+            "model_name": DEFAULT_DEEPSEEK_MODEL,
             "llm_provider": "openai",
+            "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
+            "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
             "disabled_skills": [],
             "god_mode": False,
             "default_workspace": ""
         }
         self.load_config()
+        self._apply_migrations()
 
     def get_god_mode(self):
         return self.config.get("god_mode", False)
@@ -61,8 +71,17 @@ class ConfigManager:
             except Exception as e:
                 print(f"Error loading config: {e}")
 
+    def _apply_migrations(self):
+        updated = False
+        if should_migrate_legacy_model(self.config.get("model_name")):
+            self.config["model_name"] = DEFAULT_DEEPSEEK_MODEL
+            updated = True
+        if updated:
+            self.save_config()
+
     def save_config(self):
         try:
+            os.makedirs(self.data_dir, exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception as e:

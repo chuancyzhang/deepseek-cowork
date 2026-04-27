@@ -2,6 +2,12 @@ from abc import ABC, abstractmethod
 import os
 import json
 import time
+from .deepseek import (
+    DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    build_deepseek_request_options,
+    normalize_deepseek_reasoning_effort,
+)
 
 class LLMProvider(ABC):
     @abstractmethod
@@ -16,10 +22,20 @@ class LLMProvider(ABC):
         pass
 
 class OpenAIProvider(LLMProvider):
-    def __init__(self, api_key, base_url, model_name):
+    def __init__(
+        self,
+        api_key,
+        base_url,
+        model_name,
+        thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
+        reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    ):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.base_url = base_url
         self.model_name = model_name
+        self.thinking_enabled = bool(thinking_enabled)
+        self.reasoning_effort = normalize_deepseek_reasoning_effort(reasoning_effort)
 
     def chat_stream(self, messages, tools=None):
         try:
@@ -37,6 +53,14 @@ class OpenAIProvider(LLMProvider):
             }
             if api_tools:
                 params["tools"] = api_tools
+            params.update(
+                build_deepseek_request_options(
+                    self.model_name,
+                    self.base_url,
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=self.reasoning_effort,
+                )
+            )
 
             stream = self.client.chat.completions.create(**params)
 
@@ -84,7 +108,7 @@ class OpenAIProvider(LLMProvider):
             if "reasoning_content" in m:
                 if not m.get("reasoning_content"):
                     m.pop("reasoning_content", None)
-                elif "deepseek" not in self.model_name.lower():
+                elif not build_deepseek_request_options(self.model_name, self.base_url):
                     m.pop("reasoning_content", None)
             
             # Ensure tool_calls are correctly formatted if present
@@ -103,11 +127,24 @@ class MoonshotProvider(OpenAIProvider):
     Optimized Provider for Moonshot AI (Kimi 2.5)
     Reference: https://platform.moonshot.cn/docs/guide/use-kimi-api-to-complete-tool-calls
     """
-    def __init__(self, api_key, base_url, model_name):
+    def __init__(
+        self,
+        api_key,
+        base_url,
+        model_name,
+        thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
+        reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    ):
         # Ensure correct Base URL if user selects 'moonshot' but leaves default URL
         if not base_url or "api.openai.com" in base_url:
             base_url = "https://api.moonshot.cn/v1"
-        super().__init__(api_key, base_url, model_name)
+        super().__init__(
+            api_key,
+            base_url,
+            model_name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+        )
 
     def _prepare_messages(self, messages):
         clean = []

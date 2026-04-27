@@ -1,5 +1,12 @@
 import json
 from core.config_manager import ConfigManager
+from core.llm.deepseek import (
+    DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEFAULT_DEEPSEEK_REASONING_EFFORT,
+    DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    build_deepseek_request_options,
+)
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
@@ -10,7 +17,27 @@ class SkillGenerator:
     def __init__(self, config_manager: ConfigManager):
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
-        self.base_url = config_manager.get("base_url", "https://api.deepseek.com")
+        self.base_url = config_manager.get("base_url", DEFAULT_DEEPSEEK_BASE_URL)
+        self.model_name = config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
+        self.deepseek_thinking_enabled = config_manager.get("deepseek_thinking_enabled", DEFAULT_DEEPSEEK_THINKING_ENABLED)
+        self.deepseek_reasoning_effort = config_manager.get("deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT)
+
+    def _build_chat_params(self, messages):
+        params = {
+            "model": self.model_name,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "temperature": 0.2,
+        }
+        params.update(
+            build_deepseek_request_options(
+                self.model_name,
+                self.base_url,
+                thinking_enabled=self.deepseek_thinking_enabled,
+                reasoning_effort=self.deepseek_reasoning_effort,
+            )
+        )
+        return params
 
     def refactor_code(self, code: str) -> dict:
         """
@@ -46,13 +73,10 @@ Return ONLY a JSON object with the following structure (no markdown, no extra te
         try:
             client = OpenAI(api_key=self.api_key, base_url=self.base_url)
             response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
+                **self._build_chat_params([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2
+                ])
             )
             
             content = response.choices[0].message.content
@@ -109,13 +133,10 @@ Return ONLY a JSON object:
         try:
             client = OpenAI(api_key=self.api_key, base_url=self.base_url)
             response = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
+                **self._build_chat_params([
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.2
+                ])
             )
             
             content = response.choices[0].message.content

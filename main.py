@@ -32,23 +32,18 @@ from core.llm.deepseek import (
 )
 from core.plan_mode import (
     DEFAULT_PLAN_CONFIG,
-    PLAN_MODE_COMPLETED,
     PLAN_MODE_DISABLED,
-    PLAN_MODE_DRAFTING,
-    PLAN_MODE_EXECUTING,
-    PLAN_MODE_READY,
-    PLAN_STATUS_COMPLETED,
-    PLAN_STATUS_EXECUTING,
-    PLAN_STATUS_READY,
-    RUN_MODE_EXECUTION,
+    PLAN_MODE_AWAITING_USER_INPUT,
+    PLAN_MODE_EXPLORING,
+    PLAN_MODE_READY_TO_PRESENT,
+    PLAN_PROTOCOL_VERSION,
     RUN_MODE_NORMAL,
     RUN_MODE_PLANNING,
     derive_plan_phase,
     json_copy,
-    normalize_execution_plan,
     normalize_plan_config,
     normalize_plan_phase,
-    normalize_plan_status,
+    normalize_pending_plan_questions,
     normalize_run_context,
 )
 import shutil
@@ -105,34 +100,11 @@ HISTORY_MIGRATION_VERSION = 2
 def plan_phase_label(phase):
     mapping = {
         PLAN_MODE_DISABLED: "未启用",
-        PLAN_MODE_DRAFTING: "规划中",
-        PLAN_MODE_READY: "待确认",
-        PLAN_MODE_EXECUTING: "执行中",
-        PLAN_MODE_COMPLETED: "已完成",
+        PLAN_MODE_EXPLORING: "探索中",
+        PLAN_MODE_AWAITING_USER_INPUT: "等待输入",
+        PLAN_MODE_READY_TO_PRESENT: "待呈现",
     }
     return mapping.get(normalize_plan_phase(phase), "未启用")
-
-
-def plan_status_label(status):
-    mapping = {
-        "draft": "草案",
-        "ready": "可执行",
-        "executing": "执行中",
-        "completed": "已完成",
-    }
-    return mapping.get(normalize_plan_status(status), status or "草案")
-
-
-def plan_step_status_label(status):
-    mapping = {
-        "pending": "待处理",
-        "in_progress": "进行中",
-        "completed": "已完成",
-        "blocked": "阻塞",
-        "skipped": "跳过",
-    }
-    normalized = str(status or "").strip().lower()
-    return mapping.get(normalized, normalized or "待处理")
 
 
 def readable_skill_name(skill):
@@ -191,8 +163,6 @@ def summarize_tool_action(tool_name, args):
         return "等待确认", "需要你决定下一步"
     if name in {"request_user_input"}:
         return "等待输入", "需要你补充信息"
-    if name in {"update_execution_plan"}:
-        return "更新计划", args.get("title") or "同步计划状态"
     if name in {"publish_artifacts"}:
         return "交付产物", "准备交付文件或图片"
     return name.replace("_", " ").title(), path or "执行步骤"
@@ -260,8 +230,6 @@ def summarize_tool_action(tool_name, args):
         return "Await Approval", "Need user confirmation for the next step"
     if name in {"request_user_input"}:
         return "Await Input", "Need user input before continuing"
-    if name in {"update_execution_plan"}:
-        return "Update Plan", args.get("title") or "Sync execution plan"
     if name in {"publish_artifacts"}:
         return "Deliver Artifacts", "Prepare files or images for delivery"
     return name.replace("_", " ").title(), path or "Execution step"
@@ -2498,7 +2466,6 @@ class ToolCallCard(QFrame):
             "bash": "fa5s.terminal",
             "open_preview": "fa5s.compass", "search_codebase": "fa5s.search", "grep": "fa5s.filter",
             "glob": "fa5s.globe", "web_search": "fa5s.globe-americas", "get_diagnostics": "fa5s.stethoscope",
-            "update_execution_plan": "fa5s.tasks",
         }
         icon_name = tool_icons.get(tool_name, "fa5s.tools")
         
@@ -3128,10 +3095,10 @@ class SessionState:
         self.plan_mode_enabled = False
         self.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
         self.plan_phase = PLAN_MODE_DISABLED
-        self.draft_plan = {}
-        self.confirmed_plan = {}
-        self.active_plan_step_id = ""
-        self.plan_revision = 0
+        self.plan_protocol_version = PLAN_PROTOCOL_VERSION
+        self.plan_mode_state = PLAN_MODE_EXPLORING
+        self.plan_document = ""
+        self.pending_plan_questions = []
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -3626,9 +3593,6 @@ class MainWindow(QMainWindow):
         self.plan_status_label = QLabel("状态：未启用")
         self.plan_status_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         plan_layout.addWidget(self.plan_status_label)
-        self.plan_revision_label = QLabel("版本：v0")
-        self.plan_revision_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        plan_layout.addWidget(self.plan_revision_label)
         self.plan_title_value = QLabel("暂无计划")
         self.plan_title_value.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
         self.plan_title_value.setWordWrap(True)
@@ -3637,17 +3601,16 @@ class MainWindow(QMainWindow):
         self.plan_summary_value.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         self.plan_summary_value.setWordWrap(True)
         plan_layout.addWidget(self.plan_summary_value)
-        self.plan_step_list = QListWidget()
-        self.plan_step_list.setStyleSheet(f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card};")
-        plan_layout.addWidget(self.plan_step_list, 1)
-        self.plan_confirm_btn = QPushButton("确认执行")
-        self.plan_confirm_btn.setCursor(Qt.PointingHandCursor)
-        self.plan_confirm_btn.setStyleSheet(
-            f"background: {DesignTokens.primary}; color: white; border: none; border-radius: 10px; padding: 10px 12px; font-weight: 700;"
+        self.plan_pending_label = QLabel("待回答问题：暂无")
+        self.plan_pending_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.plan_pending_label.setWordWrap(True)
+        plan_layout.addWidget(self.plan_pending_label)
+        self.plan_document_view = ReadOnlyTextEdit()
+        self.plan_document_view.setStyleSheet(
+            f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; padding: 8px;"
         )
-        self.plan_confirm_btn.clicked.connect(self.confirm_execution_plan)
-        self.plan_confirm_btn.setEnabled(False)
-        plan_layout.addWidget(self.plan_confirm_btn)
+        self.plan_document_view.setPlaceholderText("等待 <proposed_plan> 计划文档...")
+        plan_layout.addWidget(self.plan_document_view, 1)
         self.right_tabs.addTab(self.plan_tab, "计划")
 
         # Tab 2: Tool Details
@@ -4005,7 +3968,14 @@ class MainWindow(QMainWindow):
         self.phase_badge.setText(f"Phase: {phase}")
 
         has_workspace = bool(self.workspace_dir)
-        has_plan_context = bool(state and (state.plan_mode_enabled or state.draft_plan or state.confirmed_plan))
+        has_plan_context = bool(
+            state
+            and (
+                state.plan_mode_enabled
+                or bool(getattr(state, "plan_document", ""))
+                or bool(getattr(state, "pending_plan_questions", []))
+            )
+        )
         has_context = bool(state and (state.step_records or state.has_file_changes or has_plan_context))
         self.right_panel_visible = has_workspace or has_context
         self.right_sidebar.setVisible(self.right_panel_visible)
@@ -4013,86 +3983,17 @@ class MainWindow(QMainWindow):
             self.refresh_plan_controls(state.session_id)
             self.refresh_plan_view(state.session_id)
 
-    def _visible_plan(self, state):
-        if not state:
-            return {}
-        return normalize_execution_plan(state.confirmed_plan or state.draft_plan)
+    def _extract_proposed_plan(self, content):
+        text = str(content or "")
+        matches = re.findall(r"<proposed_plan>\s*(.*?)\s*</proposed_plan>", text, flags=re.IGNORECASE | re.DOTALL)
+        if len(matches) != 1:
+            return ""
+        return (matches[0] or "").strip()
 
-    def _plan_step_title(self, state, step_id):
-        plan = self._visible_plan(state)
-        for step in plan.get("steps") or []:
-            if step.get("id") == step_id:
-                return step.get("title") or step_id
-        return step_id or ""
-
-    def _merge_plan_step_tool_ids(self, base_plan, incoming_plan):
-        previous_by_id = {}
-        for step in normalize_execution_plan(base_plan).get("steps") or []:
-            previous_by_id[step.get("id")] = list(step.get("tool_ids") or [])
-        for step in incoming_plan.get("steps") or []:
-            step_id = step.get("id")
-            existing = list(step.get("tool_ids") or [])
-            if not existing and step_id in previous_by_id:
-                step["tool_ids"] = list(previous_by_id.get(step_id) or [])
-        return incoming_plan
-
-    def _assign_tool_to_plan_step(self, state, tool_id, step_id):
-        if not state or not tool_id or not step_id:
-            return
-        changed = False
-        for plan_attr in ("draft_plan", "confirmed_plan"):
-            plan = normalize_execution_plan(getattr(state, plan_attr, {}))
-            if not plan:
-                continue
-            for step in plan.get("steps") or []:
-                if step.get("id") != step_id:
-                    continue
-                tool_ids = list(step.get("tool_ids") or [])
-                if tool_id not in tool_ids:
-                    tool_ids.append(tool_id)
-                    step["tool_ids"] = tool_ids
-                    changed = True
-                break
-            setattr(state, plan_attr, plan)
-        if changed:
-            self.refresh_plan_view(state.session_id)
-
-    def _apply_plan_state(self, state, plan_payload):
-        if not state:
-            return
-        normalized_plan = normalize_execution_plan(plan_payload)
-        if not normalized_plan:
-            return
-        base_plan = state.confirmed_plan or state.draft_plan
-        normalized_plan = self._merge_plan_step_tool_ids(base_plan, normalized_plan)
-        status = normalize_plan_status(normalized_plan.get("plan_status"))
-        state.plan_revision = max(int(getattr(state, "plan_revision", 0) or 0) + 1, 1)
-        if state.confirmed_plan or status in {PLAN_STATUS_EXECUTING, PLAN_STATUS_COMPLETED}:
-            state.confirmed_plan = json_copy(normalized_plan, {})
-            state.draft_plan = json_copy(normalized_plan, {})
-        else:
-            state.draft_plan = json_copy(normalized_plan, {})
-        if status == PLAN_STATUS_READY and not state.confirmed_plan:
-            state.plan_phase = PLAN_MODE_READY
-        elif status == PLAN_STATUS_COMPLETED:
-            state.plan_phase = PLAN_MODE_COMPLETED
-            state.confirmed_plan = json_copy(normalized_plan, {})
-        elif state.confirmed_plan or status == PLAN_STATUS_EXECUTING:
-            state.plan_phase = PLAN_MODE_EXECUTING
-            state.confirmed_plan = json_copy(normalized_plan, {})
-        else:
-            state.plan_phase = PLAN_MODE_DRAFTING
-        current_step_id = normalized_plan.get("current_step_id") or ""
-        if not current_step_id:
-            for step in normalized_plan.get("steps") or []:
-                if step.get("status") == "in_progress":
-                    current_step_id = step.get("id") or ""
-                    break
-        state.active_plan_step_id = current_step_id
-        if state.session_id == self.current_session_id:
-            self.right_sidebar.setVisible(True)
-            self.right_tabs.setCurrentIndex(2)
-        self.refresh_plan_view(state.session_id)
+    def _extract_pending_plan_questions_from_args(self, args_obj):
+        if not isinstance(args_obj, dict):
+            return []
+        return normalize_pending_plan_questions(args_obj.get("questions"))
 
     def _session_plan_meta(self, state):
         if not state:
@@ -4104,14 +4005,19 @@ class MainWindow(QMainWindow):
                 getattr(state, "plan_phase", ""),
                 default=derive_plan_phase(
                     getattr(state, "plan_mode_enabled", False),
-                    getattr(state, "draft_plan", {}),
-                    getattr(state, "confirmed_plan", {}),
+                    getattr(state, "plan_mode_state", PLAN_MODE_EXPLORING),
+                    getattr(state, "plan_document", ""),
                 ),
             ),
-            "draft_plan": normalize_execution_plan(getattr(state, "draft_plan", {})),
-            "confirmed_plan": normalize_execution_plan(getattr(state, "confirmed_plan", {})),
-            "active_plan_step_id": str(getattr(state, "active_plan_step_id", "") or "").strip(),
-            "plan_revision": int(getattr(state, "plan_revision", 0) or 0),
+            "plan_protocol_version": int(getattr(state, "plan_protocol_version", PLAN_PROTOCOL_VERSION) or PLAN_PROTOCOL_VERSION),
+            "plan_mode_state": normalize_plan_phase(
+                getattr(state, "plan_mode_state", PLAN_MODE_EXPLORING),
+                default=PLAN_MODE_EXPLORING,
+            ),
+            "plan_document": str(getattr(state, "plan_document", "") or "").strip(),
+            "pending_plan_questions": normalize_pending_plan_questions(
+                getattr(state, "pending_plan_questions", [])
+            ),
         }
 
     def refresh_plan_controls(self, session_id=None):
@@ -4124,7 +4030,6 @@ class MainWindow(QMainWindow):
         self.plan_mode_check.blockSignals(blocked_check)
         self.plan_mode_check.setEnabled(
             (not ((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False)))
-            and not bool(state.confirmed_plan)
         )
         self.plan_mode_check.setText("计划模式")
 
@@ -4132,48 +4037,36 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
             return
-        plan = self._visible_plan(state)
         self.plan_status_label.setText(f"状态：{plan_phase_label(state.plan_phase)}")
-        revision_value = max(int(state.plan_revision or 0), 1 if plan else 0)
-        self.plan_revision_label.setText(f"版本：v{revision_value}")
-        if not plan:
+        pending_questions = normalize_pending_plan_questions(getattr(state, "pending_plan_questions", []))
+        if pending_questions:
+            headers = []
+            for item in pending_questions[:3]:
+                header = str(item.get("header") or item.get("id") or "").strip()
+                if header:
+                    headers.append(header)
+            suffix = " ..." if len(pending_questions) > 3 else ""
+            self.plan_pending_label.setText(f"待回答问题：{len(pending_questions)} 个（{', '.join(headers)}{suffix}）")
+        else:
+            self.plan_pending_label.setText("待回答问题：暂无")
+        plan_document = str(getattr(state, "plan_document", "") or "").strip()
+        if not plan_document:
             self.plan_title_value.setText("暂无计划")
-            self.plan_summary_value.setText("开启计划模式后，AI 会先给出可讨论的执行计划。")
-            self.plan_step_list.clear()
-            empty_item = QListWidgetItem("结构化计划会显示在这里。")
-            empty_item.setFlags(Qt.NoItemFlags)
-            self.plan_step_list.addItem(empty_item)
-            self.plan_confirm_btn.setEnabled(False)
+            self.plan_summary_value.setText("开启计划模式后，AI 将通过 <proposed_plan> 交付计划文档。")
+            self.plan_document_view.setPlainText("")
             return
-        self.plan_title_value.setText(plan.get("title") or "未命名计划")
-        summary_parts = []
-        if plan.get("summary"):
-            summary_parts.append(plan.get("summary"))
-        if plan.get("note"):
-            summary_parts.append(plan.get("note"))
-        self.plan_summary_value.setText("\n".join(summary_parts) if summary_parts else "暂无摘要")
-        self.plan_step_list.clear()
-        for step in plan.get("steps") or []:
-            line_1 = f"{plan_step_status_label(step.get('status'))} | {step.get('title') or step.get('id')}"
-            details = []
-            if step.get("description"):
-                details.append(step.get("description"))
-            elif step.get("success_criteria"):
-                details.append(step.get("success_criteria"))
-            tool_count = len(step.get("tool_ids") or [])
-            if tool_count:
-                details.append(f"关联工具 {tool_count} 个")
-            item = QListWidgetItem(line_1 + ("\n" + " | ".join(details) if details else ""))
-            item.setData(Qt.UserRole, step.get("id") or "")
-            self.plan_step_list.addItem(item)
-        can_confirm = (
-            bool(state.plan_mode_enabled)
-            and not state.confirmed_plan
-            and normalize_plan_phase(state.plan_phase) == PLAN_MODE_READY
-            and bool(state.draft_plan)
-            and not bool((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False))
-        )
-        self.plan_confirm_btn.setEnabled(can_confirm)
+        lines = [line.strip() for line in plan_document.splitlines() if line.strip()]
+        title = "计划文档"
+        summary = "计划已更新。"
+        for line in lines:
+            if line.startswith("#"):
+                title = line.lstrip("#").strip() or title
+                continue
+            summary = line
+            break
+        self.plan_title_value.setText(title)
+        self.plan_summary_value.setText(summary)
+        self.plan_document_view.setPlainText(plan_document)
 
     def set_session_phase(self, phase, session_id=None):
         state = self.get_session(session_id)
@@ -4629,7 +4522,7 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
                 self.pause_btn.setToolTip("暂停")
         else:
-            idle_text = "开始规划" if state.plan_mode_enabled and not state.confirmed_plan else "开始"
+            idle_text = "开始规划" if state.plan_mode_enabled else "开始"
             self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(
@@ -4771,6 +4664,8 @@ class MainWindow(QMainWindow):
         message = request.get("message") or ""
         metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
         options = request.get("options") if isinstance(request.get("options"), list) else []
+        questions = request.get("questions") if isinstance(request.get("questions"), list) else []
+        questions = normalize_pending_plan_questions(questions)
         allow_free_text = bool(request.get("allow_free_text"))
 
         dialog = QDialog(self)
@@ -4811,6 +4706,8 @@ class MainWindow(QMainWindow):
             hint_text = "请选择一个选项，必要时可以补充自由文本。"
         elif kind == "multi_choice":
             hint_text = "请选择一个或多个选项，必要时可以补充自由文本。"
+        elif kind == "questionnaire":
+            hint_text = "请逐题选择，必要时可以补充文本。"
         elif kind == "text":
             hint_text = "请输入你要补充给 AI 的信息。"
         hint_label = QLabel(hint_text)
@@ -4819,11 +4716,12 @@ class MainWindow(QMainWindow):
 
         input_field = QLineEdit()
         input_field.setPlaceholderText("输入补充内容…")
-        input_field.setVisible(kind == "text" or allow_free_text)
+        input_field.setVisible(kind == "text" or ((kind in {"choice", "multi_choice"}) and allow_free_text))
         layout.addWidget(input_field)
 
         option_combo = None
         option_checks = []
+        question_controls = []
         if kind == "choice" and options:
             option_combo = QComboBox()
             option_combo.addItem("请选择…", "")
@@ -4844,6 +4742,45 @@ class MainWindow(QMainWindow):
                 option_checks.append(checkbox)
                 option_layout.addWidget(checkbox)
             layout.addWidget(option_group)
+        elif kind == "questionnaire" and questions:
+            question_scroll = QScrollArea()
+            question_scroll.setWidgetResizable(True)
+            question_scroll.setFrameShape(QFrame.NoFrame)
+            question_wrap = QWidget()
+            question_layout = QVBoxLayout(question_wrap)
+            question_layout.setContentsMargins(0, 0, 0, 0)
+            question_layout.setSpacing(12)
+            for question_item in questions:
+                q_group = QGroupBox(str(question_item.get("header") or "问题"))
+                q_layout = QVBoxLayout(q_group)
+                q_text = QLabel(str(question_item.get("question") or ""))
+                q_text.setWordWrap(True)
+                q_text.setStyleSheet(f"color: {DesignTokens.text_primary};")
+                q_layout.addWidget(q_text)
+                q_combo = QComboBox()
+                q_combo.addItem("请选择…", "")
+                for idx, q_option in enumerate(question_item.get("options") or [], start=1):
+                    q_label = (q_option.get("label") or "").strip()
+                    q_value = (q_option.get("value") or q_label).strip()
+                    if not q_label:
+                        continue
+                    q_combo.addItem(f"{idx}. {q_label}", q_value)
+                q_layout.addWidget(q_combo)
+                q_input = QLineEdit()
+                q_input.setPlaceholderText("可选：补充说明")
+                q_input.setVisible(bool(allow_free_text))
+                q_layout.addWidget(q_input)
+                question_controls.append(
+                    {
+                        "id": question_item.get("id"),
+                        "combo": q_combo,
+                        "input": q_input,
+                    }
+                )
+                question_layout.addWidget(q_group)
+            question_layout.addStretch()
+            question_scroll.setWidget(question_wrap)
+            layout.addWidget(question_scroll, 1)
 
         button_layout = QHBoxLayout()
         button_layout.addStretch()
@@ -4910,6 +4847,31 @@ class MainWindow(QMainWindow):
                     return
                 QMessageBox.information(dialog, "提示", "请先选择至少一个选项或输入内容。")
                 return
+            if kind == "questionnaire":
+                answers = {}
+                for control in question_controls:
+                    question_id = str(control.get("id") or "").strip()
+                    combo_widget = control.get("combo")
+                    input_widget = control.get("input")
+                    selected = ""
+                    text_value = ""
+                    if combo_widget is not None:
+                        selected = str(combo_widget.currentData() or "").strip()
+                    if input_widget is not None:
+                        text_value = input_widget.text().strip()
+                    if not selected and not text_value:
+                        continue
+                    answers[question_id] = {
+                        "selected_options": [selected] if selected else [],
+                        "text": text_value,
+                        "raw_value": selected or text_value,
+                    }
+                if not answers:
+                    QMessageBox.information(dialog, "提示", "请至少回答一个问题。")
+                    return
+                decision["value"] = answers
+                dialog.accept()
+                return
 
         def on_yes():
             decision["value"] = True
@@ -4931,12 +4893,12 @@ class MainWindow(QMainWindow):
     def handle_interaction_request(self, request):
         state = self.get_current_session()
         if state:
-            self.set_session_phase("Awaiting approval", state.session_id)
+            self.set_session_phase("Awaiting input", state.session_id)
         result = self.show_interaction_dialog(request)
         bridge.resolve_request((request or {}).get("request_id"), result)
     
     def handle_daemon_interaction_request(self, request, session_id=None):
-        self.set_session_phase("Awaiting approval", session_id)
+        self.set_session_phase("Awaiting input", session_id)
         result = self.show_interaction_dialog(request)
         if self.daemon_client:
             self.daemon_client.respond_interaction((request or {}).get("request_id"), result)
@@ -5523,10 +5485,10 @@ class MainWindow(QMainWindow):
         state.plan_mode_enabled = False
         state.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
         state.plan_phase = PLAN_MODE_DISABLED
-        state.draft_plan = {}
-        state.confirmed_plan = {}
-        state.active_plan_step_id = ""
-        state.plan_revision = 0
+        state.plan_protocol_version = PLAN_PROTOCOL_VERSION
+        state.plan_mode_state = PLAN_MODE_EXPLORING
+        state.plan_document = ""
+        state.pending_plan_questions = []
 
         loaded_from_json = False
         conversation_meta = {}
@@ -5548,16 +5510,21 @@ class MainWindow(QMainWindow):
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
         state.plan_mode_enabled = bool(conversation_meta.get("plan_mode_enabled"))
         state.plan_config = normalize_plan_config(conversation_meta.get("plan_config"))
-        state.draft_plan = normalize_execution_plan(conversation_meta.get("draft_plan"))
-        state.confirmed_plan = normalize_execution_plan(conversation_meta.get("confirmed_plan"))
-        state.active_plan_step_id = str(conversation_meta.get("active_plan_step_id") or "").strip()
-        state.plan_revision = int(conversation_meta.get("plan_revision") or 0)
+        state.plan_protocol_version = int(conversation_meta.get("plan_protocol_version") or PLAN_PROTOCOL_VERSION)
+        state.plan_mode_state = normalize_plan_phase(
+            conversation_meta.get("plan_mode_state"),
+            default=PLAN_MODE_EXPLORING,
+        )
+        state.plan_document = str(conversation_meta.get("plan_document") or "").strip()
+        state.pending_plan_questions = normalize_pending_plan_questions(
+            conversation_meta.get("pending_plan_questions")
+        )
         state.plan_phase = normalize_plan_phase(
             conversation_meta.get("plan_phase"),
             default=derive_plan_phase(
                 state.plan_mode_enabled,
-                state.draft_plan,
-                state.confirmed_plan,
+                state.plan_mode_state,
+                state.plan_document,
             ),
         )
         state.changed_files = []
@@ -5671,7 +5638,11 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
-        has_plan_state = bool(state.plan_mode_enabled or state.draft_plan or state.confirmed_plan)
+        has_plan_state = bool(
+            state.plan_mode_enabled
+            or bool(getattr(state, "plan_document", ""))
+            or bool(getattr(state, "pending_plan_questions", []))
+        )
         if not state.messages and not has_plan_state:
             return
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
@@ -6045,12 +6016,16 @@ class MainWindow(QMainWindow):
         state.plan_config = normalize_plan_config(state.plan_config)
         if not state.plan_mode_enabled:
             state.plan_phase = PLAN_MODE_DISABLED
-            state.draft_plan = {}
-            state.confirmed_plan = {}
-            state.active_plan_step_id = ""
-            state.plan_revision = 0
+            state.plan_mode_state = PLAN_MODE_EXPLORING
+            state.plan_document = ""
+            state.pending_plan_questions = []
         else:
-            state.plan_phase = derive_plan_phase(True, state.draft_plan, state.confirmed_plan)
+            state.plan_mode_state = PLAN_MODE_EXPLORING
+            state.plan_phase = derive_plan_phase(
+                True,
+                state.plan_mode_state,
+                state.plan_document,
+            )
         self.refresh_plan_controls(state.session_id)
         self.refresh_plan_view(state.session_id)
         self.save_chat_history(session_id=state.session_id)
@@ -6061,45 +6036,17 @@ class MainWindow(QMainWindow):
             {
                 "mode": mode,
                 "plan_config": normalize_plan_config(getattr(state, "plan_config", DEFAULT_PLAN_CONFIG)),
-                "confirmed_plan": normalize_execution_plan(getattr(state, "confirmed_plan", {})),
-                "active_plan_step_id": getattr(state, "active_plan_step_id", ""),
+                "plan_protocol_version": int(getattr(state, "plan_protocol_version", PLAN_PROTOCOL_VERSION) or PLAN_PROTOCOL_VERSION),
+                "plan_mode_state": normalize_plan_phase(
+                    getattr(state, "plan_mode_state", PLAN_MODE_EXPLORING),
+                    default=PLAN_MODE_EXPLORING,
+                ),
+                "plan_document": str(getattr(state, "plan_document", "") or "").strip(),
+                "pending_plan_questions": normalize_pending_plan_questions(
+                    getattr(state, "pending_plan_questions", [])
+                ),
             }
         )
-
-    def confirm_execution_plan(self):
-        state = self.get_current_session()
-        if not state:
-            return
-        draft_plan = normalize_execution_plan(state.draft_plan)
-        if not draft_plan:
-            return
-        if normalize_plan_phase(state.plan_phase) != PLAN_MODE_READY:
-            return
-        confirmed = json_copy(draft_plan, {})
-        confirmed["plan_status"] = PLAN_STATUS_EXECUTING
-        state.confirmed_plan = confirmed
-        state.draft_plan = json_copy(confirmed, {})
-        state.plan_phase = PLAN_MODE_EXECUTING
-        state.active_plan_step_id = ""
-        state.plan_revision = max(int(state.plan_revision or 0), 1)
-        state.step_records = []
-        state.changed_files = []
-        state.has_file_changes = False
-        state.pending_tool_results = {}
-        self.refresh_change_list(state.session_id)
-        self.refresh_step_list(state.session_id)
-        self.refresh_plan_view(state.session_id)
-        self.save_chat_history(session_id=state.session_id)
-        self.set_session_phase("Executing", state.session_id)
-        self.set_session_status("running", state.session_id)
-        state.active_turn_id += 1
-        current_turn_id = state.active_turn_id
-        self.try_connect_daemon(allow_start=True, retries=4)
-        run_context = self._build_run_context(state, RUN_MODE_EXECUTION)
-        if self.daemon_available:
-            self.process_daemon_logic("", turn_id=current_turn_id, run_context=run_context)
-        else:
-            self.process_agent_logic("", turn_id=current_turn_id, run_context=run_context)
 
     def handle_send(self):
         if not self.workspace_dir:
@@ -6130,12 +6077,10 @@ class MainWindow(QMainWindow):
         current_turn_id = state.active_turn_id
         state.messages.append({"role": "user", "content": user_text})
         run_mode = RUN_MODE_NORMAL
-        if state.plan_mode_enabled and not state.confirmed_plan:
-            state.plan_phase = PLAN_MODE_DRAFTING
+        if state.plan_mode_enabled:
+            state.plan_phase = PLAN_MODE_EXPLORING
+            state.plan_mode_state = PLAN_MODE_EXPLORING
             run_mode = RUN_MODE_PLANNING
-        elif state.plan_mode_enabled and state.confirmed_plan:
-            state.plan_phase = PLAN_MODE_EXECUTING
-            run_mode = RUN_MODE_EXECUTION
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
@@ -6248,13 +6193,18 @@ class MainWindow(QMainWindow):
             "status": "running",
             "duration": meta.get("duration"),
             "related_files": related_files,
-            "plan_step_id": state.active_plan_step_id or "",
-            "plan_step_title": self._plan_step_title(state, state.active_plan_step_id or ""),
         }
         state.step_records = [r for r in state.step_records if r.get("tool_id") != data["id"]]
         state.step_records.append(record)
-        if data.get("name") != "update_execution_plan" and state.active_plan_step_id:
-            self._assign_tool_to_plan_step(state, data["id"], state.active_plan_step_id)
+        if state.plan_mode_enabled and data.get("name") == "request_user_input":
+            pending_questions = self._extract_pending_plan_questions_from_args(
+                args_obj if isinstance(args_obj, dict) else {}
+            )
+            if pending_questions:
+                state.pending_plan_questions = pending_questions
+                state.plan_mode_state = PLAN_MODE_AWAITING_USER_INPUT
+                state.plan_phase = PLAN_MODE_AWAITING_USER_INPUT
+                self.refresh_plan_view(state.session_id)
         if related_files:
             for path in related_files:
                 state.changed_files.append({"path": path, "type": "related", "summary": summary})
@@ -6313,7 +6263,7 @@ class MainWindow(QMainWindow):
                 "result_obj": pending_result.get("result_obj"),
             }, session_id=session_id)
 
-        if state.plan_mode_enabled and not state.confirmed_plan:
+        if state.plan_mode_enabled:
             self.set_session_phase("Planning", state.session_id)
         else:
             self.set_session_phase("Executing", state.session_id)
@@ -6340,8 +6290,11 @@ class MainWindow(QMainWindow):
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")
-        if isinstance(result_obj, dict) and result_obj.get("source_tool") == "update_execution_plan":
-            self._apply_plan_state(state, result_obj.get("plan") or {})
+        if state.plan_mode_enabled and isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
+            state.pending_plan_questions = []
+            state.plan_mode_state = PLAN_MODE_EXPLORING
+            state.plan_phase = PLAN_MODE_EXPLORING
+            self.refresh_plan_view(state.session_id)
         for record in state.step_records:
             if record.get("tool_id") != tool_id:
                 continue
@@ -6698,7 +6651,7 @@ class MainWindow(QMainWindow):
             return
         delta = text or ""
         if delta.strip():
-            if state.plan_mode_enabled and not state.confirmed_plan:
+            if state.plan_mode_enabled:
                 self.set_session_phase("Planning", state.session_id)
             else:
                 self.set_session_phase("Analyzing", state.session_id)
@@ -6983,16 +6936,23 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         self.update_session_tab_title(state.session_id)
-        if state.plan_mode_enabled and not state.confirmed_plan:
-            phase_text = "Plan Ready" if normalize_plan_phase(state.plan_phase) == PLAN_MODE_READY else "Planning"
+        if state.plan_mode_enabled:
+            phase_text = "Plan Ready" if normalize_plan_phase(state.plan_phase) == PLAN_MODE_READY_TO_PRESENT else "Planning"
             self.set_session_phase(phase_text, state.session_id)
-        elif state.plan_mode_enabled and state.confirmed_plan:
-            self.set_session_phase("Executing", state.session_id)
         else:
             self.set_session_phase("Wrapping up", state.session_id)
 
+        if state.plan_mode_enabled:
+            proposed_plan = self._extract_proposed_plan(content)
+            if proposed_plan:
+                state.plan_document = proposed_plan
+                state.pending_plan_questions = []
+                state.plan_mode_state = PLAN_MODE_READY_TO_PRESENT
+                state.plan_phase = PLAN_MODE_READY_TO_PRESENT
+                self.refresh_plan_view(state.session_id)
+
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
-        should_run_code_block = not (state.plan_mode_enabled and not state.confirmed_plan)
+        should_run_code_block = not state.plan_mode_enabled
         if code_match and should_run_code_block:
             code_block = code_match.group(1).strip()
             self.append_log("System: 检测到代码块，准备执行...")
@@ -7013,15 +6973,8 @@ class MainWindow(QMainWindow):
             state.code_worker.start()
             if is_current: self.normalize_session_ui(state)
         else:
-            if state.plan_mode_enabled and not state.confirmed_plan:
+            if state.plan_mode_enabled:
                 self.set_session_status("draft", state.session_id, save=True)
-            elif state.plan_mode_enabled and state.confirmed_plan:
-                if normalize_plan_phase(state.plan_phase) == PLAN_MODE_COMPLETED:
-                    self.set_session_phase("Completed", state.session_id)
-                    self.set_session_status("completed", state.session_id, save=True)
-                else:
-                    self.set_session_phase("Executing", state.session_id)
-                    self.set_session_status("running", state.session_id, save=True)
             else:
                 self.set_session_phase("Completed", state.session_id)
                 self.set_session_status("completed", state.session_id, save=True)

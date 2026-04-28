@@ -21,6 +21,21 @@ from core.filesystem_ops import (
 from core.interaction import ask_user
 
 
+def request_user_approval(message, _context=None, title="请确认", timeout_seconds=120):
+    approved = ask_user(
+        message,
+        _context=_context,
+        title=title,
+        timeout_seconds=timeout_seconds,
+    )
+    return {
+        "interaction_response": {
+            "approved": bool(approved),
+            "status": "completed",
+        }
+    }
+
+
 def _get_openpyxl():
     try:
         import openpyxl
@@ -180,7 +195,9 @@ def delete_file(workspace_dir, path, recursive=False, _context=None):
             prompt = f"Confirm delete recursively: '{rel_path}'?"
         else:
             prompt = f"Confirm delete: '{rel_path}'?"
-        return ask_user(prompt)
+        approval = request_user_approval(prompt, _context=_context)
+        interaction_response = approval.get("interaction_response") if isinstance(approval, dict) else {}
+        return bool((interaction_response or {}).get("approved"))
 
     return delete_path(
         workspace_dir,

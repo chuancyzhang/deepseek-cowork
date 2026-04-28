@@ -66,6 +66,44 @@ class TestInteractionSkill(unittest.TestCase):
         self.assertEqual(result["interaction_response"]["selected_options"], ["alpha"])
         self.assertIn("alpha", result["content"])
 
+    def test_request_user_input_questionnaire_returns_answers(self):
+        with patch.object(
+            interaction_impl.interaction_service,
+            "create_request",
+            return_value={
+                "request_id": "req-3",
+                "status": "completed",
+                "approved": True,
+                "text": "",
+                "selected_options": [],
+                "answers": {
+                    "compatibility_target": {
+                        "selected_options": ["彻底重做"],
+                        "text": "",
+                        "raw_value": "彻底重做",
+                    }
+                },
+                "raw_value": {"compatibility_target": "彻底重做"},
+                "resolved_at": "2026-04-12T00:00:00+00:00",
+            },
+        ):
+            result = interaction_impl.request_user_input(
+                message="请选择方案",
+                questions=[
+                    {
+                        "header": "兼容策略",
+                        "id": "compatibility_target",
+                        "question": "是否保留旧计划结构？",
+                        "options": [{"label": "彻底重做", "description": "移除旧结构"}],
+                    }
+                ],
+                _context={"session_id": "session-3"},
+            )
+
+        self.assertEqual(result["interaction_request"]["kind"], "questionnaire")
+        self.assertIn("compatibility_target", result["answers"])
+        self.assertTrue(result["interaction_response"]["approved"])
+
     def test_publish_artifacts_local_file_returns_structured_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             file_path = os.path.join(tmp, "sample.txt")

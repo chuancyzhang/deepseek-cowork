@@ -15,7 +15,7 @@ def _utc_now_iso() -> str:
 
 def _normalize_kind(kind: str) -> str:
     text = (kind or "").strip().lower()
-    if text in {"approval", "text", "choice", "multi_choice"}:
+    if text in {"approval", "text", "choice", "multi_choice", "questionnaire"}:
         return text
     return "text"
 
@@ -51,6 +51,28 @@ def _normalize_options(options: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_questions(questions: Any) -> list[dict[str, Any]]:
+    normalized = []
+    seen_ids = set()
+    for item in questions or []:
+        if not isinstance(item, dict):
+            continue
+        qid = str(item.get("id") or "").strip()
+        question = str(item.get("question") or "").strip()
+        if not qid or qid in seen_ids or not question:
+            continue
+        seen_ids.add(qid)
+        normalized.append(
+            {
+                "header": str(item.get("header") or "").strip(),
+                "id": qid,
+                "question": question,
+                "options": _normalize_options(item.get("options")),
+            }
+        )
+    return normalized
+
+
 def _match_option(raw_value: Any, options: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not options:
         return None
@@ -78,6 +100,7 @@ def _build_response_payload(
     approved: bool,
     text: str = "",
     selected_options: list[str] | None = None,
+    answers: dict[str, Any] | None = None,
     raw_value: Any = None,
 ) -> dict[str, Any]:
     return {
@@ -86,6 +109,7 @@ def _build_response_payload(
         "approved": approved,
         "text": text or "",
         "selected_options": list(selected_options or []),
+        "answers": dict(answers or {}),
         "raw_value": raw_value,
         "resolved_at": _utc_now_iso(),
     }
@@ -99,6 +123,7 @@ def parse_interaction_reply(
     kind = _normalize_kind(req.get("kind") or "text")
     allow_free_text = bool(req.get("allow_free_text"))
     options = _normalize_options(req.get("options"))
+    questions = _normalize_questions(req.get("questions"))
 
     if isinstance(raw_value, dict) and raw_value.get("request_id"):
         payload = _build_response_payload(
@@ -111,6 +136,7 @@ def parse_interaction_reply(
                 for item in (raw_value.get("selected_options") or [])
                 if str(item).strip()
             ],
+            answers=raw_value.get("answers") if isinstance(raw_value.get("answers"), dict) else {},
             raw_value=raw_value.get("raw_value", raw_value),
         )
         return payload, True, ""
@@ -229,6 +255,52 @@ def parse_interaction_reply(
             raw_value=raw_value,
         ), False, "multi_choice reply does not match options"
 
+    if kind == "questionnaire":
+        if not isinstance(raw_value, dict):
+            return _build_response_payload(
+                req,
+                status="invalid",
+                approved=False,
+                raw_value=raw_value,
+            ), False, "questionnaire reply must be an object"
+        answers = {}
+        for item in questions:
+            qid = item.get("id") or ""
+            if not qid:
+                continue
+            raw_answer = raw_value.get(qid)
+            if isinstance(raw_answer, dict):
+                selected = [
+                    str(choice).strip()
+                    for choice in (raw_answer.get("selected_options") or [])
+                    if str(choice).strip()
+                ]
+                text = str(raw_answer.get("text") or "").strip()
+            else:
+                selected = []
+                text = str(raw_answer or "").strip()
+            if not selected and not text:
+                continue
+            answers[qid] = {
+                "selected_options": selected,
+                "text": text,
+                "raw_value": raw_answer,
+            }
+        if not answers:
+            return _build_response_payload(
+                req,
+                status="invalid",
+                approved=False,
+                raw_value=raw_value,
+            ), False, "questionnaire reply is empty"
+        return _build_response_payload(
+            req,
+            status="completed",
+            approved=True,
+            answers=answers,
+            raw_value=raw_value,
+        ), True, ""
+
     return _build_response_payload(
         req,
         status="invalid",
@@ -245,6 +317,7 @@ class InteractionRequest:
     title: str
     message: str
     options: list[dict[str, Any]] = field(default_factory=list)
+    questions: list[dict[str, Any]] = field(default_factory=list)
     allow_free_text: bool = False
     timeout_seconds: float = 120.0
     source_tool: str = ""
@@ -261,6 +334,7 @@ class InteractionResponse:
     approved: bool
     text: str = ""
     selected_options: list[str] = field(default_factory=list)
+    answers: dict[str, Any] = field(default_factory=dict)
     raw_value: Any = None
     resolved_at: str = field(default_factory=_utc_now_iso)
 
@@ -284,6 +358,7 @@ class InteractionService(QObject):
         *,
         title: str = "",
         options: list[dict[str, Any]] | None = None,
+        questions: list[dict[str, Any]] | None = None,
         allow_free_text: bool = False,
         timeout_seconds: float = 120.0,
         source_tool: str = "",
@@ -296,6 +371,7 @@ class InteractionService(QObject):
             title=(title or "").strip(),
             message=(message or "").strip(),
             options=_normalize_options(options),
+            questions=_normalize_questions(questions),
             allow_free_text=bool(allow_free_text),
             timeout_seconds=_coerce_timeout(timeout_seconds),
             source_tool=(source_tool or "").strip(),
@@ -380,6 +456,23 @@ class InteractionService(QObject):
                 event.set()
             cancelled += 1
         return cancelled
+
+
+def ask_user(message: str, _context: dict[str, Any] | None = None, *, title: str = "请确认", timeout_seconds: float = 120.0) -> bool:
+    """
+    Backward-compatible approval helper used by legacy skills (for example file-system delete confirmation).
+    """
+    response = interaction_service.create_request(
+        session_id=((_context or {}).get("session_id") or "").strip(),
+        kind="approval",
+        message=str(message or "").strip(),
+        title=str(title or "请确认").strip(),
+        allow_free_text=False,
+        timeout_seconds=timeout_seconds,
+        source_tool="ask_user",
+        metadata={"compat": "legacy_ask_user"},
+    )
+    return bool(response.get("approved"))
 
 
 interaction_service = InteractionService()

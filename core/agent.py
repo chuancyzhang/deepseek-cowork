@@ -18,13 +18,11 @@ from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.plan_mode import (
-    RUN_MODE_EXECUTION,
+    get_planning_read_tools,
     RUN_MODE_NORMAL,
     RUN_MODE_PLANNING,
-    is_planning_mode,
     is_tool_allowed_in_planning,
     json_copy,
-    normalize_execution_plan,
     normalize_run_context,
 )
 
@@ -373,9 +371,6 @@ class LLMWorker(QThread):
     def _is_planning_mode(self):
         return self._current_run_mode() == RUN_MODE_PLANNING
 
-    def _is_execution_mode(self):
-        return self._current_run_mode() == RUN_MODE_EXECUTION
-
     def _bind_agent_manager(self):
         if self.is_subagent:
             self.agent_manager = None
@@ -477,7 +472,6 @@ class LLMWorker(QThread):
         missing_packages = runtime_snapshot.get("missing_packages", [])
         package_line = f"运行时库检测(可用): {', '.join(available_packages[:10])}" if available_packages else "运行时库检测(可用): 未检测到"
         missing_line = f"运行时库检测(缺失): {', '.join(missing_packages[:10])}" if missing_packages else "运行时库检测(缺失): 无"
-        confirmed_plan = normalize_execution_plan(self.run_context.get("confirmed_plan"))
         run_mode = self._current_run_mode()
         available_tool_names = []
         for item in self.tools or []:
@@ -486,19 +480,7 @@ class LLMWorker(QThread):
             if name:
                 available_tool_names.append(name)
         available_tool_names = list(dict.fromkeys(available_tool_names))
-        planning_read_tools = [
-            name for name in [
-                "list_files",
-                "read_file",
-                "glob",
-                "grep",
-                "read_docx",
-                "read_pptx",
-                "read_excel",
-                "read_pdf",
-            ]
-            if name in available_tool_names
-        ]
+        planning_read_tools = get_planning_read_tools(available_tool_names)
 
         # Construct System Context
         context_lines = [
@@ -574,28 +556,16 @@ class LLMWorker(QThread):
                 [
                     "",
                     "策略 [计划模式]:",
-                    "1. 你当前处于 planning 模式。只能读取当前工作区内的文件与目录来做只读调研、提出或修订计划，不能执行任何会修改工作区或系统状态的操作。",
-                    f"2. 当前 planning 模式下实际暴露给你的工作区只读工具: {read_tool_line}。",
-                    "3. 只有当这些读取工具确实存在于当前 tool schema 时，才应直接用它们调研工作区；不要声称自己能用并不存在的工具。",
-                    "4. 如果当前 tool schema 已暴露工作区读取工具，不要再声称自己无法读取当前工作区文件；真正受限的仍然是 bash、写操作、系统自动化、工作区外访问等。",
-                    "5. 你必须使用 'update_execution_plan' 来创建和更新结构化计划，并在计划可执行时将 plan_status 设为 'ready'。",
-                    "6. 在 planning 模式下，若需要继续澄清需求，可以使用 'request_user_input'；不要直接开始执行。",
-                    "7. planning 模式不会额外放宽任何权限边界：工作区外访问、写操作、命令执行、系统自动化等限制与原有禁止规则保持一致。",
-                    "8. planning 模式中的计划应简洁、可执行、步骤清晰，且 steps 中的状态应反映当前草案状态。",
+                    "1. 你当前处于 planning 模式。你必须先做只读探索，禁止执行会修改工作区或系统状态的操作。",
+                    f"2. 当前 planning 模式下可用只读工具: {read_tool_line}。",
+                    "3. 先探索再提问：优先通过代码和配置消除不确定性，不要提可以从仓库直接查到的问题。",
+                    "4. 仅在会影响方案决策时向用户提问，并且必须通过 'request_user_input'。不要在普通文本回复中直接提问。",
+                    "5. 你的规划流程固定为三阶段：环境探查 -> 意图澄清 -> 实施细节澄清。",
+                    "6. planning 模式最终交付必须是单个 '<proposed_plan>...</proposed_plan>' 块，且内容应包含标题、summary、关键改动、测试场景、假设与默认项。",
+                    "7. 若方案尚未收敛，本轮应调用 'request_user_input'；若方案已收敛，本轮应输出完整 '<proposed_plan>'。",
+                    "8. planning 模式不会放宽任何权限边界：工作区外访问、写操作、命令执行、系统自动化等限制仍然有效。",
                 ]
             )
-        elif self._is_execution_mode():
-            context_lines.extend(
-                [
-                    "",
-                    "策略 [执行模式]:",
-                    "1. 你当前处于 execution 模式，用户已经确认计划，必须按 confirmed_plan 执行。",
-                    "2. 在开始执行某个步骤前，先调用 'update_execution_plan' 将该步骤标记为 'in_progress'；完成后再标记为 'completed'、'blocked' 或 'skipped'。",
-                    "3. 除非确有必要，不要偏离 confirmed_plan 的步骤顺序与目标。",
-                ]
-            )
-            if confirmed_plan:
-                context_lines.append("\n# Confirmed Plan\n" + json.dumps(confirmed_plan, ensure_ascii=False, indent=2))
         if self.parent_agent_id:
             context_lines.append(f"Note: You are a sub-agent (ID: {self.parent_agent_id}). Perform your assigned task efficiently.")
 

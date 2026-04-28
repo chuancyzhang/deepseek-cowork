@@ -110,10 +110,92 @@ def request_user_input(
     title="",
     input_mode="text",
     options=None,
+    questions=None,
     allow_free_text=True,
     timeout_seconds=120,
     _context=None,
 ):
+    def _normalize_question_specs(raw_questions):
+        normalized = []
+        seen_ids = set()
+        for item in raw_questions or []:
+            if not isinstance(item, dict):
+                continue
+            qid = str(item.get("id") or "").strip()
+            question = str(item.get("question") or "").strip()
+            if not qid or not question or qid in seen_ids:
+                continue
+            seen_ids.add(qid)
+            q_options = []
+            for option in item.get("options") or []:
+                if isinstance(option, dict):
+                    label = str(option.get("label") or option.get("value") or "").strip()
+                    value = str(option.get("value") or label).strip()
+                    if not label or not value:
+                        continue
+                    q_options.append(
+                        {
+                            "label": label,
+                            "value": value,
+                            "description": str(option.get("description") or "").strip(),
+                        }
+                    )
+                elif isinstance(option, str) and option.strip():
+                    value = option.strip()
+                    q_options.append({"label": value, "value": value, "description": ""})
+            normalized.append(
+                {
+                    "header": str(item.get("header") or "").strip(),
+                    "id": qid,
+                    "question": question,
+                    "options": q_options,
+                }
+            )
+        return normalized
+
+    normalized_questions = _normalize_question_specs(questions)
+    if normalized_questions:
+        response = interaction_service.create_request(
+            _session_id(_context),
+            "questionnaire",
+            message,
+            title=title or "需要你的输入",
+            questions=normalized_questions,
+            allow_free_text=bool(allow_free_text),
+            timeout_seconds=timeout_seconds,
+            source_tool="request_user_input",
+            metadata={"input_mode": "questionnaire"},
+        )
+        answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
+        answered_count = len(answers)
+        response_summary = f"answers={answered_count}"
+        return {
+            "source_tool": "request_user_input",
+            "content": (
+                f"已收到用户输入，共回答 {answered_count} 个问题。"
+                if response.get("approved")
+                else f"未收到有效输入（{response.get('status') or 'unknown'}）。"
+            ),
+            "content_parts": [
+                {
+                    "type": "tool_event",
+                    "tool_name": "request_user_input",
+                    "status": response.get("status") or "completed",
+                    "summary": response_summary,
+                }
+            ],
+            "interaction_request": {
+                "kind": "questionnaire",
+                "message": message,
+                "title": title or "需要你的输入",
+                "questions": normalized_questions,
+                "allow_free_text": bool(allow_free_text),
+                "timeout_seconds": timeout_seconds,
+            },
+            "interaction_response": response,
+            "answers": answers,
+        }
+
     mode = (input_mode or "text").strip().lower()
     if mode not in {"text", "choice", "multi_choice"}:
         mode = "text"
@@ -160,10 +242,12 @@ def request_user_input(
             "message": message,
             "title": title or "需要你的输入",
             "options": normalized_options,
+            "questions": [],
             "allow_free_text": bool(allow_free_text),
             "timeout_seconds": timeout_seconds,
         },
         "interaction_response": response,
+        "answers": response.get("answers") if isinstance(response.get("answers"), dict) else {},
     }
 
 
@@ -602,7 +686,7 @@ TOOL_EXPORTS = [
     {
         "name": "request_user_input",
         "handler": request_user_input,
-        "description": "Ask the user for text, a single choice, or multiple choices.",
+        "description": "Ask the user for text, choices, or a multi-question questionnaire.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -620,6 +704,31 @@ TOOL_EXPORTS = [
                             "description": {"type": "string"},
                         },
                         "required": ["label"],
+                    },
+                },
+                "questions": {
+                    "type": "array",
+                    "description": "Optional questionnaire definition. When provided, input_mode/options are ignored.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "header": {"type": "string"},
+                            "id": {"type": "string"},
+                            "question": {"type": "string"},
+                            "options": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "value": {"type": "string"},
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["label"],
+                                },
+                            },
+                        },
+                        "required": ["id", "question", "options"],
                     },
                 },
                 "allow_free_text": {"type": "boolean", "description": "Whether arbitrary text is allowed besides listed options."},

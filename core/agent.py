@@ -359,6 +359,7 @@ class LLMWorker(QThread):
     content_signal = Signal(str)
     output_signal = Signal(str) # For generic output/errors
     agent_state_signal = Signal(dict) # Signal to report sub-agent status
+    observability_signal = Signal(dict)
     abort_signal = Signal() # Signal emitted when the worker is stopped
 
     def __init__(
@@ -534,7 +535,14 @@ class LLMWorker(QThread):
                     prompts.append(prompt)
                     disclosed_skills.add(skill_name)
         if prompts:
-            current_messages.append({"role": "system", "content": "\n\n".join(prompts)})
+            content = "\n\n".join(prompts)
+            current_messages.append({"role": "system", "content": content})
+            self.observability_signal.emit({
+                "type": "system_prompt_append",
+                "content": content,
+                "source": "skill_prompt",
+                "timestamp": time.time(),
+            })
 
     def _build_skill_query(self, messages):
         parts = []
@@ -693,6 +701,12 @@ class LLMWorker(QThread):
             context_lines.append(system_skills)
 
         system_prompt = "\n".join(context_lines)
+        self.observability_signal.emit({
+            "type": "system_prompt",
+            "content": system_prompt,
+            "timestamp": time.time(),
+            "run_mode": run_mode,
+        })
         
         # Insert System Message
         current_messages.insert(0, {"role": "system", "content": system_prompt})
@@ -869,9 +883,16 @@ class LLMWorker(QThread):
                         if not force_reply_attempted:
                             force_reply_attempted = True
                             self.step_signal.emit("System: Empty content detected, requesting a forced final answer.")
+                            force_prompt = "你必须立即给出给用户可见的最终答复。禁止只输出思考内容。除非绝对必要，不要继续调用工具。请基于已有上下文与工具结果，直接输出清晰结论。"
                             current_messages.append({
                                 "role": "system",
-                                "content": "你必须立即给出给用户可见的最终答复。禁止只输出思考内容。除非绝对必要，不要继续调用工具。请基于已有上下文与工具结果，直接输出清晰结论。"
+                                "content": force_prompt
+                            })
+                            self.observability_signal.emit({
+                                "type": "system_prompt_append",
+                                "content": force_prompt,
+                                "source": "force_final_answer",
+                                "timestamp": time.time(),
                             })
                             continue
                         content = "任务已完成，请查看上方工具执行结果。"
@@ -951,6 +972,13 @@ class LLMWorker(QThread):
                                 "id": tool.id,
                                 "name": name,
                                 "args": args
+                            })
+                            self.observability_signal.emit({
+                                "type": "tool_call",
+                                "id": tool.id,
+                                "name": name,
+                                "args": args,
+                                "timestamp": time.time(),
                             })
                             
                             # Report Active Skill
@@ -1037,6 +1065,20 @@ class LLMWorker(QThread):
                                 "args": args,
                                 "result": result_text,
                                 "result_obj": result_obj,
+                                "meta": {
+                                    "start_time": start_tool_time,
+                                    "end_time": end_tool_time,
+                                    "duration": duration_tool
+                                }
+                            })
+                            self.observability_signal.emit({
+                                "type": "tool_result",
+                                "id": tool.id,
+                                "name": name,
+                                "args": args,
+                                "result": result_text,
+                                "result_obj": result_obj,
+                                "timestamp": end_tool_time,
                                 "meta": {
                                     "start_time": start_tool_time,
                                     "end_time": end_tool_time,

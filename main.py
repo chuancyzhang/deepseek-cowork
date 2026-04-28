@@ -1510,6 +1510,7 @@ class DaemonStreamWorker(QThread):
     content_signal = Signal(str)
     tool_call_signal = Signal(dict)
     tool_result_signal = Signal(dict)
+    observability_signal = Signal(dict)
     agent_state_signal = Signal(dict)
     output_signal = Signal(str)
     interaction_signal = Signal(dict)
@@ -1576,6 +1577,10 @@ class DaemonStreamWorker(QThread):
                     elif msg.get("type") == "tool_result":
                         data = msg.get("data") or {}
                         self.tool_result_signal.emit(data)
+                    elif msg.get("type") == "observability":
+                        data = msg.get("data") or {}
+                        if isinstance(data, dict):
+                            self.observability_signal.emit(data)
                     elif msg.get("type") == "agent_state":
                         data = msg.get("data") or {}
                         if isinstance(data, dict):
@@ -3157,6 +3162,9 @@ class SessionState:
         self.completed_turn_id = 0
         self.persisted_agents = []
         self.sub_agent_events = []
+        self.observability_events = []
+        self.system_prompt_text = ""
+        self.system_prompt_appends = []
         self.plan_mode_enabled = False
         self.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
         self.plan_phase = PLAN_MODE_DISABLED
@@ -3678,35 +3686,79 @@ class MainWindow(QMainWindow):
         plan_layout.addWidget(self.plan_document_view, 1)
         self.right_tabs.addTab(self.plan_tab, "计划")
 
-        # Tab 2: Tool Details
+        # Tab 2: Observability
         self.tool_details_tab = QWidget()
         td_layout = QVBoxLayout(self.tool_details_tab)
         td_layout.setContentsMargins(12, 12, 12, 12)
         td_layout.setSpacing(12)
-        self.step_intro_label = QLabel("执行步骤会按顺序汇总，点击步骤查看详细参数与输出。")
+        self.step_intro_label = QLabel("本轮任务的系统提示词、工具调用与工具返回会在这里实时显示。")
         self.step_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         td_layout.addWidget(self.step_intro_label)
+
+        obs_prompt_label = QLabel("系统提示词")
+        obs_prompt_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #374151;")
+        td_layout.addWidget(obs_prompt_label)
+
+        self.observability_prompt_edit = ReadOnlyTextEdit()
+        self.observability_prompt_edit.setPlaceholderText("等待本轮系统提示词...")
+        self.observability_prompt_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                background: #f9fafb;
+                color: #374151;
+                font-family: 'Consolas', monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        td_layout.addWidget(self.observability_prompt_edit, 2)
+
+        obs_log_label = QLabel("工具调用与返回")
+        obs_log_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #374151;")
+        td_layout.addWidget(obs_log_label)
+
+        self.observability_log_edit = ReadOnlyTextEdit()
+        self.observability_log_edit.setPlaceholderText("工具调用和返回内容会按时间顺序显示...")
+        self.observability_log_edit.setStyleSheet("""
+            QTextEdit {
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                background: #ffffff;
+                color: #374151;
+                font-family: 'Consolas', monospace;
+                font-size: 11px;
+                padding: 8px;
+            }
+        """)
+        td_layout.addWidget(self.observability_log_edit, 3)
+
         self.step_list = QListWidget()
         self.step_list.setStyleSheet(f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card};")
         self.step_list.itemClicked.connect(self.on_step_item_clicked)
-        td_layout.addWidget(self.step_list, 1)
+        self.step_list.setVisible(False)
+        td_layout.addWidget(self.step_list)
         
         td_header = QLabel("工具调用详情")
         td_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
+        td_header.setVisible(False)
         td_layout.addWidget(td_header)
         
         # Tool ID / Name
         self.td_info_label = QLabel("选择左侧工具卡片查看详情")
         self.td_info_label.setStyleSheet("color: #6b7280; font-size: 12px;")
+        self.td_info_label.setVisible(False)
         td_layout.addWidget(self.td_info_label)
         
         self.td_meta_label = QLabel("")
         self.td_meta_label.setStyleSheet("color: #6b7280; font-size: 11px; margin-bottom: 4px;")
+        self.td_meta_label.setVisible(False)
         td_layout.addWidget(self.td_meta_label)
         
         # Args
         td_args_label = QLabel("Arguments:")
         td_args_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
+        td_args_label.setVisible(False)
         td_layout.addWidget(td_args_label)
         
         self.td_args_edit = ReadOnlyTextEdit()
@@ -3722,7 +3774,8 @@ class MainWindow(QMainWindow):
                 padding: 8px;
             }
         """)
-        td_layout.addWidget(self.td_args_edit, 1)
+        self.td_args_edit.setVisible(False)
+        td_layout.addWidget(self.td_args_edit)
         
         td_result_header = QWidget()
         td_result_header_layout = QHBoxLayout(td_result_header)
@@ -3753,6 +3806,7 @@ class MainWindow(QMainWindow):
         """)
         self.td_copy_result_btn.clicked.connect(self.copy_tool_result)
         td_result_header_layout.addWidget(self.td_copy_result_btn)
+        td_result_header.setVisible(False)
         td_layout.addWidget(td_result_header)
         
         self.td_result_edit = ReadOnlyTextEdit()
@@ -3768,9 +3822,10 @@ class MainWindow(QMainWindow):
                 padding: 8px;
             }
         """)
-        td_layout.addWidget(self.td_result_edit, 2)
+        self.td_result_edit.setVisible(False)
+        td_layout.addWidget(self.td_result_edit)
         
-        self.right_tabs.addTab(self.tool_details_tab, "工具详情")
+        self.right_tabs.addTab(self.tool_details_tab, "观测")
 
         # Tab 4: Sub-Agent Monitor
         self.sub_agent_tab = QWidget()
@@ -3792,7 +3847,7 @@ class MainWindow(QMainWindow):
             self.right_tabs.setTabText(0, "文件")
             self.right_tabs.setTabText(1, "变更")
             self.right_tabs.setTabText(2, "计划")
-            self.right_tabs.setTabText(3, "步骤")
+            self.right_tabs.setTabText(3, "观测")
             self.right_tabs.setTabText(4, "子Agent")
         except Exception:
             pass
@@ -4041,7 +4096,15 @@ class MainWindow(QMainWindow):
                 or bool(getattr(state, "pending_plan_questions", []))
             )
         )
-        has_context = bool(state and (state.step_records or state.has_file_changes or has_plan_context))
+        has_observability_context = bool(
+            state
+            and (
+                getattr(state, "observability_events", [])
+                or getattr(state, "system_prompt_text", "")
+                or getattr(state, "system_prompt_appends", [])
+            )
+        )
+        has_context = bool(state and (state.step_records or state.has_file_changes or has_plan_context or has_observability_context))
         self.right_panel_visible = has_workspace or has_context
         self.right_sidebar.setVisible(self.right_panel_visible)
         if state and state.session_id == self.current_session_id:
@@ -4208,7 +4271,108 @@ class MainWindow(QMainWindow):
                     item = QListWidgetItem(f"{title} | {status}{duration_text}\n{line2}")
                     item.setData(Qt.UserRole, record.get("tool_id"))
                     self.step_list.addItem(item)
-                self.step_intro_label.setText(f"{len(state.step_records)} execution steps")
+                self.step_intro_label.setText(
+                    f"本轮已记录 {len(state.step_records)} 个工具步骤；完整参数与返回见下方观测日志。"
+                )
+            self.refresh_context_badges(state.session_id)
+
+    def _observability_pretty_json(self, value):
+        try:
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith("{") or text.startswith("["):
+                    return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+                return value
+            return json.dumps(value, indent=2, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    def _observability_time_text(self, ts):
+        try:
+            if ts is None or ts == "":
+                return datetime.now().strftime("%H:%M:%S")
+            return datetime.fromtimestamp(float(ts)).strftime("%H:%M:%S")
+        except Exception:
+            return datetime.now().strftime("%H:%M:%S")
+
+    def _format_observability_event(self, event):
+        if not isinstance(event, dict):
+            return ""
+        event_type = event.get("type") or ""
+        stamp = self._observability_time_text(event.get("timestamp"))
+        if event_type == "tool_call":
+            return (
+                f"[{stamp}] CALL {event.get('name') or 'unknown_tool'} ({event.get('id') or ''})\n"
+                f"args:\n{self._observability_pretty_json(event.get('args') or {})}"
+            )
+        if event_type == "tool_result":
+            meta = event.get("meta") if isinstance(event.get("meta"), dict) else {}
+            duration = meta.get("duration")
+            duration_text = f" duration={float(duration):.2f}s" if isinstance(duration, (int, float)) else ""
+            result_value = event.get("result_obj") if event.get("result_obj") is not None else event.get("result", "")
+            return (
+                f"[{stamp}] RESULT {event.get('name') or 'unknown_tool'} ({event.get('id') or ''}){duration_text}\n"
+                f"result:\n{self._observability_pretty_json(result_value)}"
+            )
+        if event_type == "system_prompt_append":
+            source = event.get("source") or "system"
+            return f"[{stamp}] SYSTEM APPEND {source}\n{event.get('content') or ''}"
+        if event_type == "system_prompt":
+            return f"[{stamp}] SYSTEM PROMPT loaded"
+        return f"[{stamp}] {event_type or 'event'}\n{self._observability_pretty_json(event)}"
+
+    def refresh_observability_view(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state or state.session_id != self.current_session_id:
+            return
+        prompt_text = getattr(state, "system_prompt_text", "") or ""
+        prompt_parts = []
+        if prompt_text:
+            prompt_parts.append(prompt_text)
+        for index, item in enumerate(getattr(state, "system_prompt_appends", []) or [], start=1):
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source") or "system"
+            content = item.get("content") or ""
+            if content:
+                prompt_parts.append(f"\n\n# 追加系统消息 {index}: {source}\n{content}")
+        self.observability_prompt_edit.setPlainText("".join(prompt_parts))
+
+        log_parts = []
+        for event in getattr(state, "observability_events", []) or []:
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "system_prompt":
+                continue
+            formatted = self._format_observability_event(event)
+            if formatted:
+                log_parts.append(formatted)
+        self.observability_log_edit.setPlainText("\n\n---\n\n".join(log_parts))
+        for edit in (self.observability_prompt_edit, self.observability_log_edit):
+            cursor = edit.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            edit.setTextCursor(cursor)
+
+    def handle_observability_event(self, data, session_id=None):
+        if not isinstance(data, dict):
+            return
+        state = self.get_session(session_id)
+        if not state:
+            return
+        event = dict(data)
+        event.setdefault("timestamp", time.time())
+        event_type = event.get("type") or ""
+        if event_type == "system_prompt":
+            state.system_prompt_text = event.get("content") or ""
+        elif event_type == "system_prompt_append":
+            state.system_prompt_appends.append(event)
+        state.observability_events.append(event)
+        if len(state.observability_events) > 500:
+            state.observability_events = state.observability_events[-500:]
+        if state.session_id == self.current_session_id:
+            self.right_sidebar.setVisible(True)
+            self.right_tabs.setCurrentIndex(3)
+            self.refresh_observability_view(state.session_id)
             self.refresh_context_badges(state.session_id)
 
     def on_step_item_clicked(self, item):
@@ -4532,6 +4696,7 @@ class MainWindow(QMainWindow):
         self.active_skills_label = state.active_skills_label
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
+        self.refresh_observability_view(session_id)
         self.refresh_context_badges(session_id)
         self._render_sub_agent_monitor_for_state(state)
 
@@ -4598,6 +4763,7 @@ class MainWindow(QMainWindow):
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_context_badges(state.session_id)
+        self.refresh_observability_view(state.session_id)
 
     def get_session_id_for_tab(self, index):
         widget = self.session_tabs.widget(index)
@@ -5916,6 +6082,7 @@ class MainWindow(QMainWindow):
             "content_signal",
             "tool_call_signal",
             "tool_result_signal",
+            "observability_signal",
             "output_signal",
             "interaction_signal",
             "agent_state_signal",
@@ -6134,8 +6301,14 @@ class MainWindow(QMainWindow):
         state.changed_files = []
         state.has_file_changes = False
         state.pending_tool_results = {}
+        state.observability_events = []
+        state.system_prompt_text = ""
+        state.system_prompt_appends = []
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
+        self.refresh_observability_view(state.session_id)
+        self.right_sidebar.setVisible(True)
+        self.right_tabs.setCurrentIndex(3)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
@@ -6498,6 +6671,7 @@ class MainWindow(QMainWindow):
         state.llm_worker.skill_used_signal.connect(lambda name, sid=session_id: self.handle_skill_used(name, sid))
         state.llm_worker.tool_call_signal.connect(lambda data, sid=session_id: self.add_tool_card(data, sid))
         state.llm_worker.tool_result_signal.connect(lambda data, sid=session_id: self.update_tool_card(data, sid))
+        state.llm_worker.observability_signal.connect(lambda data, sid=session_id: self.handle_observability_event(data, sid))
         state.llm_worker.output_signal.connect(lambda text, sid=session_id: self.handle_worker_output(text, sid))
         state.llm_worker.agent_state_signal.connect(lambda data, sid=session_id: self.handle_agent_state(data, sid))
         state.llm_worker.start()
@@ -6533,6 +6707,7 @@ class MainWindow(QMainWindow):
         state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
         state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
         state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
+        state.daemon_worker.observability_signal.connect(lambda data, sid=state.session_id: self.handle_observability_event(data, sid))
         state.daemon_worker.agent_state_signal.connect(lambda data, sid=state.session_id: self.handle_agent_state(data, sid))
         state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid))
         state.daemon_worker.start()

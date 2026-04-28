@@ -567,6 +567,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
             worker.tool_result_signal.connect(lambda data: send_stream({"type": "tool_result", "data": data}), Qt.DirectConnection)
             worker.agent_state_signal.connect(lambda data: send_stream({"type": "agent_state", "data": data}), Qt.DirectConnection)
+            worker.observability_signal.connect(lambda data: send_stream({"type": "observability", "data": data}), Qt.DirectConnection)
             worker.output_signal.connect(lambda text: send_stream({"type": "log", "data": text}), Qt.DirectConnection)
             worker.finished_signal.connect(on_finished, Qt.DirectConnection)
 

@@ -1310,24 +1310,33 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameStyle(QFrame.NoFrame)
-        self.textChanged.connect(self.adjustHeight)
+        self._height_adjust_pending = False
+        self.textChanged.connect(self.scheduleAdjustHeight)
         self.setStyleSheet("background: transparent;")
         
         # Set word wrap mode to break anywhere if needed (for long strings)
         self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+
+    def scheduleAdjustHeight(self):
+        if self._height_adjust_pending:
+            return
+        self._height_adjust_pending = True
+        QTimer.singleShot(0, self.adjustHeight)
 
     def adjustHeight(self):
         """
         根据文档内容调整文本框高度
         添加最大高度限制防止初始渲染时高度异常
         """
+        self._height_adjust_pending = False
         doc_height = self.document().size().height()
         margins = self.contentsMargins()
         height = int(doc_height + margins.top() + margins.bottom())
         # 确保最小高度避免不可见，同时限制最大高度防止初始异常
         height = max(height, 24)
         height = min(height, 2000)  # 限制最大高度为2000像素
-        self.setFixedHeight(height)
+        if self.height() != height:
+            self.setFixedHeight(height)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1952,6 +1961,16 @@ class ChatBubble(QFrame):
             self.content_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
             col_layout.addWidget(self.content_edit)
             self.main_content_text = ""
+            self._pending_main_content_text = ""
+            self._pending_main_content_parts = None
+            self._pending_main_content_final = False
+            self._rendered_main_content_text = None
+            self._rendered_main_content_final = False
+            self._last_main_content_render_ts = 0.0
+            self._main_content_render_interval = 0.12
+            self._main_content_render_timer = QTimer(self)
+            self._main_content_render_timer.setSingleShot(True)
+            self._main_content_render_timer.timeout.connect(self._flush_pending_main_content_render)
             self.copy_result_btn = QPushButton("复制结果")
             self.copy_result_btn.setCursor(Qt.PointingHandCursor)
             self.copy_result_btn.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
@@ -2011,7 +2030,7 @@ class ChatBubble(QFrame):
                 self.thinking_widget.setVisible(False)
                 
             if text:
-                self.set_main_content(text)
+                self.set_main_content(text, final=True)
                 
             main_layout.addWidget(content_col)
             # main_layout.addStretch() # Removed to allow content to take full width
@@ -2304,12 +2323,54 @@ class ChatBubble(QFrame):
         self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
         self.think_toggle_btn.setChecked(False)
             
-    def set_main_content(self, text, content_parts=None):
-        """
-        设置对话气泡的主要内容
-        使用延迟调整高度确保文档渲染完成后再计算正确高度
-        """
-        self.main_content_text = text or ""
+    def set_main_content(self, text, content_parts=None, final=False):
+        """设置对话气泡的主要内容，并合并高频流式渲染。"""
+        text = text or ""
+        self.main_content_text = text
+        self._pending_main_content_text = text
+        self._pending_main_content_parts = content_parts
+        self._pending_main_content_final = bool(final)
+        self.copy_result_btn.setVisible(bool(text.strip()))
+
+        already_rendered = (
+            self._rendered_main_content_text == text
+            and (self._rendered_main_content_final or not final)
+        )
+        if already_rendered:
+            return
+
+        if final:
+            if self._main_content_render_timer.isActive():
+                self._main_content_render_timer.stop()
+            self._flush_pending_main_content_render()
+            return
+
+        now = time.time()
+        elapsed = now - self._last_main_content_render_ts
+        if elapsed >= self._main_content_render_interval:
+            self._flush_pending_main_content_render()
+            return
+
+        if not self._main_content_render_timer.isActive():
+            delay_ms = max(1, int((self._main_content_render_interval - elapsed) * 1000))
+            self._main_content_render_timer.start(delay_ms)
+
+    def _flush_pending_main_content_render(self):
+        self._render_main_content(
+            self._pending_main_content_text,
+            content_parts=self._pending_main_content_parts,
+            final=self._pending_main_content_final,
+        )
+
+    def _render_main_content(self, text, content_parts=None, final=False):
+        text = text or ""
+        already_rendered = (
+            self._rendered_main_content_text == text
+            and (self._rendered_main_content_final or not final)
+        )
+        if already_rendered:
+            return
+
         try:
             # GitHub-like CSS for Markdown
             style = """
@@ -2376,14 +2437,18 @@ class ChatBubble(QFrame):
             </style>
             """
             html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
+            self.content_edit.setUpdatesEnabled(False)
             self.content_edit.setHtml(style + html_content)
         except Exception:
+            self.content_edit.setUpdatesEnabled(False)
             self.content_edit.setPlainText(text)
-        self.copy_result_btn.setVisible(bool((text or "").strip()))
-        
-        # 延迟调整高度，确保文档已渲染完成
-        # 使用QTimer.singleShot(0, ...)在事件循环的下一个迭代执行
-        QTimer.singleShot(0, self.content_edit.adjustHeight)
+        finally:
+            self.content_edit.setUpdatesEnabled(True)
+
+        self._rendered_main_content_text = text
+        self._rendered_main_content_final = bool(final)
+        self._last_main_content_render_ts = time.time()
+        self.content_edit.scheduleAdjustHeight()
 
     def copy_main_content(self):
         text = (self.main_content_text or "").strip() or self.content_edit.toPlainText().strip()
@@ -4636,11 +4701,11 @@ class MainWindow(QMainWindow):
         state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
         state.content_flush_timer = QTimer(self)
         state.content_flush_timer.setSingleShot(True)
-        state.content_flush_timer.setInterval(40)
+        state.content_flush_timer.setInterval(120)
         state.content_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_content(sid))
         state.thinking_flush_timer = QTimer(self)
         state.thinking_flush_timer.setSingleShot(True)
-        state.thinking_flush_timer.setInterval(40)
+        state.thinking_flush_timer.setInterval(90)
         state.thinking_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_thinking(sid))
         state.scroll_flush_timer = QTimer(self)
         state.scroll_flush_timer.setSingleShot(True)
@@ -5306,7 +5371,7 @@ class MainWindow(QMainWindow):
             final_content = ""
             if pending_content_parts:
                 final_content = "\n\n".join(pending_content_parts)
-                active_agent_bubble.set_main_content(final_content, content_parts=pending_struct_parts)
+                active_agent_bubble.set_main_content(final_content, content_parts=pending_struct_parts, final=True)
             elif pending_struct_parts:
                 text_parts = []
                 for part in pending_struct_parts:
@@ -5315,7 +5380,7 @@ class MainWindow(QMainWindow):
                         if text_value.strip():
                             text_parts.append(text_value.strip())
                 final_content = "\n\n".join(text_parts)
-                active_agent_bubble.set_main_content(final_content, content_parts=pending_struct_parts)
+                active_agent_bubble.set_main_content(final_content, content_parts=pending_struct_parts, final=True)
             
             # Intelligent Fallback: Check if content is empty
             # If so, check if tools were executed
@@ -5326,7 +5391,7 @@ class MainWindow(QMainWindow):
                      has_tools = active_agent_bubble.think_container_layout.count() > 0
                 
                 if has_tools:
-                    active_agent_bubble.set_main_content("任务已处理完成，请查看上方思考过程")
+                    active_agent_bubble.set_main_content("任务已处理完成，请查看上方思考过程", final=True)
 
             active_agent_bubble.update_thinking(duration=None, is_final=True)
             active_agent_bubble = None
@@ -6662,14 +6727,14 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.current_thinking_buffer = state.current_thinking_buffer
 
-    def flush_session_content(self, session_id):
+    def flush_session_content(self, session_id, final=False):
         state = self.get_session(session_id)
         if not state:
             return
         if state.temp_thinking_bubble:
-            state.temp_thinking_bubble.set_main_content(state.current_content_buffer)
+            state.temp_thinking_bubble.set_main_content(state.current_content_buffer, final=final)
         elif state.last_agent_bubble:
-            state.last_agent_bubble.set_main_content(state.current_content_buffer)
+            state.last_agent_bubble.set_main_content(state.current_content_buffer, final=final)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def flush_session_thinking(self, session_id):
@@ -6792,7 +6857,7 @@ class MainWindow(QMainWindow):
             state.content_flush_timer.stop()
         if state.thinking_flush_timer and state.thinking_flush_timer.isActive():
             state.thinking_flush_timer.stop()
-        self.flush_session_content(state.session_id)
+        self.flush_session_content(state.session_id, final=True)
         self.flush_session_thinking(state.session_id)
         is_current = state.session_id == self.current_session_id
         if state.temp_thinking_bubble:
@@ -6812,7 +6877,7 @@ class MainWindow(QMainWindow):
             self.add_system_toast(f"Error: {result['error']}", "error", session_id=state.session_id)
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
-            bubble.set_main_content(f"⚠️ Error: {result['error']}")
+            bubble.set_main_content(f"⚠️ Error: {result['error']}", final=True)
             self.request_session_scroll_to_bottom(state.session_id, force=False)
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
@@ -6887,16 +6952,16 @@ class MainWindow(QMainWindow):
                 if replay_index >= len(reasoning):
                     timer.stop()
                     bubble.update_thinking(duration=duration, is_final=True)
-                    bubble.set_main_content(content, content_parts=content_parts)
+                    bubble.set_main_content(content, content_parts=content_parts, final=True)
 
             timer.timeout.connect(_tick)
             timer.start(interval_ms)
         elif should_replay_thinking:
             bubble.update_thinking(reasoning, duration=duration, is_final=True)
-            bubble.set_main_content(content, content_parts=content_parts)
+            bubble.set_main_content(content, content_parts=content_parts, final=True)
         else:
             bubble.update_thinking(duration=duration, is_final=True)
-            bubble.set_main_content(content, content_parts=content_parts)
+            bubble.set_main_content(content, content_parts=content_parts, final=True)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:

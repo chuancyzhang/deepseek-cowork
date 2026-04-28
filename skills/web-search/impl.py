@@ -537,3 +537,7 @@ def read_web_article(url, max_chars=12000):
         )
         return _json_response(payload)
 
+
+def read_article(url, max_chars=12000):
+    return read_web_article(url, max_chars=max_chars)
+

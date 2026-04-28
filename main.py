@@ -37,7 +37,7 @@ from core.plan_mode import (
     PLAN_MODE_EXPLORING,
     PLAN_MODE_READY_TO_PRESENT,
     PLAN_PROTOCOL_VERSION,
-    RUN_MODE_NORMAL,
+    RUN_MODE_EXECUTION,
     RUN_MODE_PLANNING,
     derive_plan_phase,
     json_copy,
@@ -6076,7 +6076,7 @@ class MainWindow(QMainWindow):
         state.active_turn_id += 1
         current_turn_id = state.active_turn_id
         state.messages.append({"role": "user", "content": user_text})
-        run_mode = RUN_MODE_NORMAL
+        run_mode = RUN_MODE_EXECUTION
         if state.plan_mode_enabled:
             state.plan_phase = PLAN_MODE_EXPLORING
             state.plan_mode_state = PLAN_MODE_EXPLORING

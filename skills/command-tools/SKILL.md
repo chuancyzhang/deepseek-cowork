@@ -7,7 +7,7 @@ metadata:
   author: deepseek-cowork team
   version: "1.0"
 security_level: high
-allowed-tools: ["bash", "run_skill_script"]
+allowed-tools: ["bash", "glob", "grep", "run_skill_script"]
 ---
 
 # Command Tools

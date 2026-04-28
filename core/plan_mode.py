@@ -15,7 +15,6 @@ PLAN_PHASES = {
 
 RUN_MODE_NORMAL = "normal"
 RUN_MODE_PLANNING = "planning"
-# Kept as a legacy run mode token so older callers do not crash if they still pass it.
 RUN_MODE_EXECUTION = "execution"
 
 RUN_MODES = {
@@ -30,6 +29,7 @@ PLAN_DETAIL_LEVELS = {"quick", "standard", "detailed"}
 DEFAULT_PLAN_CONFIG = {"detail_level": "standard"}
 
 PLANNING_INTERACTION_TOOLS = (
+    "tool_search",
     "request_user_input",
 )
 
@@ -80,8 +80,10 @@ def normalize_plan_phase(value, default=PLAN_MODE_DISABLED):
     return default
 
 
-def normalize_run_mode(value, default=RUN_MODE_NORMAL):
+def normalize_run_mode(value, default=RUN_MODE_EXECUTION):
     text = str(value or "").strip().lower()
+    if text == RUN_MODE_NORMAL:
+        return RUN_MODE_EXECUTION
     if text in RUN_MODES:
         return text
     return default

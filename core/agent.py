@@ -19,7 +19,7 @@ from core.chat_storage import ChatStorage
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.plan_mode import (
     get_planning_read_tools,
-    RUN_MODE_NORMAL,
+    RUN_MODE_EXECUTION,
     RUN_MODE_PLANNING,
     is_tool_allowed_in_planning,
     json_copy,
@@ -338,6 +338,7 @@ class LLMWorker(QThread):
         
         # Initialize Skill Manager
         self.skill_manager = SkillManager(workspace_dir, config_manager)
+        self.discovered_tool_names = set()
         self.tools = []
         self._refresh_tool_definitions()
         # Per-run filesystem read/write state used by filesystem tools.
@@ -353,23 +354,72 @@ class LLMWorker(QThread):
         self._bind_agent_manager()
 
     def _refresh_tool_definitions(self):
-        tools = self.skill_manager.get_tool_definitions()
+        try:
+            tools = self.skill_manager.get_tool_definitions(
+                run_mode=self._current_run_mode(),
+                discovered_tool_names=self.discovered_tool_names,
+            )
+        except TypeError:
+            tools = self.skill_manager.get_tool_definitions()
         filtered = []
         for item in tools:
             func = item.get("function") if isinstance(item, dict) else None
             name = func.get("name") if isinstance(func, dict) else ""
             if self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
                 continue
-            if self._is_planning_mode() and name and not is_tool_allowed_in_planning(name):
+            if name and hasattr(self.skill_manager, "is_tool_allowed"):
+                try:
+                    if not self.skill_manager.is_tool_allowed(name, self._current_run_mode()):
+                        continue
+                except Exception:
+                    pass
+            if name and hasattr(self.skill_manager, "is_tool_visible"):
+                try:
+                    if not self.skill_manager.is_tool_visible(
+                        name,
+                        self._current_run_mode(),
+                        self.discovered_tool_names,
+                    ):
+                        continue
+                except Exception:
+                    pass
+            if (
+                self._is_planning_mode()
+                and name
+                and not hasattr(self.skill_manager, "is_tool_allowed")
+                and not is_tool_allowed_in_planning(name)
+            ):
                 continue
             filtered.append(item)
         self.tools = filtered
 
     def _current_run_mode(self):
-        return self.run_context.get("mode") or RUN_MODE_NORMAL
+        return self.run_context.get("mode") or RUN_MODE_EXECUTION
 
     def _is_planning_mode(self):
         return self._current_run_mode() == RUN_MODE_PLANNING
+
+    def _is_tool_allowed_for_mode(self, name):
+        if hasattr(self.skill_manager, "is_tool_allowed"):
+            try:
+                return self.skill_manager.is_tool_allowed(name, self._current_run_mode())
+            except Exception:
+                return False
+        if self._is_planning_mode():
+            return is_tool_allowed_in_planning(name)
+        return True
+
+    def _is_tool_visible_for_run(self, name):
+        if hasattr(self.skill_manager, "is_tool_visible"):
+            try:
+                return self.skill_manager.is_tool_visible(
+                    name,
+                    self._current_run_mode(),
+                    self.discovered_tool_names,
+                )
+            except Exception:
+                return True
+        return True
 
     def _bind_agent_manager(self):
         if self.is_subagent:
@@ -538,6 +588,7 @@ class LLMWorker(QThread):
                     "",
                     "当前可用工具清单（仅以下工具真正暴露给你，可直接调用）:",
                     *tool_lines,
+                    "更多工具可能被延迟加载；需要额外能力时，先调用 `tool_search` 按关键词发现工具。",
                 ]
             )
         else:
@@ -617,6 +668,7 @@ class LLMWorker(QThread):
                 break
 
             turn_count += 1
+            self._refresh_tool_definitions()
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
 
             # --- Hot Reload Skills ---
@@ -862,6 +914,7 @@ class LLMWorker(QThread):
                                 "is_subagent": self.is_subagent,
                                 "current_messages_snapshot": current_snapshot,
                                 "run_context": json_copy(self.run_context, {}),
+                                "discovered_tool_names": self.discovered_tool_names,
                             }
                             if self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
                                 result = {
@@ -869,13 +922,21 @@ class LLMWorker(QThread):
                                     "blocked_tool": name,
                                     "status": "denied",
                                 }
-                            elif self._is_planning_mode() and not is_tool_allowed_in_planning(name):
+                            elif not self._is_tool_allowed_for_mode(name):
                                 result = {
-                                    "error": f"Tool '{name}' is not allowed while planning.",
+                                    "error": f"Tool '{name}' is not allowed in {self._current_run_mode()} mode.",
                                     "blocked_tool": name,
                                     "status": "denied",
-                                    "mode": RUN_MODE_PLANNING,
-                                    "content": f"规划阶段禁止执行 {name}，请继续调研或更新计划。",
+                                    "mode": self._current_run_mode(),
+                                    "content": f"当前模式禁止执行 {name}，请改用允许的工具或切换模式。",
+                                }
+                            elif not self._is_tool_visible_for_run(name):
+                                result = {
+                                    "error": f"Tool '{name}' has not been discovered for this run.",
+                                    "blocked_tool": name,
+                                    "status": "denied",
+                                    "mode": self._current_run_mode(),
+                                    "content": f"请先调用 tool_search 发现 {name}，再在下一轮使用它。",
                                 }
                             else:
                                 result = self.skill_manager.call_tool(
@@ -883,6 +944,8 @@ class LLMWorker(QThread):
                                     args,
                                     context=tool_context,
                                 )
+                                if name == "tool_search":
+                                    self._refresh_tool_definitions()
                             end_tool_time = time.time()
                             duration_tool = end_tool_time - start_tool_time
 

@@ -11,6 +11,7 @@ import uuid
 from .env_utils import ensure_package_installed, get_app_data_dir
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
 from .skill_adapter import adapt_skill_directory, discover_skill_artifacts
+from .tool_registry import ToolRegistry
 
 
 def _tokenize(text):
@@ -98,6 +99,7 @@ class SkillManager:
 
         self.tools = {}
         self.tool_definitions = []
+        self.tool_registry = ToolRegistry()
         self.tool_to_skill_map = {}
         self.tool_records = {}
         self.skill_to_tools = {}
@@ -539,10 +541,6 @@ class SkillManager:
             )
             return
 
-        self.tools[tool_name] = func
-        self.tool_to_skill_map[tool_name] = skill_name
-        self.skill_to_tools.setdefault(skill_name, []).append(tool_name)
-
         sig = inspect.signature(func)
         properties = {}
         required = []
@@ -572,21 +570,37 @@ class SkillManager:
 
         tool_description = description or (func.__doc__.strip().split("\n")[0] if func.__doc__ else f"Tool {tool_name}")
         parameters_schema = {"type": "object", "properties": properties, "required": required}
+        record = self.tool_registry.register(
+            tool_name,
+            func,
+            tool_description,
+            parameters_schema,
+            skill_name=skill_name,
+            kind=tool_kind,
+            runtime_binding={"type": "python_function", "skill_name": skill_name},
+            skill_refs=[skill_name],
+        )
+        if not record:
+            return
+
+        self.tools[tool_name] = func
+        self.tool_to_skill_map[tool_name] = skill_name
+        self.skill_to_tools.setdefault(skill_name, []).append(tool_name)
         self.tool_definitions.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": tool_description,
-                    "parameters": parameters_schema,
-                },
-            }
+            record.to_definition()
         )
         self.tool_records[tool_name] = {
             "name": tool_name,
             "description": tool_description,
             "kind": tool_kind,
             "parameters_schema": parameters_schema,
+            "aliases": list(record.aliases),
+            "search_hint": record.search_hint,
+            "read_only": record.read_only,
+            "destructive": record.destructive,
+            "allowed_modes": sorted(record.allowed_modes),
+            "should_defer": record.should_defer,
+            "always_load": record.always_load,
             "runtime_binding": {"type": "python_function", "skill_name": skill_name},
             "skill_refs": [skill_name],
         }
@@ -612,24 +626,50 @@ class SkillManager:
         parameters_schema.setdefault("properties", {})
         parameters_schema.setdefault("required", [])
 
+        record = self.tool_registry.register(
+            tool_name,
+            func,
+            description,
+            parameters_schema,
+            skill_name=skill_name,
+            kind=str(export.get("kind") or "explicit_tool"),
+            aliases=export.get("aliases"),
+            search_hint=export.get("search_hint") or export.get("searchHint") or "",
+            read_only=export.get("read_only") if "read_only" in export else export.get("readOnly"),
+            destructive=export.get("destructive"),
+            allowed_modes=export.get("allowed_modes") or export.get("allowedModes"),
+            should_defer=export.get("should_defer") if "should_defer" in export else export.get("shouldDefer"),
+            always_load=export.get("always_load") if "always_load" in export else export.get("alwaysLoad"),
+            runtime_binding={
+                "type": "python_function",
+                "skill_name": skill_name,
+                "export_name": tool_name,
+            },
+            skill_refs=[skill_name],
+            metadata={
+                "requires_user_interaction": bool(export.get("requires_user_interaction")),
+                "result_format": str(export.get("result_format") or ""),
+            },
+        )
+        if not record:
+            return
+
         self.tools[tool_name] = func
         self.tool_to_skill_map[tool_name] = skill_name
         self.skill_to_tools.setdefault(skill_name, []).append(tool_name)
-        self.tool_definitions.append(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "description": description,
-                    "parameters": parameters_schema,
-                },
-            }
-        )
+        self.tool_definitions.append(record.to_definition())
         self.tool_records[tool_name] = {
             "name": tool_name,
             "description": description,
             "kind": str(export.get("kind") or "explicit_tool"),
             "parameters_schema": parameters_schema,
+            "aliases": list(record.aliases),
+            "search_hint": record.search_hint,
+            "read_only": record.read_only,
+            "destructive": record.destructive,
+            "allowed_modes": sorted(record.allowed_modes),
+            "should_defer": record.should_defer,
+            "always_load": record.always_load,
             "runtime_binding": {
                 "type": "python_function",
                 "skill_name": skill_name,
@@ -683,6 +723,101 @@ class SkillManager:
                 self._register_tool(skill_name, name, func, tool_kind=tool_kind)
         except Exception as e:
             print(f"Error loading implementation {impl_path}: {e}")
+
+    def _register_builtin_tools(self):
+        parameters_schema = {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keywords describing the tool or capability to discover.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of matching tools to return.",
+                },
+                "include_loaded": {
+                    "type": "boolean",
+                    "description": "Whether to include tools already loaded in this run.",
+                },
+            },
+            "required": ["query"],
+        }
+        record = self.tool_registry.register(
+            "tool_search",
+            self._tool_search,
+            "Search deferred tools by keyword and make matched tools available on the next turn.",
+            parameters_schema,
+            skill_name="builtin",
+            kind="builtin_discovery",
+            search_hint="discover deferred tools capabilities",
+            read_only=True,
+            destructive=False,
+            allowed_modes=["planning", "execution"],
+            should_defer=False,
+            always_load=True,
+            runtime_binding={"type": "builtin_method"},
+            skill_refs=["builtin"],
+        )
+        if record:
+            self.tools["tool_search"] = self._tool_search
+            self.tool_records["tool_search"] = {
+                "name": record.name,
+                "description": record.description,
+                "kind": record.kind,
+                "parameters_schema": record.parameters_schema,
+                "aliases": list(record.aliases),
+                "search_hint": record.search_hint,
+                "read_only": record.read_only,
+                "destructive": record.destructive,
+                "allowed_modes": sorted(record.allowed_modes),
+                "should_defer": record.should_defer,
+                "always_load": record.always_load,
+                "runtime_binding": record.runtime_binding,
+                "skill_refs": list(record.skill_refs),
+            }
+
+    def _tool_search(self, query, limit=8, include_loaded=False, _context=None):
+        context = _context if isinstance(_context, dict) else {}
+        run_context = context.get("run_context") if isinstance(context.get("run_context"), dict) else {}
+        run_mode = run_context.get("mode")
+        discovered = context.get("discovered_tool_names")
+        if discovered is None:
+            discovered = set()
+        results = self.tool_registry.search(
+            query,
+            run_mode=run_mode,
+            limit=limit,
+            include_loaded=bool(include_loaded),
+            discovered_tool_names=discovered,
+        )
+        names = [item["name"] for item in results]
+        if hasattr(discovered, "update"):
+            discovered.update(names)
+        elif isinstance(discovered, list):
+            for name in names:
+                if name not in discovered:
+                    discovered.append(name)
+        return {
+            "status": "ok",
+            "query": query,
+            "count": len(results),
+            "discovered_tools": names,
+            "tools": results,
+            "message": "Matched tools will be available on the next model turn.",
+        }
+
+    def is_tool_allowed(self, name, run_mode):
+        return self.tool_registry.is_allowed(name, run_mode)
+
+    def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
+        return self.tool_registry.is_visible(name, run_mode, discovered_tool_names)
+
+    def get_tool_record(self, name):
+        record = self.tool_registry.get(name)
+        if not record:
+            return None
+        return self.tool_records.get(record.name)
 
     def _build_minimal_skill_record(self, skill_name, skill_path, tool_refs):
         body = (
@@ -1110,8 +1245,15 @@ class SkillManager:
         return False
 
     def load_skills(self):
+        if not hasattr(self, "tool_registry"):
+            self.tool_registry = ToolRegistry()
+        if not hasattr(self, "workspace_dir"):
+            self.workspace_dir = None
+        if not hasattr(self, "config_manager"):
+            self.config_manager = None
         self.tools = {}
         self.tool_definitions = []
+        self.tool_registry.clear()
         self.tool_to_skill_map = {}
         self.tool_records = {}
         self.skill_to_tools = {}
@@ -1122,6 +1264,7 @@ class SkillManager:
         self.skill_records = {}
         self.experience_packages = self.skill_records
         self.last_load_time = time.time()
+        self._register_builtin_tools()
 
         seen = set()
         pending_records = []
@@ -1150,9 +1293,14 @@ class SkillManager:
             except Exception as e:
                 print(f"[SkillManager] Failed to load skill '{skill_name}' from {skill_path}: {e}")
                 continue
-            if not record.get("tool_refs") and self.skill_to_tools.get(skill_name):
-                record["tool_refs"] = list(self.skill_to_tools.get(skill_name) or [])
-                record["spec"]["tool_refs"] = list(record["tool_refs"])
+            registered_tools = list(self.skill_to_tools.get(skill_name) or [])
+            if registered_tools:
+                merged_tool_refs = []
+                for tool_ref in list(record.get("tool_refs") or []) + registered_tools:
+                    if tool_ref not in merged_tool_refs:
+                        merged_tool_refs.append(tool_ref)
+                record["tool_refs"] = merged_tool_refs
+                record["spec"]["tool_refs"] = list(merged_tool_refs)
             record["brief"] = self._build_brief_prompt(skill_name, record["meta"], record["spec"], record["tool_refs"])
             record["prompt"] = self._build_skill_prompt(
                 skill_name,
@@ -1212,8 +1360,14 @@ class SkillManager:
     def get_skill_of_tool(self, tool_name):
         return self.tool_to_skill_map.get(tool_name)
 
-    def get_tool_definitions(self):
-        return self.tool_definitions
+    def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=None):
+        if run_mode is None and discovered_tool_names is None and include_deferred is None:
+            return self.tool_definitions
+        return self.tool_registry.definitions(
+            run_mode=run_mode,
+            discovered_tool_names=discovered_tool_names,
+            include_deferred=bool(include_deferred),
+        )
 
     def get_tools_for_skill(self, skill_name):
         return list(self.skill_to_tools.get(skill_name) or [])
@@ -1249,9 +1403,11 @@ class SkillManager:
         return self.materialize_experience_package(skill_name, include_references=include_references, include_entries=include_entries)
 
     def call_tool(self, name, args, context=None):
-        if name not in self.tools:
+        record = self.tool_registry.get(name)
+        resolved_name = record.name if record else str(name or "").strip()
+        if resolved_name not in self.tools:
             return f"Error: Tool '{name}' not found."
-        skill_name = self.tool_to_skill_map.get(name)
+        skill_name = self.tool_to_skill_map.get(resolved_name)
         if skill_name:
             record = self.skill_records.get(skill_name)
             dependency_status = (record or {}).get("dependency_status") or {"ok": True}
@@ -1260,8 +1416,9 @@ class SkillManager:
                 record["dependency_status"] = dependency_status
                 if not dependency_status.get("ok"):
                     return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
-        func = self.tools[name]
+        func = self.tools[resolved_name]
         sig = inspect.signature(func)
+        args = dict(args or {})
         if "workspace_dir" in sig.parameters:
             args["workspace_dir"] = self.workspace_dir
         if context and "_context" in sig.parameters:

@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.plan_mode import (
+    RUN_MODE_EXECUTION,
     RUN_MODE_PLANNING,
     get_planning_read_tools,
     is_tool_allowed_in_planning,
@@ -107,6 +108,98 @@ class TestPlanningModeLLMWorker(unittest.TestCase):
             self.assertNotIn("bash", tool_names)
             self.assertNotIn("write_file", tool_names)
             self.assertNotIn("update_execution_plan", tool_names)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_exposes_deferred_tools_only_after_discovery(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=False):
+                discovered = set(discovered_tool_names or [])
+                names = ["tool_search", "read_file"]
+                if run_mode == RUN_MODE_EXECUTION and "write_file" in discovered:
+                    names.append("write_file")
+                return [
+                    {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
+                    for name in names
+                ]
+
+            def is_tool_allowed(self, name, run_mode):
+                if run_mode == RUN_MODE_PLANNING and name == "write_file":
+                    return False
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
+                if name in {"tool_search", "read_file"}:
+                    return True
+                return name in set(discovered_tool_names or [])
+
+            def check_for_updates(self):
+                return False
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with patch("core.agent.SkillManager", _SkillManagerStub):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "edit this"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+
+            initial_names = {item["function"]["name"] for item in worker.tools}
+            self.assertIn("tool_search", initial_names)
+            self.assertIn("read_file", initial_names)
+            self.assertNotIn("write_file", initial_names)
+
+            worker.discovered_tool_names.add("write_file")
+            worker._refresh_tool_definitions()
+            after_discovery = {item["function"]["name"] for item in worker.tools}
+            self.assertIn("write_file", after_discovery)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_keeps_planning_hard_boundary_after_discovery(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=False):
+                names = ["tool_search", "read_file", "write_file"]
+                return [
+                    {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
+                    for name in names
+                ]
+
+            def is_tool_allowed(self, name, run_mode):
+                return not (run_mode == RUN_MODE_PLANNING and name == "write_file")
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
+                return True
+
+            def check_for_updates(self):
+                return False
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with patch("core.agent.SkillManager", _SkillManagerStub):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "plan this"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_PLANNING},
+                )
+
+            tool_names = {item["function"]["name"] for item in worker.tools}
+            self.assertIn("tool_search", tool_names)
+            self.assertIn("read_file", tool_names)
+            self.assertNotIn("write_file", tool_names)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

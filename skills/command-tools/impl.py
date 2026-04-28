@@ -247,6 +247,22 @@ def _grep_internal(workspace_dir, pattern, path=".", include="*", exclude=None, 
         return f"Error: {str(e)}"
 
 
+def glob(workspace_dir, pattern="*", path=".", limit=200, _context=None):
+    return _glob_internal(workspace_dir, pattern=pattern, path=path, limit=limit, _context=_context)
+
+
+def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
+    return _grep_internal(
+        workspace_dir,
+        pattern=pattern,
+        path=path,
+        include=include,
+        exclude=exclude,
+        recursive=recursive,
+        _context=_context,
+    )
+
+
 def run_skill_script(skill_name, script_name, args=None, input_text=None, timeout_seconds=120, _context=None):
     """
     执行目标 skill 在 script_entries 中声明的脚本入口。
@@ -331,3 +347,77 @@ def run_skill_script(skill_name, script_name, args=None, input_text=None, timeou
         return f"Error: Script '{script_name}' timed out after {timeout_seconds} seconds."
     except Exception as e:
         return f"Error executing skill script '{script_name}': {str(e)}"
+
+
+TOOL_EXPORTS = [
+    {
+        "name": "bash",
+        "handler": bash,
+        "description": "Execute a shell command in the current sandbox workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Command to execute."},
+            },
+            "required": ["command"],
+        },
+        "allowed_modes": ["execution"],
+        "should_defer": True,
+        "search_hint": "shell command build test script",
+    },
+    {
+        "name": "glob",
+        "handler": glob,
+        "description": "Find workspace files by path or filename pattern.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Filename or path glob pattern."},
+                "path": {"type": "string", "description": "Workspace-relative directory to search."},
+                "limit": {"type": "integer", "description": "Maximum number of results."},
+            },
+            "required": [],
+        },
+        "read_only": True,
+        "allowed_modes": ["planning", "execution"],
+        "search_hint": "file glob find names",
+    },
+    {
+        "name": "grep",
+        "handler": grep,
+        "description": "Search workspace file contents with a regex pattern.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern to search for."},
+                "path": {"type": "string", "description": "Workspace-relative directory to search."},
+                "include": {"type": "string", "description": "Filename include glob."},
+                "exclude": {"type": "string", "description": "Comma-separated names or patterns to skip."},
+                "recursive": {"type": "boolean", "description": "Whether to search recursively."},
+            },
+            "required": ["pattern"],
+        },
+        "read_only": True,
+        "allowed_modes": ["planning", "execution"],
+        "search_hint": "grep search code text",
+    },
+    {
+        "name": "run_skill_script",
+        "handler": run_skill_script,
+        "description": "Run a script entry declared by a skill.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "Skill that owns the script."},
+                "script_name": {"type": "string", "description": "Script entry name or path."},
+                "args": {"type": "array", "items": {"type": "string"}, "description": "Script arguments."},
+                "input_text": {"type": "string", "description": "Optional stdin text."},
+                "timeout_seconds": {"type": "integer", "description": "Execution timeout."},
+            },
+            "required": ["skill_name", "script_name"],
+        },
+        "allowed_modes": ["execution"],
+        "should_defer": True,
+        "search_hint": "skill script reusable workflow",
+    },
+]

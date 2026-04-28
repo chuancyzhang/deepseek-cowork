@@ -109,11 +109,25 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertIsNone(prepared[0]["content"])
         self.assertEqual(prepared[0]["reasoning_content"], "keep me")
 
+    def test_prepare_messages_keeps_deepseek_assistant_reasoning_without_tool_calls(self):
+        provider, _client = self._build_provider()
+        prepared = provider._prepare_messages([
+            {
+                "role": "assistant",
+                "content": "final",
+                "reasoning_content": "keep final reasoning",
+            }
+        ])
+
+        self.assertEqual(prepared[0]["reasoning_content"], "keep final reasoning")
+
 
 class TestDeepSeekMessageSanitization(unittest.TestCase):
     def test_clear_reasoning_content_preserves_tool_call_turns_only(self):
         cleaned = clear_reasoning_content([
+            {"role": "user", "content": "plain turn"},
             {"role": "assistant", "content": "plain", "reasoning_content": "drop"},
+            {"role": "user", "content": "tool turn"},
             {
                 "role": "assistant",
                 "content": "",
@@ -128,11 +142,12 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
             },
         ])
 
-        self.assertNotIn("reasoning_content", cleaned[0])
-        self.assertEqual(cleaned[1]["reasoning_content"], "keep")
+        self.assertNotIn("reasoning_content", cleaned[1])
+        self.assertEqual(cleaned[3]["reasoning_content"], "keep")
 
     def test_sanitize_llm_messages_preserves_reasoning_for_tool_turns(self):
         sanitized = sanitize_llm_messages([
+            {"role": "user", "content": "use a tool"},
             {
                 "role": "assistant",
                 "content": "",
@@ -147,12 +162,19 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
                 ],
             },
             {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
-            {"role": "assistant", "content": "final", "reasoning_content": "drop"},
+            {
+                "role": "assistant",
+                "content": "final",
+                "reasoning_content": "keep final",
+            },
+            {"role": "user", "content": "plain followup"},
+            {"role": "assistant", "content": "plain", "reasoning_content": "drop"},
         ])
 
-        self.assertEqual(sanitized[0]["reasoning_content"], "keep")
-        self.assertNotIn("reasoning", sanitized[0])
-        self.assertNotIn("reasoning_content", sanitized[2])
+        self.assertEqual(sanitized[1]["reasoning_content"], "keep")
+        self.assertNotIn("reasoning", sanitized[1])
+        self.assertEqual(sanitized[3]["reasoning_content"], "keep final")
+        self.assertNotIn("reasoning_content", sanitized[5])
 
     def test_drop_invalid_tool_call_rounds_without_reasoning(self):
         cleaned, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning([

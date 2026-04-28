@@ -177,21 +177,66 @@ def input(prompt=""):
                     pass
             self.finished_signal.emit()
 
-def clear_reasoning_content(messages):
+def _reasoning_text_from_message(msg):
+    if not isinstance(msg, dict):
+        return ""
+    reasoning_content = msg.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        return reasoning_content
+    reasoning = msg.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        return reasoning
+    return ""
+
+
+def _clean_reasoning_content_by_turn(messages, drop_meta=False):
     """
-    Drop stale reasoning for plain assistant replies, but preserve it for tool-call
-    turns because DeepSeek requires reasoning_content to be replayed after tool use.
+    Drop stale reasoning for ordinary turns, but preserve assistant reasoning for
+    every assistant message in a user turn that contains tool calls. DeepSeek's
+    thinking mode requires those reasoning_content values to be replayed.
     """
     cleaned = []
+    turn_indices = []
+    turn_has_tool_calls = False
+
+    def finish_turn():
+        nonlocal turn_indices, turn_has_tool_calls
+        for idx in turn_indices:
+            msg = cleaned[idx]
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            if role == "assistant" and turn_has_tool_calls:
+                reasoning_text = _reasoning_text_from_message(msg)
+                if reasoning_text:
+                    msg["reasoning_content"] = reasoning_text
+                else:
+                    msg.pop("reasoning_content", None)
+            else:
+                msg.pop("reasoning_content", None)
+            msg.pop("reasoning", None)
+            if drop_meta:
+                msg.pop("meta", None)
+        turn_indices = []
+        turn_has_tool_calls = False
+
     for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user":
+            finish_turn()
         clean_msg = msg.copy()
-        has_tool_calls = bool(clean_msg.get("tool_calls"))
-        if 'reasoning_content' in clean_msg and not has_tool_calls:
-            del clean_msg['reasoning_content']
-        if 'reasoning' in clean_msg: # Also clear our internal key
-            del clean_msg['reasoning']
         cleaned.append(clean_msg)
+        turn_indices.append(len(cleaned) - 1)
+        if clean_msg.get("role") == "assistant" and clean_msg.get("tool_calls"):
+            turn_has_tool_calls = True
+
+    finish_turn()
     return cleaned
+
+
+def clear_reasoning_content(messages):
+    return _clean_reasoning_content_by_turn(messages)
 
 def repair_tool_call_sequence(messages):
     cleaned = []
@@ -280,51 +325,77 @@ def repair_tool_call_sequence(messages):
 def drop_invalid_tool_call_rounds_without_reasoning(messages):
     cleaned = []
     dropped_rounds = []
-    index = 0
 
-    while index < len(messages):
-        msg = messages[index]
-        if not isinstance(msg, dict):
-            index += 1
-            continue
+    def process_turn(turn, start_index):
+        assistant_indices = []
+        tool_call_ids = set()
+        has_tool_calls = False
+        missing_reasoning = False
 
-        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-            cleaned.append(msg.copy())
-            index += 1
-            continue
+        for offset, item in enumerate(turn):
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "assistant":
+                if item.get("tool_calls"):
+                    has_tool_calls = True
+                    for tool_call in item.get("tool_calls") or []:
+                        if isinstance(tool_call, dict) and tool_call.get("id"):
+                            tool_call_ids.add(tool_call["id"])
+                assistant_indices.append(offset)
 
-        reasoning_content = msg.get("reasoning_content")
-        if isinstance(reasoning_content, str) and reasoning_content:
-            cleaned.append(msg.copy())
-            index += 1
-            continue
+        if has_tool_calls:
+            for offset in assistant_indices:
+                if not _reasoning_text_from_message(turn[offset]):
+                    missing_reasoning = True
+                    break
 
-        tool_call_ids = []
-        for tool_call in msg.get("tool_calls") or []:
-            if isinstance(tool_call, dict) and tool_call.get("id"):
-                tool_call_ids.append(tool_call["id"])
+        if not has_tool_calls or not missing_reasoning:
+            return [item.copy() for item in turn if isinstance(item, dict)], None
 
-        dropped = {
-            "assistant_index": index,
-            "tool_call_ids": tool_call_ids,
+        pruned = []
+        kept_assistant_count = 0
+        for item in turn:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if role == "tool" and item.get("tool_call_id") in tool_call_ids:
+                continue
+            if role == "assistant" and item.get("tool_calls"):
+                continue
+            msg_copy = item.copy()
+            if role == "assistant":
+                msg_copy.pop("reasoning_content", None)
+                msg_copy.pop("reasoning", None)
+                kept_assistant_count += 1
+            pruned.append(msg_copy)
+
+        return pruned, {
+            "turn_start_index": start_index,
+            "tool_call_ids": sorted(tool_call_ids),
+            "kept_assistant_count": kept_assistant_count,
         }
-        dropped_rounds.append(dropped)
-        index += 1
 
-        pending_ids = set(tool_call_ids)
-        while index < len(messages):
-            next_msg = messages[index]
-            if not isinstance(next_msg, dict):
-                index += 1
-                continue
-            if next_msg.get("role") != "tool":
-                break
-            call_id = next_msg.get("tool_call_id")
-            if call_id and call_id in pending_ids:
-                pending_ids.discard(call_id)
-                index += 1
-                continue
-            break
+    turn = []
+    turn_start_index = 0
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "user" and turn:
+            processed, dropped = process_turn(turn, turn_start_index)
+            cleaned.extend(processed)
+            if dropped:
+                dropped_rounds.append(dropped)
+            turn = []
+            turn_start_index = index
+        elif not turn:
+            turn_start_index = index
+        turn.append(msg)
+
+    if turn:
+        processed, dropped = process_turn(turn, turn_start_index)
+        cleaned.extend(processed)
+        if dropped:
+            dropped_rounds.append(dropped)
 
     return cleaned, dropped_rounds
 
@@ -333,17 +404,7 @@ def sanitize_llm_messages(messages, require_reasoning_replay=False, return_metad
     dropped_rounds = []
     if require_reasoning_replay:
         repaired, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(repaired)
-    cleaned = []
-    for msg in repaired:
-        clean_msg = msg.copy()
-        has_tool_calls = bool(clean_msg.get("tool_calls"))
-        if 'reasoning_content' in clean_msg and not has_tool_calls:
-            clean_msg.pop('reasoning_content', None)
-        if 'reasoning' in clean_msg:
-            del clean_msg['reasoning']
-        if 'meta' in clean_msg:
-            del clean_msg['meta']
-        cleaned.append(clean_msg)
+    cleaned = _clean_reasoning_content_by_turn(repaired, drop_meta=True)
     if return_metadata:
         return cleaned, {"dropped_incomplete_reasoning_rounds": dropped_rounds}
     return cleaned

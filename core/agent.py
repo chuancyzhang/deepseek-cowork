@@ -25,6 +25,7 @@ from core.plan_mode import (
     json_copy,
     normalize_run_context,
 )
+from core.llm.deepseek import is_deepseek_request
 
 try:
     from openai import OpenAI
@@ -276,8 +277,62 @@ def repair_tool_call_sequence(messages):
 
     return cleaned
 
-def sanitize_llm_messages(messages):
+def drop_invalid_tool_call_rounds_without_reasoning(messages):
+    cleaned = []
+    dropped_rounds = []
+    index = 0
+
+    while index < len(messages):
+        msg = messages[index]
+        if not isinstance(msg, dict):
+            index += 1
+            continue
+
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            cleaned.append(msg.copy())
+            index += 1
+            continue
+
+        reasoning_content = msg.get("reasoning_content")
+        if isinstance(reasoning_content, str) and reasoning_content:
+            cleaned.append(msg.copy())
+            index += 1
+            continue
+
+        tool_call_ids = []
+        for tool_call in msg.get("tool_calls") or []:
+            if isinstance(tool_call, dict) and tool_call.get("id"):
+                tool_call_ids.append(tool_call["id"])
+
+        dropped = {
+            "assistant_index": index,
+            "tool_call_ids": tool_call_ids,
+        }
+        dropped_rounds.append(dropped)
+        index += 1
+
+        pending_ids = set(tool_call_ids)
+        while index < len(messages):
+            next_msg = messages[index]
+            if not isinstance(next_msg, dict):
+                index += 1
+                continue
+            if next_msg.get("role") != "tool":
+                break
+            call_id = next_msg.get("tool_call_id")
+            if call_id and call_id in pending_ids:
+                pending_ids.discard(call_id)
+                index += 1
+                continue
+            break
+
+    return cleaned, dropped_rounds
+
+def sanitize_llm_messages(messages, require_reasoning_replay=False, return_metadata=False):
     repaired = repair_tool_call_sequence(messages)
+    dropped_rounds = []
+    if require_reasoning_replay:
+        repaired, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(repaired)
     cleaned = []
     for msg in repaired:
         clean_msg = msg.copy()
@@ -286,13 +341,11 @@ def sanitize_llm_messages(messages):
             clean_msg.pop('reasoning_content', None)
         if 'reasoning' in clean_msg:
             del clean_msg['reasoning']
-        # DeepSeek multi-round tool calls require the original reasoning_content to
-        # remain attached to the assistant message that issued the tool calls.
-        if has_tool_calls and "reasoning_content" not in clean_msg:
-            clean_msg["reasoning_content"] = ""
         if 'meta' in clean_msg:
             del clean_msg['meta']
         cleaned.append(clean_msg)
+    if return_metadata:
+        return cleaned, {"dropped_incomplete_reasoning_rounds": dropped_rounds}
     return cleaned
 
 class LLMWorker(QThread):
@@ -690,7 +743,26 @@ class LLMWorker(QThread):
                     provider = LLMFactory.create_provider(self.config_manager)
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     self.step_signal.emit(f"Provider Start: {provider_name}")
-                    stream = provider.chat_stream(sanitize_llm_messages(current_messages), tools=self.tools)
+                    require_reasoning_replay = bool(
+                        is_deepseek_request(
+                            getattr(provider, "model_name", ""),
+                            getattr(provider, "base_url", ""),
+                        ) and getattr(provider, "thinking_enabled", False)
+                    )
+                    sanitized_messages, sanitize_meta = sanitize_llm_messages(
+                        current_messages,
+                        require_reasoning_replay=require_reasoning_replay,
+                        return_metadata=True,
+                    )
+                    dropped_rounds = sanitize_meta.get("dropped_incomplete_reasoning_rounds") or []
+                    if dropped_rounds:
+                        dropped_calls = sum(len(item.get("tool_call_ids") or []) for item in dropped_rounds)
+                        self.step_signal.emit(
+                            "System: Pruned "
+                            f"{len(dropped_rounds)} DeepSeek tool-call history round(s) "
+                            f"missing reasoning_content before replay ({dropped_calls} tool call(s))."
+                        )
+                    stream = provider.chat_stream(sanitized_messages, tools=self.tools)
                     
                     # Streaming Buffers
                     chunk_reasoning = ""

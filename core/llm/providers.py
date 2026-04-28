@@ -6,6 +6,7 @@ from .deepseek import (
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
     build_deepseek_request_options,
+    is_deepseek_request,
     normalize_deepseek_reasoning_effort,
 )
 
@@ -97,18 +98,22 @@ class OpenAIProvider(LLMProvider):
     def _prepare_messages(self, messages):
         # Deep copy and clean
         clean = []
+        is_deepseek = bool(is_deepseek_request(self.model_name, self.base_url))
         for msg in messages:
             m = msg.copy()
             # Remove internal keys
             m.pop("reasoning", None)
             
-            # DeepSeek Reasoner sometimes returns reasoning_content, but most OpenAI-compatible
-            # servers reject empty or unknown fields in requests. Drop empty reasoning_content
-            # unconditionally, and only keep non-empty values for DeepSeek models.
+            # Most OpenAI-compatible providers reject reasoning_content entirely.
+            # For DeepSeek thinking+tool replay, preserve only non-empty values that
+            # belong to assistant tool-call turns.
             if "reasoning_content" in m:
-                if not m.get("reasoning_content"):
-                    m.pop("reasoning_content", None)
-                elif not build_deepseek_request_options(self.model_name, self.base_url):
+                if (
+                    not is_deepseek
+                    or not m.get("reasoning_content")
+                    or m.get("role") != "assistant"
+                    or not m.get("tool_calls")
+                ):
                     m.pop("reasoning_content", None)
             
             # Ensure tool_calls are correctly formatted if present

@@ -53,8 +53,8 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem)
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QAbstractAnimation, QVariantAnimation
+                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem)
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPropertyAnimation, QEasingCurve, QVariantAnimation
 
 # Try importing OpenAI
 try:
@@ -95,6 +95,25 @@ QMenu::separator {
 """
 
 HISTORY_MIGRATION_VERSION = 2
+CONTENT_FLUSH_INTERVAL_MS = 120
+THINKING_FLUSH_INTERVAL_MS = 140
+SCROLL_FLUSH_INTERVAL_MS = 24
+SCROLL_BOTTOM_THRESHOLD_PX = 36
+STREAM_RENDER_INTERVAL_SEC = 0.12
+STREAM_PLAIN_TEXT_THRESHOLD = 2400
+
+
+def set_stylesheet_if_changed(widget, stylesheet):
+    if widget.property("_cached_stylesheet") == stylesheet:
+        return
+    widget.setStyleSheet(stylesheet)
+    widget.setProperty("_cached_stylesheet", stylesheet)
+
+
+def set_text_if_changed(widget, text):
+    if widget.text() == text:
+        return
+    widget.setText(text)
 
 
 def plan_phase_label(phase):
@@ -1971,8 +1990,9 @@ class ChatBubble(QFrame):
             self._pending_main_content_final = False
             self._rendered_main_content_text = None
             self._rendered_main_content_final = False
+            self._rendered_main_content_mode = None
             self._last_main_content_render_ts = 0.0
-            self._main_content_render_interval = 0.12
+            self._main_content_render_interval = STREAM_RENDER_INTERVAL_SEC
             self._main_content_render_timer = QTimer(self)
             self._main_content_render_timer.setSingleShot(True)
             self._main_content_render_timer.timeout.connect(self._flush_pending_main_content_render)
@@ -2135,7 +2155,7 @@ class ChatBubble(QFrame):
         
         # Style based on status
         color = self._get_status_color(status)
-        indicator.setStyleSheet(f"""
+        set_stylesheet_if_changed(indicator, f"""
             QPushButton {{
                 background-color: {DesignTokens.bg_secondary};
                 border: 1px solid {color};
@@ -2207,7 +2227,7 @@ class ChatBubble(QFrame):
         if hasattr(self, 'agent_indicators') and agent_id in self.agent_indicators:
             indicator = self.agent_indicators[agent_id]
             color = self._get_status_color(status)
-            indicator.setStyleSheet(f"""
+            set_stylesheet_if_changed(indicator, f"""
                 QPushButton {{
                     background-color: {DesignTokens.bg_secondary};
                     border: 1px solid {color};
@@ -2441,19 +2461,39 @@ class ChatBubble(QFrame):
                th:last-child, td:last-child { border-right: none; }
             </style>
             """
-            html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
             self.content_edit.setUpdatesEnabled(False)
-            self.content_edit.setHtml(style + html_content)
+            if not final and len(text) >= STREAM_PLAIN_TEXT_THRESHOLD:
+                self._render_plain_stream_content(text)
+                render_mode = "plain"
+            else:
+                html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
+                self.content_edit.setHtml(style + html_content)
+                render_mode = "html"
         except Exception:
             self.content_edit.setUpdatesEnabled(False)
             self.content_edit.setPlainText(text)
+            render_mode = "plain"
         finally:
             self.content_edit.setUpdatesEnabled(True)
 
         self._rendered_main_content_text = text
         self._rendered_main_content_final = bool(final)
+        self._rendered_main_content_mode = render_mode
         self._last_main_content_render_ts = time.time()
         self.content_edit.scheduleAdjustHeight()
+
+    def _render_plain_stream_content(self, text):
+        """Avoid full Markdown conversion while a long response is still streaming."""
+        previous = self._rendered_main_content_text or ""
+        if self._rendered_main_content_mode == "plain" and text.startswith(previous):
+            delta = text[len(previous):]
+            if delta:
+                cursor = self.content_edit.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                cursor.insertText(delta)
+                self.content_edit.setTextCursor(cursor)
+            return
+        self.content_edit.setPlainText(text)
 
     def copy_main_content(self):
         text = (self.main_content_text or "").strip() or self.content_edit.toPlainText().strip()
@@ -2755,15 +2795,15 @@ class ToolCallCard(QFrame):
             detail_text = _trim(state.get("error") or "已强制终止")
             detail_style = "color: #dc2626; font-size: 10px;"
         
-        widgets["status_label"].setText(status_text)
-        widgets["status_label"].setStyleSheet(style)
+        set_text_if_changed(widgets["status_label"], status_text)
+        set_stylesheet_if_changed(widgets["status_label"], style)
         widgets["detail_text"] = detail_text or detail_cache
-        widgets["detail_label"].setText(widgets["detail_text"])
-        widgets["detail_label"].setStyleSheet(detail_style)
+        set_text_if_changed(widgets["detail_label"], widgets["detail_text"])
+        set_stylesheet_if_changed(widgets["detail_label"], detail_style)
 
     def focusInEvent(self, event):
         if not self.is_selected:
-            self.main_row.setStyleSheet(f"""
+            set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
                     background-color: {DesignTokens.bg_main};
                     border: 1px solid {DesignTokens.primary};
@@ -2790,7 +2830,7 @@ class ToolCallCard(QFrame):
         self.is_selected = selected
         if selected:
             # Selected: Blue Border + Light Blue BG
-            self.main_row.setStyleSheet(f"""
+            set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
                     background-color: {DesignTokens.info_bg};
                     border: 1px solid {DesignTokens.primary};
@@ -2801,7 +2841,7 @@ class ToolCallCard(QFrame):
         else:
             # Normal: Border Color based on Status
             left_color = DesignTokens.success_accent if self.result else DesignTokens.text_tertiary
-            self.main_row.setStyleSheet(f"""
+            set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
                     background-color: {DesignTokens.bg_main};
                     border: 1px solid {DesignTokens.border};
@@ -2823,7 +2863,7 @@ class ToolCallCard(QFrame):
         
         # Update style to show success (Green left border)
         if not self.is_selected:
-            self.main_row.setStyleSheet(f"""
+            set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
                     background-color: {DesignTokens.bg_main};
                     border: 1px solid {DesignTokens.border};
@@ -4023,19 +4063,12 @@ class MainWindow(QMainWindow):
             self.input_field.setEnabled(True)
             self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
             self.action_btn.setEnabled(True)
-            self.action_btn.setGraphicsEffect(None) # Remove opacity effect
             self.ws_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-weight: 600;")
         else:
             # Keep input enabled but change placeholder to guide user
             self.input_field.setPlaceholderText("📁 先选择或拖拽一个文件夹到这里...")
             # Disable send button
             self.action_btn.setEnabled(False)
-            
-            # Opacity effect for disabled button look
-            opacity = QGraphicsOpacityEffect(self.action_btn)
-            opacity.setOpacity(0.5)
-            self.action_btn.setGraphicsEffect(opacity)
-            
             self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
 
         self.refresh_context_badges()
@@ -4045,15 +4078,11 @@ class MainWindow(QMainWindow):
             self.input_field.setEnabled(True)
             self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             self.action_btn.setEnabled(True)
-            self.action_btn.setGraphicsEffect(None)
             self.ws_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-weight: 600;")
         else:
             self.input_field.setEnabled(True)
             self.input_field.setPlaceholderText("先选择一个工作区，再开始描述你要处理的任务")
             self.action_btn.setEnabled(False)
-            opacity = QGraphicsOpacityEffect(self.action_btn)
-            opacity.setOpacity(0.5)
-            self.action_btn.setGraphicsEffect(opacity)
             self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
         self.refresh_context_badges()
 
@@ -4867,15 +4896,15 @@ class MainWindow(QMainWindow):
         state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
         state.content_flush_timer = QTimer(self)
         state.content_flush_timer.setSingleShot(True)
-        state.content_flush_timer.setInterval(120)
+        state.content_flush_timer.setInterval(CONTENT_FLUSH_INTERVAL_MS)
         state.content_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_content(sid))
         state.thinking_flush_timer = QTimer(self)
         state.thinking_flush_timer.setSingleShot(True)
-        state.thinking_flush_timer.setInterval(90)
+        state.thinking_flush_timer.setInterval(THINKING_FLUSH_INTERVAL_MS)
         state.thinking_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_thinking(sid))
         state.scroll_flush_timer = QTimer(self)
         state.scroll_flush_timer.setSingleShot(True)
-        state.scroll_flush_timer.setInterval(24)
+        state.scroll_flush_timer.setInterval(SCROLL_FLUSH_INTERVAL_MS)
         state.scroll_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_scroll(sid))
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
@@ -5390,7 +5419,7 @@ class MainWindow(QMainWindow):
         vbar = state.chat_scroll.verticalScrollBar() if getattr(state, "chat_scroll", None) else None
         if vbar is not None:
             distance_to_bottom = max(0, vbar.maximum() - value)
-            if distance_to_bottom <= 36:
+            if distance_to_bottom <= SCROLL_BOTTOM_THRESHOLD_PX:
                 state.auto_scroll_enabled = True
             elif not state.auto_loading_history:
                 state.auto_scroll_enabled = False
@@ -5435,10 +5464,7 @@ class MainWindow(QMainWindow):
         state.pending_scroll_force = False
         if not force and not state.auto_scroll_enabled:
             return
-        vbar = state.chat_scroll.verticalScrollBar()
-        vbar.setValue(vbar.maximum())
         QTimer.singleShot(0, lambda sid=session_id, must=force: self._finalize_session_scroll(sid, must))
-        QTimer.singleShot(32, lambda sid=session_id, must=force: self._finalize_session_scroll(sid, must))
 
     def load_more_history(self, session_id=None):
         state = self.get_session(session_id)
@@ -6460,38 +6486,12 @@ class MainWindow(QMainWindow):
             layout.setContentsMargins(48, 4, 16, 4)
             layout.addWidget(card)
             layout.addStretch()
-            
-            # Animation: Fade + Slide
-            opacity_effect = QGraphicsOpacityEffect(wrapper)
-            wrapper.setGraphicsEffect(opacity_effect)
-            
+
             if index is not None:
                 state.chat_layout.insertWidget(index, wrapper)
             else:
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
-            
-            self.process_ui_events(force=animate)
-            
-            if animate:
-                opacity_effect.setOpacity(0)
-                fade_anim = QPropertyAnimation(opacity_effect, b"opacity", wrapper)
-                fade_anim.setDuration(350)
-                fade_anim.setStartValue(0.0)
-                fade_anim.setEndValue(1.0)
-                fade_anim.setEasingCurve(QEasingCurve.OutCubic)
-                
-                slide_anim = QPropertyAnimation(wrapper, b"pos", wrapper)
-                slide_anim.setDuration(350)
-                slide_anim.setStartValue(wrapper.pos() + QPoint(0, 20))
-                slide_anim.setEndValue(wrapper.pos())
-                slide_anim.setEasingCurve(QEasingCurve.OutBack)
-                
-                group = QParallelAnimationGroup(wrapper)
-                group.addAnimation(fade_anim)
-                group.addAnimation(slide_anim)
-                group.start(QAbstractAnimation.DeleteWhenStopped)
-            else:
-                opacity_effect.setOpacity(1.0)
+            self.process_ui_events(force=False)
             
         if has_pending_result:
             self.update_tool_card({
@@ -6506,7 +6506,7 @@ class MainWindow(QMainWindow):
         else:
             self.set_session_phase("Executing", state.session_id)
         self.refresh_step_list(state.session_id)
-        self.process_ui_events(force=animate)
+        self.process_ui_events(force=False)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def update_tool_card(self, data, session_id=None):
@@ -6586,37 +6586,11 @@ class MainWindow(QMainWindow):
             
         bubble = ChatBubble(role, text, thinking, duration)
         
-        # Animation: Fade + Slide
-        opacity_effect = QGraphicsOpacityEffect(bubble)
-        bubble.setGraphicsEffect(opacity_effect)
-        
         if index is not None:
             state.chat_layout.insertWidget(index, bubble)
         else:
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
-        
-        self.process_ui_events(force=animate)
-        
-        if animate:
-            opacity_effect.setOpacity(0)
-            fade_anim = QPropertyAnimation(opacity_effect, b"opacity", bubble)
-            fade_anim.setDuration(350)
-            fade_anim.setStartValue(0.0)
-            fade_anim.setEndValue(1.0)
-            fade_anim.setEasingCurve(QEasingCurve.OutCubic)
-            
-            slide_anim = QPropertyAnimation(bubble, b"pos", bubble)
-            slide_anim.setDuration(350)
-            slide_anim.setStartValue(bubble.pos() + QPoint(0, 20))
-            slide_anim.setEndValue(bubble.pos())
-            slide_anim.setEasingCurve(QEasingCurve.OutBack)
-            
-            group = QParallelAnimationGroup(bubble)
-            group.addAnimation(fade_anim)
-            group.addAnimation(slide_anim)
-            group.start(QAbstractAnimation.DeleteWhenStopped)
-        else:
-            opacity_effect.setOpacity(1.0)
+        self.process_ui_events(force=False)
         
         # Keep latest message in view when appending.
         if index is None:

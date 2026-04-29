@@ -19,11 +19,13 @@
 *   **经验优先的技能**：技能被视为结构化经验包，而不是第二套执行协议。
 *   **热重载技能**：将新技能放入 `skills/` 或 `ai_skills/`，无需重启即可使用。
 *   **结构化经验沉淀**：运行中的 lessons learned 可以先写入结构化 entry，再同步回 `SKILL.md` 摘要。
+*   **会话沉淀为 Skill**：点击 `沉淀为 Skill` 可将当前会话提炼为可审阅草稿，用于新建 Skill 或更新已有 Skill。
 
 ### 🖥️ 桌面体验
 *   **PySide6 UI**：气泡对话、Markdown 渲染与工具调用卡片。
 *   **工作区侧边栏**：文件树与内容预览一体化。
 *   **多分身监控**：查看并行子任务状态。
+*   **手动反馈入口**：侧边栏提供 `更新长期记忆` 与 `沉淀为 Skill`，在人确认后再保存可复用知识。
 
 ### 🛰️ 守护进程与 IM 网关
 *   **无头守护进程**：后台推理保证 UI 轻量响应。
@@ -82,7 +84,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 *   *“汇总文件夹里的所有 PDF 并生成报告。”*
 *   *“创建一个使用 yt-dlp 的视频下载技能。”*
 
-### 4. 企业消息 (飞书)
+### 4. 闭合反馈回路
+在完成有价值的会话后，可以使用侧边栏入口：
+*   **`更新长期记忆`**：扫描新增或变更的历史会话，分批合并写入 `memories.md`；支持进度展示、缩小到后台、结果预览、手动编辑与再次保存。
+*   **`沉淀为 Skill`**：将当前会话生成 Skill 草稿，可新建 Skill，也可对已有 Skill 追加经验或重写说明；保存前可预览和编辑。
+
+### 5. 企业消息 (飞书)
 打开 **⚙️ 设置 → 企业消息**，填写 **飞书 App ID / App Secret** 并启动网关。
 
 ## 🏗️ 架构概览
@@ -100,6 +107,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 - 工具源于技能目录中的公开 Python 函数（`impl.py`），自动生成 JSON Schema 并被模型调用。
 - `skill` 是结构化经验包，承载边界、坑点、经验、推荐流程与推荐工具。
 - 新经验默认可先写入结构化 entry，再回写到 `SKILL.md` 摘要。
+- `沉淀为 Skill` 是人工确认的沉淀入口，会把会话经验转化为 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`。
 - 新技能仍然支持热加载，无需重启。
 - 当前源码已打通“提示模型记录经验 -> 调用 `update_experience` -> 持久化经验 -> 后续任务再次注入”的链路，因此 AI 在合适场景下可以主动调用经验工具。
 - 但这仍属于可用的第一版经验闭环：系统会鼓励并支持 AI 记录经验，不保证每次都会主动调用，也尚未内建经验验证、效果评估、生命周期治理等强反馈机制。
@@ -113,6 +121,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ## 🧠 分层记忆与上下文
 - 系统上下文：工作区、操作系统、Python、日期与操作规则。
 - 记忆层：可选 `memories.md` 自动注入，承载稳定偏好与长期信息；在架构上，记忆被视为经验系统中的长期层，而不是独立于经验系统之外的另一套协议。
+- 长期记忆通过 `更新长期记忆` 手动触发，系统用 `memories_update_state.json` 记录已处理历史，后续更新聚焦新增或变更会话。
 - 技能提示：先注入最小经验摘要，需要时再展开完整说明。
 - 渐进式披露：references、结构化经验 entry 和更大的目录上下文只在必要时展开。
 - 历史清洁：每轮清理/折叠思考内容，避免上下文污染。
@@ -132,4 +141,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 
 ## 📄 许可证
 
-[MIT License](LICENSE)
+MIT License

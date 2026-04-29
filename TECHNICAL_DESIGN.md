@@ -11,6 +11,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.1 UI 层 (PySide6)
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、工作区侧边栏等 UI 交互。
 *   **可视化监控**：展示子任务状态与思考过程。
+*   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
 
 ### 2.2 Agent Core
 *   **core/agent.py**：推理循环与工具调度，负责将用户输入转化为可执行任务。
@@ -23,10 +24,12 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.4 技能系统
 *   **core/skill_manager.py**：加载 `skills/` 与 `ai_skills/`，注入工具定义与经验。
 *   **经验回写**：执行结果可回写到 `SKILL.md`，形成自进化闭环。
+*   **core/skill_from_conversation.py**：把当前会话转录为可复用 Skill 草稿，并负责新建或更新 Skill 文件。
 
 ### 2.5 配置与存储
 *   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、工作区等设置。
 *   **core/chat_storage.py**：历史对话持久化与按日归档。
+*   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 
 ### 2.6 企业 IM
 *   **core/im_gateway.py**：飞书长连接网关，接收 IM 事件并回传执行结果。
@@ -48,9 +51,23 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 4.  工具结果回传给 Agent，完成最终回复。
 5.  UI 渲染聊天气泡、工具调用卡片与状态变化。
 
+### 3.1 手动反馈回路数据流
+
+**长期记忆更新**
+1.  用户点击 `更新长期记忆`。
+2.  `MemoryUpdateWorker` 从 `core/chat_storage.py` 读取新增或变更的历史会话，并跳过 `memories_update_state.json` 中已处理的内容。
+3.  `core/memory_update.py` 按批构造提示，将当前 `memories.md` 与历史批次交给模型合并；当模型返回为空或失败时执行有限重试。
+4.  每个批次写入 `memories.md` 并生成备份，同时向对话框回传进度和批次预览；最终结果仍允许用户编辑并再次保存。
+
+**会话沉淀为 Skill**
+1.  用户点击 `沉淀为 Skill`。
+2.  `ConversationSkillDraftWorker` 将当前会话渲染为转录文本，调用 `core/skill_from_conversation.py` 生成草稿。
+3.  用户选择新建 Skill，或更新已有 Skill 的追加经验/重写说明策略。
+4.  保存时写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`，然后重新加载技能。
+
 ## 4. 分层记忆与上下文处理
 - **系统层**：工作区、OS、Python 路径、日期、操作规范等基础上下文。
-- **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt。
+- **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
 - **技能层**：首次调用技能时注入简版能力提示；按需注入技能完整说明与经验。
 - **历史层**：每轮清理/折叠思考内容以避免重复；仅保留必要字段满足 API 要求。
 
@@ -63,6 +80,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **更新检测**：对 `SKILL.md`/`impl.py` 的修改时间进行检测，晚于上次加载则触发热加载。
 - **热加载**：重置工具注册与提示集合，重新解析并加载实现。
 - **经验写回**：通过 `update_skill_experience` 追加经验到 `SKILL.md` 的 `experience` 字段，形成“执行—学习—再执行”的闭环。
+- **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill。
 
 ## 6. 状态机流转 (Agentic Workflow)
 - **状态**：Idle → Thinking → ToolCalling → Observing → Answering → Completed。

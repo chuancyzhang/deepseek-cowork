@@ -20,11 +20,13 @@ Built by **deepseek-cowork team**.
 *   **Experience-First Skills**: Skills are treated as structured experience packages rather than a second execution protocol.
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
 *   **Structured Experience Capture**: Runtime lessons can be stored as structured entries and synced back into `SKILL.md`.
+*   **Conversation-to-Skill Loop**: Click `沉淀为 Skill` to turn the current conversation into a reviewed skill draft, then create a new skill or update an existing one.
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
 *   **Workspace Sidebar**: File tree and previews without leaving the app.
 *   **Sub-Agent Monitor**: Observe parallel workers and their statuses.
+*   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 
 ### 🛰️ Daemon & IM Gateway
 *   **Headless Daemon**: Background inference keeps UI responsive.
@@ -83,7 +85,12 @@ Examples:
 *   *"Summarize all PDFs in this folder into a single report."*
 *   *"Create a new skill to download videos using yt-dlp."*
 
-### 4. Enterprise IM (Feishu)
+### 4. Close the Feedback Loop
+Use the sidebar after meaningful work:
+*   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
+*   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
+
+### 5. Enterprise IM (Feishu)
 Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App Secret**, then start the gateway.
 
 ## 🏗️ Architecture
@@ -101,6 +108,7 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App
 - Tools are plain Python functions discovered from skill folders (`impl.py`) and converted into JSON-schema function calls.
 - Skills are structured experience packages: guidance, boundaries, lessons learned, recommended workflows, and recommended tools.
 - New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
+- `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, and optional `impl.py` assets.
 - Skills remain hot-reloadable without restarting.
 
 ## 🔄 Agentic Workflow
@@ -112,6 +120,7 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App
 ## 🧠 Layered Memory & Context
 - System context: workspace, OS, Python, date, and operational rules.
 - Memories: optional `memories.md` auto-injected when present.
+- Long-term memory updates are manually triggered with `更新长期记忆`; processed history is tracked in `memories_update_state.json` so later runs focus on new or changed conversations.
 - Skill prompts: minimal experience briefs first, then fuller guidance only when needed.
 - Progressive disclosure: references, structured experience entries, and larger directory context expand only when required.
 - History hygiene: reasoning content deduplicated per turn to avoid clutter.
@@ -131,4 +140,4 @@ See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the full architecture.
 
 ## 📄 License
 
-[MIT License](LICENSE)
+MIT License

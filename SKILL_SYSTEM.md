@@ -16,6 +16,7 @@ The default rule is simple:
 - AI does not directly call `skill`
 - `skill` injects the minimum necessary experience, boundaries, and recommended tools
 - `workflow` is experience that has been organized into a recommended sequence of steps
+- `沉淀为 Skill` is the manual review path for turning a useful conversation into a skill update
 
 ## Core Concepts
 
@@ -99,6 +100,17 @@ The runtime behavior is:
 7. The model continues using both tool outputs and the disclosed experience.
 
 This preserves a single execution surface: tools.
+
+## Manual Feedback Loop
+
+The system now has a human-confirmed loop for promoting completed work into reusable knowledge:
+
+- `更新长期记忆` updates the long-term memory layer by scanning new or changed conversation history, merging it into `memories.md`, and tracking processed history in `memories_update_state.json`.
+- `沉淀为 Skill` turns the current conversation into an editable skill draft before anything is saved.
+- New skills are written as `SKILL.md`, `skill.json`, optional `impl.py`, and optional structured entries under `experience/entries.jsonl`.
+- Existing skills can be updated by appending structured experience entries or rewriting the visible guidance.
+
+This path is intentionally manual. The model may propose reusable experience, but the user reviews and confirms the draft before it becomes part of the skill system.
 
 ## Progressive Disclosure
 
@@ -210,6 +222,8 @@ The default update path is:
 1. write a structured entry first
 2. sync high-value lessons back into the summary in `SKILL.md`
 
+For conversation-derived updates, `沉淀为 Skill` uses this storage model after user confirmation. Appending to an existing skill records reusable lessons as structured entries; rewriting a skill updates the human-readable guidance while preserving prior structured experience where possible.
+
 ### `references/`
 
 Optional supporting material such as:
@@ -239,6 +253,8 @@ If a lesson clearly belongs to a specific skill, it should be recorded there.
 If a lesson is cross-task or cross-tool and does not naturally belong to a narrower skill, it should go into the dedicated experience package:
 
 - `general-experience`
+
+The conversation-to-skill flow follows the same ownership rule: create a new skill only for a reusable pattern, or update the narrowest existing skill when the lesson clearly belongs there.
 
 This keeps the model simple:
 

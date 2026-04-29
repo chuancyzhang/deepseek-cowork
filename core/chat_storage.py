@@ -3,6 +3,7 @@ import os
 import sqlite3
 import time
 import uuid
+from datetime import datetime
 
 AGENT_TERMINAL_STATUSES = {
     "completed",
@@ -773,6 +774,149 @@ class ChatStorage:
                 }
             )
         return conversations
+
+    def iter_conversation_transcripts(self, include_archived=True, include_legacy_json=True):
+        with self._connect() as conn:
+            conversation_rows = conn.execute(
+                """
+                SELECT id, title, created_at, updated_at, status, meta
+                FROM conversations
+                ORDER BY updated_at ASC, created_at ASC
+                """
+            ).fetchall()
+            db_ids = {row["id"] for row in conversation_rows}
+            transcripts = []
+            for row in conversation_rows:
+                meta = self._parse_json_dict(row["meta"])
+                if not include_archived and meta.get("archived"):
+                    continue
+                message_rows = conn.execute(
+                    """
+                    SELECT id, role, content, tool_calls, reasoning_content,
+                           token_count, tool_call_id, position, created_at
+                    FROM messages
+                    WHERE conversation_id = ?
+                    ORDER BY position ASC
+                    """,
+                    (row["id"],),
+                ).fetchall()
+                messages = []
+                for msg_row in message_rows:
+                    message = {
+                        "id": msg_row["id"],
+                        "role": msg_row["role"],
+                        "content": msg_row["content"] or "",
+                        "position": msg_row["position"],
+                        "created_at": msg_row["created_at"],
+                        "created_at_iso": self._timestamp_to_iso(msg_row["created_at"]),
+                    }
+                    if msg_row["tool_calls"]:
+                        try:
+                            message["tool_calls"] = json.loads(msg_row["tool_calls"])
+                        except Exception:
+                            message["tool_calls"] = msg_row["tool_calls"]
+                    if msg_row["reasoning_content"]:
+                        message["reasoning_content"] = msg_row["reasoning_content"]
+                    if msg_row["token_count"] is not None:
+                        message["token_count"] = msg_row["token_count"]
+                    if msg_row["tool_call_id"]:
+                        message["tool_call_id"] = msg_row["tool_call_id"]
+                    messages.append(message)
+                transcripts.append(
+                    {
+                        "id": row["id"],
+                        "title": row["title"] or "新任务",
+                        "created_at": row["created_at"],
+                        "updated_at": row["updated_at"],
+                        "created_at_iso": self._timestamp_to_iso(row["created_at"]),
+                        "updated_at_iso": self._timestamp_to_iso(row["updated_at"]),
+                        "status": row["status"] or "active",
+                        "meta": meta,
+                        "source": "sqlite",
+                        "messages": messages,
+                    }
+                )
+
+        if include_legacy_json:
+            transcripts.extend(self._legacy_json_transcripts(db_ids))
+        return transcripts
+
+    def _timestamp_to_iso(self, value):
+        if not value:
+            return None
+        try:
+            return datetime.fromtimestamp(int(value)).isoformat()
+        except Exception:
+            return None
+
+    def _legacy_json_transcripts(self, existing_ids):
+        history_dir = os.path.dirname(self.db_path)
+        if not os.path.isdir(history_dir):
+            return []
+        transcripts = []
+        for filename in sorted(os.listdir(history_dir)):
+            if not (filename.startswith("chat_history_") and filename.endswith(".json")):
+                continue
+            session_id = filename[len("chat_history_") : -len(".json")]
+            if session_id in existing_ids:
+                continue
+            path = os.path.join(history_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    raw_messages = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(raw_messages, list) or not raw_messages:
+                continue
+            messages = []
+            for position, raw_msg in enumerate(self.normalize_messages(raw_messages)):
+                if not isinstance(raw_msg, dict):
+                    continue
+                message = {
+                    "id": raw_msg.get("id") or f"{session_id}-{position}",
+                    "role": raw_msg.get("role") or "unknown",
+                    "content": raw_msg.get("content") or "",
+                    "position": position,
+                    "created_at": raw_msg.get("created_at"),
+                    "created_at_iso": self._timestamp_to_iso(raw_msg.get("created_at")),
+                }
+                if raw_msg.get("tool_calls"):
+                    message["tool_calls"] = raw_msg.get("tool_calls")
+                reasoning = raw_msg.get("reasoning_content") or raw_msg.get("reasoning")
+                if reasoning:
+                    message["reasoning_content"] = reasoning
+                if raw_msg.get("token_count") is not None:
+                    message["token_count"] = raw_msg.get("token_count")
+                if raw_msg.get("tool_call_id"):
+                    message["tool_call_id"] = raw_msg.get("tool_call_id")
+                messages.append(message)
+            try:
+                updated_at = int(os.path.getmtime(path))
+            except Exception:
+                updated_at = None
+            transcripts.append(
+                {
+                    "id": session_id,
+                    "title": self._legacy_title(messages),
+                    "created_at": updated_at,
+                    "updated_at": updated_at,
+                    "created_at_iso": self._timestamp_to_iso(updated_at),
+                    "updated_at_iso": self._timestamp_to_iso(updated_at),
+                    "status": "legacy",
+                    "meta": {},
+                    "source": "legacy_json",
+                    "messages": messages,
+                }
+            )
+        return transcripts
+
+    def _legacy_title(self, messages):
+        for message in messages:
+            if message.get("role") == "user":
+                content = str(message.get("content") or "").strip()
+                if content:
+                    return content[:30] + ("..." if len(content) > 30 else "")
+        return "旧版历史会话"
 
     def get_messages(self, conversation_id):
         with self._connect() as conn:

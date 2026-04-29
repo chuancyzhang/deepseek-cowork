@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import tempfile
@@ -5,6 +6,7 @@ import time
 
 
 DEFAULT_MEMORY_BATCH_TOKEN_LIMIT = 200_000
+MEMORY_UPDATE_STATE_FILENAME = "memories_update_state.json"
 
 
 def estimate_tokens(text):
@@ -83,9 +85,14 @@ def _split_large_text(text, max_tokens):
 
 
 def batch_transcripts(transcripts, max_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT):
+    return [batch["text"] for batch in build_transcript_batches(transcripts, max_tokens)]
+
+
+def build_transcript_batches(transcripts, max_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT):
     max_tokens = max(1, int(max_tokens or DEFAULT_MEMORY_BATCH_TOKEN_LIMIT))
     batches = []
     current_parts = []
+    current_transcripts = []
     current_tokens = 0
 
     for transcript in transcripts or []:
@@ -107,14 +114,29 @@ def batch_transcripts(transcripts, max_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT):
                 part_text = header_template.format(part_index, len(parts)) + part
             token_count = estimate_tokens(part_text)
             if current_parts and current_tokens + token_count > max_tokens:
-                batches.append("\n\n---\n\n".join(current_parts))
+                batches.append(
+                    {
+                        "text": "\n\n---\n\n".join(current_parts),
+                        "transcripts": current_transcripts,
+                        "estimated_tokens": current_tokens,
+                    }
+                )
                 current_parts = []
+                current_transcripts = []
                 current_tokens = 0
             current_parts.append(part_text)
+            if isinstance(transcript, dict) and transcript not in current_transcripts:
+                current_transcripts.append(transcript)
             current_tokens += token_count
 
     if current_parts:
-        batches.append("\n\n---\n\n".join(current_parts))
+        batches.append(
+            {
+                "text": "\n\n---\n\n".join(current_parts),
+                "transcripts": current_transcripts,
+                "estimated_tokens": current_tokens,
+            }
+        )
     return batches
 
 
@@ -141,6 +163,28 @@ def build_memory_update_messages(current_memory, batch_text=None, batch_index=1,
             f"# 当前 memories.md\n{current_memory or '(空)'}\n\n"
             f"# 历史会话批次\n{batch_text or ''}"
         )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_incremental_memory_update_messages(current_memory, batch_text, batch_index=1, batch_count=1):
+    system_prompt = (
+        "你是长期记忆整理助手。你需要维护完整的 memories.md。只保留长期稳定、有复用价值的信息："
+        "用户偏好、项目背景、持续约定、重要环境事实、反复出现的工作方式。不要写入一次性任务细节、"
+        "敏感信息、临时状态、完整聊天记录或冗余内容。输出完整 Markdown 文件内容。"
+    )
+    user_prompt = (
+        f"下面是第 {batch_index}/{batch_count} 批历史会话。请将这一批值得长期保存的信息合并进当前 memories.md，"
+        "并输出合并后的完整 memories.md。要求：\n"
+        "- 保留已有仍然有效的长期记忆；\n"
+        "- 去重、纠错、合并相近条目；\n"
+        "- 不要输出说明文字、过程记录或代码块围栏；\n"
+        "- 如果这一批没有新长期信息，也请输出整理后的完整 memories.md。\n\n"
+        f"# 当前 memories.md\n{current_memory or '(空)'}\n\n"
+        f"# 历史会话批次\n{batch_text or ''}"
+    )
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -205,6 +249,171 @@ def generate_memory_update(provider, current_memory, transcripts, max_batch_toke
     }
 
 
+def generate_memory_update_incremental(
+    provider,
+    current_memory,
+    transcripts,
+    history_dir,
+    max_batch_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
+    progress_callback=None,
+    preview_callback=None,
+    state_callback=None,
+):
+    transcript_count = len(transcripts or [])
+    batches = build_transcript_batches(transcripts, max_batch_tokens)
+    if not batches:
+        return {
+            "content": current_memory or "",
+            "batch_count": 0,
+            "transcript_count": transcript_count,
+            "estimated_tokens": 0,
+            "processed_transcripts": [],
+        }
+
+    estimated_tokens = sum(batch.get("estimated_tokens") or 0 for batch in batches)
+    updated_memory = current_memory or ""
+    processed_transcripts = []
+    for index, batch in enumerate(batches, start=1):
+        if progress_callback:
+            progress_callback(f"正在合并并保存历史批次 {index}/{len(batches)}")
+        messages = build_incremental_memory_update_messages(
+            current_memory=updated_memory,
+            batch_text=batch.get("text") or "",
+            batch_index=index,
+            batch_count=len(batches),
+        )
+        updated_memory = collect_llm_content(provider, messages)
+        save_result = save_memory_file_with_backup(history_dir, updated_memory + "\n")
+        batch_transcripts = batch.get("transcripts") or []
+        processed_transcripts.extend(batch_transcripts)
+        processed_at = max([transcript_updated_at(item) for item in processed_transcripts] or [0])
+        state = save_memory_update_state(history_dir, processed_at, processed_transcripts)
+        payload = {
+            "content": updated_memory,
+            "batch_index": index,
+            "batch_count": len(batches),
+            "transcript_count": transcript_count,
+            "processed_count": len(processed_transcripts),
+            "estimated_tokens": estimated_tokens,
+            "save_result": save_result,
+            "state": state,
+            "processed_at": processed_at,
+        }
+        if preview_callback:
+            preview_callback(payload)
+        if state_callback:
+            state_callback(state)
+
+    if progress_callback:
+        progress_callback("长期记忆已按批次更新完成")
+    return {
+        "content": updated_memory,
+        "batch_count": len(batches),
+        "transcript_count": transcript_count,
+        "estimated_tokens": estimated_tokens,
+        "processed_transcripts": processed_transcripts,
+    }
+
+
+def memory_update_state_path(history_dir):
+    return os.path.join(history_dir, MEMORY_UPDATE_STATE_FILENAME)
+
+
+def load_memory_update_state(history_dir):
+    path = memory_update_state_path(history_dir)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def transcript_updated_at(transcript):
+    values = []
+    for key in ("updated_at", "created_at"):
+        try:
+            value = int(transcript.get(key) or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            values.append(value)
+    for message in transcript.get("messages") or []:
+        try:
+            value = int(message.get("created_at") or 0)
+        except Exception:
+            value = 0
+        if value > 0:
+            values.append(value)
+    return max(values) if values else 0
+
+
+def filter_transcripts_for_memory_update(transcripts, last_processed_at=0, cutoff_at=None):
+    try:
+        last_processed_at = int(last_processed_at or 0)
+    except Exception:
+        last_processed_at = 0
+    try:
+        cutoff_at = int(cutoff_at or time.time())
+    except Exception:
+        cutoff_at = int(time.time())
+
+    filtered = []
+    for transcript in transcripts or []:
+        updated_at = transcript_updated_at(transcript)
+        if updated_at and updated_at <= last_processed_at:
+            continue
+        if updated_at and updated_at > cutoff_at:
+            continue
+        filtered.append(transcript)
+    return sorted(filtered, key=lambda item: (transcript_updated_at(item), item.get("id") or ""))
+
+
+def processed_conversation_records(transcripts):
+    records = []
+    for transcript in transcripts or []:
+        records.append(
+            {
+                "id": transcript.get("id") or "",
+                "title": transcript.get("title") or "",
+                "source": transcript.get("source") or "",
+                "updated_at": transcript_updated_at(transcript),
+                "updated_at_iso": transcript.get("updated_at_iso"),
+                "message_count": len(transcript.get("messages") or []),
+            }
+        )
+    return records
+
+
+def save_memory_update_state(history_dir, cutoff_at, transcripts):
+    os.makedirs(history_dir, exist_ok=True)
+    try:
+        cutoff_at = int(cutoff_at or time.time())
+    except Exception:
+        cutoff_at = int(time.time())
+    payload = {
+        "last_processed_at": cutoff_at,
+        "last_processed_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(cutoff_at)),
+        "updated_at": int(time.time()),
+        "processed_conversations": processed_conversation_records(transcripts),
+    }
+    path = memory_update_state_path(history_dir)
+    fd, tmp_path = tempfile.mkstemp(prefix="memories_update_state.", suffix=".tmp", dir=history_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+    return payload
+
+
 def memories_path_for_history_dir(history_dir):
     return os.path.join(history_dir, "memories.md")
 
@@ -224,6 +433,11 @@ def save_memory_file_with_backup(history_dir, content):
     if os.path.exists(path):
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         backup_path = f"{path}.bak.{timestamp}"
+        if os.path.exists(backup_path):
+            counter = 2
+            while os.path.exists(f"{backup_path}.{counter}"):
+                counter += 1
+            backup_path = f"{backup_path}.{counter}"
         with open(path, "rb") as src, open(backup_path, "wb") as dst:
             dst.write(src.read())
     fd, tmp_path = tempfile.mkstemp(prefix="memories.", suffix=".tmp", dir=history_dir)

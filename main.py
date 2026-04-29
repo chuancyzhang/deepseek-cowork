@@ -25,7 +25,9 @@ from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.llm.factory import LLMFactory
 from core.memory_update import (
     DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
-    generate_memory_update,
+    filter_transcripts_for_memory_update,
+    generate_memory_update_incremental,
+    load_memory_update_state,
     read_memory_file,
     save_memory_file_with_backup,
 )
@@ -3354,6 +3356,7 @@ class SmartSplitter(QSplitter):
 
 class MemoryUpdateWorker(QThread):
     progress_signal = Signal(str)
+    batch_preview_signal = Signal(dict)
     finished_signal = Signal(dict)
 
     def __init__(self, config_manager, chat_storage, history_dir, parent=None):
@@ -3364,6 +3367,9 @@ class MemoryUpdateWorker(QThread):
 
     def run(self):
         try:
+            cutoff_at = int(time.time())
+            update_state = load_memory_update_state(self.history_dir)
+            last_processed_at = int(update_state.get("last_processed_at") or 0)
             transcripts = self.chat_storage.iter_conversation_transcripts(
                 include_archived=True,
                 include_legacy_json=True,
@@ -3372,28 +3378,46 @@ class MemoryUpdateWorker(QThread):
                 item for item in transcripts
                 if item.get("messages")
             ]
+            all_transcript_count = len(transcripts)
+            transcripts = filter_transcripts_for_memory_update(
+                transcripts,
+                last_processed_at=last_processed_at,
+                cutoff_at=cutoff_at,
+            )
             if not transcripts:
                 self.finished_signal.emit({
                     "ok": False,
                     "empty": True,
-                    "error": "没有可用于更新长期记忆的历史会话。",
+                    "error": "没有上次更新后新增或变更的历史会话。",
+                    "last_processed_at": last_processed_at,
+                    "cutoff_at": cutoff_at,
+                    "all_transcript_count": all_transcript_count,
                 })
                 return
 
+            self.progress_signal.emit(
+                f"发现 {len(transcripts)} 个需要更新的历史会话；已跳过 {max(0, all_transcript_count - len(transcripts))} 个旧会话"
+            )
             self.progress_signal.emit("正在读取当前长期记忆")
             current_memory = read_memory_file(self.history_dir)
             self.progress_signal.emit("正在连接当前模型")
             provider = LLMFactory.create_provider(self.config_manager)
-            result = generate_memory_update(
+            result = generate_memory_update_incremental(
                 provider,
                 current_memory,
                 transcripts,
+                self.history_dir,
                 max_batch_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
                 progress_callback=self.progress_signal.emit,
+                preview_callback=self.batch_preview_signal.emit,
             )
             result.update({
                 "ok": True,
                 "current_memory": current_memory,
+                "cutoff_at": cutoff_at,
+                "last_processed_at": last_processed_at,
+                "processed_transcripts": transcripts,
+                "all_transcript_count": all_transcript_count,
             })
             self.finished_signal.emit(result)
         except Exception as exc:
@@ -3403,27 +3427,50 @@ class MemoryUpdateWorker(QThread):
             })
 
 
-class MemoryPreviewDialog(QDialog):
-    def __init__(self, memory_text, stats, parent=None):
+class MemoryUpdateDialog(QDialog):
+    save_requested = Signal(str)
+    background_requested = Signal()
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("长期记忆预览")
+        self.setWindowTitle("更新长期记忆")
         self.resize(760, 620)
+        self.running = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
-        title = QLabel("预览即将写入 memories.md 的长期记忆")
+        title = QLabel("正在根据历史会话更新长期记忆")
         title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
         layout.addWidget(title)
 
-        stats_label = QLabel(stats)
-        stats_label.setWordWrap(True)
-        stats_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(stats_label)
+        self.status_label = QLabel("准备开始")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(self.status_label)
+
+        process_label = QLabel("更新过程")
+        process_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
+        layout.addWidget(process_label)
+
+        self.process_log = QTextEdit()
+        self.process_log.setReadOnly(True)
+        self.process_log.setFixedHeight(150)
+        self.process_log.setStyleSheet(
+            f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
+            f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
+            "font-family: 'Consolas', monospace; font-size: 12px; padding: 8px;"
+        )
+        layout.addWidget(self.process_log)
+
+        result_label = QLabel("更新结果")
+        result_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
+        layout.addWidget(result_label)
 
         self.editor = QTextEdit()
-        self.editor.setPlainText(memory_text or "")
+        self.editor.setReadOnly(True)
+        self.editor.setPlaceholderText("生成完成后会在这里显示新的 memories.md 内容。")
         self.editor.setStyleSheet(
             f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
             f"background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; "
@@ -3433,23 +3480,80 @@ class MemoryPreviewDialog(QDialog):
 
         button_row = QHBoxLayout()
         button_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("保存到 memories.md")
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setIcon(qta.icon('fa5s.save', color='#ffffff'))
-        save_btn.setStyleSheet(
+        self.background_btn = QPushButton("缩小到后台")
+        self.background_btn.setCursor(Qt.PointingHandCursor)
+        self.background_btn.clicked.connect(self.hide_to_background)
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setEnabled(False)
+        self.close_btn.clicked.connect(self.reject)
+        self.save_btn = QPushButton("保存到 memories.md")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.setEnabled(False)
+        self.save_btn.setIcon(qta.icon('fa5s.save', color='#ffffff'))
+        self.save_btn.setStyleSheet(
             f"background-color: {DesignTokens.primary}; color: white; border-radius: 12px; "
             "padding: 8px 14px; font-weight: 700; border: none;"
         )
-        save_btn.clicked.connect(self.accept)
-        button_row.addWidget(cancel_btn)
-        button_row.addWidget(save_btn)
+        self.save_btn.clicked.connect(lambda: self.save_requested.emit(self.memory_text()))
+        button_row.addWidget(self.background_btn)
+        button_row.addWidget(self.close_btn)
+        button_row.addWidget(self.save_btn)
         layout.addLayout(button_row)
+
+    def append_progress(self, text):
+        text = str(text or "").strip()
+        if not text:
+            return
+        self.status_label.setText(text)
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.process_log.append(f"[{timestamp}] {text}")
+
+    def show_result(self, memory_text, stats):
+        self.running = False
+        self.append_progress("长期记忆预览生成完成")
+        self.status_label.setText(stats)
+        self.editor.setReadOnly(False)
+        self.editor.setPlainText(memory_text or "")
+        self.save_btn.setEnabled(True)
+        self.close_btn.setEnabled(True)
+        self.background_btn.setEnabled(False)
+
+    def show_batch_result(self, memory_text, stats):
+        self.status_label.setText(stats)
+        self.editor.setReadOnly(True)
+        self.editor.setPlainText(memory_text or "")
+        self.append_progress(stats)
+
+    def show_error(self, message):
+        self.running = False
+        self.status_label.setText(message)
+        self.append_progress(message)
+        self.close_btn.setEnabled(True)
+        self.save_btn.setEnabled(False)
+        self.background_btn.setEnabled(False)
+
+    def mark_saved(self, message):
+        self.running = False
+        self.status_label.setText(message)
+        self.append_progress(message)
+        self.save_btn.setEnabled(False)
+        self.close_btn.setEnabled(True)
+        self.background_btn.setEnabled(False)
 
     def memory_text(self):
         return self.editor.toPlainText()
+
+    def hide_to_background(self):
+        self.hide()
+        self.background_requested.emit()
+
+    def closeEvent(self, event):
+        if self.running:
+            self.hide_to_background()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 class ConversationSkillDraftWorker(QThread):
@@ -3840,6 +3944,9 @@ class MainWindow(QMainWindow):
         self._last_submit_ts = 0.0
         self._detached_workers = []
         self.memory_update_worker = None
+        self.memory_update_dialog = None
+        self._last_memory_update_cutoff_at = None
+        self._last_memory_update_transcripts = []
         self.conversation_skill_worker = None
         
         self.config_manager = ConfigManager()
@@ -6287,12 +6394,30 @@ class MainWindow(QMainWindow):
 
     def start_memory_update(self):
         if self.memory_update_worker and self.memory_update_worker.isRunning():
+            if self.memory_update_dialog:
+                self.memory_update_dialog.show()
+                self.memory_update_dialog.raise_()
+                self.memory_update_dialog.activateWindow()
+            return
+        if self.memory_update_dialog and not getattr(self.memory_update_dialog, "running", False):
+            self.memory_update_dialog.show()
+            self.memory_update_dialog.raise_()
+            self.memory_update_dialog.activateWindow()
             return
         self.save_chat_history(session_id=self.current_session_id)
+        self._last_memory_update_cutoff_at = None
+        self._last_memory_update_transcripts = []
         if hasattr(self, "sidebar_memory_btn"):
-            self.sidebar_memory_btn.setEnabled(False)
+            self.sidebar_memory_btn.setEnabled(True)
             self.sidebar_memory_btn.setText(" 正在更新记忆")
-        self.add_system_toast("开始扫描历史会话并生成长期记忆预览。", "info", auto_close_ms=3500)
+        self.memory_update_dialog = MemoryUpdateDialog(self)
+        self.memory_update_dialog.save_requested.connect(self.save_memory_update_from_dialog)
+        self.memory_update_dialog.background_requested.connect(self.handle_memory_update_backgrounded)
+        self.memory_update_dialog.finished.connect(self.handle_memory_update_dialog_finished)
+        self.memory_update_dialog.append_progress("开始扫描历史会话并生成长期记忆预览")
+        self.memory_update_dialog.show()
+        self.memory_update_dialog.raise_()
+        self.memory_update_dialog.activateWindow()
         self.memory_update_worker = MemoryUpdateWorker(
             self.config_manager,
             self.chat_storage,
@@ -6300,12 +6425,33 @@ class MainWindow(QMainWindow):
             self,
         )
         self.memory_update_worker.progress_signal.connect(self.handle_memory_update_progress)
+        self.memory_update_worker.batch_preview_signal.connect(self.handle_memory_update_batch_preview)
         self.memory_update_worker.finished_signal.connect(self.handle_memory_update_finished)
         self.memory_update_worker.finished.connect(self.memory_update_worker.deleteLater)
         self.memory_update_worker.start()
 
     def handle_memory_update_progress(self, text):
-        self.add_system_toast(text, "info", auto_close_ms=2500)
+        if self.memory_update_dialog:
+            self.memory_update_dialog.append_progress(text)
+
+    def handle_memory_update_batch_preview(self, data):
+        if not self.memory_update_dialog:
+            return
+        stats = (
+            f"批次 {data.get('batch_index', 0)}/{data.get('batch_count', 0)} 已写入 memories.md，"
+            f"累计处理 {data.get('processed_count', 0)}/{data.get('transcript_count', 0)} 个历史会话。"
+        )
+        self.memory_update_dialog.show_batch_result(data.get("content") or "", stats)
+
+    def handle_memory_update_backgrounded(self):
+        self.add_system_toast("长期记忆正在后台更新。点击“正在更新记忆”可查看进度。", "info", auto_close_ms=5000)
+
+    def handle_memory_update_dialog_finished(self, _result):
+        if self.memory_update_worker and self.memory_update_worker.isRunning():
+            return
+        self.memory_update_dialog = None
+        if hasattr(self, "sidebar_memory_btn"):
+            self.sidebar_memory_btn.setText(" 更新长期记忆")
 
     def handle_memory_update_finished(self, result):
         if hasattr(self, "sidebar_memory_btn"):
@@ -6322,23 +6468,45 @@ class MainWindow(QMainWindow):
         if not result.get("ok"):
             message = result.get("error") or "长期记忆更新失败。"
             if result.get("empty"):
+                if self.memory_update_dialog:
+                    self.memory_update_dialog.show_error(message)
+                    self.memory_update_dialog.show()
+                    self.memory_update_dialog.raise_()
+                    self.memory_update_dialog.activateWindow()
+                if hasattr(self, "sidebar_memory_btn"):
+                    self.sidebar_memory_btn.setText(" 查看更新状态")
                 self.add_system_toast(message, "info", auto_close_ms=5000)
             else:
+                if self.memory_update_dialog:
+                    self.memory_update_dialog.show_error(f"长期记忆更新失败：{message}")
+                    self.memory_update_dialog.show()
+                    self.memory_update_dialog.raise_()
+                    self.memory_update_dialog.activateWindow()
+                if hasattr(self, "sidebar_memory_btn"):
+                    self.sidebar_memory_btn.setText(" 查看更新状态")
                 self.add_system_toast(f"长期记忆更新失败：{message}", "error", auto_close_ms=8000)
             return
 
         memory_text = result.get("content") or ""
+        self._last_memory_update_cutoff_at = result.get("cutoff_at")
+        self._last_memory_update_transcripts = result.get("processed_transcripts") or []
         stats = (
             f"历史会话 {result.get('transcript_count', 0)} 个，"
+            f"本次跳过旧会话 {max(0, result.get('all_transcript_count', 0) - result.get('transcript_count', 0))} 个，"
             f"分批 {result.get('batch_count', 0)} 批，"
             f"估算输入 {result.get('estimated_tokens', 0)} tokens。"
-            "保存前你可以直接编辑下方内容。"
+            "每个批次已自动写入 memories.md；你仍可编辑下方内容并再次保存。"
         )
-        dialog = MemoryPreviewDialog(memory_text, stats, self)
-        if dialog.exec() != QDialog.Accepted:
-            self.add_system_toast("已取消保存长期记忆，memories.md 未改动。", "info", auto_close_ms=4000)
-            return
-        final_text = dialog.memory_text().strip()
+        if self.memory_update_dialog:
+            self.memory_update_dialog.show_result(memory_text, stats)
+            self.memory_update_dialog.show()
+            self.memory_update_dialog.raise_()
+            self.memory_update_dialog.activateWindow()
+        if hasattr(self, "sidebar_memory_btn"):
+            self.sidebar_memory_btn.setText(" 查看记忆结果")
+
+    def save_memory_update_from_dialog(self, memory_text):
+        final_text = (memory_text or "").strip()
         if not final_text:
             QMessageBox.warning(self, "无法保存", "长期记忆内容为空，已取消保存。")
             return
@@ -6346,8 +6514,13 @@ class MainWindow(QMainWindow):
             save_result = save_memory_file_with_backup(self.chat_history_dir, final_text + "\n")
             backup_path = save_result.get("backup_path")
             suffix = f" 已备份旧文件：{backup_path}" if backup_path else ""
+            suffix = f"{suffix} 本次处理状态已在批次写入时记录。"
+            if self.memory_update_dialog:
+                self.memory_update_dialog.mark_saved(f"长期记忆已保存到 memories.md。{suffix}")
             self.add_system_toast(f"长期记忆已保存到 memories.md。{suffix}", "success", auto_close_ms=8000)
         except Exception as exc:
+            if self.memory_update_dialog:
+                self.memory_update_dialog.show_error(f"保存长期记忆失败：{exc}")
             self.add_system_toast(f"保存长期记忆失败：{exc}", "error", auto_close_ms=8000)
 
     def load_default_workspace(self):

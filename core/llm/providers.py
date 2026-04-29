@@ -171,10 +171,28 @@ class MoonshotProvider(OpenAIProvider):
 
 class AnthropicProvider(LLMProvider):
     def __init__(self, api_key, base_url, model_name):
+        import anthropic
         from anthropic import Anthropic
         # Anthropic SDK handles base_url differently usually, but we can pass it
-        self.client = Anthropic(api_key=api_key, base_url=base_url)
+        client_kwargs = {"base_url": base_url}
+        cleaned_key = str(api_key or "").strip()
+        if self._uses_bearer_auth(base_url):
+            if cleaned_key.lower().startswith("bearer "):
+                cleaned_key = cleaned_key[7:].strip()
+            client_kwargs["auth_token"] = cleaned_key
+            omit_header = getattr(anthropic, "omit", None)
+            if omit_header is not None:
+                client_kwargs["default_headers"] = {"X-Api-Key": omit_header}
+        else:
+            client_kwargs["api_key"] = cleaned_key
+        self.client = Anthropic(**client_kwargs)
+        self.base_url = base_url
         self.model_name = model_name
+
+    @staticmethod
+    def _uses_bearer_auth(base_url):
+        text = str(base_url or "").strip().lower().rstrip("/")
+        return text.endswith("/coding/anthropic") or "/coding/anthropic/" in text
 
     def chat_stream(self, messages, tools=None):
         try:

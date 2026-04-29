@@ -3351,6 +3351,11 @@ def resolve_app_icon_path():
     return ""
 
 class MainWindow(QMainWindow):
+    RIGHT_TAB_FILES = 0
+    RIGHT_TAB_PLAN = 1
+    RIGHT_TAB_OBSERVABILITY = 2
+    RIGHT_TAB_SUB_AGENTS = 3
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSeek Cowork")
@@ -3597,7 +3602,7 @@ class MainWindow(QMainWindow):
         right_header_layout.setContentsMargins(16, 14, 16, 14)
         self.right_title_label = QLabel("任务上下文")
         self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
-        self.right_desc_label = QLabel("查看文件、变更与执行步骤")
+        self.right_desc_label = QLabel("查看文件、计划与执行步骤")
         self.right_desc_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         right_title_box = QVBoxLayout()
         right_title_box.setContentsMargins(0, 0, 0, 0)
@@ -3686,18 +3691,6 @@ class MainWindow(QMainWindow):
         ws_tab_layout.addWidget(self.right_inner_splitter)
         
         self.right_tabs.addTab(self.workspace_tab, "工作区文件")
-        
-        self.change_tab = QWidget()
-        change_layout = QVBoxLayout(self.change_tab)
-        change_layout.setContentsMargins(12, 12, 12, 12)
-        change_layout.setSpacing(10)
-        self.change_intro_label = QLabel("本次任务涉及的文件变更会在这里汇总显示。")
-        self.change_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        change_layout.addWidget(self.change_intro_label)
-        self.change_list = QListWidget()
-        self.change_list.setStyleSheet(f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card};")
-        change_layout.addWidget(self.change_list, 1)
-        self.right_tabs.addTab(self.change_tab, "变更")
 
         self.plan_tab = QWidget()
         plan_layout = QVBoxLayout(self.plan_tab)
@@ -3726,7 +3719,7 @@ class MainWindow(QMainWindow):
         plan_layout.addWidget(self.plan_document_view, 1)
         self.right_tabs.addTab(self.plan_tab, "计划")
 
-        # Tab 2: Observability
+        # Observability
         self.tool_details_tab = QWidget()
         td_layout = QVBoxLayout(self.tool_details_tab)
         td_layout.setContentsMargins(12, 12, 12, 12)
@@ -3867,7 +3860,7 @@ class MainWindow(QMainWindow):
         
         self.right_tabs.addTab(self.tool_details_tab, "观测")
 
-        # Tab 4: Sub-Agent Monitor
+        # Sub-Agent Monitor
         self.sub_agent_tab = QWidget()
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
         sub_agent_layout.setContentsMargins(12, 12, 12, 12)
@@ -3884,11 +3877,10 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(self.right_tabs)
         try:
-            self.right_tabs.setTabText(0, "文件")
-            self.right_tabs.setTabText(1, "变更")
-            self.right_tabs.setTabText(2, "计划")
-            self.right_tabs.setTabText(3, "观测")
-            self.right_tabs.setTabText(4, "子Agent")
+            self.right_tabs.setTabText(self.RIGHT_TAB_FILES, "文件")
+            self.right_tabs.setTabText(self.RIGHT_TAB_PLAN, "计划")
+            self.right_tabs.setTabText(self.RIGHT_TAB_OBSERVABILITY, "观测")
+            self.right_tabs.setTabText(self.RIGHT_TAB_SUB_AGENTS, "子Agent")
         except Exception:
             pass
         
@@ -4249,31 +4241,6 @@ class MainWindow(QMainWindow):
         if not state:
             return
         if session_id is None or state.session_id == self.current_session_id:
-            self.change_list.clear()
-            if not state.changed_files:
-                item = QListWidgetItem("No file changes yet in this task.")
-                item.setFlags(Qt.NoItemFlags)
-                self.change_list.addItem(item)
-            else:
-                seen = set()
-                for entry in state.changed_files:
-                    if not isinstance(entry, dict):
-                        continue
-                    path = entry.get("path") or ""
-                    if path in seen:
-                        continue
-                    seen.add(path)
-                    change_type = entry.get("type") or "updated"
-                    label = path
-                    if self.workspace_dir and path.startswith(self.workspace_dir):
-                        label = os.path.relpath(path, self.workspace_dir)
-                    summary = entry.get("summary") or change_type
-                    item = QListWidgetItem(f"{change_type} | {label}\n{summary}")
-                    item.setData(Qt.UserRole, entry)
-                    self.change_list.addItem(item)
-            self.change_intro_label.setText(
-                "Files touched by the current task." if state.changed_files else "File changes will appear here."
-            )
             self.refresh_context_badges(state.session_id)
 
     def refresh_step_list(self, session_id=None):
@@ -4400,7 +4367,7 @@ class MainWindow(QMainWindow):
             state.observability_events = state.observability_events[-500:]
         if state.session_id == self.current_session_id:
             self.right_sidebar.setVisible(True)
-            self.right_tabs.setCurrentIndex(3)
+            self.right_tabs.setCurrentIndex(self.RIGHT_TAB_OBSERVABILITY)
             self.refresh_observability_view(state.session_id)
             self.refresh_context_badges(state.session_id)
 
@@ -5948,7 +5915,7 @@ class MainWindow(QMainWindow):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
             self.right_sidebar.setVisible(True)
-            self.right_tabs.setCurrentIndex(0)
+            self.right_tabs.setCurrentIndex(self.RIGHT_TAB_FILES)
 
     def update_recent_workspaces(self, path):
         if path in self.recent_workspaces: self.recent_workspaces.remove(path)
@@ -6334,7 +6301,7 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)
         self.right_sidebar.setVisible(True)
-        self.right_tabs.setCurrentIndex(3)
+        self.right_tabs.setCurrentIndex(self.RIGHT_TAB_OBSERVABILITY)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
@@ -6376,7 +6343,7 @@ class MainWindow(QMainWindow):
             self.right_sidebar.setVisible(True)
             
         if switch_tab:
-            self.right_tabs.setCurrentIndex(3)
+            self.right_tabs.setCurrentIndex(self.RIGHT_TAB_OBSERVABILITY)
         
         # 3. Update Content
         self.td_info_label.setText(f"工具 ID: {tool_id}")
@@ -6564,7 +6531,7 @@ class MainWindow(QMainWindow):
         if (hasattr(self, 'current_selected_tool_id') and 
             self.current_selected_tool_id == tool_id and 
             self.right_sidebar.isVisible() and 
-            self.right_tabs.currentIndex() == 3):
+            self.right_tabs.currentIndex() == self.RIGHT_TAB_OBSERVABILITY):
             
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
         self.process_ui_events(force=True)

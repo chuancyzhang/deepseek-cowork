@@ -27,6 +27,7 @@ class TestLLMFactory(unittest.TestCase):
         self.openai_module.OpenAI = MagicMock()
         self.anthropic_module = ModuleType("anthropic")
         self.anthropic_module.Anthropic = MagicMock()
+        self.anthropic_module.omit = object()
         self.module_patcher = unittest.mock.patch.dict(
             sys.modules,
             {"openai": self.openai_module, "anthropic": self.anthropic_module},
@@ -50,6 +51,24 @@ class TestLLMFactory(unittest.TestCase):
         provider = LLMFactory.create_provider(self.mock_config)
         self.assertIsInstance(provider, AnthropicProvider)
         self.assertEqual(provider.model_name, "test-model")
+        self.anthropic_module.Anthropic.assert_called_with(
+            api_key="test_key",
+            base_url="https://test.url",
+        )
+
+    def test_create_anthropic_provider_uses_bearer_for_tencent_coding_endpoint(self):
+        self.config_data["llm_provider"] = "anthropic"
+        self.config_data["api_key"] = "Bearer coding-token"
+        self.config_data["base_url"] = "https://api.lkeap.cloud.tencent.com/coding/anthropic"
+
+        provider = LLMFactory.create_provider(self.mock_config)
+
+        self.assertIsInstance(provider, AnthropicProvider)
+        self.anthropic_module.Anthropic.assert_called_with(
+            auth_token="coding-token",
+            base_url="https://api.lkeap.cloud.tencent.com/coding/anthropic",
+            default_headers={"X-Api-Key": self.anthropic_module.omit},
+        )
 
     def test_create_provider_uses_new_default_model_name(self):
         self.config_data.pop("model_name", None)

@@ -7,6 +7,7 @@ import unittest
 from core.chat_storage import ChatStorage
 from core.memory_update import (
     batch_transcripts,
+    collect_llm_content,
     estimate_tokens,
     filter_transcripts_for_memory_update,
     generate_memory_update,
@@ -37,6 +38,18 @@ class IncrementalFakeProvider:
     def chat_stream(self, messages, tools=None):
         self.calls += 1
         yield {"type": "content", "content": f"# Memory\n- batch {self.calls}"}
+
+
+class EmptyThenSuccessProvider:
+    def __init__(self, empty_count=4):
+        self.calls = 0
+        self.empty_count = empty_count
+
+    def chat_stream(self, messages, tools=None):
+        self.calls += 1
+        if self.calls <= self.empty_count:
+            return
+        yield {"type": "content", "content": "success"}
 
 
 class TestMemoryUpdate(unittest.TestCase):
@@ -150,6 +163,19 @@ class TestMemoryUpdate(unittest.TestCase):
         state = load_memory_update_state(self.temp_dir)
         self.assertEqual(state["last_processed_at"], 200)
         self.assertEqual([item["id"] for item in state["processed_conversations"]], ["a", "b"])
+
+    def test_collect_llm_content_retries_empty_responses_five_times(self):
+        provider = EmptyThenSuccessProvider(empty_count=4)
+        progress = []
+        content = collect_llm_content(
+            provider,
+            [{"role": "user", "content": "hello"}],
+            max_retries=5,
+            progress_callback=progress.append,
+        )
+        self.assertEqual(content, "success")
+        self.assertEqual(provider.calls, 5)
+        self.assertEqual(len(progress), 4)
 
 
 if __name__ == "__main__":

@@ -191,7 +191,23 @@ def build_incremental_memory_update_messages(current_memory, batch_text, batch_i
     ]
 
 
-def collect_llm_content(provider, messages):
+def collect_llm_content(provider, messages, max_retries=5, progress_callback=None):
+    max_retries = max(1, int(max_retries or 1))
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return _collect_llm_content_once(provider, messages)
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt >= max_retries:
+                break
+            if progress_callback:
+                progress_callback(f"LLM 返回为空或失败，正在重试 {attempt + 1}/{max_retries}：{exc}")
+            time.sleep(min(2.0, 0.3 * attempt))
+    raise RuntimeError(str(last_error or "LLM did not return memory content."))
+
+
+def _collect_llm_content_once(provider, messages):
     parts = []
     errors = []
     for chunk in provider.chat_stream(messages, tools=None):
@@ -231,7 +247,7 @@ def generate_memory_update(provider, current_memory, transcripts, max_batch_toke
             batch_index=index,
             batch_count=len(batches),
         )
-        summaries.append(collect_llm_content(provider, messages))
+        summaries.append(collect_llm_content(provider, messages, progress_callback=progress_callback))
 
     if progress_callback:
         progress_callback("正在合并长期记忆预览")
@@ -239,7 +255,7 @@ def generate_memory_update(provider, current_memory, transcripts, max_batch_toke
         current_memory=current_memory,
         batch_summaries=summaries,
     )
-    final_content = collect_llm_content(provider, final_messages)
+    final_content = collect_llm_content(provider, final_messages, progress_callback=progress_callback)
     return {
         "content": final_content,
         "batch_count": len(batches),
@@ -282,7 +298,7 @@ def generate_memory_update_incremental(
             batch_index=index,
             batch_count=len(batches),
         )
-        updated_memory = collect_llm_content(provider, messages)
+        updated_memory = collect_llm_content(provider, messages, progress_callback=progress_callback)
         save_result = save_memory_file_with_backup(history_dir, updated_memory + "\n")
         batch_transcripts = batch.get("transcripts") or []
         processed_transcripts.extend(batch_transcripts)

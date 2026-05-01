@@ -112,9 +112,17 @@ class TestPlanningModeLLMWorker(unittest.TestCase):
 
             self.assertTrue(events)
             self.assertEqual(events[0].get("type"), "system_prompt")
-            self.assertIn("策略 [计划模式]", events[0].get("content", ""))
+            system_prompt = events[0].get("content", "")
+            self.assertIn("策略 [计划模式]", system_prompt)
+            self.assertIn("run_python_code", system_prompt)
+            self.assertIn("bash", system_prompt)
+            self.assertIn("优先使用 'run_python_code'", system_prompt)
+            self.assertIn("策略 [元工具导航]", system_prompt)
+            self.assertIn("tool_search", system_prompt)
+            self.assertIn("update_experience", system_prompt)
+            self.assertIn("request_user_input", system_prompt)
             self.assertTrue(provider_events)
-            self.assertEqual(events[0].get("content"), provider_events[0][1])
+            self.assertEqual(system_prompt, provider_events[0][1])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -746,7 +746,9 @@ class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.resize(720, 560)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available_height = screen.availableGeometry().height() if screen else 560
+        self.resize(720, min(560, max(420, available_height - 96)))
         self.config_manager = config_manager
         self._main = parent
 
@@ -763,8 +765,12 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        base_tab = QWidget()
-        base_layout = QVBoxLayout(base_tab)
+        base_tab = QScrollArea()
+        base_tab.setWidgetResizable(True)
+        base_tab.setFrameShape(QFrame.NoFrame)
+        base_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        base_content = QWidget()
+        base_layout = QVBoxLayout(base_content)
         base_layout.setContentsMargins(12, 16, 12, 16)
         base_layout.setSpacing(18)
 
@@ -924,6 +930,7 @@ class SettingsDialog(QDialog):
         base_layout.addWidget(storage_group)
         base_layout.addWidget(advanced_group)
         base_layout.addStretch()
+        base_tab.setWidget(base_content)
         self.tabs.addTab(base_tab, "基础设置")
 
         im_tab = QWidget()

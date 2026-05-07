@@ -16,6 +16,7 @@ class TestLLMFactory(unittest.TestCase):
     def setUp(self):
         self.mock_config = MagicMock(spec=ConfigManager)
         self.mock_config.get.side_effect = self._config_get
+        self.mock_config.get_model_profile.return_value = None
 
         self.config_data = {
             "api_key": "test_key",
@@ -75,6 +76,44 @@ class TestLLMFactory(unittest.TestCase):
         provider = LLMFactory.create_provider(self.mock_config)
         self.assertIsInstance(provider, OpenAIProvider)
         self.assertEqual(provider.model_name, DEFAULT_DEEPSEEK_MODEL)
+
+    def test_create_provider_uses_selected_model_profile(self):
+        self.mock_config.get_model_profile.return_value = {
+            "provider": "openai",
+            "api_key": "profile_key",
+            "base_url": "https://profile.url",
+            "model_name": "profile-model",
+            "deepseek_thinking_enabled": False,
+            "deepseek_reasoning_effort": "max",
+        }
+
+        provider = LLMFactory.create_provider(self.mock_config, "openai-profile")
+
+        self.assertIsInstance(provider, OpenAIProvider)
+        self.assertEqual(provider.model_name, "profile-model")
+        self.openai_module.OpenAI.assert_called_with(
+            api_key="profile_key",
+            base_url="https://profile.url",
+        )
+        self.assertFalse(provider.thinking_enabled)
+        self.assertEqual(provider.reasoning_effort, "max")
+
+    def test_create_provider_uses_anthropic_profile(self):
+        self.mock_config.get_model_profile.return_value = {
+            "provider": "anthropic",
+            "api_key": "anthropic_key",
+            "base_url": "https://anthropic.url",
+            "model_name": "claude-test",
+        }
+
+        provider = LLMFactory.create_provider(self.mock_config, "anthropic-profile")
+
+        self.assertIsInstance(provider, AnthropicProvider)
+        self.assertEqual(provider.model_name, "claude-test")
+        self.anthropic_module.Anthropic.assert_called_with(
+            api_key="anthropic_key",
+            base_url="https://anthropic.url",
+        )
 
 if __name__ == '__main__':
     unittest.main()

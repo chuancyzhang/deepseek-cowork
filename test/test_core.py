@@ -56,6 +56,51 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)
         self.assertEqual(cm.get("deepseek_reasoning_effort"), DEFAULT_DEEPSEEK_REASONING_EFFORT)
         self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
+        self.assertTrue(cm.get("model_provider_configs"))
+        self.assertEqual(cm.get_selected_model_id(), "openai-default")
+
+    def test_migrates_legacy_model_config_to_provider_group(self):
+        cm = self._create_config_manager(
+            {
+                "llm_provider": "openai",
+                "api_key": "legacy-key",
+                "base_url": "https://legacy.example",
+                "model_name": "legacy-model",
+                "deepseek_thinking_enabled": False,
+                "deepseek_reasoning_effort": "max",
+            }
+        )
+
+        profile = cm.get_model_profile()
+
+        self.assertEqual(profile["provider"], "openai")
+        self.assertEqual(profile["api_key"], "legacy-key")
+        self.assertEqual(profile["base_url"], "https://legacy.example")
+        self.assertEqual(profile["model_name"], "legacy-model")
+        self.assertFalse(profile["deepseek_thinking_enabled"])
+        self.assertEqual(profile["deepseek_reasoning_effort"], "max")
+        self.assertEqual(cm.get("llm_provider"), "openai")
+        self.assertEqual(cm.get("model_name"), "legacy-model")
+
+    def test_set_selected_model_id_syncs_legacy_fields(self):
+        cm = self._create_config_manager()
+        configs = cm.get_model_provider_configs()
+        configs["anthropic"]["api_key"] = "anthropic-key"
+        configs["anthropic"]["base_url"] = "https://anthropic.example"
+        configs["anthropic"]["models"] = [
+            {
+                "id": "anthropic-custom",
+                "display_name": "Claude Test",
+                "model_name": "claude-test",
+            }
+        ]
+        cm.set_model_provider_configs(configs, "anthropic-custom")
+
+        self.assertEqual(cm.get_selected_model_id(), "anthropic-custom")
+        self.assertEqual(cm.get("llm_provider"), "anthropic")
+        self.assertEqual(cm.get("api_key"), "anthropic-key")
+        self.assertEqual(cm.get("base_url"), "https://anthropic.example")
+        self.assertEqual(cm.get("model_name"), "claude-test")
 
     def test_migrates_legacy_deepseek_model_name(self):
         cm = self._create_config_manager({"model_name": "deepseek-reasoner"})

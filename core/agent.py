@@ -827,7 +827,10 @@ class LLMWorker(QThread):
                     start_time = time.time()
                     
                     # Create Provider via Factory
-                    provider = LLMFactory.create_provider(self.config_manager)
+                    provider = LLMFactory.create_provider(
+                        self.config_manager,
+                        self.run_context.get("selected_model_id"),
+                    )
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     self.step_signal.emit(f"Provider Start: {provider_name}")
                     require_reasoning_replay = bool(

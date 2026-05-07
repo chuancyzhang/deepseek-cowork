@@ -742,6 +742,200 @@ class SkillsCenterDialog(QDialog):
             else:
                 QMessageBox.warning(self, "失败", msg)
 
+class ModelEditDialog(QDialog):
+    def __init__(self, provider_id, model=None, parent=None):
+        super().__init__(parent)
+        self.provider_id = provider_id
+        self.setWindowTitle("模型配置")
+        self.resize(420, 260)
+        model = dict(model or {})
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.display_name_input = QLineEdit()
+        self.display_name_input.setPlaceholderText("例如：DeepSeek V4 Pro")
+        self.display_name_input.setText(str(model.get("display_name") or ""))
+        form.addRow("显示名称", self.display_name_input)
+
+        self.model_name_input = QLineEdit()
+        self.model_name_input.setPlaceholderText(DEFAULT_DEEPSEEK_MODEL if provider_id == "openai" else "claude-sonnet-4-5")
+        self.model_name_input.setText(str(model.get("model_name") or ""))
+        form.addRow("模型名称", self.model_name_input)
+
+        self.thinking_check = None
+        self.reasoning_combo = None
+        if provider_id == "openai":
+            self.thinking_check = QCheckBox("启用 Thinking 模式")
+            self.thinking_check.setChecked(
+                bool(model.get("deepseek_thinking_enabled", DEFAULT_DEEPSEEK_THINKING_ENABLED))
+            )
+            form.addRow("DeepSeek 思考", self.thinking_check)
+
+            self.reasoning_combo = QComboBox()
+            for effort in SUPPORTED_DEEPSEEK_REASONING_EFFORTS:
+                self.reasoning_combo.addItem(effort, effort)
+            effort = normalize_deepseek_reasoning_effort(
+                model.get("deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT)
+            )
+            effort_index = self.reasoning_combo.findData(effort)
+            if effort_index >= 0:
+                self.reasoning_combo.setCurrentIndex(effort_index)
+            form.addRow("思考强度", self.reasoning_combo)
+
+        layout.addLayout(form)
+        hint = QLabel("显示名称用于提问栏下拉；模型名称会原样传给对应供应商 API。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("保存")
+        ok_btn.setObjectName("PrimaryBtn")
+        ok_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(ok_btn)
+        layout.addLayout(buttons)
+
+    def get_model(self, existing_id=None):
+        model_name = self.model_name_input.text().strip()
+        display_name = self.display_name_input.text().strip() or model_name
+        item = {
+            "id": existing_id or "",
+            "display_name": display_name,
+            "model_name": model_name,
+        }
+        if self.provider_id == "openai":
+            item["deepseek_thinking_enabled"] = bool(self.thinking_check and self.thinking_check.isChecked())
+            item["deepseek_reasoning_effort"] = (
+                self.reasoning_combo.currentData()
+                if self.reasoning_combo
+                else DEFAULT_DEEPSEEK_REASONING_EFFORT
+            )
+        return item
+
+    def accept(self):
+        if not self.model_name_input.text().strip():
+            QMessageBox.warning(self, "模型配置", "请填写模型名称。")
+            return
+        super().accept()
+
+
+class ProviderModelEditor(QGroupBox):
+    def __init__(self, provider_id, title, provider_config, parent=None):
+        super().__init__(title, parent)
+        self.provider_id = provider_id
+        self.provider_config = json.loads(json.dumps(provider_config or {}, ensure_ascii=False))
+        self.setStyleSheet(
+            "QGroupBox { font-weight: 600; border: 1px solid #dbe3ee; border-radius: 14px; "
+            "margin-top: 10px; padding: 18px 16px 16px 16px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        form = QFormLayout()
+        form.setSpacing(10)
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("粘贴这个供应商的 API Key")
+        self.api_key_input.setText(str(self.provider_config.get("api_key") or ""))
+        form.addRow("API Key", self.api_key_input)
+        self.base_url_input = QLineEdit()
+        self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL if provider_id == "openai" else "https://api.anthropic.com")
+        self.base_url_input.setText(str(self.provider_config.get("base_url") or ""))
+        form.addRow("Base URL", self.base_url_input)
+        layout.addLayout(form)
+
+        self.model_list = QListWidget()
+        self.model_list.setMinimumHeight(120)
+        layout.addWidget(self.model_list)
+
+        button_row = QHBoxLayout()
+        add_btn = QPushButton("新增模型")
+        add_btn.setObjectName("SecondaryBtn")
+        edit_btn = QPushButton("编辑")
+        edit_btn.setObjectName("SecondaryBtn")
+        delete_btn = QPushButton("删除")
+        delete_btn.setObjectName("SecondaryBtn")
+        add_btn.clicked.connect(self.add_model)
+        edit_btn.clicked.connect(self.edit_model)
+        delete_btn.clicked.connect(self.delete_model)
+        button_row.addWidget(add_btn)
+        button_row.addWidget(edit_btn)
+        button_row.addWidget(delete_btn)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        self.refresh_model_list()
+
+    def _models(self):
+        models = self.provider_config.setdefault("models", [])
+        if not isinstance(models, list):
+            self.provider_config["models"] = []
+        return self.provider_config["models"]
+
+    def refresh_model_list(self):
+        self.model_list.clear()
+        for model in self._models():
+            label = model.get("display_name") or model.get("model_name") or "未命名模型"
+            item = QListWidgetItem(f"{label}  ·  {model.get('model_name', '')}")
+            item.setData(Qt.UserRole, model.get("id"))
+            self.model_list.addItem(item)
+        if self.model_list.count() and self.model_list.currentRow() < 0:
+            self.model_list.setCurrentRow(0)
+
+    def add_model(self):
+        dialog = ModelEditDialog(self.provider_id, parent=self)
+        if dialog.exec() == QDialog.Accepted:
+            model = dialog.get_model()
+            model["id"] = f"{self.provider_id}-{uuid.uuid4().hex[:8]}"
+            self._models().append(model)
+            self.refresh_model_list()
+
+    def _current_model_index(self):
+        row = self.model_list.currentRow()
+        if row < 0 or row >= len(self._models()):
+            return -1
+        return row
+
+    def edit_model(self):
+        index = self._current_model_index()
+        if index < 0:
+            return
+        current = self._models()[index]
+        dialog = ModelEditDialog(self.provider_id, current, self)
+        if dialog.exec() == QDialog.Accepted:
+            self._models()[index] = dialog.get_model(existing_id=current.get("id"))
+            self.refresh_model_list()
+            self.model_list.setCurrentRow(index)
+
+    def delete_model(self):
+        index = self._current_model_index()
+        if index < 0:
+            return
+        if len(self._models()) <= 1:
+            QMessageBox.warning(self, "模型配置", "每个供应商至少保留一个模型。")
+            return
+        del self._models()[index]
+        self.refresh_model_list()
+        self.model_list.setCurrentRow(min(index, self.model_list.count() - 1))
+
+    def get_provider_config(self):
+        return {
+            "display_name": self.provider_config.get("display_name") or self.title(),
+            "api_key": self.api_key_input.text().strip(),
+            "base_url": self.base_url_input.text().strip(),
+            "models": self._models(),
+        }
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
@@ -774,78 +968,25 @@ class SettingsDialog(QDialog):
         base_layout.setContentsMargins(12, 16, 12, 16)
         base_layout.setSpacing(18)
 
-        model_group = QGroupBox("模型与连接")
-        model_group.setStyleSheet(group_style)
-        model_layout = QFormLayout(model_group)
-        model_layout.setSpacing(12)
+        model_header = QLabel("模型与连接")
+        model_header.setProperty("roleTitle", True)
+        model_intro = QLabel("按供应商共享 API Key 与 Base URL，并在提问栏选择本轮使用的具体模型。")
+        model_intro.setWordWrap(True)
+        model_intro.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        base_layout.addWidget(model_header)
+        base_layout.addWidget(model_intro)
 
-        self.provider_combo = QComboBox()
-        self.provider_combo.addItem("OpenAI 兼容服务（含 DeepSeek）", "openai")
-        self.provider_combo.addItem("Anthropic / Claude 系列", "anthropic")
-        current_provider = self.config_manager.get("llm_provider", "openai")
-        index = self.provider_combo.findData(current_provider)
-        if index >= 0:
-            self.provider_combo.setCurrentIndex(index)
-        model_layout.addRow("模型供应商", self.provider_combo)
-
-        provider_hint = QLabel("常用场景直接选择默认供应商即可，接口地址与模型名称可在高级配置里调整。")
-        provider_hint.setWordWrap(True)
-        provider_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        model_layout.addRow("", provider_hint)
-
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("粘贴你的 API Key")
-        self.api_key_input.setText(self.config_manager.get("api_key", ""))
-        model_layout.addRow("API Key", self.api_key_input)
-
-        guide_label = QLabel('获取方式：<a href="https://platform.deepseek.com/">DeepSeek 开发者平台</a>')
-        guide_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        guide_label.setOpenExternalLinks(True)
-        guide_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
-        model_layout.addRow("", guide_label)
-
-        self.advanced_model_toggle = QCheckBox("显示高级模型配置")
-        self.advanced_model_toggle.setChecked(True)
-        model_layout.addRow("", self.advanced_model_toggle)
-
-        self.advanced_model_container = QWidget()
-        advanced_model_layout = QFormLayout(self.advanced_model_container)
-        advanced_model_layout.setContentsMargins(0, 0, 0, 0)
-        advanced_model_layout.setSpacing(12)
-        self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL)
-        self.base_url_input.setText(self.config_manager.get("base_url", DEFAULT_DEEPSEEK_BASE_URL))
-        advanced_model_layout.addRow("自定义接口地址", self.base_url_input)
-
-        self.model_name_input = QLineEdit()
-        self.model_name_input.setPlaceholderText(DEFAULT_DEEPSEEK_MODEL)
-        self.model_name_input.setText(self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL))
-        advanced_model_layout.addRow("模型名称", self.model_name_input)
-
-        self.deepseek_thinking_check = QCheckBox("启用 Thinking 模式")
-        self.deepseek_thinking_check.setChecked(
-            bool(self.config_manager.get("deepseek_thinking_enabled", DEFAULT_DEEPSEEK_THINKING_ENABLED))
+        provider_configs = self.config_manager.get_model_provider_configs()
+        self.openai_model_editor = ProviderModelEditor(
+            "openai",
+            "OpenAI 兼容服务（含 DeepSeek）",
+            provider_configs.get("openai") or {},
         )
-        advanced_model_layout.addRow("DeepSeek 思考模式", self.deepseek_thinking_check)
-
-        self.deepseek_reasoning_effort_combo = QComboBox()
-        for effort in SUPPORTED_DEEPSEEK_REASONING_EFFORTS:
-            self.deepseek_reasoning_effort_combo.addItem(effort, effort)
-        current_effort = normalize_deepseek_reasoning_effort(
-            self.config_manager.get("deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT)
+        self.anthropic_model_editor = ProviderModelEditor(
+            "anthropic",
+            "Anthropic / Claude 系列",
+            provider_configs.get("anthropic") or {},
         )
-        effort_index = self.deepseek_reasoning_effort_combo.findData(current_effort)
-        if effort_index >= 0:
-            self.deepseek_reasoning_effort_combo.setCurrentIndex(effort_index)
-        advanced_model_layout.addRow("DeepSeek 思考强度", self.deepseek_reasoning_effort_combo)
-
-        deepseek_hint = QLabel("以上两项仅在使用 DeepSeek 接口时生效，其他 OpenAI 兼容服务不会下发这些参数。")
-        deepseek_hint.setWordWrap(True)
-        deepseek_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        advanced_model_layout.addRow("", deepseek_hint)
-        model_layout.addRow("", self.advanced_model_container)
-        self.advanced_model_toggle.toggled.connect(self.advanced_model_container.setVisible)
 
         storage_group = QGroupBox("工作区与存储")
         storage_group.setStyleSheet(group_style)
@@ -926,7 +1067,8 @@ class SettingsDialog(QDialog):
         permission_layout.addWidget(self.god_mode_check)
         advanced_layout.addWidget(permission_panel)
 
-        base_layout.addWidget(model_group)
+        base_layout.addWidget(self.openai_model_editor)
+        base_layout.addWidget(self.anthropic_model_editor)
         base_layout.addWidget(storage_group)
         base_layout.addWidget(advanced_group)
         base_layout.addStretch()
@@ -999,17 +1141,20 @@ class SettingsDialog(QDialog):
         layout.addLayout(btn_layout)
 
     def save_settings(self):
-        self.config_manager.set("llm_provider", self.provider_combo.currentData())
-        self.config_manager.set("api_key", self.api_key_input.text().strip())
-        base_url = self.base_url_input.text().strip() or DEFAULT_DEEPSEEK_BASE_URL
-        self.config_manager.set("base_url", base_url)
-        model_name = self.model_name_input.text().strip() or DEFAULT_DEEPSEEK_MODEL
-        self.config_manager.set("model_name", model_name)
-        self.config_manager.set("deepseek_thinking_enabled", self.deepseek_thinking_check.isChecked())
-        self.config_manager.set(
-            "deepseek_reasoning_effort",
-            self.deepseek_reasoning_effort_combo.currentData() or DEFAULT_DEEPSEEK_REASONING_EFFORT,
-        )
+        selected_model_id = self.config_manager.get_selected_model_id()
+        provider_configs = {
+            "openai": self.openai_model_editor.get_provider_config(),
+            "anthropic": self.anthropic_model_editor.get_provider_config(),
+        }
+        all_model_ids = [
+            model.get("id")
+            for provider_id in ("openai", "anthropic")
+            for model in (provider_configs.get(provider_id) or {}).get("models", [])
+            if model.get("id")
+        ]
+        if selected_model_id not in all_model_ids:
+            selected_model_id = all_model_ids[0] if all_model_ids else ""
+        self.config_manager.set_model_provider_configs(provider_configs, selected_model_id)
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -4471,9 +4616,6 @@ class MainWindow(QMainWindow):
         # Input Area
         input_card = QFrame()
         input_card.setObjectName("ContentCard")
-        # Styling handled in global stylesheet
-        input_layout = QHBoxLayout(input_card)
-        input_layout.setContentsMargins(0, 0, 0, 0)
 
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
@@ -4484,6 +4626,32 @@ class MainWindow(QMainWindow):
         self.plan_mode_check = QCheckBox("计划模式")
         self.plan_mode_check.setCursor(Qt.PointingHandCursor)
         self.plan_mode_check.toggled.connect(self.on_plan_mode_toggled)
+        self.plan_mode_check.hide()
+
+        self.plan_mode_action = QAction("计划模式", self)
+        self.plan_mode_action.setCheckable(True)
+        self.plan_mode_action.triggered.connect(self.plan_mode_check.setChecked)
+
+        self.tool_menu_btn = QPushButton()
+        self.tool_menu_btn.setIcon(qta.icon('fa5s.plus', color='#6b7280'))
+        self.tool_menu_btn.setToolTip("工具")
+        self.tool_menu_btn.setCursor(Qt.PointingHandCursor)
+        self.tool_menu_btn.setFixedSize(36, 36)
+        self.tool_menu_btn.setStyleSheet(
+            f"background: {DesignTokens.bg_secondary}; border: 1px solid {DesignTokens.border}; "
+            "border-radius: 18px;"
+        )
+        self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
+
+        self.model_select_combo = QComboBox()
+        self.model_select_combo.setCursor(Qt.PointingHandCursor)
+        self.model_select_combo.setMinimumWidth(150)
+        self.model_select_combo.setMaximumWidth(260)
+        self.model_select_combo.setStyleSheet(
+            "QComboBox { border: none; background: transparent; color: #4b5563; "
+            "font-size: 12px; padding: 4px 20px 4px 8px; }"
+        )
+        self.model_select_combo.currentIndexChanged.connect(self.on_model_selection_changed)
 
         self.pause_btn = QPushButton()
         self.pause_btn.setIcon(qta.icon('fa5s.pause', color='#4b5563'))
@@ -4510,28 +4678,29 @@ class MainWindow(QMainWindow):
         self.loop_hint.setVisible(False)
 
         # Input Layout
-        input_wrapper = QWidget()
-        input_wrapper_layout = QHBoxLayout(input_wrapper)
-        input_wrapper_layout.setContentsMargins(0,0,0,0)
-        input_wrapper_layout.addWidget(self.input_field)
-        
-        # Position buttons inside the input field visually (using negative margins or overlapping layout would be complex, 
-        # so we place them in a row)
-        
-        bottom_controls = QHBoxLayout()
-        bottom_controls.addWidget(input_wrapper, 1)
-        bottom_controls.addWidget(self.plan_mode_check)
-        bottom_controls.addWidget(self.pause_btn)
-        bottom_controls.addWidget(self.loop_hint)
-        bottom_controls.addWidget(self.action_btn)
+        input_card_layout = QVBoxLayout(input_card)
+        input_card_layout.setContentsMargins(16, 12, 16, 12)
+        input_card_layout.setSpacing(8)
+        input_card_layout.addWidget(self.input_field)
 
-        layout.addLayout(bottom_controls)
+        prompt_toolbar = QHBoxLayout()
+        prompt_toolbar.setContentsMargins(0, 0, 0, 0)
+        prompt_toolbar.setSpacing(8)
+        prompt_toolbar.addWidget(self.tool_menu_btn)
+        prompt_toolbar.addWidget(self.pause_btn)
+        prompt_toolbar.addWidget(self.loop_hint)
+        prompt_toolbar.addStretch()
+        prompt_toolbar.addWidget(self.model_select_combo)
+        prompt_toolbar.addWidget(self.action_btn)
+        input_card_layout.addLayout(prompt_toolbar)
+        layout.addWidget(input_card)
 
         # Init Data
         self.data_dir = get_app_data_dir()
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
         self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
+        self.refresh_model_selector()
         
         self.create_new_session()
         self.refresh_history_list()
@@ -4554,6 +4723,49 @@ class MainWindow(QMainWindow):
         if force or (now - self.last_ui_update_time > 0.05):
             QApplication.processEvents()
             self.last_ui_update_time = now
+
+    def show_prompt_tool_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_STYLESHEET)
+        add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加照片和文件", self)
+        add_files.setEnabled(False)
+        menu.addAction(add_files)
+        menu.addAction(self.plan_mode_action)
+        menu.addSeparator()
+        plugins_action = QAction(qta.icon('fa5s.th-large', color='#4b5563'), "插件", self)
+        plugins_action.triggered.connect(self.open_skills_center)
+        menu.addAction(plugins_action)
+        menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
+
+    def refresh_model_selector(self):
+        if not hasattr(self, "model_select_combo"):
+            return
+        selected_id = self.config_manager.get_selected_model_id()
+        blocked = self.model_select_combo.blockSignals(True)
+        self.model_select_combo.clear()
+        for profile in self.config_manager.iter_model_profiles():
+            display_name = profile.get("display_name") or profile.get("model_name") or "模型"
+            provider_name = profile.get("provider_display_name") or profile.get("provider") or ""
+            effort = ""
+            if profile.get("provider") == "openai":
+                effort = str(profile.get("deepseek_reasoning_effort") or "").strip()
+            label = f"{display_name} · {effort}" if effort else display_name
+            tooltip = f"{provider_name} / {profile.get('model_name', '')}" if provider_name else profile.get("model_name", "")
+            self.model_select_combo.addItem(label, profile.get("id"))
+            self.model_select_combo.setItemData(self.model_select_combo.count() - 1, tooltip, Qt.ToolTipRole)
+        index = self.model_select_combo.findData(selected_id)
+        if index < 0 and self.model_select_combo.count():
+            index = 0
+        if index >= 0:
+            self.model_select_combo.setCurrentIndex(index)
+        self.model_select_combo.blockSignals(blocked)
+
+    def on_model_selection_changed(self, index):
+        if index < 0:
+            return
+        model_id = self.model_select_combo.itemData(index)
+        if model_id and self.config_manager.set_selected_model_id(model_id):
+            self.refresh_context_badges()
 
     def update_ui_state_for_workspace(self):
         if self.workspace_dir:
@@ -4585,13 +4797,9 @@ class MainWindow(QMainWindow):
 
     def refresh_context_badges(self, session_id=None):
         state = self.get_session(session_id)
-        provider_map = {
-            "openai": "OpenAI Compatible",
-            "anthropic": "Anthropic",
-        }
-        provider = self.config_manager.get("llm_provider", "openai")
-        model_name = self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
-        provider_text = provider_map.get(provider, provider)
+        profile = self.config_manager.get_model_profile()
+        provider_text = profile.get("provider_display_name") if profile else self.config_manager.get("llm_provider", "openai")
+        model_name = profile.get("display_name") or profile.get("model_name") if profile else self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
         connection_text = "Daemon Ready" if getattr(self, "daemon_available", False) else "Local Agent"
         self.model_badge.setText(f"{provider_text} | {model_name} | {connection_text}")
 
@@ -4682,10 +4890,16 @@ class MainWindow(QMainWindow):
         blocked_check = self.plan_mode_check.blockSignals(True)
         self.plan_mode_check.setChecked(plan_enabled)
         self.plan_mode_check.blockSignals(blocked_check)
-        self.plan_mode_check.setEnabled(
-            (not ((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False)))
+        plan_enabled_for_ui = (
+            not ((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False))
         )
+        self.plan_mode_check.setEnabled(plan_enabled_for_ui)
         self.plan_mode_check.setText("计划模式")
+        if hasattr(self, "plan_mode_action"):
+            blocked_action = self.plan_mode_action.blockSignals(True)
+            self.plan_mode_action.setChecked(plan_enabled)
+            self.plan_mode_action.blockSignals(blocked_action)
+            self.plan_mode_action.setEnabled(plan_enabled_for_ui)
 
     def refresh_plan_view(self, session_id=None):
         state = self.get_session(session_id)
@@ -6677,6 +6891,7 @@ class MainWindow(QMainWindow):
 
     def open_settings(self):
         SettingsDialog(self.config_manager, self).exec()
+        self.refresh_model_selector()
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()
 
@@ -7019,6 +7234,7 @@ class MainWindow(QMainWindow):
                 "pending_plan_questions": normalize_pending_plan_questions(
                     getattr(state, "pending_plan_questions", [])
                 ),
+                "selected_model_id": self.config_manager.get_selected_model_id(),
             }
         )
 

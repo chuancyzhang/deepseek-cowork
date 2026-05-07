@@ -12,6 +12,7 @@ from core.plan_mode import (
     RUN_MODE_PLANNING,
     get_planning_read_tools,
     is_tool_allowed_in_planning,
+    normalize_run_context,
 )
 
 
@@ -29,6 +30,17 @@ class _ConfigStub:
 
 
 class TestPlanModeHelpers(unittest.TestCase):
+    def test_normalize_run_context_preserves_selected_model_id(self):
+        ctx = normalize_run_context(
+            {
+                "mode": RUN_MODE_PLANNING,
+                "selected_model_id": "openai-fast",
+            }
+        )
+
+        self.assertEqual(ctx["mode"], RUN_MODE_PLANNING)
+        self.assertEqual(ctx["selected_model_id"], "openai-fast")
+
     def test_get_planning_read_tools_preserves_planning_order_and_deduplicates(self):
         available_tool_names = [
             "bash",

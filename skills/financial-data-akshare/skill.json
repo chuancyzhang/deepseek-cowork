@@ -1,0 +1,81 @@
+{
+  "version": 2,
+  "name": "financial-data-akshare",
+  "kind": "knowledge",
+  "capability_group": "file-information-interaction",
+  "description": "Query free financial data through AKShare, including stocks, funds, indices, futures, bonds, macro data, and company data.",
+  "tags": [
+    "finance",
+    "financial-data",
+    "akshare",
+    "akfamily",
+    "stock",
+    "fund",
+    "index",
+    "futures",
+    "bond",
+    "macro",
+    "market-data",
+    "股票",
+    "基金",
+    "指数",
+    "期货",
+    "债券",
+    "宏观",
+    "金融数据"
+  ],
+  "triggers": [
+    "AKShare",
+    "akshare",
+    "akfamily",
+    "金融数据",
+    "股票行情",
+    "A股",
+    "港股",
+    "美股",
+    "基金数据",
+    "指数数据",
+    "期货数据",
+    "债券数据",
+    "宏观数据",
+    "市场数据",
+    "财务数据",
+    "行情数据"
+  ],
+  "anti_triggers": [
+    "investment advice",
+    "buy recommendation",
+    "sell recommendation",
+    "投资建议",
+    "买卖建议",
+    "荐股"
+  ],
+  "references": [],
+  "tool_refs": [
+    "query_akshare_data"
+  ],
+  "experience_policy": {
+    "entry_storage": "experience/entries.jsonl",
+    "summary_sync": "frontmatter_experience"
+  },
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "Map the user's requested financial dataset to an AKShare public function.",
+    "Call query_akshare_data with function_name, kwargs, limit, and optional columns.",
+    "Inspect ok, error, columns, shape, and truncated before summarizing results.",
+    "State that AKShare data is for research/reference only and not investment advice."
+  ],
+  "python_dependencies": [
+    "akshare",
+    "pandas"
+  ],
+  "node_dependencies": [],
+  "script_refs": [],
+  "script_entries": [],
+  "asset_refs": [],
+  "source_format": "cowork"
+}

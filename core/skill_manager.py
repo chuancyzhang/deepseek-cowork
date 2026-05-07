@@ -38,6 +38,7 @@ def _humanize_skill_name(skill_name):
         "memory-manager": "长期记忆",
         "meta-tools": "任务辅助工具",
         "command-tools": "命令与搜索工具",
+        "financial-data-akshare": "AKShare 金融数据",
         "python-runner": "Python 执行",
         "skill-importer": "能力导入",
         "skill_builder": "能力创建",
@@ -50,6 +51,7 @@ def _humanize_skill_name(skill_name):
 class SkillManager:
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
+        "financial-data-akshare": "file-information-interaction",
         "web-search": "file-information-interaction",
         "command-tools": "code-command-execution",
         "system-tools": "code-command-execution",

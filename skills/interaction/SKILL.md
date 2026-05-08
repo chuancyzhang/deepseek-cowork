@@ -8,7 +8,7 @@ allowed-tools: request_user_approval, request_user_input, publish_artifacts
 
 # Interaction Skill
 
-This skill provides interaction capabilities with the user.
+This skill provides interaction capabilities with the user, plus enterprise-message artifact delivery for Feishu sessions.
 
 ## Tools
 
@@ -32,11 +32,11 @@ Ask the user for text, a single choice, or multiple choices.
 - **timeout_seconds** (number, optional): timeout before the request is cancelled.
 
 ### publish_artifacts
-Publish generated files/images for transcript rendering and optional IM delivery.
+Publish generated files/images for Feishu enterprise-message delivery.
 Use this tool when:
-- A task produced files and user needs them delivered or displayed.
-- User asks to view image output or receive downloadable files.
-- This tool is the only supported delivery entry for file/image handoff.
+- A Feishu enterprise-message task produced files and user needs them delivered there.
+- User asks to send image output or downloadable files into the current Feishu conversation.
+- This tool is the supported delivery entry for enterprise-message file/image handoff.
 
 - **items** (array, required): list of artifacts. Each item supports:
   - `path` or `url`
@@ -44,7 +44,7 @@ Use this tool when:
   - `mime`
   - `subtype` (`image` recommended for images)
   - `caption`
-- **audience** (string, optional): `auto`, `desktop`, or `feishu`
+- **audience** (string, optional): `auto` or `feishu`
 - **summary** (string, optional): summary text for timeline display
 - **title** (string, optional): title used when sending IM post link messages
 
@@ -53,4 +53,4 @@ Use this tool when:
 Output contract:
 - Must return a structured object with `source_tool="publish_artifacts"`.
 - Must include `content_parts` (file/tool_event) and `delivery_result`.
-- Desktop transcript always records artifacts even when no IM delivery target is available.
+- Tool availability is restricted to Feishu enterprise-message sessions; normal desktop chats should hand off files by mentioning local paths or links in the final reply.

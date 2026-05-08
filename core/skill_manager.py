@@ -793,6 +793,24 @@ class SkillManager:
             include_loaded=bool(include_loaded),
             discovered_tool_names=discovered,
         )
+        results = self._filter_enterprise_tool_results(results, run_context)
+        if self._is_enterprise_tool_allowed("publish_artifacts", run_context):
+            loaded_matches = self.tool_registry.search(
+                query,
+                run_mode=run_mode,
+                limit=max(int(limit or 8), 1),
+                include_loaded=True,
+                discovered_tool_names=discovered,
+            )
+            for item in loaded_matches:
+                if item.get("name") != "publish_artifacts":
+                    continue
+                if any(existing.get("name") == "publish_artifacts" for existing in results):
+                    break
+                results.append(item)
+                break
+            results.sort(key=lambda item: (-float(item.get("score") or 0), item.get("name") or ""))
+            results = results[: max(1, int(limit or 8))]
         names = [item["name"] for item in results]
         if hasattr(discovered, "update"):
             discovered.update(names)
@@ -812,7 +830,11 @@ class SkillManager:
     def is_tool_allowed(self, name, run_mode):
         return self.tool_registry.is_allowed(name, run_mode)
 
-    def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
+    def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
+        if not self._is_enterprise_tool_allowed(name, run_context):
+            return False
+        if name == "publish_artifacts":
+            return True
         return self.tool_registry.is_visible(name, run_mode, discovered_tool_names)
 
     def get_tool_record(self, name):
@@ -1362,14 +1384,60 @@ class SkillManager:
     def get_skill_of_tool(self, tool_name):
         return self.tool_to_skill_map.get(tool_name)
 
-    def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=None):
-        if run_mode is None and discovered_tool_names is None and include_deferred is None:
+    def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=None, run_context=None):
+        if run_mode is None and discovered_tool_names is None and include_deferred is None and run_context is None:
             return self.tool_definitions
-        return self.tool_registry.definitions(
+        definitions = self.tool_registry.definitions(
             run_mode=run_mode,
             discovered_tool_names=discovered_tool_names,
             include_deferred=bool(include_deferred),
         )
+        definitions = self._filter_enterprise_tool_definitions(definitions, run_context)
+        if self._is_enterprise_tool_allowed("publish_artifacts", run_context):
+            publish_definition = self._get_tool_definition("publish_artifacts")
+            if publish_definition and not any(
+                (item.get("function") or {}).get("name") == "publish_artifacts"
+                for item in definitions
+                if isinstance(item, dict)
+            ):
+                definitions.append(publish_definition)
+        return definitions
+
+    def _get_tool_definition(self, name):
+        record = self.tool_registry.get(name)
+        if not record:
+            return None
+        return record.to_definition()
+
+    def _normalize_run_context_for_tools(self, run_context):
+        return run_context if isinstance(run_context, dict) else {}
+
+    def _is_feishu_run_context(self, run_context):
+        ctx = self._normalize_run_context_for_tools(run_context)
+        return (ctx.get("im_provider") or "").strip().lower() == "feishu" or (
+            (ctx.get("channel") or "").strip().lower() == "feishu"
+        )
+
+    def _is_enterprise_tool_allowed(self, name, run_context):
+        if name != "publish_artifacts":
+            return True
+        return self._is_feishu_run_context(run_context)
+
+    def _filter_enterprise_tool_results(self, results, run_context):
+        filtered = []
+        for item in results or []:
+            if self._is_enterprise_tool_allowed(item.get("name"), run_context):
+                filtered.append(item)
+        return filtered
+
+    def _filter_enterprise_tool_definitions(self, definitions, run_context):
+        filtered = []
+        for item in definitions or []:
+            function = item.get("function") if isinstance(item, dict) else None
+            name = function.get("name") if isinstance(function, dict) else ""
+            if self._is_enterprise_tool_allowed(name, run_context):
+                filtered.append(item)
+        return filtered
 
     def get_tools_for_skill(self, skill_name):
         return list(self.skill_to_tools.get(skill_name) or [])

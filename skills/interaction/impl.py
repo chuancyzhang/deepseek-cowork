@@ -20,6 +20,24 @@ def _cfg(_context, key, default=""):
         return default
 
 
+def _run_context(_context):
+    if not isinstance(_context, dict):
+        return {}
+    run_context = _context.get("run_context")
+    return run_context if isinstance(run_context, dict) else {}
+
+
+def _is_feishu_runtime_context(_context):
+    ctx = _run_context(_context)
+    if (ctx.get("im_provider") or "").strip().lower() == "feishu":
+        return True
+    if (ctx.get("channel") or "").strip().lower() == "feishu":
+        return True
+    if not isinstance(_context, dict):
+        return False
+    return isinstance(_context.get("im_event") or _context.get("feishu_event"), dict)
+
+
 def _session_id(_context):
     if not isinstance(_context, dict):
         return ""
@@ -489,8 +507,10 @@ def publish_artifacts(
         return {"error": "items must be a non-empty list."}
 
     audience_value = (audience or "auto").strip().lower()
-    if audience_value not in {"auto", "desktop", "feishu"}:
-        return {"error": "audience must be auto, desktop, or feishu."}
+    if audience_value not in {"auto", "feishu"}:
+        return {"error": "audience must be auto or feishu."}
+    if not _is_feishu_runtime_context(_context):
+        return {"error": "publish_artifacts is only available in Feishu enterprise messaging sessions."}
 
     app_id = (_cfg(_context, "feishu_app_id", "") or "").strip()
     app_secret = (_cfg(_context, "feishu_app_secret", "") or "").strip()
@@ -498,7 +518,7 @@ def publish_artifacts(
     if not receive_error:
         receive_id_type_value, receive_id_value, receive_error = _validate_receive(receive_id_type_value, receive_id_value)
 
-    should_try_feishu = audience_value in {"auto", "feishu"}
+    should_try_feishu = True
     tenant_token = None
     token_reason = ""
     if should_try_feishu and app_id and app_secret and not receive_error:
@@ -608,19 +628,13 @@ def publish_artifacts(
             else:
                 reason = f"send_post_failed:{send_reason}"
         if not delivered:
-            if audience_value == "desktop":
-                reason = "desktop_only"
-                skipped.append({"name": name, "reason": reason})
-            elif not reason:
+            if not reason:
                 if should_try_feishu and not feishu_enabled:
                     reason = "delivery_skipped_missing_runtime_target_or_credentials"
                     skipped.append({"name": name, "reason": reason})
                 elif should_try_feishu:
                     reason = "delivery_failed"
                     failed.append({"name": name, "reason": reason})
-                else:
-                    reason = "desktop_only"
-                    skipped.append({"name": name, "reason": reason})
             elif feishu_enabled:
                 failed.append({"name": name, "reason": reason})
             else:
@@ -641,11 +655,6 @@ def publish_artifacts(
     content_parts.extend(normalized_items)
 
     delivery_result = {
-        "desktop": {
-            "ok": True,
-            "reason": "artifacts recorded in transcript",
-            "count": len(normalized_items),
-        },
         "feishu": {
             "ok": len(failed) == 0,
             "enabled": feishu_enabled,
@@ -762,7 +771,7 @@ TOOL_EXPORTS = [
                         },
                     },
                 },
-                "audience": {"type": "string", "description": "One of auto, desktop, or feishu."},
+                "audience": {"type": "string", "description": "One of auto or feishu for enterprise-message delivery."},
                 "summary": {"type": "string", "description": "Summary text for timeline display."},
                 "title": {"type": "string", "description": "Title used for IM post link messages."},
             },

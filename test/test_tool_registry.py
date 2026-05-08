@@ -90,6 +90,13 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         sm.load_skills()
         return sm
 
+    def _copy_repo_skill(self, skill_name):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source_dir = os.path.join(repo_root, "skills", skill_name)
+        target_dir = os.path.join(self.skills_dir, skill_name)
+        shutil.copytree(source_dir, target_dir)
+        return target_dir
+
     def test_skill_manager_filters_tools_by_mode_and_discovery(self):
         skill_dir = os.path.join(self.skills_dir, "notes-tools")
         os.makedirs(skill_dir, exist_ok=True)
@@ -166,6 +173,53 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("tool_search", planning_tools)
         self.assertIn("read_note", planning_tools)
         self.assertNotIn("write_note", planning_tools)
+
+    def test_publish_artifacts_is_visible_only_in_feishu_context(self):
+        self._copy_repo_skill("interaction")
+        sm = self._build_manager()
+
+        desktop_tools = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                run_context={"mode": RUN_MODE_EXECUTION},
+            )
+        }
+        self.assertNotIn("publish_artifacts", desktop_tools)
+
+        desktop_search = sm.call_tool(
+            "tool_search",
+            {"query": "publish artifact file delivery"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+        self.assertNotIn("publish_artifacts", desktop_search["discovered_tools"])
+
+        feishu_run_context = {
+            "mode": RUN_MODE_EXECUTION,
+            "im_provider": "feishu",
+            "channel": "feishu",
+        }
+        feishu_tools = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                run_context=feishu_run_context,
+            )
+        }
+        self.assertIn("publish_artifacts", feishu_tools)
+
+        feishu_search = sm.call_tool(
+            "tool_search",
+            {"query": "publish artifact file delivery"},
+            context={
+                "run_context": feishu_run_context,
+                "discovered_tool_names": set(),
+            },
+        )
+        self.assertIn("publish_artifacts", feishu_search["discovered_tools"])
 
 
 if __name__ == "__main__":

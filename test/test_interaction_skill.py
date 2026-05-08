@@ -104,7 +104,7 @@ class TestInteractionSkill(unittest.TestCase):
         self.assertIn("compatibility_target", result["answers"])
         self.assertTrue(result["interaction_response"]["approved"])
 
-    def test_publish_artifacts_local_file_returns_structured_payload(self):
+    def test_publish_artifacts_feishu_context_returns_structured_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             file_path = os.path.join(tmp, "sample.txt")
             with open(file_path, "w", encoding="utf-8") as f:
@@ -112,8 +112,12 @@ class TestInteractionSkill(unittest.TestCase):
 
             result = interaction_impl.publish_artifacts(
                 items=[{"path": file_path, "caption": "demo file"}],
-                audience="desktop",
+                audience="feishu",
                 summary="artifact ready",
+                _context={
+                    "run_context": {"im_provider": "feishu", "channel": "feishu"},
+                    "im_event": {"chat_id": "chat-1"},
+                },
             )
 
         self.assertEqual(result["source_tool"], "publish_artifacts")
@@ -121,14 +125,22 @@ class TestInteractionSkill(unittest.TestCase):
         file_parts = [p for p in parts if isinstance(p, dict) and p.get("type") == "file"]
         self.assertTrue(file_parts)
         self.assertEqual(file_parts[0].get("artifact_source"), "publish_artifacts")
-        self.assertTrue(result["delivery_result"]["desktop"]["ok"])
+        self.assertIn("feishu", result["delivery_result"])
 
     def test_publish_artifacts_missing_file_returns_error(self):
         result = interaction_impl.publish_artifacts(
             items=[{"path": "Z:/not-found.bin"}],
-            audience="desktop",
+            audience="feishu",
+            _context={"run_context": {"im_provider": "feishu"}},
         )
         self.assertIn("file not found", (result.get("error") or "").lower())
+
+    def test_publish_artifacts_requires_feishu_context(self):
+        result = interaction_impl.publish_artifacts(
+            items=[{"url": "https://example.com/demo.txt", "name": "demo.txt"}],
+            audience="feishu",
+        )
+        self.assertIn("only available in feishu", (result.get("error") or "").lower())
 
     def test_delete_file_requires_request_user_approval(self):
         module_path = os.path.join(

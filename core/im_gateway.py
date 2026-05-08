@@ -14,6 +14,7 @@ from core.daemon import DaemonClient, DEFAULT_HOST, DEFAULT_PORT
 from core.env_utils import ensure_package_installed, get_app_data_dir, get_python_executable
 from core.interaction import parse_interaction_reply
 from core.im_session_key import build_im_session_key, resolve_date_key
+from core.plan_mode import RUN_MODE_EXECUTION
 
 _RECENT_MESSAGE_IDS = {}
 _RECENT_LOCK = threading.Lock()
@@ -910,7 +911,16 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
                     "thinking_expanded": False
                 }
     try:
-        for msg in daemon_client.send_message_stream(conversation_id, model_input_text, workspace_dir):
+        for msg in daemon_client.send_message_stream(
+            conversation_id,
+            model_input_text,
+            workspace_dir,
+            run_context={
+                "mode": RUN_MODE_EXECUTION,
+                "im_provider": "feishu",
+                "channel": "feishu",
+            },
+        ):
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "content":

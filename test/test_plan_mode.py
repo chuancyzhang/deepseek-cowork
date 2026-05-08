@@ -35,11 +35,15 @@ class TestPlanModeHelpers(unittest.TestCase):
             {
                 "mode": RUN_MODE_PLANNING,
                 "selected_model_id": "openai-fast",
+                "im_provider": "feishu",
+                "channel": "feishu",
             }
         )
 
         self.assertEqual(ctx["mode"], RUN_MODE_PLANNING)
         self.assertEqual(ctx["selected_model_id"], "openai-fast")
+        self.assertEqual(ctx["im_provider"], "feishu")
+        self.assertEqual(ctx["channel"], "feishu")
 
     def test_get_planning_read_tools_preserves_planning_order_and_deduplicates(self):
         available_tool_names = [

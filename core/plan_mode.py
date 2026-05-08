@@ -146,6 +146,8 @@ def normalize_run_context(run_context):
             ctx.get("pending_plan_questions")
         ),
         "selected_model_id": str(ctx.get("selected_model_id") or "").strip(),
+        "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
+        "channel": str(ctx.get("channel") or "").strip().lower(),
     }
 
 

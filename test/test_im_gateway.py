@@ -61,6 +61,22 @@ class _DaemonClientStub:
         return {"status": "ok", "resolved": True}
 
 
+class _StreamDaemonClientStub:
+    def __init__(self):
+        self.calls = []
+
+    def send_message_stream(self, session_id, content, workspace_dir=None, run_context=None):
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "content": content,
+                "workspace_dir": workspace_dir,
+                "run_context": dict(run_context or {}),
+            }
+        )
+        yield {"type": "final", "result": {"content": "done"}}
+
+
 class TestImGatewayPendingInteraction(unittest.TestCase):
     def test_pending_choice_reply_is_consumed_before_model_roundtrip(self):
         provider = _ProviderStub(
@@ -145,6 +161,36 @@ class TestImGatewayPendingInteraction(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(daemon_client.respond_calls, [])
         self.assertIn("请回复：是 / 否", provider.replies[-1]["card_content"])
+
+    def test_stream_im_response_passes_feishu_run_context(self):
+        provider = _ProviderStub(
+            {
+                "event_type": "im.message.receive_v1",
+                "sender_type": "user",
+                "message_type": "text",
+                "text": "send artifact",
+                "user_id": "user-1",
+                "chat_id": "chat-1",
+                "message_id": "msg-3",
+                "create_time": "1710000000000",
+            }
+        )
+        daemon_client = _StreamDaemonClientStub()
+
+        result = im_gateway._stream_im_response(
+            "conversation-1",
+            provider._event,
+            provider,
+            daemon_client,
+            "D:\\code\\cowork",
+            config_manager=_ConfigStub(),
+        )
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(daemon_client.calls), 1)
+        run_context = daemon_client.calls[0]["run_context"]
+        self.assertEqual(run_context.get("im_provider"), "feishu")
+        self.assertEqual(run_context.get("channel"), "feishu")
 
 
 if __name__ == "__main__":

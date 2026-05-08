@@ -473,9 +473,16 @@ class LLMWorker(QThread):
             tools = self.skill_manager.get_tool_definitions(
                 run_mode=self._current_run_mode(),
                 discovered_tool_names=self.discovered_tool_names,
+                run_context=self.run_context,
             )
         except TypeError:
-            tools = self.skill_manager.get_tool_definitions()
+            try:
+                tools = self.skill_manager.get_tool_definitions(
+                    run_mode=self._current_run_mode(),
+                    discovered_tool_names=self.discovered_tool_names,
+                )
+            except TypeError:
+                tools = self.skill_manager.get_tool_definitions()
         filtered = []
         for item in tools:
             func = item.get("function") if isinstance(item, dict) else None
@@ -494,8 +501,19 @@ class LLMWorker(QThread):
                         name,
                         self._current_run_mode(),
                         self.discovered_tool_names,
+                        run_context=self.run_context,
                     ):
                         continue
+                except TypeError:
+                    try:
+                        if not self.skill_manager.is_tool_visible(
+                            name,
+                            self._current_run_mode(),
+                            self.discovered_tool_names,
+                        ):
+                            continue
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             if (
@@ -531,7 +549,17 @@ class LLMWorker(QThread):
                     name,
                     self._current_run_mode(),
                     self.discovered_tool_names,
+                    run_context=self.run_context,
                 )
+            except TypeError:
+                try:
+                    return self.skill_manager.is_tool_visible(
+                        name,
+                        self._current_run_mode(),
+                        self.discovered_tool_names,
+                    )
+                except Exception:
+                    return True
             except Exception:
                 return True
         return True
@@ -653,6 +681,10 @@ class LLMWorker(QThread):
                 available_tool_names.append(name)
         available_tool_names = list(dict.fromkeys(available_tool_names))
         planning_read_tools = get_planning_read_tools(available_tool_names)
+        enterprise_delivery_enabled = (
+            (self.run_context.get("im_provider") or "").strip().lower() == "feishu"
+            or (self.run_context.get("channel") or "").strip().lower() == "feishu"
+        )
 
         # Construct System Context
         context_lines = [
@@ -695,14 +727,14 @@ class LLMWorker(QThread):
             "策略 [历史检索]: 当用户需要回忆之前讨论内容时，优先使用 'query_history' 工具进行检索。",
             "",
             "策略 [交互]: 如果你需要向用户获取确认，请使用 'request_user_approval'。如果你需要向用户提问、收集文本或选项，请使用 'request_user_input'。",
-            "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。若需要交付文件、图片或链接，请使用 'publish_artifacts'。",
+            "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。",
             "",
             "策略 [元工具导航]:",
             "1. 工具发现: 需要额外能力时先用 'tool_search'，匹配到的延迟工具会在下一轮可用。",
             "2. 通用执行: 优先使用 'run_python_code'，需要 shell/CLI 时使用 'bash'。",
             "3. 技能创建/维护: 使用 'create_new_skill'、'update_skill'、'convert_claude_skill'、'convert_openclaw_skill'、'convert_external_skill'、'analyze_skill_source_folder'、'generate_skill_from_folder'、'run_skill_script'。",
             "4. 经验/记忆/历史: 使用 'update_experience'、'read_memories'、'write_memories'、'query_history'、'query_history_vector'。",
-            "5. 用户交互/交付: 使用 'request_user_input'、'request_user_approval'、'publish_artifacts'。",
+            "5. 用户交互: 使用 'request_user_input'、'request_user_approval'。",
             "6. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。",
             "7. 元工具导航只是推荐；必须遵守当前可用工具清单、延迟发现机制和当前运行模式权限。",
             "",
@@ -711,6 +743,20 @@ class LLMWorker(QThread):
             "2. 严禁将最终给用户的回复（如任务总结、文件列表、结果汇报）放在思考过程中。",
             "3. 思考过程对用户是折叠的，用户主要阅读的是你的最终 Content 回复。"
         ]
+        if enterprise_delivery_enabled:
+            context_lines.insert(
+                context_lines.index("策略 [元工具导航]:"),
+                "企业消息会话中，若需要交付文件、图片或链接，请使用 'publish_artifacts'。",
+            )
+            context_lines.insert(
+                context_lines.index("6. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。"),
+                "补充: 企业消息链路中可使用 'publish_artifacts' 交付文件或图片。",
+            )
+        else:
+            context_lines.insert(
+                context_lines.index("策略 [元工具导航]:"),
+                "普通桌面会话不要调用 'publish_artifacts'；若生成了本地文件或链接，请直接在最终回复里说明路径或地址。",
+            )
         if available_tool_names:
             tool_lines = []
             chunk_size = 12

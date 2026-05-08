@@ -1,7 +1,7 @@
 import os
 import sys
 import unittest
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
@@ -120,6 +120,56 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         ])
 
         self.assertEqual(prepared[0]["reasoning_content"], "keep final reasoning")
+
+    def test_chat_stream_omits_none_tool_call_arguments(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+
+        client.chat.completions.create.return_value = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call_1",
+                                    function=SimpleNamespace(name="read_file", arguments=None),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id=None,
+                                    function=SimpleNamespace(name=None, arguments='{"path":"a.txt"}'),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "read"}]))
+
+        self.assertEqual(len(chunks), 2)
+        self.assertNotIn("arguments", chunks[0]["function"])
+        self.assertEqual(chunks[1]["function"]["arguments"], '{"path":"a.txt"}')
+        for chunk in chunks:
+            if "arguments" in chunk["function"]:
+                self.assertIsNot(chunk["function"]["arguments"], None)
 
 
 class TestDeepSeekMessageSanitization(unittest.TestCase):

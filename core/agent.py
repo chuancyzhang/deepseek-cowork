@@ -885,20 +885,43 @@ class LLMWorker(QThread):
                         # 3. Handle Tool Calls
                         elif type_ == "tool_call":
                             index = chunk.get("index", 0) # Default to 0 if not provided
+                            if index is None:
+                                index = 0
+                            chunk_function = chunk.get("function") or {}
+                            if not isinstance(chunk_function, dict):
+                                chunk_function = {}
                             
                             if index not in tool_calls_buffer:
                                 tool_calls_buffer[index] = {
-                                    "id": chunk.get("id"),
+                                    "id": chunk.get("id") or "",
                                     "type": "function",
                                     "function": {
-                                        "name": chunk["function"].get("name", ""),
+                                        "name": "",
                                         "arguments": ""
                                     }
                                 }
+
+                            chunk_id = chunk.get("id")
+                            if chunk_id:
+                                tool_calls_buffer[index]["id"] = chunk_id
+
+                            chunk_name = chunk_function.get("name")
+                            if chunk_name:
+                                tool_calls_buffer[index]["function"]["name"] = str(chunk_name)
                             
                             # Append arguments
-                            if "arguments" in chunk["function"]:
-                                tool_calls_buffer[index]["function"]["arguments"] += chunk["function"]["arguments"]
+                            if "arguments" in chunk_function:
+                                raw_arguments = chunk_function.get("arguments")
+                                if raw_arguments is None:
+                                    arguments_part = ""
+                                elif isinstance(raw_arguments, str):
+                                    arguments_part = raw_arguments
+                                else:
+                                    try:
+                                        arguments_part = json.dumps(raw_arguments, ensure_ascii=False)
+                                    except Exception:
+                                        arguments_part = str(raw_arguments)
+                                tool_calls_buffer[index]["function"]["arguments"] += arguments_part
                         
                         # 4. Handle Error
                         elif type_ == "error":
@@ -1030,7 +1053,7 @@ class LLMWorker(QThread):
                                 self.msleep(100)
                             if self.is_stopped: break
                             
-                            name = tool.function.name
+                            name = str(tool.function.name or "").strip()
                             raw_args = tool.function.arguments
                             args = {}
                             if isinstance(raw_args, dict):
@@ -1041,26 +1064,35 @@ class LLMWorker(QThread):
                                 except Exception:
                                     args = {}
                                     self.output_signal.emit(f"Tool Args Parse Fallback: {name} received invalid JSON arguments.")
-                            self.step_signal.emit(f"Executing Tool: {name}({args})")
-                            
-                            # Emit Tool Call Signal
-                            self.tool_call_signal.emit({
-                                "id": tool.id,
-                                "name": name,
-                                "args": args
-                            })
-                            self.observability_signal.emit({
-                                "type": "tool_call",
-                                "id": tool.id,
-                                "name": name,
-                                "args": args,
-                                "timestamp": time.time(),
-                            })
-                            
-                            # Report Active Skill
-                            skill_name = self.skill_manager.get_skill_of_tool(name)
-                            if skill_name:
-                                self.skill_used_signal.emit(skill_name)
+                            missing_tool_name = not name
+                            missing_tool_name_message = (
+                                "Provider returned a tool call without function.name; "
+                                "tool execution was skipped."
+                            )
+                            if missing_tool_name:
+                                self.step_signal.emit(f"Tool Call Error: {missing_tool_name_message}")
+                                self.output_signal.emit(f"Tool Call Error: {missing_tool_name_message}")
+                            else:
+                                self.step_signal.emit(f"Executing Tool: {name}({args})")
+
+                                # Emit Tool Call Signal
+                                self.tool_call_signal.emit({
+                                    "id": tool.id,
+                                    "name": name,
+                                    "args": args
+                                })
+                                self.observability_signal.emit({
+                                    "type": "tool_call",
+                                    "id": tool.id,
+                                    "name": name,
+                                    "args": args,
+                                    "timestamp": time.time(),
+                                })
+
+                                # Report Active Skill
+                                skill_name = self.skill_manager.get_skill_of_tool(name)
+                                if skill_name:
+                                    self.skill_used_signal.emit(skill_name)
                             
                             # Execute via Skill Manager
                             # Pass step_signal as context to allow tools to log
@@ -1092,7 +1124,14 @@ class LLMWorker(QThread):
                                 "run_context": json_copy(self.run_context, {}),
                                 "discovered_tool_names": self.discovered_tool_names,
                             }
-                            if self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
+                            if missing_tool_name:
+                                result = {
+                                    "error": missing_tool_name_message,
+                                    "blocked_tool": name,
+                                    "status": "invalid_tool_call",
+                                    "content": "模型返回了缺少函数名的工具调用，已跳过执行。",
+                                }
+                            elif self.is_subagent and name in AGENT_MANAGEMENT_TOOLS:
                                 result = {
                                     "error": "sub-agents cannot manage other agents",
                                     "blocked_tool": name,

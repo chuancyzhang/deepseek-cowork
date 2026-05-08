@@ -212,6 +212,83 @@ class TestPlanningModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_llm_worker_handles_none_tool_call_arguments_delta(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [
+                    {"type": "function", "function": {"name": "read_file", "description": "", "parameters": {}}}
+                ]
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, query_text=""):
+                return ""
+
+            def get_skill_of_tool(self, name):
+                return None
+
+            def call_tool(self, name, args, context=None):
+                return {"content": f"{name}:{args.get('path')}", "ok": True}
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.turn = 0
+
+            def chat_stream(self, messages, tools=None):
+                self.turn += 1
+                if self.turn == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {"name": "read_file", "arguments": None},
+                    }
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "function": {"arguments": '{"path":"a.txt"}'},
+                    }
+                else:
+                    yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        events = []
+        provider = _ProviderStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "read a file"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.run()
+
+            calls = [event for event in events if event.get("type") == "tool_call"]
+            results = [event for event in events if event.get("type") == "tool_result"]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0].get("name"), "read_file")
+            self.assertEqual(calls[0].get("args"), {"path": "a.txt"})
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].get("result_obj", {}).get("content"), "read_file:a.txt")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_planning_mode_filters_to_allowed_read_and_interaction_tools(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):

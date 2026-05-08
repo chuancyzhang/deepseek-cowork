@@ -76,21 +76,42 @@ class OpenAIProvider(LLMProvider):
                     yield {"type": "reasoning", "content": delta.reasoning_content}
                 
                 # 2. Content
-                if delta.content:
-                    yield {"type": "content", "content": delta.content}
+                delta_content = getattr(delta, "content", None)
+                if delta_content:
+                    yield {"type": "content", "content": delta_content}
                 
                 # 3. Tool Calls
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        yield {
+                delta_tool_calls = getattr(delta, "tool_calls", None)
+                if delta_tool_calls:
+                    for tc in delta_tool_calls:
+                        function = getattr(tc, "function", None)
+                        raw_arguments = getattr(function, "arguments", None) if function else None
+                        if raw_arguments is None:
+                            arguments = None
+                        elif isinstance(raw_arguments, str):
+                            arguments = raw_arguments
+                        else:
+                            try:
+                                arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                            except Exception:
+                                arguments = str(raw_arguments)
+
+                        function_payload = {}
+                        name = getattr(function, "name", None) if function else None
+                        if name:
+                            function_payload["name"] = str(name)
+                        if arguments is not None:
+                            function_payload["arguments"] = arguments
+
+                        tool_call_payload = {
                             "type": "tool_call",
-                            "index": tc.index,
-                            "id": tc.id,
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
+                            "index": getattr(tc, "index", 0),
+                            "function": function_payload,
                         }
+                        tool_call_id = getattr(tc, "id", None)
+                        if tool_call_id:
+                            tool_call_payload["id"] = str(tool_call_id)
+                        yield tool_call_payload
                         
         except Exception as e:
             yield {"type": "error", "content": str(e)}

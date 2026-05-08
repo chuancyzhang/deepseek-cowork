@@ -30,7 +30,7 @@ Built by **deepseek-cowork team**.
 
 ### 🛰️ Daemon & IM Gateway
 *   **Headless Daemon**: Background inference keeps UI responsive.
-*   **Enterprise IM (Feishu)**: Send commands via IM with daily session rotation.
+*   **Enterprise IM (Feishu / DingTalk / WeCom smart bot)**: Send commands via IM with daily session rotation.
 *   **Workspace Guardrails**: IM requests follow the same workspace limits unless God Mode is enabled.
 
 ## 📦 Installation
@@ -90,15 +90,15 @@ Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
 
-### 5. Enterprise IM (Feishu)
-Open **⚙️ Settings → Enterprise Messaging**, fill in **Feishu App ID / App Secret**, then start the gateway.
+### 5. Enterprise IM
+Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
 
 ## 🏗️ Architecture
 
 *   **`main.py`**: PySide6 desktop UI entry.
 *   **`core/agent.py`**: Reasoning loop and tool orchestration.
 *   **`core/daemon.py`**: Headless inference server.
-*   **`core/im_gateway.py`**: Feishu IM integration.
+*   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
 *   **`skills/`**: Built-in system skills.
 *   **`ai_skills/`**: AI or user-created skills.

@@ -174,7 +174,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("read_note", planning_tools)
         self.assertNotIn("write_note", planning_tools)
 
-    def test_publish_artifacts_is_visible_only_in_feishu_context(self):
+    def test_publish_artifacts_is_visible_only_in_enterprise_im_context(self):
         self._copy_repo_skill("interaction")
         sm = self._build_manager()
 
@@ -220,6 +220,21 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             },
         )
         self.assertIn("publish_artifacts", feishu_search["discovered_tools"])
+
+        for provider in ("dingtalk", "wecom"):
+            run_context = {
+                "mode": RUN_MODE_EXECUTION,
+                "im_provider": provider,
+                "channel": provider,
+            }
+            tools = {
+                item["function"]["name"]
+                for item in sm.get_tool_definitions(
+                    run_mode=RUN_MODE_EXECUTION,
+                    run_context=run_context,
+                )
+            }
+            self.assertIn("publish_artifacts", tools)
 
 
 if __name__ == "__main__":

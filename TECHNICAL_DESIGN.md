@@ -32,8 +32,8 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 
 ### 2.6 企业 IM
-*   **core/im_gateway.py**：飞书长连接网关，接收 IM 事件并回传执行结果。
-*   **会话映射**：IM 会话与本地会话保持一致的工作区边界。
+*   **core/im_gateway/**：多平台企业消息网关，接收飞书、钉钉与企业微信智能机器人事件并回传执行结果。
+*   **会话映射**：IM 会话与本地会话保持一致的工作区边界，并按 provider 区分会话来源。
 
 ## 3. 万物皆工具 (Everything Is a Tool)
 - 工具即 `impl.py` 中的函数，解析签名动态生成 JSON Schema，作为 LLM 可调用的函数接口。

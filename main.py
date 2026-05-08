@@ -432,33 +432,21 @@ class SettingsDialog(QDialog):
 
         im_tab = QWidget()
         im_layout = QVBoxLayout(im_tab)
-        im_form = QFormLayout()
-
-        self.feishu_app_id_input = QLineEdit()
-        self.feishu_app_id_input.setText(self.config_manager.get("feishu_app_id", ""))
-        im_form.addRow("飞书 App ID:", self.feishu_app_id_input)
-
-        self.feishu_app_secret_input = QLineEdit()
-        self.feishu_app_secret_input.setEchoMode(QLineEdit.Password)
-        self.feishu_app_secret_input.setPlaceholderText("••••••••")
-        self.feishu_app_secret_input.setText(self.config_manager.get("feishu_app_secret", ""))
-        im_form.addRow("飞书 App Secret:", self.feishu_app_secret_input)
-
-        im_layout.addLayout(im_form)
+        im_intro = QLabel("企业消息配置使用 im_gateway.providers 的多平台结构。")
+        im_intro.setWordWrap(True)
+        im_layout.addWidget(im_intro)
         gateway_bar = QHBoxLayout()
-        gateway_info = QLabel("飞书长连接模式：无需配置 Webhook\n服务监听: 0.0.0.0:8001")
+        gateway_info = QLabel("支持飞书、钉钉和企业微信智能机器人。")
         gateway_info.setStyleSheet("color: #5f6368; font-size: 11px;")
         gateway_btn = QPushButton("启动网关")
         gateway_btn.setIcon(qta.icon('fa5s.play', color='#374151'))
         def start_gateway():
             try:
-                self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
-                self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
                 if hasattr(self._main, "try_connect_daemon"):
                     self._main.try_connect_daemon(allow_start=True, retries=6)
                 if hasattr(self._main, "start_gateway_process"):
                     self._main.start_gateway_process()
-                QMessageBox.information(self, "统一消息网关", "已启动。\n飞书长连接模式已启用\n服务监听: 0.0.0.0:8001")
+                QMessageBox.information(self, "统一消息网关", "已启动。")
             except Exception:
                 QMessageBox.warning(self, "统一消息网关", "启动失败，请检查环境和依赖。")
         gateway_btn.clicked.connect(start_gateway)
@@ -498,8 +486,6 @@ class SettingsDialog(QDialog):
         # Save God Mode
         self.config_manager.set_god_mode(self.god_mode_check.isChecked())
 
-        self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
-        self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
         self.accept()
 
 class SkillsCenterDialog(QDialog):
@@ -942,7 +928,8 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         screen = self.screen() or QGuiApplication.primaryScreen()
         available_height = screen.availableGeometry().height() if screen else 560
-        self.resize(720, min(560, max(420, available_height - 96)))
+        self.resize(860, min(560, max(420, available_height - 96)))
+        self.setMinimumSize(720, 420)
         self.config_manager = config_manager
         self._main = parent
 
@@ -956,25 +943,75 @@ class SettingsDialog(QDialog):
             "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
         )
 
-        self.tabs = QTabWidget()
-        layout.addWidget(self.tabs)
+        body_layout = QHBoxLayout()
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(18)
+        layout.addLayout(body_layout, 1)
 
-        base_tab = QScrollArea()
-        base_tab.setWidgetResizable(True)
-        base_tab.setFrameShape(QFrame.NoFrame)
-        base_tab.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        base_content = QWidget()
-        base_layout = QVBoxLayout(base_content)
-        base_layout.setContentsMargins(12, 16, 12, 16)
-        base_layout.setSpacing(18)
+        self.nav_list = QListWidget()
+        self.nav_list.setFixedWidth(156)
+        self.nav_list.setSpacing(4)
+        self.nav_list.setStyleSheet(
+            f"""
+            QListWidget {{
+                background: {DesignTokens.bg_secondary};
+                border: 1px solid {DesignTokens.border};
+                border-radius: 12px;
+                padding: 8px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                color: {DesignTokens.text_secondary};
+                border-radius: 8px;
+                padding: 10px 8px;
+                min-height: 24px;
+            }}
+            QListWidget::item:selected {{
+                background: {DesignTokens.bg_card};
+                color: {DesignTokens.text_primary};
+                font-weight: 700;
+            }}
+            QListWidget::item:hover {{
+                background: {DesignTokens.bg_card};
+            }}
+            """
+        )
+        body_layout.addWidget(self.nav_list)
 
-        model_header = QLabel("模型与连接")
-        model_header.setProperty("roleTitle", True)
-        model_intro = QLabel("按供应商共享 API Key 与 Base URL，并在提问栏选择本轮使用的具体模型。")
-        model_intro.setWordWrap(True)
-        model_intro.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        base_layout.addWidget(model_header)
-        base_layout.addWidget(model_intro)
+        self.content_stack = QStackedWidget()
+        body_layout.addWidget(self.content_stack, 1)
+
+        def make_scroll_page(title, intro):
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            content = QWidget()
+            page_layout = QVBoxLayout(content)
+            page_layout.setContentsMargins(12, 4, 12, 16)
+            page_layout.setSpacing(18)
+
+            header = QLabel(title)
+            header.setProperty("roleTitle", True)
+            page_layout.addWidget(header)
+            if intro:
+                intro_label = QLabel(intro)
+                intro_label.setWordWrap(True)
+                intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+                page_layout.addWidget(intro_label)
+
+            scroll_area.setWidget(content)
+            return scroll_area, page_layout
+
+        def add_settings_page(label, icon_name, page):
+            item = QListWidgetItem(qta.icon(icon_name, color=DesignTokens.text_secondary), label)
+            self.nav_list.addItem(item)
+            self.content_stack.addWidget(page)
+
+        model_page, model_layout = make_scroll_page(
+            "模型",
+            "按供应商共享 API Key 与 Base URL，并在提问栏选择本轮使用的具体模型。",
+        )
 
         provider_configs = self.config_manager.get_model_provider_configs()
         self.openai_model_editor = ProviderModelEditor(
@@ -988,6 +1025,10 @@ class SettingsDialog(QDialog):
             provider_configs.get("anthropic") or {},
         )
 
+        workspace_page, workspace_layout = make_scroll_page(
+            "工作区",
+            "配置默认工作区和聊天历史保存位置。",
+        )
         storage_group = QGroupBox("工作区与存储")
         storage_group.setStyleSheet(group_style)
         storage_layout = QFormLayout(storage_group)
@@ -1044,17 +1085,21 @@ class SettingsDialog(QDialog):
 
         history_dir_btn.clicked.connect(choose_history_dir)
 
-        advanced_group = QGroupBox("高级权限与企业消息")
-        advanced_group.setStyleSheet(group_style)
-        advanced_layout = QVBoxLayout(advanced_group)
-        advanced_layout.setSpacing(14)
+        permission_page, permission_page_layout = make_scroll_page(
+            "权限",
+            "控制是否允许助手执行更高风险的本机操作。",
+        )
+        permission_group = QGroupBox("权限控制")
+        permission_group.setStyleSheet(group_style)
+        permission_group_layout = QVBoxLayout(permission_group)
+        permission_group_layout.setSpacing(14)
 
         permission_panel = QFrame()
         permission_panel.setStyleSheet(
             f"QFrame {{ background: {DesignTokens.warning_panel_bg}; border: 1px solid {DesignTokens.warning_panel_border}; border-radius: 14px; }}"
         )
-        permission_layout = QVBoxLayout(permission_panel)
-        permission_layout.setContentsMargins(14, 14, 14, 14)
+        permission_panel_layout = QVBoxLayout(permission_panel)
+        permission_panel_layout.setContentsMargins(14, 14, 14, 14)
         permission_title = QLabel("扩展权限模式")
         permission_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.warning_panel_text};")
         permission_desc = QLabel("开启后，助手可以突破工作区限制并执行更高风险的代码操作。仅在完全信任任务时使用。")
@@ -1062,71 +1107,137 @@ class SettingsDialog(QDialog):
         permission_desc.setStyleSheet(f"color: {DesignTokens.warning_panel_text}; font-size: 12px;")
         self.god_mode_check = QCheckBox("允许高风险操作")
         self.god_mode_check.setChecked(self.config_manager.get_god_mode())
-        permission_layout.addWidget(permission_title)
-        permission_layout.addWidget(permission_desc)
-        permission_layout.addWidget(self.god_mode_check)
-        advanced_layout.addWidget(permission_panel)
+        permission_panel_layout.addWidget(permission_title)
+        permission_panel_layout.addWidget(permission_desc)
+        permission_panel_layout.addWidget(self.god_mode_check)
+        permission_group_layout.addWidget(permission_panel)
 
-        base_layout.addWidget(self.openai_model_editor)
-        base_layout.addWidget(self.anthropic_model_editor)
-        base_layout.addWidget(storage_group)
-        base_layout.addWidget(advanced_group)
-        base_layout.addStretch()
-        base_tab.setWidget(base_content)
-        self.tabs.addTab(base_tab, "基础设置")
+        model_layout.addWidget(self.openai_model_editor)
+        model_layout.addWidget(self.anthropic_model_editor)
+        model_layout.addStretch()
+        workspace_layout.addWidget(storage_group)
+        workspace_layout.addStretch()
+        permission_page_layout.addWidget(permission_group)
+        permission_page_layout.addStretch()
 
-        im_tab = QWidget()
-        im_layout = QVBoxLayout(im_tab)
-        im_layout.setContentsMargins(12, 16, 12, 16)
-        im_layout.setSpacing(18)
+        add_settings_page("模型", "fa5s.brain", model_page)
+        add_settings_page("工作区", "fa5s.folder-open", workspace_page)
+        add_settings_page("权限", "fa5s.shield-alt", permission_page)
 
-        im_header = QLabel("企业消息")
-        im_header.setProperty("roleTitle", True)
-        im_intro = QLabel("将助手接入飞书后，你可以直接在企业消息中下发任务，并复用同一套工作区约束。")
-        im_intro.setProperty("roleSubtitle", True)
-        im_intro.setWordWrap(True)
-        im_layout.addWidget(im_header)
-        im_layout.addWidget(im_intro)
+        im_page, im_layout = make_scroll_page(
+            "企业消息",
+            "将助手接入飞书、钉钉或企业微信智能机器人后，你可以直接在企业消息中下发任务，并复用同一套工作区约束。",
+        )
 
-        im_group = QGroupBox("飞书接入")
-        im_group.setStyleSheet(group_style)
-        im_form = QFormLayout(im_group)
-        im_form.setSpacing(12)
-        self.feishu_app_id_input = QLineEdit()
-        self.feishu_app_id_input.setText(self.config_manager.get("feishu_app_id", ""))
-        im_form.addRow("App ID", self.feishu_app_id_input)
+        im_cfg = self.config_manager.get("im_gateway", {})
+        if not isinstance(im_cfg, dict):
+            im_cfg = {}
+        im_providers = im_cfg.get("providers")
+        if not isinstance(im_providers, dict):
+            im_providers = {}
+        enabled_providers = im_cfg.get("enabled_providers")
+        if not isinstance(enabled_providers, list):
+            enabled_providers = []
+        self.im_provider_checks = {}
 
-        self.feishu_app_secret_input = QLineEdit()
-        self.feishu_app_secret_input.setEchoMode(QLineEdit.Password)
-        self.feishu_app_secret_input.setText(self.config_manager.get("feishu_app_secret", ""))
-        im_form.addRow("App Secret", self.feishu_app_secret_input)
-        im_layout.addWidget(im_group)
+        def provider_cfg(name):
+            value = im_providers.get(name)
+            return value if isinstance(value, dict) else {}
+
+        def add_provider_group(name, title, rows):
+            cfg = provider_cfg(name)
+            group = QGroupBox(title)
+            group.setStyleSheet(group_style)
+            form = QFormLayout(group)
+            form.setSpacing(10)
+            enabled_check = QCheckBox("启用该渠道")
+            enabled_check.setChecked(name in enabled_providers or bool(cfg.get("enabled")))
+            form.addRow("状态", enabled_check)
+            self.im_provider_checks[name] = enabled_check
+            fields = {}
+            for key, label, secret in rows:
+                editor = QLineEdit()
+                if secret:
+                    editor.setEchoMode(QLineEdit.Password)
+                editor.setText(str(cfg.get(key, "") or ""))
+                form.addRow(label, editor)
+                fields[key] = editor
+            im_layout.addWidget(group)
+            return fields
+
+        self.feishu_fields = add_provider_group("feishu", "飞书接入", [
+            ("app_id", "App ID", False),
+            ("app_secret", "App Secret", True),
+            ("verification_token", "Verification Token", True),
+            ("encrypt_key", "Encrypt Key", True),
+        ])
+        self.dingtalk_fields = add_provider_group("dingtalk", "钉钉机器人接入", [
+            ("client_id", "Client ID / App Key", False),
+            ("client_secret", "Client Secret", True),
+            ("robot_code", "Robot Code", False),
+            ("webhook_url", "Webhook URL", True),
+            ("ws_url", "Stream / WS URL", False),
+            ("secret", "Webhook Secret", True),
+        ])
+        self.wecom_fields = add_provider_group("wecom", "企业微信智能机器人接入", [
+            ("bot_key", "Bot Key", True),
+            ("webhook_url", "Webhook URL", True),
+            ("ws_url", "WS URL", False),
+        ])
 
         gateway_bar = QHBoxLayout()
-        gateway_info = QLabel("采用长连接模式，无需单独配置 Webhook。\n监听地址：0.0.0.0:8001")
+        log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
+        running = bool(getattr(self._main, "gateway_process", None) and self._main.gateway_process.poll() is None)
+        gateway_info = QLabel(("网关状态：运行中" if running else "网关状态：未运行") + f"\n日志：{log_path}")
         gateway_info.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         gateway_btn = QPushButton("启动企业消息网关")
         gateway_btn.setObjectName("PrimaryBtn")
         gateway_btn.setIcon(qta.icon('fa5s.play', color='white'))
+        stop_gateway_btn = QPushButton("停止网关")
+        stop_gateway_btn.setObjectName("SecondaryBtn")
+        stop_gateway_btn.setIcon(qta.icon('fa5s.stop', color='#334155'))
+        log_btn = QPushButton("打开日志")
+        log_btn.setObjectName("SecondaryBtn")
+        log_btn.setIcon(qta.icon('fa5s.file-alt', color='#334155'))
 
         def start_gateway():
             try:
-                self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
-                self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
+                self._save_im_gateway_config()
                 if hasattr(self._main, "try_connect_daemon"):
                     self._main.try_connect_daemon(allow_start=True, retries=6)
                 if hasattr(self._main, "start_gateway_process"):
                     self._main.start_gateway_process()
-                QMessageBox.information(self, "企业消息网关", "已启动企业消息网关，飞书长连接接入已可使用。")
+                gateway_info.setText("网关状态：运行中\n日志：" + log_path)
+                QMessageBox.information(self, "企业消息网关", "已启动企业消息网关。")
             except Exception:
                 QMessageBox.warning(self, "企业消息网关", "启动失败，请检查环境与依赖是否完整。")
 
+        def stop_gateway():
+            if hasattr(self._main, "stop_gateway_process"):
+                self._main.stop_gateway_process()
+            gateway_info.setText("网关状态：未运行\n日志：" + log_path)
+
+        def open_gateway_log():
+            try:
+                if not os.path.exists(log_path):
+                    with open(log_path, "a", encoding="utf-8"):
+                        pass
+                os.startfile(log_path)
+            except Exception:
+                QMessageBox.information(self, "企业消息网关日志", log_path)
+
         gateway_btn.clicked.connect(start_gateway)
+        stop_gateway_btn.clicked.connect(stop_gateway)
+        log_btn.clicked.connect(open_gateway_log)
         gateway_bar.addWidget(gateway_info, 1)
         gateway_bar.addWidget(gateway_btn)
+        gateway_bar.addWidget(stop_gateway_btn)
+        gateway_bar.addWidget(log_btn)
         im_layout.addLayout(gateway_bar)
         im_layout.addStretch()
-        self.tabs.addTab(im_tab, "企业消息")
+        add_settings_page("企业消息", "fa5s.comments", im_page)
+        self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
+        self.nav_list.setCurrentRow(0)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -1139,6 +1250,28 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
+
+    def _save_im_gateway_config(self):
+        provider_fields = {
+            "feishu": self.feishu_fields,
+            "dingtalk": self.dingtalk_fields,
+            "wecom": self.wecom_fields,
+        }
+        providers = {}
+        enabled = []
+        for name, fields in provider_fields.items():
+            provider_cfg = {
+                key: editor.text().strip()
+                for key, editor in fields.items()
+            }
+            is_enabled = bool(self.im_provider_checks.get(name) and self.im_provider_checks[name].isChecked())
+            provider_cfg["enabled"] = is_enabled
+            if name == "feishu":
+                provider_cfg["long_connection"] = True
+            if is_enabled:
+                enabled.append(name)
+            providers[name] = provider_cfg
+        self.config_manager.set("im_gateway", {"enabled_providers": enabled, "providers": providers})
 
     def save_settings(self):
         selected_model_id = self.config_manager.get_selected_model_id()
@@ -1168,8 +1301,7 @@ class SettingsDialog(QDialog):
             if reply != QMessageBox.Yes:
                 self.god_mode_check.setChecked(False)
         self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-        self.config_manager.set("feishu_app_id", self.feishu_app_id_input.text().strip())
-        self.config_manager.set("feishu_app_secret", self.feishu_app_secret_input.text().strip())
+        self._save_im_gateway_config()
         self.accept()
 
 

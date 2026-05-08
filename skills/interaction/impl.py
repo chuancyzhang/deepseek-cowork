@@ -27,15 +27,36 @@ def _run_context(_context):
     return run_context if isinstance(run_context, dict) else {}
 
 
-def _is_feishu_runtime_context(_context):
+ENTERPRISE_PROVIDERS = {"feishu", "dingtalk", "wecom"}
+
+
+def _runtime_im_provider(_context):
     ctx = _run_context(_context)
-    if (ctx.get("im_provider") or "").strip().lower() == "feishu":
-        return True
-    if (ctx.get("channel") or "").strip().lower() == "feishu":
-        return True
+    provider = (ctx.get("im_provider") or ctx.get("channel") or "").strip().lower()
+    if provider in ENTERPRISE_PROVIDERS:
+        return provider
     if not isinstance(_context, dict):
-        return False
-    return isinstance(_context.get("im_event") or _context.get("feishu_event"), dict)
+        return ""
+    event_like = _context.get("im_event") or _context.get("feishu_event")
+    if isinstance(event_like, dict):
+        provider = (event_like.get("provider") or "").strip().lower()
+        return provider if provider in ENTERPRISE_PROVIDERS else "feishu"
+    return ""
+
+
+def _is_enterprise_runtime_context(_context):
+    return bool(_runtime_im_provider(_context))
+
+
+def _gateway_provider_config(_context, provider_name):
+    gateway = _cfg(_context, "im_gateway", {})
+    if not isinstance(gateway, dict):
+        return {}
+    providers = gateway.get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    cfg = providers.get(provider_name)
+    return cfg if isinstance(cfg, dict) else {}
 
 
 def _session_id(_context):
@@ -301,9 +322,10 @@ def _validate_receive(receive_id_type, receive_id):
     return rid_type, rid, ""
 
 
-def _resolve_receive_target(_context):
-    receive_id_type_value = (_cfg(_context, "feishu_receive_id_type", "") or "").strip()
-    receive_id_value = (_cfg(_context, "feishu_receive_id", "") or "").strip()
+def _resolve_receive_target(_context, provider_cfg=None):
+    provider_cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
+    receive_id_type_value = (provider_cfg.get("receive_id_type") or "").strip()
+    receive_id_value = (provider_cfg.get("receive_id") or "").strip()
     if receive_id_type_value and receive_id_value:
         return receive_id_type_value, receive_id_value, ""
     event_like = None
@@ -491,6 +513,28 @@ def _send_feishu_message(tenant_token, receive_id_type, receive_id, msg_type, co
         return False, str(e)
 
 
+def _send_webhook_markdown(webhook_url, provider_name, title, text):
+    if not webhook_url:
+        return False, "missing_webhook_url"
+    provider_name = (provider_name or "").strip().lower()
+    if provider_name == "wecom":
+        payload = {"msgtype": "markdown", "markdown": {"content": text or ""}}
+    else:
+        payload = {"msgtype": "markdown", "markdown": {"title": title or "AI 助手交付物", "text": text or ""}}
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=12)
+        if resp.ok:
+            return True, ""
+        body = None
+        try:
+            body = resp.json()
+        except Exception:
+            body = _truncate_text(getattr(resp, "text", ""))
+        return False, _safe_json(body)
+    except Exception as e:
+        return False, str(e)
+
+
 def publish_artifacts(
     items,
     audience="auto",
@@ -507,23 +551,31 @@ def publish_artifacts(
         return {"error": "items must be a non-empty list."}
 
     audience_value = (audience or "auto").strip().lower()
-    if audience_value not in {"auto", "feishu"}:
-        return {"error": "audience must be auto or feishu."}
-    if not _is_feishu_runtime_context(_context):
-        return {"error": "publish_artifacts is only available in Feishu enterprise messaging sessions."}
+    if audience_value not in {"auto", "feishu", "dingtalk", "wecom"}:
+        return {"error": "audience must be auto, feishu, dingtalk, or wecom."}
+    runtime_provider = _runtime_im_provider(_context)
+    if not runtime_provider:
+        return {"error": "publish_artifacts is only available in enterprise messaging sessions."}
+    target_provider = runtime_provider if audience_value == "auto" else audience_value
+    provider_cfg = _gateway_provider_config(_context, target_provider)
 
-    app_id = (_cfg(_context, "feishu_app_id", "") or "").strip()
-    app_secret = (_cfg(_context, "feishu_app_secret", "") or "").strip()
-    receive_id_type_value, receive_id_value, receive_error = _resolve_receive_target(_context)
-    if not receive_error:
-        receive_id_type_value, receive_id_value, receive_error = _validate_receive(receive_id_type_value, receive_id_value)
-
-    should_try_feishu = True
     tenant_token = None
     token_reason = ""
-    if should_try_feishu and app_id and app_secret and not receive_error:
-        tenant_token, token_reason = _get_tenant_token(app_id, app_secret)
-    feishu_enabled = bool(should_try_feishu and tenant_token and not receive_error)
+    receive_error = ""
+    receive_id_type_value = ""
+    receive_id_value = ""
+    target_enabled = False
+    if target_provider == "feishu":
+        app_id = (provider_cfg.get("app_id") or "").strip()
+        app_secret = (provider_cfg.get("app_secret") or "").strip()
+        receive_id_type_value, receive_id_value, receive_error = _resolve_receive_target(_context, provider_cfg)
+        if not receive_error:
+            receive_id_type_value, receive_id_value, receive_error = _validate_receive(receive_id_type_value, receive_id_value)
+        if app_id and app_secret and not receive_error:
+            tenant_token, token_reason = _get_tenant_token(app_id, app_secret)
+        target_enabled = bool(tenant_token and not receive_error)
+    else:
+        target_enabled = bool((provider_cfg.get("webhook_url") or "").strip())
 
     content_parts = []
     normalized_items = []
@@ -579,7 +631,7 @@ def publish_artifacts(
         is_image = _is_image_item(subtype, mime, name)
         delivered = False
         reason = ""
-        if feishu_enabled and path and os.path.exists(path):
+        if target_provider == "feishu" and target_enabled and path and os.path.exists(path):
             if is_image:
                 image_key, upload_reason = _upload_image(tenant_token, path)
                 if image_key:
@@ -614,7 +666,7 @@ def publish_artifacts(
                         reason = f"send_file_failed:{send_reason}"
                 else:
                     reason = f"upload_file_failed:{upload_reason}"
-        if feishu_enabled and (not delivered) and url:
+        if target_provider == "feishu" and target_enabled and (not delivered) and url:
             ok, send_reason = _send_feishu_message(
                 tenant_token,
                 receive_id_type_value,
@@ -627,15 +679,32 @@ def publish_artifacts(
                 success.append({"name": name, "type": "post_link"})
             else:
                 reason = f"send_post_failed:{send_reason}"
+        if target_provider in {"dingtalk", "wecom"} and target_enabled and url:
+            webhook_url = (provider_cfg.get("webhook_url") or "").strip()
+            text = f"**{title or 'AI 助手交付物'}**\n\n- {name}: {url}"
+            if caption:
+                text += f"\n  {caption}"
+            ok, send_reason = _send_webhook_markdown(webhook_url, target_provider, title, text)
+            if ok:
+                delivered = True
+                success.append({"name": name, "type": "link"})
+            else:
+                reason = f"send_markdown_failed:{send_reason}"
         if not delivered:
             if not reason:
-                if should_try_feishu and not feishu_enabled:
+                if target_provider == "feishu" and not target_enabled:
                     reason = "delivery_skipped_missing_runtime_target_or_credentials"
                     skipped.append({"name": name, "reason": reason})
-                elif should_try_feishu:
+                elif target_provider in {"dingtalk", "wecom"} and not target_enabled:
+                    reason = "delivery_skipped_missing_webhook_url"
+                    skipped.append({"name": name, "reason": reason})
+                elif target_provider in {"dingtalk", "wecom"} and path and not url:
+                    reason = "delivery_skipped_native_file_upload_not_available"
+                    skipped.append({"name": name, "reason": reason})
+                else:
                     reason = "delivery_failed"
                     failed.append({"name": name, "reason": reason})
-            elif feishu_enabled:
+            elif target_enabled:
                 failed.append({"name": name, "reason": reason})
             else:
                 skipped.append({"name": name, "reason": reason})
@@ -655,9 +724,9 @@ def publish_artifacts(
     content_parts.extend(normalized_items)
 
     delivery_result = {
-        "feishu": {
+        target_provider: {
             "ok": len(failed) == 0,
-            "enabled": feishu_enabled,
+            "enabled": target_enabled,
             "reason": f"success={len(success)} failed={len(failed)} skipped={len(skipped)} receive_error={receive_error or 'none'} token_error={token_reason or 'none'}",
             "success": success,
             "failed": failed,
@@ -666,7 +735,7 @@ def publish_artifacts(
     }
     return {
         "source_tool": "publish_artifacts",
-        "content": f"已处理 {len(normalized_items)} 个文件输出，飞书成功 {len(success)}，失败 {len(failed)}，跳过 {len(skipped)}。",
+        "content": f"已处理 {len(normalized_items)} 个文件输出，{target_provider} 成功 {len(success)}，失败 {len(failed)}，跳过 {len(skipped)}。",
         "content_parts": content_parts,
         "delivery_result": delivery_result,
     }
@@ -771,7 +840,7 @@ TOOL_EXPORTS = [
                         },
                     },
                 },
-                "audience": {"type": "string", "description": "One of auto or feishu for enterprise-message delivery."},
+                "audience": {"type": "string", "description": "One of auto, feishu, dingtalk, or wecom for enterprise-message delivery."},
                 "summary": {"type": "string", "description": "Summary text for timeline display."},
                 "title": {"type": "string", "description": "Title used for IM post link messages."},
             },

@@ -681,9 +681,10 @@ class LLMWorker(QThread):
                 available_tool_names.append(name)
         available_tool_names = list(dict.fromkeys(available_tool_names))
         planning_read_tools = get_planning_read_tools(available_tool_names)
+        enterprise_channels = {"feishu", "dingtalk", "wecom"}
         enterprise_delivery_enabled = (
-            (self.run_context.get("im_provider") or "").strip().lower() == "feishu"
-            or (self.run_context.get("channel") or "").strip().lower() == "feishu"
+            (self.run_context.get("im_provider") or "").strip().lower() in enterprise_channels
+            or (self.run_context.get("channel") or "").strip().lower() in enterprise_channels
         )
 
         # Construct System Context

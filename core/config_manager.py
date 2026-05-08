@@ -51,7 +51,15 @@ class ConfigManager:
             "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
             "disabled_skills": [],
             "god_mode": False,
-            "default_workspace": ""
+            "default_workspace": "",
+            "im_gateway": {
+                "enabled_providers": [],
+                "providers": {
+                    "feishu": {"enabled": False, "long_connection": True},
+                    "dingtalk": {"enabled": False},
+                    "wecom": {"enabled": False},
+                },
+            },
         }
         self.load_config()
         self._apply_migrations()

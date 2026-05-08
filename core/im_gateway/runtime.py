@@ -48,12 +48,17 @@ def _truncate_text(value, limit=800):
 def _sanitize(value):
     sensitive_keys = {
         "app_secret",
+        "bot_key",
+        "client_secret",
         "tenant_access_token",
         "Authorization",
         "authorization",
         "encrypt_key",
         "encrypt",
-        "verification_token"
+        "secret",
+        "verification_token",
+        "webhook_url",
+        "ws_url"
     }
     if isinstance(value, dict):
         result = {}
@@ -233,15 +238,64 @@ def _build_interaction_hint(request):
     return "\n".join(line for line in lines if line is not None)
 
 
-def _build_feishu_model_input(event):
+def _im_gateway_config(config_manager):
+    if not config_manager:
+        return {}
+    try:
+        cfg = config_manager.get("im_gateway", {})
+    except Exception:
+        cfg = {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _provider_config(config_manager, provider_name):
+    cfg = _im_gateway_config(config_manager)
+    providers = cfg.get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    item = providers.get(provider_name)
+    return item if isinstance(item, dict) else {}
+
+
+def _enabled_provider_names(config_manager):
+    cfg = _im_gateway_config(config_manager)
+    enabled = cfg.get("enabled_providers")
+    if isinstance(enabled, list):
+        return [
+            str(item or "").strip().lower()
+            for item in enabled
+            if str(item or "").strip()
+        ]
+    providers = cfg.get("providers")
+    if not isinstance(providers, dict):
+        return []
+    names = []
+    for name, item in providers.items():
+        if isinstance(item, dict) and item.get("enabled"):
+            names.append(str(name or "").strip().lower())
+    return [name for name in names if name]
+
+
+def _build_model_input(event, provider_name=None):
     user_text = (event or {}).get("text") or ""
+    provider_value = (provider_name or (event or {}).get("provider") or "enterprise").strip().lower()
+    labels = {
+        "feishu": "飞书",
+        "dingtalk": "钉钉",
+        "wecom": "企业微信智能机器人",
+    }
+    label = labels.get(provider_value, provider_value or "企业消息")
     channel_hint = (
         "[渠道上下文]\n"
-        "- 当前交互渠道: 飞书\n"
-        "- 你正在处理飞书会话消息，请优先使用适配飞书的交互方式。\n"
-        "- 若需要交付文件或图片，请调用 publish_artifacts；需要触达飞书时将 audience 设为 'feishu' 或 'auto'。\n"
+        f"- 当前交互渠道: {label}\n"
+        f"- 你正在处理{label}会话消息，请优先使用适配企业消息的交互方式。\n"
+        f"- 若需要交付文件、图片或链接，请调用 publish_artifacts；需要触达当前渠道时将 audience 设为 '{provider_value}' 或 'auto'。\n"
     )
     return f"{channel_hint}\n[用户消息]\n{user_text}"
+
+
+def _build_feishu_model_input(event):
+    return _build_model_input(event, "feishu")
 
 
 LARK_AVAILABLE = False
@@ -265,7 +319,7 @@ def _extend_lark_sys_path():
     python_exe = get_python_executable()
     if python_exe and os.path.exists(python_exe):
         candidates.append(os.path.join(os.path.dirname(python_exe), "Lib", "site-packages"))
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     candidates.append(os.path.join(base_dir, ".venv", "Lib", "site-packages"))
     for p in candidates:
         if p and os.path.isdir(p) and p not in sys.path:
@@ -295,6 +349,19 @@ def _load_lark_sdk():
 class IMProvider:
     name = ""
 
+    def __init__(self, config_manager=None):
+        self.config_manager = config_manager
+        self.config = _provider_config(config_manager, self.name)
+
+    def config_value(self, key, default=""):
+        if not isinstance(self.config, dict):
+            return default
+        value = self.config.get(key, default)
+        return default if value is None else value
+
+    def is_enabled(self):
+        return bool(self.config_value("enabled", False))
+
     def verify_signature(self, request, raw_body):
         return True
 
@@ -304,6 +371,12 @@ class IMProvider:
     def build_reply(self, text):
         return {"msgtype": "text", "text": {"content": text}}
 
+    def send_card_reply(self, event=None, card_content="", title="AI 助手", **kwargs):
+        return self.send_message(card_content, event=event)
+
+    def update_card_message(self, message_id, content, title="AI 助手", **kwargs):
+        return False
+
     def send_message(self, text, event=None):
         return self.build_reply(text)
 
@@ -311,10 +384,11 @@ class FeishuProvider(IMProvider):
     name = "feishu"
 
     def __init__(self, config_manager):
-        self.app_id = config_manager.get("feishu_app_id", "")
-        self.app_secret = config_manager.get("feishu_app_secret", "")
-        self.verification_token = config_manager.get("feishu_verification_token", "")
-        self.encrypt_key = config_manager.get("feishu_encrypt_key", "")
+        super().__init__(config_manager)
+        self.app_id = str(self.config_value("app_id", "") or "")
+        self.app_secret = str(self.config_value("app_secret", "") or "")
+        self.verification_token = str(self.config_value("verification_token", "") or "")
+        self.encrypt_key = str(self.config_value("encrypt_key", "") or "")
         self._token_cache = {"token": None, "expire_at": 0}
         self._card_sequences = {}
 
@@ -671,6 +745,176 @@ class FeishuProvider(IMProvider):
             return {"code": 0, "msg": "success"}
         return self.build_reply(text)
 
+
+class DingTalkProvider(IMProvider):
+    name = "dingtalk"
+
+    def __init__(self, config_manager):
+        super().__init__(config_manager)
+        self.client_id = str(self.config_value("client_id", "") or self.config_value("app_key", "") or "")
+        self.client_secret = str(self.config_value("client_secret", "") or self.config_value("app_secret", "") or "")
+        self.robot_code = str(self.config_value("robot_code", "") or "")
+        self.webhook_url = str(self.config_value("webhook_url", "") or "")
+        self.ws_url = str(self.config_value("ws_url", "") or self.config_value("stream_url", "") or "")
+        self.secret = str(self.config_value("secret", "") or "")
+
+    def parse_event(self, payload):
+        _log_gateway(f"dingtalk parse_event payload={_safe_json_dump(payload)}")
+        if not isinstance(payload, dict):
+            return None
+        event_type = payload.get("eventType") or payload.get("event_type") or payload.get("type") or "im.message.receive"
+        text = ""
+        raw_text = payload.get("text")
+        if isinstance(raw_text, dict):
+            text = raw_text.get("content") or raw_text.get("text") or ""
+        elif isinstance(raw_text, str):
+            text = raw_text
+        if not text:
+            content = payload.get("content")
+            if isinstance(content, dict):
+                text = content.get("text") or content.get("content") or ""
+            elif isinstance(content, str):
+                text = content
+        sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+        conversation = payload.get("conversation") if isinstance(payload.get("conversation"), dict) else {}
+        user_id = (
+            payload.get("senderStaffId")
+            or payload.get("senderId")
+            or payload.get("userId")
+            or sender.get("staffId")
+            or sender.get("userId")
+            or "unknown"
+        )
+        chat_id = (
+            payload.get("conversationId")
+            or payload.get("chatId")
+            or conversation.get("conversationId")
+            or conversation.get("chatId")
+            or ""
+        )
+        message_id = payload.get("msgId") or payload.get("messageId") or payload.get("message_id") or payload.get("eventId")
+        create_time = payload.get("createAt") or payload.get("createTime") or payload.get("timestamp")
+        if not text:
+            _log_gateway(f"dingtalk event without text type={event_type}")
+            return None
+        return {
+            "provider": self.name,
+            "event_type": event_type,
+            "user_id": str(user_id or "unknown"),
+            "chat_id": str(chat_id or ""),
+            "message_id": message_id,
+            "text": text,
+            "create_time": create_time,
+            "raw_event": payload,
+            "event": payload,
+            "reply_url": payload.get("sessionWebhook") or payload.get("conversationWebhook") or payload.get("replyUrl"),
+            "message_type": payload.get("msgtype") or payload.get("messageType") or "text",
+            "sender_type": "user",
+        }
+
+    def build_reply(self, text):
+        return {"msgtype": "markdown", "markdown": {"title": "AI 助手", "text": text or ""}}
+
+    def _signed_webhook_url(self, url):
+        if not url or not self.secret:
+            return url
+        try:
+            ts = str(round(time.time() * 1000))
+            string_to_sign = f"{ts}\n{self.secret}"
+            sign = base64.b64encode(
+                hmac.new(self.secret.encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).digest()
+            ).decode("utf-8")
+            joiner = "&" if "?" in url else "?"
+            return f"{url}{joiner}timestamp={ts}&sign={requests.utils.quote(sign, safe='')}"
+        except Exception:
+            return url
+
+    def send_message(self, text, event=None):
+        url = (event or {}).get("reply_url") or self.webhook_url
+        payload = self.build_reply(text)
+        if not url:
+            return payload
+        try:
+            resp = requests.post(self._signed_webhook_url(url), json=payload, timeout=8)
+            _log_gateway(f"dingtalk send status={resp.status_code} ok={resp.ok}")
+            return {"code": 0 if resp.ok else resp.status_code, "ok": bool(resp.ok)}
+        except Exception as e:
+            _log_gateway(f"dingtalk send failed: {e}")
+            return {"code": -1, "error": str(e)}
+
+
+class WeComProvider(IMProvider):
+    name = "wecom"
+
+    def __init__(self, config_manager):
+        super().__init__(config_manager)
+        self.bot_key = str(self.config_value("bot_key", "") or self.config_value("key", "") or "")
+        self.webhook_url = str(self.config_value("webhook_url", "") or "")
+        self.ws_url = str(self.config_value("ws_url", "") or "")
+
+    def parse_event(self, payload):
+        _log_gateway(f"wecom parse_event payload={_safe_json_dump(payload)}")
+        if not isinstance(payload, dict):
+            return None
+        event_type = payload.get("event_type") or payload.get("event") or payload.get("type") or "im.message.receive"
+        text = ""
+        raw_text = payload.get("text")
+        if isinstance(raw_text, dict):
+            text = raw_text.get("content") or raw_text.get("text") or ""
+        elif isinstance(raw_text, str):
+            text = raw_text
+        if not text:
+            content = payload.get("content")
+            if isinstance(content, dict):
+                text = content.get("content") or content.get("text") or ""
+            elif isinstance(content, str):
+                text = content
+        sender = payload.get("from") if isinstance(payload.get("from"), dict) else {}
+        user_id = (
+            payload.get("from_user_id")
+            or payload.get("user_id")
+            or payload.get("userid")
+            or sender.get("userid")
+            or sender.get("user_id")
+            or "unknown"
+        )
+        chat_id = payload.get("chat_id") or payload.get("chatid") or payload.get("group_id") or ""
+        message_id = payload.get("msgid") or payload.get("msg_id") or payload.get("message_id") or payload.get("event_id")
+        create_time = payload.get("create_time") or payload.get("timestamp")
+        if not text:
+            _log_gateway(f"wecom event without text type={event_type}")
+            return None
+        return {
+            "provider": self.name,
+            "event_type": event_type,
+            "user_id": str(user_id or "unknown"),
+            "chat_id": str(chat_id or ""),
+            "message_id": message_id,
+            "text": text,
+            "create_time": create_time,
+            "raw_event": payload,
+            "event": payload,
+            "reply_url": payload.get("response_url") or payload.get("reply_url"),
+            "message_type": payload.get("msgtype") or payload.get("message_type") or "text",
+            "sender_type": "user",
+        }
+
+    def build_reply(self, text):
+        return {"msgtype": "markdown", "markdown": {"content": text or ""}}
+
+    def send_message(self, text, event=None):
+        url = (event or {}).get("reply_url") or self.webhook_url
+        payload = self.build_reply(text)
+        if not url:
+            return payload
+        try:
+            resp = requests.post(url, json=payload, timeout=8)
+            _log_gateway(f"wecom send status={resp.status_code} ok={resp.ok}")
+            return {"code": 0 if resp.ok else resp.status_code, "ok": bool(resp.ok)}
+        except Exception as e:
+            _log_gateway(f"wecom send failed: {e}")
+            return {"code": -1, "error": str(e)}
+
 class SessionMapper:
     def __init__(self, chat_storage):
         self.chat_storage = chat_storage
@@ -811,6 +1055,7 @@ def _resolve_streaming_config(config_manager):
 
 
 def _stream_im_response(conversation_id, event, provider, daemon_client, workspace_dir, config_manager=None):
+    provider_name = (getattr(provider, "name", "") or (event or {}).get("provider") or "feishu").strip().lower()
     pending_text = ""
     total_text = ""
     pending_thinking = ""
@@ -827,7 +1072,7 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
     tool_events = []
     file_parts = []
     tool_call_index = {}
-    model_input_text = _build_feishu_model_input(event)
+    model_input_text = _build_model_input(event, provider_name)
     def _effective_interval(base_interval):
         if update_fail_count >= 2:
             return max(base_interval, stream_cfg["backoff_min_interval"])
@@ -892,7 +1137,7 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
         pending_thinking = ""
         last_send_time = time.time()
         return bool(updated)
-    if hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
+    if provider_name == "feishu" and hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
         card_attempted = True
         card_message_id = provider.send_card_reply(event, card_content="正在处理...", title="🤖 AI 助手", thinking="思考中...", content_parts=[{"type": "text", "text": "正在处理..."}])
         if card_message_id:
@@ -917,8 +1162,8 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
             workspace_dir,
             run_context={
                 "mode": RUN_MODE_EXECUTION,
-                "im_provider": "feishu",
-                "channel": "feishu",
+                "im_provider": provider_name,
+                "channel": provider_name,
             },
         ):
             if not isinstance(msg, dict):
@@ -1072,16 +1317,19 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
 
 
 def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_client):
-    _log_gateway(f"feishu handle_im_event payload={_safe_json_dump(payload)}")
+    provider_name = (getattr(provider, "name", "") or "feishu").strip().lower()
+    _log_gateway(f"{provider_name} handle_im_event payload={_safe_json_dump(payload)}")
     event = provider.parse_event(payload)
     if not event:
-        _log_gateway("feishu handle_im_event ignored: parse_event returned None")
+        _log_gateway(f"{provider_name} handle_im_event ignored: parse_event returned None")
         return None
+    if isinstance(event, dict):
+        event.setdefault("provider", provider_name)
     if "challenge" in event:
-        _log_gateway("feishu handle_im_event ignored: challenge")
+        _log_gateway(f"{provider_name} handle_im_event ignored: challenge")
         return None
     event_type = event.get("event_type")
-    if event_type == "card.action.trigger" or event_type == "card.action.trigger_v1":
+    if provider_name == "feishu" and (event_type == "card.action.trigger" or event_type == "card.action.trigger_v1"):
         action_data = event.get("event") or {}
         action_event_id = action_data.get("event_id") or (action_data.get("header") or {}).get("event_id") or event.get("event_id")
         action_payload = action_data.get("action") or {}
@@ -1093,7 +1341,7 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
             action_name = action_data.get("action_name") or "unknown"
         dedup_key = f"{action_event_id}:{action_name}"
         if _seen_action(dedup_key):
-            _log_gateway(f"feishu card action ignored by dedup dedup_key={dedup_key}")
+            _log_gateway(f"{provider_name} card action ignored by dedup dedup_key={dedup_key}")
             return None
         open_message_id = None
         if isinstance(action_data, dict):
@@ -1103,7 +1351,7 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
                 open_message_id = operator.get("open_message_id")
         if not open_message_id and isinstance(action_payload, dict):
             open_message_id = action_payload.get("open_message_id")
-        _log_gateway(f"feishu card action received action={action_name} message_id={open_message_id} event_id={action_event_id}")
+        _log_gateway(f"{provider_name} card action received action={action_name} message_id={open_message_id} event_id={action_event_id}")
         if open_message_id and hasattr(provider, "update_card_message"):
             with _CARD_CONTEXT_LOCK:
                 ctx = _CARD_CONTEXT.get(open_message_id) or {}
@@ -1151,45 +1399,39 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
                         live_ctx["awaiting_feedback"] = True
                 provider.update_card_message(open_message_id, "请直接回复你对当前结果的反馈内容，我会转给 AI 并继续优化。", thinking=thinking_text, collapse_thinking=False, content_parts=content_parts, interactive_actions=actions_running)
         return None
-    if event_type != "im.message.receive_v1":
-        _log_gateway(f"feishu handle_im_event ignored: event_type={event.get('event_type')}")
+    allowed_event_types = {
+        "feishu": {"im.message.receive_v1"},
+        "dingtalk": {"im.message.receive", "im.message.receive_v1", "message", "text"},
+        "wecom": {"im.message.receive", "im.message.receive_v1", "message", "text"},
+    }
+    if event_type not in allowed_event_types.get(provider_name, {"im.message.receive"}):
+        _log_gateway(f"{provider_name} handle_im_event ignored: event_type={event.get('event_type')}")
         return None
     if event.get("sender_type") and event.get("sender_type") != "user":
-        _log_gateway(f"feishu handle_im_event ignored: sender_type={event.get('sender_type')}")
+        _log_gateway(f"{provider_name} handle_im_event ignored: sender_type={event.get('sender_type')}")
         return None
-    if event.get("message_type") and event.get("message_type") != "text":
-        _log_gateway(f"feishu handle_im_event ignored: message_type={event.get('message_type')}")
+    if event.get("message_type") and str(event.get("message_type")).lower() not in {"text", "markdown"}:
+        _log_gateway(f"{provider_name} handle_im_event ignored: message_type={event.get('message_type')}")
         return None
     if not event.get("text"):
-        _log_gateway("feishu handle_im_event ignored: empty text")
+        _log_gateway(f"{provider_name} handle_im_event ignored: empty text")
         return None
     dedup_key = event.get("message_id") or event.get("event_id")
     if _seen_message(dedup_key):
-        _log_gateway(f"feishu handle_im_event ignored: dedup_key={dedup_key}")
+        _log_gateway(f"{provider_name} handle_im_event ignored: dedup_key={dedup_key}")
         return None
     try:
         config_manager.load_config()
     except Exception as e:
-        _log_gateway(f"feishu load_config failed error={e}")
+        _log_gateway(f"{provider_name} load_config failed error={e}")
     workspace_dir = config_manager.get("default_workspace", "")
     if not config_manager.get_god_mode() and not workspace_dir:
-        _log_gateway("feishu handle_im_event blocked: workspace not configured")
+        _log_gateway(f"{provider_name} handle_im_event blocked: workspace not configured")
         provider.send_card_reply(event, card_content="请先在桌面端选择默认工作区（未开启上帝模式，需在工作区内操作）。", title="🤖 AI 助手")
         return None
-    try:
-        chat_id = (event.get("chat_id") or "").strip()
-        user_id = (event.get("user_id") or "").strip()
-        if chat_id:
-            config_manager.set("feishu_receive_id_type", "chat_id")
-            config_manager.set("feishu_receive_id", chat_id)
-        elif user_id:
-            config_manager.set("feishu_receive_id_type", "open_id")
-            config_manager.set("feishu_receive_id", user_id)
-    except Exception:
-        pass
     date_key = resolve_date_key(event.get("create_time"))
     session_key = build_im_session_key(event["user_id"], event.get("chat_id") or "", date_key)
-    conversation_id = session_mapper.get_or_create("feishu", session_key)
+    conversation_id = session_mapper.get_or_create(provider_name, session_key)
     pending_resp = daemon_client.get_pending_interaction(conversation_id)
     pending_interaction = (pending_resp or {}).get("pending") if isinstance(pending_resp, dict) else None
     if pending_interaction:
@@ -1233,13 +1475,13 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
         return None
     event = dict(event)
     event["text"] = _consume_feedback_prefix(conversation_id, event.get("text") or "")
-    _log_gateway(f"feishu session mapped conversation_id={conversation_id} session_key={session_key}")
-    _log_gateway(f"feishu daemon request conversation_id={conversation_id} text_len={len(event.get('text') or '')} workspace={workspace_dir}")
+    _log_gateway(f"{provider_name} session mapped conversation_id={conversation_id} session_key={session_key}")
+    _log_gateway(f"{provider_name} daemon request conversation_id={conversation_id} text_len={len(event.get('text') or '')} workspace={workspace_dir}")
     result, total_text, pending_text, total_thinking, sent_any, card_message_id, use_card, card_attempted = _stream_im_response(
         conversation_id, event, provider, daemon_client, workspace_dir, config_manager=config_manager
     )
     if result.get("error"):
-        _log_gateway(f"feishu daemon stream error response={_safe_json_dump(result)}")
+        _log_gateway(f"{provider_name} daemon stream error response={_safe_json_dump(result)}")
         if card_message_id:
             provider.update_card_message(card_message_id, f"⚠️ {result.get('error')}", thinking=_truncate_text(total_thinking, limit=2000), collapse_thinking=True)
         else:
@@ -1292,7 +1534,7 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
             )
         return None
     if (not sent_any and has_output) or ((not total_text.strip()) and has_output):
-        _log_gateway(f"feishu daemon ok result={_safe_json_dump(result)} output_len={len(output or '')}")
+        _log_gateway(f"{provider_name} daemon ok result={_safe_json_dump(result)} output_len={len(output or '')}")
         if hasattr(provider, "send_card_reply"):
             if card_message_id:
                 return None
@@ -1316,8 +1558,20 @@ def build_context():
     daemon_port = config_manager.get("daemon_port", DEFAULT_PORT)
     daemon_client = DaemonClient(daemon_host, daemon_port)
 
-    provider = FeishuProvider(config_manager)
-    return config_manager, session_mapper, daemon_client, provider
+    provider_classes = {
+        "feishu": FeishuProvider,
+        "dingtalk": DingTalkProvider,
+        "wecom": WeComProvider,
+    }
+    providers = []
+    for provider_name in _enabled_provider_names(config_manager):
+        provider_cls = provider_classes.get(provider_name)
+        if not provider_cls:
+            _log_gateway(f"unknown provider ignored: {provider_name}")
+            continue
+        provider = provider_cls(config_manager)
+        providers.append(provider)
+    return config_manager, session_mapper, daemon_client, providers
 
 
 def _start_feishu_long_connection(context):
@@ -1328,7 +1582,7 @@ def _start_feishu_long_connection(context):
     if not provider or not provider.app_id or not provider.app_secret:
         _log_gateway("feishu app_id/app_secret missing")
         return None
-    enabled = config_manager.get("feishu_long_connection", True)
+    enabled = provider.config_value("long_connection", True)
     if isinstance(enabled, str) and enabled.strip().lower() in ("0", "false", "no"):
         _log_gateway("feishu long connection disabled by config")
         return None
@@ -1375,11 +1629,71 @@ def _start_feishu_long_connection(context):
     return None
 
 
+def _start_websocket_provider(context):
+    config_manager, session_mapper, daemon_client, provider = context
+    provider_name = getattr(provider, "name", "enterprise")
+    ws_url = getattr(provider, "ws_url", "") or ""
+    if not ws_url:
+        _log_gateway(f"{provider_name} websocket url missing; provider waits for outbound/webhook-style test events only")
+        return None
+    try:
+        import websocket
+    except Exception as e:
+        _log_gateway(f"{provider_name} websocket-client unavailable: {e}")
+        return None
+
+    def on_message(_ws, message):
+        try:
+            payload = json.loads(message) if isinstance(message, str) else message
+        except Exception:
+            payload = {"text": str(message or "")}
+        _log_gateway(f"{provider_name} ws message received payload={_safe_json_dump(payload)}")
+        threading.Thread(
+            target=_handle_im_event,
+            args=(payload, provider, session_mapper, config_manager, daemon_client),
+            daemon=True,
+        ).start()
+
+    def on_error(_ws, error):
+        _log_gateway(f"{provider_name} websocket error: {error}")
+
+    def on_close(_ws, status_code, message):
+        _log_gateway(f"{provider_name} websocket closed status={status_code} message={message}")
+
+    app = websocket.WebSocketApp(
+        ws_url,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+    )
+    _log_gateway(f"{provider_name} websocket starting")
+    try:
+        app.run_forever()
+    except Exception as e:
+        _log_gateway(f"{provider_name} websocket failed: {e}")
+    return None
+
+
+def _start_provider(context):
+    _config_manager, _session_mapper, _daemon_client, provider = context
+    provider_name = getattr(provider, "name", "")
+    if provider_name == "feishu":
+        return _start_feishu_long_connection(context)
+    if provider_name in {"dingtalk", "wecom"}:
+        return _start_websocket_provider(context)
+    _log_gateway(f"provider start ignored: {provider_name}")
+    return None
+
+
 def run():
-    context = build_context()
+    config_manager, session_mapper, daemon_client, providers = build_context()
     _log_gateway("im_gateway start")
-    thread = threading.Thread(target=_start_feishu_long_connection, args=(context,), daemon=True)
-    thread.start()
+    if not providers:
+        _log_gateway("im_gateway has no enabled providers in im_gateway.enabled_providers")
+    for provider in providers:
+        context = (config_manager, session_mapper, daemon_client, provider)
+        thread = threading.Thread(target=_start_provider, args=(context,), daemon=True)
+        thread.start()
     while True:
         time.sleep(3600)
 

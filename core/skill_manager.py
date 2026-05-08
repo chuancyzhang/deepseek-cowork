@@ -1412,16 +1412,17 @@ class SkillManager:
     def _normalize_run_context_for_tools(self, run_context):
         return run_context if isinstance(run_context, dict) else {}
 
-    def _is_feishu_run_context(self, run_context):
+    def _is_enterprise_im_run_context(self, run_context):
         ctx = self._normalize_run_context_for_tools(run_context)
-        return (ctx.get("im_provider") or "").strip().lower() == "feishu" or (
-            (ctx.get("channel") or "").strip().lower() == "feishu"
+        enterprise_channels = {"feishu", "dingtalk", "wecom"}
+        return (ctx.get("im_provider") or "").strip().lower() in enterprise_channels or (
+            (ctx.get("channel") or "").strip().lower() in enterprise_channels
         )
 
     def _is_enterprise_tool_allowed(self, name, run_context):
         if name != "publish_artifacts":
             return True
-        return self._is_feishu_run_context(run_context)
+        return self._is_enterprise_im_run_context(run_context)
 
     def _filter_enterprise_tool_results(self, results, run_context):
         filtered = []

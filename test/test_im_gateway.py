@@ -33,12 +33,17 @@ class _SessionMapperStub:
 
 
 class _ConfigStub:
+    def __init__(self, im_gateway=None):
+        self.im_gateway = im_gateway or {}
+
     def load_config(self):
         return None
 
     def get(self, key, default=None):
         if key == "default_workspace":
             return "D:\\code\\cowork"
+        if key == "im_gateway":
+            return self.im_gateway
         return default
 
     def get_god_mode(self):
@@ -191,6 +196,88 @@ class TestImGatewayPendingInteraction(unittest.TestCase):
         run_context = daemon_client.calls[0]["run_context"]
         self.assertEqual(run_context.get("im_provider"), "feishu")
         self.assertEqual(run_context.get("channel"), "feishu")
+
+    def test_enabled_provider_names_reads_new_config_only(self):
+        cfg = _ConfigStub(
+            {
+                "enabled_providers": ["feishu", "dingtalk"],
+                "providers": {
+                    "feishu": {"enabled": True},
+                    "dingtalk": {"enabled": True},
+                    "wecom": {"enabled": False},
+                },
+            }
+        )
+
+        self.assertEqual(
+            im_gateway._enabled_provider_names(cfg),
+            ["feishu", "dingtalk"],
+        )
+
+    def test_dingtalk_event_parse_and_run_context(self):
+        provider = im_gateway.DingTalkProvider(
+            _ConfigStub(
+                {
+                    "providers": {
+                        "dingtalk": {
+                            "enabled": True,
+                            "webhook_url": "",
+                        }
+                    }
+                }
+            )
+        )
+        payload = {
+            "text": {"content": "hello"},
+            "senderStaffId": "user-1",
+            "conversationId": "chat-1",
+            "msgId": "dt-msg-1",
+            "createAt": "1710000000000",
+        }
+        event = provider.parse_event(payload)
+        self.assertEqual(event["provider"], "dingtalk")
+        self.assertEqual(event["text"], "hello")
+
+        daemon_client = _StreamDaemonClientStub()
+        result = im_gateway._stream_im_response(
+            "conversation-dt",
+            event,
+            provider,
+            daemon_client,
+            "D:\\code\\cowork",
+            config_manager=_ConfigStub(),
+        )
+
+        self.assertIsInstance(result, tuple)
+        run_context = daemon_client.calls[0]["run_context"]
+        self.assertEqual(run_context.get("im_provider"), "dingtalk")
+        self.assertEqual(run_context.get("channel"), "dingtalk")
+
+    def test_wecom_event_parse(self):
+        provider = im_gateway.WeComProvider(
+            _ConfigStub(
+                {
+                    "providers": {
+                        "wecom": {
+                            "enabled": True,
+                            "webhook_url": "",
+                        }
+                    }
+                }
+            )
+        )
+        event = provider.parse_event(
+            {
+                "text": {"content": "hello"},
+                "from_user_id": "user-2",
+                "chat_id": "room-1",
+                "msgid": "wx-msg-1",
+                "timestamp": "1710000000000",
+            }
+        )
+        self.assertEqual(event["provider"], "wecom")
+        self.assertEqual(event["user_id"], "user-2")
+        self.assertEqual(event["chat_id"], "room-1")
 
 
 if __name__ == "__main__":

@@ -117,6 +117,22 @@ class TestInteractionSkill(unittest.TestCase):
                 _context={
                     "run_context": {"im_provider": "feishu", "channel": "feishu"},
                     "im_event": {"chat_id": "chat-1"},
+                    "config_manager": type(
+                        "Cfg",
+                        (),
+                        {
+                            "get": lambda self, key, default=None: {
+                                "providers": {
+                                    "feishu": {
+                                        "app_id": "",
+                                        "app_secret": "",
+                                    }
+                                }
+                            }
+                            if key == "im_gateway"
+                            else default
+                        },
+                    )(),
                 },
             )
 
@@ -135,12 +151,64 @@ class TestInteractionSkill(unittest.TestCase):
         )
         self.assertIn("file not found", (result.get("error") or "").lower())
 
-    def test_publish_artifacts_requires_feishu_context(self):
+    def test_publish_artifacts_requires_enterprise_context(self):
         result = interaction_impl.publish_artifacts(
             items=[{"url": "https://example.com/demo.txt", "name": "demo.txt"}],
             audience="feishu",
         )
-        self.assertIn("only available in feishu", (result.get("error") or "").lower())
+        self.assertIn("only available in enterprise", (result.get("error") or "").lower())
+
+    def test_publish_artifacts_supports_dingtalk_context_with_fallback(self):
+        result = interaction_impl.publish_artifacts(
+            items=[{"url": "https://example.com/demo.txt", "name": "demo.txt"}],
+            audience="dingtalk",
+            _context={
+                "run_context": {"im_provider": "dingtalk", "channel": "dingtalk"},
+                "config_manager": type(
+                    "Cfg",
+                    (),
+                    {
+                        "get": lambda self, key, default=None: {
+                            "providers": {
+                                "dingtalk": {
+                                    "webhook_url": "",
+                                }
+                            }
+                        }
+                        if key == "im_gateway"
+                        else default
+                    },
+                )(),
+            },
+        )
+        self.assertIn("dingtalk", result["delivery_result"])
+        self.assertFalse(result["delivery_result"]["dingtalk"]["enabled"])
+
+    def test_publish_artifacts_supports_wecom_context_with_fallback(self):
+        result = interaction_impl.publish_artifacts(
+            items=[{"url": "https://example.com/demo.txt", "name": "demo.txt"}],
+            audience="wecom",
+            _context={
+                "run_context": {"im_provider": "wecom", "channel": "wecom"},
+                "config_manager": type(
+                    "Cfg",
+                    (),
+                    {
+                        "get": lambda self, key, default=None: {
+                            "providers": {
+                                "wecom": {
+                                    "webhook_url": "",
+                                }
+                            }
+                        }
+                        if key == "im_gateway"
+                        else default
+                    },
+                )(),
+            },
+        )
+        self.assertIn("wecom", result["delivery_result"])
+        self.assertFalse(result["delivery_result"]["wecom"]["enabled"])
 
     def test_delete_file_requires_request_user_approval(self):
         module_path = os.path.join(

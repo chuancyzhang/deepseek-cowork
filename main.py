@@ -18,6 +18,11 @@ from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
+from core.single_instance import (
+    UiSingleInstanceServer,
+    build_ui_server_name,
+    notify_existing_ui,
+)
 from core.chat_storage import ChatStorage
 from core.conversation_render import build_conversation_render_items
 from core.theme import apply_theme, DesignTokens
@@ -4256,6 +4261,7 @@ class MainWindow(QMainWindow):
         self.gateway_log_file = None
         self.tray_icon = None
         self.daemon_timer = None
+        self.single_instance_server = None
         
         # Animation Throttling
         self.last_message_time = 0
@@ -5375,9 +5381,17 @@ class MainWindow(QMainWindow):
         if self.isVisible():
             self.hide()
         else:
+            self.activate_existing_window()
+
+    def activate_existing_window(self):
+        if self.isMinimized():
+            self.showNormal()
+        elif not self.isVisible():
             self.show()
-            self.activateWindow()
-            self.raise_()
+        else:
+            self.show()
+        self.activateWindow()
+        self.raise_()
 
     def get_daemon_status_text(self):
         if not self.daemon_client:
@@ -5471,6 +5485,9 @@ class MainWindow(QMainWindow):
             self.stop_daemon_process()
             self.stop_gateway_process()
             event.accept()
+
+    def attach_single_instance_server(self, server):
+        self.single_instance_server = server
             
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -8481,6 +8498,9 @@ if __name__ == "__main__":
         from core.im_gateway import run as run_im_gateway
         run_im_gateway()
         sys.exit(0)
+    ui_server_name = build_ui_server_name()
+    if notify_existing_ui(ui_server_name):
+        sys.exit(0)
     if platform.system() == 'Windows':
         try:
             import ctypes
@@ -8499,7 +8519,24 @@ if __name__ == "__main__":
     font.setFamily("Segoe UI")
     font.setPointSize(10)
     app.setFont(font)
+    pending_activation = {"requested": False}
+
+    def activate_main_window():
+        if app.main_window:
+            app.main_window.activate_existing_window()
+        else:
+            pending_activation["requested"] = True
+
+    single_instance_server = UiSingleInstanceServer(ui_server_name, activate_main_window, app)
+    single_instance_server_started = single_instance_server.start()
+    if not single_instance_server_started and notify_existing_ui(ui_server_name):
+        sys.exit(0)
+
     window = MainWindow()
     app.main_window = window
+    if single_instance_server_started:
+        window.attach_single_instance_server(single_instance_server)
     window.showMaximized()
+    if pending_activation["requested"]:
+        window.activate_existing_window()
     sys.exit(app.exec())

@@ -273,6 +273,7 @@ qt_minimal_datas = _collect_minimal_pyside6()
 pyside6_hidden = [
     "PySide6.QtCore",
     "PySide6.QtGui",
+    "PySide6.QtNetwork",
     "PySide6.QtWidgets",
 ]
 

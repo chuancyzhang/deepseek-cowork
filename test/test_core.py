@@ -6,6 +6,7 @@ import shutil
 import threading
 import time
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
@@ -17,6 +18,11 @@ from core.interaction import InteractionBridge, interaction_service, parse_inter
 from core import env_utils
 from core import sandbox_runtime
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
+from core.single_instance import (
+    UiSingleInstanceServer,
+    build_ui_server_name,
+    notify_existing_ui,
+)
 from core.chat_storage import ChatStorage
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
 from core.llm.deepseek import (
@@ -364,6 +370,46 @@ class TestDaemonState(unittest.TestCase):
     def test_is_context_overflow_error(self):
         self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
         self.assertFalse(self.state._is_context_overflow_error({"error": "network timeout"}))
+
+
+class TestSingleInstance(unittest.TestCase):
+    def test_build_ui_server_name_is_stable_and_scoped(self):
+        first = build_ui_server_name(os.path.join("C:\\Apps", "Cowork"))
+        second = build_ui_server_name(os.path.join("C:\\Apps", "Cowork"))
+        other = build_ui_server_name(os.path.join("C:\\Apps", "Cowork2"))
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, other)
+        self.assertTrue(first.startswith("deepseek-cowork-ui-"))
+
+    def test_notify_existing_ui_triggers_activate(self):
+        from PySide6.QtCore import QCoreApplication
+
+        app = QCoreApplication.instance() or QCoreApplication([])
+        temp_dir = tempfile.mkdtemp()
+        server_name = build_ui_server_name(temp_dir)
+        activated = []
+        server = UiSingleInstanceServer(server_name, lambda: activated.append(True))
+        try:
+            self.assertTrue(server.start())
+            client_path = os.path.join(os.path.dirname(__file__), "single_instance_client.py")
+            proc = subprocess.Popen(
+                [sys.executable, client_path, server_name],
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.time() + 1
+            while time.time() < deadline and (not activated or proc.poll() is None):
+                app.processEvents()
+                time.sleep(0.01)
+            stdout, stderr = proc.communicate(timeout=1)
+            self.assertEqual(proc.returncode, 0, stdout + stderr)
+            self.assertEqual(activated, [True])
+        finally:
+            server.stop()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestDaemonInteractionRoundtrip(unittest.TestCase):

@@ -28,6 +28,13 @@ from core.conversation_render import build_conversation_render_items
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
+from core.app_version import APP_VERSION
+from core.updater import (
+    GITHUB_RELEASES_URL,
+    create_windows_update_script,
+    launch_windows_update_script,
+    prepare_update,
+)
 from core.llm.factory import LLMFactory
 from core.memory_update import (
     DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
@@ -76,6 +83,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem)
+from PySide6.QtWidgets import QProgressBar
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPropertyAnimation, QEasingCurve, QVariantAnimation
 
 # Try importing OpenAI
@@ -929,6 +937,31 @@ class ProviderModelEditor(QGroupBox):
             "models": self._models(),
         }
 
+
+class AppUpdateWorker(QThread):
+    progress_signal = Signal(str, int)
+    finished_signal = Signal(dict)
+
+    def __init__(self, install_enabled=False, parent=None):
+        super().__init__(parent)
+        self.install_enabled = install_enabled
+
+    def run(self):
+        try:
+            def emit_progress(message, percent=None):
+                self.progress_signal.emit(str(message or ""), int(percent if percent is not None else -1))
+
+            result = prepare_update(
+                current_version=APP_VERSION,
+                download=self.install_enabled,
+                progress_callback=emit_progress,
+            )
+            result["install_enabled"] = self.install_enabled
+            self.finished_signal.emit(result)
+        except Exception as exc:
+            self.finished_signal.emit({"error": str(exc), "install_enabled": self.install_enabled})
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
@@ -1119,6 +1152,47 @@ class SettingsDialog(QDialog):
         permission_panel_layout.addWidget(self.god_mode_check)
         permission_group_layout.addWidget(permission_panel)
 
+        update_page, update_layout = make_scroll_page(
+            "应用更新",
+            "从 GitHub Releases 检查并安装 deepseek-cowork 的最新 Windows 发布包。",
+        )
+        update_group = QGroupBox("GitHub Releases 自动更新")
+        update_group.setStyleSheet(group_style)
+        update_group_layout = QVBoxLayout(update_group)
+        update_group_layout.setSpacing(12)
+
+        self.update_current_label = QLabel(f"当前版本：{APP_VERSION}")
+        self.update_current_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        self.update_latest_label = QLabel("最新版本：尚未检查")
+        self.update_latest_label.setStyleSheet(f"color: {DesignTokens.text_secondary};")
+        self.update_status_label = QLabel("点击按钮后会检查 GitHub Releases。打包版可自动下载并重启更新，源码运行时只检查版本。")
+        self.update_status_label.setWordWrap(True)
+        self.update_status_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.update_notes_label = QLabel("更新日志：尚未检查")
+        self.update_notes_label.setWordWrap(True)
+        self.update_notes_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.update_progress = QProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setValue(0)
+        self.update_progress.setVisible(False)
+        self.update_btn = QPushButton("检查并更新")
+        self.update_btn.setObjectName("PrimaryBtn")
+        self.update_btn.setIcon(qta.icon('fa5s.download', color='white'))
+        self.update_btn.clicked.connect(self.start_app_update)
+
+        update_button_bar = QHBoxLayout()
+        update_button_bar.addWidget(self.update_btn)
+        update_button_bar.addStretch()
+        update_group_layout.addWidget(self.update_current_label)
+        update_group_layout.addWidget(self.update_latest_label)
+        update_group_layout.addWidget(self.update_status_label)
+        update_group_layout.addWidget(self.update_notes_label)
+        update_group_layout.addWidget(self.update_progress)
+        update_group_layout.addLayout(update_button_bar)
+        update_layout.addWidget(update_group)
+        update_layout.addStretch()
+        self.app_update_worker = None
+
         model_layout.addWidget(self.openai_model_editor)
         model_layout.addWidget(self.anthropic_model_editor)
         model_layout.addStretch()
@@ -1130,6 +1204,7 @@ class SettingsDialog(QDialog):
         add_settings_page("模型", "fa5s.brain", model_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
+        add_settings_page("更新", "fa5s.download", update_page)
 
         im_page, im_layout = make_scroll_page(
             "企业消息",
@@ -1257,6 +1332,106 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
+
+    def start_app_update(self):
+        if self.app_update_worker and self.app_update_worker.isRunning():
+            return
+        install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("正在检查...")
+        self.update_status_label.setText("正在连接 GitHub Releases...")
+        self.update_progress.setValue(0)
+        self.update_progress.setVisible(install_enabled)
+        self.app_update_worker = AppUpdateWorker(install_enabled=install_enabled, parent=self)
+        self.app_update_worker.progress_signal.connect(self.handle_app_update_progress)
+        self.app_update_worker.finished_signal.connect(self.handle_app_update_finished)
+        self.app_update_worker.finished.connect(self.app_update_worker.deleteLater)
+        self.app_update_worker.start()
+
+    def handle_app_update_progress(self, message, percent):
+        if message:
+            self.update_status_label.setText(message)
+        if percent >= 0:
+            self.update_progress.setVisible(True)
+            self.update_progress.setValue(max(0, min(100, percent)))
+
+    def handle_app_update_finished(self, result):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("检查并更新")
+        self.app_update_worker = None
+        if not isinstance(result, dict):
+            self.update_status_label.setText("检查更新失败：返回结果无效。")
+            return
+        if result.get("error"):
+            message = result.get("error") or "未知错误"
+            self.update_status_label.setText(f"检查更新失败：{message}")
+            QMessageBox.warning(self, "应用更新", message)
+            return
+
+        release = result.get("release") or {}
+        latest_version = release.get("tag_name") or release.get("name") or "未知"
+        self.update_latest_label.setText(f"最新版本：{latest_version}")
+        notes = (release.get("body") or "").strip()
+        if notes:
+            notes = re.sub(r"\s+", " ", notes)
+            if len(notes) > 240:
+                notes = notes[:240].rstrip() + "..."
+            self.update_notes_label.setText(f"更新日志：{notes}")
+        else:
+            self.update_notes_label.setText("更新日志：该 Release 未填写说明。")
+
+        if not result.get("update_available"):
+            self.update_progress.setVisible(False)
+            self.update_status_label.setText("当前已是最新版本。")
+            QMessageBox.information(self, "应用更新", "当前已是最新版本。")
+            return
+
+        html_url = release.get("html_url") or GITHUB_RELEASES_URL
+        if not result.get("install_enabled"):
+            self.update_progress.setVisible(False)
+            self.update_status_label.setText("发现新版本。源码运行模式不会自动替换目录，可打开 Releases 页面手动下载。")
+            reply = QMessageBox.question(
+                self,
+                "发现新版本",
+                f"发现新版本 {latest_version}。\n当前处于源码运行模式，不能自动安装。是否打开 GitHub Releases 页面？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                QDesktopServices.openUrl(QUrl(html_url))
+            return
+
+        staged_app_dir = result.get("staged_app_dir")
+        if not staged_app_dir:
+            self.update_status_label.setText("更新包已检查，但没有准备好安装目录。")
+            QMessageBox.warning(self, "应用更新", "更新包已检查，但没有准备好安装目录。")
+            return
+
+        self.update_progress.setValue(100)
+        self.update_status_label.setText(f"新版本 {latest_version} 已下载并校验完成。")
+        reply = QMessageBox.question(
+            self,
+            "安装更新",
+            f"新版本 {latest_version} 已准备好。\n现在将关闭应用、安装更新并自动重启，是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            self.update_status_label.setText("更新已下载，尚未安装。再次点击可重新检查。")
+            return
+        try:
+            script_path = create_windows_update_script(
+                install_dir=get_base_dir(),
+                staged_app_dir=staged_app_dir,
+                current_pid=os.getpid(),
+                exe_name=os.path.basename(sys.executable) or "deepseek-cowork.exe",
+                target_dir=result.get("updates_dir"),
+            )
+            launch_windows_update_script(script_path)
+            QApplication.quit()
+        except Exception as exc:
+            self.update_status_label.setText(f"启动更新安装失败：{exc}")
+            QMessageBox.warning(self, "应用更新", f"启动更新安装失败：{exc}")
 
     def _save_im_gateway_config(self):
         provider_fields = {

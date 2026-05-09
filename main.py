@@ -1171,6 +1171,14 @@ class SettingsDialog(QDialog):
         self.update_notes_label = QLabel("更新日志：尚未检查")
         self.update_notes_label.setWordWrap(True)
         self.update_notes_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.update_log_edit = QTextEdit()
+        self.update_log_edit.setReadOnly(True)
+        self.update_log_edit.setFixedHeight(120)
+        self.update_log_edit.setStyleSheet(
+            "QTextEdit { background: #f8fafc; border: 1px solid #dbe3ee; border-radius: 8px; "
+            "padding: 8px; color: #475569; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 12px; }"
+        )
+        self.update_log_edit.setPlaceholderText("更新过程会显示在这里。")
         self.update_progress = QProgressBar()
         self.update_progress.setRange(0, 100)
         self.update_progress.setValue(0)
@@ -1187,6 +1195,7 @@ class SettingsDialog(QDialog):
         update_group_layout.addWidget(self.update_latest_label)
         update_group_layout.addWidget(self.update_status_label)
         update_group_layout.addWidget(self.update_notes_label)
+        update_group_layout.addWidget(self.update_log_edit)
         update_group_layout.addWidget(self.update_progress)
         update_group_layout.addLayout(update_button_bar)
         update_layout.addWidget(update_group)
@@ -1340,6 +1349,8 @@ class SettingsDialog(QDialog):
         self.update_btn.setEnabled(False)
         self.update_btn.setText("正在检查...")
         self.update_status_label.setText("正在连接 GitHub Releases...")
+        self.update_log_edit.clear()
+        self.append_app_update_log("开始检查更新。")
         self.update_progress.setValue(0)
         self.update_progress.setVisible(install_enabled)
         self.app_update_worker = AppUpdateWorker(install_enabled=install_enabled, parent=self)
@@ -1351,9 +1362,16 @@ class SettingsDialog(QDialog):
     def handle_app_update_progress(self, message, percent):
         if message:
             self.update_status_label.setText(message)
+            self.append_app_update_log(message)
         if percent >= 0:
             self.update_progress.setVisible(True)
             self.update_progress.setValue(max(0, min(100, percent)))
+
+    def append_app_update_log(self, message):
+        if not message:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.update_log_edit.append(f"[{timestamp}] {message}")
 
     def handle_app_update_finished(self, result):
         self.update_btn.setEnabled(True)
@@ -1361,10 +1379,12 @@ class SettingsDialog(QDialog):
         self.app_update_worker = None
         if not isinstance(result, dict):
             self.update_status_label.setText("检查更新失败：返回结果无效。")
+            self.append_app_update_log("检查更新失败：返回结果无效。")
             return
         if result.get("error"):
             message = result.get("error") or "未知错误"
             self.update_status_label.setText(f"检查更新失败：{message}")
+            self.append_app_update_log(f"检查更新失败：{message}")
             QMessageBox.warning(self, "应用更新", message)
             return
 
@@ -1383,6 +1403,7 @@ class SettingsDialog(QDialog):
         if not result.get("update_available"):
             self.update_progress.setVisible(False)
             self.update_status_label.setText("当前已是最新版本。")
+            self.append_app_update_log("当前已是最新版本。")
             QMessageBox.information(self, "应用更新", "当前已是最新版本。")
             return
 
@@ -1390,6 +1411,7 @@ class SettingsDialog(QDialog):
         if not result.get("install_enabled"):
             self.update_progress.setVisible(False)
             self.update_status_label.setText("发现新版本。源码运行模式不会自动替换目录，可打开 Releases 页面手动下载。")
+            self.append_app_update_log("源码运行模式只检查版本，不执行自动安装。")
             reply = QMessageBox.question(
                 self,
                 "发现新版本",
@@ -1404,33 +1426,55 @@ class SettingsDialog(QDialog):
         staged_app_dir = result.get("staged_app_dir")
         if not staged_app_dir:
             self.update_status_label.setText("更新包已检查，但没有准备好安装目录。")
+            self.append_app_update_log("更新包已检查，但没有准备好安装目录。")
             QMessageBox.warning(self, "应用更新", "更新包已检查，但没有准备好安装目录。")
             return
 
         self.update_progress.setValue(100)
+        zip_path = result.get("zip_path") or ""
         self.update_status_label.setText(f"新版本 {latest_version} 已下载并校验完成。")
+        self.append_app_update_log("下载、解压和结构校验完成。")
+        if zip_path:
+            self.append_app_update_log(f"安装包位置：{zip_path}")
+        package_line = f"\n安装包位置：{zip_path}" if zip_path else ""
         reply = QMessageBox.question(
             self,
             "安装更新",
-            f"新版本 {latest_version} 已准备好。\n现在将关闭应用、安装更新并自动重启，是否继续？",
+            f"新版本 {latest_version} 已准备好。{package_line}\n接下来会打开更新进度窗口，主程序将关闭、安装更新并自动重启。是否继续？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
         if reply != QMessageBox.Yes:
             self.update_status_label.setText("更新已下载，尚未安装。再次点击可重新检查。")
+            self.append_app_update_log("用户取消安装，更新包保留在本机更新目录。")
             return
         try:
+            self.append_app_update_log("正在启动独立更新进度窗口。")
+            launch_log_path = os.path.join(result.get("updates_dir") or get_app_data_dir(), "update-launch.log")
+            self.append_app_update_log(f"更新器启动日志：{launch_log_path}")
+            extra_wait_pids = []
+            if getattr(self._main, "daemon_process", None) and self._main.daemon_process.poll() is None:
+                extra_wait_pids.append(self._main.daemon_process.pid)
+                self.append_app_update_log(f"更新器将等待守护进程退出：PID {self._main.daemon_process.pid}")
+            if getattr(self._main, "gateway_process", None) and self._main.gateway_process.poll() is None:
+                extra_wait_pids.append(self._main.gateway_process.pid)
+                self.append_app_update_log(f"更新器将等待企业消息网关退出：PID {self._main.gateway_process.pid}")
             script_path = create_windows_update_script(
                 install_dir=get_base_dir(),
                 staged_app_dir=staged_app_dir,
                 current_pid=os.getpid(),
                 exe_name=os.path.basename(sys.executable) or "deepseek-cowork.exe",
                 target_dir=result.get("updates_dir"),
+                extra_wait_pids=extra_wait_pids,
             )
             launch_windows_update_script(script_path)
-            QApplication.quit()
+            if hasattr(self._main, "quit_app"):
+                self._main.quit_app()
+            else:
+                QApplication.quit()
         except Exception as exc:
             self.update_status_label.setText(f"启动更新安装失败：{exc}")
+            self.append_app_update_log(f"启动更新安装失败：{exc}")
             QMessageBox.warning(self, "应用更新", f"启动更新安装失败：{exc}")
 
     def _save_im_gateway_config(self):

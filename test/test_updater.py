@@ -13,7 +13,11 @@ from core.updater import (
     APP_EXE_NAME,
     INTERNAL_DIR_NAME,
     UpdaterError,
+    create_windows_update_script,
+    download_asset,
     extract_update_zip,
+    expected_asset_path,
+    launch_windows_update_script,
     prepare_update,
     select_release_asset,
 )
@@ -105,6 +109,110 @@ class TestUpdater(unittest.TestCase):
         self.assertEqual(result["release"]["tag_name"], "V4.8.0")
         self.assertEqual(result["asset"]["name"], "deepseek-cowork-v4.8.0.zip")
         self.assertNotIn("zip_path", result)
+
+    def test_download_asset_reuses_existing_package_when_size_matches(self):
+        asset = {
+            "name": "deepseek-cowork-v4.8.0.zip",
+            "browser_download_url": "https://example/app.zip",
+            "size": 4,
+        }
+        zip_path = expected_asset_path(asset, target_dir=self.temp_dir)
+        with open(zip_path, "wb") as handle:
+            handle.write(b"1234")
+        progress = []
+
+        with patch("core.updater.requests.get") as mocked_get:
+            result = download_asset(asset, target_dir=self.temp_dir, progress_callback=lambda msg, pct=None: progress.append((msg, pct)))
+
+        self.assertEqual(result, zip_path)
+        mocked_get.assert_not_called()
+        self.assertTrue(any("跳过下载" in message for message, _percent in progress))
+
+    def test_create_windows_update_script_generates_observable_gui_and_fallback(self):
+        install_dir = os.path.join(self.temp_dir, "install")
+        staged_dir = os.path.join(self.temp_dir, "staged")
+        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        os.makedirs(install_dir, exist_ok=True)
+        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
+            handle.write("")
+
+        with patch("core.updater.sys.platform", "win32"):
+            script_path = create_windows_update_script(
+                install_dir=install_dir,
+                staged_app_dir=staged_dir,
+                current_pid=12345,
+                extra_wait_pids=[23456],
+                target_dir=self.temp_dir,
+            )
+
+        fallback_path = os.path.splitext(script_path)[0] + ".cmd"
+        self.assertTrue(script_path.endswith(".ps1"))
+        self.assertTrue(os.path.exists(script_path))
+        self.assertTrue(os.path.exists(fallback_path))
+        with open(script_path, "rb") as handle:
+            self.assertEqual(handle.read(3), b"\xef\xbb\xbf")
+        with open(script_path, "r", encoding="utf-8-sig") as handle:
+            ps_content = handle.read()
+        with open(fallback_path, "r", encoding="utf-8") as handle:
+            cmd_content = handle.read()
+
+        self.assertIn("System.Windows.Forms", ps_content)
+        self.assertIn("DeepSeek Cowork Update", ps_content)
+        self.assertIn("ProgressBar", ps_content)
+        self.assertIn("$PidsToWait = @(12345, 23456)", ps_content)
+        self.assertIn("[string[]]$RoboArgs", ps_content)
+        self.assertIn("robocopy @RoboArgs", ps_content)
+        self.assertNotIn("robocopy @Args", ps_content)
+        self.assertIn("Invoke-Robocopy -RoboArgs @($InstallDir, $BackupDir", ps_content)
+        self.assertIn("Invoke-Robocopy -RoboArgs @($SourceDir, $InstallDir", ps_content)
+        self.assertIn("Invoke-Robocopy -RoboArgs @($BackupDir, $InstallDir", ps_content)
+        self.assertNotIn("Invoke-Robocopy -Args", ps_content)
+        self.assertIn("10", ps_content)
+        self.assertIn("25", ps_content)
+        self.assertIn("55", ps_content)
+        self.assertIn("75", ps_content)
+        self.assertIn("90", ps_content)
+        self.assertIn("100", ps_content)
+        self.assertIn("user_data", ps_content)
+        self.assertIn("update.log", ps_content)
+        self.assertNotIn("-WindowStyle", ps_content)
+        self.assertIn("call :wait_pid 12345", cmd_content)
+        self.assertIn("call :wait_pid 23456", cmd_content)
+        self.assertIn("[10%%] Waiting for app to exit", cmd_content)
+
+    def test_create_windows_update_script_rejects_non_windows(self):
+        staged_dir = os.path.join(self.temp_dir, "staged")
+        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
+            handle.write("")
+
+        with patch("core.updater.sys.platform", "linux"):
+            with self.assertRaises(UpdaterError):
+                create_windows_update_script(
+                    install_dir=os.path.join(self.temp_dir, "install"),
+                    staged_app_dir=staged_dir,
+                    target_dir=self.temp_dir,
+                )
+
+    def test_launch_windows_update_script_does_not_hide_forms_window(self):
+        script_path = os.path.join(self.temp_dir, "apply-update.ps1")
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+
+        with patch("core.updater.sys.platform", "win32"), \
+             patch("core.updater.subprocess.Popen") as popen:
+            launch_windows_update_script(script_path)
+
+        args = popen.call_args.args[0]
+        kwargs = popen.call_args.kwargs
+        self.assertIn("-STA", args)
+        self.assertIn("-File", args)
+        self.assertNotIn("-WindowStyle", args)
+        self.assertNotIn("Hidden", args)
+        self.assertNotIn("creationflags", kwargs)
+        self.assertEqual(kwargs.get("cwd"), self.temp_dir)
+        self.assertIsNotNone(kwargs.get("stdout"))
+        self.assertIsNotNone(kwargs.get("stderr"))
 
 
 if __name__ == "__main__":

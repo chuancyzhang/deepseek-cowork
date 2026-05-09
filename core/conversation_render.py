@@ -1,0 +1,142 @@
+import json
+
+
+def _safe_jsonable(value):
+    try:
+        json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return value
+    except Exception:
+        return str(value)
+
+
+def _join_segments(segments):
+    cleaned = []
+    for segment in segments or []:
+        text = str(segment or "")
+        if not text:
+            continue
+        cleaned.append(text)
+    return "\n\n".join(cleaned).strip()
+
+
+def _normalize_tool_args(arguments):
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except Exception:
+            return arguments
+    return arguments
+
+
+def _new_assistant_group():
+    return {
+        "messages": [],
+        "reasoning_segments": [],
+        "content_segments": [],
+        "content_parts": [],
+        "tool_order": [],
+        "tools_by_id": {},
+    }
+
+
+def _ensure_tool_entry(group, tool_call_id, fallback_name="unknown_tool", fallback_args=None):
+    tool_call_id = tool_call_id or f"tool-{len(group['tool_order'])}"
+    if tool_call_id in group["tools_by_id"]:
+        return group["tools_by_id"][tool_call_id]
+    tool_entry = {
+        "id": tool_call_id,
+        "name": fallback_name,
+        "args": fallback_args if fallback_args is not None else {},
+        "result": "",
+        "result_obj": None,
+        "meta": {},
+    }
+    group["tool_order"].append(tool_call_id)
+    group["tools_by_id"][tool_call_id] = tool_entry
+    return tool_entry
+
+
+def _finalize_assistant_group(group):
+    if not group:
+        return None
+    tool_calls = [group["tools_by_id"][tool_id] for tool_id in group["tool_order"]]
+    content = _join_segments(group["content_segments"])
+    reasoning = "".join(str(item or "") for item in group["reasoning_segments"]).strip()
+    content_parts = list(group["content_parts"])
+    source_messages = list(group["messages"])
+    if not (content or reasoning or tool_calls or source_messages):
+        return None
+    return {
+        "type": "assistant",
+        "content": content,
+        "reasoning": reasoning,
+        "content_parts": content_parts,
+        "tool_calls": tool_calls,
+        "messages": source_messages,
+    }
+
+
+def build_conversation_render_items(messages):
+    items = []
+    assistant_group = None
+
+    def flush_group():
+        nonlocal assistant_group
+        item = _finalize_assistant_group(assistant_group)
+        if item:
+            items.append(item)
+        assistant_group = None
+
+    for raw_message in messages or []:
+        if not isinstance(raw_message, dict):
+            continue
+        role = raw_message.get("role") or ""
+        if role == "user":
+            flush_group()
+            items.append({"type": "user", "message": raw_message})
+            continue
+        if role == "assistant":
+            if assistant_group is None:
+                assistant_group = _new_assistant_group()
+            assistant_group["messages"].append(raw_message)
+            reasoning = raw_message.get("reasoning_content") or raw_message.get("reasoning")
+            if reasoning:
+                assistant_group["reasoning_segments"].append(reasoning)
+            content = raw_message.get("content") or ""
+            if content:
+                assistant_group["content_segments"].append(content)
+            content_parts = raw_message.get("content_parts")
+            if isinstance(content_parts, list):
+                assistant_group["content_parts"].extend(content_parts)
+            for tool_call in raw_message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                tool_entry = _ensure_tool_entry(
+                    assistant_group,
+                    tool_call.get("id"),
+                    fallback_name=function.get("name") or "unknown_tool",
+                    fallback_args=_normalize_tool_args(function.get("arguments")),
+                )
+                tool_entry["name"] = function.get("name") or tool_entry["name"]
+                if function.get("arguments") is not None:
+                    tool_entry["args"] = _normalize_tool_args(function.get("arguments"))
+            continue
+        if role == "tool":
+            if assistant_group is None:
+                assistant_group = _new_assistant_group()
+            assistant_group["messages"].append(raw_message)
+            tool_call_id = raw_message.get("tool_call_id")
+            tool_entry = _ensure_tool_entry(assistant_group, tool_call_id)
+            tool_entry["result"] = raw_message.get("content") or ""
+            if raw_message.get("result_obj") is not None:
+                tool_entry["result_obj"] = _safe_jsonable(raw_message.get("result_obj"))
+            meta = raw_message.get("meta")
+            if isinstance(meta, dict) and meta:
+                tool_entry["meta"] = meta
+            continue
+        flush_group()
+        items.append({"type": role or "message", "message": raw_message})
+
+    flush_group()
+    return items

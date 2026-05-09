@@ -1,0 +1,164 @@
+import os
+import shutil
+import sqlite3
+import tempfile
+import unittest
+
+from core.chat_storage import ChatStorage
+
+
+class TestChatStorageMessages(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "chat_history.sqlite")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_message_roundtrip_preserves_structured_fields(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation(
+            "conv-1",
+            [
+                {
+                    "id": "a1",
+                    "role": "assistant",
+                    "content": "hello",
+                    "reasoning_content": "thinking",
+                    "content_parts": [{"type": "text", "text": "hello"}],
+                    "tool_calls": [
+                        {
+                            "id": "tool-1",
+                            "type": "function",
+                            "function": {"name": "demo", "arguments": {"value": 1}},
+                        }
+                    ],
+                },
+                {
+                    "id": "t1",
+                    "role": "tool",
+                    "tool_call_id": "tool-1",
+                    "content": "{\"ok\": true}",
+                    "meta": {"duration": 0.5},
+                    "result_obj": {"ok": True},
+                },
+            ],
+            title="demo",
+            meta={"workspace_dir": "D:/demo"},
+        )
+        messages = storage.get_messages("conv-1")
+        self.assertEqual(messages[0]["content_parts"][0]["text"], "hello")
+        self.assertEqual(messages[1]["meta"]["duration"], 0.5)
+        self.assertEqual(messages[1]["result_obj"], {"ok": True})
+
+    def test_existing_database_is_migrated_with_new_message_columns(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    tool_calls TEXT,
+                    reasoning_content TEXT,
+                    token_count INTEGER,
+                    tool_call_id TEXT,
+                    position INTEGER,
+                    created_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE agent_messages (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    tool_calls TEXT,
+                    reasoning_content TEXT,
+                    token_count INTEGER,
+                    tool_call_id TEXT,
+                    position INTEGER,
+                    created_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    status TEXT,
+                    meta TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE agents (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    parent_message_id TEXT,
+                    name TEXT,
+                    status TEXT NOT NULL,
+                    is_subagent INTEGER NOT NULL DEFAULT 1,
+                    fork_context INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    started_at INTEGER,
+                    finished_at INTEGER,
+                    last_error TEXT,
+                    last_result TEXT,
+                    meta TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE im_sessions (
+                    provider TEXT NOT NULL,
+                    im_user_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    PRIMARY KEY (provider, im_user_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE im_daily_summaries (
+                    provider TEXT NOT NULL,
+                    im_user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    summary_date TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    summary_text TEXT,
+                    source_message_upto_pos INTEGER,
+                    token_estimate INTEGER,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    PRIMARY KEY (provider, im_user_id, chat_id, summary_date)
+                )
+                """
+            )
+
+        storage = ChatStorage(self.db_path)
+        with storage._connect() as conn:
+            message_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            agent_message_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(agent_messages)").fetchall()
+            }
+        for column_name in ("content_parts", "meta", "result_obj"):
+            self.assertIn(column_name, message_columns)
+            self.assertIn(column_name, agent_message_columns)
+
+
+if __name__ == "__main__":
+    unittest.main()

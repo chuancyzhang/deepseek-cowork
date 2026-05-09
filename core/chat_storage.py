@@ -13,6 +13,19 @@ AGENT_TERMINAL_STATUSES = {
     "failed_recovered",
 }
 
+MESSAGE_JSON_COLUMNS = {
+    "messages": {
+        "content_parts": "TEXT",
+        "meta": "TEXT",
+        "result_obj": "TEXT",
+    },
+    "agent_messages": {
+        "content_parts": "TEXT",
+        "meta": "TEXT",
+        "result_obj": "TEXT",
+    },
+}
+
 
 class ChatStorage:
     def __init__(self, db_path):
@@ -49,6 +62,9 @@ class ChatStorage:
                     content TEXT,
                     tool_calls TEXT,
                     reasoning_content TEXT,
+                    content_parts TEXT,
+                    meta TEXT,
+                    result_obj TEXT,
                     token_count INTEGER,
                     tool_call_id TEXT,
                     position INTEGER,
@@ -105,6 +121,9 @@ class ChatStorage:
                     content TEXT,
                     tool_calls TEXT,
                     reasoning_content TEXT,
+                    content_parts TEXT,
+                    meta TEXT,
+                    result_obj TEXT,
                     token_count INTEGER,
                     tool_call_id TEXT,
                     position INTEGER,
@@ -202,6 +221,7 @@ class ChatStorage:
                 END
                 """
             )
+            self._ensure_message_columns(conn)
 
     def _parse_json_dict(self, text):
         if not text:
@@ -211,6 +231,32 @@ class ChatStorage:
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
             return {}
+
+    def _parse_json_value(self, text, default=None):
+        if text is None or text == "":
+            return default
+        try:
+            return json.loads(text)
+        except Exception:
+            return default
+
+    def _json_dumps(self, value):
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=False)
+
+    def _ensure_message_columns(self, conn):
+        for table_name, columns in MESSAGE_JSON_COLUMNS.items():
+            existing_columns = {
+                row["name"]
+                for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            for column_name, column_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                conn.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                )
 
     def _agent_row_to_dict(self, row):
         if not row:
@@ -241,6 +287,15 @@ class ChatStorage:
             "tool_call_id": message.get("tool_call_id") or "",
             "reasoning_content": message.get("reasoning_content") or message.get("reasoning") or "",
         }
+        content_parts = message.get("content_parts")
+        if isinstance(content_parts, list):
+            signature["content_parts"] = content_parts
+        meta = message.get("meta")
+        if isinstance(meta, dict) and meta:
+            signature["meta"] = meta
+        result_obj = message.get("result_obj")
+        if result_obj is not None:
+            signature["result_obj"] = result_obj
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
             normalized_calls = []
@@ -560,13 +615,17 @@ class ChatStorage:
                     json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
                 )
                 reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
+                content_parts_json = self._json_dumps(msg.get("content_parts"))
+                meta_json = self._json_dumps(msg.get("meta"))
+                result_obj_json = self._json_dumps(msg.get("result_obj"))
                 conn.execute(
                     """
                     INSERT INTO agent_messages (
                         id, agent_id, role, content, tool_calls, reasoning_content,
+                        content_parts, meta, result_obj,
                         token_count, tool_call_id, position, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         msg_id,
@@ -575,6 +634,9 @@ class ChatStorage:
                         msg.get("content"),
                         tool_calls_json,
                         reasoning_content,
+                        content_parts_json,
+                        meta_json,
+                        result_obj_json,
                         msg.get("token_count"),
                         msg.get("tool_call_id"),
                         index,
@@ -586,7 +648,8 @@ class ChatStorage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, role, content, tool_calls, reasoning_content, token_count, tool_call_id
+                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                       result_obj, token_count, tool_call_id
                 FROM agent_messages
                 WHERE agent_id = ?
                 ORDER BY position ASC
@@ -601,6 +664,15 @@ class ChatStorage:
             if row["reasoning_content"] is not None:
                 msg["reasoning_content"] = row["reasoning_content"]
                 msg["reasoning"] = row["reasoning_content"]
+            content_parts = self._parse_json_value(row["content_parts"])
+            if isinstance(content_parts, list):
+                msg["content_parts"] = content_parts
+            meta = self._parse_json_value(row["meta"], default={})
+            if isinstance(meta, dict) and meta:
+                msg["meta"] = meta
+            result_obj = self._parse_json_value(row["result_obj"])
+            if result_obj is not None:
+                msg["result_obj"] = result_obj
             if row["token_count"] is not None:
                 msg["token_count"] = row["token_count"]
             if row["tool_call_id"] is not None:
@@ -713,13 +785,17 @@ class ChatStorage:
                     json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
                 )
                 reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
+                content_parts_json = self._json_dumps(msg.get("content_parts"))
+                meta_json = self._json_dumps(msg.get("meta"))
+                result_obj_json = self._json_dumps(msg.get("result_obj"))
                 conn.execute(
                     """
                     INSERT INTO messages (
                         id, conversation_id, role, content, tool_calls, reasoning_content,
+                        content_parts, meta, result_obj,
                         token_count, tool_call_id, position, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         msg_id,
@@ -728,6 +804,9 @@ class ChatStorage:
                         msg.get("content"),
                         tool_calls_json,
                         reasoning_content,
+                        content_parts_json,
+                        meta_json,
+                        result_obj_json,
                         msg.get("token_count"),
                         msg.get("tool_call_id"),
                         index,
@@ -792,7 +871,8 @@ class ChatStorage:
                     continue
                 message_rows = conn.execute(
                     """
-                    SELECT id, role, content, tool_calls, reasoning_content,
+                    SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                           result_obj,
                            token_count, tool_call_id, position, created_at
                     FROM messages
                     WHERE conversation_id = ?
@@ -817,6 +897,15 @@ class ChatStorage:
                             message["tool_calls"] = msg_row["tool_calls"]
                     if msg_row["reasoning_content"]:
                         message["reasoning_content"] = msg_row["reasoning_content"]
+                    content_parts = self._parse_json_value(msg_row["content_parts"])
+                    if isinstance(content_parts, list):
+                        message["content_parts"] = content_parts
+                    meta_value = self._parse_json_value(msg_row["meta"], default={})
+                    if isinstance(meta_value, dict) and meta_value:
+                        message["meta"] = meta_value
+                    result_obj = self._parse_json_value(msg_row["result_obj"])
+                    if result_obj is not None:
+                        message["result_obj"] = result_obj
                     if msg_row["token_count"] is not None:
                         message["token_count"] = msg_row["token_count"]
                     if msg_row["tool_call_id"]:
@@ -885,6 +974,12 @@ class ChatStorage:
                 reasoning = raw_msg.get("reasoning_content") or raw_msg.get("reasoning")
                 if reasoning:
                     message["reasoning_content"] = reasoning
+                if isinstance(raw_msg.get("content_parts"), list):
+                    message["content_parts"] = raw_msg.get("content_parts")
+                if isinstance(raw_msg.get("meta"), dict) and raw_msg.get("meta"):
+                    message["meta"] = raw_msg.get("meta")
+                if raw_msg.get("result_obj") is not None:
+                    message["result_obj"] = raw_msg.get("result_obj")
                 if raw_msg.get("token_count") is not None:
                     message["token_count"] = raw_msg.get("token_count")
                 if raw_msg.get("tool_call_id"):
@@ -922,7 +1017,8 @@ class ChatStorage:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, role, content, tool_calls, reasoning_content, token_count, tool_call_id
+                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                       result_obj, token_count, tool_call_id
                 FROM messages
                 WHERE conversation_id = ?
                 ORDER BY position ASC
@@ -937,6 +1033,15 @@ class ChatStorage:
             if row["reasoning_content"] is not None:
                 msg["reasoning_content"] = row["reasoning_content"]
                 msg["reasoning"] = row["reasoning_content"]
+            content_parts = self._parse_json_value(row["content_parts"])
+            if isinstance(content_parts, list):
+                msg["content_parts"] = content_parts
+            meta = self._parse_json_value(row["meta"], default={})
+            if isinstance(meta, dict) and meta:
+                msg["meta"] = meta
+            result_obj = self._parse_json_value(row["result_obj"])
+            if result_obj is not None:
+                msg["result_obj"] = result_obj
             if row["token_count"] is not None:
                 msg["token_count"] = row["token_count"]
             if row["tool_call_id"] is not None:

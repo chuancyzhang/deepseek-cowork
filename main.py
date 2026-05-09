@@ -19,6 +19,7 @@ from core.skill_generator import SkillGenerator
 from core.interaction import bridge
 from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
 from core.chat_storage import ChatStorage
+from core.conversation_render import build_conversation_render_items
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
@@ -117,6 +118,7 @@ SCROLL_FLUSH_INTERVAL_MS = 24
 SCROLL_BOTTOM_THRESHOLD_PX = 36
 STREAM_RENDER_INTERVAL_SEC = 0.12
 STREAM_PLAIN_TEXT_THRESHOLD = 2400
+HISTORY_RENDER_PAGE_SIZE = 12
 
 
 def set_stylesheet_if_changed(widget, stylesheet):
@@ -3467,6 +3469,7 @@ class SessionState:
     def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll):
         self.session_id = session_id
         self.messages = []
+        self.render_items = []
         self.tool_cards = {}
         self.step_records = []
         self.pending_tool_results = {}
@@ -3484,8 +3487,12 @@ class SessionState:
         self.chat_scroll = chat_scroll
         self.empty_state = None
         self.displayed_count = 0
+        self.displayed_render_count = 0
         self.load_more_btn = None
         self.auto_loading_history = False
+        self.history_loaded = False
+        self.history_loading = False
+        self.history_load_token = 0
         self.content_flush_timer = None
         self.thinking_flush_timer = None
         self.pending_thinking_delta = ""
@@ -4211,6 +4218,9 @@ class MainWindow(QMainWindow):
         self.sessions = {}
         self.current_session_id = None
         self.messages = []
+        self.history_rows = {}
+        self.history_buttons = {}
+        self._session_load_token_counter = 0
         self.tool_cards = {}
         self.pending_tool_results = {}
         self.current_content_buffer = ""
@@ -5652,13 +5662,7 @@ class MainWindow(QMainWindow):
         self.sync_current_session_state()
         session_id = self.get_session_id_for_tab(index)
         if session_id:
-            self.set_current_session(session_id)
-            self.refresh_history_list()
-            self.refresh_change_list(session_id)
-            self.refresh_step_list(session_id)
-            current_state = self.get_current_session()
-            self.normalize_session_ui(current_state)
-            self._render_sub_agent_monitor_for_state(current_state)
+            self.activate_session(session_id, switch_tab=False, ensure_loaded=True)
 
     def clear_chat_layout(self, chat_layout):
         while chat_layout.count():
@@ -5683,7 +5687,8 @@ class MainWindow(QMainWindow):
         index = self.session_tabs.indexOf(state.session_widget)
         if index >= 0: self.session_tabs.setTabText(index, title)
 
-    def create_new_session(self, session_id=None, title=None):
+    def create_new_session(self, session_id=None, title=None, make_current=True):
+        is_fresh_session = session_id is None
         if session_id is None: session_id = uuid.uuid4().hex
         session_widget = QWidget()
         session_layout = QVBoxLayout(session_widget)
@@ -5727,14 +5732,213 @@ class MainWindow(QMainWindow):
         state.scroll_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_scroll(sid))
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
+        state.history_loaded = is_fresh_session
         self.sessions[session_id] = state
-        self.session_tabs.setCurrentIndex(tab_index)
+        if make_current:
+            self.session_tabs.setCurrentIndex(tab_index)
+            self.set_current_session(session_id)
+            self.refresh_change_list(session_id)
+            self.refresh_step_list(session_id)
+            self.refresh_plan_view(session_id)
+            self.refresh_context_badges(session_id)
+        return session_id
+
+    def _reset_session_history_state(self, state):
+        self.clear_chat_layout(state.chat_layout)
+        state.empty_state = None
+        state.messages = []
+        state.render_items = []
+        state.tool_cards = {}
+        state.pending_tool_results = {}
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        state.pending_thinking_delta = ""
+        state.temp_thinking_bubble = None
+        state.last_agent_bubble = None
+        state.llm_worker = None
+        state.auto_scroll_enabled = True
+        state.pending_scroll_force = False
+        state.active_turn_id = 0
+        state.completed_turn_id = 0
+        state.active_skills_label.setText("本次会话使用的功能: ")
+        state.displayed_count = 0
+        state.displayed_render_count = 0
+        state.load_more_btn = None
+        state.plan_mode_enabled = False
+        state.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
+        state.plan_phase = PLAN_MODE_DISABLED
+        state.plan_protocol_version = PLAN_PROTOCOL_VERSION
+        state.plan_mode_state = PLAN_MODE_EXPLORING
+        state.plan_document = ""
+        state.pending_plan_questions = []
+        state.changed_files = []
+        state.step_records = []
+        state.persisted_agents = []
+        state.sub_agent_events = []
+
+    def _show_session_loading_state(self, state, text="正在加载历史会话…"):
+        self.clear_chat_layout(state.chat_layout)
+        state.empty_state = None
+        placeholder = QLabel(text)
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; font-size: 13px; padding: 32px 0;"
+        )
+        state.chat_layout.insertWidget(0, placeholder)
+
+    def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
+        state = self.sessions.get(session_id)
+        if state is None:
+            self.create_new_session(session_id=session_id, make_current=False)
+            state = self.sessions.get(session_id)
+            if not state:
+                return
+            state.history_loaded = False
+            self._show_session_loading_state(state)
+
+        index = self.session_tabs.indexOf(state.session_widget)
+        if switch_tab and index >= 0 and self.session_tabs.currentIndex() != index:
+            self.session_tabs.setCurrentIndex(index)
+
         self.set_current_session(session_id)
+        self.update_history_selection()
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.refresh_plan_view(session_id)
-        self.refresh_context_badges(session_id)
-        return session_id
+        current_state = self.get_current_session()
+        self.normalize_session_ui(current_state)
+        self._render_sub_agent_monitor_for_state(current_state)
+
+        if ensure_loaded and not state.history_loaded and not state.history_loading:
+            self.queue_session_history_load(session_id)
+
+    def queue_session_history_load(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        self._session_load_token_counter += 1
+        state.history_load_token = self._session_load_token_counter
+        state.history_loading = True
+        self._show_session_loading_state(state)
+        QTimer.singleShot(
+            0,
+            lambda sid=session_id, token=state.history_load_token: self._load_session_history(sid, token)
+        )
+
+    def _load_session_history(self, session_id, token):
+        state = self.get_session(session_id)
+        if not state or token != state.history_load_token:
+            return
+
+        self._reset_session_history_state(state)
+        loaded_from_json = False
+        conversation_meta = {}
+        conversation_record = None
+        try:
+            conversation_meta = self.chat_storage.get_conversation_meta(session_id)
+        except Exception:
+            conversation_meta = {}
+        try:
+            conversation_record = self.chat_storage.get_conversation_record(session_id)
+        except Exception:
+            conversation_record = None
+
+        state.session_status = (
+            (conversation_record or {}).get("status")
+            or conversation_meta.get("session_status")
+            or "draft"
+        )
+        state.run_phase = conversation_meta.get("run_phase") or "Idle"
+        state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
+        state.plan_mode_enabled = bool(conversation_meta.get("plan_mode_enabled"))
+        state.plan_config = normalize_plan_config(conversation_meta.get("plan_config"))
+        state.plan_protocol_version = int(conversation_meta.get("plan_protocol_version") or PLAN_PROTOCOL_VERSION)
+        state.plan_mode_state = normalize_plan_phase(
+            conversation_meta.get("plan_mode_state"),
+            default=PLAN_MODE_EXPLORING,
+        )
+        state.plan_document = str(conversation_meta.get("plan_document") or "").strip()
+        state.pending_plan_questions = normalize_pending_plan_questions(
+            conversation_meta.get("pending_plan_questions")
+        )
+        state.plan_phase = normalize_plan_phase(
+            conversation_meta.get("plan_phase"),
+            default=derive_plan_phase(
+                state.plan_mode_enabled,
+                state.plan_mode_state,
+                state.plan_document,
+            ),
+        )
+
+        try:
+            state.messages = self.chat_storage.get_messages(session_id)
+        except Exception:
+            state.messages = []
+        try:
+            state.persisted_agents = self.chat_storage.list_agents(session_id)
+        except Exception:
+            state.persisted_agents = []
+        for item in state.persisted_agents or []:
+            if not isinstance(item, dict):
+                continue
+            agent_id = item.get("id") or ""
+            if not agent_id:
+                continue
+            status = item.get("status") or "closed"
+            summary = item.get("last_result") or item.get("last_error") or ""
+            state.sub_agent_events.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_name": item.get("name") or "",
+                    "status": status,
+                    "content": summary,
+                    "ts": int(item.get("updated_at") or time.time()),
+                }
+            )
+        if not state.messages:
+            history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
+            if os.path.exists(history_path):
+                try:
+                    with open(history_path, 'r', encoding='utf-8') as f:
+                        state.messages = json.load(f)
+                    loaded_from_json = True
+                except Exception as e:
+                    print(f"Error loading session: {e}")
+
+        if state.messages:
+            state.messages = self._normalize_and_persist_session_messages(
+                session_id,
+                state.messages,
+                force_persist=loaded_from_json,
+                existing_meta=conversation_meta
+            )
+        state.render_items = build_conversation_render_items(state.messages)
+        state.displayed_count = len(state.messages)
+
+        if state.render_items:
+            total = len(state.render_items)
+            start_idx = max(0, total - HISTORY_RENDER_PAGE_SIZE)
+            initial_items = state.render_items[start_idx:]
+            state.displayed_render_count = len(initial_items)
+            self.render_render_items(initial_items, session_id, animate=False)
+        else:
+            empty_state = EmptyStateWidget(self)
+            state.chat_layout.insertWidget(0, empty_state)
+            state.empty_state = empty_state
+
+        state.history_loaded = True
+        state.history_loading = False
+        self.update_session_tab_title(session_id)
+        self.update_history_selection()
+        self.refresh_change_list(session_id)
+        self.refresh_step_list(session_id)
+        self.refresh_plan_view(session_id)
+        self.normalize_session_ui(self.get_current_session())
+        if session_id == self.current_session_id:
+            self._render_sub_agent_monitor_for_state(state)
+
+    def load_session(self, session_id):
+        self.activate_session(session_id)
 
     def show_interaction_dialog(self, request):
         request = dict(request or {})
@@ -6064,6 +6268,8 @@ class MainWindow(QMainWindow):
 
     def refresh_history_list(self):
         self.history_container.setUpdatesEnabled(False)
+        self.history_rows = {}
+        self.history_buttons = {}
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
             if item.widget():
@@ -6111,11 +6317,7 @@ class MainWindow(QMainWindow):
                 "text-align: left; padding: 6px 8px; border: none; background: transparent; "
                 f"color: {DesignTokens.text_primary}; font-weight: 600;"
             )
-            if session_id == self.current_session_id:
-                row.setStyleSheet(
-                    f"QFrame#HistoryRow {{ background: {DesignTokens.primary_soft}; border-radius: 12px; }}"
-                )
-            btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
+            btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
 
             meta_row = QHBoxLayout()
             meta_row.setContentsMargins(8, 0, 8, 0)
@@ -6149,6 +6351,8 @@ class MainWindow(QMainWindow):
             row_layout.addWidget(content, 1)
             row_layout.addWidget(menu_btn, 0, Qt.AlignTop)
             self.history_layout.addWidget(row)
+            self.history_rows[session_id] = row
+            self.history_buttons[session_id] = btn
 
         history_dir = self.chat_history_dir
         if os.path.exists(history_dir):
@@ -6175,14 +6379,59 @@ class MainWindow(QMainWindow):
                             "text-align: left; padding: 10px 8px; border: none; background: transparent; "
                             f"color: {DesignTokens.text_primary}; font-weight: 600;"
                         )
-                        btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
+                        btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
                         row_layout.addWidget(btn, 1)
                         self.history_layout.addWidget(row)
+                        self.history_rows[session_id] = row
+                        self.history_buttons[session_id] = btn
                 except Exception:
                     continue
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
+        self.update_history_selection()
+
+    def update_history_selection(self):
+        selected_row_style = (
+            f"QFrame#HistoryRow {{ background: {DesignTokens.primary_soft}; border-radius: 12px; }}"
+        )
+        normal_row_style = (
+            f"QFrame#HistoryRow {{ background: transparent; border-radius: 12px; }}"
+            f"QFrame#HistoryRow:hover {{ background: {DesignTokens.bg_secondary}; }}"
+        )
+        selected_btn_style = (
+            "text-align: left; padding: 6px 8px; border: none; background: transparent; "
+            f"color: {DesignTokens.primary}; font-weight: 700;"
+        )
+        normal_btn_style = (
+            "text-align: left; padding: 6px 8px; border: none; background: transparent; "
+            f"color: {DesignTokens.text_primary}; font-weight: 600;"
+        )
+        legacy_selected_btn_style = (
+            "text-align: left; padding: 10px 8px; border: none; background: transparent; "
+            f"color: {DesignTokens.primary}; font-weight: 700;"
+        )
+        legacy_normal_btn_style = (
+            "text-align: left; padding: 10px 8px; border: none; background: transparent; "
+            f"color: {DesignTokens.text_primary}; font-weight: 600;"
+        )
+
+        for session_id, row in self.history_rows.items():
+            is_current = session_id == self.current_session_id
+            if row.objectName() == "HistoryRow":
+                row.setStyleSheet(selected_row_style if is_current else normal_row_style)
+            button = self.history_buttons.get(session_id)
+            if not button:
+                continue
+            is_legacy_row = row.objectName() != "HistoryRow"
+            if is_legacy_row:
+                button.setStyleSheet(
+                    legacy_selected_btn_style if is_current else legacy_normal_btn_style
+                )
+            else:
+                button.setStyleSheet(
+                    selected_btn_style if is_current else normal_btn_style
+                )
 
     def show_session_menu(self, session_id, anchor):
         menu = QMenu(self)
@@ -6246,7 +6495,7 @@ class MainWindow(QMainWindow):
             return
         if state.auto_loading_history:
             return
-        if state.displayed_count >= len(state.messages):
+        if state.displayed_render_count >= len(getattr(state, "render_items", []) or []):
             return
         self.load_more_history(session_id=session_id)
 
@@ -6292,35 +6541,96 @@ class MainWindow(QMainWindow):
         if not state: return
         if state.auto_loading_history:
             return
-        
-        PAGE_SIZE = 20
-        total = len(state.messages)
-        remaining = total - state.displayed_count
+
+        total = len(state.render_items or [])
+        remaining = total - state.displayed_render_count
         if remaining <= 0: return
         state.auto_loading_history = True
         try:
-            count_to_load = min(PAGE_SIZE, remaining)
-            start_idx = total - state.displayed_count - count_to_load
-            end_idx = total - state.displayed_count
-            
-            msgs_to_load = state.messages[start_idx:end_idx]
-            
+            count_to_load = min(HISTORY_RENDER_PAGE_SIZE, remaining)
+            start_idx = total - state.displayed_render_count - count_to_load
+            end_idx = total - state.displayed_render_count
+            items_to_load = state.render_items[start_idx:end_idx]
             vbar = state.chat_scroll.verticalScrollBar()
             old_max = vbar.maximum()
             old_val = vbar.value()
-            
-            self.render_message_batch(msgs_to_load, state.session_id, insert_index=0, animate=False)
-            
+            self.render_render_items(items_to_load, state.session_id, insert_index=0, animate=False)
             self.process_ui_events(force=True)
             new_max = vbar.maximum()
             if old_val <= 5:
                 vbar.setValue(0)
             else:
                 vbar.setValue(old_val + (new_max - old_max))
-            
-            state.displayed_count += count_to_load
+            state.displayed_render_count += count_to_load
         finally:
             state.auto_loading_history = False
+
+    def render_render_items(self, render_items, session_id, insert_index=None, animate=True):
+        state = self.get_session(session_id)
+        if not state:
+            return
+
+        current_idx = insert_index
+        backup_last_agent = state.last_agent_bubble
+        state.last_agent_bubble = None
+
+        for item in render_items or []:
+            item_type = item.get("type")
+            if item_type == "user":
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                self.add_chat_bubble("User", message.get("content") or "", index=current_idx, animate=animate)
+                if current_idx is not None:
+                    current_idx += 1
+                state.last_agent_bubble = None
+                continue
+
+            if item_type != "assistant":
+                continue
+
+            content = item.get("content") or ""
+            tool_calls = item.get("tool_calls") or []
+            if not content and tool_calls:
+                content = "任务已处理完成，请查看上方思考过程。"
+            bubble = self.add_chat_bubble("Agent", "", thinking=None, index=current_idx, animate=animate)
+            if current_idx is not None:
+                current_idx += 1
+            state.last_agent_bubble = bubble
+
+            reasoning = item.get("reasoning") or ""
+            if reasoning:
+                bubble.update_thinking(reasoning)
+            for tool in tool_calls:
+                tool_id = tool.get("id") or uuid.uuid4().hex
+                self.add_tool_card(
+                    {
+                        "id": tool_id,
+                        "name": tool.get("name") or "unknown_tool",
+                        "args": tool.get("args") if tool.get("args") is not None else {},
+                        "meta": tool.get("meta") or {},
+                    },
+                    session_id=session_id,
+                    index=current_idx,
+                    animate=animate,
+                )
+                if tool.get("result") or tool.get("result_obj") is not None or tool.get("meta"):
+                    self.update_tool_card(
+                        {
+                            "id": tool_id,
+                            "result": tool.get("result") or "",
+                            "result_obj": tool.get("result_obj"),
+                            "meta": tool.get("meta"),
+                        },
+                        session_id=session_id,
+                    )
+            bubble.update_thinking(duration=None, is_final=True)
+            bubble.set_main_content(
+                content,
+                content_parts=item.get("content_parts") if isinstance(item.get("content_parts"), list) else None,
+                final=True,
+            )
+
+        if insert_index is not None:
+            state.last_agent_bubble = backup_last_agent
 
     def delete_session(self, session_id):
         confirm = QMessageBox.question(self, "确认删除", "确定要删除该会话吗？")
@@ -6523,154 +6833,6 @@ class MainWindow(QMainWindow):
                 print(f"Error migrating session messages: {e}")
 
         return normalized_messages
-
-    def load_session(self, session_id):
-        if session_id in self.sessions:
-            state = self.sessions[session_id]
-            index = self.session_tabs.indexOf(state.session_widget)
-            if index >= 0: self.session_tabs.setCurrentIndex(index)
-            self.set_current_session(session_id)
-            self.refresh_history_list()
-            self.normalize_session_ui(self.get_current_session())
-            return
-        else:
-            self.create_new_session(session_id=session_id)
-
-        state = self.get_current_session()
-        if not state: return
-
-        self.clear_chat_layout(state.chat_layout)
-        state.empty_state = None # Reset empty state reference
-        
-        state.messages = []
-        state.tool_cards = {}
-        state.pending_tool_results = {}
-        state.current_content_buffer = ""
-        state.current_thinking_buffer = ""
-        state.pending_thinking_delta = ""
-        state.temp_thinking_bubble = None
-        state.last_agent_bubble = None
-        state.llm_worker = None
-        state.auto_scroll_enabled = True
-        state.pending_scroll_force = False
-        state.active_turn_id = 0
-        state.completed_turn_id = 0
-        state.active_skills_label.setText("本次会话使用的功能: ")
-        state.displayed_count = 0
-        state.load_more_btn = None
-        state.plan_mode_enabled = False
-        state.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
-        state.plan_phase = PLAN_MODE_DISABLED
-        state.plan_protocol_version = PLAN_PROTOCOL_VERSION
-        state.plan_mode_state = PLAN_MODE_EXPLORING
-        state.plan_document = ""
-        state.pending_plan_questions = []
-
-        loaded_from_json = False
-        conversation_meta = {}
-        conversation_record = None
-        try:
-            conversation_meta = self.chat_storage.get_conversation_meta(session_id)
-        except Exception:
-            conversation_meta = {}
-        try:
-            conversation_record = self.chat_storage.get_conversation_record(session_id)
-        except Exception:
-            conversation_record = None
-        state.session_status = (
-            (conversation_record or {}).get("status")
-            or conversation_meta.get("session_status")
-            or "draft"
-        )
-        state.run_phase = conversation_meta.get("run_phase") or "Idle"
-        state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
-        state.plan_mode_enabled = bool(conversation_meta.get("plan_mode_enabled"))
-        state.plan_config = normalize_plan_config(conversation_meta.get("plan_config"))
-        state.plan_protocol_version = int(conversation_meta.get("plan_protocol_version") or PLAN_PROTOCOL_VERSION)
-        state.plan_mode_state = normalize_plan_phase(
-            conversation_meta.get("plan_mode_state"),
-            default=PLAN_MODE_EXPLORING,
-        )
-        state.plan_document = str(conversation_meta.get("plan_document") or "").strip()
-        state.pending_plan_questions = normalize_pending_plan_questions(
-            conversation_meta.get("pending_plan_questions")
-        )
-        state.plan_phase = normalize_plan_phase(
-            conversation_meta.get("plan_phase"),
-            default=derive_plan_phase(
-                state.plan_mode_enabled,
-                state.plan_mode_state,
-                state.plan_document,
-            ),
-        )
-        state.changed_files = []
-        state.step_records = []
-        state.persisted_agents = []
-        state.sub_agent_events = []
-        state.messages = self.chat_storage.get_messages(session_id)
-        try:
-            state.persisted_agents = self.chat_storage.list_agents(session_id)
-        except Exception:
-            state.persisted_agents = []
-        for item in state.persisted_agents or []:
-            if not isinstance(item, dict):
-                continue
-            agent_id = item.get("id") or ""
-            if not agent_id:
-                continue
-            status = item.get("status") or "closed"
-            summary = item.get("last_result") or item.get("last_error") or ""
-            state.sub_agent_events.append(
-                {
-                    "agent_id": agent_id,
-                    "agent_name": item.get("name") or "",
-                    "status": status,
-                    "content": summary,
-                    "ts": int(item.get("updated_at") or time.time()),
-                }
-            )
-        if not state.messages:
-            history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
-            if os.path.exists(history_path):
-                try:
-                    with open(history_path, 'r', encoding='utf-8') as f:
-                        state.messages = json.load(f)
-                    loaded_from_json = True
-                except Exception as e:
-                    print(f"Error loading session: {e}")
-
-        if state.messages:
-            state.messages = self._normalize_and_persist_session_messages(
-                session_id,
-                state.messages,
-                force_persist=loaded_from_json,
-                existing_meta=conversation_meta
-            )
-
-        if state.messages:
-            PAGE_SIZE = 20
-            total = len(state.messages)
-            start_idx = max(0, total - PAGE_SIZE)
-            
-            display_msgs = state.messages[start_idx:]
-            state.displayed_count = len(display_msgs)
-            
-            self.render_message_batch(display_msgs, session_id, animate=False)
-        
-        # Restore Empty State if no messages
-        if len(state.messages) == 0:
-            empty_state = EmptyStateWidget(self)
-            state.chat_layout.insertWidget(0, empty_state)
-            state.empty_state = empty_state
-
-        self.update_session_tab_title(session_id)
-        self.refresh_history_list()
-        self.refresh_change_list(session_id)
-        self.refresh_step_list(session_id)
-        self.refresh_plan_view(session_id)
-        self.normalize_session_ui(self.get_current_session())
-        if session_id == self.current_session_id:
-            self._render_sub_agent_monitor_for_state(state)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -7404,6 +7566,7 @@ class MainWindow(QMainWindow):
         state.active_turn_id += 1
         current_turn_id = state.active_turn_id
         state.messages.append({"role": "user", "content": user_text})
+        state.render_items = build_conversation_render_items(state.messages)
         run_mode = RUN_MODE_EXECUTION
         if state.plan_mode_enabled:
             state.plan_phase = PLAN_MODE_EXPLORING
@@ -7412,6 +7575,7 @@ class MainWindow(QMainWindow):
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        state.displayed_render_count = len(state.render_items)
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
         self.try_connect_daemon(allow_start=True, retries=4)
@@ -8207,9 +8371,11 @@ class MainWindow(QMainWindow):
                 "content_parts": content_parts
             })
         state.messages = self.chat_storage.normalize_messages(state.messages)
+        state.render_items = build_conversation_render_items(state.messages)
         if len(state.messages) > previous_message_count:
             newly_rendered = len(state.messages) - previous_message_count
             state.displayed_count = min(len(state.messages), state.displayed_count + newly_rendered)
+        state.displayed_render_count = len(state.render_items)
         self.save_chat_history(session_id=state.session_id)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""

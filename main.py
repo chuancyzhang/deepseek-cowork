@@ -1223,7 +1223,8 @@ class SettingsDialog(QDialog):
         update_group_layout = QVBoxLayout(update_group)
         update_group_layout.setSpacing(12)
 
-        self.update_current_label = QLabel(f"当前版本：{APP_VERSION}")
+        self.update_current_label = QLabel()
+        self.refresh_current_version_label()
         self.update_current_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
         self.update_latest_label = QLabel("最新版本：尚未检查")
         self.update_latest_label.setStyleSheet(f"color: {DesignTokens.text_secondary};")
@@ -1404,9 +1405,17 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
 
+    def refresh_current_version_label(self):
+        self.update_current_label.setText(f"当前版本：{APP_VERSION}")
+
+    def showEvent(self, event):
+        self.refresh_current_version_label()
+        super().showEvent(event)
+
     def start_app_update(self):
         if self.app_update_worker and self.app_update_worker.isRunning():
             return
+        self.refresh_current_version_label()
         install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
         self.update_btn.setEnabled(False)
         self.update_btn.setText("正在检查...")
@@ -1436,6 +1445,7 @@ class SettingsDialog(QDialog):
         self.update_log_edit.append(f"[{timestamp}] {message}")
 
     def handle_app_update_finished(self, result):
+        self.refresh_current_version_label()
         self.update_btn.setEnabled(True)
         self.update_btn.setText("检查并更新")
         self.app_update_worker = None

@@ -84,7 +84,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem)
 from PySide6.QtWidgets import QProgressBar
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPropertyAnimation, QEasingCurve, QVariantAnimation
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent
 
 # Try importing OpenAI
 try:
@@ -103,24 +103,24 @@ except ImportError:
 MENU_STYLESHEET = """
 QMenu {
     background-color: #ffffff;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
-    padding: 4px;
+    border: 1px solid #d2d2d7;
+    border-radius: 14px;
+    padding: 8px;
 }
 QMenu::item {
-    padding: 6px 24px 6px 12px;
-    border-radius: 4px;
-    color: #24292f;
+    padding: 8px 26px 8px 12px;
+    border-radius: 10px;
+    color: #1d1d1f;
     background-color: transparent;
 }
 QMenu::item:selected {
-    background-color: #0969da;
-    color: #ffffff;
+    background-color: #e8f2ff;
+    color: #007aff;
 }
 QMenu::separator {
     height: 1px;
-    background: #d0d7de;
-    margin: 4px 0;
+    background: #d2d2d7;
+    margin: 6px 4px;
 }
 """
 
@@ -145,6 +145,65 @@ def set_text_if_changed(widget, text):
     if widget.text() == text:
         return
     widget.setText(text)
+
+
+def add_soft_shadow(widget, blur=28, y_offset=10, alpha=28):
+    shadow = QGraphicsDropShadowEffect(widget)
+    shadow.setBlurRadius(blur)
+    shadow.setOffset(0, y_offset)
+    shadow.setColor(QColor(0, 0, 0, alpha))
+    widget.setGraphicsEffect(shadow)
+
+
+def apple_button_style(kind="secondary", radius=17, align="center"):
+    if kind == "primary":
+        return (
+            "QPushButton { "
+            f"background: {DesignTokens.primary}; color: white; border: none; border-radius: {radius}px; "
+            "padding: 8px 14px; font-weight: 700; "
+            f"text-align: {align};"
+            " } "
+            "QPushButton:hover { "
+            f"background: {DesignTokens.primary_hover};"
+            " } "
+            "QPushButton:disabled { background: #d1d1d6; color: #ffffff; }"
+        )
+    if kind == "ghost":
+        return (
+            "QPushButton { "
+            f"background: transparent; color: {DesignTokens.text_secondary}; border: none; border-radius: {radius}px; "
+            "padding: 8px 10px; "
+            f"text-align: {align};"
+            " } "
+            "QPushButton:hover { "
+            f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary};"
+            " } "
+        )
+    return (
+        "QPushButton { "
+        f"background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary}; "
+        f"border: 1px solid {DesignTokens.border}; border-radius: {radius}px; padding: 8px 14px; "
+        f"text-align: {align};"
+        " } "
+        "QPushButton:hover { "
+        f"background: {DesignTokens.bg_secondary}; border-color: {DesignTokens.border_strong};"
+        " } "
+    )
+
+
+def apple_tool_button_style(active=False):
+    bg = DesignTokens.primary_soft if active else "rgba(255, 255, 255, 0.88)"
+    color = DesignTokens.primary if active else DesignTokens.text_secondary
+    border = DesignTokens.primary if active else DesignTokens.border
+    return (
+        "QToolButton { "
+        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 18px; "
+        "padding: 0px; "
+        "} "
+        "QToolButton:hover { "
+        f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; border-color: {DesignTokens.primary};"
+        "} "
+    )
 
 
 def plan_phase_label(phase):
@@ -749,6 +808,7 @@ class ModelEditDialog(QDialog):
         self.provider_id = provider_id
         self.setWindowTitle("模型配置")
         self.resize(420, 260)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
         model = dict(model or {})
 
         layout = QVBoxLayout(self)
@@ -972,15 +1032,17 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(720, 420)
         self.config_manager = config_manager
         self._main = parent
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(18)
 
         group_style = (
-            "QGroupBox { font-weight: 600; border: 1px solid #dbe3ee; border-radius: 14px; "
+            f"QGroupBox {{ font-weight: 600; border: 1px solid {DesignTokens.border}; "
+            f"border-radius: 16px; background: {DesignTokens.bg_main}; "
             "margin-top: 10px; padding: 18px 16px 16px 16px; } "
-            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 12px; padding: 0 6px; color: {DesignTokens.text_primary}; }}"
         )
 
         body_layout = QHBoxLayout()
@@ -1175,8 +1237,8 @@ class SettingsDialog(QDialog):
         self.update_log_edit.setReadOnly(True)
         self.update_log_edit.setFixedHeight(120)
         self.update_log_edit.setStyleSheet(
-            "QTextEdit { background: #f8fafc; border: 1px solid #dbe3ee; border-radius: 8px; "
-            "padding: 8px; color: #475569; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 12px; }"
+            f"QTextEdit {{ background: {DesignTokens.bg_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 12px; "
+            f"padding: 8px; color: {DesignTokens.text_secondary}; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 12px; }}"
         )
         self.update_log_edit.setPlaceholderText("更新过程会显示在这里。")
         self.update_progress = QProgressBar()
@@ -1538,6 +1600,7 @@ class SkillsCenterDialog(QDialog):
         self.resize(820, 620)
         self.skill_manager = skill_manager
         self.config_manager = config_manager
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -1632,8 +1695,9 @@ class SkillsCenterDialog(QDialog):
         card = QFrame()
         card.setObjectName("SkillCard")
         card.setStyleSheet(
-            f"QFrame#SkillCard {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 18px; }}"
+            f"QFrame#SkillCard {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 16px; }}"
         )
+        add_soft_shadow(card, blur=18, y_offset=4, alpha=12)
         card_layout = QHBoxLayout(card)
         card_layout.setContentsMargins(20, 18, 20, 18)
         card_layout.setSpacing(16)
@@ -2350,10 +2414,11 @@ class SystemToast(QFrame):
             QFrame {{
                 background-color: {bg_color};
                 border: 1px solid {border_color};
-                border-radius: 8px;
+                border-radius: 14px;
                 margin: 8px 40px;
             }}
         """)
+        add_soft_shadow(self, blur=16, y_offset=4, alpha=12)
 
 class ChatBubble(QFrame):
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
@@ -2380,11 +2445,9 @@ class ChatBubble(QFrame):
             bubble_frame = QFrame()
             bubble_frame.setStyleSheet(f"""
                 QFrame {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                                              stop:0 {DesignTokens.primary_gradient_start}, 
-                                              stop:1 {DesignTokens.primary_gradient_end});
-                    border-radius: 16px;
-                    border-bottom-right-radius: 4px;
+                    background: {DesignTokens.primary};
+                    border-radius: 18px;
+                    border-bottom-right-radius: 6px;
                 }}
             """)
             bubble_layout = QVBoxLayout(bubble_frame)
@@ -3721,8 +3784,6 @@ class SessionState:
         self.thinking_flush_timer = None
         self.pending_thinking_delta = ""
         self.run_phase = "待开始"
-        self.right_panel_mode = "files"
-        self.right_panel_visible = False
         self.session_status = "draft"
         self.has_file_changes = False
         self.changed_files = []
@@ -3781,31 +3842,31 @@ class SmartSplitter(QSplitter):
             # Let's use the user provided CSS which was known good.
             self.setStyleSheet("""
                 QSplitter::handle:horizontal { 
-                    background-color: #e5e7eb; 
+                    background-color: #d2d2d7; 
                     width: 1px; 
                     margin: 0 4px; 
                 } 
                 QSplitter::handle:horizontal:hover { 
-                    background-color: #3b82f6; 
+                    background-color: #007aff; 
                 }
                 QSplitter::handle:vertical { 
-                    background-color: #e5e7eb; 
+                    background-color: #d2d2d7; 
                     height: 1px; 
                     margin: 4px 0; 
                 } 
                 QSplitter::handle:vertical:hover { 
-                    background-color: #3b82f6; 
+                    background-color: #007aff; 
                 }
             """)
         else:
             self.setStyleSheet("""
                 QSplitter::handle:vertical { 
-                    background-color: #e5e7eb; 
+                    background-color: #d2d2d7; 
                     height: 1px; 
                     margin: 4px 0; 
                 } 
                 QSplitter::handle:vertical:hover { 
-                    background-color: #3b82f6; 
+                    background-color: #007aff; 
                 }
             """)
 
@@ -3951,6 +4012,7 @@ class MemoryUpdateDialog(QDialog):
         self.setWindowTitle("更新长期记忆")
         self.resize(760, 620)
         self.running = True
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -4142,6 +4204,7 @@ class ConversationSkillOptionsDialog(QDialog):
         self.setWindowTitle("沉淀为 Skill")
         self.resize(520, 300)
         self.skills = list(skills or [])
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -4224,6 +4287,7 @@ class ConversationSkillPreviewDialog(QDialog):
         self.update_strategy = update_strategy or "append"
         self.setWindowTitle("Skill 草稿预览")
         self.resize(860, 700)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
         draft = dict(draft or {})
         layout = QVBoxLayout(self)
@@ -4363,15 +4427,19 @@ class MainWindow(QMainWindow):
         self.resize(1280, 720)
         self.setAcceptDrops(True)
         self.workspace_dir = None
+        self.right_drawer_open = False
+        self.right_drawer_tab = self.RIGHT_TAB_FILES
+        self.context_rail_buttons = {}
+        self.context_available_tabs = set()
         
         # Apply Clean Light Theme manually for optimized components
         self.setStyleSheet(f"""
             QMainWindow {{ background-color: {DesignTokens.bg_app}; }}
-            QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 700; color: {DesignTokens.text_primary}; }}
+            QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 700; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
             QLabel[roleSubtitle="true"] {{ font-size: 13px; color: {DesignTokens.text_secondary}; }}
             QTextEdit#MainInput {{
                 padding: 12px 16px;
-                border-radius: 24px;
+                border-radius: 22px;
                 border: 1px solid {DesignTokens.border};
                 background: {DesignTokens.bg_main};
                 font-size: 14px;
@@ -4385,31 +4453,32 @@ class MainWindow(QMainWindow):
             QTabWidget::pane {{ border: none; }}
             QTabBar::tab {{
                 background: transparent;
-                padding: 8px 16px;
+                padding: 8px 14px;
                 margin-right: 4px;
-                border-radius: 6px;
+                border-radius: 14px;
                 color: {DesignTokens.text_secondary};
             }}
             QTabBar::tab:selected {{
                 background: {DesignTokens.primary_soft};
                 color: {DesignTokens.primary};
-                font-weight: bold;
+                font-weight: 700;
             }}
 
             /* Global Scrollbar Beautification */
             QScrollBar:vertical {{
                 border: none;
                 background: transparent;
-                width: 6px;
+                width: 8px;
                 margin: 0px;
             }}
             QScrollBar::handle:vertical {{
-                background: {DesignTokens.border};
+                background: #c7c7cc88;
                 min-height: 20px;
-                border-radius: 3px;
+                border-radius: 4px;
+                margin: 2px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: {DesignTokens.border_strong};
+                background: #a1a1a688;
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
@@ -4420,16 +4489,17 @@ class MainWindow(QMainWindow):
             QScrollBar:horizontal {{
                 border: none;
                 background: transparent;
-                height: 6px;
+                height: 8px;
                 margin: 0px;
             }}
             QScrollBar::handle:horizontal {{
-                background: {DesignTokens.border};
+                background: #c7c7cc88;
                 min-width: 20px;
-                border-radius: 3px;
+                border-radius: 4px;
+                margin: 2px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background: {DesignTokens.border_strong};
+                background: #a1a1a688;
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
@@ -4496,6 +4566,7 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
         
         self.main_splitter = SmartSplitter(Qt.Horizontal)
+        self.main_splitter.splitterMoved.connect(lambda *_: self.position_context_drawer())
         root_layout.addWidget(self.main_splitter)
 
         # --- Sidebar ---
@@ -4509,8 +4580,8 @@ class MainWindow(QMainWindow):
         # sidebar.setGraphicsEffect(None) 
 
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(16, 24, 16, 24)
-        sidebar_layout.setSpacing(16)
+        sidebar_layout.setContentsMargins(18, 24, 18, 24)
+        sidebar_layout.setSpacing(14)
 
         app_title = QLabel("DeepSeek Cowork")
         app_title.setProperty("roleTitle", True)
@@ -4525,17 +4596,7 @@ class MainWindow(QMainWindow):
         new_chat_btn.setText(" 新任务")
         new_chat_btn.setIcon(qta.icon('fa5s.plus', color='#ffffff'))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
-        new_chat_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2f6fed; 
-                color: white; 
-                border-radius: 14px; 
-                padding: 12px 16px;
-                font-weight: 700;
-                border: none;
-            }
-            QPushButton:hover { background-color: #245fce; }
-        """)
+        new_chat_btn.setStyleSheet(apple_button_style("primary", radius=18, align="left"))
         new_chat_btn.clicked.connect(self.new_conversation)
         sidebar_layout.addWidget(new_chat_btn)
 
@@ -4559,10 +4620,7 @@ class MainWindow(QMainWindow):
         sidebar_footer_label.setProperty("roleSubtitle", True)
         sidebar_layout.addWidget(sidebar_footer_label)
         
-        sidebar_btn_style = """
-            QPushButton { text-align: left; padding: 8px; border: none; color: #4b5563; background: transparent; border-radius: 6px; }
-            QPushButton:hover { background-color: #e5e7eb; color: #111827; }
-        """
+        sidebar_btn_style = apple_button_style("ghost", radius=14, align="left")
         
         sidebar_settings_btn = QPushButton(" 系统设置")
         sidebar_settings_btn.setText(" 系统设置")
@@ -4603,19 +4661,26 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(main_container)
 
         # Right Sidebar (Context Drawer)
-        self.right_sidebar = QWidget()
+        self.right_sidebar = QFrame(main_container)
         self.right_sidebar.setObjectName("RightSidebar")
-        self.right_sidebar.setStyleSheet(f"background-color: {DesignTokens.bg_main}; border-left: 1px solid {DesignTokens.border};")
+        self.right_sidebar.setStyleSheet(
+            f"QFrame#RightSidebar {{ background-color: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border}; border-radius: 22px; }}"
+        )
         self.right_sidebar.setVisible(False)
+        add_soft_shadow(self.right_sidebar, blur=42, y_offset=12, alpha=34)
         
         right_layout = QVBoxLayout(self.right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
         
         right_header = QFrame()
-        right_header.setStyleSheet(f"background: {DesignTokens.bg_card}; border-bottom: 1px solid {DesignTokens.border};")
+        right_header.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.bg_card}; border-bottom: 1px solid {DesignTokens.border}; "
+            "border-top-left-radius: 22px; border-top-right-radius: 22px; }"
+        )
         right_header_layout = QHBoxLayout(right_header)
-        right_header_layout.setContentsMargins(16, 14, 16, 14)
+        right_header_layout.setContentsMargins(16, 14, 12, 14)
         self.right_title_label = QLabel("任务上下文")
         self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
         self.right_desc_label = QLabel("查看文件、计划与执行步骤")
@@ -4626,27 +4691,35 @@ class MainWindow(QMainWindow):
         right_title_box.addWidget(self.right_title_label)
         right_title_box.addWidget(self.right_desc_label)
         right_header_layout.addLayout(right_title_box, 1)
+        self.right_close_btn = QToolButton()
+        self.right_close_btn.setIcon(qta.icon('fa5s.times', color=DesignTokens.text_secondary))
+        self.right_close_btn.setToolTip("收起上下文")
+        self.right_close_btn.setCursor(Qt.PointingHandCursor)
+        self.right_close_btn.setFixedSize(34, 34)
+        self.right_close_btn.setStyleSheet(apple_tool_button_style(False))
+        self.right_close_btn.clicked.connect(self.hide_context_drawer)
+        right_header_layout.addWidget(self.right_close_btn)
         right_layout.addWidget(right_header)
 
         # Right Sidebar Tabs
         self.right_tabs = QTabWidget()
-        self.right_tabs.setStyleSheet("""
-            QTabWidget::pane { border: none; }
-            QTabBar::tab {
+        self.right_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: none; }}
+            QTabBar::tab {{
                 background: transparent;
                 padding: 8px 12px;
                 margin-right: 2px;
-                border-bottom: 2px solid transparent;
-                color: #6b7280;
+                border-radius: 13px;
+                color: {DesignTokens.text_secondary};
                 font-weight: 500;
-            }
-            QTabBar::tab:selected {
-                color: #2563eb;
-                border-bottom: 2px solid #2563eb;
-            }
-            QTabBar::tab:hover {
-                background: #f3f4f6;
-            }
+            }}
+            QTabBar::tab:selected {{
+                color: {DesignTokens.primary};
+                background: {DesignTokens.primary_soft};
+            }}
+            QTabBar::tab:hover {{
+                background: {DesignTokens.bg_secondary};
+            }}
         """)
         
         # Tab 1: Workspace Files
@@ -4665,10 +4738,10 @@ class MainWindow(QMainWindow):
         self.file_tree.setRootIndex(self.file_model.index(""))
         self.file_tree.setHeaderHidden(True)
         for i in range(1, 4): self.file_tree.setColumnHidden(i, True)
-        self.file_tree.setStyleSheet("""
-             QTreeView { border: none; } 
-             QTreeView::item { padding: 4px; }
-             QTreeView::item:selected { background-color: #eff6ff; color: #1d4ed8; }
+        self.file_tree.setStyleSheet(f"""
+             QTreeView {{ border: none; }} 
+             QTreeView::item {{ padding: 5px; border-radius: 8px; }}
+             QTreeView::item:selected {{ background-color: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}
         """)
         self.file_tree.clicked.connect(self.on_file_clicked)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -4683,13 +4756,20 @@ class MainWindow(QMainWindow):
         preview_layout.setSpacing(0)
         
         r_preview_header = QLabel("  内容预览")
-        r_preview_header.setStyleSheet("font-weight: 600; color: #4b5563; padding: 8px 12px; border-top: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; background: #f9fafb;")
+        r_preview_header.setStyleSheet(
+            f"font-weight: 600; color: {DesignTokens.text_secondary}; padding: 8px 12px; "
+            f"border-top: 1px solid {DesignTokens.border}; border-bottom: 1px solid {DesignTokens.border}; "
+            f"background: {DesignTokens.bg_secondary};"
+        )
         preview_layout.addWidget(r_preview_header)
         
         self.preview_stack = QStackedWidget()
         self.preview_text = ReadOnlyTextEdit()
         # self.preview_text.setReadOnly(True) # Handled by class
-        self.preview_text.setStyleSheet("border: none; padding: 8px; color: #374151; font-family: 'Consolas', monospace; font-size: 11px;")
+        self.preview_text.setStyleSheet(
+            f"border: none; padding: 8px; color: {DesignTokens.text_primary}; "
+            "font-family: 'Consolas', monospace; font-size: 11px;"
+        )
         self.preview_text.setPlaceholderText("点击文件预览内容...")
         self.preview_image = QLabel()
         self.preview_image.setAlignment(Qt.AlignCenter)
@@ -4900,13 +4980,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        self.main_splitter.addWidget(self.right_sidebar)
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
-        self.main_splitter.setStretchFactor(2, 0)
         
-        # Set Initial Sizes (Sidebar: 260, Main: Flexible, Right: 280)
-        self.main_splitter.setSizes([260, 800, 280])
+        # Set Initial Sizes (Sidebar: 260, Main: Flexible). The context drawer floats over main content.
+        self.main_splitter.setSizes([260, 1000])
 
         # Main Layout Construction
         layout = QVBoxLayout(main_container)
@@ -4929,7 +5007,11 @@ class MainWindow(QMainWindow):
         
         # Workspace Selector
         ws_container = QFrame()
-        ws_container.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 16px; padding: 4px;")
+        ws_container.setStyleSheet(
+            f"background: rgba(255, 255, 255, 0.86); border: 1px solid {DesignTokens.border}; "
+            "border-radius: 18px; padding: 4px;"
+        )
+        add_soft_shadow(ws_container, blur=18, y_offset=4, alpha=14)
         ws_layout = QHBoxLayout(ws_container)
         ws_layout.setContentsMargins(12, 10, 12, 10)
         ws_layout.setSpacing(10)
@@ -4960,13 +5042,42 @@ class MainWindow(QMainWindow):
         self.ws_btn.setText(" 切换工作区")
         self.ws_btn.setIcon(qta.icon('fa5s.folder-open', color='#374151'))
         self.ws_btn.setCursor(Qt.PointingHandCursor)
-        self.ws_btn.setStyleSheet(f"background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 6px 14px; color: {DesignTokens.text_primary};")
+        self.ws_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.ws_btn.clicked.connect(self.select_workspace)
         
         ws_layout.addWidget(self.ws_label)
         ws_layout.addStretch()
         ws_layout.addWidget(self.ws_btn)
         top_bar.addWidget(ws_container)
+
+        self.context_rail = QFrame()
+        self.context_rail.setObjectName("ContextRail")
+        self.context_rail.setStyleSheet(
+            f"QFrame#ContextRail {{ background: rgba(255, 255, 255, 0.82); border: 1px solid {DesignTokens.border}; "
+            "border-radius: 20px; }"
+        )
+        add_soft_shadow(self.context_rail, blur=18, y_offset=4, alpha=16)
+        context_rail_layout = QHBoxLayout(self.context_rail)
+        context_rail_layout.setContentsMargins(5, 5, 5, 5)
+        context_rail_layout.setSpacing(4)
+        context_actions = [
+            (self.RIGHT_TAB_FILES, "文件", "fa5s.folder-open"),
+            (self.RIGHT_TAB_PLAN, "计划", "fa5s.tasks"),
+            (self.RIGHT_TAB_OBSERVABILITY, "观测", "fa5s.chart-line"),
+            (self.RIGHT_TAB_SUB_AGENTS, "子 Agent", "fa5s.project-diagram"),
+        ]
+        for tab_index, tooltip, icon_name in context_actions:
+            btn = QToolButton()
+            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+            btn.setToolTip(tooltip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedSize(36, 36)
+            btn.setCheckable(True)
+            btn.setStyleSheet(apple_tool_button_style(False))
+            btn.clicked.connect(lambda checked=False, tab=tab_index: self.show_context_drawer(tab))
+            context_rail_layout.addWidget(btn)
+            self.context_rail_buttons[tab_index] = btn
+        top_bar.addWidget(self.context_rail)
         
         layout.addLayout(top_bar)
         
@@ -4983,6 +5094,11 @@ class MainWindow(QMainWindow):
         # Input Area
         input_card = QFrame()
         input_card.setObjectName("ContentCard")
+        input_card.setStyleSheet(
+            f"QFrame#ContentCard {{ background: rgba(255, 255, 255, 0.92); "
+            f"border: 1px solid {DesignTokens.border}; border-radius: 22px; }}"
+        )
+        add_soft_shadow(input_card, blur=28, y_offset=8, alpha=18)
 
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
@@ -5034,7 +5150,7 @@ class MainWindow(QMainWindow):
         self.action_btn.setFixedSize(96, 40)
         self.action_btn.setAutoDefault(False)
         self.action_btn.setDefault(False)
-        self.action_btn.setStyleSheet(f"background-color: {DesignTokens.primary}; color: white; border-radius: 20px; font-weight: 700; border: none;")
+        self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
         self.action_btn.clicked.connect(self.on_action_clicked)
         
         self.loop_hint = QPushButton(" 循环中")
@@ -5083,6 +5199,8 @@ class MainWindow(QMainWindow):
         self.setup_daemon_client()
         self.start_daemon_monitor()
         self.setup_tray()
+        QApplication.instance().installEventFilter(self)
+        self.position_context_drawer()
 
     def process_ui_events(self, force=False):
         import time
@@ -5090,6 +5208,83 @@ class MainWindow(QMainWindow):
         if force or (now - self.last_ui_update_time > 0.05):
             QApplication.processEvents()
             self.last_ui_update_time = now
+
+    def eventFilter(self, obj, event):
+        if (
+            getattr(self, "right_drawer_open", False)
+            and event.type() == QEvent.MouseButtonPress
+            and isinstance(obj, QWidget)
+            and obj.window() == self
+        ):
+            in_drawer = obj is self.right_sidebar or self.right_sidebar.isAncestorOf(obj)
+            in_rail = hasattr(self, "context_rail") and (obj is self.context_rail or self.context_rail.isAncestorOf(obj))
+            if not in_drawer and not in_rail:
+                self.hide_context_drawer()
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and getattr(self, "right_drawer_open", False):
+            self.hide_context_drawer()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def position_context_drawer(self):
+        if not hasattr(self, "right_sidebar") or not hasattr(self, "main_splitter"):
+            return
+        parent = self.right_sidebar.parentWidget()
+        if not parent:
+            return
+        margin = 16
+        width = min(390, max(320, int(parent.width() * 0.36)))
+        height = max(120, parent.height() - (margin * 2))
+        self.right_sidebar.setGeometry(parent.width() - width - margin, margin, width, height)
+        if self.right_sidebar.isVisible():
+            self.right_sidebar.raise_()
+
+    def show_context_drawer(self, tab_index=None):
+        if tab_index is None:
+            tab_index = self.right_drawer_tab
+        self.right_drawer_tab = tab_index
+        self.right_drawer_open = True
+        self.right_tabs.setCurrentIndex(tab_index)
+        self.right_sidebar.setVisible(True)
+        self.position_context_drawer()
+        self.right_sidebar.raise_()
+        self.update_context_rail_badges()
+
+    def hide_context_drawer(self):
+        if not hasattr(self, "right_sidebar"):
+            return
+        self.right_drawer_open = False
+        self.right_sidebar.setVisible(False)
+        self.update_context_rail_badges()
+
+    def set_context_tab_hint(self, tab_index, available=True):
+        if not hasattr(self, "context_available_tabs"):
+            return
+        if available:
+            self.context_available_tabs.add(tab_index)
+        else:
+            self.context_available_tabs.discard(tab_index)
+        self.update_context_rail_badges()
+
+    def update_context_rail_badges(self):
+        if not hasattr(self, "context_rail_buttons"):
+            return
+        icons = {
+            self.RIGHT_TAB_FILES: "fa5s.folder-open",
+            self.RIGHT_TAB_PLAN: "fa5s.tasks",
+            self.RIGHT_TAB_OBSERVABILITY: "fa5s.chart-line",
+            self.RIGHT_TAB_SUB_AGENTS: "fa5s.project-diagram",
+        }
+        for tab_index, btn in self.context_rail_buttons.items():
+            active = self.right_drawer_open and self.right_drawer_tab == tab_index
+            hinted = tab_index in self.context_available_tabs
+            btn.setChecked(active)
+            btn.setStyleSheet(apple_tool_button_style(active or hinted))
+            color = DesignTokens.primary if active or hinted else DesignTokens.text_secondary
+            btn.setIcon(qta.icon(icons.get(tab_index, "fa5s.circle"), color=color))
 
     def show_prompt_tool_menu(self):
         menu = QMenu(self)
@@ -5206,8 +5401,16 @@ class MainWindow(QMainWindow):
             )
         )
         has_context = bool(state and (state.step_records or state.has_file_changes or has_plan_context or has_observability_context))
-        self.right_panel_visible = has_workspace or has_context
-        self.right_sidebar.setVisible(self.right_panel_visible)
+        self.context_available_tabs = set()
+        if has_workspace:
+            self.context_available_tabs.add(self.RIGHT_TAB_FILES)
+        if has_plan_context:
+            self.context_available_tabs.add(self.RIGHT_TAB_PLAN)
+        if has_observability_context or has_context:
+            self.context_available_tabs.add(self.RIGHT_TAB_OBSERVABILITY)
+        if state and getattr(state, "sub_agent_events", []):
+            self.context_available_tabs.add(self.RIGHT_TAB_SUB_AGENTS)
+        self.update_context_rail_badges()
         if state and state.session_id == self.current_session_id:
             self.refresh_plan_controls(state.session_id)
             self.refresh_plan_view(state.session_id)
@@ -5452,8 +5655,7 @@ class MainWindow(QMainWindow):
         if len(state.observability_events) > 500:
             state.observability_events = state.observability_events[-500:]
         if state.session_id == self.current_session_id:
-            self.right_sidebar.setVisible(True)
-            self.right_tabs.setCurrentIndex(self.RIGHT_TAB_OBSERVABILITY)
+            self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
             self.refresh_observability_view(state.session_id)
             self.refresh_context_badges(state.session_id)
 
@@ -5712,6 +5914,8 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, 'drag_overlay'):
             self.drag_overlay.resize(self.size())
+        if hasattr(self, "right_sidebar"):
+            self.position_context_drawer()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -5832,7 +6036,8 @@ class MainWindow(QMainWindow):
             self.action_btn.setText("停止")
             self.action_btn.setIcon(qta.icon('fa5s.stop', color='white'))
             self.action_btn.setStyleSheet(
-                f"background-color: {DesignTokens.error_text}; color: white; border-radius: 20px; font-weight: 700; border: none;"
+                "QPushButton { background: #ff3b30; color: white; border-radius: 20px; font-weight: 700; border: none; } "
+                "QPushButton:hover { background: #d70015; }"
             )
             self.action_btn.setEnabled(True)
             self.input_field.setEnabled(False)
@@ -5848,9 +6053,7 @@ class MainWindow(QMainWindow):
             idle_text = "开始规划" if state.plan_mode_enabled else "开始"
             self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet(
-                f"background-color: {DesignTokens.primary}; color: white; border-radius: 20px; font-weight: 700; border: none;"
-            )
+            self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
             self.action_btn.setEnabled(bool(self.workspace_dir))
             self.input_field.setEnabled(bool(self.workspace_dir))
             self.pause_btn.setVisible(False)
@@ -7296,8 +7499,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'file_model'):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
-            self.right_sidebar.setVisible(True)
-            self.right_tabs.setCurrentIndex(self.RIGHT_TAB_FILES)
+            self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
 
     def update_recent_workspaces(self, path):
         if path in self.recent_workspaces: self.recent_workspaces.remove(path)
@@ -7795,8 +7997,7 @@ class MainWindow(QMainWindow):
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)
-        self.right_sidebar.setVisible(True)
-        self.right_tabs.setCurrentIndex(self.RIGHT_TAB_OBSERVABILITY)
+        self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
@@ -7835,12 +8036,11 @@ class MainWindow(QMainWindow):
 
         self.current_selected_tool_id = tool_id
 
-        # 2. Open Sidebar & Switch Tab
-        if not self.right_sidebar.isVisible():
-            self.right_sidebar.setVisible(True)
-            
+        # 2. Open Drawer & Switch Tab for explicit tool-detail requests.
         if switch_tab:
-            self.right_tabs.setCurrentIndex(self.RIGHT_TAB_OBSERVABILITY)
+            self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
+        else:
+            self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         
         # 3. Update Content
         self.td_info_label.setText(f"工具 ID: {tool_id}")
@@ -7970,6 +8170,8 @@ class MainWindow(QMainWindow):
         else:
             self.set_session_phase("Executing", state.session_id)
         self.refresh_step_list(state.session_id)
+        if state.session_id == self.current_session_id:
+            self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         self.process_ui_events(force=False)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
@@ -8023,6 +8225,8 @@ class MainWindow(QMainWindow):
             break
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
+        if state.session_id == self.current_session_id:
+            self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         
         # [Optimization] Real-time refresh if currently viewing this tool
         if (hasattr(self, 'current_selected_tool_id') and 
@@ -8197,10 +8401,14 @@ class MainWindow(QMainWindow):
                 merged_text = (last.get("content") or "") + (event.get("content") or "")
                 last["content"] = merged_text[-240:]
                 last["ts"] = event["ts"]
+                if state.session_id == self.current_session_id:
+                    self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
                 return
         state.sub_agent_events.append(event)
         if len(state.sub_agent_events) > 800:
             state.sub_agent_events = state.sub_agent_events[-800:]
+        if state.session_id == self.current_session_id:
+            self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
 
     def _render_sub_agent_monitor_for_state(self, state):
         if not state or not hasattr(self, "sub_agent_monitor") or self.sub_agent_monitor is None:

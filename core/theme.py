@@ -2,37 +2,37 @@ import qdarktheme
 
 
 class DesignTokens:
-    primary = "#2f6fed"
-    primary_hover = "#245fce"
-    primary_soft = "#eef4ff"
-    primary_gradient_start = "#5384f7"
-    primary_gradient_end = "#3f67df"
+    primary = "#007aff"
+    primary_hover = "#0066d6"
+    primary_soft = "#e8f2ff"
+    primary_gradient_start = "#4aa3ff"
+    primary_gradient_end = "#007aff"
 
-    accent_ai = "#4f7cf3"
-    accent_user = "#4b5563"
-    accent_success = "#10b981"
-    accent_tool = "#d97706"
+    accent_ai = "#007aff"
+    accent_user = "#3a3a3c"
+    accent_success = "#34c759"
+    accent_tool = "#ff9500"
 
-    text_primary = "#0f172a"
-    text_secondary = "#475569"
-    text_tertiary = "#94a3b8"
+    text_primary = "#1d1d1f"
+    text_secondary = "#636366"
+    text_tertiary = "#a1a1a6"
     text_inverse = "#ffffff"
 
-    bg_app = "#f4f7fb"
+    bg_app = "#f5f5f7"
     bg_main = "#ffffff"
-    bg_secondary = "#f8fafc"
-    bg_tertiary = "#eef2f7"
-    bg_sidebar = "#f6f8fc"
+    bg_secondary = "#f7f7f9"
+    bg_tertiary = "#ececf0"
+    bg_sidebar = "#fbfbfd"
     bg_card = "#ffffff"
-    bg_card_subtle = "#fbfcfe"
+    bg_card_subtle = "#fafafa"
 
-    border = "#dbe3ee"
-    border_strong = "#c7d2e3"
+    border = "#d2d2d7"
+    border_strong = "#b8b8bf"
 
     radius_sm = 8
     radius_md = 12
-    radius_lg = 18
-    radius_xl = 24
+    radius_lg = 16
+    radius_xl = 22
 
     spacing_xs = 6
     spacing_sm = 10
@@ -40,9 +40,9 @@ class DesignTokens:
     spacing_lg = 24
     spacing_xl = 32
 
-    shadow_sidebar = "0 10px 30px rgba(15, 23, 42, 0.04)"
-    shadow_card = "0 8px 24px rgba(15, 23, 42, 0.06)"
-    shadow_soft = "0 2px 8px rgba(15, 23, 42, 0.06)"
+    shadow_sidebar = "0 18px 44px rgba(0, 0, 0, 0.08)"
+    shadow_card = "0 10px 30px rgba(0, 0, 0, 0.06)"
+    shadow_soft = "0 4px 14px rgba(0, 0, 0, 0.06)"
 
     success_bg = "#f0fdf4"
     success_text = "#166534"
@@ -68,8 +68,8 @@ class DesignTokens:
     info_border = "#bfdbfe"
     info_icon = "#1e40af"
 
-    muted_chip_bg = "#eef2f7"
-    muted_chip_text = "#475569"
+    muted_chip_bg = "#f0f0f3"
+    muted_chip_text = "#636366"
 
 
 def get_tech_stylesheet(theme="light"):
@@ -83,8 +83,8 @@ def get_tech_stylesheet(theme="light"):
         c_text_primary = "#e6edf3"
         c_text_secondary = "#8b949e"
         c_text_tertiary = "#484f58"
-        c_accent = "#2f81f7"
-        c_accent_hover = "#58a6ff"
+        c_accent = "#0a84ff"
+        c_accent_hover = "#409cff"
         c_border = "#30363d"
         c_selection = "#1f6feb"
     else:
@@ -102,7 +102,7 @@ def get_tech_stylesheet(theme="light"):
 
     css = f"""
     QWidget {{
-        font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
         font-size: 14px;
         color: {c_text_primary};
         selection-background-color: {c_selection};
@@ -126,7 +126,7 @@ def get_tech_stylesheet(theme="light"):
     QPushButton {{
         background-color: {c_bg_card};
         border: 1px solid {c_border};
-        border-radius: {DesignTokens.radius_md}px;
+        border-radius: 17px;
         padding: 8px 14px;
         color: {c_text_primary};
         text-align: center;
@@ -166,7 +166,7 @@ def get_tech_stylesheet(theme="light"):
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
         background-color: {c_bg_input};
         border: 1px solid {c_border};
-        border-radius: {DesignTokens.radius_md}px;
+        border-radius: {DesignTokens.radius_lg}px;
         padding: 8px 10px;
         color: {c_text_primary};
     }}
@@ -204,18 +204,18 @@ def get_tech_stylesheet(theme="light"):
     }}
     QTabBar::tab {{
         background: transparent;
-        padding: 10px 16px;
+        padding: 8px 14px;
         margin-right: 4px;
         color: {c_text_secondary};
         font-weight: 500;
-        border-bottom: 2px solid transparent;
+        border-radius: 14px;
     }}
     QTabBar::tab:hover {{
         color: {c_text_primary};
     }}
     QTabBar::tab:selected {{
-        color: {c_accent};
-        border-bottom: 2px solid {c_accent};
+        color: {c_text_primary};
+        background: {DesignTokens.primary_soft};
     }}
 
     QScrollBar:vertical {{
@@ -265,8 +265,8 @@ def get_tech_stylesheet(theme="light"):
     QMenu {{
         background-color: {c_bg_card};
         border: 1px solid {c_border};
-        padding: 6px;
-        border-radius: {DesignTokens.radius_md}px;
+        padding: 8px;
+        border-radius: {DesignTokens.radius_lg}px;
     }}
     QMenu::item {{
         padding: 7px 24px 7px 12px;

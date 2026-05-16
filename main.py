@@ -25,6 +25,7 @@ from core.single_instance import (
 )
 from core.chat_storage import ChatStorage
 from core.conversation_render import build_conversation_render_items
+from core.html_render import looks_like_complete_html_response
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
@@ -132,7 +133,6 @@ SCROLL_BOTTOM_THRESHOLD_PX = 36
 STREAM_RENDER_INTERVAL_SEC = 0.12
 STREAM_PLAIN_TEXT_THRESHOLD = 2400
 HISTORY_RENDER_PAGE_SIZE = 12
-
 
 def set_stylesheet_if_changed(widget, stylesheet):
     if widget.property("_cached_stylesheet") == stylesheet:
@@ -3064,6 +3064,9 @@ class ChatBubble(QFrame):
             if not final and len(text) >= STREAM_PLAIN_TEXT_THRESHOLD:
                 self._render_plain_stream_content(text)
                 render_mode = "plain"
+            elif final and looks_like_complete_html_response(text):
+                self.content_edit.setHtml(style + text)
+                render_mode = "raw_html"
             else:
                 html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
                 self.content_edit.setHtml(style + html_content)

@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+import json
 
 from core.chat_storage import ChatStorage
 
@@ -158,6 +159,55 @@ class TestChatStorageMessages(unittest.TestCase):
         for column_name in ("content_parts", "meta", "result_obj"):
             self.assertIn(column_name, message_columns)
             self.assertIn(column_name, agent_message_columns)
+
+    def test_legacy_plan_meta_is_cleaned_on_load_and_save(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    status TEXT,
+                    meta TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO conversations (id, title, created_at, updated_at, status, meta)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "conv-plan",
+                    "legacy",
+                    1,
+                    1,
+                    "draft",
+                    json.dumps(
+                        {
+                            "workspace_dir": "D:/demo",
+                            "plan_mode_enabled": True,
+                            "plan_document": "# Old Plan",
+                            "pending_plan_questions": [{"id": "scope", "question": "Scope?"}],
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+
+        storage = ChatStorage(self.db_path)
+        meta = storage.get_conversation_meta("conv-plan")
+        self.assertEqual(meta, {"workspace_dir": "D:/demo"})
+
+        storage.save_conversation(
+            "conv-new",
+            [{"role": "user", "content": "hello"}],
+            meta={"workspace_dir": "D:/demo", "plan_mode_enabled": True, "plan_phase": "exploring"},
+        )
+        new_meta = storage.get_conversation_meta("conv-new")
+        self.assertEqual(new_meta, {"workspace_dir": "D:/demo"})
 
 
 if __name__ == "__main__":

@@ -93,7 +93,7 @@ class TestInteractionSkill(unittest.TestCase):
                     {
                         "header": "兼容策略",
                         "id": "compatibility_target",
-                        "question": "是否保留旧计划结构？",
+                        "question": "是否保留旧结构？",
                         "options": [{"label": "彻底重做", "description": "移除旧结构"}],
                     }
                 ],

@@ -3,11 +3,11 @@ import math
 import re
 from dataclasses import dataclass, field
 
-from .plan_mode import (
-    PLANNING_ALLOWED_TOOLS,
+from .clarify_mode import (
+    CLARIFY_ALLOWED_TOOLS,
+    RUN_MODE_CLARIFYING,
     RUN_MODE_EXECUTION,
     RUN_MODE_NORMAL,
-    RUN_MODE_PLANNING,
     normalize_run_mode,
 )
 
@@ -321,13 +321,13 @@ class ToolRegistry:
         return name.startswith(DESTRUCTIVE_PREFIXES)
 
     def _infer_always_load(self, name):
-        return name in CORE_ALWAYS_LOAD_TOOLS or name in PLANNING_ALLOWED_TOOLS
+        return name in CORE_ALWAYS_LOAD_TOOLS or name in CLARIFY_ALLOWED_TOOLS
 
     def _normalize_allowed_modes(self, allowed_modes, *, name, read_only):
         raw_modes = set(_as_string_list(allowed_modes))
         if not raw_modes:
-            if name in PLANNING_ALLOWED_TOOLS or read_only:
-                raw_modes = {RUN_MODE_EXECUTION, RUN_MODE_PLANNING}
+            if name in CLARIFY_ALLOWED_TOOLS or read_only:
+                raw_modes = {RUN_MODE_EXECUTION, RUN_MODE_CLARIFYING}
             else:
                 raw_modes = {RUN_MODE_EXECUTION}
         normalized = set()

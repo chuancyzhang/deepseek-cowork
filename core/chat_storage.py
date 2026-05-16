@@ -26,6 +26,16 @@ MESSAGE_JSON_COLUMNS = {
     },
 }
 
+LEGACY_PLAN_META_KEYS = {
+    "plan_mode_enabled",
+    "plan_config",
+    "plan_phase",
+    "plan_protocol_version",
+    "plan_mode_state",
+    "plan_document",
+    "pending_plan_questions",
+}
+
 
 class ChatStorage:
     def __init__(self, db_path):
@@ -222,6 +232,7 @@ class ChatStorage:
                 """
             )
             self._ensure_message_columns(conn)
+            self._cleanup_legacy_plan_meta(conn)
 
     def _parse_json_dict(self, text):
         if not text:
@@ -244,6 +255,26 @@ class ChatStorage:
         if value is None:
             return None
         return json.dumps(value, ensure_ascii=False)
+
+    def _strip_legacy_plan_meta(self, meta):
+        if not isinstance(meta, dict):
+            return meta
+        cleaned = dict(meta)
+        for key in LEGACY_PLAN_META_KEYS:
+            cleaned.pop(key, None)
+        return cleaned
+
+    def _cleanup_legacy_plan_meta(self, conn):
+        rows = conn.execute("SELECT id, meta FROM conversations WHERE meta IS NOT NULL AND meta != ''").fetchall()
+        for row in rows:
+            meta = self._parse_json_dict(row["meta"])
+            if not meta or not any(key in meta for key in LEGACY_PLAN_META_KEYS):
+                continue
+            cleaned = self._strip_legacy_plan_meta(meta)
+            conn.execute(
+                "UPDATE conversations SET meta = ? WHERE id = ?",
+                (self._json_dumps(cleaned), row["id"]),
+            )
 
     def _ensure_message_columns(self, conn):
         for table_name, columns in MESSAGE_JSON_COLUMNS.items():
@@ -397,6 +428,7 @@ class ChatStorage:
 
     def upsert_conversation(self, conversation_id, title=None, status="active", meta=None):
         now = int(time.time())
+        meta = self._strip_legacy_plan_meta(meta)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
         with self._connect() as conn:
             existing = conn.execute(

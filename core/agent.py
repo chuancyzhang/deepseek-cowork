@@ -17,11 +17,11 @@ from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
-from core.plan_mode import (
-    get_planning_read_tools,
+from core.clarify_mode import (
+    get_clarifying_read_tools,
     RUN_MODE_EXECUTION,
-    RUN_MODE_PLANNING,
-    is_tool_allowed_in_planning,
+    RUN_MODE_CLARIFYING,
+    is_tool_allowed_in_clarifying,
     json_copy,
     normalize_run_context,
 )
@@ -517,10 +517,10 @@ class LLMWorker(QThread):
                 except Exception:
                     pass
             if (
-                self._is_planning_mode()
+                self._is_clarifying_mode()
                 and name
                 and not hasattr(self.skill_manager, "is_tool_allowed")
-                and not is_tool_allowed_in_planning(name)
+                and not is_tool_allowed_in_clarifying(name)
             ):
                 continue
             filtered.append(item)
@@ -529,8 +529,8 @@ class LLMWorker(QThread):
     def _current_run_mode(self):
         return self.run_context.get("mode") or RUN_MODE_EXECUTION
 
-    def _is_planning_mode(self):
-        return self._current_run_mode() == RUN_MODE_PLANNING
+    def _is_clarifying_mode(self):
+        return self._current_run_mode() == RUN_MODE_CLARIFYING
 
     def _is_tool_allowed_for_mode(self, name):
         if hasattr(self.skill_manager, "is_tool_allowed"):
@@ -538,8 +538,8 @@ class LLMWorker(QThread):
                 return self.skill_manager.is_tool_allowed(name, self._current_run_mode())
             except Exception:
                 return False
-        if self._is_planning_mode():
-            return is_tool_allowed_in_planning(name)
+        if self._is_clarifying_mode():
+            return is_tool_allowed_in_clarifying(name)
         return True
 
     def _is_tool_visible_for_run(self, name):
@@ -680,7 +680,7 @@ class LLMWorker(QThread):
             if name:
                 available_tool_names.append(name)
         available_tool_names = list(dict.fromkeys(available_tool_names))
-        planning_read_tools = get_planning_read_tools(available_tool_names)
+        clarifying_read_tools = get_clarifying_read_tools(available_tool_names)
         enterprise_channels = {"feishu", "dingtalk", "wecom"}
         enterprise_delivery_enabled = (
             (self.run_context.get("im_provider") or "").strip().lower() in enterprise_channels
@@ -779,23 +779,24 @@ class LLMWorker(QThread):
                     "当前可用工具清单: 本轮未暴露任何工具。",
                 ]
             )
-        if self._is_planning_mode():
-            if planning_read_tools:
-                read_tool_line = "、".join(f"`{name}`" for name in planning_read_tools)
+        if self._is_clarifying_mode():
+            if clarifying_read_tools:
+                read_tool_line = "、".join(f"`{name}`" for name in clarifying_read_tools)
             else:
                 read_tool_line = "当前 tool schema 中未暴露工作区读取工具"
             context_lines.extend(
                 [
                     "",
-                    "策略 [计划模式]:",
-                    "1. 你当前处于 planning 模式。你必须先做只读探索，禁止执行会修改工作区或系统状态的操作。",
-                    f"2. 当前 planning 模式下可用只读工具: {read_tool_line}。",
+                    "策略 [反问模式]:",
+                    "1. 你当前处于 clarifying 模式。你必须先做只读探索，禁止执行会修改工作区或系统状态的操作。",
+                    f"2. 当前反问模式下可用只读工具: {read_tool_line}。",
                     "3. 先探索再提问：优先通过代码和配置消除不确定性，不要提可以从仓库直接查到的问题。",
-                    "4. 仅在会影响方案决策时向用户提问，并且必须通过 'request_user_input'。不要在普通文本回复中直接提问。",
-                    "5. 你的规划流程固定为三阶段：环境探查 -> 意图澄清 -> 实施细节澄清。",
-                    "6. planning 模式最终交付必须是单个 '<proposed_plan>...</proposed_plan>' 块，且内容应包含标题、summary、关键改动、测试场景、假设与默认项。",
-                    "7. 若方案尚未收敛，本轮应调用 'request_user_input'；若方案已收敛，本轮应输出完整 '<proposed_plan>'。",
-                    "8. planning 模式不会放宽任何权限边界：工作区外访问、写操作、命令执行、系统自动化等限制仍然有效。",
+                    "4. 若需求仍不清楚，必须立即通过 'request_user_input' 以问卷卡片提出澄清问题；不要在普通文本回复中询问用户是否愿意进入反问。",
+                    "5. 问题数量应弹性控制在 3-4 个；需求已经足够清楚时可以少问或不问。",
+                    "6. 每个问题都要 materially 改变执行方案、确认重要假设，或选择真实取舍；选项要互斥且带简短说明。",
+                    "7. 允许多轮反问；如果本轮回答后仍缺少关键决策，继续调用 'request_user_input'。",
+                    "8. 当信息足够执行时，输出一段简短的已确认需求总结，不要输出计划文档或 XML 标签；UI 会切回正常执行模式继续同一任务。",
+                    "9. 反问模式不会放宽任何权限边界：工作区外访问、写操作、命令执行、系统自动化等限制仍然有效。",
                 ]
             )
         if self.parent_agent_id:

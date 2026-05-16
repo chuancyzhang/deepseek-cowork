@@ -755,7 +755,7 @@ class SkillManager:
             search_hint="discover deferred tools capabilities",
             read_only=True,
             destructive=False,
-            allowed_modes=["planning", "execution"],
+            allowed_modes=["clarifying", "execution"],
             should_defer=False,
             always_load=True,
             runtime_binding={"type": "builtin_method"},

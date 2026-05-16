@@ -29,7 +29,7 @@ class TestHtmlRenderDetection(unittest.TestCase):
     def test_app_protocol_tags_are_not_detected_as_html(self):
         self.assertFalse(
             looks_like_complete_html_response(
-                "<proposed_plan>\n# Plan\n</proposed_plan>"
+                "<app_event>\n# Metadata\n</app_event>"
             )
         )
 

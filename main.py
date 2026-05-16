@@ -60,20 +60,15 @@ from core.llm.deepseek import (
     SUPPORTED_DEEPSEEK_REASONING_EFFORTS,
     normalize_deepseek_reasoning_effort,
 )
-from core.plan_mode import (
-    DEFAULT_PLAN_CONFIG,
-    PLAN_MODE_DISABLED,
-    PLAN_MODE_AWAITING_USER_INPUT,
-    PLAN_MODE_EXPLORING,
-    PLAN_MODE_READY_TO_PRESENT,
-    PLAN_PROTOCOL_VERSION,
+from core.clarify_mode import (
+    CLARIFY_MODE_DISABLED,
+    CLARIFY_MODE_AWAITING_USER_INPUT,
+    CLARIFY_MODE_EXPLORING,
     RUN_MODE_EXECUTION,
-    RUN_MODE_PLANNING,
-    derive_plan_phase,
-    json_copy,
-    normalize_plan_config,
-    normalize_plan_phase,
-    normalize_pending_plan_questions,
+    RUN_MODE_CLARIFYING,
+    derive_clarify_phase,
+    normalize_clarify_phase,
+    normalize_pending_clarify_questions,
     normalize_run_context,
 )
 import shutil
@@ -206,14 +201,13 @@ def apple_tool_button_style(active=False):
     )
 
 
-def plan_phase_label(phase):
+def clarify_phase_label(phase):
     mapping = {
-        PLAN_MODE_DISABLED: "未启用",
-        PLAN_MODE_EXPLORING: "探索中",
-        PLAN_MODE_AWAITING_USER_INPUT: "等待输入",
-        PLAN_MODE_READY_TO_PRESENT: "待呈现",
+        CLARIFY_MODE_DISABLED: "未启用",
+        CLARIFY_MODE_EXPLORING: "澄清中",
+        CLARIFY_MODE_AWAITING_USER_INPUT: "等待输入",
     }
-    return mapping.get(normalize_plan_phase(phase), "未启用")
+    return mapping.get(normalize_clarify_phase(phase), "未启用")
 
 
 def readable_skill_name(skill):
@@ -2416,8 +2410,12 @@ class SystemToast(QFrame):
         
         msg_label = QLabel(text)
         msg_label.setStyleSheet(f"color: {text_color}; font-weight: 500; font-size: 13px; background: transparent;")
-        msg_label.setWordWrap(True)
-        msg_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        msg_label.setWordWrap(False)
+        msg_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        msg_label.setTextInteractionFlags(Qt.NoTextInteraction)
+        msg_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        metrics = QFontMetrics(msg_label.font())
+        msg_label.setMinimumWidth(metrics.horizontalAdvance(text) + 8)
         layout.addWidget(msg_label)
         
         self.setStyleSheet(f"""
@@ -3812,13 +3810,12 @@ class SessionState:
         self.observability_events = []
         self.system_prompt_text = ""
         self.system_prompt_appends = []
-        self.plan_mode_enabled = False
-        self.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
-        self.plan_phase = PLAN_MODE_DISABLED
-        self.plan_protocol_version = PLAN_PROTOCOL_VERSION
-        self.plan_mode_state = PLAN_MODE_EXPLORING
-        self.plan_document = ""
-        self.pending_plan_questions = []
+        self.clarify_mode_enabled = False
+        self.clarify_phase = CLARIFY_MODE_DISABLED
+        self.clarify_mode_state = CLARIFY_MODE_EXPLORING
+        self.pending_clarify_questions = []
+        self.clarify_source_user_text = ""
+        self.clarify_answers_context = []
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -4424,9 +4421,8 @@ def resolve_app_icon_path():
 
 class MainWindow(QMainWindow):
     RIGHT_TAB_FILES = 0
-    RIGHT_TAB_PLAN = 1
-    RIGHT_TAB_OBSERVABILITY = 2
-    RIGHT_TAB_SUB_AGENTS = 3
+    RIGHT_TAB_OBSERVABILITY = 1
+    RIGHT_TAB_SUB_AGENTS = 2
 
     def __init__(self):
         super().__init__()
@@ -4698,7 +4694,7 @@ class MainWindow(QMainWindow):
         right_header_layout.setContentsMargins(16, 14, 12, 14)
         self.right_title_label = QLabel("任务上下文")
         self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
-        self.right_desc_label = QLabel("查看文件、计划与执行步骤")
+        self.right_desc_label = QLabel("查看文件与执行步骤")
         self.right_desc_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         right_title_box = QVBoxLayout()
         right_title_box.setContentsMargins(0, 0, 0, 0)
@@ -4785,33 +4781,6 @@ class MainWindow(QMainWindow):
         ws_tab_layout.addWidget(self.right_inner_splitter)
         
         self.right_stack.addWidget(self.workspace_tab)
-
-        self.plan_tab = QWidget()
-        plan_layout = QVBoxLayout(self.plan_tab)
-        plan_layout.setContentsMargins(12, 12, 12, 12)
-        plan_layout.setSpacing(10)
-        self.plan_status_label = QLabel("状态：未启用")
-        self.plan_status_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        plan_layout.addWidget(self.plan_status_label)
-        self.plan_title_value = QLabel("暂无计划")
-        self.plan_title_value.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
-        self.plan_title_value.setWordWrap(True)
-        plan_layout.addWidget(self.plan_title_value)
-        self.plan_summary_value = QLabel("开启计划模式后，AI 会先给出可讨论的执行计划。")
-        self.plan_summary_value.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        self.plan_summary_value.setWordWrap(True)
-        plan_layout.addWidget(self.plan_summary_value)
-        self.plan_pending_label = QLabel("待回答问题：暂无")
-        self.plan_pending_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        self.plan_pending_label.setWordWrap(True)
-        plan_layout.addWidget(self.plan_pending_label)
-        self.plan_document_view = ReadOnlyTextEdit()
-        self.plan_document_view.setStyleSheet(
-            f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; padding: 8px;"
-        )
-        self.plan_document_view.setPlaceholderText("等待 <proposed_plan> 计划文档...")
-        plan_layout.addWidget(self.plan_document_view, 1)
-        self.right_stack.addWidget(self.plan_tab)
 
         # Observability
         self.tool_details_tab = QWidget()
@@ -5053,7 +5022,6 @@ class MainWindow(QMainWindow):
         context_rail_layout.setSpacing(4)
         context_actions = [
             (self.RIGHT_TAB_FILES, "文件", "fa5s.folder-open"),
-            (self.RIGHT_TAB_PLAN, "计划", "fa5s.tasks"),
             (self.RIGHT_TAB_OBSERVABILITY, "观测", "fa5s.chart-line"),
             (self.RIGHT_TAB_SUB_AGENTS, "子 Agent", "fa5s.project-diagram"),
         ]
@@ -5097,14 +5065,14 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
         self.input_field.returnPressed.connect(self.handle_send)
 
-        self.plan_mode_check = QCheckBox("计划模式")
-        self.plan_mode_check.setCursor(Qt.PointingHandCursor)
-        self.plan_mode_check.toggled.connect(self.on_plan_mode_toggled)
-        self.plan_mode_check.hide()
+        self.clarify_mode_check = QCheckBox("反问模式")
+        self.clarify_mode_check.setCursor(Qt.PointingHandCursor)
+        self.clarify_mode_check.toggled.connect(self.on_clarify_mode_toggled)
+        self.clarify_mode_check.hide()
 
-        self.plan_mode_action = QAction("计划模式", self)
-        self.plan_mode_action.setCheckable(True)
-        self.plan_mode_action.triggered.connect(self.plan_mode_check.setChecked)
+        self.clarify_mode_action = QAction("反问模式", self)
+        self.clarify_mode_action.setCheckable(True)
+        self.clarify_mode_action.triggered.connect(self.on_clarify_mode_toggled)
 
         self.tool_menu_btn = QPushButton()
         self.tool_menu_btn.setIcon(qta.icon('fa5s.plus', color='#6b7280'))
@@ -5116,6 +5084,24 @@ class MainWindow(QMainWindow):
             "border-radius: 18px;"
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
+
+        self.clarify_mode_badge = QPushButton("  反问模式")
+        self.clarify_mode_badge.setIcon(qta.icon('fa5s.question-circle', color=DesignTokens.primary))
+        self.clarify_mode_badge.setToolTip("反问模式已开启，点击关闭")
+        self.clarify_mode_badge.setCursor(Qt.PointingHandCursor)
+        self.clarify_mode_badge.setCheckable(True)
+        self.clarify_mode_badge.setFixedHeight(30)
+        self.clarify_mode_badge.setMinimumWidth(96)
+        self.clarify_mode_badge.setVisible(False)
+        self.clarify_mode_badge.setStyleSheet(
+            f"QPushButton {{ background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_secondary}; "
+            f"border: 1px solid {DesignTokens.border}; border-radius: 15px; "
+            "padding: 4px 10px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}"
+            f"QPushButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+            f"border-color: rgba(0, 122, 255, 0.32); }}"
+        )
+        self.clarify_mode_badge.clicked.connect(self.on_clarify_mode_toggled)
 
         self.model_select_combo = QComboBox()
         self.model_select_combo.setCursor(Qt.PointingHandCursor)
@@ -5161,6 +5147,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.setContentsMargins(0, 0, 0, 0)
         prompt_toolbar.setSpacing(8)
         prompt_toolbar.addWidget(self.tool_menu_btn)
+        prompt_toolbar.addWidget(self.clarify_mode_badge)
         prompt_toolbar.addWidget(self.pause_btn)
         prompt_toolbar.addWidget(self.loop_hint)
         prompt_toolbar.addStretch()
@@ -5253,11 +5240,10 @@ class MainWindow(QMainWindow):
             return
         page_titles = {
             self.RIGHT_TAB_FILES: ("任务文件", "查看工作区文件与内容预览"),
-            self.RIGHT_TAB_PLAN: ("任务计划", "查看计划模式状态与执行方案"),
             self.RIGHT_TAB_OBSERVABILITY: ("任务观测", "查看系统提示词、工具调用与返回"),
             self.RIGHT_TAB_SUB_AGENTS: ("子 Agent", "查看并行子 Agent 状态与日志"),
         }
-        title, description = page_titles.get(tab_index, ("任务上下文", "查看文件、计划与执行步骤"))
+        title, description = page_titles.get(tab_index, ("任务上下文", "查看文件与执行步骤"))
         self.right_title_label.setText(title)
         self.right_desc_label.setText(description)
 
@@ -5282,7 +5268,6 @@ class MainWindow(QMainWindow):
             return
         icons = {
             self.RIGHT_TAB_FILES: "fa5s.folder-open",
-            self.RIGHT_TAB_PLAN: "fa5s.tasks",
             self.RIGHT_TAB_OBSERVABILITY: "fa5s.chart-line",
             self.RIGHT_TAB_SUB_AGENTS: "fa5s.project-diagram",
         }
@@ -5300,7 +5285,7 @@ class MainWindow(QMainWindow):
         add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加照片和文件", self)
         add_files.setEnabled(False)
         menu.addAction(add_files)
-        menu.addAction(self.plan_mode_action)
+        menu.addAction(self.clarify_mode_action)
         menu.addSeparator()
         plugins_action = QAction(qta.icon('fa5s.th-large', color='#4b5563'), "插件", self)
         plugins_action.triggered.connect(self.open_skills_center)
@@ -5392,12 +5377,11 @@ class MainWindow(QMainWindow):
         self.phase_badge.setText(f"Phase: {phase}")
 
         has_workspace = bool(self.workspace_dir)
-        has_plan_context = bool(
+        has_clarify_context = bool(
             state
             and (
-                state.plan_mode_enabled
-                or bool(getattr(state, "plan_document", ""))
-                or bool(getattr(state, "pending_plan_questions", []))
+                state.clarify_mode_enabled
+                or bool(getattr(state, "pending_clarify_questions", []))
             )
         )
         has_observability_context = bool(
@@ -5408,111 +5392,68 @@ class MainWindow(QMainWindow):
                 or getattr(state, "system_prompt_appends", [])
             )
         )
-        has_context = bool(state and (state.step_records or state.has_file_changes or has_plan_context or has_observability_context))
+        has_context = bool(state and (state.step_records or state.has_file_changes or has_clarify_context or has_observability_context))
         self.context_available_tabs = set()
         if has_workspace:
             self.context_available_tabs.add(self.RIGHT_TAB_FILES)
-        if has_plan_context:
-            self.context_available_tabs.add(self.RIGHT_TAB_PLAN)
         if has_observability_context or has_context:
             self.context_available_tabs.add(self.RIGHT_TAB_OBSERVABILITY)
         if state and getattr(state, "sub_agent_events", []):
             self.context_available_tabs.add(self.RIGHT_TAB_SUB_AGENTS)
         self.update_context_rail_badges()
         if state and state.session_id == self.current_session_id:
-            self.refresh_plan_controls(state.session_id)
-            self.refresh_plan_view(state.session_id)
+            self.refresh_clarify_controls(state.session_id)
 
-    def _extract_proposed_plan(self, content):
-        text = str(content or "")
-        matches = re.findall(r"<proposed_plan>\s*(.*?)\s*</proposed_plan>", text, flags=re.IGNORECASE | re.DOTALL)
-        if len(matches) != 1:
-            return ""
-        return (matches[0] or "").strip()
-
-    def _extract_pending_plan_questions_from_args(self, args_obj):
+    def _extract_pending_clarify_questions_from_args(self, args_obj):
         if not isinstance(args_obj, dict):
             return []
-        return normalize_pending_plan_questions(args_obj.get("questions"))
+        return normalize_pending_clarify_questions(args_obj.get("questions"))
 
-    def _session_plan_meta(self, state):
+    def _session_clarify_meta(self, state):
         if not state:
             return {}
         return {
-            "plan_mode_enabled": bool(getattr(state, "plan_mode_enabled", False)),
-            "plan_config": normalize_plan_config(getattr(state, "plan_config", DEFAULT_PLAN_CONFIG)),
-            "plan_phase": normalize_plan_phase(
-                getattr(state, "plan_phase", ""),
-                default=derive_plan_phase(
-                    getattr(state, "plan_mode_enabled", False),
-                    getattr(state, "plan_mode_state", PLAN_MODE_EXPLORING),
-                    getattr(state, "plan_document", ""),
+            "clarify_mode_enabled": bool(getattr(state, "clarify_mode_enabled", False)),
+            "clarify_phase": normalize_clarify_phase(
+                getattr(state, "clarify_phase", ""),
+                default=derive_clarify_phase(
+                    getattr(state, "clarify_mode_enabled", False),
+                    getattr(state, "clarify_mode_state", CLARIFY_MODE_EXPLORING),
                 ),
             ),
-            "plan_protocol_version": int(getattr(state, "plan_protocol_version", PLAN_PROTOCOL_VERSION) or PLAN_PROTOCOL_VERSION),
-            "plan_mode_state": normalize_plan_phase(
-                getattr(state, "plan_mode_state", PLAN_MODE_EXPLORING),
-                default=PLAN_MODE_EXPLORING,
+            "clarify_mode_state": normalize_clarify_phase(
+                getattr(state, "clarify_mode_state", CLARIFY_MODE_EXPLORING),
+                default=CLARIFY_MODE_EXPLORING,
             ),
-            "plan_document": str(getattr(state, "plan_document", "") or "").strip(),
-            "pending_plan_questions": normalize_pending_plan_questions(
-                getattr(state, "pending_plan_questions", [])
+            "pending_clarify_questions": normalize_pending_clarify_questions(
+                getattr(state, "pending_clarify_questions", [])
             ),
         }
 
-    def refresh_plan_controls(self, session_id=None):
+    def refresh_clarify_controls(self, session_id=None):
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
             return
-        plan_enabled = bool(state.plan_mode_enabled)
-        blocked_check = self.plan_mode_check.blockSignals(True)
-        self.plan_mode_check.setChecked(plan_enabled)
-        self.plan_mode_check.blockSignals(blocked_check)
-        plan_enabled_for_ui = (
+        clarify_enabled = bool(state.clarify_mode_enabled)
+        blocked_check = self.clarify_mode_check.blockSignals(True)
+        self.clarify_mode_check.setChecked(clarify_enabled)
+        self.clarify_mode_check.blockSignals(blocked_check)
+        clarify_enabled_for_ui = (
             not ((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False))
         )
-        self.plan_mode_check.setEnabled(plan_enabled_for_ui)
-        self.plan_mode_check.setText("计划模式")
-        if hasattr(self, "plan_mode_action"):
-            blocked_action = self.plan_mode_action.blockSignals(True)
-            self.plan_mode_action.setChecked(plan_enabled)
-            self.plan_mode_action.blockSignals(blocked_action)
-            self.plan_mode_action.setEnabled(plan_enabled_for_ui)
-
-    def refresh_plan_view(self, session_id=None):
-        state = self.get_session(session_id)
-        if not state or state.session_id != self.current_session_id:
-            return
-        self.plan_status_label.setText(f"状态：{plan_phase_label(state.plan_phase)}")
-        pending_questions = normalize_pending_plan_questions(getattr(state, "pending_plan_questions", []))
-        if pending_questions:
-            headers = []
-            for item in pending_questions[:3]:
-                header = str(item.get("header") or item.get("id") or "").strip()
-                if header:
-                    headers.append(header)
-            suffix = " ..." if len(pending_questions) > 3 else ""
-            self.plan_pending_label.setText(f"待回答问题：{len(pending_questions)} 个（{', '.join(headers)}{suffix}）")
-        else:
-            self.plan_pending_label.setText("待回答问题：暂无")
-        plan_document = str(getattr(state, "plan_document", "") or "").strip()
-        if not plan_document:
-            self.plan_title_value.setText("暂无计划")
-            self.plan_summary_value.setText("开启计划模式后，AI 将通过 <proposed_plan> 交付计划文档。")
-            self.plan_document_view.setPlainText("")
-            return
-        lines = [line.strip() for line in plan_document.splitlines() if line.strip()]
-        title = "计划文档"
-        summary = "计划已更新。"
-        for line in lines:
-            if line.startswith("#"):
-                title = line.lstrip("#").strip() or title
-                continue
-            summary = line
-            break
-        self.plan_title_value.setText(title)
-        self.plan_summary_value.setText(summary)
-        self.plan_document_view.setPlainText(plan_document)
+        self.clarify_mode_check.setEnabled(clarify_enabled_for_ui)
+        self.clarify_mode_check.setText("反问模式")
+        if hasattr(self, "clarify_mode_badge"):
+            self.clarify_mode_badge.setVisible(clarify_enabled)
+            self.clarify_mode_badge.setEnabled(clarify_enabled_for_ui)
+            blocked_badge = self.clarify_mode_badge.blockSignals(True)
+            self.clarify_mode_badge.setChecked(clarify_enabled)
+            self.clarify_mode_badge.blockSignals(blocked_badge)
+        if hasattr(self, "clarify_mode_action"):
+            blocked_action = self.clarify_mode_action.blockSignals(True)
+            self.clarify_mode_action.setChecked(clarify_enabled)
+            self.clarify_mode_action.blockSignals(blocked_action)
+            self.clarify_mode_action.setEnabled(clarify_enabled_for_ui)
 
     def set_session_phase(self, phase, session_id=None):
         state = self.get_session(session_id)
@@ -5555,12 +5496,12 @@ class MainWindow(QMainWindow):
                     status = record.get("status") or "running"
                     title = record.get("display_title") or record.get("tool_name") or "Step"
                     summary = record.get("summary") or "Waiting for more output"
-                    plan_step_title = record.get("plan_step_title") or ""
+                    step_title = record.get("plan_step_title") or ""
                     duration = record.get("duration")
                     duration_text = f" | {duration:.1f}s" if isinstance(duration, (int, float)) else ""
                     line2 = summary
-                    if plan_step_title:
-                        line2 = f"[计划] {plan_step_title} | {summary}"
+                    if step_title:
+                        line2 = f"[步骤] {step_title} | {summary}"
                     item = QListWidgetItem(f"{title} | {status}{duration_text}\n{line2}")
                     item.setData(Qt.UserRole, record.get("tool_id"))
                     self.step_list.addItem(item)
@@ -6058,7 +5999,7 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
                 self.pause_btn.setToolTip("暂停")
         else:
-            idle_text = "开始规划" if state.plan_mode_enabled else "开始"
+            idle_text = "开始反问" if state.clarify_mode_enabled else "开始"
             self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
@@ -6186,7 +6127,6 @@ class MainWindow(QMainWindow):
             self.set_current_session(session_id)
             self.refresh_change_list(session_id)
             self.refresh_step_list(session_id)
-            self.refresh_plan_view(session_id)
             self.refresh_context_badges(session_id)
         return session_id
 
@@ -6211,13 +6151,12 @@ class MainWindow(QMainWindow):
         state.displayed_count = 0
         state.displayed_render_count = 0
         state.load_more_btn = None
-        state.plan_mode_enabled = False
-        state.plan_config = json_copy(DEFAULT_PLAN_CONFIG, dict(DEFAULT_PLAN_CONFIG))
-        state.plan_phase = PLAN_MODE_DISABLED
-        state.plan_protocol_version = PLAN_PROTOCOL_VERSION
-        state.plan_mode_state = PLAN_MODE_EXPLORING
-        state.plan_document = ""
-        state.pending_plan_questions = []
+        state.clarify_mode_enabled = False
+        state.clarify_phase = CLARIFY_MODE_DISABLED
+        state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+        state.pending_clarify_questions = []
+        state.clarify_source_user_text = ""
+        state.clarify_answers_context = []
         state.changed_files = []
         state.step_records = []
         state.persisted_agents = []
@@ -6251,7 +6190,6 @@ class MainWindow(QMainWindow):
         self.update_history_selection()
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
-        self.refresh_plan_view(session_id)
         current_state = self.get_current_session()
         self.normalize_session_ui(current_state)
         self._render_sub_agent_monitor_for_state(current_state)
@@ -6297,23 +6235,19 @@ class MainWindow(QMainWindow):
         )
         state.run_phase = conversation_meta.get("run_phase") or "Idle"
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
-        state.plan_mode_enabled = bool(conversation_meta.get("plan_mode_enabled"))
-        state.plan_config = normalize_plan_config(conversation_meta.get("plan_config"))
-        state.plan_protocol_version = int(conversation_meta.get("plan_protocol_version") or PLAN_PROTOCOL_VERSION)
-        state.plan_mode_state = normalize_plan_phase(
-            conversation_meta.get("plan_mode_state"),
-            default=PLAN_MODE_EXPLORING,
+        state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
+        state.clarify_mode_state = normalize_clarify_phase(
+            conversation_meta.get("clarify_mode_state"),
+            default=CLARIFY_MODE_EXPLORING,
         )
-        state.plan_document = str(conversation_meta.get("plan_document") or "").strip()
-        state.pending_plan_questions = normalize_pending_plan_questions(
-            conversation_meta.get("pending_plan_questions")
+        state.pending_clarify_questions = normalize_pending_clarify_questions(
+            conversation_meta.get("pending_clarify_questions")
         )
-        state.plan_phase = normalize_plan_phase(
-            conversation_meta.get("plan_phase"),
-            default=derive_plan_phase(
-                state.plan_mode_enabled,
-                state.plan_mode_state,
-                state.plan_document,
+        state.clarify_phase = normalize_clarify_phase(
+            conversation_meta.get("clarify_phase"),
+            default=derive_clarify_phase(
+                state.clarify_mode_enabled,
+                state.clarify_mode_state,
             ),
         )
 
@@ -6379,7 +6313,6 @@ class MainWindow(QMainWindow):
         self.update_history_selection()
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
-        self.refresh_plan_view(session_id)
         self.normalize_session_ui(self.get_current_session())
         if session_id == self.current_session_id:
             self._render_sub_agent_monitor_for_state(state)
@@ -6395,7 +6328,7 @@ class MainWindow(QMainWindow):
         metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
         options = request.get("options") if isinstance(request.get("options"), list) else []
         questions = request.get("questions") if isinstance(request.get("questions"), list) else []
-        questions = normalize_pending_plan_questions(questions)
+        questions = normalize_pending_clarify_questions(questions)
         allow_free_text = bool(request.get("allow_free_text"))
 
         dialog = QDialog(self)
@@ -7273,7 +7206,7 @@ class MainWindow(QMainWindow):
                 merged_meta["workspace_dir"] = self.workspace_dir
             merged_meta["history_migration_version"] = HISTORY_MIGRATION_VERSION
             if session_id in self.sessions:
-                merged_meta.update(self._session_plan_meta(self.sessions.get(session_id)))
+                merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
             try:
                 self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
@@ -7323,12 +7256,11 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
-        has_plan_state = bool(
-            state.plan_mode_enabled
-            or bool(getattr(state, "plan_document", ""))
-            or bool(getattr(state, "pending_plan_questions", []))
+        has_clarify_state = bool(
+            state.clarify_mode_enabled
+            or bool(getattr(state, "pending_clarify_questions", []))
         )
-        if not state.messages and not has_plan_state:
+        if not state.messages and not has_clarify_state:
             return
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
         meta = {}
@@ -7341,7 +7273,7 @@ class MainWindow(QMainWindow):
         meta["run_phase"] = getattr(state, "run_phase", "Idle")
         meta["session_status"] = getattr(state, "session_status", "draft")
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
-        meta.update(self._session_plan_meta(state))
+        meta.update(self._session_clarify_meta(state))
         try:
             self.chat_storage.save_conversation(
                 state.session_id,
@@ -7937,26 +7869,34 @@ class MainWindow(QMainWindow):
         else:
             self.handle_send()
 
-    def on_plan_mode_toggled(self, checked):
+    def on_clarify_mode_toggled(self, checked):
         state = self.get_current_session()
         if not state:
             return
-        state.plan_mode_enabled = bool(checked)
-        state.plan_config = normalize_plan_config(state.plan_config)
-        if not state.plan_mode_enabled:
-            state.plan_phase = PLAN_MODE_DISABLED
-            state.plan_mode_state = PLAN_MODE_EXPLORING
-            state.plan_document = ""
-            state.pending_plan_questions = []
+        state.clarify_mode_enabled = bool(checked)
+        if hasattr(self, "clarify_mode_badge"):
+            self.clarify_mode_badge.setVisible(state.clarify_mode_enabled)
+            blocked_badge = self.clarify_mode_badge.blockSignals(True)
+            self.clarify_mode_badge.setChecked(state.clarify_mode_enabled)
+            self.clarify_mode_badge.blockSignals(blocked_badge)
+        if hasattr(self, "clarify_mode_action"):
+            blocked_action = self.clarify_mode_action.blockSignals(True)
+            self.clarify_mode_action.setChecked(state.clarify_mode_enabled)
+            self.clarify_mode_action.blockSignals(blocked_action)
+        blocked_check = self.clarify_mode_check.blockSignals(True)
+        self.clarify_mode_check.setChecked(state.clarify_mode_enabled)
+        self.clarify_mode_check.blockSignals(blocked_check)
+        if not state.clarify_mode_enabled:
+            state.clarify_phase = CLARIFY_MODE_DISABLED
+            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            state.pending_clarify_questions = []
         else:
-            state.plan_mode_state = PLAN_MODE_EXPLORING
-            state.plan_phase = derive_plan_phase(
+            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            state.clarify_phase = derive_clarify_phase(
                 True,
-                state.plan_mode_state,
-                state.plan_document,
+                state.clarify_mode_state,
             )
-        self.refresh_plan_controls(state.session_id)
-        self.refresh_plan_view(state.session_id)
+        self.refresh_clarify_controls(state.session_id)
         self.save_chat_history(session_id=state.session_id)
         self.normalize_session_ui(state)
 
@@ -7964,19 +7904,39 @@ class MainWindow(QMainWindow):
         return normalize_run_context(
             {
                 "mode": mode,
-                "plan_config": normalize_plan_config(getattr(state, "plan_config", DEFAULT_PLAN_CONFIG)),
-                "plan_protocol_version": int(getattr(state, "plan_protocol_version", PLAN_PROTOCOL_VERSION) or PLAN_PROTOCOL_VERSION),
-                "plan_mode_state": normalize_plan_phase(
-                    getattr(state, "plan_mode_state", PLAN_MODE_EXPLORING),
-                    default=PLAN_MODE_EXPLORING,
+                "clarify_mode_state": normalize_clarify_phase(
+                    getattr(state, "clarify_mode_state", CLARIFY_MODE_EXPLORING),
+                    default=CLARIFY_MODE_EXPLORING,
                 ),
-                "plan_document": str(getattr(state, "plan_document", "") or "").strip(),
-                "pending_plan_questions": normalize_pending_plan_questions(
-                    getattr(state, "pending_plan_questions", [])
+                "pending_clarify_questions": normalize_pending_clarify_questions(
+                    getattr(state, "pending_clarify_questions", [])
                 ),
                 "selected_model_id": self.config_manager.get_selected_model_id(),
             }
         )
+
+    def _finish_clarification(self, state):
+        if not state:
+            return
+        state.clarify_mode_enabled = False
+        state.clarify_phase = CLARIFY_MODE_DISABLED
+        state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+        state.pending_clarify_questions = []
+        self.refresh_clarify_controls(state.session_id)
+
+        is_current = state.session_id == self.current_session_id
+        if is_current:
+            self.add_system_toast("反问已完成，等待用户确认", "info", session_id=state.session_id)
+        state.render_items = build_conversation_render_items(state.messages)
+        state.displayed_render_count = len(state.render_items)
+        self.refresh_change_list(state.session_id)
+        self.refresh_step_list(state.session_id)
+        self.set_session_phase("Clarified", state.session_id)
+        self.set_session_status("draft", state.session_id)
+        self.save_chat_history(session_id=state.session_id)
+        self.update_session_tab_title(state.session_id)
+        if is_current:
+            self.normalize_session_ui(state)
 
     def handle_send(self):
         if not self.workspace_dir:
@@ -8013,10 +7973,13 @@ class MainWindow(QMainWindow):
         state.messages.append({"role": "user", "content": user_text})
         state.render_items = build_conversation_render_items(state.messages)
         run_mode = RUN_MODE_EXECUTION
-        if state.plan_mode_enabled:
-            state.plan_phase = PLAN_MODE_EXPLORING
-            state.plan_mode_state = PLAN_MODE_EXPLORING
-            run_mode = RUN_MODE_PLANNING
+        if state.clarify_mode_enabled:
+            state.clarify_phase = CLARIFY_MODE_EXPLORING
+            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            state.pending_clarify_questions = []
+            state.clarify_source_user_text = user_text
+            state.clarify_answers_context = []
+            run_mode = RUN_MODE_CLARIFYING
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
@@ -8132,15 +8095,14 @@ class MainWindow(QMainWindow):
         }
         state.step_records = [r for r in state.step_records if r.get("tool_id") != data["id"]]
         state.step_records.append(record)
-        if state.plan_mode_enabled and data.get("name") == "request_user_input":
-            pending_questions = self._extract_pending_plan_questions_from_args(
+        if state.clarify_mode_enabled and data.get("name") == "request_user_input":
+            pending_questions = self._extract_pending_clarify_questions_from_args(
                 args_obj if isinstance(args_obj, dict) else {}
             )
             if pending_questions:
-                state.pending_plan_questions = pending_questions
-                state.plan_mode_state = PLAN_MODE_AWAITING_USER_INPUT
-                state.plan_phase = PLAN_MODE_AWAITING_USER_INPUT
-                self.refresh_plan_view(state.session_id)
+                state.pending_clarify_questions = pending_questions
+                state.clarify_mode_state = CLARIFY_MODE_AWAITING_USER_INPUT
+                state.clarify_phase = CLARIFY_MODE_AWAITING_USER_INPUT
         if related_files:
             for path in related_files:
                 state.changed_files.append({"path": path, "type": "related", "summary": summary})
@@ -8173,8 +8135,8 @@ class MainWindow(QMainWindow):
                 "result_obj": pending_result.get("result_obj"),
             }, session_id=session_id)
 
-        if state.plan_mode_enabled:
-            self.set_session_phase("Planning", state.session_id)
+        if state.clarify_mode_enabled:
+            self.set_session_phase("Clarifying", state.session_id)
         else:
             self.set_session_phase("Executing", state.session_id)
         self.refresh_step_list(state.session_id)
@@ -8202,11 +8164,13 @@ class MainWindow(QMainWindow):
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")
-        if state.plan_mode_enabled and isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
-            state.pending_plan_questions = []
-            state.plan_mode_state = PLAN_MODE_EXPLORING
-            state.plan_phase = PLAN_MODE_EXPLORING
-            self.refresh_plan_view(state.session_id)
+        if state.clarify_mode_enabled and isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
+            state.pending_clarify_questions = []
+            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            state.clarify_phase = CLARIFY_MODE_EXPLORING
+            answers = result_obj.get("answers") if isinstance(result_obj.get("answers"), dict) else {}
+            if answers:
+                state.clarify_answers_context.append(answers)
         for record in state.step_records:
             if record.get("tool_id") != tool_id:
                 continue
@@ -8545,8 +8509,8 @@ class MainWindow(QMainWindow):
             return
         delta = text or ""
         if delta.strip():
-            if state.plan_mode_enabled:
-                self.set_session_phase("Planning", state.session_id)
+            if state.clarify_mode_enabled:
+                self.set_session_phase("Clarifying", state.session_id)
             else:
                 self.set_session_phase("Analyzing", state.session_id)
         state.current_thinking_buffer += delta
@@ -8832,23 +8796,29 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         self.update_session_tab_title(state.session_id)
-        if state.plan_mode_enabled:
-            phase_text = "Plan Ready" if normalize_plan_phase(state.plan_phase) == PLAN_MODE_READY_TO_PRESENT else "Planning"
-            self.set_session_phase(phase_text, state.session_id)
+        clarify_active = bool(state.clarify_mode_enabled)
+        if clarify_active:
+            self.set_session_phase("Clarifying", state.session_id)
         else:
             self.set_session_phase("Wrapping up", state.session_id)
 
-        if state.plan_mode_enabled:
-            proposed_plan = self._extract_proposed_plan(content)
-            if proposed_plan:
-                state.plan_document = proposed_plan
-                state.pending_plan_questions = []
-                state.plan_mode_state = PLAN_MODE_READY_TO_PRESENT
-                state.plan_phase = PLAN_MODE_READY_TO_PRESENT
-                self.refresh_plan_view(state.session_id)
+        if clarify_active and not normalize_pending_clarify_questions(getattr(state, "pending_clarify_questions", [])):
+            has_clarify_answers = bool(getattr(state, "clarify_answers_context", []))
+            self.set_session_status("draft", state.session_id, save=True)
+            self.refresh_step_list(state.session_id)
+            self.refresh_change_list(state.session_id)
+            if has_clarify_answers:
+                if is_current:
+                    self.normalize_session_ui(state)
+                self._finish_clarification(state)
+                return
+            self.set_session_phase("Clarifying", state.session_id)
+            if is_current:
+                self.normalize_session_ui(state)
+            return
 
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
-        should_run_code_block = not state.plan_mode_enabled
+        should_run_code_block = not clarify_active
         if code_match and should_run_code_block:
             code_block = code_match.group(1).strip()
             self.append_log("System: 检测到代码块，准备执行...")
@@ -8869,14 +8839,13 @@ class MainWindow(QMainWindow):
             state.code_worker.start()
             if is_current: self.normalize_session_ui(state)
         else:
-            if state.plan_mode_enabled:
+            if clarify_active:
                 self.set_session_status("draft", state.session_id, save=True)
             else:
                 self.set_session_phase("Completed", state.session_id)
                 self.set_session_status("completed", state.session_id, save=True)
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
-            self.refresh_plan_view(state.session_id)
             if is_current: self.normalize_session_ui(state)
 
     def handle_code_output(self, text, session_id=None):

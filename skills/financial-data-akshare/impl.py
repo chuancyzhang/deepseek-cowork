@@ -276,7 +276,7 @@ TOOL_EXPORTS = [
         "search_hint": "akshare financial data stock fund index futures bond macro market quotes",
         "read_only": True,
         "destructive": False,
-        "allowed_modes": ["planning", "execution"],
+        "allowed_modes": ["clarifying", "execution"],
         "should_defer": True,
         "result_format": "json",
     }

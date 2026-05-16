@@ -15,7 +15,7 @@ from core.config_manager import ConfigManager
 from core.env_utils import get_app_data_dir, get_base_dir
 from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
-from core.plan_mode import RUN_MODE_EXECUTION, normalize_run_context
+from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -34,7 +34,7 @@ def get_runtime_signature():
             os.path.join(base_dir, "main.py"),
             os.path.join(base_dir, "core", "agent.py"),
             os.path.join(base_dir, "core", "daemon.py"),
-            os.path.join(base_dir, "core", "plan_mode.py"),
+            os.path.join(base_dir, "core", "clarify_mode.py"),
             os.path.join(base_dir, "skills", "file-system", "impl.py"),
         ]
         parts = []

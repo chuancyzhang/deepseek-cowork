@@ -6,7 +6,7 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.plan_mode import RUN_MODE_EXECUTION, RUN_MODE_PLANNING
+from core.clarify_mode import RUN_MODE_CLARIFYING, RUN_MODE_EXECUTION
 from core.skill_manager import SkillManager
 from core.tool_registry import ToolRegistry
 
@@ -34,9 +34,9 @@ class TestToolRegistry(unittest.TestCase):
             {"type": "object", "properties": {}, "required": []},
         )
 
-        planning_names = [item["function"]["name"] for item in registry.definitions(RUN_MODE_PLANNING)]
-        self.assertIn("read_file", planning_names)
-        self.assertNotIn("write_file", planning_names)
+        clarifying_names = [item["function"]["name"] for item in registry.definitions(RUN_MODE_CLARIFYING)]
+        self.assertIn("read_file", clarifying_names)
+        self.assertNotIn("write_file", clarifying_names)
 
         execution_initial = [
             item["function"]["name"]
@@ -55,7 +55,7 @@ class TestToolRegistry(unittest.TestCase):
             )
         ]
         self.assertIn("write_file", execution_after_search)
-        self.assertEqual(registry.search("write file", run_mode=RUN_MODE_PLANNING), [])
+        self.assertEqual(registry.search("write file", run_mode=RUN_MODE_CLARIFYING), [])
 
     def test_alias_resolution(self):
         registry = ToolRegistry()
@@ -72,7 +72,7 @@ class TestToolRegistry(unittest.TestCase):
         )
 
         self.assertEqual(registry.resolve_name("open_file"), "read_file")
-        self.assertTrue(registry.is_allowed("open_file", RUN_MODE_PLANNING))
+        self.assertTrue(registry.is_allowed("open_file", RUN_MODE_CLARIFYING))
 
 
 class TestSkillManagerToolDiscovery(unittest.TestCase):
@@ -162,17 +162,17 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("read_note", after_search)
         self.assertIn("write_note", after_search)
 
-        planning_discovered = {"read_note", "write_note"}
-        planning_tools = {
+        clarifying_discovered = {"read_note", "write_note"}
+        clarifying_tools = {
             item["function"]["name"]
             for item in sm.get_tool_definitions(
-                run_mode=RUN_MODE_PLANNING,
-                discovered_tool_names=planning_discovered,
+                run_mode=RUN_MODE_CLARIFYING,
+                discovered_tool_names=clarifying_discovered,
             )
         }
-        self.assertIn("tool_search", planning_tools)
-        self.assertIn("read_note", planning_tools)
-        self.assertNotIn("write_note", planning_tools)
+        self.assertIn("tool_search", clarifying_tools)
+        self.assertIn("read_note", clarifying_tools)
+        self.assertNotIn("write_note", clarifying_tools)
 
     def test_publish_artifacts_is_visible_only_in_enterprise_im_context(self):
         self._copy_repo_skill("interaction")

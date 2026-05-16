@@ -25,7 +25,7 @@ from core.single_instance import (
 )
 from core.chat_storage import ChatStorage
 from core.conversation_render import build_conversation_render_items
-from core.html_render import looks_like_complete_html_response
+from core.html_render import extract_renderable_html_response
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
@@ -3064,13 +3064,15 @@ class ChatBubble(QFrame):
             if not final and len(text) >= STREAM_PLAIN_TEXT_THRESHOLD:
                 self._render_plain_stream_content(text)
                 render_mode = "plain"
-            elif final and looks_like_complete_html_response(text):
-                self.content_edit.setHtml(style + text)
-                render_mode = "raw_html"
             else:
-                html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
-                self.content_edit.setHtml(style + html_content)
-                render_mode = "html"
+                raw_html = extract_renderable_html_response(text) if final else ""
+                if raw_html:
+                    self.content_edit.setHtml(style + raw_html)
+                    render_mode = "raw_html"
+                else:
+                    html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
+                    self.content_edit.setHtml(style + html_content)
+                    render_mode = "html"
         except Exception:
             self.content_edit.setUpdatesEnabled(False)
             self.content_edit.setPlainText(text)

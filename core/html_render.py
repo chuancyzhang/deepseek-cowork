@@ -63,3 +63,32 @@ def looks_like_complete_html_response(text):
 
     tag_name = match.group(1)
     return f"</{tag_name}>" in lower or lower.endswith("/>")
+
+
+def extract_renderable_html_response(text):
+    stripped = str(text or "").strip()
+    if not stripped:
+        return ""
+
+    if looks_like_complete_html_response(stripped):
+        return stripped
+
+    fenced_match = re.search(
+        r"```(?:html|htm)\s*\n(.*?)(?:\n```|```$)",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced_match:
+        fenced_html = fenced_match.group(1).strip()
+        if looks_like_complete_html_response(fenced_html):
+            return fenced_html
+
+    document_match = re.search(
+        r"(<!doctype\s+html\b.*?</html\s*>|<html\b.*?</html\s*>)",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if document_match:
+        return document_match.group(1).strip()
+
+    return ""

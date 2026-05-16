@@ -4716,26 +4716,9 @@ class MainWindow(QMainWindow):
         right_header_layout.addWidget(self.right_close_btn)
         right_layout.addWidget(right_header)
 
-        # Right Sidebar Tabs
-        self.right_tabs = QTabWidget()
-        self.right_tabs.setStyleSheet(f"""
-            QTabWidget::pane {{ border: none; }}
-            QTabBar::tab {{
-                background: transparent;
-                padding: 8px 12px;
-                margin-right: 2px;
-                border-radius: 13px;
-                color: {DesignTokens.text_secondary};
-                font-weight: 500;
-            }}
-            QTabBar::tab:selected {{
-                color: {DesignTokens.primary};
-                background: {DesignTokens.primary_soft};
-            }}
-            QTabBar::tab:hover {{
-                background: {DesignTokens.bg_secondary};
-            }}
-        """)
+        # Right Sidebar Pages
+        self.right_stack = QStackedWidget()
+        self.right_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
         
         # Tab 1: Workspace Files
         self.workspace_tab = QWidget()
@@ -4801,7 +4784,7 @@ class MainWindow(QMainWindow):
         
         ws_tab_layout.addWidget(self.right_inner_splitter)
         
-        self.right_tabs.addTab(self.workspace_tab, "工作区文件")
+        self.right_stack.addWidget(self.workspace_tab)
 
         self.plan_tab = QWidget()
         plan_layout = QVBoxLayout(self.plan_tab)
@@ -4828,7 +4811,7 @@ class MainWindow(QMainWindow):
         )
         self.plan_document_view.setPlaceholderText("等待 <proposed_plan> 计划文档...")
         plan_layout.addWidget(self.plan_document_view, 1)
-        self.right_tabs.addTab(self.plan_tab, "计划")
+        self.right_stack.addWidget(self.plan_tab)
 
         # Observability
         self.tool_details_tab = QWidget()
@@ -4969,7 +4952,7 @@ class MainWindow(QMainWindow):
         self.td_result_edit.setVisible(False)
         td_layout.addWidget(self.td_result_edit)
         
-        self.right_tabs.addTab(self.tool_details_tab, "观测")
+        self.right_stack.addWidget(self.tool_details_tab)
 
         # Sub-Agent Monitor
         self.sub_agent_tab = QWidget()
@@ -4981,19 +4964,12 @@ class MainWindow(QMainWindow):
         sub_agent_layout.addWidget(self.sub_agent_intro_label)
         self.sub_agent_monitor = SubAgentMonitor()
         sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
-        self.right_tabs.addTab(self.sub_agent_tab, "子Agent")
+        self.right_stack.addWidget(self.sub_agent_tab)
 
         # Sub-Agent Monitor (legacy independent window entry)
         self.sub_agent_monitor_window = None
         
-        right_layout.addWidget(self.right_tabs)
-        try:
-            self.right_tabs.setTabText(self.RIGHT_TAB_FILES, "文件")
-            self.right_tabs.setTabText(self.RIGHT_TAB_PLAN, "计划")
-            self.right_tabs.setTabText(self.RIGHT_TAB_OBSERVABILITY, "观测")
-            self.right_tabs.setTabText(self.RIGHT_TAB_SUB_AGENTS, "子Agent")
-        except Exception:
-            pass
+        right_layout.addWidget(self.right_stack)
         
         self.main_splitter.setStretchFactor(0, 0)
         self.main_splitter.setStretchFactor(1, 1)
@@ -5260,13 +5236,30 @@ class MainWindow(QMainWindow):
     def show_context_drawer(self, tab_index=None):
         if tab_index is None:
             tab_index = self.right_drawer_tab
+        if not hasattr(self, "right_stack"):
+            return
+        tab_index = max(0, min(tab_index, self.right_stack.count() - 1))
         self.right_drawer_tab = tab_index
         self.right_drawer_open = True
-        self.right_tabs.setCurrentIndex(tab_index)
+        self.right_stack.setCurrentIndex(tab_index)
+        self.update_context_drawer_header(tab_index)
         self.right_sidebar.setVisible(True)
         self.position_context_drawer()
         self.right_sidebar.raise_()
         self.update_context_rail_badges()
+
+    def update_context_drawer_header(self, tab_index):
+        if not hasattr(self, "right_title_label") or not hasattr(self, "right_desc_label"):
+            return
+        page_titles = {
+            self.RIGHT_TAB_FILES: ("任务文件", "查看工作区文件与内容预览"),
+            self.RIGHT_TAB_PLAN: ("任务计划", "查看计划模式状态与执行方案"),
+            self.RIGHT_TAB_OBSERVABILITY: ("任务观测", "查看系统提示词、工具调用与返回"),
+            self.RIGHT_TAB_SUB_AGENTS: ("子 Agent", "查看并行子 Agent 状态与日志"),
+        }
+        title, description = page_titles.get(tab_index, ("任务上下文", "查看文件、计划与执行步骤"))
+        self.right_title_label.setText(title)
+        self.right_desc_label.setText(description)
 
     def hide_context_drawer(self):
         if not hasattr(self, "right_sidebar"):
@@ -8247,7 +8240,7 @@ class MainWindow(QMainWindow):
         if (hasattr(self, 'current_selected_tool_id') and 
             self.current_selected_tool_id == tool_id and 
             self.right_sidebar.isVisible() and 
-            self.right_tabs.currentIndex() == self.RIGHT_TAB_OBSERVABILITY):
+            self.right_drawer_tab == self.RIGHT_TAB_OBSERVABILITY):
             
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
         self.process_ui_events(force=True)

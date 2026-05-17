@@ -201,6 +201,160 @@ def apple_tool_button_style(active=False):
     )
 
 
+def apple_panel_style(radius=14, bg=None):
+    bg = bg or DesignTokens.bg_card
+    return (
+        f"background: {bg}; border: 1px solid {DesignTokens.border}; "
+        f"border-radius: {radius}px;"
+    )
+
+
+def apple_code_edit_style(bg=None, radius=12):
+    bg = bg or DesignTokens.bg_code
+    return f"""
+        QTextEdit {{
+            border: 1px solid {DesignTokens.border};
+            border-radius: {radius}px;
+            background: {bg};
+            color: {DesignTokens.text_primary};
+            font-family: 'SF Mono', 'Cascadia Mono', 'Consolas', 'Microsoft YaHei UI', monospace;
+            font-size: 11px;
+            padding: 9px;
+            line-height: 1.45;
+        }}
+    """
+
+
+def apple_tree_style():
+    return f"""
+        QTreeView {{
+            border: none;
+            background: {DesignTokens.bg_main};
+            alternate-background-color: {DesignTokens.bg_card_subtle};
+            outline: none;
+            show-decoration-selected: 1;
+        }}
+        QTreeView::item {{
+            min-height: 26px;
+            padding: 3px 8px;
+            margin: 1px 8px;
+            border-radius: 7px;
+            color: {DesignTokens.text_primary};
+        }}
+        QTreeView::item:hover {{
+            background: {DesignTokens.bg_hover};
+        }}
+        QTreeView::item:selected {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.text_primary};
+            border: 1px solid #c9def8;
+        }}
+        QTreeView::branch {{
+            background: transparent;
+        }}
+    """
+
+
+def apple_list_style():
+    return f"""
+        QListWidget {{
+            border: 1px solid {DesignTokens.border};
+            border-radius: 14px;
+            background: {DesignTokens.bg_card};
+            padding: 6px;
+            outline: none;
+        }}
+        QListWidget::item {{
+            padding: 8px 10px;
+            margin: 2px;
+            border-radius: 10px;
+            color: {DesignTokens.text_primary};
+        }}
+        QListWidget::item:hover {{
+            background: {DesignTokens.bg_hover};
+        }}
+        QListWidget::item:selected {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.text_primary};
+            border: 1px solid #c9def8;
+        }}
+    """
+
+
+def status_color(status):
+    status = (status or "").strip().lower()
+    if status in {"active", "running", "pending", "waiting_input", "log", "content"}:
+        return DesignTokens.status_running
+    if status == "thinking":
+        return DesignTokens.status_thinking
+    if status in {"tool", "tool_use"}:
+        return DesignTokens.status_tool
+    if status in {"completed", "done"}:
+        return DesignTokens.status_success
+    if status in {"error", "failed", "failed_recovered", "killed", "provider_error"}:
+        return DesignTokens.status_error
+    return DesignTokens.status_idle
+
+
+def status_label_text(status):
+    mapping = {
+        "pending": "等待",
+        "active": "运行中",
+        "running": "运行中",
+        "thinking": "思考中",
+        "content": "输出中",
+        "tool_use": "调用工具",
+        "log": "日志",
+        "provider_log": "Provider",
+        "provider_error": "Provider 异常",
+        "waiting_input": "等待输入",
+        "completed": "已完成",
+        "done": "已完成",
+        "failed": "失败",
+        "failed_recovered": "失败已恢复",
+        "closed": "已关闭",
+        "killed": "已终止",
+    }
+    return mapping.get(status or "", status or "空闲")
+
+
+def rgba_from_hex(hex_color, alpha):
+    text = str(hex_color or "").strip().lstrip("#")
+    if len(text) != 6:
+        return f"rgba(0, 0, 0, {alpha})"
+    try:
+        r = int(text[0:2], 16)
+        g = int(text[2:4], 16)
+        b = int(text[4:6], 16)
+    except ValueError:
+        return f"rgba(0, 0, 0, {alpha})"
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def apple_status_chip_style(status, subtle=False):
+    color = status_color(status)
+    bg = DesignTokens.bg_secondary if subtle else rgba_from_hex(color, 0.10)
+    return (
+        f"background: {bg}; color: {color}; border: 1px solid {rgba_from_hex(color, 0.22)}; "
+        "border-radius: 10px; padding: 3px 8px; font-size: 11px; font-weight: 700;"
+    )
+
+
+def format_file_size(size):
+    try:
+        size = float(size)
+    except Exception:
+        return ""
+    units = ["B", "KB", "MB", "GB", "TB"]
+    index = 0
+    while size >= 1024 and index < len(units) - 1:
+        size /= 1024.0
+        index += 1
+    if index == 0:
+        return f"{int(size)} {units[index]}"
+    return f"{size:.1f} {units[index]}"
+
+
 def clarify_phase_label(phase):
     mapping = {
         CLARIFY_MODE_DISABLED: "未启用",
@@ -2746,30 +2900,34 @@ class ChatBubble(QFrame):
 
         # Create Indicator
         indicator = QPushButton()
-        indicator.setFixedSize(24, 24)
+        indicator.setFixedHeight(26)
+        indicator.setMinimumWidth(84)
+        indicator.setMaximumWidth(140)
         indicator.setCursor(Qt.PointingHandCursor)
-        indicator.setToolTip(f"Agent: {agent_id} ({status})")
+        indicator.setToolTip(f"Agent: {agent_id} ({status_label_text(status)})")
         
         # Style based on status
-        color = self._get_status_color(status)
+        color = status_color(status)
         set_stylesheet_if_changed(indicator, f"""
             QPushButton {{
-                background-color: {DesignTokens.bg_secondary};
-                border: 1px solid {color};
-                border-radius: 12px;
-                color: {color};
-                font-size: 10px;
-                font-weight: bold;
+                background-color: {DesignTokens.bg_glass};
+                border: 1px solid {rgba_from_hex(color, 0.28)};
+                border-radius: 13px;
+                color: {DesignTokens.text_primary};
+                font-size: 11px;
+                font-weight: 700;
+                padding: 3px 9px;
+                text-align: left;
             }}
             QPushButton:hover {{
-                background-color: {color};
-                color: white;
+                background-color: {DesignTokens.primary_soft};
+                border-color: {color};
             }}
         """)
         
         # Simple initial or dot
-        initial = agent_id[0].upper() if agent_id else "?"
-        indicator.setText(initial)
+        short_id = agent_id[:6] if agent_id else "agent"
+        indicator.setText(f"● {short_id}")
         
         indicator.clicked.connect(lambda: self._toggle_sub_agent_log(agent_id))
         
@@ -2823,33 +2981,28 @@ class ChatBubble(QFrame):
     def update_sub_agent_status_icon(self, agent_id, status):
         if hasattr(self, 'agent_indicators') and agent_id in self.agent_indicators:
             indicator = self.agent_indicators[agent_id]
-            color = self._get_status_color(status)
+            color = status_color(status)
             set_stylesheet_if_changed(indicator, f"""
                 QPushButton {{
-                    background-color: {DesignTokens.bg_secondary};
-                    border: 1px solid {color};
-                    border-radius: 12px;
-                    color: {color};
-                    font-size: 10px;
-                    font-weight: bold;
+                    background-color: {DesignTokens.bg_glass};
+                    border: 1px solid {rgba_from_hex(color, 0.28)};
+                    border-radius: 13px;
+                    color: {DesignTokens.text_primary};
+                    font-size: 11px;
+                    font-weight: 700;
+                    padding: 3px 9px;
+                    text-align: left;
                 }}
                 QPushButton:hover {{
-                    background-color: {color};
-                    color: white;
+                    background-color: {DesignTokens.primary_soft};
+                    border-color: {color};
                 }}
             """)
-            indicator.setToolTip(f"Agent: {agent_id} ({status})")
+            indicator.setToolTip(f"Agent: {agent_id} ({status_label_text(status)})")
+            indicator.setText(f"● {agent_id[:6] if agent_id else 'agent'}")
 
     def _get_status_color(self, status):
-        if status in ["active", "running", "thinking", "waiting_input", "pending"]:
-            return DesignTokens.accent_ai
-        if status == "completed": return DesignTokens.success_text
-        if status in ["error", "failed", "failed_recovered", "killed"]:
-            return DesignTokens.error_text
-        if status == "closed":
-            return DesignTokens.text_secondary
-        if status == "tool_use": return DesignTokens.accent_tool
-        return DesignTokens.text_tertiary
+        return status_color(status)
 
     def _create_log_viewer(self, agent_id):
         text_edit = AutoResizingTextEdit()
@@ -2857,9 +3010,9 @@ class ChatBubble(QFrame):
         text_edit.setStyleSheet(f"""
             QTextEdit {{
                 border: none;
-                padding: 8px;
+                padding: 10px;
                 background: transparent;
-                font-family: 'Consolas', monospace;
+                font-family: 'SF Mono', 'Cascadia Mono', 'Consolas', monospace;
                 font-size: 11px;
                 color: {DesignTokens.text_secondary};
             }}
@@ -3276,20 +3429,20 @@ class ToolCallCard(QFrame):
             head_layout.setSpacing(6)
             
             icon = QLabel()
-            icon.setPixmap(qta.icon('fa5s.robot', color='#6b7280').pixmap(12, 12))
+            icon.setPixmap(qta.icon('fa5s.robot', color=DesignTokens.text_secondary).pixmap(12, 12))
             
             display_name = agent_name or agent_id
             if agent_name and agent_name != agent_id:
                 display_name = f"{agent_name} ({agent_id[:8]})"
             name = QLabel(display_name)
-            name.setStyleSheet("font-weight: bold; color: #4b5563; font-size: 11px;")
+            name.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 11px;")
             
             status_label = QLabel(status)
-            status_label.setStyleSheet("color: #6b7280; font-size: 11px;")
+            status_label.setStyleSheet(apple_status_chip_style(status, subtle=True))
 
             detail_label = QLabel("")
             detail_label.setWordWrap(True)
-            detail_label.setStyleSheet("color: #6b7280; font-size: 10px;")
+            detail_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 10px;")
             
             head_layout.addWidget(icon)
             head_layout.addWidget(name)
@@ -3311,12 +3464,12 @@ class ToolCallCard(QFrame):
         if agent_name:
             display_name = agent_name if agent_name == agent_id else f"{agent_name} ({agent_id[:8]})"
             widgets["name_label"].setText(display_name)
-        status_text = f"{status}"
+        status_text = status_label_text(status)
         detail_text = ""
         
         # Default style
-        style = "color: #6b7280; font-size: 11px;"
-        detail_style = "color: #6b7280; font-size: 10px;"
+        style = apple_status_chip_style(status, subtle=True)
+        detail_style = f"color: {DesignTokens.text_secondary}; font-size: 10px;"
         detail_cache = widgets.get("detail_text", "")
 
         def _trim(text, limit=180):
@@ -3326,76 +3479,76 @@ class ToolCallCard(QFrame):
             return text[: limit - 3] + "..."
         
         if status == "pending":
-            status_text = f"Pending: {task[:30]}..." if task else "Pending"
+            status_text = "等待"
             detail_text = _trim(task)
         elif status == "completed":
-            status_text = "Completed"
-            style = "color: #10b981; font-size: 11px; font-weight: bold;"
+            status_text = "已完成"
+            style = apple_status_chip_style(status)
             detail_text = _trim(state.get("content") or state.get("last_result") or "")
         elif status in {"active", "running"}:
-             status_text = "Running..."
-             style = "color: #3b82f6; font-size: 11px;"
+             status_text = "运行中"
+             style = apple_status_chip_style(status)
              detail_text = _trim(task or detail_cache)
         elif status == "waiting_input":
-            status_text = "Waiting input..."
-            style = "color: #0ea5e9; font-size: 11px;"
+            status_text = "等待输入"
+            style = apple_status_chip_style(status)
             detail_text = "等待新的 send_input..."
         elif status == "thinking":
-            status_text = "Thinking..." 
-            style = "color: #6366f1; font-size: 11px; font-style: italic;"
+            status_text = "思考中"
+            style = apple_status_chip_style(status)
             chunk = _trim(state.get("reasoning_delta") or "")
             if chunk:
                 detail_text = _trim((detail_cache + " " + chunk).strip(), limit=200)
-                detail_style = "color: #6366f1; font-size: 10px; font-style: italic;"
+                detail_style = f"color: {DesignTokens.status_thinking}; font-size: 10px; font-style: italic;"
             else:
                 detail_text = detail_cache
         elif status == "content":
-            status_text = "Writing..."
-            style = "color: #16a34a; font-size: 11px;"
+            status_text = "输出中"
+            style = apple_status_chip_style(status)
             chunk = _trim(state.get("content_delta") or "")
             if chunk:
                 detail_text = _trim((detail_cache + " " + chunk).strip(), limit=220)
-                detail_style = "color: #166534; font-size: 10px;"
+                detail_style = f"color: {DesignTokens.success_text}; font-size: 10px;"
             else:
                 detail_text = detail_cache
         elif status == "provider_log":
             status_text = "Provider..."
-            style = "color: #0f766e; font-size: 11px; font-weight: bold;"
+            style = apple_status_chip_style(status)
             detail_text = _trim(state.get("provider_message") or "")
             detail_style = "color: #0f766e; font-size: 10px;"
         elif status == "provider_error":
-            status_text = "Provider error"
-            style = "color: #b91c1c; font-size: 11px; font-weight: bold;"
+            status_text = "Provider 异常"
+            style = apple_status_chip_style(status)
             detail_text = _trim(state.get("provider_message") or state.get("error") or "")
-            detail_style = "color: #b91c1c; font-size: 10px;"
+            detail_style = f"color: {DesignTokens.error_text}; font-size: 10px;"
         elif status == "tool_use":
             # task contains "Tool: <name>"
-            status_text = f"Action: {task}"
-            style = "color: #f59e0b; font-size: 11px; font-weight: bold;"
+            status_text = "调用工具"
+            style = apple_status_chip_style(status)
             detail_text = _trim(task)
-            detail_style = "color: #f59e0b; font-size: 10px;"
+            detail_style = f"color: {DesignTokens.status_tool}; font-size: 10px;"
         elif status == "log":
-            status_text = "Running..."
-            style = "color: #3b82f6; font-size: 11px;"
+            status_text = "日志"
+            style = apple_status_chip_style(status, subtle=True)
             chunk = _trim(state.get("log_content") or "")
             if chunk:
                 detail_text = _trim((detail_cache + " " + chunk).strip(), limit=200)
             else:
                 detail_text = detail_cache
         elif status in {"failed", "failed_recovered"}:
-            status_text = "Failed"
-            style = "color: #ef4444; font-size: 11px; font-weight: bold;"
+            status_text = "失败"
+            style = apple_status_chip_style(status)
             detail_text = _trim(state.get("error") or state.get("content") or "")
-            detail_style = "color: #ef4444; font-size: 10px;"
+            detail_style = f"color: {DesignTokens.error_text}; font-size: 10px;"
         elif status == "closed":
-            status_text = "Closed"
-            style = "color: #6b7280; font-size: 11px;"
+            status_text = "已关闭"
+            style = apple_status_chip_style(status, subtle=True)
             detail_text = _trim(state.get("error") or "已关闭")
         elif status == "killed":
-            status_text = "Killed"
-            style = "color: #dc2626; font-size: 11px; font-weight: bold;"
+            status_text = "已终止"
+            style = apple_status_chip_style(status)
             detail_text = _trim(state.get("error") or "已强制终止")
-            detail_style = "color: #dc2626; font-size: 10px;"
+            detail_style = f"color: {DesignTokens.error_text}; font-size: 10px;"
         
         set_text_if_changed(widgets["status_label"], status_text)
         set_stylesheet_if_changed(widgets["status_label"], style)
@@ -3486,22 +3639,30 @@ class SubAgentMonitor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         
         self.tabs = QTabWidget()
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane { border: none; }
-            QTabBar::tab {
-                background: #f3f4f6;
-                color: #6b7280;
-                padding: 6px 12px;
-                margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {DesignTokens.border};
+                border-radius: 14px;
+                background: {DesignTokens.bg_card};
+            }}
+            QTabBar::tab {{
+                background: transparent;
+                color: {DesignTokens.text_secondary};
+                padding: 7px 12px;
+                margin-right: 4px;
+                border-radius: 12px;
                 font-size: 11px;
-            }
-            QTabBar::tab:selected {
-                background: #ffffff;
-                color: #3b82f6;
-                font-weight: bold;
-            }
+                font-weight: 600;
+            }}
+            QTabBar::tab:hover {{
+                background: {DesignTokens.bg_hover};
+                color: {DesignTokens.text_primary};
+            }}
+            QTabBar::tab:selected {{
+                background: {DesignTokens.primary_soft};
+                color: {DesignTokens.primary};
+            }}
         """)
         layout.addWidget(self.tabs)
         
@@ -3531,10 +3692,10 @@ class SubAgentMonitor(QWidget):
             
             cursor = text_edit.textCursor()
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#111827"))
+            fmt.setForeground(QColor(DesignTokens.text_primary))
             fmt.setFontWeight(QFont.Bold)
             fmt.setFontPointSize(12)
-            cursor.insertText(f"🚀 Task Started at {ts}\n{content}\n\n", fmt)
+            cursor.insertText(f"Task started at {ts}\n{content}\n\n", fmt)
             text_edit.setTextCursor(cursor)
             
             # Update Tab Icon/Text
@@ -3545,7 +3706,7 @@ class SubAgentMonitor(QWidget):
             cursor.movePosition(QTextCursor.End)
             
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#6366f1"))
+            fmt.setForeground(QColor(DesignTokens.status_thinking))
             fmt.setFontItalic(True)
             fmt.setFontWeight(QFont.Normal)
             fmt.setFontPointSize(11)
@@ -3560,7 +3721,7 @@ class SubAgentMonitor(QWidget):
             cursor.movePosition(QTextCursor.End)
 
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#166534"))
+            fmt.setForeground(QColor(DesignTokens.success_text))
             fmt.setFontItalic(False)
             fmt.setFontWeight(QFont.Normal)
             fmt.setFontPointSize(11)
@@ -3578,7 +3739,7 @@ class SubAgentMonitor(QWidget):
                 cursor.insertText("\n")
                 
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#6b7280"))
+            fmt.setForeground(QColor(DesignTokens.text_secondary))
             fmt.setFontItalic(False)
             fmt.setFontWeight(QFont.Normal)
             fmt.setFontPointSize(10)
@@ -3607,7 +3768,7 @@ class SubAgentMonitor(QWidget):
                 cursor.insertText("\n")
 
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#b91c1c"))
+            fmt.setForeground(QColor(DesignTokens.error_text))
             fmt.setFontWeight(QFont.Bold)
             fmt.setFontPointSize(10)
 
@@ -3623,12 +3784,12 @@ class SubAgentMonitor(QWidget):
                 cursor.insertText("\n")
                 
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#d97706")) # Amber
+            fmt.setForeground(QColor(DesignTokens.status_tool))
             fmt.setFontWeight(QFont.Bold)
             fmt.setFontItalic(False)
             fmt.setFontPointSize(11)
             
-            cursor.insertText(f"\n[{ts}] 🛠️ Action: {content}\n", fmt)
+            cursor.insertText(f"\n[{ts}] Action: {content}\n", fmt)
             text_edit.setTextCursor(cursor)
             text_edit.ensureCursorVisible()
             
@@ -3641,10 +3802,10 @@ class SubAgentMonitor(QWidget):
             cursor = text_edit.textCursor()
             cursor.movePosition(QTextCursor.End)
             fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#0ea5e9"))
+            fmt.setForeground(QColor(DesignTokens.status_running))
             fmt.setFontWeight(QFont.Bold)
             fmt.setFontPointSize(11)
-            cursor.insertText(f"\n[{ts}] ⏸ Waiting input\n", fmt)
+            cursor.insertText(f"\n[{ts}] Waiting input\n", fmt)
             text_edit.setTextCursor(cursor)
             text_edit.ensureCursorVisible()
             self._update_tab_status(agent_id, "running")
@@ -3656,16 +3817,16 @@ class SubAgentMonitor(QWidget):
                 cursor.insertText("\n")
                 
              fmt = QTextCharFormat()
-             fmt.setForeground(QColor("#10b981")) # Green
+             fmt.setForeground(QColor(DesignTokens.status_success))
              fmt.setFontWeight(QFont.Bold)
              fmt.setFontItalic(False)
              fmt.setFontPointSize(12)
              
-             cursor.insertText(f"\n✅ Completed at {ts}.\n", fmt)
+             cursor.insertText(f"\nCompleted at {ts}.\n", fmt)
              final_text = (content or "").strip()
              if final_text:
                  body_fmt = QTextCharFormat()
-                 body_fmt.setForeground(QColor("#166534"))
+                 body_fmt.setForeground(QColor(DesignTokens.success_text))
                  body_fmt.setFontPointSize(11)
                  cursor.insertText(final_text + "\n", body_fmt)
              text_edit.setTextCursor(cursor)
@@ -3676,14 +3837,14 @@ class SubAgentMonitor(QWidget):
              cursor = text_edit.textCursor()
              cursor.movePosition(QTextCursor.End)
              fmt = QTextCharFormat()
-             fmt.setForeground(QColor("#ef4444"))
+             fmt.setForeground(QColor(DesignTokens.status_error))
              fmt.setFontWeight(QFont.Bold)
              fmt.setFontPointSize(11)
              detail = (content or "").strip()
              if detail:
-                 cursor.insertText(f"\n❌ Failed at {ts}: {detail}\n", fmt)
+                 cursor.insertText(f"\nFailed at {ts}: {detail}\n", fmt)
              else:
-                 cursor.insertText(f"\n❌ Failed at {ts}\n", fmt)
+                 cursor.insertText(f"\nFailed at {ts}\n", fmt)
              text_edit.setTextCursor(cursor)
              text_edit.ensureCursorVisible()
              self._update_tab_status(agent_id, "failed")
@@ -3691,7 +3852,7 @@ class SubAgentMonitor(QWidget):
              cursor = text_edit.textCursor()
              cursor.movePosition(QTextCursor.End)
              fmt = QTextCharFormat()
-             fmt.setForeground(QColor("#6b7280"))
+             fmt.setForeground(QColor(DesignTokens.text_secondary))
              fmt.setFontPointSize(11)
              cursor.insertText(f"\n■ Closed at {ts}\n", fmt)
              text_edit.setTextCursor(cursor)
@@ -3704,17 +3865,17 @@ class SubAgentMonitor(QWidget):
             if tab_bar.tabData(i) == agent_id:
                 icon = None
                 if state == "running":
-                    icon = qta.icon('fa5s.play-circle', color='#3b82f6')
+                    icon = qta.icon('fa5s.play-circle', color=DesignTokens.status_running)
                 elif state == "thinking":
-                    icon = qta.icon('fa5s.brain', color='#8b5cf6')
+                    icon = qta.icon('fa5s.brain', color=DesignTokens.status_thinking)
                 elif state == "tool":
-                    icon = qta.icon('fa5s.tools', color='#f59e0b')
+                    icon = qta.icon('fa5s.tools', color=DesignTokens.status_tool)
                 elif state == "completed":
-                    icon = qta.icon('fa5s.check-circle', color='#10b981')
+                    icon = qta.icon('fa5s.check-circle', color=DesignTokens.status_success)
                 elif state == "failed":
-                    icon = qta.icon('fa5s.exclamation-circle', color='#ef4444')
+                    icon = qta.icon('fa5s.exclamation-circle', color=DesignTokens.status_error)
                 elif state == "closed":
-                    icon = qta.icon('fa5s.stop-circle', color='#6b7280')
+                    icon = qta.icon('fa5s.stop-circle', color=DesignTokens.status_idle)
                 
                 if icon:
                     self.tabs.setTabIcon(i, icon)
@@ -3735,14 +3896,7 @@ class SubAgentMonitor(QWidget):
         
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
-        text_edit.setStyleSheet("""
-            border: none;
-            padding: 8px;
-            background: #ffffff;
-            font-family: 'Consolas', monospace;
-            font-size: 11px;
-            line-height: 1.5;
-        """)
+        text_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_main, radius=0))
         layout.addWidget(text_edit)
         
         title = agent_id if not agent_name else f"{agent_name}"
@@ -4732,11 +4886,11 @@ class MainWindow(QMainWindow):
         self.file_tree.setRootIndex(self.file_model.index(""))
         self.file_tree.setHeaderHidden(True)
         for i in range(1, 4): self.file_tree.setColumnHidden(i, True)
-        self.file_tree.setStyleSheet(f"""
-             QTreeView {{ border: none; }} 
-             QTreeView::item {{ padding: 5px; border-radius: 8px; }}
-             QTreeView::item:selected {{ background-color: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}
-        """)
+        self.file_tree.setAlternatingRowColors(True)
+        self.file_tree.setAnimated(True)
+        self.file_tree.setIndentation(18)
+        self.file_tree.setIconSize(QSize(18, 18))
+        self.file_tree.setStyleSheet(apple_tree_style())
         self.file_tree.clicked.connect(self.on_file_clicked)
         self.file_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self.show_file_context_menu)
@@ -4749,22 +4903,55 @@ class MainWindow(QMainWindow):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(0)
         
-        r_preview_header = QLabel("  内容预览")
+        r_preview_header = QFrame()
         r_preview_header.setStyleSheet(
-            f"font-weight: 600; color: {DesignTokens.text_secondary}; padding: 8px 12px; "
-            f"border-top: 1px solid {DesignTokens.border}; border-bottom: 1px solid {DesignTokens.border}; "
-            f"background: {DesignTokens.bg_secondary};"
+            f"QFrame {{ background: {DesignTokens.bg_secondary}; border-top: 1px solid {DesignTokens.separator}; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
         )
+        r_preview_header_layout = QHBoxLayout(r_preview_header)
+        r_preview_header_layout.setContentsMargins(12, 8, 10, 8)
+        r_preview_header_layout.setSpacing(8)
+        preview_title_box = QVBoxLayout()
+        preview_title_box.setContentsMargins(0, 0, 0, 0)
+        preview_title_box.setSpacing(1)
+        self.preview_title_label = QLabel("内容预览")
+        self.preview_title_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 12px;")
+        self.preview_meta_label = QLabel("选择文件查看内容")
+        self.preview_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
+        preview_title_box.addWidget(self.preview_title_label)
+        preview_title_box.addWidget(self.preview_meta_label)
+        r_preview_header_layout.addLayout(preview_title_box, 1)
+        self.preview_open_btn = QToolButton()
+        self.preview_open_btn.setIcon(qta.icon('fa5s.external-link-alt', color=DesignTokens.text_secondary))
+        self.preview_open_btn.setToolTip("打开")
+        self.preview_open_btn.setCursor(Qt.PointingHandCursor)
+        self.preview_open_btn.setFixedSize(30, 30)
+        self.preview_open_btn.setStyleSheet(apple_tool_button_style(False))
+        self.preview_open_btn.clicked.connect(lambda: self.open_path_in_system(getattr(self, "current_preview_path", "")))
+        self.preview_reveal_btn = QToolButton()
+        self.preview_reveal_btn.setIcon(qta.icon('fa5s.folder-open', color=DesignTokens.text_secondary))
+        self.preview_reveal_btn.setToolTip("在资源管理器中显示")
+        self.preview_reveal_btn.setCursor(Qt.PointingHandCursor)
+        self.preview_reveal_btn.setFixedSize(30, 30)
+        self.preview_reveal_btn.setStyleSheet(apple_tool_button_style(False))
+        self.preview_reveal_btn.clicked.connect(lambda: self.reveal_in_explorer(getattr(self, "current_preview_path", "")))
+        self.preview_copy_btn = QToolButton()
+        self.preview_copy_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
+        self.preview_copy_btn.setToolTip("复制路径")
+        self.preview_copy_btn.setCursor(Qt.PointingHandCursor)
+        self.preview_copy_btn.setFixedSize(30, 30)
+        self.preview_copy_btn.setStyleSheet(apple_tool_button_style(False))
+        self.preview_copy_btn.clicked.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_preview_path", "")))
+        for btn in (self.preview_open_btn, self.preview_reveal_btn, self.preview_copy_btn):
+            btn.setEnabled(False)
+            r_preview_header_layout.addWidget(btn)
         preview_layout.addWidget(r_preview_header)
         
         self.preview_stack = QStackedWidget()
         self.preview_text = ReadOnlyTextEdit()
         # self.preview_text.setReadOnly(True) # Handled by class
-        self.preview_text.setStyleSheet(
-            f"border: none; padding: 8px; color: {DesignTokens.text_primary}; "
-            "font-family: 'Consolas', monospace; font-size: 11px;"
-        )
-        self.preview_text.setPlaceholderText("点击文件预览内容...")
+        self.preview_text.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_main, radius=0))
+        self.preview_text.setPlaceholderText("点击文件预览内容")
         self.preview_image = QLabel()
         self.preview_image.setAlignment(Qt.AlignCenter)
         self.preview_stack.addWidget(self.preview_text)
@@ -4786,139 +4973,85 @@ class MainWindow(QMainWindow):
         self.tool_details_tab = QWidget()
         td_layout = QVBoxLayout(self.tool_details_tab)
         td_layout.setContentsMargins(12, 12, 12, 12)
-        td_layout.setSpacing(12)
-        self.step_intro_label = QLabel("本轮任务的系统提示词、工具调用与工具返回会在这里实时显示。")
+        td_layout.setSpacing(10)
+        self.step_intro_label = QLabel("本轮步骤")
         self.step_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         td_layout.addWidget(self.step_intro_label)
 
+        self.step_list = QListWidget()
+        self.step_list.setStyleSheet(apple_list_style())
+        self.step_list.itemClicked.connect(self.on_step_item_clicked)
+        self.step_list.setMinimumHeight(112)
+        td_layout.addWidget(self.step_list, 1)
+
         obs_prompt_label = QLabel("系统提示词")
-        obs_prompt_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #374151;")
+        obs_prompt_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
         td_layout.addWidget(obs_prompt_label)
 
         self.observability_prompt_edit = ReadOnlyTextEdit()
         self.observability_prompt_edit.setPlaceholderText("等待本轮系统提示词...")
-        self.observability_prompt_edit.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                background: #f9fafb;
-                color: #374151;
-                font-family: 'Consolas', monospace;
-                font-size: 11px;
-                padding: 8px;
-            }
-        """)
+        self.observability_prompt_edit.setStyleSheet(apple_code_edit_style())
         td_layout.addWidget(self.observability_prompt_edit, 2)
 
         obs_log_label = QLabel("工具调用与返回")
-        obs_log_label.setStyleSheet("font-size: 12px; font-weight: 700; color: #374151;")
+        obs_log_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
         td_layout.addWidget(obs_log_label)
 
         self.observability_log_edit = ReadOnlyTextEdit()
         self.observability_log_edit.setPlaceholderText("工具调用和返回内容会按时间顺序显示...")
-        self.observability_log_edit.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
-                background: #ffffff;
-                color: #374151;
-                font-family: 'Consolas', monospace;
-                font-size: 11px;
-                padding: 8px;
-            }
-        """)
+        self.observability_log_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_main))
         td_layout.addWidget(self.observability_log_edit, 3)
-
-        self.step_list = QListWidget()
-        self.step_list.setStyleSheet(f"border: 1px solid {DesignTokens.border}; border-radius: 12px; background: {DesignTokens.bg_card};")
-        self.step_list.itemClicked.connect(self.on_step_item_clicked)
-        self.step_list.setVisible(False)
-        td_layout.addWidget(self.step_list)
         
         td_header = QLabel("工具调用详情")
-        td_header.setStyleSheet("font-size: 14px; font-weight: bold; color: #111827;")
-        td_header.setVisible(False)
+        td_header.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary};")
+        td_header.setVisible(True)
         td_layout.addWidget(td_header)
         
         # Tool ID / Name
         self.td_info_label = QLabel("选择左侧工具卡片查看详情")
-        self.td_info_label.setStyleSheet("color: #6b7280; font-size: 12px;")
-        self.td_info_label.setVisible(False)
+        self.td_info_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.td_info_label.setVisible(True)
         td_layout.addWidget(self.td_info_label)
         
         self.td_meta_label = QLabel("")
-        self.td_meta_label.setStyleSheet("color: #6b7280; font-size: 11px; margin-bottom: 4px;")
+        self.td_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; margin-bottom: 4px;")
         self.td_meta_label.setVisible(False)
         td_layout.addWidget(self.td_meta_label)
         
         # Args
-        td_args_label = QLabel("Arguments:")
-        td_args_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
-        td_args_label.setVisible(False)
+        td_args_label = QLabel("参数")
+        td_args_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary}; margin-top: 8px;")
+        td_args_label.setVisible(True)
         td_layout.addWidget(td_args_label)
         
         self.td_args_edit = ReadOnlyTextEdit()
         # self.td_args_edit.setReadOnly(True)
-        self.td_args_edit.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #e5e7eb;
-                border-radius: 6px;
-                background: #f9fafb;
-                color: #374151;
-                font-family: 'Consolas', monospace;
-                font-size: 11px;
-                padding: 8px;
-            }
-        """)
-        self.td_args_edit.setVisible(False)
+        self.td_args_edit.setStyleSheet(apple_code_edit_style())
+        self.td_args_edit.setVisible(True)
         td_layout.addWidget(self.td_args_edit)
         
         td_result_header = QWidget()
         td_result_header_layout = QHBoxLayout(td_result_header)
         td_result_header_layout.setContentsMargins(0, 0, 0, 0)
         td_result_header_layout.setSpacing(8)
-        td_result_label = QLabel("Result:")
-        td_result_label.setStyleSheet("font-size: 12px; font-weight: 600; color: #374151; margin-top: 8px;")
+        td_result_label = QLabel("结果")
+        td_result_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary}; margin-top: 8px;")
         td_result_header_layout.addWidget(td_result_label)
         td_result_header_layout.addStretch()
         self.td_copy_result_btn = QPushButton("复制结果")
         self.td_copy_result_btn.setCursor(Qt.PointingHandCursor)
-        self.td_copy_result_btn.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+        self.td_copy_result_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
         self.td_copy_result_btn.setFixedHeight(26)
-        self.td_copy_result_btn.setStyleSheet("""
-            QPushButton {
-                border: 1px solid #e5e7eb;
-                border-radius: 6px;
-                background: #f9fafb;
-                color: #6b7280;
-                padding: 2px 10px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                color: #2563eb;
-                border-color: #2563eb;
-                background: #ffffff;
-            }
-        """)
+        self.td_copy_result_btn.setStyleSheet(apple_button_style("secondary", radius=13))
         self.td_copy_result_btn.clicked.connect(self.copy_tool_result)
         td_result_header_layout.addWidget(self.td_copy_result_btn)
-        td_result_header.setVisible(False)
+        td_result_header.setVisible(True)
         td_layout.addWidget(td_result_header)
         
         self.td_result_edit = ReadOnlyTextEdit()
         # self.td_result_edit.setReadOnly(True)
-        self.td_result_edit.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #e5e7eb;
-                border-radius: 6px;
-                background: #f9fafb;
-                color: #374151;
-                font-family: 'Consolas', monospace;
-                font-size: 11px;
-                padding: 8px;
-            }
-        """)
-        self.td_result_edit.setVisible(False)
+        self.td_result_edit.setStyleSheet(apple_code_edit_style())
+        self.td_result_edit.setVisible(True)
         td_layout.addWidget(self.td_result_edit)
         
         self.right_stack.addWidget(self.tool_details_tab)
@@ -4928,7 +5061,7 @@ class MainWindow(QMainWindow):
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
         sub_agent_layout.setContentsMargins(12, 12, 12, 12)
         sub_agent_layout.setSpacing(8)
-        self.sub_agent_intro_label = QLabel("子 Agent 的实时状态和执行日志（仅 UI 展示，不写入主对话上下文）。")
+        self.sub_agent_intro_label = QLabel("实时状态与执行日志")
         self.sub_agent_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         sub_agent_layout.addWidget(self.sub_agent_intro_label)
         self.sub_agent_monitor = SubAgentMonitor()
@@ -5488,9 +5621,10 @@ class MainWindow(QMainWindow):
         if session_id is None or state.session_id == self.current_session_id:
             self.step_list.clear()
             if not state.step_records:
-                item = QListWidgetItem("Execution steps will appear here.")
+                item = QListWidgetItem(qta.icon('fa5s.stream', color=DesignTokens.text_tertiary), "本轮工具步骤会显示在这里")
                 item.setFlags(Qt.NoItemFlags)
                 self.step_list.addItem(item)
+                self.step_intro_label.setText("本轮步骤")
             else:
                 for record in state.step_records:
                     status = record.get("status") or "running"
@@ -5498,15 +5632,20 @@ class MainWindow(QMainWindow):
                     summary = record.get("summary") or "Waiting for more output"
                     step_title = record.get("plan_step_title") or ""
                     duration = record.get("duration")
-                    duration_text = f" | {duration:.1f}s" if isinstance(duration, (int, float)) else ""
+                    duration_text = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
                     line2 = summary
                     if step_title:
                         line2 = f"[步骤] {step_title} | {summary}"
-                    item = QListWidgetItem(f"{title} | {status}{duration_text}\n{line2}")
+                    icon_name = "fa5s.check-circle" if status == "done" else "fa5s.play-circle"
+                    icon_color = DesignTokens.status_success if status == "done" else DesignTokens.status_running
+                    item = QListWidgetItem(
+                        qta.icon(icon_name, color=icon_color),
+                        f"{title} · {status_label_text(status)}{duration_text}\n{line2}",
+                    )
                     item.setData(Qt.UserRole, record.get("tool_id"))
                     self.step_list.addItem(item)
                 self.step_intro_label.setText(
-                    f"本轮已记录 {len(state.step_records)} 个工具步骤；完整参数与返回见下方观测日志。"
+                    f"本轮已记录 {len(state.step_records)} 个工具步骤"
                 )
             self.refresh_context_badges(state.session_id)
 
@@ -7430,7 +7569,7 @@ class MainWindow(QMainWindow):
         self.workspace_dir = directory
         font_metrics = QFontMetrics(self.ws_label.font())
         display_path = font_metrics.elidedText(directory, Qt.ElideMiddle, 400)
-        self.ws_label.setText(f"当前工作区: {display_path}")
+        self.ws_label.setText(f"当前工作区：{display_path}")
         self.ws_label.setToolTip(directory)
         self.config_manager.set("default_workspace", directory)
         self.update_recent_workspaces(directory)
@@ -7440,6 +7579,31 @@ class MainWindow(QMainWindow):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
             self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
+
+    def set_preview_header(self, path="", title=None, meta=None, enabled=False):
+        self.current_preview_path = path or ""
+        if hasattr(self, "preview_title_label"):
+            self.preview_title_label.setText(title or "内容预览")
+        if hasattr(self, "preview_meta_label"):
+            self.preview_meta_label.setText(meta or "选择文件查看内容")
+        for name in ("preview_open_btn", "preview_reveal_btn", "preview_copy_btn"):
+            btn = getattr(self, name, None)
+            if btn:
+                btn.setEnabled(bool(enabled and path))
+
+    def describe_path_for_preview(self, path):
+        if not path:
+            return ""
+        try:
+            modified = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+            if os.path.isdir(path):
+                count = len(os.listdir(path))
+                return f"文件夹 | {count} 项 | 修改于 {modified}"
+            size = format_file_size(os.path.getsize(path))
+            ext = os.path.splitext(path)[1].lower().lstrip(".") or "文件"
+            return f"{ext.upper()} | {size} | 修改于 {modified}"
+        except Exception:
+            return ""
 
     def update_recent_workspaces(self, path):
         if path in self.recent_workspaces: self.recent_workspaces.remove(path)
@@ -7503,15 +7667,21 @@ class MainWindow(QMainWindow):
         menu.exec(self.file_tree.viewport().mapToGlobal(position))
 
     def open_path_in_system(self, path):
+        if not path:
+            return
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def reveal_in_explorer(self, path):
+        if not path:
+            return
         if platform.system() == "Windows":
             subprocess.Popen(["explorer", "/select,", path])
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
 
     def copy_path_to_clipboard(self, path):
+        if not path:
+            return
         QApplication.clipboard().setText(path)
 
     def copy_tool_result(self):
@@ -7532,6 +7702,23 @@ class MainWindow(QMainWindow):
 
     def on_file_clicked(self, index):
         path = self.file_model.filePath(index)
+        if not path:
+            return
+        title = os.path.basename(path) or path
+        self.set_preview_header(path, title=title, meta=self.describe_path_for_preview(path), enabled=True)
+        if os.path.isdir(path):
+            try:
+                names = sorted(os.listdir(path), key=lambda name: (not os.path.isdir(os.path.join(path, name)), name.lower()))
+                preview_names = names[:80]
+                extra = len(names) - len(preview_names)
+                body = "\n".join(preview_names)
+                if extra > 0:
+                    body += f"\n... 还有 {extra} 项"
+                self.preview_text.setPlainText(body or "空文件夹")
+            except Exception as exc:
+                self.preview_text.setPlainText(f"无法读取文件夹：{exc}")
+            self.preview_stack.setCurrentWidget(self.preview_text)
+            return
         if not os.path.isfile(path): return
         ext = os.path.splitext(path)[1].lower()
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}

@@ -25,9 +25,13 @@ class DesignTokens:
     bg_sidebar = "#fbfbfd"
     bg_card = "#ffffff"
     bg_card_subtle = "#fafafa"
+    bg_glass = "rgba(255, 255, 255, 0.88)"
+    bg_hover = "#f2f2f7"
+    bg_code = "#fbfbfd"
 
     border = "#d2d2d7"
     border_strong = "#b8b8bf"
+    separator = "#e5e5ea"
 
     radius_sm = 8
     radius_md = 12
@@ -70,6 +74,13 @@ class DesignTokens:
 
     muted_chip_bg = "#f0f0f3"
     muted_chip_text = "#636366"
+
+    status_running = "#007aff"
+    status_thinking = "#5856d6"
+    status_tool = "#ff9500"
+    status_success = "#34c759"
+    status_error = "#ff3b30"
+    status_idle = "#8e8e93"
 
 
 def get_tech_stylesheet(theme="light"):

@@ -886,6 +886,80 @@ class ChatStorage:
             )
         return conversations
 
+    def search_conversations(self, query, limit=50):
+        text = str(query or "").strip()
+        if not text:
+            return []
+        limit = max(1, int(limit or 50))
+        like_query = f"%{text}%"
+        matches = {}
+
+        def add_match(conversation_id, score):
+            if not conversation_id:
+                return
+            current = matches.get(conversation_id)
+            if current is None or score < current:
+                matches[conversation_id] = score
+
+        with self._connect() as conn:
+            title_rows = conn.execute(
+                """
+                SELECT id
+                FROM conversations
+                WHERE title LIKE ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (like_query, limit),
+            ).fetchall()
+            for index, row in enumerate(title_rows):
+                add_match(row["id"], index)
+
+            fts_query = '"' + text.replace('"', '""') + '"'
+            try:
+                message_rows = conn.execute(
+                    """
+                    SELECT m.conversation_id, MIN(m.position) AS first_position
+                    FROM messages_fts f
+                    JOIN messages m ON m.rowid = f.rowid
+                    WHERE messages_fts MATCH ?
+                    GROUP BY m.conversation_id
+                    LIMIT ?
+                    """,
+                    (fts_query, limit),
+                ).fetchall()
+            except sqlite3.Error:
+                message_rows = conn.execute(
+                    """
+                    SELECT conversation_id, MIN(position) AS first_position
+                    FROM messages
+                    WHERE content LIKE ? OR reasoning_content LIKE ?
+                    GROUP BY conversation_id
+                    LIMIT ?
+                    """,
+                    (like_query, like_query, limit),
+                ).fetchall()
+            for row in message_rows:
+                add_match(row["conversation_id"], 1000 + int(row["first_position"] or 0))
+
+            like_rows = conn.execute(
+                """
+                SELECT conversation_id, MIN(position) AS first_position
+                FROM messages
+                WHERE content LIKE ? OR reasoning_content LIKE ?
+                GROUP BY conversation_id
+                LIMIT ?
+                """,
+                (like_query, like_query, limit),
+            ).fetchall()
+            for row in like_rows:
+                add_match(row["conversation_id"], 2000 + int(row["first_position"] or 0))
+
+        return [
+            conversation_id
+            for conversation_id, _score in sorted(matches.items(), key=lambda item: item[1])
+        ][:limit]
+
     def iter_conversation_transcripts(self, include_archived=True, include_legacy_json=True):
         with self._connect() as conn:
             conversation_rows = conn.execute(

@@ -11,7 +11,7 @@ import uuid
 import glob
 import markdown
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
@@ -337,6 +337,49 @@ def apple_status_chip_style(status, subtle=False):
     return (
         f"background: {bg}; color: {color}; border: 1px solid {rgba_from_hex(color, 0.22)}; "
         "border-radius: 10px; padding: 3px 8px; font-size: 11px; font-weight: 700;"
+    )
+
+
+def apple_search_field_style():
+    return f"""
+        QLineEdit {{
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid {DesignTokens.border_subtle};
+            border-radius: 13px;
+            padding: 7px 10px;
+            color: {DesignTokens.text_primary};
+            font-size: 12px;
+        }}
+        QLineEdit:focus {{
+            background: {DesignTokens.bg_main};
+            border-color: rgba(0, 122, 255, 0.32);
+        }}
+    """
+
+
+def apple_history_row_style(selected=False):
+    bg = DesignTokens.bg_sidebar_selected if selected else "transparent"
+    hover = DesignTokens.bg_sidebar_selected if selected else DesignTokens.bg_sidebar_hover
+    border = "rgba(0, 122, 255, 0.18)" if selected else "transparent"
+    return (
+        f"QFrame#HistoryRow {{ background: {bg}; border: 1px solid {border}; border-radius: 11px; }}"
+        f"QFrame#HistoryRow:hover {{ background: {hover}; border-color: rgba(0, 0, 0, 0.04); }}"
+    )
+
+
+def apple_history_title_style(selected=False):
+    color = DesignTokens.primary if selected else DesignTokens.text_primary
+    weight = "700" if selected else "600"
+    return (
+        "text-align: left; padding: 2px 0; border: none; background: transparent; "
+        f"color: {color}; font-size: 13px; font-weight: {weight};"
+    )
+
+
+def apple_history_group_style():
+    return (
+        f"color: {DesignTokens.text_tertiary}; font-size: 11px; font-weight: 700; "
+        "letter-spacing: 0px; padding: 10px 8px 3px 8px; background: transparent;"
     )
 
 
@@ -1999,7 +2042,10 @@ class AutoResizingLabel(QLabel):
         self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.setCursor(Qt.IBeamCursor)
         # Use a transparent background and specific text color
-        self.setStyleSheet("background: transparent; border: none; color: #6b7280; font-size: 13px; font-family: 'Segoe UI', sans-serif;")
+        self.setStyleSheet(
+            f"background: transparent; border: none; color: {DesignTokens.text_secondary}; "
+            "font-size: 12px; font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;"
+        )
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)
@@ -2592,8 +2638,8 @@ class ChatBubble(QFrame):
         
         # Main Horizontal Layout (Avatar | Content)
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 10, 0, 10)
-        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(0, 8, 0, 8)
+        main_layout.setSpacing(10)
         
         if role == "User":
             main_layout.setAlignment(Qt.AlignRight | Qt.AlignTop)
@@ -2607,13 +2653,13 @@ class ChatBubble(QFrame):
             bubble_frame = QFrame()
             bubble_frame.setStyleSheet(f"""
                 QFrame {{
-                    background: {DesignTokens.primary};
-                    border-radius: 18px;
-                    border-bottom-right-radius: 6px;
+                    background: {DesignTokens.bg_user_bubble};
+                    border-radius: 17px;
+                    border-bottom-right-radius: 7px;
                 }}
             """)
             bubble_layout = QVBoxLayout(bubble_frame)
-            bubble_layout.setContentsMargins(16, 12, 16, 12)
+            bubble_layout.setContentsMargins(14, 9, 14, 9)
             
             content_label = QLabel(text)
             content_label.setWordWrap(True)
@@ -2634,27 +2680,18 @@ class ChatBubble(QFrame):
             main_layout.addStretch() # Push everything right
             main_layout.addWidget(content_wrapper)
             
-            # Avatar
-            avatar = Avatar("User", 40)
-            avatar_container = QWidget()
-            avatar_layout = QVBoxLayout(avatar_container)
-            avatar_layout.setContentsMargins(0, 5, 0, 0) # Top margin for alignment
-            avatar_layout.setSpacing(0)
-            avatar_layout.addWidget(avatar)
-            # 不添加addStretch，让容器高度只由Avatar决定，避免气泡被撑高
-            main_layout.addWidget(avatar_container)
-
         else: # Agent
             main_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             
             # Avatar
-            avatar = Avatar("Agent", 40)
+            avatar = Avatar("Agent", 28)
             avatar_container = QWidget()
             avatar_layout = QVBoxLayout(avatar_container)
-            avatar_layout.setContentsMargins(0, 5, 0, 0) # Top margin for alignment
+            avatar_layout.setContentsMargins(0, 3, 0, 0) # Top margin for alignment
             avatar_layout.setSpacing(0)
             avatar_layout.addWidget(avatar)
             avatar_layout.addStretch()
+            avatar_container.setVisible(False)
             main_layout.addWidget(avatar_container)
             
             # Content Column
@@ -2662,7 +2699,7 @@ class ChatBubble(QFrame):
             content_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             col_layout = QVBoxLayout(content_col)
             col_layout.setContentsMargins(0, 0, 0, 0)
-            col_layout.setSpacing(10)
+            col_layout.setSpacing(8)
             
             # 1. Thinking Section (DeepSeek Style - Grey Block)
             self.thinking_widget = QWidget()
@@ -2679,22 +2716,19 @@ class ChatBubble(QFrame):
             self.think_toggle_btn.setStyleSheet(f"""
                 QPushButton {{
                     text-align: left;
-                    background-color: {DesignTokens.bg_main};
+                    background-color: transparent;
                     color: {DesignTokens.text_secondary};
-                    border: 1px solid {DesignTokens.border};
-                    border-radius: 12px;
-                    padding: 8px 16px;
-                    font-size: 13px;
-                    font-weight: 500;
+                    border: none;
+                    border-radius: 10px;
+                    padding: 5px 8px;
+                    font-size: 12px;
+                    font-weight: 600;
                     margin-bottom: 0px; /* Reduced to connect with container */
                 }}
-                QPushButton:hover {{ background-color: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; border-color: {DesignTokens.border}; }}
+                QPushButton:hover {{ background-color: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; }}
                 QPushButton:checked {{ 
                     background-color: {DesignTokens.bg_secondary}; 
                     color: {DesignTokens.text_primary}; 
-                    border-color: {DesignTokens.border}; 
-                    border-bottom-left-radius: 0; 
-                    border-bottom-right-radius: 0; 
                 }}
             """)
             self.think_toggle_btn.toggled.connect(self.toggle_thinking)
@@ -2706,17 +2740,14 @@ class ChatBubble(QFrame):
             self.think_container.setStyleSheet(f"""
                 QWidget {{
                     background: {DesignTokens.bg_secondary};
-                    border: 1px solid {DesignTokens.border};
-                    border-left: 3px solid {DesignTokens.accent_ai};
-                    border-top: none;
-                    margin-top: -1px;
+                    border: 1px solid {DesignTokens.border_subtle};
+                    margin-top: 2px;
                     margin-left: 0px;
-                    border-bottom-left-radius: 12px;
-                    border-bottom-right-radius: 12px;
+                    border-radius: 12px;
                 }}
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
-            self.think_container_layout.setContentsMargins(12, 12, 12, 12)
+            self.think_container_layout.setContentsMargins(12, 10, 12, 10)
             self.think_container_layout.setSpacing(8)
             self.think_duration = 0.0 # Store duration
             self.think_start_time = None
@@ -2754,17 +2785,16 @@ class ChatBubble(QFrame):
             self.copy_result_btn.setFixedHeight(26)
             self.copy_result_btn.setStyleSheet(f"""
                 QPushButton {{
-                    border: 1px solid {DesignTokens.border};
-                    border-radius: 6px;
-                    padding: 2px 10px;
-                    background: {DesignTokens.bg_secondary};
+                    border: none;
+                    border-radius: 12px;
+                    padding: 2px 9px;
+                    background: transparent;
                     color: {DesignTokens.text_secondary};
                     font-size: 12px;
                 }}
                 QPushButton:hover {{
                     color: {DesignTokens.primary};
-                    border-color: {DesignTokens.primary};
-                    background: {DesignTokens.bg_main};
+                    background: {DesignTokens.primary_soft};
                 }}
             """)
             self.copy_result_btn.clicked.connect(self.copy_main_content)
@@ -2824,7 +2854,7 @@ class ChatBubble(QFrame):
         if not hasattr(self, 'think_animation'):
              self.think_animation = QPropertyAnimation(self.think_container, b"maximumHeight")
              self.think_animation.setEasingCurve(QEasingCurve.OutCubic)
-             self.think_animation.setDuration(300)
+             self.think_animation.setDuration(200)
 
         # Calculate target height
         # Since we can't easily get exact height if it's dynamic and hidden,
@@ -3148,67 +3178,68 @@ class ChatBubble(QFrame):
 
         try:
             # GitHub-like CSS for Markdown
-            style = """
+            style = f"""
             <style>
-               body { 
+               body {{ 
                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-                   line-height: 1.6; 
-                   color: #1f2937; 
+                   line-height: 1.62; 
+                   color: {DesignTokens.text_primary}; 
                    margin: 0; 
                    font-size: 14px;
-               }
-               p { margin-top: 0; margin-bottom: 12px; }
-               pre { 
-                   background-color: #f3f4f6; 
-                   padding: 12px; 
-                   border-radius: 6px; 
-                   border: 1px solid #e5e7eb; 
+               }}
+               p {{ margin-top: 0; margin-bottom: 12px; }}
+               pre {{ 
+                   background-color: {DesignTokens.bg_code}; 
+                   padding: 12px 14px; 
+                   border-radius: 12px; 
+                   border: 1px solid {DesignTokens.border_subtle}; 
                    white-space: pre-wrap; 
                    margin-bottom: 12px;
                    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-               }
-               code { 
+               }}
+               code {{ 
                    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; 
                    font-size: 90%; 
                    padding: 0.2em 0.4em; 
-                   background-color: #f3f4f6; 
-                   border-radius: 4px; 
-               }
-               h1, h2, h3 { color: #111827; font-weight: 600; margin-top: 24px; margin-bottom: 12px; }
-               h1 { font-size: 1.5em; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.3em; }
-               h2 { font-size: 1.3em; }
-               a { color: #2563eb; text-decoration: none; }
-               blockquote { 
-                   border-left: 3px solid #d1d5db; 
-                   color: #4b5563; 
+                   background-color: {DesignTokens.bg_secondary}; 
+                   border-radius: 6px; 
+               }}
+               h1, h2, h3 {{ color: {DesignTokens.text_primary}; font-weight: 700; margin-top: 22px; margin-bottom: 10px; }}
+               h1 {{ font-size: 1.42em; border-bottom: 1px solid {DesignTokens.border_subtle}; padding-bottom: 0.3em; }}
+               h2 {{ font-size: 1.22em; }}
+               h3 {{ font-size: 1.08em; }}
+               a {{ color: {DesignTokens.primary}; text-decoration: none; }}
+               blockquote {{ 
+                   border-left: 3px solid {DesignTokens.border}; 
+                   color: {DesignTokens.text_secondary}; 
                    padding-left: 1em; 
                    margin: 0 0 16px 0; 
-               }
-               table { 
+               }}
+               table {{ 
                    border-collapse: separate; 
                    border-spacing: 0; 
                    width: 100%; 
                    margin-bottom: 16px; 
                    font-size: 13px; 
-                   border: 1px solid #e5e7eb;
-                   border-radius: 6px;
+                   border: 1px solid {DesignTokens.border_subtle};
+                   border-radius: 10px;
                    overflow: hidden;
-               }
-               th, td { 
-                   border-bottom: 1px solid #e5e7eb; 
-                   border-right: 1px solid #e5e7eb; 
+               }}
+               th, td {{ 
+                   border-bottom: 1px solid {DesignTokens.border_subtle}; 
+                   border-right: 1px solid {DesignTokens.border_subtle}; 
                    padding: 8px 12px; 
                    text-align: left; 
-               }
-               th { 
-                   background-color: #f8fafc; 
+               }}
+               th {{ 
+                   background-color: {DesignTokens.bg_secondary}; 
                    font-weight: 600; 
-                   color: #4b5563;
-                   border-bottom: 1px solid #e5e7eb;
-               }
-               tr:last-child td { border-bottom: none; }
-               tr:hover td { background-color: #f8fafc; }
-               th:last-child, td:last-child { border-right: none; }
+                   color: {DesignTokens.text_secondary};
+                   border-bottom: 1px solid {DesignTokens.border_subtle};
+               }}
+               tr:last-child td {{ border-bottom: none; }}
+               tr:hover td {{ background-color: {DesignTokens.bg_card_subtle}; }}
+               th:last-child, td:last-child {{ border-right: none; }}
             </style>
             """
             self.content_edit.setUpdatesEnabled(False)
@@ -4605,13 +4636,13 @@ class MainWindow(QMainWindow):
             QTextEdit#MainInput {{
                 padding: 12px 16px;
                 border-radius: 22px;
-                border: 1px solid {DesignTokens.border};
+                border: 1px solid transparent;
                 background: {DesignTokens.bg_main};
                 font-size: 14px;
                 color: {DesignTokens.text_primary};
             }}
             QTextEdit#MainInput:focus {{
-                border: 1px solid {DesignTokens.primary};
+                border: 1px solid rgba(0, 122, 255, 0.28);
                 background: {DesignTokens.bg_main};
             }}
             QScrollArea {{ border: none; background: transparent; }}
@@ -4770,6 +4801,18 @@ class MainWindow(QMainWindow):
         history_label.setText("最近任务")
         history_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; font-weight: 600; margin-top: 12px;")
         sidebar_layout.addWidget(history_label)
+
+        self.history_search_input = QLineEdit()
+        self.history_search_input.setPlaceholderText("搜索历史")
+        self.history_search_input.setClearButtonEnabled(True)
+        self.history_search_input.setFixedHeight(30)
+        self.history_search_input.setStyleSheet(apple_search_field_style())
+        self.history_search_timer = QTimer(self)
+        self.history_search_timer.setSingleShot(True)
+        self.history_search_timer.setInterval(140)
+        self.history_search_timer.timeout.connect(self.refresh_history_list)
+        self.history_search_input.textChanged.connect(lambda *_: self.history_search_timer.start())
+        sidebar_layout.addWidget(self.history_search_input)
 
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
@@ -5188,9 +5231,9 @@ class MainWindow(QMainWindow):
         input_card.setObjectName("ContentCard")
         input_card.setStyleSheet(
             f"QFrame#ContentCard {{ background: rgba(255, 255, 255, 0.92); "
-            f"border: 1px solid {DesignTokens.border}; border-radius: 22px; }}"
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 22px; }}"
         )
-        add_soft_shadow(input_card, blur=28, y_offset=8, alpha=18)
+        add_soft_shadow(input_card, blur=22, y_offset=6, alpha=10)
 
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
@@ -5213,8 +5256,8 @@ class MainWindow(QMainWindow):
         self.tool_menu_btn.setCursor(Qt.PointingHandCursor)
         self.tool_menu_btn.setFixedSize(36, 36)
         self.tool_menu_btn.setStyleSheet(
-            f"background: {DesignTokens.bg_secondary}; border: 1px solid {DesignTokens.border}; "
-            "border-radius: 18px;"
+            f"QPushButton {{ background: transparent; border: none; border-radius: 18px; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; }}"
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
@@ -5241,8 +5284,9 @@ class MainWindow(QMainWindow):
         self.model_select_combo.setMinimumWidth(150)
         self.model_select_combo.setMaximumWidth(260)
         self.model_select_combo.setStyleSheet(
-            "QComboBox { border: none; background: transparent; color: #4b5563; "
-            "font-size: 12px; padding: 4px 20px 4px 8px; }"
+            f"QComboBox {{ border: none; background: transparent; color: {DesignTokens.text_secondary}; "
+            "font-size: 12px; padding: 4px 20px 4px 8px; }}"
+            f"QComboBox:hover {{ color: {DesignTokens.text_primary}; }}"
         )
         self.model_select_combo.currentIndexChanged.connect(self.on_model_selection_changed)
 
@@ -5272,7 +5316,7 @@ class MainWindow(QMainWindow):
 
         # Input Layout
         input_card_layout = QVBoxLayout(input_card)
-        input_card_layout.setContentsMargins(16, 12, 16, 12)
+        input_card_layout.setContentsMargins(14, 10, 14, 10)
         input_card_layout.setSpacing(8)
         input_card_layout.addWidget(self.input_field)
 
@@ -6224,14 +6268,17 @@ class MainWindow(QMainWindow):
 
         active_skills_label = QLabel("本次会话使用的功能: ")
         active_skills_label.setStyleSheet("color: #9ca3af; font-size: 11px; margin-left: 12px;")
+        active_skills_label.setVisible(False)
         session_layout.addWidget(active_skills_label)
 
         chat_scroll = QScrollArea()
         chat_scroll.setWidgetResizable(True)
+        chat_scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {DesignTokens.bg_chat}; }}")
         chat_container = QWidget()
+        chat_container.setStyleSheet(f"background: {DesignTokens.bg_chat};")
         chat_layout = QVBoxLayout(chat_container)
-        chat_layout.setContentsMargins(12, 12, 12, 24) # Bottom padding
-        chat_layout.setSpacing(24) # Space between messages
+        chat_layout.setContentsMargins(20, 8, 20, 20) # Bottom padding
+        chat_layout.setSpacing(16) # Space between messages
         
         # Add Empty State
         empty_state = EmptyStateWidget(self)
@@ -6785,6 +6832,110 @@ class MainWindow(QMainWindow):
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
 
+    def _history_query_text(self):
+        field = getattr(self, "history_search_input", None)
+        return (field.text() if field else "").strip()
+
+    def _history_group_title(self, updated_at):
+        if not updated_at:
+            return "更早"
+        try:
+            item_date = datetime.fromtimestamp(int(updated_at)).date()
+        except Exception:
+            return "更早"
+        today = datetime.now().date()
+        if item_date == today:
+            return "今天"
+        if item_date == today - timedelta(days=1):
+            return "昨天"
+        if item_date >= today - timedelta(days=7):
+            return "近 7 天"
+        return "更早"
+
+    def _history_time_text(self, updated_at):
+        if not updated_at:
+            return ""
+        try:
+            dt = datetime.fromtimestamp(int(updated_at))
+        except Exception:
+            return ""
+        if dt.date() == datetime.now().date():
+            return dt.strftime("%H:%M")
+        return dt.strftime("%m-%d %H:%M")
+
+    def _add_history_group_label(self, text):
+        label = QLabel(text)
+        label.setStyleSheet(apple_history_group_style())
+        self.history_layout.addWidget(label)
+
+    def _add_history_empty_state(self, text):
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 12px; padding: 28px 12px;"
+        )
+        self.history_layout.addWidget(label)
+
+    def _make_history_row(self, entry):
+        session_id = entry["id"]
+        title = entry.get("title") or "新任务"
+        selected = session_id == self.current_session_id
+
+        row = QFrame()
+        row.setObjectName("HistoryRow")
+        set_stylesheet_if_changed(row, apple_history_row_style(selected))
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(10, 7, 7, 7)
+        row_layout.setSpacing(6)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(3)
+
+        btn = HistoryTitleButton(title)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(apple_history_title_style(selected))
+        btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
+
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(6)
+
+        status_label = QLabel(entry.get("status_text") or "新任务")
+        status_label.setStyleSheet(
+            f"color: {entry.get('status_color') or DesignTokens.text_tertiary}; "
+            "font-size: 11px; font-weight: 600; background: transparent;"
+        )
+        time_label = QLabel(entry.get("time_text") or "")
+        time_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 11px; background: transparent;"
+        )
+        meta_row.addWidget(status_label)
+        if entry.get("time_text"):
+            meta_row.addWidget(time_label)
+        meta_row.addStretch()
+
+        content_layout.addWidget(btn)
+        content_layout.addLayout(meta_row)
+
+        menu_btn = QToolButton()
+        menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_tertiary))
+        menu_btn.setToolTip("更多操作")
+        menu_btn.setCursor(Qt.PointingHandCursor)
+        menu_btn.setAutoRaise(True)
+        menu_btn.setFixedSize(28, 28)
+        menu_btn.setStyleSheet(
+            f"QToolButton {{ border: none; background: transparent; border-radius: 14px; padding: 0; }}"
+            f"QToolButton:hover {{ background: {DesignTokens.bg_main}; }}"
+        )
+        menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))
+
+        row_layout.addWidget(content, 1)
+        row_layout.addWidget(menu_btn, 0, Qt.AlignTop)
+        return row, btn
+
     def refresh_history_list(self):
         self.history_container.setUpdatesEnabled(False)
         self.history_rows = {}
@@ -6794,6 +6945,15 @@ class MainWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
+        query = self._history_query_text()
+        search_ids = None
+        if query:
+            try:
+                search_ids = set(self.chat_storage.search_conversations(query, limit=80))
+            except Exception:
+                search_ids = set()
+
+        entries = []
         conversations = self.chat_storage.list_conversations()
         conversation_ids = {c["id"] for c in conversations}
 
@@ -6801,83 +6961,32 @@ class MainWindow(QMainWindow):
             meta = conv.get("meta") or {}
             if meta.get("archived"):
                 continue
-
             session_id = conv["id"]
             title = conv["title"] or "新任务"
             if conv.get("im_provider") == "feishu":
                 ts = conv.get("updated_at")
                 title = f"飞书会话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}" if ts else "飞书会话"
-
-            status_text, status_color, status_bg = session_status_text(
+            if query and session_id not in search_ids and query.lower() not in title.lower():
+                continue
+            status_text, status_color, _status_bg = session_status_text(
                 conv.get("status") or "draft",
                 conv.get("im_provider"),
             )
             updated_at = conv.get("updated_at")
-            time_text = datetime.fromtimestamp(updated_at).strftime("%m-%d %H:%M") if updated_at else ""
-
-            row = QFrame()
-            row.setObjectName("HistoryRow")
-            row.setStyleSheet(
-                f"QFrame#HistoryRow {{ background: transparent; border-radius: 12px; }}"
-                f"QFrame#HistoryRow:hover {{ background: {DesignTokens.bg_secondary}; }}"
-            )
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(6, 4, 6, 4)
-            row_layout.setSpacing(8)
-
-            content = QWidget()
-            content_layout = QVBoxLayout(content)
-            content_layout.setContentsMargins(0, 0, 0, 0)
-            content_layout.setSpacing(4)
-
-            btn = HistoryTitleButton(title)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet(
-                "text-align: left; padding: 6px 8px; border: none; background: transparent; "
-                f"color: {DesignTokens.text_primary}; font-weight: 600;"
-            )
-            btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
-
-            meta_row = QHBoxLayout()
-            meta_row.setContentsMargins(8, 0, 8, 0)
-            meta_row.setSpacing(6)
-
-            status_label = QLabel(status_text)
-            status_label.setStyleSheet(
-                f"background: {status_bg}; color: {status_color}; border-radius: 10px; "
-                "padding: 2px 8px; font-size: 11px; font-weight: 600;"
-            )
-            time_label = QLabel(time_text)
-            time_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px;")
-
-            meta_row.addWidget(status_label)
-            meta_row.addWidget(time_label)
-            meta_row.addStretch()
-
-            content_layout.addWidget(btn)
-            content_layout.addLayout(meta_row)
-
-            menu_btn = QToolButton()
-            menu_btn.setText("⋯")
-            menu_btn.setCursor(Qt.PointingHandCursor)
-            menu_btn.setAutoRaise(True)
-            menu_btn.setStyleSheet(
-                f"QToolButton {{ border: none; color: {DesignTokens.text_secondary}; padding: 4px 8px; }}"
-                f"QToolButton:hover {{ background: {DesignTokens.bg_card}; border-radius: 10px; }}"
-            )
-            menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))
-
-            row_layout.addWidget(content, 1)
-            row_layout.addWidget(menu_btn, 0, Qt.AlignTop)
-            self.history_layout.addWidget(row)
-            self.history_rows[session_id] = row
-            self.history_buttons[session_id] = btn
+            entries.append({
+                "id": session_id,
+                "title": title,
+                "updated_at": updated_at,
+                "group": self._history_group_title(updated_at),
+                "time_text": self._history_time_text(updated_at),
+                "status_text": status_text,
+                "status_color": status_color,
+            })
 
         history_dir = self.chat_history_dir
         if os.path.exists(history_dir):
             files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
             files.sort(key=os.path.getmtime, reverse=True)
-
             for file_path in files:
                 try:
                     filename = os.path.basename(file_path)
@@ -6886,71 +6995,58 @@ class MainWindow(QMainWindow):
                         continue
                     with open(file_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        if not data:
+                    if not data:
+                        continue
+                    title = self._compute_session_title(data)
+                    if query:
+                        haystack = title + "\n" + "\n".join(str(msg.get("content") or "") for msg in data if isinstance(msg, dict))
+                        if query.lower() not in haystack.lower():
                             continue
-                        title = self._compute_session_title(data)
-                        row = QFrame()
-                        row_layout = QHBoxLayout(row)
-                        row_layout.setContentsMargins(6, 4, 6, 4)
-                        btn = HistoryTitleButton(title)
-                        btn.setCursor(Qt.PointingHandCursor)
-                        btn.setStyleSheet(
-                            "text-align: left; padding: 10px 8px; border: none; background: transparent; "
-                            f"color: {DesignTokens.text_primary}; font-weight: 600;"
-                        )
-                        btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
-                        row_layout.addWidget(btn, 1)
-                        self.history_layout.addWidget(row)
-                        self.history_rows[session_id] = row
-                        self.history_buttons[session_id] = btn
+                    updated_at = int(os.path.getmtime(file_path))
+                    entries.append({
+                        "id": session_id,
+                        "title": title,
+                        "updated_at": updated_at,
+                        "group": self._history_group_title(updated_at),
+                        "time_text": self._history_time_text(updated_at),
+                        "status_text": "旧版",
+                        "status_color": DesignTokens.text_tertiary,
+                    })
                 except Exception:
                     continue
+
+        entries.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+        group_order = ["今天", "昨天", "近 7 天", "更早"]
+        rendered_any = False
+        for group_name in group_order:
+            group_entries = [entry for entry in entries if entry.get("group") == group_name]
+            if not group_entries:
+                continue
+            if not query:
+                self._add_history_group_label(group_name)
+            for entry in group_entries:
+                row, btn = self._make_history_row(entry)
+                self.history_layout.addWidget(row)
+                self.history_rows[entry["id"]] = row
+                self.history_buttons[entry["id"]] = btn
+                rendered_any = True
+
+        if not rendered_any:
+            self._add_history_empty_state("没有匹配的历史任务" if query else "还没有历史任务")
+
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
         self.update_history_selection()
 
     def update_history_selection(self):
-        selected_row_style = (
-            f"QFrame#HistoryRow {{ background: {DesignTokens.primary_soft}; border-radius: 12px; }}"
-        )
-        normal_row_style = (
-            f"QFrame#HistoryRow {{ background: transparent; border-radius: 12px; }}"
-            f"QFrame#HistoryRow:hover {{ background: {DesignTokens.bg_secondary}; }}"
-        )
-        selected_btn_style = (
-            "text-align: left; padding: 6px 8px; border: none; background: transparent; "
-            f"color: {DesignTokens.primary}; font-weight: 700;"
-        )
-        normal_btn_style = (
-            "text-align: left; padding: 6px 8px; border: none; background: transparent; "
-            f"color: {DesignTokens.text_primary}; font-weight: 600;"
-        )
-        legacy_selected_btn_style = (
-            "text-align: left; padding: 10px 8px; border: none; background: transparent; "
-            f"color: {DesignTokens.primary}; font-weight: 700;"
-        )
-        legacy_normal_btn_style = (
-            "text-align: left; padding: 10px 8px; border: none; background: transparent; "
-            f"color: {DesignTokens.text_primary}; font-weight: 600;"
-        )
-
         for session_id, row in self.history_rows.items():
             is_current = session_id == self.current_session_id
             if row.objectName() == "HistoryRow":
-                row.setStyleSheet(selected_row_style if is_current else normal_row_style)
+                set_stylesheet_if_changed(row, apple_history_row_style(is_current))
             button = self.history_buttons.get(session_id)
-            if not button:
-                continue
-            is_legacy_row = row.objectName() != "HistoryRow"
-            if is_legacy_row:
-                button.setStyleSheet(
-                    legacy_selected_btn_style if is_current else legacy_normal_btn_style
-                )
-            else:
-                button.setStyleSheet(
-                    selected_btn_style if is_current else normal_btn_style
-                )
+            if button:
+                button.setStyleSheet(apple_history_title_style(is_current))
 
     def show_session_menu(self, session_id, anchor):
         menu = QMenu(self)

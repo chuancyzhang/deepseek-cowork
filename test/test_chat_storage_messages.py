@@ -209,6 +209,35 @@ class TestChatStorageMessages(unittest.TestCase):
         new_meta = storage.get_conversation_meta("conv-new")
         self.assertEqual(new_meta, {"workspace_dir": "D:/demo"})
 
+    def test_search_conversations_matches_titles_and_message_content(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation(
+            "conv-title",
+            [{"role": "user", "content": "unrelated message"}],
+            title="Quarterly report cleanup",
+        )
+        storage.save_conversation(
+            "conv-content",
+            [{"role": "assistant", "content": "The screenshots were grouped by date."}],
+            title="Image task",
+        )
+        storage.save_conversation(
+            "conv-archived",
+            [{"role": "user", "content": "archived details"}],
+            title="Archived reference",
+            meta={"archived": True},
+        )
+        storage.save_conversation(
+            "conv-cjk",
+            [{"role": "assistant", "content": "截图归档完成。"}],
+            title="图片整理",
+        )
+
+        self.assertIn("conv-title", storage.search_conversations("Quarterly"))
+        self.assertIn("conv-content", storage.search_conversations("screenshots"))
+        self.assertIn("conv-archived", storage.search_conversations("archived"))
+        self.assertIn("conv-cjk", storage.search_conversations("截图"))
+
 
 if __name__ == "__main__":
     unittest.main()

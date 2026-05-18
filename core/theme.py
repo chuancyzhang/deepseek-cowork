@@ -28,10 +28,16 @@ class DesignTokens:
     bg_glass = "rgba(255, 255, 255, 0.88)"
     bg_hover = "#f2f2f7"
     bg_code = "#fbfbfd"
+    bg_sidebar_selected = "#e8f2ff"
+    bg_sidebar_hover = "#f2f2f7"
+    bg_chat = "#ffffff"
+    bg_user_bubble = "#007aff"
+    bg_assistant_stream = "#ffffff"
 
     border = "#d2d2d7"
     border_strong = "#b8b8bf"
     separator = "#e5e5ea"
+    border_subtle = "#ededf2"
 
     radius_sm = 8
     radius_md = 12

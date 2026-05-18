@@ -358,12 +358,11 @@ def apple_search_field_style():
 
 
 def apple_history_row_style(selected=False):
-    bg = DesignTokens.bg_sidebar_selected if selected else "transparent"
-    hover = DesignTokens.bg_sidebar_selected if selected else DesignTokens.bg_sidebar_hover
-    border = "rgba(0, 122, 255, 0.18)" if selected else "transparent"
+    bg = "#dfeef2" if selected else "transparent"
+    hover = "#e6f2f5" if selected else "rgba(255, 255, 255, 0.42)"
     return (
-        f"QFrame#HistoryRow {{ background: {bg}; border: 1px solid {border}; border-radius: 11px; }}"
-        f"QFrame#HistoryRow:hover {{ background: {hover}; border-color: rgba(0, 0, 0, 0.04); }}"
+        f"QFrame#HistoryRow {{ background: {bg}; border: none; border-radius: 12px; }}"
+        f"QFrame#HistoryRow:hover {{ background: {hover}; border: none; }}"
     )
 
 
@@ -4234,12 +4233,12 @@ class SmartSplitter(QSplitter):
             # Let's use the user provided CSS which was known good.
             self.setStyleSheet("""
                 QSplitter::handle:horizontal { 
-                    background-color: #d2d2d7; 
+                    background-color: transparent; 
                     width: 1px; 
-                    margin: 0 4px; 
+                    margin: 0; 
                 } 
                 QSplitter::handle:horizontal:hover { 
-                    background-color: #007aff; 
+                    background-color: rgba(0, 122, 255, 0.16); 
                 }
                 QSplitter::handle:vertical { 
                     background-color: #d2d2d7; 
@@ -4965,7 +4964,7 @@ class MainWindow(QMainWindow):
         sidebar.setObjectName("Sidebar")
         # sidebar.setMinimumWidth(200) # Removed to allow collapsing
         # sidebar.setStyleSheet("background-color: #f9fafb; border-right: 1px solid #e5e7eb;")
-        sidebar.setStyleSheet(f"background-color: {DesignTokens.bg_sidebar}; border-right: 1px solid {DesignTokens.border};")
+        sidebar.setStyleSheet("background-color: #eef8fb; border: none;")
         
         # Lower sidebar weight: Removed shadow
         # sidebar.setGraphicsEffect(None) 
@@ -5011,7 +5010,12 @@ class MainWindow(QMainWindow):
 
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
+        self.history_scroll.setFrameShape(QFrame.NoFrame)
+        self.history_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.history_container = QWidget()
+        self.history_container.setStyleSheet("background: transparent; border: none;")
         self.history_layout = QVBoxLayout(self.history_container)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
         self.history_layout.setSpacing(4)
@@ -7090,8 +7094,8 @@ class MainWindow(QMainWindow):
         row.setObjectName("HistoryRow")
         set_stylesheet_if_changed(row, apple_history_row_style(selected))
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(10, 7, 7, 7)
-        row_layout.setSpacing(6)
+        row_layout.setContentsMargins(12, 8, 8, 8)
+        row_layout.setSpacing(8)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -7123,8 +7127,8 @@ class MainWindow(QMainWindow):
         menu_btn.setFocusPolicy(Qt.NoFocus)
         menu_btn.setFixedSize(28, 28)
         menu_btn.setStyleSheet(
-            f"QToolButton {{ border: 0px solid transparent; background: transparent; border-radius: 14px; padding: 0; }}"
-            f"QToolButton:hover {{ background: {DesignTokens.bg_main}; }}"
+            "QToolButton { border: none; background: transparent; border-radius: 14px; padding: 0; }"
+            "QToolButton:hover { background: rgba(255, 255, 255, 0.62); }"
             "QToolButton:focus { outline: none; border: 0px solid transparent; }"
         )
         menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))

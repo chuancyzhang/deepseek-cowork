@@ -371,8 +371,10 @@ def apple_history_title_style(selected=False):
     color = DesignTokens.primary if selected else DesignTokens.text_primary
     weight = "700" if selected else "600"
     return (
-        "text-align: left; padding: 2px 0; border: none; background: transparent; "
-        f"color: {color}; font-size: 13px; font-weight: {weight};"
+        "QPushButton { text-align: left; padding: 2px 0; border: 0px solid transparent; "
+        f"background: transparent; color: {color}; font-size: 13px; font-weight: {weight}; }}"
+        "QPushButton:hover { background: transparent; } "
+        "QPushButton:focus { outline: none; border: 0px solid transparent; }"
     )
 
 
@@ -2306,6 +2308,7 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameStyle(QFrame.NoFrame)
+        self.setFixedHeight(24)
         self._height_adjust_pending = False
         self.textChanged.connect(self.scheduleAdjustHeight)
         self.setStyleSheet("background: transparent;")
@@ -2821,8 +2824,8 @@ class ChatBubble(QFrame):
         
         # Main Horizontal Layout (Avatar | Content)
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 8, 0, 8)
-        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(0, 3, 0, 3)
+        main_layout.setSpacing(8)
         
         if role == "User":
             main_layout.setAlignment(Qt.AlignRight | Qt.AlignTop)
@@ -2830,7 +2833,7 @@ class ChatBubble(QFrame):
             # 1. Content Wrapper (to push content to right)
             content_wrapper = QWidget()
             cw_layout = QVBoxLayout(content_wrapper)
-            cw_layout.setContentsMargins(0,0,0,0)
+            cw_layout.setContentsMargins(0, 0, 0, 0)
             
             # Bubble Frame
             bubble_frame = QFrame()
@@ -2842,7 +2845,7 @@ class ChatBubble(QFrame):
                 }}
             """)
             bubble_layout = QVBoxLayout(bubble_frame)
-            bubble_layout.setContentsMargins(14, 9, 14, 9)
+            bubble_layout.setContentsMargins(14, 8, 14, 8)
             
             content_label = QLabel(text)
             content_label.setWordWrap(True)
@@ -2882,7 +2885,7 @@ class ChatBubble(QFrame):
             content_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             col_layout = QVBoxLayout(content_col)
             col_layout.setContentsMargins(0, 0, 0, 0)
-            col_layout.setSpacing(8)
+            col_layout.setSpacing(5)
             
             # 1. Thinking Section (DeepSeek Style - Grey Block)
             self.thinking_widget = QWidget()
@@ -6469,8 +6472,8 @@ class MainWindow(QMainWindow):
         chat_container = QWidget()
         chat_container.setStyleSheet(f"background: {DesignTokens.bg_chat};")
         chat_layout = QVBoxLayout(chat_container)
-        chat_layout.setContentsMargins(20, 8, 20, 20) # Bottom padding
-        chat_layout.setSpacing(16) # Space between messages
+        chat_layout.setContentsMargins(20, 6, 20, 18) # Bottom padding
+        chat_layout.setSpacing(8) # Space between messages
         
         # Add Empty State
         empty_state = EmptyStateWidget(self)
@@ -7088,39 +7091,34 @@ class MainWindow(QMainWindow):
 
         btn = HistoryTitleButton(title)
         btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.setFlat(True)
         btn.setStyleSheet(apple_history_title_style(selected))
         btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
 
-        meta_row = QHBoxLayout()
-        meta_row.setContentsMargins(0, 0, 0, 0)
-        meta_row.setSpacing(6)
-
-        status_label = QLabel(entry.get("status_text") or "新任务")
-        status_label.setStyleSheet(
-            f"color: {entry.get('status_color') or DesignTokens.text_tertiary}; "
-            "font-size: 11px; font-weight: 600; background: transparent;"
-        )
-        time_label = QLabel(entry.get("time_text") or "")
-        time_label.setStyleSheet(
-            f"color: {DesignTokens.text_tertiary}; font-size: 11px; background: transparent;"
-        )
-        meta_row.addWidget(status_label)
+        meta_text = entry.get("status_text") or "新任务"
         if entry.get("time_text"):
-            meta_row.addWidget(time_label)
-        meta_row.addStretch()
+            meta_text = f"{meta_text}  {entry.get('time_text')}"
+        meta_label = QLabel(meta_text)
+        meta_label.setStyleSheet(
+            f"color: {entry.get('status_color') or DesignTokens.text_tertiary}; "
+            "font-size: 11px; font-weight: 600; background: transparent; border: none;"
+        )
 
         content_layout.addWidget(btn)
-        content_layout.addLayout(meta_row)
+        content_layout.addWidget(meta_label)
 
         menu_btn = QToolButton()
         menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_tertiary))
         menu_btn.setToolTip("更多操作")
         menu_btn.setCursor(Qt.PointingHandCursor)
         menu_btn.setAutoRaise(True)
+        menu_btn.setFocusPolicy(Qt.NoFocus)
         menu_btn.setFixedSize(28, 28)
         menu_btn.setStyleSheet(
-            f"QToolButton {{ border: none; background: transparent; border-radius: 14px; padding: 0; }}"
+            f"QToolButton {{ border: 0px solid transparent; background: transparent; border-radius: 14px; padding: 0; }}"
             f"QToolButton:hover {{ background: {DesignTokens.bg_main}; }}"
+            "QToolButton:focus { outline: none; border: 0px solid transparent; }"
         )
         menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))
 

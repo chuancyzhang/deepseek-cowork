@@ -79,7 +79,9 @@ class TestLLMFactory(unittest.TestCase):
 
     def test_create_provider_uses_selected_model_profile(self):
         self.mock_config.get_model_profile.return_value = {
-            "provider": "openai",
+            "provider_type": "openai",
+            "channel_id": "custom-openai",
+            "channel_display_name": "Custom OpenAI",
             "api_key": "profile_key",
             "base_url": "https://profile.url",
             "model_name": "profile-model",
@@ -100,7 +102,9 @@ class TestLLMFactory(unittest.TestCase):
 
     def test_create_provider_uses_anthropic_profile(self):
         self.mock_config.get_model_profile.return_value = {
-            "provider": "anthropic",
+            "provider_type": "anthropic",
+            "channel_id": "custom-anthropic",
+            "channel_display_name": "Custom Anthropic",
             "api_key": "anthropic_key",
             "base_url": "https://anthropic.url",
             "model_name": "claude-test",

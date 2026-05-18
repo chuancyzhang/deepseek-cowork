@@ -46,6 +46,7 @@ class ConfigManager:
             "model_name": DEFAULT_DEEPSEEK_MODEL,
             "llm_provider": "openai",
             "selected_model_id": "openai-default",
+            "model_channels": self._default_model_channels(),
             "model_provider_configs": self._default_model_provider_configs(),
             "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
             "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
@@ -95,22 +96,32 @@ class ConfigManager:
         if should_migrate_legacy_model(self.config.get("model_name")):
             self.config["model_name"] = DEFAULT_DEEPSEEK_MODEL
             updated = True
+        raw_channels = (
+            self.config.get("model_channels")
+            if "model_channels" in self._loaded_config_keys
+            else None
+        )
         raw_provider_configs = (
             self.config.get("model_provider_configs")
             if "model_provider_configs" in self._loaded_config_keys
             else None
         )
-        normalized_configs = self._normalize_model_provider_configs(
-            raw_provider_configs
+        normalized_channels = self._normalize_model_channels(
+            raw_channels,
+            raw_provider_configs,
         )
-        if normalized_configs != self.config.get("model_provider_configs"):
-            self.config["model_provider_configs"] = normalized_configs
+        if normalized_channels != self.config.get("model_channels"):
+            self.config["model_channels"] = normalized_channels
+            updated = True
+        legacy_provider_configs = self._provider_configs_from_channels(normalized_channels)
+        if legacy_provider_configs != self.config.get("model_provider_configs"):
+            self.config["model_provider_configs"] = legacy_provider_configs
             updated = True
         if not self._get_profile_from_configs(
-            normalized_configs,
+            normalized_channels,
             self.config.get("selected_model_id"),
         ):
-            self.config["selected_model_id"] = self._first_model_id(normalized_configs)
+            self.config["selected_model_id"] = self._first_model_id(normalized_channels)
             updated = True
         updated = self._sync_legacy_model_fields(save=False) or updated
         if updated:
@@ -146,6 +157,40 @@ class ConfigManager:
             },
         }
 
+    def _default_model_channels(self):
+        return [
+            {
+                "channel_id": "openai-default-channel",
+                "display_name": "OpenAI 兼容服务",
+                "provider_type": "openai",
+                "api_key": "",
+                "base_url": DEFAULT_DEEPSEEK_BASE_URL,
+                "models": [
+                    {
+                        "id": "openai-default",
+                        "display_name": "DeepSeek V4 Pro",
+                        "model_name": DEFAULT_DEEPSEEK_MODEL,
+                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
+                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
+                    }
+                ],
+            },
+            {
+                "channel_id": "anthropic-default-channel",
+                "display_name": "Anthropic",
+                "provider_type": "anthropic",
+                "api_key": "",
+                "base_url": DEFAULT_ANTHROPIC_BASE_URL,
+                "models": [
+                    {
+                        "id": "anthropic-default",
+                        "display_name": "Claude Sonnet",
+                        "model_name": DEFAULT_ANTHROPIC_MODEL,
+                    }
+                ],
+            },
+        ]
+
     def _slug(self, value):
         text = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip()).strip("-").lower()
         return text or uuid.uuid4().hex[:8]
@@ -153,15 +198,19 @@ class ConfigManager:
     def _make_model_id(self, provider_id, model_name):
         return f"{provider_id}-{self._slug(model_name)}"
 
-    def _normalize_model_entry(self, provider_id, model, index=0):
+    def _normalize_provider_type(self, value):
+        provider_type = str(value or "openai").strip().lower()
+        return "anthropic" if provider_type == "anthropic" else "openai"
+
+    def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None):
         source = dict(model or {})
         model_name = str(source.get("model_name") or source.get("name") or "").strip()
         if should_migrate_legacy_model(model_name):
             model_name = DEFAULT_DEEPSEEK_MODEL if provider_id == "openai" else DEFAULT_ANTHROPIC_MODEL
         display_name = str(source.get("display_name") or source.get("label") or model_name).strip()
-        model_id = str(source.get("id") or "").strip() or self._make_model_id(provider_id, model_name)
+        model_id = str(source.get("id") or "").strip() or self._make_model_id(id_prefix or provider_id, model_name)
         if not model_id:
-            model_id = f"{provider_id}-model-{index + 1}"
+            model_id = f"{id_prefix or provider_id}-model-{index + 1}"
         entry = {
             "id": model_id,
             "display_name": display_name or model_name,
@@ -182,6 +231,55 @@ class ConfigManager:
                 or DEFAULT_DEEPSEEK_REASONING_EFFORT
             )
         return entry
+
+    def _normalize_channel_config(self, channel, index=0, used_channel_ids=None, used_model_ids=None):
+        used_channel_ids = used_channel_ids if used_channel_ids is not None else set()
+        used_model_ids = used_model_ids if used_model_ids is not None else set()
+        source = dict(channel or {})
+        provider_type = self._normalize_provider_type(
+            source.get("provider_type", source.get("provider"))
+        )
+        default_name = "Anthropic" if provider_type == "anthropic" else "OpenAI 兼容服务"
+        display_name = str(source.get("display_name") or source.get("label") or default_name).strip()
+        channel_id = str(source.get("channel_id") or source.get("id") or "").strip()
+        if not channel_id:
+            channel_id = f"{provider_type}-{self._slug(display_name)}"
+        base_channel_id = channel_id
+        suffix = 2
+        while channel_id in used_channel_ids:
+            channel_id = f"{base_channel_id}-{suffix}"
+            suffix += 1
+        used_channel_ids.add(channel_id)
+
+        models = source.get("models") if isinstance(source.get("models"), list) else []
+        normalized_models = []
+        for model_index, model in enumerate(models):
+            entry = self._normalize_model_entry(
+                provider_type,
+                model,
+                model_index,
+                id_prefix=channel_id,
+            )
+            base_id = entry["id"]
+            suffix = 2
+            while entry["id"] in used_model_ids:
+                entry["id"] = f"{base_id}-{suffix}"
+                suffix += 1
+            used_model_ids.add(entry["id"])
+            normalized_models.append(entry)
+
+        return {
+            "channel_id": channel_id,
+            "display_name": display_name or default_name,
+            "provider_type": provider_type,
+            "api_key": str(source.get("api_key") if source.get("api_key") is not None else ""),
+            "base_url": str(
+                source.get("base_url")
+                or (DEFAULT_ANTHROPIC_BASE_URL if provider_type == "anthropic" else DEFAULT_DEEPSEEK_BASE_URL)
+                or ""
+            ).strip(),
+            "models": normalized_models,
+        }
 
     def _normalize_provider_config(self, provider_id, config):
         defaults = self._default_model_provider_configs().get(provider_id, {})
@@ -255,60 +353,197 @@ class ConfigManager:
             ]
         return provider_configs
 
-    def _first_model_id(self, provider_configs=None):
-        provider_configs = provider_configs or self.config.get("model_provider_configs") or {}
+    def _channels_from_provider_configs(self, provider_configs):
+        defaults = self._default_model_provider_configs()
+        source = provider_configs if isinstance(provider_configs, dict) else {}
+        channels = []
         for provider_id in ("openai", "anthropic"):
-            models = ((provider_configs.get(provider_id) or {}).get("models") or [])
-            if models:
-                return models[0].get("id")
+            raw_config = source.get(provider_id) if isinstance(source.get(provider_id), dict) else defaults.get(provider_id)
+            provider_config = self._normalize_provider_config(provider_id, raw_config)
+            channels.append(
+                {
+                    "channel_id": f"{provider_id}-default-channel",
+                    "display_name": provider_config.get("display_name") or provider_id,
+                    "provider_type": provider_id,
+                    "api_key": provider_config.get("api_key", ""),
+                    "base_url": provider_config.get("base_url", ""),
+                    "models": provider_config.get("models", []),
+                }
+            )
+        return channels
+
+    def _normalize_model_channels(self, value, legacy_provider_configs=None):
+        if isinstance(value, list) and value:
+            raw_channels = value
+        elif isinstance(legacy_provider_configs, dict) and legacy_provider_configs:
+            raw_channels = self._channels_from_provider_configs(legacy_provider_configs)
+        else:
+            raw_channels = json.loads(json.dumps(self._default_model_channels(), ensure_ascii=False))
+            legacy_provider = self._normalize_provider_type(self.config.get("llm_provider", "openai"))
+            legacy_model = self.config.get("model_name", DEFAULT_DEEPSEEK_MODEL)
+            if should_migrate_legacy_model(legacy_model):
+                legacy_model = DEFAULT_DEEPSEEK_MODEL
+            for channel in raw_channels:
+                if channel.get("provider_type") != legacy_provider:
+                    continue
+                channel["api_key"] = str(self.config.get("api_key", "") or "")
+                channel["base_url"] = str(
+                    self.config.get(
+                        "base_url",
+                        DEFAULT_DEEPSEEK_BASE_URL if legacy_provider == "openai" else DEFAULT_ANTHROPIC_BASE_URL,
+                    )
+                    or ""
+                )
+                channel["models"] = [
+                    {
+                        "id": f"{legacy_provider}-default",
+                        "display_name": legacy_model,
+                        "model_name": legacy_model,
+                        "deepseek_thinking_enabled": self.config.get(
+                            "deepseek_thinking_enabled",
+                            DEFAULT_DEEPSEEK_THINKING_ENABLED,
+                        ),
+                        "deepseek_reasoning_effort": self.config.get(
+                            "deepseek_reasoning_effort",
+                            DEFAULT_DEEPSEEK_REASONING_EFFORT,
+                        ),
+                    }
+                ]
+        normalized_channels = []
+        used_channel_ids = set()
+        used_model_ids = set()
+        for index, channel in enumerate(raw_channels):
+            normalized_channels.append(
+                self._normalize_channel_config(
+                    channel,
+                    index,
+                    used_channel_ids=used_channel_ids,
+                    used_model_ids=used_model_ids,
+                )
+            )
+        if not normalized_channels:
+            return self._normalize_model_channels(self._default_model_channels())
+        if not any(channel.get("models") for channel in normalized_channels):
+            default_channel = self._normalize_channel_config(
+                self._default_model_channels()[0],
+                0,
+                used_channel_ids=used_channel_ids,
+                used_model_ids=used_model_ids,
+            )
+            normalized_channels[0]["models"] = default_channel.get("models", [])
+        return normalized_channels
+
+    def _provider_configs_from_channels(self, channels):
+        provider_configs = {}
+        for provider_id in ("openai", "anthropic"):
+            matching = [
+                channel
+                for channel in (channels or [])
+                if channel.get("provider_type") == provider_id
+            ]
+            if matching:
+                channel = matching[0]
+                models = []
+                for item in matching:
+                    models.extend(item.get("models") or [])
+                provider_configs[provider_id] = {
+                    "display_name": channel.get("display_name") or provider_id,
+                    "api_key": channel.get("api_key", ""),
+                    "base_url": channel.get("base_url", ""),
+                    "models": models,
+                }
+            else:
+                provider_configs[provider_id] = self._normalize_provider_config(
+                    provider_id,
+                    self._default_model_provider_configs().get(provider_id),
+                )
+        return provider_configs
+
+    def _first_model_id(self, configs=None):
+        configs = configs or self.config.get("model_channels") or []
+        if isinstance(configs, dict):
+            for provider_id in ("openai", "anthropic"):
+                models = ((configs.get(provider_id) or {}).get("models") or [])
+                if models:
+                    return models[0].get("id")
+            return "openai-default"
+        for channel in configs or []:
+            for model in channel.get("models") or []:
+                if model.get("id"):
+                    return model.get("id")
         return "openai-default"
 
-    def _get_profile_from_configs(self, provider_configs, model_id=None):
+    def _get_profile_from_configs(self, configs, model_id=None):
         selected_id = str(model_id or "").strip()
-        for provider_id, provider_config in (provider_configs or {}).items():
-            for model in (provider_config or {}).get("models") or []:
+        if isinstance(configs, dict):
+            configs = self._normalize_model_channels(None, configs)
+        for channel in configs or []:
+            provider_type = channel.get("provider_type") or "openai"
+            for model in channel.get("models") or []:
                 if selected_id and model.get("id") != selected_id:
                     continue
                 profile = dict(model)
-                profile["provider"] = provider_id
-                profile["provider_display_name"] = (provider_config or {}).get("display_name") or provider_id
-                profile["api_key"] = (provider_config or {}).get("api_key") or ""
-                profile["base_url"] = (provider_config or {}).get("base_url") or ""
+                profile["provider"] = provider_type
+                profile["provider_type"] = provider_type
+                profile["provider_display_name"] = channel.get("display_name") or provider_type
+                profile["channel_id"] = channel.get("channel_id") or ""
+                profile["channel_display_name"] = channel.get("display_name") or provider_type
+                profile["api_key"] = channel.get("api_key") or ""
+                profile["base_url"] = channel.get("base_url") or ""
                 return profile
         return None
 
+    def get_model_channels(self):
+        channels = self._normalize_model_channels(self.config.get("model_channels"))
+        if channels != self.config.get("model_channels"):
+            self.config["model_channels"] = channels
+            self.config["model_provider_configs"] = self._provider_configs_from_channels(channels)
+            self.save_config()
+        return json.loads(json.dumps(channels, ensure_ascii=False))
+
+    def set_model_channels(self, channels, selected_model_id=None):
+        normalized_channels = self._normalize_model_channels(channels)
+        self.config["model_channels"] = normalized_channels
+        self.config["model_provider_configs"] = self._provider_configs_from_channels(normalized_channels)
+        if selected_model_id is not None:
+            self.config["selected_model_id"] = str(selected_model_id or "").strip()
+        if not self.get_model_profile(self.config.get("selected_model_id")):
+            self.config["selected_model_id"] = self._first_model_id(normalized_channels)
+        self._sync_legacy_model_fields(save=False)
+        self.save_config()
+
     def get_model_provider_configs(self):
-        configs = self._normalize_model_provider_configs(self.config.get("model_provider_configs"))
+        configs = self._provider_configs_from_channels(self.get_model_channels())
         if configs != self.config.get("model_provider_configs"):
             self.config["model_provider_configs"] = configs
             self.save_config()
         return json.loads(json.dumps(configs, ensure_ascii=False))
 
     def set_model_provider_configs(self, provider_configs, selected_model_id=None):
-        self.config["model_provider_configs"] = self._normalize_model_provider_configs(provider_configs)
-        if selected_model_id is not None:
-            self.config["selected_model_id"] = str(selected_model_id or "").strip()
-        if not self.get_model_profile(self.config.get("selected_model_id")):
-            self.config["selected_model_id"] = self._first_model_id(self.config["model_provider_configs"])
-        self._sync_legacy_model_fields(save=False)
-        self.save_config()
+        self.set_model_channels(
+            self._channels_from_provider_configs(provider_configs),
+            selected_model_id,
+        )
 
     def iter_model_profiles(self):
-        configs = self.get_model_provider_configs()
+        channels = self.get_model_channels()
         profiles = []
-        for provider_id in ("openai", "anthropic"):
-            provider_config = configs.get(provider_id) or {}
-            for model in provider_config.get("models") or []:
+        for channel in channels:
+            provider_type = channel.get("provider_type") or "openai"
+            for model in channel.get("models") or []:
                 profile = dict(model)
-                profile["provider"] = provider_id
-                profile["provider_display_name"] = provider_config.get("display_name") or provider_id
-                profile["api_key"] = provider_config.get("api_key") or ""
-                profile["base_url"] = provider_config.get("base_url") or ""
+                profile["provider"] = provider_type
+                profile["provider_type"] = provider_type
+                profile["provider_display_name"] = channel.get("display_name") or provider_type
+                profile["channel_id"] = channel.get("channel_id") or ""
+                profile["channel_display_name"] = channel.get("display_name") or provider_type
+                profile["api_key"] = channel.get("api_key") or ""
+                profile["base_url"] = channel.get("base_url") or ""
                 profiles.append(profile)
         return profiles
 
     def get_model_profile(self, model_id=None):
-        configs = self.get_model_provider_configs()
+        configs = self.get_model_channels()
         selected_id = str(model_id or self.config.get("selected_model_id") or "").strip()
         profile = self._get_profile_from_configs(configs, selected_id)
         if profile:
@@ -335,7 +570,7 @@ class ConfigManager:
         name = profile.get("display_name") or profile.get("model_name") or DEFAULT_DEEPSEEK_MODEL
         if not include_provider:
             return name
-        provider = profile.get("provider_display_name") or profile.get("provider") or ""
+        provider = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
         return f"{provider} / {name}" if provider else name
 
     def _sync_legacy_model_fields(self, save=True):
@@ -344,12 +579,12 @@ class ConfigManager:
             return False
         updates = {
             "selected_model_id": profile.get("id"),
-            "llm_provider": profile.get("provider", "openai"),
+            "llm_provider": profile.get("provider_type") or profile.get("provider", "openai"),
             "api_key": profile.get("api_key", ""),
             "base_url": profile.get("base_url", ""),
             "model_name": profile.get("model_name", DEFAULT_DEEPSEEK_MODEL),
         }
-        if profile.get("provider") == "openai":
+        if (profile.get("provider_type") or profile.get("provider")) == "openai":
             updates["deepseek_thinking_enabled"] = profile.get(
                 "deepseek_thinking_enabled",
                 DEFAULT_DEEPSEEK_THINKING_ENABLED,

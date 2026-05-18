@@ -14,7 +14,7 @@ class LLMFactory:
             if not isinstance(profile, dict):
                 profile = None
         if profile:
-            provider_type = str(profile.get("provider") or "openai").lower()
+            provider_type = str(profile.get("provider_type") or profile.get("provider") or "openai").lower()
             api_key = profile.get("api_key")
             base_url = profile.get("base_url")
             model_name = profile.get("model_name", DEFAULT_DEEPSEEK_MODEL)

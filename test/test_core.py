@@ -62,6 +62,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)
         self.assertEqual(cm.get("deepseek_reasoning_effort"), DEFAULT_DEEPSEEK_REASONING_EFFORT)
         self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
+        self.assertTrue(cm.get("model_channels"))
         self.assertTrue(cm.get("model_provider_configs"))
         self.assertEqual(cm.get_selected_model_id(), "openai-default")
 
@@ -87,6 +88,37 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(profile["deepseek_reasoning_effort"], "max")
         self.assertEqual(cm.get("llm_provider"), "openai")
         self.assertEqual(cm.get("model_name"), "legacy-model")
+        self.assertEqual(profile["channel_id"], "openai-default-channel")
+        self.assertEqual(profile["channel_display_name"], "OpenAI 兼容服务")
+
+    def test_migrates_provider_configs_to_model_channels(self):
+        cm = self._create_config_manager(
+            {
+                "selected_model_id": "openai-custom",
+                "model_provider_configs": {
+                    "openai": {
+                        "display_name": "Tencent OpenAI",
+                        "api_key": "tencent-key",
+                        "base_url": "https://tencent.example/v1",
+                        "models": [
+                            {
+                                "id": "openai-custom",
+                                "display_name": "GLM Test",
+                                "model_name": "glm-test",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+
+        channels = cm.get_model_channels()
+        profile = cm.get_model_profile("openai-custom")
+
+        self.assertTrue(any(channel["channel_id"] == "openai-default-channel" for channel in channels))
+        self.assertEqual(profile["channel_display_name"], "Tencent OpenAI")
+        self.assertEqual(profile["base_url"], "https://tencent.example/v1")
+        self.assertEqual(profile["model_name"], "glm-test")
 
     def test_set_selected_model_id_syncs_legacy_fields(self):
         cm = self._create_config_manager()
@@ -107,6 +139,53 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("api_key"), "anthropic-key")
         self.assertEqual(cm.get("base_url"), "https://anthropic.example")
         self.assertEqual(cm.get("model_name"), "claude-test")
+
+    def test_model_channels_support_multiple_openai_base_urls(self):
+        cm = self._create_config_manager()
+        channels = [
+            {
+                "channel_id": "deepseek-channel",
+                "display_name": "DeepSeek",
+                "provider_type": "openai",
+                "api_key": "deepseek-key",
+                "base_url": "https://api.deepseek.com",
+                "models": [
+                    {
+                        "id": "shared-model",
+                        "display_name": "DeepSeek Chat",
+                        "model_name": "deepseek-chat",
+                        "deepseek_thinking_enabled": True,
+                        "deepseek_reasoning_effort": "high",
+                    }
+                ],
+            },
+            {
+                "channel_id": "tencent-channel",
+                "display_name": "腾讯云",
+                "provider_type": "openai",
+                "api_key": "tencent-key",
+                "base_url": "https://tencent.example/v1",
+                "models": [
+                    {
+                        "id": "shared-model",
+                        "display_name": "GLM",
+                        "model_name": "glm-test",
+                    }
+                ],
+            },
+        ]
+
+        cm.set_model_channels(channels, "shared-model-2")
+        profiles = cm.iter_model_profiles()
+        ids = [profile["id"] for profile in profiles]
+        selected = cm.get_model_profile()
+
+        self.assertEqual(ids, ["shared-model", "shared-model-2"])
+        self.assertEqual(selected["channel_id"], "tencent-channel")
+        self.assertEqual(selected["api_key"], "tencent-key")
+        self.assertEqual(selected["base_url"], "https://tencent.example/v1")
+        self.assertEqual(cm.get("llm_provider"), "openai")
+        self.assertEqual(cm.get("model_name"), "glm-test")
 
     def test_migrates_legacy_deepseek_model_name(self):
         cm = self._create_config_manager({"model_name": "deepseek-reasoner"})

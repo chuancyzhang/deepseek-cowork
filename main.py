@@ -1080,43 +1080,116 @@ class ModelEditDialog(QDialog):
         super().accept()
 
 
-class ProviderModelEditor(QGroupBox):
-    def __init__(self, provider_id, title, provider_config, parent=None):
-        super().__init__(title, parent)
-        self.provider_id = provider_id
-        self.provider_config = json.loads(json.dumps(provider_config or {}, ensure_ascii=False))
+class ModelChannelEditor(QFrame):
+    def __init__(self, channel_config, parent=None, expanded=False, on_expand=None, on_delete=None):
+        super().__init__(parent)
+        self.channel_config = json.loads(json.dumps(channel_config or {}, ensure_ascii=False))
+        self.expanded = bool(expanded)
+        self.on_expand = on_expand
+        self.on_delete = on_delete
+        self.setObjectName("ModelChannelEditor")
         self.setStyleSheet(
-            "QGroupBox { font-weight: 600; border: 1px solid #dbe3ee; border-radius: 14px; "
-            "margin-top: 10px; padding: 18px 16px 16px 16px; } "
-            "QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }"
+            f"""
+            QFrame#ModelChannelEditor {{
+                background: {DesignTokens.bg_main};
+                border: 1px solid {DesignTokens.border};
+                border-radius: 14px;
+            }}
+            QLabel#ChannelTitle {{
+                font-size: 14px;
+                font-weight: 700;
+                color: {DesignTokens.text_primary};
+            }}
+            QLabel#ChannelMeta {{
+                font-size: 12px;
+                color: {DesignTokens.text_secondary};
+            }}
+            """
         )
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 10, 10, 10)
+        header_layout.setSpacing(10)
+
+        self.expand_btn = QToolButton()
+        self.expand_btn.setAutoRaise(True)
+        self.expand_btn.setFixedSize(28, 28)
+        self.expand_btn.clicked.connect(self.toggle_expanded)
+        header_layout.addWidget(self.expand_btn)
+
+        self.title_label = QLabel()
+        self.title_label.setObjectName("ChannelTitle")
+        self.meta_label = QLabel()
+        self.meta_label.setObjectName("ChannelMeta")
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(2)
+        title_box.addWidget(self.title_label)
+        title_box.addWidget(self.meta_label)
+        header_layout.addLayout(title_box, 1)
+
+        self.delete_channel_btn = QToolButton()
+        self.delete_channel_btn.setAutoRaise(True)
+        self.delete_channel_btn.setToolTip("删除渠道")
+        self.delete_channel_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
+        self.delete_channel_btn.clicked.connect(self.delete_channel)
+        header_layout.addWidget(self.delete_channel_btn)
+
+        layout.addWidget(header)
+
+        self.body = QWidget()
+        body_layout = QVBoxLayout(self.body)
+        body_layout.setContentsMargins(18, 4, 18, 16)
+        body_layout.setSpacing(12)
+
         form = QFormLayout()
         form.setSpacing(10)
+        self.display_name_input = QLineEdit()
+        self.display_name_input.setPlaceholderText("例如：腾讯云 DeepSeek")
+        self.display_name_input.setText(str(self.channel_config.get("display_name") or ""))
+        self.display_name_input.textChanged.connect(self.refresh_header)
+        form.addRow("渠道名称", self.display_name_input)
+
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItem("OpenAI 兼容", "openai")
+        self.provider_combo.addItem("Anthropic", "anthropic")
+        provider_type = str(self.channel_config.get("provider_type") or "openai").lower()
+        provider_index = self.provider_combo.findData("anthropic" if provider_type == "anthropic" else "openai")
+        if provider_index >= 0:
+            self.provider_combo.setCurrentIndex(provider_index)
+        self.provider_combo.currentIndexChanged.connect(self.on_provider_changed)
+        form.addRow("协议类型", self.provider_combo)
+
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("粘贴这个供应商的 API Key")
-        self.api_key_input.setText(str(self.provider_config.get("api_key") or ""))
+        self.api_key_input.setPlaceholderText("粘贴这个渠道的 API Key")
+        self.api_key_input.setText(str(self.channel_config.get("api_key") or ""))
         form.addRow("API Key", self.api_key_input)
+
         self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL if provider_id == "openai" else "https://api.anthropic.com")
-        self.base_url_input.setText(str(self.provider_config.get("base_url") or ""))
+        self.base_url_input.setText(str(self.channel_config.get("base_url") or ""))
         form.addRow("Base URL", self.base_url_input)
-        layout.addLayout(form)
+        body_layout.addLayout(form)
 
         self.model_list = QListWidget()
-        self.model_list.setMinimumHeight(120)
-        layout.addWidget(self.model_list)
+        self.model_list.setMinimumHeight(104)
+        body_layout.addWidget(self.model_list)
 
         button_row = QHBoxLayout()
         add_btn = QPushButton("新增模型")
         add_btn.setObjectName("SecondaryBtn")
+        add_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         edit_btn = QPushButton("编辑")
         edit_btn.setObjectName("SecondaryBtn")
+        edit_btn.setIcon(qta.icon("fa5s.pen", color=DesignTokens.text_secondary))
         delete_btn = QPushButton("删除")
         delete_btn.setObjectName("SecondaryBtn")
+        delete_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
         add_btn.clicked.connect(self.add_model)
         edit_btn.clicked.connect(self.edit_model)
         delete_btn.clicked.connect(self.delete_model)
@@ -1124,15 +1197,59 @@ class ProviderModelEditor(QGroupBox):
         button_row.addWidget(edit_btn)
         button_row.addWidget(delete_btn)
         button_row.addStretch()
-        layout.addLayout(button_row)
+        body_layout.addLayout(button_row)
 
+        layout.addWidget(self.body)
         self.refresh_model_list()
+        self.set_expanded(self.expanded)
+        self.refresh_provider_placeholders()
+        self.refresh_header()
+
+    def _provider_type(self):
+        return str(self.provider_combo.currentData() or "openai")
 
     def _models(self):
-        models = self.provider_config.setdefault("models", [])
+        models = self.channel_config.setdefault("models", [])
         if not isinstance(models, list):
-            self.provider_config["models"] = []
-        return self.provider_config["models"]
+            self.channel_config["models"] = []
+        return self.channel_config["models"]
+
+    def _channel_name(self):
+        name = self.display_name_input.text().strip()
+        if name:
+            return name
+        return "Anthropic" if self._provider_type() == "anthropic" else "OpenAI 兼容服务"
+
+    def refresh_provider_placeholders(self):
+        if self._provider_type() == "anthropic":
+            self.base_url_input.setPlaceholderText("https://api.anthropic.com")
+        else:
+            self.base_url_input.setPlaceholderText(DEFAULT_DEEPSEEK_BASE_URL)
+
+    def on_provider_changed(self):
+        self.refresh_provider_placeholders()
+        self.refresh_header()
+
+    def refresh_header(self):
+        provider_label = "Anthropic" if self._provider_type() == "anthropic" else "OpenAI 兼容"
+        model_count = len(self._models())
+        self.title_label.setText(self._channel_name())
+        self.meta_label.setText(f"{provider_label} · {model_count} 个模型")
+
+    def set_expanded(self, expanded):
+        self.expanded = bool(expanded)
+        self.body.setVisible(self.expanded)
+        icon_name = "fa5s.chevron-up" if self.expanded else "fa5s.chevron-down"
+        self.expand_btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+
+    def toggle_expanded(self):
+        self.set_expanded(not self.expanded)
+        if self.expanded and self.on_expand:
+            self.on_expand(self)
+
+    def delete_channel(self):
+        if self.on_delete:
+            self.on_delete(self)
 
     def refresh_model_list(self):
         self.model_list.clear()
@@ -1143,12 +1260,13 @@ class ProviderModelEditor(QGroupBox):
             self.model_list.addItem(item)
         if self.model_list.count() and self.model_list.currentRow() < 0:
             self.model_list.setCurrentRow(0)
+        self.refresh_header()
 
     def add_model(self):
-        dialog = ModelEditDialog(self.provider_id, parent=self)
+        dialog = ModelEditDialog(self._provider_type(), parent=self)
         if dialog.exec() == QDialog.Accepted:
             model = dialog.get_model()
-            model["id"] = f"{self.provider_id}-{uuid.uuid4().hex[:8]}"
+            model["id"] = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
             self._models().append(model)
             self.refresh_model_list()
 
@@ -1163,7 +1281,7 @@ class ProviderModelEditor(QGroupBox):
         if index < 0:
             return
         current = self._models()[index]
-        dialog = ModelEditDialog(self.provider_id, current, self)
+        dialog = ModelEditDialog(self._provider_type(), current, self)
         if dialog.exec() == QDialog.Accepted:
             self._models()[index] = dialog.get_model(existing_id=current.get("id"))
             self.refresh_model_list()
@@ -1173,20 +1291,94 @@ class ProviderModelEditor(QGroupBox):
         index = self._current_model_index()
         if index < 0:
             return
-        if len(self._models()) <= 1:
-            QMessageBox.warning(self, "模型配置", "每个供应商至少保留一个模型。")
-            return
         del self._models()[index]
         self.refresh_model_list()
-        self.model_list.setCurrentRow(min(index, self.model_list.count() - 1))
+        if self.model_list.count():
+            self.model_list.setCurrentRow(min(index, self.model_list.count() - 1))
 
-    def get_provider_config(self):
+    def get_channel_config(self):
         return {
-            "display_name": self.provider_config.get("display_name") or self.title(),
+            "channel_id": self.channel_config.get("channel_id") or f"{self._provider_type()}-{uuid.uuid4().hex[:8]}",
+            "display_name": self._channel_name(),
+            "provider_type": self._provider_type(),
             "api_key": self.api_key_input.text().strip(),
             "base_url": self.base_url_input.text().strip(),
             "models": self._models(),
         }
+
+
+class ModelChannelManager(QWidget):
+    def __init__(self, channels, parent=None):
+        super().__init__(parent)
+        self.editors = []
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(12)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("模型渠道")
+        title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        toolbar.addWidget(title)
+        toolbar.addStretch()
+        add_channel_btn = QPushButton("添加渠道")
+        add_channel_btn.setObjectName("SecondaryBtn")
+        add_channel_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
+        add_channel_btn.clicked.connect(self.add_channel)
+        toolbar.addWidget(add_channel_btn)
+        self.layout.addLayout(toolbar)
+
+        for index, channel in enumerate(channels or []):
+            self._add_editor(channel, expanded=index == 0)
+
+    def _add_editor(self, channel, expanded=False):
+        editor = ModelChannelEditor(
+            channel,
+            self,
+            expanded=expanded,
+            on_expand=self._collapse_others,
+            on_delete=self.delete_channel,
+        )
+        self.editors.append(editor)
+        self.layout.addWidget(editor)
+        return editor
+
+    def _collapse_others(self, active_editor):
+        for editor in self.editors:
+            if editor is not active_editor:
+                editor.set_expanded(False)
+
+    def add_channel(self):
+        channel = {
+            "channel_id": f"openai-custom-{uuid.uuid4().hex[:8]}",
+            "display_name": "新渠道",
+            "provider_type": "openai",
+            "api_key": "",
+            "base_url": DEFAULT_DEEPSEEK_BASE_URL,
+            "models": [],
+        }
+        editor = self._add_editor(channel, expanded=True)
+        self._collapse_others(editor)
+
+    def delete_channel(self, editor):
+        reply = QMessageBox.question(
+            self,
+            "删除模型渠道",
+            "确定删除这个渠道及其下的模型吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if editor in self.editors:
+            self.editors.remove(editor)
+            editor.setParent(None)
+            editor.deleteLater()
+        if self.editors and not any(item.expanded for item in self.editors):
+            self.editors[0].set_expanded(True)
+
+    def get_channels(self):
+        return [editor.get_channel_config() for editor in self.editors]
 
 
 class AppUpdateWorker(QThread):
@@ -1303,19 +1495,11 @@ class SettingsDialog(QDialog):
 
         model_page, model_layout = make_scroll_page(
             "模型",
-            "按供应商共享 API Key 与 Base URL，并在提问栏选择本轮使用的具体模型。",
+            "添加多个模型渠道，每个渠道可配置独立 API Key、Base URL 和多个模型。",
         )
 
-        provider_configs = self.config_manager.get_model_provider_configs()
-        self.openai_model_editor = ProviderModelEditor(
-            "openai",
-            "OpenAI 兼容服务（含 DeepSeek）",
-            provider_configs.get("openai") or {},
-        )
-        self.anthropic_model_editor = ProviderModelEditor(
-            "anthropic",
-            "Anthropic / Claude 系列",
-            provider_configs.get("anthropic") or {},
+        self.model_channel_manager = ModelChannelManager(
+            self.config_manager.get_model_channels()
         )
 
         workspace_page, workspace_layout = make_scroll_page(
@@ -1456,8 +1640,7 @@ class SettingsDialog(QDialog):
         update_layout.addStretch()
         self.app_update_worker = None
 
-        model_layout.addWidget(self.openai_model_editor)
-        model_layout.addWidget(self.anthropic_model_editor)
+        model_layout.addWidget(self.model_channel_manager)
         model_layout.addStretch()
         workspace_layout.addWidget(storage_group)
         workspace_layout.addStretch()
@@ -1764,19 +1947,19 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         selected_model_id = self.config_manager.get_selected_model_id()
-        provider_configs = {
-            "openai": self.openai_model_editor.get_provider_config(),
-            "anthropic": self.anthropic_model_editor.get_provider_config(),
-        }
+        model_channels = self.model_channel_manager.get_channels()
         all_model_ids = [
             model.get("id")
-            for provider_id in ("openai", "anthropic")
-            for model in (provider_configs.get(provider_id) or {}).get("models", [])
+            for channel in model_channels
+            for model in (channel.get("models") or [])
             if model.get("id")
         ]
+        if not all_model_ids:
+            QMessageBox.warning(self, "模型配置", "请至少保留一个可用模型。")
+            return
         if selected_model_id not in all_model_ids:
             selected_model_id = all_model_ids[0] if all_model_ids else ""
-        self.config_manager.set_model_provider_configs(provider_configs, selected_model_id)
+        self.config_manager.set_model_channels(model_channels, selected_model_id)
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -5477,12 +5660,21 @@ class MainWindow(QMainWindow):
         self.model_select_combo.clear()
         for profile in self.config_manager.iter_model_profiles():
             display_name = profile.get("display_name") or profile.get("model_name") or "模型"
-            provider_name = profile.get("provider_display_name") or profile.get("provider") or ""
+            provider_name = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
             effort = ""
             if profile.get("provider") == "openai":
                 effort = str(profile.get("deepseek_reasoning_effort") or "").strip()
             label = f"{display_name} · {effort}" if effort else display_name
-            tooltip = f"{provider_name} / {profile.get('model_name', '')}" if provider_name else profile.get("model_name", "")
+            tooltip_parts = [
+                part
+                for part in (
+                    provider_name,
+                    profile.get("model_name", ""),
+                    profile.get("base_url", ""),
+                )
+                if part
+            ]
+            tooltip = " / ".join(tooltip_parts)
             self.model_select_combo.addItem(label, profile.get("id"))
             self.model_select_combo.setItemData(self.model_select_combo.count() - 1, tooltip, Qt.ToolTipRole)
         index = self.model_select_combo.findData(selected_id)

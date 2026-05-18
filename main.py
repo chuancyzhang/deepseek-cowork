@@ -371,10 +371,8 @@ def apple_history_title_style(selected=False):
     color = DesignTokens.primary if selected else DesignTokens.text_primary
     weight = "700" if selected else "600"
     return (
-        "QPushButton { text-align: left; padding: 2px 0; border: 0px solid transparent; "
-        f"background: transparent; color: {color}; font-size: 13px; font-weight: {weight}; }}"
-        "QPushButton:hover { background: transparent; } "
-        "QPushButton:focus { outline: none; border: 0px solid transparent; }"
+        f"color: {color}; font-size: 13px; font-weight: {weight}; "
+        "background: transparent; border: none; padding: 2px 0;"
     )
 
 
@@ -2620,7 +2618,9 @@ class DaemonStreamWorker(QThread):
         finally:
             self._sock = None
 
-class HistoryTitleButton(QPushButton):
+class HistoryTitleButton(QLabel):
+    clicked = Signal()
+
     def __init__(self, title, parent=None):
         super().__init__(parent)
         self._full_title = title or ""
@@ -2628,6 +2628,8 @@ class HistoryTitleButton(QPushButton):
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setToolTip(self._full_title)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
         self._apply_elide()
 
     def set_full_title(self, title):
@@ -2645,7 +2647,14 @@ class HistoryTitleButton(QPushButton):
         display = metrics.elidedText(self._full_title, Qt.ElideRight, available)
         if display != self._display_title:
             self._display_title = display
-            super().setText(display)
+            self.setText(display)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 class EmptyStateWidget(QWidget):
     def __init__(self, main_window):
@@ -7091,10 +7100,8 @@ class MainWindow(QMainWindow):
 
         btn = HistoryTitleButton(title)
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setFocusPolicy(Qt.NoFocus)
-        btn.setFlat(True)
         btn.setStyleSheet(apple_history_title_style(selected))
-        btn.clicked.connect(lambda checked=False, sid=session_id: self.activate_session(sid))
+        btn.clicked.connect(lambda sid=session_id: self.activate_session(sid))
 
         meta_text = entry.get("status_text") or "新任务"
         if entry.get("time_text"):

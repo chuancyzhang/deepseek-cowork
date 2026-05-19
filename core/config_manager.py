@@ -13,6 +13,7 @@ from .llm.deepseek import (
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
     should_migrate_legacy_model,
 )
+from .sop_manager import default_sop_templates, normalize_sop_templates
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
@@ -53,6 +54,7 @@ class ConfigManager:
             "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
             "disabled_skills": [],
             "agent_profiles": self._default_agent_profiles(),
+            "sop_templates": self._default_sop_templates(),
             "god_mode": False,
             "default_workspace": "",
             "im_gateway": {
@@ -131,6 +133,12 @@ class ConfigManager:
         if normalized_agent_profiles != self.config.get("agent_profiles"):
             self.config["agent_profiles"] = normalized_agent_profiles
             updated = True
+        normalized_sop_templates = self._normalize_sop_templates(
+            self.config.get("sop_templates")
+        )
+        if normalized_sop_templates != self.config.get("sop_templates"):
+            self.config["sop_templates"] = normalized_sop_templates
+            updated = True
         updated = self._sync_legacy_model_fields(save=False) or updated
         if updated:
             self.save_config()
@@ -202,6 +210,9 @@ class ConfigManager:
     def _default_agent_profiles(self):
         return []
 
+    def _default_sop_templates(self):
+        return default_sop_templates()
+
     def _slug(self, value):
         text = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip()).strip("-").lower()
         return text or uuid.uuid4().hex[:8]
@@ -257,6 +268,9 @@ class ConfigManager:
             if entry:
                 normalized.append(entry)
         return normalized
+
+    def _normalize_sop_templates(self, value):
+        return normalize_sop_templates(value)
 
     def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None):
         source = dict(model or {})
@@ -681,6 +695,31 @@ class ConfigManager:
         for profile in profiles:
             if profile.get("name") == identifier:
                 return profile
+        return None
+
+    def get_sop_templates(self):
+        templates = self._normalize_sop_templates(self.config.get("sop_templates"))
+        if templates != self.config.get("sop_templates"):
+            self.config["sop_templates"] = templates
+            self.save_config()
+        return json.loads(json.dumps(templates, ensure_ascii=False))
+
+    def set_sop_templates(self, templates):
+        normalized = self._normalize_sop_templates(templates)
+        self.config["sop_templates"] = normalized
+        self.save_config()
+
+    def get_sop_template(self, template_id_or_name):
+        identifier = str(template_id_or_name or "").strip()
+        if not identifier:
+            return None
+        templates = self.get_sop_templates()
+        for template in templates:
+            if template.get("id") == identifier:
+                return template
+        for template in templates:
+            if template.get("name") == identifier:
+                return template
         return None
 
     def save_config(self):

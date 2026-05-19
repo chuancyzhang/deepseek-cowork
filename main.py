@@ -72,6 +72,22 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
+from core.sop_manager import (
+    SOP_RUN_STATUS_AWAITING_CONFIRMATION,
+    SOP_RUN_STATUS_COMPLETED,
+    SOP_STEP_STATUS_AWAITING_CONFIRMATION,
+    build_sop_prompt_fragment,
+    confirm_current_step,
+    create_sop_run,
+    get_current_step,
+    is_sop_awaiting_confirmation,
+    is_sop_completed,
+    mark_step_awaiting_confirmation,
+    mark_step_running,
+    normalize_sop_run,
+    rerun_current_step,
+    skip_current_step,
+)
 import shutil
 import traceback
 import qtawesome as qta
@@ -1708,6 +1724,608 @@ class AgentProfileManager(QWidget):
         return profiles
 
 
+class SopTemplateManager(QWidget):
+    def __init__(self, templates, skill_provider, agent_profile_provider, parent=None):
+        super().__init__(parent)
+        self.skill_provider = skill_provider
+        self.agent_profile_provider = agent_profile_provider
+        self.templates = json.loads(json.dumps(templates or [], ensure_ascii=False))
+        self._current_template_index = -1
+        self._current_step_index = -1
+        self._loading_template = False
+        self._loading_step = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("SOP 模板")
+        title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        toolbar.addWidget(title)
+        toolbar.addStretch()
+        for label, handler, icon_name in (
+            ("新增模板", self.add_template, "fa5s.plus"),
+            ("复制", self.copy_template, "fa5s.copy"),
+            ("删除", self.delete_template, "fa5s.trash"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("SecondaryBtn")
+            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+            btn.clicked.connect(handler)
+            toolbar.addWidget(btn)
+        layout.addLayout(toolbar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(14)
+        layout.addLayout(body, 1)
+
+        self.template_list = QListWidget()
+        self.template_list.setFixedWidth(220)
+        self.template_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
+            f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        self.template_list.currentRowChanged.connect(self._on_template_changed)
+        body.addWidget(self.template_list)
+
+        editor_card = QFrame()
+        editor_card.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 16px; }}"
+        )
+        editor_layout = QVBoxLayout(editor_card)
+        editor_layout.setContentsMargins(18, 18, 18, 18)
+        editor_layout.setSpacing(14)
+        body.addWidget(editor_card, 1)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        self.template_id_input = QLineEdit()
+        self.template_id_input.setPlaceholderText("例如：office-file-first-placeholder")
+        self.template_id_input.textChanged.connect(self._sync_current_template_from_fields)
+        form.addRow("ID", self.template_id_input)
+        self.template_name_input = QLineEdit()
+        self.template_name_input.setPlaceholderText("例如：办公文件优先（示例）")
+        self.template_name_input.textChanged.connect(self._sync_current_template_from_fields)
+        form.addRow("名称", self.template_name_input)
+        self.template_desc_edit = QTextEdit()
+        self.template_desc_edit.setFixedHeight(72)
+        self.template_desc_edit.setPlaceholderText("描述这个 SOP 的目标和适用范围")
+        self.template_desc_edit.textChanged.connect(self._sync_current_template_from_fields)
+        form.addRow("描述", self.template_desc_edit)
+        self.triggers_input = QLineEdit()
+        self.triggers_input.setPlaceholderText("用逗号分隔，例如：办公文件, 周报, 示例")
+        self.triggers_input.textChanged.connect(self._sync_current_template_from_fields)
+        form.addRow("触发词", self.triggers_input)
+        self.default_agent_combo = QComboBox()
+        self.default_agent_combo.currentIndexChanged.connect(self._sync_current_template_from_fields)
+        form.addRow("默认智能体", self.default_agent_combo)
+        editor_layout.addLayout(form)
+
+        skills_label = QLabel("SOP 自带能力")
+        skills_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        editor_layout.addWidget(skills_label)
+        self.skill_list = QListWidget()
+        self.skill_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px; }}"
+            f"QListWidget::item {{ padding: 8px 10px; color: {DesignTokens.text_primary}; }}"
+        )
+        self.skill_list.itemChanged.connect(lambda _item: self._sync_current_template_from_fields())
+        editor_layout.addWidget(self.skill_list, 1)
+
+        step_toolbar = QHBoxLayout()
+        step_title = QLabel("步骤")
+        step_title.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        step_toolbar.addWidget(step_title)
+        step_toolbar.addStretch()
+        for label, handler, icon_name in (
+            ("新增步骤", self.add_step, "fa5s.plus"),
+            ("复制步骤", self.copy_step, "fa5s.copy"),
+            ("删除步骤", self.delete_step, "fa5s.trash"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("SecondaryBtn")
+            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+            btn.clicked.connect(handler)
+            step_toolbar.addWidget(btn)
+        editor_layout.addLayout(step_toolbar)
+
+        step_body = QHBoxLayout()
+        step_body.setContentsMargins(0, 0, 0, 0)
+        step_body.setSpacing(12)
+        editor_layout.addLayout(step_body, 1)
+
+        self.step_list = QListWidget()
+        self.step_list.setFixedWidth(220)
+        self.step_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px; }}"
+            f"QListWidget::item {{ padding: 8px 10px; color: {DesignTokens.text_primary}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        self.step_list.currentRowChanged.connect(self._on_step_changed)
+        step_body.addWidget(self.step_list)
+
+        step_editor = QFrame()
+        step_editor.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; }}"
+        )
+        step_editor_layout = QFormLayout(step_editor)
+        step_editor_layout.setContentsMargins(14, 14, 14, 14)
+        step_editor_layout.setSpacing(12)
+        self.step_title_input = QLineEdit()
+        self.step_title_input.setPlaceholderText("例如：确认当前步骤目标")
+        self.step_title_input.textChanged.connect(self._sync_current_step_from_fields)
+        step_editor_layout.addRow("标题", self.step_title_input)
+        self.step_instruction_edit = QTextEdit()
+        self.step_instruction_edit.setFixedHeight(96)
+        self.step_instruction_edit.setPlaceholderText("写清楚这一小步允许做什么")
+        self.step_instruction_edit.textChanged.connect(self._sync_current_step_from_fields)
+        step_editor_layout.addRow("执行指令", self.step_instruction_edit)
+        self.step_success_edit = QTextEdit()
+        self.step_success_edit.setFixedHeight(80)
+        self.step_success_edit.setPlaceholderText("用户如何判断这一步已经完成")
+        self.step_success_edit.textChanged.connect(self._sync_current_step_from_fields)
+        step_editor_layout.addRow("成功标准", self.step_success_edit)
+        self.step_allow_skip_check = QCheckBox("允许标记为不适用")
+        self.step_allow_skip_check.toggled.connect(self._sync_current_step_from_fields)
+        step_editor_layout.addRow("跳过", self.step_allow_skip_check)
+        step_body.addWidget(step_editor, 1)
+
+        helper = QLabel("SOP 激活后，每轮只会执行当前步骤；完成后需在抽屉中确认才能继续。")
+        helper.setWordWrap(True)
+        helper.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        editor_layout.addWidget(helper)
+
+        self._refresh_template_list()
+        if self.template_list.count():
+            self.template_list.setCurrentRow(0)
+        else:
+            self.add_template()
+
+    def _available_skills(self):
+        skills = list(self.skill_provider() or []) if callable(self.skill_provider) else []
+        skills.sort(key=lambda item: (readable_skill_name(item) or item.get("name") or "").lower())
+        return skills
+
+    def _available_agent_profiles(self):
+        profiles = list(self.agent_profile_provider() or []) if callable(self.agent_profile_provider) else []
+        profiles.sort(key=lambda item: str(item.get("name") or "").lower())
+        return profiles
+
+    def _csv_to_list(self, text):
+        values = []
+        seen = set()
+        for item in re.split(r"[,，\n]+", str(text or "")):
+            value = item.strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        return values
+
+    def _selected_skill_names_from_widgets(self):
+        names = []
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            if item.checkState() == Qt.Checked:
+                names.append(str(item.data(Qt.UserRole) or "").strip())
+        return normalize_selected_skill_names(names)
+
+    def _reload_skill_options(self):
+        selected = set(self._selected_skill_names_from_widgets())
+        if 0 <= self._current_template_index < len(self.templates):
+            selected = set(normalize_selected_skill_names(self.templates[self._current_template_index].get("skill_names")))
+        self.skill_list.blockSignals(True)
+        self.skill_list.clear()
+        for skill in self._available_skills():
+            skill_name = str(skill.get("name") or "").strip()
+            if not skill_name:
+                continue
+            item = QListWidgetItem(readable_skill_name(skill) or skill_name)
+            item.setData(Qt.UserRole, skill_name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if skill_name in selected else Qt.Unchecked)
+            item.setToolTip(skill.get("user_description") or skill.get("description") or "")
+            self.skill_list.addItem(item)
+        self.skill_list.blockSignals(False)
+
+    def _reload_agent_profiles(self):
+        current_value = self.default_agent_combo.currentData()
+        self.default_agent_combo.blockSignals(True)
+        self.default_agent_combo.clear()
+        self.default_agent_combo.addItem("主 Agent（默认）", "")
+        for profile in self._available_agent_profiles():
+            self.default_agent_combo.addItem(profile.get("name") or "智能体", profile.get("id") or "")
+        index = self.default_agent_combo.findData(current_value)
+        if index < 0:
+            index = 0
+        self.default_agent_combo.setCurrentIndex(index)
+        self.default_agent_combo.blockSignals(False)
+
+    def _refresh_template_list(self):
+        self.template_list.blockSignals(True)
+        self.template_list.clear()
+        for template in self.templates:
+            name = str(template.get("name") or "未命名 SOP").strip()
+            step_count = len(template.get("steps") or [])
+            item = QListWidgetItem(f"{name} ({step_count})")
+            item.setData(Qt.UserRole, template.get("id"))
+            item.setToolTip(template.get("description") or "")
+            self.template_list.addItem(item)
+        self.template_list.blockSignals(False)
+
+    def _refresh_step_list(self):
+        self.step_list.blockSignals(True)
+        self.step_list.clear()
+        template = self.templates[self._current_template_index] if 0 <= self._current_template_index < len(self.templates) else {}
+        for index, step in enumerate(template.get("steps") or []):
+            title = str(step.get("title") or f"步骤 {index + 1}").strip()
+            item = QListWidgetItem(title)
+            item.setData(Qt.UserRole, index)
+            item.setToolTip(step.get("instructions") or "")
+            self.step_list.addItem(item)
+        self.step_list.blockSignals(False)
+
+    def _load_template_into_fields(self, index):
+        self._loading_template = True
+        try:
+            template = self.templates[index] if 0 <= index < len(self.templates) else {}
+            self.template_id_input.setText(str(template.get("id") or ""))
+            self.template_name_input.setText(str(template.get("name") or ""))
+            self.template_desc_edit.setPlainText(str(template.get("description") or ""))
+            self.triggers_input.setText("，".join(template.get("triggers") or []))
+            self._reload_agent_profiles()
+            combo_index = self.default_agent_combo.findData(str(template.get("default_agent_profile_id") or ""))
+            self.default_agent_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+            self._reload_skill_options()
+            self._refresh_step_list()
+            if self.step_list.count():
+                self.step_list.setCurrentRow(0)
+            else:
+                self._current_step_index = -1
+                self._clear_step_fields()
+        finally:
+            self._loading_template = False
+
+    def _clear_step_fields(self):
+        self._loading_step = True
+        try:
+            self.step_title_input.setText("")
+            self.step_instruction_edit.setPlainText("")
+            self.step_success_edit.setPlainText("")
+            self.step_allow_skip_check.setChecked(False)
+        finally:
+            self._loading_step = False
+
+    def _load_step_into_fields(self, index):
+        self._loading_step = True
+        try:
+            template = self.templates[self._current_template_index] if 0 <= self._current_template_index < len(self.templates) else {}
+            steps = template.get("steps") or []
+            step = steps[index] if 0 <= index < len(steps) else {}
+            self.step_title_input.setText(str(step.get("title") or ""))
+            self.step_instruction_edit.setPlainText(str(step.get("instructions") or ""))
+            self.step_success_edit.setPlainText(str(step.get("success_criteria") or ""))
+            self.step_allow_skip_check.setChecked(bool(step.get("allow_skip", False)))
+        finally:
+            self._loading_step = False
+
+    def _sync_current_template_from_fields(self):
+        if self._loading_template:
+            return
+        index = self._current_template_index
+        if index < 0 or index >= len(self.templates):
+            return
+        template = self.templates[index]
+        template["id"] = self.template_id_input.text().strip()
+        template["name"] = self.template_name_input.text().strip() or "未命名 SOP"
+        template["description"] = self.template_desc_edit.toPlainText().strip()
+        template["triggers"] = self._csv_to_list(self.triggers_input.text())
+        template["skill_names"] = self._selected_skill_names_from_widgets()
+        template["default_agent_profile_id"] = str(self.default_agent_combo.currentData() or "").strip()
+        template["updated_at"] = int(time.time())
+        self._refresh_template_list()
+        self.template_list.blockSignals(True)
+        self.template_list.setCurrentRow(index)
+        self.template_list.blockSignals(False)
+
+    def _sync_current_step_from_fields(self):
+        if self._loading_step:
+            return
+        template_index = self._current_template_index
+        step_index = self._current_step_index
+        if template_index < 0 or template_index >= len(self.templates):
+            return
+        steps = self.templates[template_index].setdefault("steps", [])
+        if step_index < 0 or step_index >= len(steps):
+            return
+        step = steps[step_index]
+        step["title"] = self.step_title_input.text().strip() or f"步骤 {step_index + 1}"
+        step["instructions"] = self.step_instruction_edit.toPlainText().strip()
+        step["success_criteria"] = self.step_success_edit.toPlainText().strip()
+        step["allow_skip"] = self.step_allow_skip_check.isChecked()
+        self.templates[template_index]["updated_at"] = int(time.time())
+        self._refresh_step_list()
+        self.step_list.blockSignals(True)
+        self.step_list.setCurrentRow(step_index)
+        self.step_list.blockSignals(False)
+        self._sync_current_template_from_fields()
+
+    def _on_template_changed(self, index):
+        if self._current_template_index >= 0:
+            self._sync_current_step_from_fields()
+            self._sync_current_template_from_fields()
+        self._current_template_index = index
+        self._current_step_index = -1
+        if index < 0 or index >= len(self.templates):
+            return
+        self._load_template_into_fields(index)
+
+    def _on_step_changed(self, index):
+        if self._current_step_index >= 0:
+            self._sync_current_step_from_fields()
+        self._current_step_index = index
+        if index < 0:
+            self._clear_step_fields()
+            return
+        self._load_step_into_fields(index)
+
+    def add_template(self):
+        now = int(time.time())
+        self.templates.append(
+            {
+                "id": f"sop-{uuid.uuid4().hex[:8]}",
+                "name": "新 SOP",
+                "description": "",
+                "triggers": [],
+                "skill_names": [],
+                "default_agent_profile_id": "",
+                "steps": [
+                    {
+                        "title": "步骤 1",
+                        "instructions": "",
+                        "success_criteria": "",
+                        "allow_skip": False,
+                    }
+                ],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        self._refresh_template_list()
+        self.template_list.setCurrentRow(len(self.templates) - 1)
+
+    def copy_template(self):
+        index = self.template_list.currentRow()
+        if index < 0 or index >= len(self.templates):
+            return
+        source = json.loads(json.dumps(self.templates[index], ensure_ascii=False))
+        now = int(time.time())
+        source["id"] = f"sop-{uuid.uuid4().hex[:8]}"
+        source["name"] = f"{source.get('name') or 'SOP'} 副本"
+        source["created_at"] = now
+        source["updated_at"] = now
+        self.templates.insert(index + 1, source)
+        self._refresh_template_list()
+        self.template_list.setCurrentRow(index + 1)
+
+    def delete_template(self):
+        index = self.template_list.currentRow()
+        if index < 0 or index >= len(self.templates):
+            return
+        reply = QMessageBox.question(
+            self,
+            "删除 SOP",
+            "确定删除这个 SOP 模板吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        del self.templates[index]
+        self._refresh_template_list()
+        if self.templates:
+            self.template_list.setCurrentRow(min(index, len(self.templates) - 1))
+        else:
+            self.add_template()
+
+    def add_step(self):
+        index = self._current_template_index
+        if index < 0 or index >= len(self.templates):
+            return
+        steps = self.templates[index].setdefault("steps", [])
+        steps.append(
+            {
+                "title": f"步骤 {len(steps) + 1}",
+                "instructions": "",
+                "success_criteria": "",
+                "allow_skip": False,
+            }
+        )
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(len(steps) - 1)
+        self._sync_current_template_from_fields()
+
+    def copy_step(self):
+        template_index = self._current_template_index
+        step_index = self._current_step_index
+        if template_index < 0 or step_index < 0:
+            return
+        steps = self.templates[template_index].setdefault("steps", [])
+        if step_index >= len(steps):
+            return
+        source = json.loads(json.dumps(steps[step_index], ensure_ascii=False))
+        source["title"] = f"{source.get('title') or '步骤'} 副本"
+        steps.insert(step_index + 1, source)
+        self._refresh_step_list()
+        self.step_list.setCurrentRow(step_index + 1)
+        self._sync_current_template_from_fields()
+
+    def delete_step(self):
+        template_index = self._current_template_index
+        step_index = self._current_step_index
+        if template_index < 0 or step_index < 0:
+            return
+        steps = self.templates[template_index].setdefault("steps", [])
+        if step_index >= len(steps):
+            return
+        del steps[step_index]
+        self._refresh_step_list()
+        if steps:
+            self.step_list.setCurrentRow(min(step_index, len(steps) - 1))
+        else:
+            self._current_step_index = -1
+            self._clear_step_fields()
+        self._sync_current_template_from_fields()
+
+    def get_templates(self):
+        self._sync_current_step_from_fields()
+        self._sync_current_template_from_fields()
+        valid_skill_names = {
+            str(skill.get("name") or "").strip()
+            for skill in self._available_skills()
+            if str(skill.get("name") or "").strip()
+        }
+        agent_ids = {
+            str(profile.get("id") or "").strip()
+            for profile in self._available_agent_profiles()
+            if str(profile.get("id") or "").strip()
+        }
+        templates = []
+        for template in self.templates:
+            name = str(template.get("name") or "").strip()
+            if not name:
+                continue
+            steps = []
+            for index, step in enumerate(template.get("steps") or []):
+                title = str(step.get("title") or "").strip()
+                instructions = str(step.get("instructions") or "").strip()
+                success_criteria = str(step.get("success_criteria") or "").strip()
+                if not title and not instructions and not success_criteria:
+                    continue
+                steps.append(
+                    {
+                        "title": title or f"步骤 {index + 1}",
+                        "instructions": instructions,
+                        "success_criteria": success_criteria,
+                        "allow_skip": bool(step.get("allow_skip", False)),
+                    }
+                )
+            default_agent_profile_id = str(template.get("default_agent_profile_id") or "").strip()
+            if default_agent_profile_id not in agent_ids:
+                default_agent_profile_id = ""
+            templates.append(
+                {
+                    "id": str(template.get("id") or f"sop-{uuid.uuid4().hex[:8]}").strip(),
+                    "name": name,
+                    "description": str(template.get("description") or "").strip(),
+                    "triggers": self._csv_to_list("，".join(template.get("triggers") or [])),
+                    "skill_names": [
+                        skill_name
+                        for skill_name in normalize_selected_skill_names(template.get("skill_names"))
+                        if skill_name in valid_skill_names
+                    ],
+                    "default_agent_profile_id": default_agent_profile_id,
+                    "steps": steps,
+                    "created_at": int(template.get("created_at") or int(time.time())),
+                    "updated_at": int(time.time()),
+                }
+            )
+        return templates
+
+
+class SessionSopPickerDialog(QDialog):
+    def __init__(self, templates, current_template_id="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("为当前会话添加 SOP")
+        self.resize(700, 520)
+        self.templates = list(templates or [])
+        self.current_template_id = str(current_template_id or "").strip()
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("为当前会话添加 SOP")
+        title.setProperty("roleTitle", True)
+        subtitle = QLabel("选择后会把 SOP 绑定到当前会话。执行会严格按当前步骤推进，完成后需要在抽屉里确认。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.template_list = QListWidget()
+        self.template_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
+            f"QListWidget::item {{ padding: 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        for template in self.templates:
+            item = QListWidgetItem(template.get("name") or "未命名 SOP")
+            item.setData(Qt.UserRole, template.get("id"))
+            step_count = len(template.get("steps") or [])
+            desc = template.get("description") or "未填写描述"
+            item.setToolTip(f"{desc}\n步骤数：{step_count}")
+            self.template_list.addItem(item)
+        layout.addWidget(self.template_list, 1)
+
+        self.detail_label = QLabel("选择一个 SOP 模板查看说明。")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(self.detail_label)
+
+        actions = QHBoxLayout()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("绑定到本会话")
+        save_btn.setObjectName("PrimaryBtn")
+        save_btn.clicked.connect(self.accept)
+        actions.addStretch()
+        actions.addWidget(cancel_btn)
+        actions.addWidget(save_btn)
+        layout.addLayout(actions)
+
+        self.template_list.currentRowChanged.connect(self.refresh_details)
+        initial_index = 0
+        if self.current_template_id:
+            for index, template in enumerate(self.templates):
+                if str(template.get("id") or "") == self.current_template_id:
+                    initial_index = index
+                    break
+        if self.template_list.count():
+            self.template_list.setCurrentRow(initial_index)
+
+    def refresh_details(self, index):
+        template = self.templates[index] if 0 <= index < len(self.templates) else {}
+        if not template:
+            self.detail_label.setText("选择一个 SOP 模板查看说明。")
+            return
+        steps = template.get("steps") or []
+        preview = " -> ".join(
+            [str(step.get("title") or f"步骤 {i + 1}") for i, step in enumerate(steps[:4])]
+        )
+        if len(steps) > 4:
+            preview += " -> ..."
+        self.detail_label.setText(
+            f"{template.get('description') or '未填写描述'}\n步骤：{preview or '暂无步骤'}"
+        )
+
+    def selected_template(self):
+        item = self.template_list.currentItem()
+        if not item:
+            return None
+        template_id = str(item.data(Qt.UserRole) or "").strip()
+        for template in self.templates:
+            if str(template.get("id") or "").strip() == template_id:
+                return template
+        return None
+
+
 class AppUpdateWorker(QThread):
     progress_signal = Signal(str, int)
     finished_signal = Signal(dict)
@@ -1841,6 +2459,20 @@ class SettingsDialog(QDialog):
         self.agent_profile_manager = AgentProfileManager(
             self.config_manager.get_agent_profiles(),
             skill_provider=skill_provider,
+        )
+        sop_page, sop_layout = make_scroll_page(
+            "SOP",
+            "配置会话级 SOP 模板，定义步骤、成功标准和默认智能体。",
+        )
+        agent_profile_provider = (
+            self._main._available_agent_profiles
+            if self._main and hasattr(self._main, "_available_agent_profiles")
+            else (lambda: [])
+        )
+        self.sop_template_manager = SopTemplateManager(
+            self.config_manager.get_sop_templates(),
+            skill_provider=skill_provider,
+            agent_profile_provider=agent_profile_provider,
         )
 
         workspace_page, workspace_layout = make_scroll_page(
@@ -1985,6 +2617,8 @@ class SettingsDialog(QDialog):
         model_layout.addStretch()
         agent_layout.addWidget(self.agent_profile_manager)
         agent_layout.addStretch()
+        sop_layout.addWidget(self.sop_template_manager)
+        sop_layout.addStretch()
         workspace_layout.addWidget(storage_group)
         workspace_layout.addStretch()
         permission_page_layout.addWidget(permission_group)
@@ -1992,6 +2626,7 @@ class SettingsDialog(QDialog):
 
         add_settings_page("模型", "fa5s.brain", model_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
+        add_settings_page("SOP", "fa5s.tasks", sop_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("更新", "fa5s.download", update_page)
@@ -2305,6 +2940,7 @@ class SettingsDialog(QDialog):
             selected_model_id = all_model_ids[0] if all_model_ids else ""
         self.config_manager.set_model_channels(model_channels, selected_model_id)
         self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
+        self.config_manager.set_sop_templates(self.sop_template_manager.get_templates())
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -4637,6 +5273,7 @@ class SessionState:
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
         self.selected_skill_names = []
+        self.sop_run = None
         self.completed_agent_result_ids = set()
 
 class SmartSplitterHandle(QSplitterHandle):
@@ -5243,8 +5880,9 @@ def resolve_app_icon_path():
 
 class MainWindow(QMainWindow):
     RIGHT_TAB_FILES = 0
-    RIGHT_TAB_OBSERVABILITY = 1
-    RIGHT_TAB_SUB_AGENTS = 2
+    RIGHT_TAB_SOP = 1
+    RIGHT_TAB_OBSERVABILITY = 2
+    RIGHT_TAB_SUB_AGENTS = 3
 
     def __init__(self):
         super().__init__()
@@ -5658,6 +6296,67 @@ class MainWindow(QMainWindow):
         
         self.right_stack.addWidget(self.workspace_tab)
 
+        # SOP
+        self.sop_tab = QWidget()
+        sop_tab_layout = QVBoxLayout(self.sop_tab)
+        sop_tab_layout.setContentsMargins(14, 12, 14, 14)
+        sop_tab_layout.setSpacing(10)
+
+        sop_intro_card = QFrame()
+        sop_intro_card.setStyleSheet(apple_section_surface_style(radius=16))
+        sop_intro_layout = QVBoxLayout(sop_intro_card)
+        sop_intro_layout.setContentsMargins(12, 10, 12, 10)
+        sop_intro_layout.setSpacing(4)
+        self.sop_intro_label = QLabel("当前会话未绑定 SOP")
+        self.sop_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.sop_intro_label.setWordWrap(True)
+        sop_intro_layout.addWidget(self.sop_intro_label)
+        sop_tab_layout.addWidget(sop_intro_card)
+
+        self.sop_step_list = QListWidget()
+        self.sop_step_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=14, padding=4))
+        self.sop_step_list.setMinimumHeight(150)
+        sop_tab_layout.addWidget(self.sop_step_list)
+
+        sop_detail_card = QFrame()
+        sop_detail_card.setStyleSheet(apple_section_surface_style(radius=16))
+        sop_detail_layout = QVBoxLayout(sop_detail_card)
+        sop_detail_layout.setContentsMargins(12, 12, 12, 12)
+        sop_detail_layout.setSpacing(8)
+        self.sop_current_step_label = QLabel("当前步骤")
+        self.sop_current_step_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary};")
+        self.sop_current_step_label.setWordWrap(True)
+        self.sop_instruction_label = QLabel("绑定 SOP 后，这里会显示当前步骤的执行要求。")
+        self.sop_instruction_label.setWordWrap(True)
+        self.sop_instruction_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.sop_success_label = QLabel("")
+        self.sop_success_label.setWordWrap(True)
+        self.sop_success_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        sop_detail_layout.addWidget(self.sop_current_step_label)
+        sop_detail_layout.addWidget(self.sop_instruction_label)
+        sop_detail_layout.addWidget(self.sop_success_label)
+        sop_tab_layout.addWidget(sop_detail_card)
+
+        sop_actions = QHBoxLayout()
+        sop_actions.setContentsMargins(0, 0, 0, 0)
+        sop_actions.setSpacing(8)
+        self.sop_confirm_btn = QPushButton("确认完成")
+        self.sop_confirm_btn.setObjectName("PrimaryBtn")
+        self.sop_confirm_btn.clicked.connect(self.confirm_current_sop_step)
+        self.sop_rerun_btn = QPushButton("重跑本步")
+        self.sop_rerun_btn.setObjectName("SecondaryBtn")
+        self.sop_rerun_btn.clicked.connect(self.rerun_current_sop_step)
+        self.sop_skip_btn = QPushButton("标记不适用")
+        self.sop_skip_btn.setObjectName("SecondaryBtn")
+        self.sop_skip_btn.clicked.connect(self.skip_current_sop_step)
+        sop_actions.addWidget(self.sop_confirm_btn)
+        sop_actions.addWidget(self.sop_rerun_btn)
+        sop_actions.addWidget(self.sop_skip_btn)
+        sop_actions.addStretch()
+        sop_tab_layout.addLayout(sop_actions)
+
+        self.right_stack.addWidget(self.sop_tab)
+
         # Observability
         self.tool_details_tab = QWidget()
         td_layout = QVBoxLayout(self.tool_details_tab)
@@ -5915,6 +6614,7 @@ class MainWindow(QMainWindow):
         context_rail_layout.setSpacing(4)
         context_actions = [
             (self.RIGHT_TAB_FILES, "文件", "fa5s.folder-open"),
+            (self.RIGHT_TAB_SOP, "SOP", "fa5s.tasks"),
             (self.RIGHT_TAB_OBSERVABILITY, "观测", "fa5s.chart-line"),
             (self.RIGHT_TAB_SUB_AGENTS, "子 Agent", "fa5s.project-diagram"),
         ]
@@ -5978,6 +6678,21 @@ class MainWindow(QMainWindow):
             f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; }}"
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
+
+        self.sop_badge = QPushButton(" SOP")
+        self.sop_badge.setIcon(qta.icon('fa5s.tasks', color=DesignTokens.primary))
+        self.sop_badge.setToolTip("查看或调整当前会话 SOP")
+        self.sop_badge.setCursor(Qt.PointingHandCursor)
+        self.sop_badge.setFixedHeight(30)
+        self.sop_badge.setVisible(False)
+        self.sop_badge.setStyleSheet(
+            f"QPushButton {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+            f"border: 1px solid rgba(0, 122, 255, 0.22); border-radius: 15px; "
+            "padding: 4px 10px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
+            f"border-color: {DesignTokens.border}; }}"
+        )
+        self.sop_badge.clicked.connect(lambda: self.show_context_drawer(self.RIGHT_TAB_SOP))
 
         self.selected_skills_badge = QPushButton(" 已选能力")
         self.selected_skills_badge.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
@@ -6057,6 +6772,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.setContentsMargins(0, 0, 0, 0)
         prompt_toolbar.setSpacing(8)
         prompt_toolbar.addWidget(self.tool_menu_btn)
+        prompt_toolbar.addWidget(self.sop_badge)
         prompt_toolbar.addWidget(self.selected_skills_badge)
         prompt_toolbar.addWidget(self.clarify_mode_badge)
         prompt_toolbar.addWidget(self.pause_btn)
@@ -6154,6 +6870,7 @@ class MainWindow(QMainWindow):
             return
         page_titles = {
             self.RIGHT_TAB_FILES: ("任务文件", "查看工作区文件与内容预览"),
+            self.RIGHT_TAB_SOP: ("SOP 流程", "查看当前会话的 SOP 步骤与确认状态"),
             self.RIGHT_TAB_OBSERVABILITY: ("任务观测", "查看系统提示词、工具调用与返回"),
             self.RIGHT_TAB_SUB_AGENTS: ("子 Agent", "查看并行子 Agent 状态与日志"),
         }
@@ -6182,6 +6899,7 @@ class MainWindow(QMainWindow):
             return
         icons = {
             self.RIGHT_TAB_FILES: "fa5s.folder-open",
+            self.RIGHT_TAB_SOP: "fa5s.tasks",
             self.RIGHT_TAB_OBSERVABILITY: "fa5s.chart-line",
             self.RIGHT_TAB_SUB_AGENTS: "fa5s.project-diagram",
         }
@@ -6205,19 +6923,34 @@ class MainWindow(QMainWindow):
         for btn_index, btn in enumerate(getattr(self, "observability_segment_buttons", [])):
             btn.setChecked(btn_index == index)
 
+    def _prompt_tool_menu_entries(self):
+        return [
+            ("add_files", "添加文件"),
+            ("add_agent", "添加智能体"),
+            ("add_sop", "添加 SOP"),
+            ("select_skills", "指定能力"),
+            ("clarify_mode", "反问模式"),
+        ]
+
+    def _should_block_send_for_sop(self, state):
+        return bool(state and is_sop_awaiting_confirmation(getattr(state, "sop_run", None)))
+
     def show_prompt_tool_menu(self):
         menu = QMenu(self)
         menu.setStyleSheet(MENU_STYLESHEET)
-        add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加照片和文件", self)
+        add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加文件", self)
         add_files.setEnabled(False)
         menu.addAction(add_files)
         add_agent_menu = menu.addMenu(qta.icon('fa5s.user-astronaut', color='#4b5563'), "添加智能体")
         self._populate_agent_menu(add_agent_menu)
+        add_sop_action = QAction(qta.icon('fa5s.tasks', color='#4b5563'), "添加 SOP", self)
+        add_sop_action.triggered.connect(self.open_session_sop_picker)
+        menu.addAction(add_sop_action)
+        select_skills_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "指定能力", self)
+        select_skills_action.triggered.connect(self.open_session_skill_picker)
+        menu.addAction(select_skills_action)
         menu.addAction(self.clarify_mode_action)
         menu.addSeparator()
-        plugins_action = QAction(qta.icon('fa5s.th-large', color='#4b5563'), "插件", self)
-        plugins_action.triggered.connect(self.open_session_skill_picker)
-        menu.addAction(plugins_action)
         manage_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "能力中心", self)
         manage_action.triggered.connect(self.open_skills_center)
         menu.addAction(manage_action)
@@ -6337,10 +7070,13 @@ class MainWindow(QMainWindow):
                 or getattr(state, "system_prompt_appends", [])
             )
         )
-        has_context = bool(state and (state.step_records or state.has_file_changes or has_clarify_context or has_observability_context))
+        has_sop_context = bool(state and normalize_sop_run(getattr(state, "sop_run", None)))
+        has_context = bool(state and (state.step_records or state.has_file_changes or has_clarify_context or has_observability_context or has_sop_context))
         self.context_available_tabs = set()
         if has_workspace:
             self.context_available_tabs.add(self.RIGHT_TAB_FILES)
+        if has_sop_context:
+            self.context_available_tabs.add(self.RIGHT_TAB_SOP)
         if has_observability_context or has_context:
             self.context_available_tabs.add(self.RIGHT_TAB_OBSERVABILITY)
         if state and getattr(state, "sub_agent_events", []):
@@ -6348,6 +7084,7 @@ class MainWindow(QMainWindow):
         self.update_context_rail_badges()
         if state and state.session_id == self.current_session_id:
             self.refresh_clarify_controls(state.session_id)
+            self.refresh_sop_controls(state.session_id)
 
     def _extract_pending_clarify_questions_from_args(self, args_obj):
         if not isinstance(args_obj, dict):
@@ -6383,6 +7120,147 @@ class MainWindow(QMainWindow):
                 getattr(state, "selected_skill_names", [])
             )
         }
+
+    def _session_sop_meta(self, state):
+        if not state:
+            return {}
+        return {
+            "sop_run": normalize_sop_run(getattr(state, "sop_run", None))
+        }
+
+    def _active_sop_template(self, state):
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run:
+            return None
+        return self.config_manager.get_sop_template(sop_run.get("template_id"))
+
+    def _resolve_sop_default_profile(self, state):
+        template = self._active_sop_template(state)
+        if not template:
+            return None
+        profile_id = str(template.get("default_agent_profile_id") or "").strip()
+        if not profile_id:
+            return None
+        profile = self.config_manager.get_agent_profile(profile_id)
+        if not profile or not bool(profile.get("enabled", True)):
+            return None
+        return profile
+
+    def _effective_sop_skill_names(self, state, extra_skill_names=None):
+        names = []
+        seen = set()
+        sources = [
+            getattr(state, "selected_skill_names", []),
+        ]
+        template = self._active_sop_template(state)
+        if template:
+            sources.append(template.get("skill_names") or [])
+        if extra_skill_names:
+            sources.append(extra_skill_names)
+        for source in sources:
+            for skill_name in normalize_selected_skill_names(source):
+                if skill_name in seen:
+                    continue
+                seen.add(skill_name)
+                names.append(skill_name)
+        return names
+
+    def refresh_sop_controls(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state or state.session_id != self.current_session_id:
+            return
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        running = bool(
+            (state.llm_worker and state.llm_worker.isRunning())
+            or (state.code_worker and state.code_worker.isRunning())
+            or getattr(state, "daemon_running", False)
+        )
+        if not sop_run:
+            self.sop_badge.setVisible(False)
+            self.sop_intro_label.setText("当前会话未绑定 SOP")
+            self.sop_step_list.clear()
+            self.sop_current_step_label.setText("当前步骤")
+            self.sop_instruction_label.setText("绑定 SOP 后，这里会显示当前步骤的执行要求。")
+            self.sop_success_label.setText("")
+            self.sop_confirm_btn.setEnabled(False)
+            self.sop_rerun_btn.setEnabled(False)
+            self.sop_skip_btn.setEnabled(False)
+            return
+        state.sop_run = sop_run
+        current_step = get_current_step(sop_run)
+        badge_text = f" SOP · {sop_run.get('template_name') or '未命名 SOP'}"
+        if current_step:
+            badge_text = f"{badge_text} · {current_step.get('title') or '当前步骤'}"
+        self.sop_badge.setText(badge_text)
+        self.sop_badge.setToolTip(
+            f"当前 SOP：{sop_run.get('template_name') or '未命名 SOP'}"
+        )
+        self.sop_badge.setVisible(True)
+        self.sop_badge.setEnabled(not running)
+
+        self.sop_step_list.blockSignals(True)
+        self.sop_step_list.clear()
+        for index, step in enumerate(sop_run.get("steps") or []):
+            status = str(step.get("status") or "")
+            icon_name = "fa5s.circle"
+            icon_color = DesignTokens.text_tertiary
+            if status in {"completed", "skipped"}:
+                icon_name = "fa5s.check-circle" if status == "completed" else "fa5s.forward"
+                icon_color = DesignTokens.status_success if status == "completed" else DesignTokens.warning_text
+            elif index == sop_run.get("current_step_index"):
+                icon_name = "fa5s.play-circle"
+                icon_color = DesignTokens.status_running
+            item = QListWidgetItem(
+                qta.icon(icon_name, color=icon_color),
+                f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}",
+            )
+            item.setToolTip(step.get("success_criteria") or "")
+            self.sop_step_list.addItem(item)
+        if self.sop_step_list.count():
+            self.sop_step_list.setCurrentRow(min(sop_run.get("current_step_index", 0), self.sop_step_list.count() - 1))
+        self.sop_step_list.blockSignals(False)
+
+        intro = sop_run.get("template_description") or "当前会话正在按 SOP 严格逐步执行。"
+        if sop_run.get("status") == SOP_RUN_STATUS_COMPLETED:
+            intro = f"{intro}\n当前 SOP 已完成。"
+        elif sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION:
+            intro = f"{intro}\n当前步骤已完成，等待你确认。"
+        self.sop_intro_label.setText(intro)
+
+        if current_step:
+            self.sop_current_step_label.setText(
+                f"当前步骤 {sop_run.get('current_step_index', 0) + 1} / {len(sop_run.get('steps') or [])}: {current_step.get('title') or '未命名步骤'}"
+            )
+            self.sop_instruction_label.setText(current_step.get("instructions") or "未填写执行指令。")
+            success_text = current_step.get("success_criteria") or "未填写成功标准。"
+            self.sop_success_label.setText(f"成功标准：{success_text}")
+        else:
+            self.sop_current_step_label.setText("当前步骤")
+            self.sop_instruction_label.setText("当前没有可执行步骤。")
+            self.sop_success_label.setText("")
+
+        allow_actions = sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION and not running
+        self.sop_confirm_btn.setEnabled(allow_actions)
+        self.sop_rerun_btn.setEnabled(allow_actions)
+        self.sop_skip_btn.setEnabled(allow_actions and bool(current_step and current_step.get("allow_skip")))
+
+    def _mark_sop_step_done_for_confirmation(self, state, executor="", content="", agent_profile=None):
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run or is_sop_completed(sop_run):
+            return False
+        execution_info = {
+            "finished_at": int(time.time()),
+            "executor": executor or ((sop_run.get("last_execution") or {}).get("executor") or "main_agent"),
+            "content": str(content or "").strip(),
+        }
+        if agent_profile:
+            execution_info["agent_profile_id"] = agent_profile.get("id") or ""
+            execution_info["agent_profile_name"] = agent_profile.get("name") or ""
+        state.sop_run = mark_step_awaiting_confirmation(sop_run, execution_info=execution_info)
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        return True
 
     def refresh_clarify_controls(self, session_id=None):
         state = self.get_session(session_id)
@@ -6928,6 +7806,7 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(session_id)
         self.refresh_observability_view(session_id)
         self.refresh_context_badges(session_id)
+        self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         self._render_sub_agent_monitor_for_state(state)
 
@@ -6984,12 +7863,17 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
                 self.pause_btn.setToolTip("暂停")
         else:
-            idle_text = "开始反问" if state.clarify_mode_enabled else "开始"
+            awaiting_sop_confirmation = is_sop_awaiting_confirmation(getattr(state, "sop_run", None))
+            idle_text = "等待确认" if awaiting_sop_confirmation else ("开始反问" if state.clarify_mode_enabled else "开始")
             self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
             self.action_btn.setEnabled(bool(self.workspace_dir))
             self.input_field.setEnabled(bool(self.workspace_dir))
+            if awaiting_sop_confirmation:
+                self.input_field.setPlaceholderText("请先在右侧 SOP 抽屉中确认当前步骤")
+            elif self.workspace_dir:
+                self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
@@ -7148,6 +8032,7 @@ class MainWindow(QMainWindow):
         state.clarify_source_user_text = ""
         state.clarify_answers_context = []
         state.selected_skill_names = []
+        state.sop_run = None
         state.completed_agent_result_ids = set()
         state.changed_files = []
         state.step_records = []
@@ -7230,6 +8115,7 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = normalize_selected_skill_names(
             conversation_meta.get("selected_skill_names")
         )
+        state.sop_run = normalize_sop_run(conversation_meta.get("sop_run"))
         state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
         state.clarify_mode_state = normalize_clarify_phase(
             conversation_meta.get("clarify_mode_state"),
@@ -7309,6 +8195,7 @@ class MainWindow(QMainWindow):
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.normalize_session_ui(self.get_current_session())
+        self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._render_sub_agent_monitor_for_state(state)
@@ -8246,6 +9133,7 @@ class MainWindow(QMainWindow):
             if session_id in self.sessions:
                 merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
                 merged_meta.update(self._session_selected_skills_meta(self.sessions.get(session_id)))
+                merged_meta.update(self._session_sop_meta(self.sessions.get(session_id)))
             try:
                 self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
@@ -8300,7 +9188,8 @@ class MainWindow(QMainWindow):
             or bool(getattr(state, "pending_clarify_questions", []))
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not state.messages and not has_clarify_state and not has_selected_skills:
+        has_sop_state = bool(normalize_sop_run(getattr(state, "sop_run", None)))
+        if not state.messages and not has_clarify_state and not has_selected_skills and not has_sop_state:
             return
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
         meta = {}
@@ -8315,6 +9204,7 @@ class MainWindow(QMainWindow):
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
+        meta.update(self._session_sop_meta(state))
         try:
             self.chat_storage.save_conversation(
                 state.session_id,
@@ -8829,6 +9719,81 @@ class MainWindow(QMainWindow):
             self.set_session_selected_skills(dialog.selected_skill_names(), session_id=state.session_id)
             self.add_system_toast("当前会话的指定能力已更新。", "success", session_id=state.session_id, auto_close_ms=3200)
 
+    def open_session_sop_picker(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        templates = self.config_manager.get_sop_templates()
+        dialog = SessionSopPickerDialog(
+            templates,
+            current_template_id=(normalize_sop_run(getattr(state, "sop_run", None)) or {}).get("template_id", ""),
+            parent=self,
+        )
+        if dialog.exec():
+            template = dialog.selected_template()
+            if not template:
+                QMessageBox.information(self, "添加 SOP", "请选择一个 SOP 模板。")
+                return
+            sop_run = create_sop_run(template)
+            if not sop_run:
+                QMessageBox.warning(self, "添加 SOP", "这个 SOP 模板没有可执行步骤，请先到设置里补充。")
+                return
+            state.sop_run = sop_run
+            self.save_chat_history(session_id=state.session_id)
+            self.refresh_sop_controls(state.session_id)
+            self.refresh_context_badges(state.session_id)
+            self.show_context_drawer(self.RIGHT_TAB_SOP)
+            self.add_system_toast("当前会话已绑定 SOP。", "success", session_id=state.session_id, auto_close_ms=3200)
+
+    def confirm_current_sop_step(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run or not is_sop_awaiting_confirmation(sop_run):
+            return
+        state.sop_run = confirm_current_step(sop_run)
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        if is_sop_completed(state.sop_run):
+            self.add_system_toast("SOP 已完成。", "success", session_id=state.session_id, auto_close_ms=3200)
+        else:
+            self.add_system_toast("已确认当前步骤，SOP 已推进到下一步。", "success", session_id=state.session_id, auto_close_ms=3200)
+
+    def rerun_current_sop_step(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run or not is_sop_awaiting_confirmation(sop_run):
+            return
+        state.sop_run = rerun_current_step(sop_run)
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        self.add_system_toast("当前步骤已恢复为待执行，可重新发送。", "info", session_id=state.session_id, auto_close_ms=3200)
+
+    def skip_current_sop_step(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        current_step = get_current_step(sop_run)
+        if not sop_run or not current_step or not current_step.get("allow_skip"):
+            return
+        text, ok = QInputDialog.getText(self, "标记不适用", "请填写原因（可选）")
+        if not ok:
+            return
+        state.sop_run = skip_current_step(sop_run, reason=(text or "").strip())
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        if is_sop_completed(state.sop_run):
+            self.add_system_toast("已标记不适用，SOP 已完成。", "info", session_id=state.session_id, auto_close_ms=3200)
+        else:
+            self.add_system_toast("已标记不适用，SOP 已推进到下一步。", "info", session_id=state.session_id, auto_close_ms=3200)
+
     def update_skill_capture_button_state(self):
         if not hasattr(self, "sidebar_skill_capture_btn"):
             return
@@ -9161,6 +10126,7 @@ class MainWindow(QMainWindow):
         self.normalize_session_ui(state)
 
     def _build_run_context(self, state, mode):
+        effective_skill_names = self._effective_sop_skill_names(state)
         return normalize_run_context(
             {
                 "mode": mode,
@@ -9171,10 +10137,9 @@ class MainWindow(QMainWindow):
                 "pending_clarify_questions": normalize_pending_clarify_questions(
                     getattr(state, "pending_clarify_questions", [])
                 ),
-                "selected_skill_names": normalize_selected_skill_names(
-                    getattr(state, "selected_skill_names", [])
-                ),
+                "selected_skill_names": effective_skill_names,
                 "selected_model_id": self.config_manager.get_selected_model_id(),
+                "sop_run": normalize_sop_run(getattr(state, "sop_run", None)),
             }
         )
 
@@ -9201,8 +10166,11 @@ class MainWindow(QMainWindow):
         if is_current:
             self.normalize_session_ui(state)
 
-    def _build_agent_profile_run_context(self, profile):
-        skill_names = normalize_selected_skill_names(profile.get("skill_names"))
+    def _build_agent_profile_run_context(self, profile, state=None, summon_source="mention"):
+        skill_names = self._effective_sop_skill_names(
+            state,
+            extra_skill_names=profile.get("skill_names") if profile else [],
+        )
         return normalize_run_context(
             {
                 "mode": RUN_MODE_EXECUTION,
@@ -9213,7 +10181,8 @@ class MainWindow(QMainWindow):
                 "agent_profile_name": profile.get("name"),
                 "agent_description": profile.get("description"),
                 "agent_system_prompt": profile.get("system_prompt"),
-                "agent_summon_source": "mention",
+                "agent_summon_source": summon_source,
+                "sop_run": normalize_sop_run(getattr(state, "sop_run", None)) if state else None,
             }
         )
 
@@ -9221,7 +10190,7 @@ class MainWindow(QMainWindow):
         base_name = str(profile.get("name") or "智能体").strip() or "智能体"
         return f"{base_name}-{uuid.uuid4().hex[:4]}"
 
-    def _dispatch_agent_profiles(self, state, original_text, task_text, profiles):
+    def _dispatch_agent_profiles(self, state, original_text, task_text, profiles, summon_source="mention"):
         agent_state_proxy = type(
             "_AgentStateProxy",
             (),
@@ -9250,12 +10219,12 @@ class MainWindow(QMainWindow):
         self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
 
         for profile in profiles:
-            run_context = self._build_agent_profile_run_context(profile)
+            run_context = self._build_agent_profile_run_context(profile, state=state, summon_source=summon_source)
             meta = {
                 "agent_profile_id": profile.get("id") or "",
                 "agent_profile_name": profile.get("name") or "",
                 "agent_description": profile.get("description") or "",
-                "summon_source": "mention",
+                "summon_source": summon_source,
             }
             try:
                 manager.spawn_agent(
@@ -9282,7 +10251,11 @@ class MainWindow(QMainWindow):
             return False
 
         summary_names = "、".join([str(item.get("name") or "") for item in started_profiles])
-        summary_text = f"已召唤 {len(started_profiles)} 个智能体：{summary_names}\n任务：{task_text}"
+        summary_prefix = "已按 SOP 启动" if summon_source == "sop_default" else "已召唤"
+        step = get_current_step(getattr(state, "sop_run", None))
+        summary_text = f"{summary_prefix} {len(started_profiles)} 个智能体：{summary_names}\n任务：{task_text}"
+        if step:
+            summary_text = f"{summary_text}\n当前 SOP 步骤：{step.get('title') or '未命名步骤'}"
         state.last_agent_bubble = self.add_chat_bubble("agent", summary_text, animate=False, force_scroll=True)
         self.add_system_toast(
             f"已启动 {len(started_profiles)} 个智能体，完成后会回填结果。",
@@ -9300,7 +10273,7 @@ class MainWindow(QMainWindow):
     def _append_summoned_agent_result(self, state, data):
         if not state or not isinstance(data, dict):
             return
-        if data.get("summon_source") != "mention":
+        if data.get("summon_source") not in {"mention", "sop_default"}:
             return
         agent_id = str(data.get("agent_id") or "").strip()
         if not agent_id or agent_id in getattr(state, "completed_agent_result_ids", set()):
@@ -9315,6 +10288,9 @@ class MainWindow(QMainWindow):
             detail = error or content or "任务未成功完成。"
             text = f"[{profile_name}] {detail}"
         state.completed_agent_result_ids.add(agent_id)
+        step = get_current_step(getattr(state, "sop_run", None))
+        if data.get("summon_source") == "sop_default" and step:
+            text = f"[SOP: {step.get('title') or '当前步骤'}] {text}"
         state.messages.append(
             {
                 "role": "assistant",
@@ -9323,7 +10299,7 @@ class MainWindow(QMainWindow):
                     "agent_id": agent_id,
                     "agent_profile_id": data.get("agent_profile_id") or "",
                     "agent_profile_name": profile_name,
-                    "summon_source": "mention",
+                    "summon_source": data.get("summon_source") or "mention",
                     "agent_status": status,
                 },
             }
@@ -9340,6 +10316,11 @@ class MainWindow(QMainWindow):
         if not self.workspace_dir:
             QMessageBox.warning(self, "提示", "请先选择一个工作区目录！")
             return
+        state = self.get_current_session()
+        if self._should_block_send_for_sop(state):
+            QMessageBox.information(self, "SOP 等待确认", "当前步骤已完成，请先在右侧 SOP 抽屉中确认、重跑或标记不适用。")
+            self.show_context_drawer(self.RIGHT_TAB_SOP)
+            return
         user_text = self.input_field.toPlainText().strip()
         if not user_text: return
         mentioned_profiles, delegated_text = self._extract_agent_mentions(user_text)
@@ -9354,8 +10335,7 @@ class MainWindow(QMainWindow):
 
         self.add_chat_bubble("User", user_text, animate=False, force_scroll=True)
         self.input_field.clear()
-        
-        state = self.get_current_session()
+
         if not state: return
         state.step_records = []
         state.changed_files = []
@@ -9386,10 +10366,25 @@ class MainWindow(QMainWindow):
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
+        if normalize_sop_run(getattr(state, "sop_run", None)):
+            state.sop_run = mark_step_running(
+                state.sop_run,
+                {
+                    "started_at": int(time.time()),
+                    "executor": "sub_agent" if mentioned_profiles else "main_agent",
+                    "trigger_message": user_text,
+                },
+            )
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
         if mentioned_profiles:
-            self._dispatch_agent_profiles(state, user_text, delegated_text, mentioned_profiles)
+            self.refresh_sop_controls(state.session_id)
+            self._dispatch_agent_profiles(state, user_text, delegated_text, mentioned_profiles, summon_source="mention")
+            return
+        sop_default_profile = self._resolve_sop_default_profile(state)
+        if sop_default_profile:
+            self.refresh_sop_controls(state.session_id)
+            self._dispatch_agent_profiles(state, user_text, user_text, [sop_default_profile], summon_source="sop_default")
             return
         self.try_connect_daemon(allow_start=True, retries=4)
         run_context = self._build_run_context(state, run_mode)
@@ -9912,8 +10907,22 @@ class MainWindow(QMainWindow):
                 (state.llm_worker and state.llm_worker.isRunning())
                 or getattr(state, "daemon_running", False)
             ):
-                self.set_session_phase("Completed", state.session_id)
-                self.set_session_status("completed", state.session_id, save=True)
+                if normalize_sop_run(getattr(state, "sop_run", None)) and status == "completed":
+                    content = data.get("content") or ""
+                    self._mark_sop_step_done_for_confirmation(
+                        state,
+                        executor="sub_agent",
+                        content=content,
+                        agent_profile={
+                            "id": data.get("agent_profile_id") or "",
+                            "name": data.get("agent_profile_name") or data.get("agent_name") or "",
+                        },
+                    )
+                    self.set_session_phase("Awaiting confirmation", state.session_id)
+                    self.set_session_status("draft", state.session_id, save=True)
+                else:
+                    self.set_session_phase("Completed", state.session_id)
+                    self.set_session_status("completed", state.session_id, save=True)
 
     def handle_content_signal(self, text, session_id=None, turn_id=None):
         state = self.get_session(session_id)
@@ -10270,8 +11279,16 @@ class MainWindow(QMainWindow):
             if clarify_active:
                 self.set_session_status("draft", state.session_id, save=True)
             else:
-                self.set_session_phase("Completed", state.session_id)
-                self.set_session_status("completed", state.session_id, save=True)
+                if self._mark_sop_step_done_for_confirmation(
+                    state,
+                    executor="main_agent",
+                    content=content,
+                ):
+                    self.set_session_phase("Awaiting confirmation", state.session_id)
+                    self.set_session_status("draft", state.session_id, save=True)
+                else:
+                    self.set_session_phase("Completed", state.session_id)
+                    self.set_session_status("completed", state.session_id, save=True)
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
             if is_current: self.normalize_session_ui(state)
@@ -10298,8 +11315,18 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if state: state.code_worker = None
         if state:
-            self.set_session_phase("Completed", state.session_id)
-            self.set_session_status("completed", state.session_id, save=True)
+            code_text = ""
+            if state.last_agent_bubble and hasattr(state.last_agent_bubble, "code_output_edit"):
+                try:
+                    code_text = state.last_agent_bubble.code_output_edit.toPlainText().strip()
+                except Exception:
+                    code_text = ""
+            if self._mark_sop_step_done_for_confirmation(state, executor="main_agent", content=code_text):
+                self.set_session_phase("Awaiting confirmation", state.session_id)
+                self.set_session_status("draft", state.session_id, save=True)
+            else:
+                self.set_session_phase("Completed", state.session_id)
+                self.set_session_status("completed", state.session_id, save=True)
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
         if session_id == self.current_session_id:

@@ -234,6 +234,62 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(stored["name"], "写作助手")
         self.assertFalse(stored["enabled"])
 
+    def test_sop_templates_are_normalized_and_persisted(self):
+        cm = self._create_config_manager(
+            {
+                "sop_templates": [
+                    {
+                        "name": "办公流程",
+                        "description": "示例",
+                        "skill_names": ["browser-automation", "browser-automation", ""],
+                        "triggers": ["办公", "办公", ""],
+                        "steps": [
+                            {
+                                "title": "确认目标",
+                                "instructions": "只确认目标",
+                                "success_criteria": "目标清楚",
+                                "allow_skip": False,
+                            },
+                            {
+                                "title": "",
+                                "instructions": "",
+                                "success_criteria": "",
+                            },
+                        ],
+                    },
+                    {
+                        "name": "办公流程",
+                        "steps": [{"title": "第二步"}],
+                    },
+                ]
+            }
+        )
+
+        templates = cm.get_sop_templates()
+
+        self.assertEqual(len(templates), 2)
+        self.assertEqual(templates[0]["name"], "办公流程")
+        self.assertEqual(templates[0]["skill_names"], ["browser-automation"])
+        self.assertEqual(templates[0]["triggers"], ["办公"])
+        self.assertEqual(len(templates[0]["steps"]), 1)
+        self.assertNotEqual(templates[0]["id"], templates[1]["id"])
+
+        cm.set_sop_templates(
+            [
+                {
+                    "id": "office-flow",
+                    "name": "Office Flow",
+                    "description": "demo",
+                    "default_agent_profile_id": "agent-review",
+                    "steps": [{"title": "Step 1", "instructions": "Do it"}],
+                }
+            ]
+        )
+        stored = cm.get_sop_template("office-flow")
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["name"], "Office Flow")
+        self.assertEqual(stored["default_agent_profile_id"], "agent-review")
+
     def test_migrates_legacy_deepseek_model_name(self):
         cm = self._create_config_manager({"model_name": "deepseek-reasoner"})
         self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)

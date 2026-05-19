@@ -1,4 +1,5 @@
 import json
+from .sop_manager import normalize_sop_run
 
 
 CLARIFY_MODE_DISABLED = "disabled"
@@ -159,6 +160,7 @@ def normalize_run_context(run_context):
         "selected_model_id": str(ctx.get("selected_model_id") or "").strip(),
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
         "channel": str(ctx.get("channel") or "").strip().lower(),
+        "sop_run": normalize_sop_run(ctx.get("sop_run")),
     }
 
 

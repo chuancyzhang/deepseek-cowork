@@ -26,6 +26,7 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
+from core.sop_manager import build_sop_prompt_fragment
 from core.llm.deepseek import is_deepseek_request
 
 try:
@@ -875,6 +876,10 @@ class LLMWorker(QThread):
                     "\n\n".join([item for item in selected_skill_briefs if item]),
                 ]
             )
+
+        sop_prompt_fragment = build_sop_prompt_fragment(self.run_context.get("sop_run"))
+        if sop_prompt_fragment:
+            context_lines.extend(["", sop_prompt_fragment])
 
         # Append Skill-Specific Prompts (e.g. usage guidelines, learned experiences)
         try:

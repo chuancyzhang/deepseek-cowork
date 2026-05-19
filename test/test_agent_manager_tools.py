@@ -206,6 +206,33 @@ class TestAgentManagerTools(unittest.TestCase):
         self.assertEqual(messages[0]["role"], "user")
         self.assertEqual(messages[0]["content"], "task A")
 
+    def test_spawn_agent_persists_run_context_and_profile_meta(self):
+        result = self.manager.spawn_agent(
+            message="task A",
+            name="worker-a",
+            fork_context=False,
+            run_context={
+                "mode": "execution",
+                "allowed_skill_names": ["command-tools"],
+                "agent_profile_id": "agent-review",
+                "agent_profile_name": "审查助手",
+                "agent_system_prompt": "只做审查",
+            },
+            meta={
+                "agent_profile_id": "agent-review",
+                "agent_profile_name": "审查助手",
+                "summon_source": "mention",
+            },
+        )
+        agent = self.storage.get_agent(result["agent_id"])
+        self.assertEqual(agent["meta"]["agent_profile_id"], "agent-review")
+        self.assertEqual(agent["meta"]["agent_profile_name"], "审查助手")
+        self.assertEqual(agent["meta"]["summon_source"], "mention")
+        self.assertEqual(
+            agent["meta"]["run_context"]["allowed_skill_names"],
+            ["command-tools"],
+        )
+
     def test_fork_context_initializes_agent_messages_from_snapshot(self):
         self.factory.delay = 0.2
         snapshot = [

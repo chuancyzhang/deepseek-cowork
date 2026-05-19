@@ -472,6 +472,9 @@ class LLMWorker(QThread):
     def _selected_skill_names(self):
         return normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
 
+    def _allowed_skill_names(self):
+        return normalize_selected_skill_names(self.run_context.get("allowed_skill_names"))
+
     def _selected_skill_tool_names(self):
         tool_names = []
         seen = set()
@@ -835,6 +838,19 @@ class LLMWorker(QThread):
         if memories_text:
             context_lines.append("\n# Memories\n" + memories_text)
 
+        agent_profile_name = str(self.run_context.get("agent_profile_name") or "").strip()
+        agent_description = str(self.run_context.get("agent_description") or "").strip()
+        agent_system_prompt = str(self.run_context.get("agent_system_prompt") or "").strip()
+        if agent_profile_name or agent_system_prompt:
+            agent_lines = ["# 智能体角色"]
+            if agent_profile_name:
+                agent_lines.append(f"当前智能体: {agent_profile_name}")
+            if agent_description:
+                agent_lines.append(agent_description)
+            if agent_system_prompt:
+                agent_lines.append(agent_system_prompt)
+            context_lines.append("\n" + "\n".join(agent_lines))
+
         selected_skill_names = [
             skill_name for skill_name in self._selected_skill_names()
             if self.skill_manager.get_brief_skill_prompt(skill_name)
@@ -865,6 +881,7 @@ class LLMWorker(QThread):
             system_skills = self.skill_manager.get_system_prompts(
                 query_text=self._build_skill_query(current_messages),
                 exclude_skill_names=selected_skill_names,
+                allowed_skill_names=self._allowed_skill_names(),
             )
         except TypeError:
             system_skills = self.skill_manager.get_system_prompts(

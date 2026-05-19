@@ -187,6 +187,53 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("llm_provider"), "openai")
         self.assertEqual(cm.get("model_name"), "glm-test")
 
+    def test_agent_profiles_are_normalized_and_persisted(self):
+        cm = self._create_config_manager(
+            {
+                "agent_profiles": [
+                    {
+                        "name": "审查助手",
+                        "description": "代码审查",
+                        "system_prompt": "只做审查",
+                        "skill_names": ["browser-automation", "browser-automation", ""],
+                        "enabled": True,
+                    },
+                    {
+                        "name": "审查助手",
+                        "skill_names": ["command-tools"],
+                    },
+                    {
+                        "name": "",
+                        "skill_names": ["ignored"],
+                    },
+                ]
+            }
+        )
+
+        profiles = cm.get_agent_profiles()
+
+        self.assertEqual(len(profiles), 2)
+        self.assertEqual(profiles[0]["name"], "审查助手")
+        self.assertEqual(profiles[0]["skill_names"], ["browser-automation"])
+        self.assertNotEqual(profiles[0]["id"], profiles[1]["id"])
+
+        cm.set_agent_profiles(
+            [
+                {
+                    "id": "agent-writer",
+                    "name": "写作助手",
+                    "description": "输出润色",
+                    "system_prompt": "更简洁",
+                    "skill_names": ["command-tools"],
+                    "enabled": False,
+                }
+            ]
+        )
+        stored = cm.get_agent_profile("agent-writer")
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["name"], "写作助手")
+        self.assertFalse(stored["enabled"])
+
     def test_migrates_legacy_deepseek_model_name(self):
         cm = self._create_config_manager({"model_name": "deepseek-reasoner"})
         self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)

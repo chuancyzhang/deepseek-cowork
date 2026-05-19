@@ -236,6 +236,75 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             }
             self.assertIn("publish_artifacts", tools)
 
+    def test_allowed_skill_scope_filters_tool_visibility_and_search(self):
+        skill_dir = os.path.join(self.skills_dir, "notes-tools")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "impl.py"), "w", encoding="utf-8") as f:
+            f.write(
+                "def _read_note(path):\n"
+                "    return path\n\n"
+                "TOOL_EXPORTS = [\n"
+                "    {\n"
+                "        'name': 'read_note',\n"
+                "        'handler': _read_note,\n"
+                "        'description': 'Read note content',\n"
+                "        'parameters': {'type': 'object', 'properties': {}, 'required': []},\n"
+                "        'search_hint': 'notes read text',\n"
+                "    },\n"
+                "]\n"
+            )
+        other_dir = os.path.join(self.skills_dir, "image-tools")
+        os.makedirs(other_dir, exist_ok=True)
+        with open(os.path.join(other_dir, "impl.py"), "w", encoding="utf-8") as f:
+            f.write(
+                "def _resize_image(path):\n"
+                "    return path\n\n"
+                "TOOL_EXPORTS = [\n"
+                "    {\n"
+                "        'name': 'resize_image',\n"
+                "        'handler': _resize_image,\n"
+                "        'description': 'Resize an image',\n"
+                "        'parameters': {'type': 'object', 'properties': {}, 'required': []},\n"
+                "        'search_hint': 'image resize photo',\n"
+                "    },\n"
+                "]\n"
+            )
+
+        sm = self._build_manager()
+        run_context = {"mode": RUN_MODE_EXECUTION, "allowed_skill_names": ["notes-tools"]}
+        discovered = set()
+
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "notes image resize"},
+            context={
+                "run_context": run_context,
+                "discovered_tool_names": discovered,
+            },
+        )
+
+        self.assertIn("read_note", result["discovered_tools"])
+        self.assertNotIn("resize_image", result["discovered_tools"])
+
+        visible = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=discovered,
+                run_context=run_context,
+            )
+        }
+        self.assertIn("tool_search", visible)
+        self.assertIn("read_note", visible)
+        self.assertNotIn("resize_image", visible)
+
+        denied = sm.call_tool(
+            "resize_image",
+            {"path": "demo.png"},
+            context={"run_context": run_context},
+        )
+        self.assertIn("not allowed", denied)
+
 
 if __name__ == "__main__":
     unittest.main()

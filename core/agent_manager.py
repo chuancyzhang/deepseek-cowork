@@ -51,6 +51,7 @@ def _default_worker_factory(
     workspace_dir,
     agent_id,
     conversation_id,
+    run_context=None,
 ):
     from core.agent import LLMWorker
 
@@ -63,6 +64,7 @@ def _default_worker_factory(
         conversation_id=conversation_id,
         agent_id=agent_id,
         is_subagent=True,
+        run_context=run_context,
     )
 
 
@@ -81,6 +83,8 @@ class AgentRuntimeRecord:
     last_error: str = ""
     last_result: str = ""
     source_tool_call_id: str = ""
+    run_context: dict = field(default_factory=dict)
+    meta: dict = field(default_factory=dict)
     worker: object = None
     messages: list = field(default_factory=list)
     pending_inputs: list = field(default_factory=list)
@@ -171,6 +175,11 @@ class SessionAgentManager:
         }
         if record.source_tool_call_id:
             payload["tool_call_id"] = record.source_tool_call_id
+        if isinstance(record.meta, dict):
+            for key in ("agent_profile_id", "agent_profile_name", "agent_description", "summon_source"):
+                value = record.meta.get(key)
+                if value not in (None, ""):
+                    payload[key] = value
         payload.update(extra or {})
         if not self.agent_state_signal:
             if self._event_bridge is None:
@@ -224,6 +233,8 @@ class SessionAgentManager:
                 last_error=row.get("last_error") or "",
                 last_result=row.get("last_result") or "",
                 source_tool_call_id=str(meta.get("source_tool_call_id") or ""),
+                run_context=_json_copy(meta.get("run_context"), {}),
+                meta=_json_copy(meta, {}),
                 messages=self.chat_storage.get_agent_messages(row.get("id") or ""),
             )
             if record.agent_id:
@@ -241,6 +252,7 @@ class SessionAgentManager:
             "finished_at": record.finished_at,
             "last_error": record.last_error or "",
             "last_result": record.last_result or "",
+            "meta": _json_copy(record.meta, {}),
             "has_pending_input": bool(record.pending_inputs),
         }
 
@@ -323,8 +335,12 @@ class SessionAgentManager:
         now = int(time.time())
         record.updated_at = now
         meta = {}
+        if isinstance(record.meta, dict):
+            meta.update(_json_copy(record.meta, {}))
         if record.source_tool_call_id:
             meta["source_tool_call_id"] = record.source_tool_call_id
+        if record.run_context:
+            meta["run_context"] = _json_copy(record.run_context, {})
         self.chat_storage.upsert_agent(
             record.agent_id,
             conversation_id=record.conversation_id,
@@ -361,6 +377,7 @@ class SessionAgentManager:
             self.workspace_dir,
             record.agent_id,
             self.conversation_id,
+            _json_copy(record.run_context, {}),
         )
         record.worker = worker
         self._connect_worker_signals(record)
@@ -447,6 +464,8 @@ class SessionAgentManager:
         current_messages_snapshot=None,
         parent_message_id=None,
         source_tool_call_id=None,
+        run_context=None,
+        meta=None,
     ):
         text = str(message or "").strip()
         if not text:
@@ -488,6 +507,8 @@ class SessionAgentManager:
                 created_at=now,
                 updated_at=now,
                 source_tool_call_id=str(source_tool_call_id or ""),
+                run_context=_json_copy(run_context, {}),
+                meta=_json_copy(meta, {}),
                 messages=self.chat_storage.normalize_messages(base_messages),
             )
             self._agents[agent_id] = record
@@ -523,6 +544,8 @@ class SessionAgentManager:
                     last_error=agent.get("last_error") or "",
                     last_result=agent.get("last_result") or "",
                     source_tool_call_id=str((agent.get("meta") or {}).get("source_tool_call_id") or ""),
+                    run_context=_json_copy((agent.get("meta") or {}).get("run_context"), {}),
+                    meta=_json_copy(agent.get("meta"), {}),
                     messages=self.chat_storage.get_agent_messages(agent["id"]),
                 )
                 self._agents[record.agent_id] = record

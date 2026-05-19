@@ -4,6 +4,7 @@ import sys
 import shutil
 import re
 import uuid
+import time
 from .env_utils import get_app_data_dir, get_base_dir
 from .llm.deepseek import (
     DEFAULT_DEEPSEEK_BASE_URL,
@@ -51,6 +52,7 @@ class ConfigManager:
             "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
             "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
             "disabled_skills": [],
+            "agent_profiles": self._default_agent_profiles(),
             "god_mode": False,
             "default_workspace": "",
             "im_gateway": {
@@ -123,6 +125,12 @@ class ConfigManager:
         ):
             self.config["selected_model_id"] = self._first_model_id(normalized_channels)
             updated = True
+        normalized_agent_profiles = self._normalize_agent_profiles(
+            self.config.get("agent_profiles")
+        )
+        if normalized_agent_profiles != self.config.get("agent_profiles"):
+            self.config["agent_profiles"] = normalized_agent_profiles
+            updated = True
         updated = self._sync_legacy_model_fields(save=False) or updated
         if updated:
             self.save_config()
@@ -191,6 +199,9 @@ class ConfigManager:
             },
         ]
 
+    def _default_agent_profiles(self):
+        return []
+
     def _slug(self, value):
         text = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip()).strip("-").lower()
         return text or uuid.uuid4().hex[:8]
@@ -201,6 +212,51 @@ class ConfigManager:
     def _normalize_provider_type(self, value):
         provider_type = str(value or "openai").strip().lower()
         return "anthropic" if provider_type == "anthropic" else "openai"
+
+    def _normalize_agent_profile(self, profile, index=0, used_ids=None):
+        used_ids = used_ids if used_ids is not None else set()
+        source = dict(profile or {})
+        name = str(source.get("name") or source.get("display_name") or "").strip()
+        if not name:
+            return None
+        profile_id = str(source.get("id") or "").strip() or f"agent-{self._slug(name)}"
+        base_profile_id = profile_id
+        suffix = 2
+        while profile_id in used_ids:
+            profile_id = f"{base_profile_id}-{suffix}"
+            suffix += 1
+        used_ids.add(profile_id)
+        skill_names = []
+        seen_skills = set()
+        for item in source.get("skill_names") or source.get("selected_skill_names") or []:
+            text = str(item or "").strip()
+            if not text or text in seen_skills:
+                continue
+            seen_skills.add(text)
+            skill_names.append(text)
+        now = int(time.time())
+        created_at = int(source.get("created_at") or now)
+        updated_at = int(source.get("updated_at") or created_at or now)
+        return {
+            "id": profile_id,
+            "name": name,
+            "description": str(source.get("description") or "").strip(),
+            "system_prompt": str(source.get("system_prompt") or source.get("prompt") or "").strip(),
+            "skill_names": skill_names,
+            "enabled": bool(source.get("enabled", True)),
+            "created_at": created_at,
+            "updated_at": updated_at,
+        }
+
+    def _normalize_agent_profiles(self, value):
+        profiles = value if isinstance(value, list) else []
+        normalized = []
+        used_ids = set()
+        for index, profile in enumerate(profiles):
+            entry = self._normalize_agent_profile(profile, index=index, used_ids=used_ids)
+            if entry:
+                normalized.append(entry)
+        return normalized
 
     def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None):
         source = dict(model or {})
@@ -601,6 +657,31 @@ class ConfigManager:
         if changed and save:
             self.save_config()
         return changed
+
+    def get_agent_profiles(self):
+        profiles = self._normalize_agent_profiles(self.config.get("agent_profiles"))
+        if profiles != self.config.get("agent_profiles"):
+            self.config["agent_profiles"] = profiles
+            self.save_config()
+        return json.loads(json.dumps(profiles, ensure_ascii=False))
+
+    def set_agent_profiles(self, profiles):
+        normalized = self._normalize_agent_profiles(profiles)
+        self.config["agent_profiles"] = normalized
+        self.save_config()
+
+    def get_agent_profile(self, profile_id_or_name):
+        identifier = str(profile_id_or_name or "").strip()
+        if not identifier:
+            return None
+        profiles = self.get_agent_profiles()
+        for profile in profiles:
+            if profile.get("id") == identifier:
+                return profile
+        for profile in profiles:
+            if profile.get("name") == identifier:
+                return profile
+        return None
 
     def save_config(self):
         try:

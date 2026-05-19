@@ -77,6 +77,7 @@ def spawn_agent(message, name="", fork_context=False, _context=None):
         current_messages_snapshot=(_context or {}).get("current_messages_snapshot"),
         parent_message_id=(_context or {}).get("current_agent_id") or "",
         source_tool_call_id=(_context or {}).get("tool_call_id") or "",
+        run_context=(_context or {}).get("run_context"),
     )
     return {
         "status": "spawned",

@@ -12,6 +12,7 @@ from .env_utils import ensure_package_installed, get_app_data_dir
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
 from .skill_adapter import adapt_skill_directory, discover_skill_artifacts
 from .tool_registry import ToolRegistry
+from .clarify_mode import normalize_selected_skill_names
 
 
 def _tokenize(text):
@@ -793,8 +794,12 @@ class SkillManager:
             include_loaded=bool(include_loaded),
             discovered_tool_names=discovered,
         )
+        results = self._filter_results_by_allowed_skills(results, run_context)
         results = self._filter_enterprise_tool_results(results, run_context)
-        if self._is_enterprise_tool_allowed("publish_artifacts", run_context):
+        if (
+            self._is_enterprise_tool_allowed("publish_artifacts", run_context)
+            and self._is_tool_allowed_by_skill_scope("publish_artifacts", run_context)
+        ):
             loaded_matches = self.tool_registry.search(
                 query,
                 run_mode=run_mode,
@@ -802,6 +807,7 @@ class SkillManager:
                 include_loaded=True,
                 discovered_tool_names=discovered,
             )
+            loaded_matches = self._filter_results_by_allowed_skills(loaded_matches, run_context)
             for item in loaded_matches:
                 if item.get("name") != "publish_artifacts":
                     continue
@@ -835,6 +841,8 @@ class SkillManager:
             return False
         if name == "publish_artifacts":
             return True
+        if not self._is_tool_allowed_by_skill_scope(name, run_context):
+            return False
         return self.tool_registry.is_visible(name, run_mode, discovered_tool_names)
 
     def get_tool_record(self, name):
@@ -1392,6 +1400,7 @@ class SkillManager:
             discovered_tool_names=discovered_tool_names,
             include_deferred=bool(include_deferred),
         )
+        definitions = self._filter_definitions_by_allowed_skills(definitions, run_context)
         definitions = self._filter_enterprise_tool_definitions(definitions, run_context)
         if self._is_enterprise_tool_allowed("publish_artifacts", run_context):
             publish_definition = self._get_tool_definition("publish_artifacts")
@@ -1440,6 +1449,39 @@ class SkillManager:
                 filtered.append(item)
         return filtered
 
+    def _allowed_skill_names(self, run_context):
+        ctx = self._normalize_run_context_for_tools(run_context)
+        allowed = normalize_selected_skill_names(ctx.get("allowed_skill_names"))
+        return [name for name in allowed if name in self.skill_records]
+
+    def _is_tool_allowed_by_skill_scope(self, tool_name, run_context):
+        allowed_skill_names = self._allowed_skill_names(run_context)
+        if not allowed_skill_names:
+            return True
+        resolved_name = self.tool_registry.resolve_name(tool_name) or str(tool_name or "").strip()
+        if resolved_name == "tool_search":
+            return True
+        skill_name = self.tool_to_skill_map.get(resolved_name)
+        if not skill_name:
+            return False
+        return skill_name in allowed_skill_names
+
+    def _filter_definitions_by_allowed_skills(self, definitions, run_context):
+        filtered = []
+        for item in definitions or []:
+            function = item.get("function") if isinstance(item, dict) else None
+            name = function.get("name") if isinstance(function, dict) else ""
+            if self._is_tool_allowed_by_skill_scope(name, run_context):
+                filtered.append(item)
+        return filtered
+
+    def _filter_results_by_allowed_skills(self, results, run_context):
+        filtered = []
+        for item in results or []:
+            if self._is_tool_allowed_by_skill_scope(item.get("name"), run_context):
+                filtered.append(item)
+        return filtered
+
     def get_tools_for_skill(self, skill_name):
         return list(self.skill_to_tools.get(skill_name) or [])
 
@@ -1468,17 +1510,32 @@ class SkillManager:
             include_references=include_references,
         )
 
-    def get_system_prompts(self, query_text=None, limit=6, preferred_skill_names=None, exclude_skill_names=None):
+    def get_system_prompts(
+        self,
+        query_text=None,
+        limit=6,
+        preferred_skill_names=None,
+        exclude_skill_names=None,
+        allowed_skill_names=None,
+    ):
         selected = []
+        allowed_scope = set(normalize_selected_skill_names(allowed_skill_names))
         for skill_name in preferred_skill_names or []:
-            if skill_name in self.skill_records and skill_name not in selected:
+            if (
+                skill_name in self.skill_records
+                and skill_name not in selected
+                and (not allowed_scope or skill_name in allowed_scope)
+            ):
                 selected.append(skill_name)
         if query_text:
             for skill_name in self.select_relevant_skills(query_text, limit=limit):
-                if skill_name not in selected:
+                if skill_name not in selected and (not allowed_scope or skill_name in allowed_scope):
                     selected.append(skill_name)
         elif not selected:
-            selected = [name for name in self.skill_records][:limit]
+            selected = [
+                name for name in self.skill_records
+                if not allowed_scope or name in allowed_scope
+            ][:limit]
         excluded = {name for name in (exclude_skill_names or []) if name}
         blocks = []
         for skill_name in selected:
@@ -1500,6 +1557,9 @@ class SkillManager:
         resolved_name = record.name if record else str(name or "").strip()
         if resolved_name not in self.tools:
             return f"Error: Tool '{name}' not found."
+        run_context = context.get("run_context") if isinstance(context, dict) else None
+        if not self._is_tool_allowed_by_skill_scope(resolved_name, run_context):
+            return f"Error: Tool '{name}' is not allowed for this agent profile."
         skill_name = self.tool_to_skill_map.get(resolved_name)
         if skill_name:
             record = self.skill_records.get(skill_name)

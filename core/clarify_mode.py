@@ -148,6 +148,14 @@ def normalize_run_context(run_context):
         "selected_skill_names": normalize_selected_skill_names(
             ctx.get("selected_skill_names")
         ),
+        "allowed_skill_names": normalize_selected_skill_names(
+            ctx.get("allowed_skill_names")
+        ),
+        "agent_profile_id": str(ctx.get("agent_profile_id") or "").strip(),
+        "agent_profile_name": str(ctx.get("agent_profile_name") or "").strip(),
+        "agent_description": str(ctx.get("agent_description") or "").strip(),
+        "agent_system_prompt": str(ctx.get("agent_system_prompt") or "").strip(),
+        "agent_summon_source": str(ctx.get("agent_summon_source") or "").strip(),
         "selected_model_id": str(ctx.get("selected_model_id") or "").strip(),
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
         "channel": str(ctx.get("channel") or "").strip().lower(),

@@ -1381,6 +1381,287 @@ class ModelChannelManager(QWidget):
         return [editor.get_channel_config() for editor in self.editors]
 
 
+class AgentProfileManager(QWidget):
+    def __init__(self, profiles, skill_provider, parent=None):
+        super().__init__(parent)
+        self.skill_provider = skill_provider
+        self.profiles = json.loads(json.dumps(profiles or [], ensure_ascii=False))
+        self._current_index = -1
+        self._loading_profile = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("智能体模板")
+        title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        toolbar.addWidget(title)
+        toolbar.addStretch()
+
+        add_btn = QPushButton("新增智能体")
+        add_btn.setObjectName("SecondaryBtn")
+        add_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
+        add_btn.clicked.connect(self.add_profile)
+        toolbar.addWidget(add_btn)
+
+        copy_btn = QPushButton("复制")
+        copy_btn.setObjectName("SecondaryBtn")
+        copy_btn.setIcon(qta.icon("fa5s.copy", color=DesignTokens.text_secondary))
+        copy_btn.clicked.connect(self.copy_profile)
+        toolbar.addWidget(copy_btn)
+
+        delete_btn = QPushButton("删除")
+        delete_btn.setObjectName("SecondaryBtn")
+        delete_btn.setIcon(qta.icon("fa5s.trash", color=DesignTokens.text_secondary))
+        delete_btn.clicked.connect(self.delete_profile)
+        toolbar.addWidget(delete_btn)
+        layout.addLayout(toolbar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(14)
+        layout.addLayout(body, 1)
+
+        self.profile_list = QListWidget()
+        self.profile_list.setFixedWidth(220)
+        self.profile_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
+            f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        self.profile_list.currentRowChanged.connect(self._on_profile_changed)
+        body.addWidget(self.profile_list)
+
+        editor_card = QFrame()
+        editor_card.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 16px; }}"
+        )
+        editor_layout = QVBoxLayout(editor_card)
+        editor_layout.setContentsMargins(18, 18, 18, 18)
+        editor_layout.setSpacing(14)
+        body.addWidget(editor_card, 1)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        self.enabled_check = QCheckBox("启用这个智能体")
+        self.enabled_check.toggled.connect(self._sync_current_profile_from_fields)
+        form.addRow("状态", self.enabled_check)
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("例如：代码审查助手")
+        self.name_input.textChanged.connect(self._sync_current_profile_from_fields)
+        form.addRow("名称", self.name_input)
+
+        self.description_input = QLineEdit()
+        self.description_input.setPlaceholderText("简短说明它擅长什么")
+        self.description_input.textChanged.connect(self._sync_current_profile_from_fields)
+        form.addRow("描述", self.description_input)
+        editor_layout.addLayout(form)
+
+        prompt_label = QLabel("系统提示词")
+        prompt_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        editor_layout.addWidget(prompt_label)
+        self.system_prompt_edit = QTextEdit()
+        self.system_prompt_edit.setFixedHeight(150)
+        self.system_prompt_edit.setPlaceholderText("定义这个智能体的角色、输出风格和工作约束")
+        self.system_prompt_edit.textChanged.connect(self._sync_current_profile_from_fields)
+        editor_layout.addWidget(self.system_prompt_edit)
+
+        skills_label = QLabel("能力范围")
+        skills_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        editor_layout.addWidget(skills_label)
+        self.skill_list = QListWidget()
+        self.skill_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px; }}"
+            f"QListWidget::item {{ padding: 8px 10px; color: {DesignTokens.text_primary}; }}"
+        )
+        self.skill_list.itemChanged.connect(lambda _item: self._sync_current_profile_from_fields())
+        editor_layout.addWidget(self.skill_list, 1)
+
+        helper = QLabel("勾选后，这个智能体只会使用这些已启用的能力。")
+        helper.setWordWrap(True)
+        helper.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        editor_layout.addWidget(helper)
+
+        self._reload_skill_options()
+        self._refresh_profile_list()
+        if self.profile_list.count():
+            self.profile_list.setCurrentRow(0)
+        else:
+            self.add_profile()
+
+    def _available_skills(self):
+        skills = []
+        if callable(self.skill_provider):
+            skills = list(self.skill_provider() or [])
+        skills.sort(key=lambda item: (readable_skill_name(item) or item.get("name") or "").lower())
+        return skills
+
+    def _reload_skill_options(self):
+        selected = set(self._selected_skill_names_from_widgets())
+        self.skill_list.blockSignals(True)
+        self.skill_list.clear()
+        for skill in self._available_skills():
+            skill_name = str(skill.get("name") or "").strip()
+            if not skill_name:
+                continue
+            label = readable_skill_name(skill) or skill_name
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, skill_name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if skill_name in selected else Qt.Unchecked)
+            item.setToolTip(skill.get("user_description") or skill.get("description") or "")
+            self.skill_list.addItem(item)
+        self.skill_list.blockSignals(False)
+
+    def _selected_skill_names_from_widgets(self):
+        names = []
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            if item.checkState() == Qt.Checked:
+                names.append(str(item.data(Qt.UserRole) or "").strip())
+        return normalize_selected_skill_names(names)
+
+    def _refresh_profile_list(self):
+        self.profile_list.blockSignals(True)
+        self.profile_list.clear()
+        for profile in self.profiles:
+            name = str(profile.get("name") or "未命名智能体").strip()
+            enabled = bool(profile.get("enabled", True))
+            label = name if enabled else f"{name} (已停用)"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, profile.get("id"))
+            item.setToolTip(profile.get("description") or "")
+            self.profile_list.addItem(item)
+        self.profile_list.blockSignals(False)
+
+    def _load_profile_into_fields(self, index):
+        self._loading_profile = True
+        try:
+            profile = self.profiles[index] if 0 <= index < len(self.profiles) else {}
+            self.enabled_check.setChecked(bool(profile.get("enabled", True)))
+            self.name_input.setText(str(profile.get("name") or ""))
+            self.description_input.setText(str(profile.get("description") or ""))
+            self.system_prompt_edit.setPlainText(str(profile.get("system_prompt") or ""))
+            selected = set(normalize_selected_skill_names(profile.get("skill_names")))
+            self.skill_list.blockSignals(True)
+            for row in range(self.skill_list.count()):
+                item = self.skill_list.item(row)
+                skill_name = str(item.data(Qt.UserRole) or "").strip()
+                item.setCheckState(Qt.Checked if skill_name in selected else Qt.Unchecked)
+            self.skill_list.blockSignals(False)
+        finally:
+            self._loading_profile = False
+
+    def _sync_current_profile_from_fields(self):
+        if self._loading_profile:
+            return
+        index = self._current_index
+        if index < 0 or index >= len(self.profiles):
+            return
+        profile = self.profiles[index]
+        profile["enabled"] = self.enabled_check.isChecked()
+        profile["name"] = self.name_input.text().strip() or "未命名智能体"
+        profile["description"] = self.description_input.text().strip()
+        profile["system_prompt"] = self.system_prompt_edit.toPlainText().strip()
+        profile["skill_names"] = self._selected_skill_names_from_widgets()
+        profile["updated_at"] = int(time.time())
+        self._refresh_profile_list()
+        self.profile_list.blockSignals(True)
+        self.profile_list.setCurrentRow(index)
+        self.profile_list.blockSignals(False)
+
+    def _on_profile_changed(self, index):
+        if self._current_index >= 0:
+            self._sync_current_profile_from_fields()
+        self._current_index = index
+        if index < 0 or index >= len(self.profiles):
+            return
+        self._reload_skill_options()
+        self._load_profile_into_fields(index)
+
+    def add_profile(self):
+        now = int(time.time())
+        profile = {
+            "id": f"agent-{uuid.uuid4().hex[:8]}",
+            "name": "新智能体",
+            "description": "",
+            "system_prompt": "",
+            "skill_names": [],
+            "enabled": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.profiles.append(profile)
+        self._refresh_profile_list()
+        self.profile_list.setCurrentRow(len(self.profiles) - 1)
+
+    def copy_profile(self):
+        index = self.profile_list.currentRow()
+        if index < 0 or index >= len(self.profiles):
+            return
+        source = json.loads(json.dumps(self.profiles[index], ensure_ascii=False))
+        now = int(time.time())
+        source["id"] = f"agent-{uuid.uuid4().hex[:8]}"
+        source["name"] = f"{source.get('name') or '智能体'} 副本"
+        source["created_at"] = now
+        source["updated_at"] = now
+        self.profiles.insert(index + 1, source)
+        self._refresh_profile_list()
+        self.profile_list.setCurrentRow(index + 1)
+
+    def delete_profile(self):
+        index = self.profile_list.currentRow()
+        if index < 0 or index >= len(self.profiles):
+            return
+        reply = QMessageBox.question(
+            self,
+            "删除智能体",
+            "确定删除这个智能体模板吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        del self.profiles[index]
+        self._refresh_profile_list()
+        if self.profiles:
+            self.profile_list.setCurrentRow(min(index, len(self.profiles) - 1))
+        else:
+            self.add_profile()
+
+    def get_profiles(self):
+        self._sync_current_profile_from_fields()
+        valid_skill_names = {
+            str(skill.get("name") or "").strip()
+            for skill in self._available_skills()
+            if str(skill.get("name") or "").strip()
+        }
+        profiles = []
+        for profile in self.profiles:
+            name = str(profile.get("name") or "").strip()
+            if not name:
+                continue
+            item = {
+                "id": str(profile.get("id") or f"agent-{uuid.uuid4().hex[:8]}").strip(),
+                "name": name,
+                "description": str(profile.get("description") or "").strip(),
+                "system_prompt": str(profile.get("system_prompt") or "").strip(),
+                "skill_names": [
+                    skill_name
+                    for skill_name in normalize_selected_skill_names(profile.get("skill_names"))
+                    if skill_name in valid_skill_names
+                ],
+                "enabled": bool(profile.get("enabled", True)),
+                "created_at": int(profile.get("created_at") or int(time.time())),
+                "updated_at": int(time.time()),
+            }
+            profiles.append(item)
+        return profiles
+
+
 class AppUpdateWorker(QThread):
     progress_signal = Signal(str, int)
     finished_signal = Signal(dict)
@@ -1500,6 +1781,20 @@ class SettingsDialog(QDialog):
 
         self.model_channel_manager = ModelChannelManager(
             self.config_manager.get_model_channels()
+        )
+
+        agent_page, agent_layout = make_scroll_page(
+            "智能体",
+            "配置可复用的智能体模板，定义它们的系统提示词和可用能力。",
+        )
+        skill_provider = (
+            self._main._available_session_skills
+            if self._main and hasattr(self._main, "_available_session_skills")
+            else (lambda: [])
+        )
+        self.agent_profile_manager = AgentProfileManager(
+            self.config_manager.get_agent_profiles(),
+            skill_provider=skill_provider,
         )
 
         workspace_page, workspace_layout = make_scroll_page(
@@ -1642,12 +1937,15 @@ class SettingsDialog(QDialog):
 
         model_layout.addWidget(self.model_channel_manager)
         model_layout.addStretch()
+        agent_layout.addWidget(self.agent_profile_manager)
+        agent_layout.addStretch()
         workspace_layout.addWidget(storage_group)
         workspace_layout.addStretch()
         permission_page_layout.addWidget(permission_group)
         permission_page_layout.addStretch()
 
         add_settings_page("模型", "fa5s.brain", model_page)
+        add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("更新", "fa5s.download", update_page)
@@ -1960,6 +2258,7 @@ class SettingsDialog(QDialog):
         if selected_model_id not in all_model_ids:
             selected_model_id = all_model_ids[0] if all_model_ids else ""
         self.config_manager.set_model_channels(model_channels, selected_model_id)
+        self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -2432,6 +2731,7 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
 
 class AutoResizingInputEdit(QTextEdit):
     returnPressed = Signal()
+    mentionRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2476,6 +2776,9 @@ class AutoResizingInputEdit(QTextEdit):
             else:
                 self.returnPressed.emit()
                 event.accept()
+        elif event.text() == "@":
+            super().keyPressEvent(event)
+            QTimer.singleShot(0, self.mentionRequested.emit)
         else:
             super().keyPressEvent(event)
 
@@ -4288,6 +4591,7 @@ class SessionState:
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
         self.selected_skill_names = []
+        self.completed_agent_result_ids = set()
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -5532,6 +5836,7 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("例如：把这个文件夹里的图片按日期分类")
         self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
         self.input_field.returnPressed.connect(self.handle_send)
+        self.input_field.mentionRequested.connect(self.show_agent_mention_menu)
 
         self.clarify_mode_check = QCheckBox("反问模式")
         self.clarify_mode_check.setCursor(Qt.PointingHandCursor)
@@ -5770,6 +6075,8 @@ class MainWindow(QMainWindow):
         add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加照片和文件", self)
         add_files.setEnabled(False)
         menu.addAction(add_files)
+        add_agent_menu = menu.addMenu(qta.icon('fa5s.user-astronaut', color='#4b5563'), "添加智能体")
+        self._populate_agent_menu(add_agent_menu)
         menu.addAction(self.clarify_mode_action)
         menu.addSeparator()
         plugins_action = QAction(qta.icon('fa5s.th-large', color='#4b5563'), "插件", self)
@@ -6676,6 +6983,7 @@ class MainWindow(QMainWindow):
         state.clarify_source_user_text = ""
         state.clarify_answers_context = []
         state.selected_skill_names = []
+        state.completed_agent_result_ids = set()
         state.changed_files = []
         state.step_records = []
         state.persisted_agents = []
@@ -8195,6 +8503,108 @@ class MainWindow(QMainWindow):
         skills.sort(key=lambda item: (readable_skill_name(item) or item.get("name") or "").lower())
         return skills
 
+    def _available_agent_profiles(self):
+        valid_skill_names = {
+            str(skill.get("name") or "").strip()
+            for skill in self._available_session_skills()
+            if str(skill.get("name") or "").strip()
+        }
+        profiles = []
+        for profile in self.config_manager.get_agent_profiles():
+            if not bool(profile.get("enabled", True)):
+                continue
+            normalized = dict(profile)
+            normalized["skill_names"] = [
+                skill_name
+                for skill_name in normalize_selected_skill_names(profile.get("skill_names"))
+                if skill_name in valid_skill_names
+            ]
+            profiles.append(normalized)
+        profiles.sort(key=lambda item: str(item.get("name") or "").lower())
+        return profiles
+
+    def _insert_agent_mention(self, profile):
+        if not profile or not hasattr(self, "input_field"):
+            return
+        cursor = self.input_field.textCursor()
+        mention = f"@{profile.get('name') or ''}".strip()
+        if not mention or mention == "@":
+            return
+        prefix = ""
+        suffix = " "
+        if cursor.position() > 0:
+            cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, 1)
+            previous_char = cursor.selectedText()
+            cursor.clearSelection()
+            if previous_char and not previous_char.isspace():
+                prefix = " "
+        cursor.insertText(prefix + mention + suffix)
+        self.input_field.setFocus()
+
+    def show_agent_mention_menu(self):
+        profiles = self._available_agent_profiles()
+        if not profiles:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(MENU_STYLESHEET)
+        for profile in profiles:
+            skill_count = len(profile.get("skill_names") or [])
+            subtitle = profile.get("description") or (f"{skill_count} 个能力" if skill_count else "未限制能力")
+            action = QAction(profile.get("name") or "智能体", self)
+            action.setToolTip(subtitle)
+            action.triggered.connect(lambda checked=False, item=profile: self._insert_agent_mention(item))
+            menu.addAction(action)
+        rect = self.input_field.cursorRect()
+        global_pos = self.input_field.mapToGlobal(rect.bottomLeft())
+        menu.exec(global_pos)
+
+    def _populate_agent_menu(self, menu):
+        profiles = self._available_agent_profiles()
+        if not profiles:
+            empty_action = QAction("暂无可用智能体", self)
+            empty_action.setEnabled(False)
+            menu.addAction(empty_action)
+            settings_action = QAction("打开设置", self)
+            settings_action.triggered.connect(self.open_settings)
+            menu.addAction(settings_action)
+            return
+        for profile in profiles:
+            skill_count = len(profile.get("skill_names") or [])
+            label = profile.get("name") or "智能体"
+            if skill_count:
+                label = f"{label} ({skill_count})"
+            action = QAction(label, self)
+            action.setToolTip(profile.get("description") or "")
+            action.triggered.connect(lambda checked=False, item=profile: self._insert_agent_mention(item))
+            menu.addAction(action)
+
+    def _extract_agent_mentions(self, text):
+        source = str(text or "")
+        profiles = self._available_agent_profiles()
+        if not source or not profiles:
+            return [], source
+        mentions = []
+        consumed = set()
+        cleaned = source
+        sorted_profiles = sorted(
+            profiles,
+            key=lambda item: len(str(item.get("name") or "")),
+            reverse=True,
+        )
+        for profile in sorted_profiles:
+            name = str(profile.get("name") or "").strip()
+            if not name:
+                continue
+            pattern = re.compile(rf"@{re.escape(name)}(?=$|[\s,，.。!！?？:：;；])")
+            if not pattern.search(cleaned):
+                continue
+            if profile.get("id") not in consumed:
+                mentions.append(profile)
+                consumed.add(profile.get("id"))
+            cleaned = pattern.sub("", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        return mentions, cleaned
+
     def _selected_skill_display_names(self, selected_skill_names):
         selected = normalize_selected_skill_names(selected_skill_names)
         if not selected:
@@ -8626,12 +9036,151 @@ class MainWindow(QMainWindow):
         if is_current:
             self.normalize_session_ui(state)
 
+    def _build_agent_profile_run_context(self, profile):
+        skill_names = normalize_selected_skill_names(profile.get("skill_names"))
+        return normalize_run_context(
+            {
+                "mode": RUN_MODE_EXECUTION,
+                "selected_model_id": self.config_manager.get_selected_model_id(),
+                "selected_skill_names": skill_names,
+                "allowed_skill_names": skill_names,
+                "agent_profile_id": profile.get("id"),
+                "agent_profile_name": profile.get("name"),
+                "agent_description": profile.get("description"),
+                "agent_system_prompt": profile.get("system_prompt"),
+                "agent_summon_source": "mention",
+            }
+        )
+
+    def _build_summoned_agent_name(self, profile):
+        base_name = str(profile.get("name") or "智能体").strip() or "智能体"
+        return f"{base_name}-{uuid.uuid4().hex[:4]}"
+
+    def _dispatch_agent_profiles(self, state, original_text, task_text, profiles):
+        agent_state_proxy = type(
+            "_AgentStateProxy",
+            (),
+            {"emit": lambda _self, payload, sid=state.session_id: self.handle_agent_state(payload, sid)},
+        )()
+        try:
+            manager = get_agent_manager_registry().get_session_manager(
+                state.session_id,
+                chat_storage=self.chat_storage,
+                config_manager=self.config_manager,
+                workspace_dir=self.workspace_dir,
+                agent_state_signal=agent_state_proxy,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "智能体召唤失败", f"无法初始化子智能体运行时：{exc}")
+            return False
+
+        started_profiles = []
+        state.current_content_buffer = ""
+        state.current_thinking_buffer = ""
+        self.set_session_phase("Delegating", state.session_id)
+        self.set_session_status("running", state.session_id)
+        state.active_turn_id += 1
+        state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id - 1)
+        state.persisted_agents = self.chat_storage.list_agents(state.session_id)
+        self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
+
+        for profile in profiles:
+            run_context = self._build_agent_profile_run_context(profile)
+            meta = {
+                "agent_profile_id": profile.get("id") or "",
+                "agent_profile_name": profile.get("name") or "",
+                "agent_description": profile.get("description") or "",
+                "summon_source": "mention",
+            }
+            try:
+                manager.spawn_agent(
+                    message=task_text,
+                    name=self._build_summoned_agent_name(profile),
+                    fork_context=True,
+                    current_messages_snapshot=state.messages[:-1],
+                    parent_message_id="",
+                    run_context=run_context,
+                    meta=meta,
+                )
+                started_profiles.append(profile)
+            except Exception as exc:
+                self.add_system_toast(
+                    f"召唤智能体失败：{profile.get('name') or '未命名智能体'} - {exc}",
+                    "error",
+                    session_id=state.session_id,
+                    auto_close_ms=6000,
+                )
+
+        if not started_profiles:
+            self.set_session_phase("Error", state.session_id)
+            self.set_session_status("error", state.session_id, save=True)
+            return False
+
+        summary_names = "、".join([str(item.get("name") or "") for item in started_profiles])
+        summary_text = f"已召唤 {len(started_profiles)} 个智能体：{summary_names}\n任务：{task_text}"
+        state.last_agent_bubble = self.add_chat_bubble("agent", summary_text, animate=False, force_scroll=True)
+        self.add_system_toast(
+            f"已启动 {len(started_profiles)} 个智能体，完成后会回填结果。",
+            "success",
+            session_id=state.session_id,
+            auto_close_ms=3500,
+        )
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_change_list(state.session_id)
+        self.refresh_step_list(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        self.normalize_session_ui(state)
+        return True
+
+    def _append_summoned_agent_result(self, state, data):
+        if not state or not isinstance(data, dict):
+            return
+        if data.get("summon_source") != "mention":
+            return
+        agent_id = str(data.get("agent_id") or "").strip()
+        if not agent_id or agent_id in getattr(state, "completed_agent_result_ids", set()):
+            return
+        content = str(data.get("content") or "").strip()
+        error = str(data.get("error") or "").strip()
+        profile_name = str(data.get("agent_profile_name") or data.get("agent_name") or "智能体").strip()
+        status = str(data.get("status") or "").strip()
+        if status == "completed":
+            text = f"[{profile_name}] {content or '已完成。'}"
+        else:
+            detail = error or content or "任务未成功完成。"
+            text = f"[{profile_name}] {detail}"
+        state.completed_agent_result_ids.add(agent_id)
+        state.messages.append(
+            {
+                "role": "assistant",
+                "content": text,
+                "meta": {
+                    "agent_id": agent_id,
+                    "agent_profile_id": data.get("agent_profile_id") or "",
+                    "agent_profile_name": profile_name,
+                    "summon_source": "mention",
+                    "agent_status": status,
+                },
+            }
+        )
+        state.messages = self.chat_storage.normalize_messages(state.messages)
+        state.render_items = build_conversation_render_items(state.messages)
+        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        state.displayed_render_count = len(state.render_items)
+        if state.session_id == self.current_session_id:
+            self.add_chat_bubble("agent", text, animate=False, force_scroll=False)
+        self.save_chat_history(session_id=state.session_id)
+
     def handle_send(self):
         if not self.workspace_dir:
             QMessageBox.warning(self, "提示", "请先选择一个工作区目录！")
             return
         user_text = self.input_field.toPlainText().strip()
         if not user_text: return
+        mentioned_profiles, delegated_text = self._extract_agent_mentions(user_text)
+        if mentioned_profiles and not delegated_text:
+            QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
+            return
         now = time.time()
         if user_text == self._last_submit_text and (now - self._last_submit_ts) < 0.8:
             return
@@ -8674,6 +9223,9 @@ class MainWindow(QMainWindow):
         state.displayed_render_count = len(state.render_items)
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
+        if mentioned_profiles:
+            self._dispatch_agent_profiles(state, user_text, delegated_text, mentioned_profiles)
+            return
         self.try_connect_daemon(allow_start=True, retries=4)
         run_context = self._build_run_context(state, run_mode)
         if self.daemon_available:
@@ -9120,7 +9672,11 @@ class MainWindow(QMainWindow):
             monitor_content = data.get("error") or data.get("content") or ""
         elif status == "completed":
             monitor_content = data.get("content") or ""
+        elif status in {"failed", "failed_recovered", "killed", "closed"}:
+            monitor_content = data.get("error") or data.get("content") or ""
         self._record_sub_agent_event(state, data, monitor_content)
+        if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
+            self._append_summoned_agent_result(state, data)
         if session_id == self.current_session_id and hasattr(self, "sub_agent_monitor") and self.sub_agent_monitor:
             agent_id = data.get("agent_id")
             if agent_id:
@@ -9174,6 +9730,24 @@ class MainWindow(QMainWindow):
                 # Update indicator status
                 if hasattr(state.last_agent_bubble, 'add_sub_agent_indicator'):
                     state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
+
+        if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
+            try:
+                manager = get_agent_manager_registry().get_session_manager(
+                    state.session_id,
+                    chat_storage=self.chat_storage,
+                    config_manager=self.config_manager,
+                    workspace_dir=self.workspace_dir,
+                )
+                live_agents = manager.list_agent_summaries(status_filter=list(AGENT_LIVE_STATUSES))
+            except Exception:
+                live_agents = []
+            if not live_agents and not (
+                (state.llm_worker and state.llm_worker.isRunning())
+                or getattr(state, "daemon_running", False)
+            ):
+                self.set_session_phase("Completed", state.session_id)
+                self.set_session_status("completed", state.session_id, save=True)
 
     def handle_content_signal(self, text, session_id=None, turn_id=None):
         state = self.get_session(session_id)

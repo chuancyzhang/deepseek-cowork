@@ -12,6 +12,7 @@ from core.clarify_mode import (
     RUN_MODE_EXECUTION,
     get_clarifying_read_tools,
     is_tool_allowed_in_clarifying,
+    normalize_selected_skill_names,
     normalize_run_context,
 )
 
@@ -44,6 +45,12 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertEqual(ctx["selected_model_id"], "openai-fast")
         self.assertEqual(ctx["im_provider"], "feishu")
         self.assertEqual(ctx["channel"], "feishu")
+
+    def test_normalize_selected_skill_names_deduplicates_and_filters_blanks(self):
+        self.assertEqual(
+            normalize_selected_skill_names([" browser ", "", None, "browser", "python-runner"]),
+            ["browser", "python-runner"],
+        )
 
     def test_get_clarifying_read_tools_preserves_order_and_deduplicates(self):
         available_tool_names = [
@@ -135,6 +142,108 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertNotIn("<proposed_plan>", system_prompt)
             self.assertTrue(provider_events)
             self.assertEqual(system_prompt, provider_events[0][1])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_includes_user_selected_skills_in_system_prompt(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_brief_skill_prompt(self, skill_name):
+                if skill_name == "browser-automation":
+                    return "Browser automation brief"
+                return ""
+
+            def get_skill_display_name(self, skill_name):
+                if skill_name == "browser-automation":
+                    return "浏览器自动化"
+                return skill_name
+
+            def get_system_prompts(self, query_text="", limit=6, preferred_skill_names=None, exclude_skill_names=None):
+                return "General skill prompt"
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self, events):
+                self.events = events
+
+            def chat_stream(self, messages, tools=None):
+                self.events.append(("request", messages[0].get("content", "")))
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        events = []
+        provider_events = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_events)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "open the site"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION, "selected_skill_names": ["browser-automation"]},
+                )
+                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.run()
+
+            system_prompt = events[0].get("content", "")
+            self.assertIn("# 用户指定能力", system_prompt)
+            self.assertIn("`browser-automation`: 浏览器自动化", system_prompt)
+            self.assertIn("Browser automation brief", system_prompt)
+            self.assertIn("General skill prompt", system_prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_selected_skill_tools_are_visible_without_tool_search(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tools_for_skill(self, skill_name):
+                if skill_name == "browser-automation":
+                    return ["open_browser_tab"]
+                return []
+
+            def get_tool_definitions(self, *args, **kwargs):
+                discovered = set(kwargs.get("discovered_tool_names") or [])
+                names = ["open_browser_tab"] if "open_browser_tab" in discovered else []
+                return [
+                    {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
+                    for name in names
+                ]
+
+            def check_for_updates(self):
+                return False
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with patch("core.agent.SkillManager", _SkillManagerStub):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "browse"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION, "selected_skill_names": ["browser-automation"]},
+                )
+
+            tool_names = {item["function"]["name"] for item in worker.tools}
+            self.assertIn("open_browser_tab", tool_names)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

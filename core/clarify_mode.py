@@ -119,6 +119,18 @@ def normalize_clarify_mode_state(value):
     return normalize_clarify_phase(value, default=CLARIFY_MODE_EXPLORING)
 
 
+def normalize_selected_skill_names(values):
+    normalized = []
+    seen = set()
+    for item in values or []:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
 def normalize_run_context(run_context):
     ctx = dict(run_context or {})
     pending_questions = ctx.get("pending_clarify_questions")
@@ -132,6 +144,9 @@ def normalize_run_context(run_context):
         "clarify_mode_state": normalize_clarify_mode_state(state),
         "pending_clarify_questions": normalize_pending_clarify_questions(
             pending_questions
+        ),
+        "selected_skill_names": normalize_selected_skill_names(
+            ctx.get("selected_skill_names")
         ),
         "selected_model_id": str(ctx.get("selected_model_id") or "").strip(),
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),

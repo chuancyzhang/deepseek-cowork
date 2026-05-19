@@ -69,6 +69,7 @@ from core.clarify_mode import (
     derive_clarify_phase,
     normalize_clarify_phase,
     normalize_pending_clarify_questions,
+    normalize_selected_skill_names,
     normalize_run_context,
 )
 import shutil
@@ -2165,6 +2166,97 @@ class SkillsCenterDialog(QDialog):
                 QMessageBox.warning(self, "能力中心", msg)
 
 
+class SessionSkillPickerDialog(QDialog):
+    def __init__(self, skills, selected_skill_names=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("为当前会话指定能力")
+        self.resize(680, 520)
+        self.skills = list(skills or [])
+        self._selected_skill_names = normalize_selected_skill_names(selected_skill_names)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("为当前会话指定能力")
+        title.setProperty("roleTitle", True)
+        subtitle = QLabel("这些能力会在本会话后续轮次持续写入系统提示词，作为用户明确要求优先使用的能力。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.skill_list = QListWidget()
+        self.skill_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; "
+            "border-radius: 14px; padding: 6px; }}"
+            f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        selected = set(self._selected_skill_names)
+        for skill in self.skills:
+            name = str(skill.get("name") or "").strip()
+            if not name:
+                continue
+            display = readable_skill_name(skill) or name
+            desc = skill.get("user_description") or skill.get("description") or ""
+            tools = skill.get("tools") or []
+            suffix = f" · {len(tools)} 个关联工具" if tools else ""
+            item = QListWidgetItem(f"{display} ({name}){suffix}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            item.setCheckState(Qt.Checked if name in selected else Qt.Unchecked)
+            item.setData(Qt.UserRole, name)
+            if desc:
+                item.setToolTip(desc)
+            self.skill_list.addItem(item)
+        layout.addWidget(self.skill_list, 1)
+
+        self.selection_hint = QLabel("")
+        self.selection_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(self.selection_hint)
+
+        actions = QHBoxLayout()
+        clear_btn = QPushButton("清空")
+        clear_btn.setObjectName("SecondaryBtn")
+        clear_btn.clicked.connect(self.clear_selection)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("保存到本会话")
+        save_btn.setObjectName("PrimaryBtn")
+        save_btn.clicked.connect(self.accept)
+        actions.addWidget(clear_btn)
+        actions.addStretch()
+        actions.addWidget(cancel_btn)
+        actions.addWidget(save_btn)
+        layout.addLayout(actions)
+
+        self.skill_list.itemChanged.connect(lambda *_: self.refresh_selection_hint())
+        self.refresh_selection_hint()
+
+    def clear_selection(self):
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            item.setCheckState(Qt.Unchecked)
+        self.refresh_selection_hint()
+
+    def selected_skill_names(self):
+        names = []
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            if item.checkState() == Qt.Checked:
+                names.append(str(item.data(Qt.UserRole) or "").strip())
+        return normalize_selected_skill_names(names)
+
+    def refresh_selection_hint(self):
+        count = len(self.selected_skill_names())
+        if count:
+            self.selection_hint.setText(f"当前已指定 {count} 个能力。")
+        else:
+            self.selection_hint.setText("当前未指定额外能力，将继续使用默认自动匹配。")
+
+
 class DragOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4195,6 +4287,7 @@ class SessionState:
         self.pending_clarify_questions = []
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
+        self.selected_skill_names = []
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -5460,6 +5553,21 @@ class MainWindow(QMainWindow):
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
+        self.selected_skills_badge = QPushButton(" 已选能力")
+        self.selected_skills_badge.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
+        self.selected_skills_badge.setToolTip("查看或调整本会话指定能力")
+        self.selected_skills_badge.setCursor(Qt.PointingHandCursor)
+        self.selected_skills_badge.setFixedHeight(30)
+        self.selected_skills_badge.setVisible(False)
+        self.selected_skills_badge.setStyleSheet(
+            f"QPushButton {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+            f"border: 1px solid rgba(0, 122, 255, 0.22); border-radius: 15px; "
+            "padding: 4px 10px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
+            f"border-color: {DesignTokens.border}; }}"
+        )
+        self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
+
         self.clarify_mode_badge = QPushButton("  反问模式")
         self.clarify_mode_badge.setIcon(qta.icon('fa5s.question-circle', color=DesignTokens.primary))
         self.clarify_mode_badge.setToolTip("反问模式已开启，点击关闭")
@@ -5523,6 +5631,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.setContentsMargins(0, 0, 0, 0)
         prompt_toolbar.setSpacing(8)
         prompt_toolbar.addWidget(self.tool_menu_btn)
+        prompt_toolbar.addWidget(self.selected_skills_badge)
         prompt_toolbar.addWidget(self.clarify_mode_badge)
         prompt_toolbar.addWidget(self.pause_btn)
         prompt_toolbar.addWidget(self.loop_hint)
@@ -5664,8 +5773,11 @@ class MainWindow(QMainWindow):
         menu.addAction(self.clarify_mode_action)
         menu.addSeparator()
         plugins_action = QAction(qta.icon('fa5s.th-large', color='#4b5563'), "插件", self)
-        plugins_action.triggered.connect(self.open_skills_center)
+        plugins_action.triggered.connect(self.open_session_skill_picker)
         menu.addAction(plugins_action)
+        manage_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "能力中心", self)
+        manage_action.triggered.connect(self.open_skills_center)
+        menu.addAction(manage_action)
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
     def refresh_model_selector(self):
@@ -5813,6 +5925,15 @@ class MainWindow(QMainWindow):
             "pending_clarify_questions": normalize_pending_clarify_questions(
                 getattr(state, "pending_clarify_questions", [])
             ),
+        }
+
+    def _session_selected_skills_meta(self, state):
+        if not state:
+            return {}
+        return {
+            "selected_skill_names": normalize_selected_skill_names(
+                getattr(state, "selected_skill_names", [])
+            )
         }
 
     def refresh_clarify_controls(self, session_id=None):
@@ -6335,6 +6456,7 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(session_id)
         self.refresh_observability_view(session_id)
         self.refresh_context_badges(session_id)
+        self.refresh_selected_skill_controls(session_id)
         self._render_sub_agent_monitor_for_state(state)
 
     def normalize_session_ui(self, state):
@@ -6398,6 +6520,7 @@ class MainWindow(QMainWindow):
             self.input_field.setEnabled(bool(self.workspace_dir))
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
+        self.refresh_selected_skill_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.refresh_observability_view(state.session_id)
         self.update_skill_capture_button_state()
@@ -6542,6 +6665,7 @@ class MainWindow(QMainWindow):
         state.active_turn_id = 0
         state.completed_turn_id = 0
         state.active_skills_label.setText("本次会话使用的功能: ")
+        state.active_skills_label.setVisible(False)
         state.displayed_count = 0
         state.displayed_render_count = 0
         state.load_more_btn = None
@@ -6551,6 +6675,7 @@ class MainWindow(QMainWindow):
         state.pending_clarify_questions = []
         state.clarify_source_user_text = ""
         state.clarify_answers_context = []
+        state.selected_skill_names = []
         state.changed_files = []
         state.step_records = []
         state.persisted_agents = []
@@ -6629,6 +6754,9 @@ class MainWindow(QMainWindow):
         )
         state.run_phase = conversation_meta.get("run_phase") or "Idle"
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
+        state.selected_skill_names = normalize_selected_skill_names(
+            conversation_meta.get("selected_skill_names")
+        )
         state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
         state.clarify_mode_state = normalize_clarify_phase(
             conversation_meta.get("clarify_mode_state"),
@@ -6708,6 +6836,7 @@ class MainWindow(QMainWindow):
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.normalize_session_ui(self.get_current_session())
+        self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._render_sub_agent_monitor_for_state(state)
 
@@ -7643,6 +7772,7 @@ class MainWindow(QMainWindow):
             merged_meta["history_migration_version"] = HISTORY_MIGRATION_VERSION
             if session_id in self.sessions:
                 merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
+                merged_meta.update(self._session_selected_skills_meta(self.sessions.get(session_id)))
             try:
                 self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
@@ -7696,7 +7826,8 @@ class MainWindow(QMainWindow):
             state.clarify_mode_enabled
             or bool(getattr(state, "pending_clarify_questions", []))
         )
-        if not state.messages and not has_clarify_state:
+        has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
+        if not state.messages and not has_clarify_state and not has_selected_skills:
             return
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
         meta = {}
@@ -7710,6 +7841,7 @@ class MainWindow(QMainWindow):
         meta["session_status"] = getattr(state, "session_status", "draft")
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
         meta.update(self._session_clarify_meta(state))
+        meta.update(self._session_selected_skills_meta(state))
         try:
             self.chat_storage.save_conversation(
                 state.session_id,
@@ -8054,6 +8186,74 @@ class MainWindow(QMainWindow):
     def open_skills_center(self):
         SkillsCenterDialog(self.skill_manager, self.config_manager, self).exec()
 
+    def _available_session_skills(self):
+        skills = []
+        for skill in self.skill_manager.get_all_skills():
+            if skill.get("enabled") is False:
+                continue
+            skills.append(skill)
+        skills.sort(key=lambda item: (readable_skill_name(item) or item.get("name") or "").lower())
+        return skills
+
+    def _selected_skill_display_names(self, selected_skill_names):
+        selected = normalize_selected_skill_names(selected_skill_names)
+        if not selected:
+            return []
+        display_map = {
+            str(skill.get("name") or "").strip(): readable_skill_name(skill) or str(skill.get("name") or "").strip()
+            for skill in self._available_session_skills()
+        }
+        names = []
+        for skill_name in selected:
+            names.append(display_map.get(skill_name, skill_name))
+        return names
+
+    def refresh_selected_skill_controls(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state or state.session_id != self.current_session_id:
+            return
+        selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        running = bool(
+            (state.llm_worker and state.llm_worker.isRunning())
+            or (state.code_worker and state.code_worker.isRunning())
+            or getattr(state, "daemon_running", False)
+        )
+        if not selected:
+            self.selected_skills_badge.setVisible(False)
+            self.selected_skills_badge.setEnabled(not running)
+            self.selected_skills_badge.setToolTip("为当前会话指定能力")
+            return
+        display_names = self._selected_skill_display_names(selected)
+        label = f" 已选 {len(selected)} 个能力"
+        if len(display_names) == 1:
+            label = f" {display_names[0]}"
+        self.selected_skills_badge.setText(label)
+        self.selected_skills_badge.setToolTip("本会话指定能力: " + "、".join(display_names))
+        self.selected_skills_badge.setVisible(True)
+        self.selected_skills_badge.setEnabled(not running)
+
+    def set_session_selected_skills(self, skill_names, session_id=None):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        state.selected_skill_names = normalize_selected_skill_names(skill_names)
+        self.refresh_selected_skill_controls(state.session_id)
+        self.save_chat_history(session_id=state.session_id)
+
+    def open_session_skill_picker(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        skills = self._available_session_skills()
+        dialog = SessionSkillPickerDialog(
+            skills,
+            selected_skill_names=getattr(state, "selected_skill_names", []),
+            parent=self,
+        )
+        if dialog.exec():
+            self.set_session_selected_skills(dialog.selected_skill_names(), session_id=state.session_id)
+            self.add_system_toast("当前会话的指定能力已更新。", "success", session_id=state.session_id, auto_close_ms=3200)
+
     def update_skill_capture_button_state(self):
         if not hasattr(self, "sidebar_skill_capture_btn"):
             return
@@ -8171,6 +8371,7 @@ class MainWindow(QMainWindow):
         current_text = state.active_skills_label.text()
         if f"[{skill_name}]" not in current_text:
             state.active_skills_label.setText(current_text + f" [{skill_name}]")
+            state.active_skills_label.setVisible(True)
 
     def toggle_pause(self):
         state = self.get_current_session()
@@ -8394,6 +8595,9 @@ class MainWindow(QMainWindow):
                 ),
                 "pending_clarify_questions": normalize_pending_clarify_questions(
                     getattr(state, "pending_clarify_questions", [])
+                ),
+                "selected_skill_names": normalize_selected_skill_names(
+                    getattr(state, "selected_skill_names", [])
                 ),
                 "selected_model_id": self.config_manager.get_selected_model_id(),
             }

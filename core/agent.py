@@ -23,6 +23,7 @@ from core.clarify_mode import (
     RUN_MODE_CLARIFYING,
     is_tool_allowed_in_clarifying,
     json_copy,
+    normalize_selected_skill_names,
     normalize_run_context,
 )
 from core.llm.deepseek import is_deepseek_request
@@ -468,7 +469,26 @@ class LLMWorker(QThread):
             self.chat_storage = None
         self._bind_agent_manager()
 
+    def _selected_skill_names(self):
+        return normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
+
+    def _selected_skill_tool_names(self):
+        tool_names = []
+        seen = set()
+        if not hasattr(self.skill_manager, "get_tools_for_skill"):
+            return tool_names
+        for skill_name in self._selected_skill_names():
+            for tool_name in self.skill_manager.get_tools_for_skill(skill_name):
+                text = str(tool_name or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                tool_names.append(text)
+        return tool_names
+
     def _refresh_tool_definitions(self):
+        for tool_name in self._selected_skill_tool_names():
+            self.discovered_tool_names.add(tool_name)
         try:
             tools = self.skill_manager.get_tool_definitions(
                 run_mode=self._current_run_mode(),
@@ -815,8 +835,41 @@ class LLMWorker(QThread):
         if memories_text:
             context_lines.append("\n# Memories\n" + memories_text)
 
+        selected_skill_names = [
+            skill_name for skill_name in self._selected_skill_names()
+            if self.skill_manager.get_brief_skill_prompt(skill_name)
+        ]
+        if selected_skill_names:
+            selected_skill_lines = [
+                f"- `{skill_name}`: {self.skill_manager.get_skill_display_name(skill_name)}"
+                for skill_name in selected_skill_names
+            ]
+            selected_skill_briefs = [
+                self.skill_manager.get_brief_skill_prompt(skill_name)
+                for skill_name in selected_skill_names
+            ]
+            context_lines.extend(
+                [
+                    "",
+                    "# 用户指定能力",
+                    "以下能力由用户通过对话栏的插件入口为当前会话明确指定。除非明显不适用，或受当前运行模式/权限限制，你必须优先参考并使用这些能力。",
+                    *selected_skill_lines,
+                    "",
+                    "这些用户指定能力的简版说明如下：",
+                    "\n\n".join([item for item in selected_skill_briefs if item]),
+                ]
+            )
+
         # Append Skill-Specific Prompts (e.g. usage guidelines, learned experiences)
-        system_skills = self.skill_manager.get_system_prompts(query_text=self._build_skill_query(current_messages))
+        try:
+            system_skills = self.skill_manager.get_system_prompts(
+                query_text=self._build_skill_query(current_messages),
+                exclude_skill_names=selected_skill_names,
+            )
+        except TypeError:
+            system_skills = self.skill_manager.get_system_prompts(
+                query_text=self._build_skill_query(current_messages),
+            )
         if system_skills:
             context_lines.append("\n# Skill Capabilities & Guidelines")
             context_lines.append(system_skills)

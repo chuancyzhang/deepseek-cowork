@@ -1443,6 +1443,16 @@ class SkillManager:
     def get_tools_for_skill(self, skill_name):
         return list(self.skill_to_tools.get(skill_name) or [])
 
+    def get_skill_display_name(self, skill_name):
+        record = self.skill_records.get(skill_name)
+        if not record:
+            return str(skill_name or "").strip()
+        return record["meta"].get("display_name") or _humanize_skill_name(skill_name)
+
+    def get_brief_skill_prompt(self, skill_name):
+        record = self.skill_records.get(skill_name) or {}
+        return record.get("brief") or ""
+
     def materialize_experience_package(self, skill_name, include_references=False, include_entries=False):
         record = self.skill_records.get(skill_name)
         if not record:
@@ -1458,14 +1468,26 @@ class SkillManager:
             include_references=include_references,
         )
 
-    def get_system_prompts(self, query_text=None, limit=6):
-        if not query_text:
-            return "\n\n".join(self.skill_prompts_brief[:limit])
-        selected = self.select_relevant_skills(query_text, limit=limit)
+    def get_system_prompts(self, query_text=None, limit=6, preferred_skill_names=None, exclude_skill_names=None):
+        selected = []
+        for skill_name in preferred_skill_names or []:
+            if skill_name in self.skill_records and skill_name not in selected:
+                selected.append(skill_name)
+        if query_text:
+            for skill_name in self.select_relevant_skills(query_text, limit=limit):
+                if skill_name not in selected:
+                    selected.append(skill_name)
+        elif not selected:
+            selected = [name for name in self.skill_records][:limit]
+        excluded = {name for name in (exclude_skill_names or []) if name}
         blocks = []
         for skill_name in selected:
+            if skill_name in excluded:
+                continue
             record = self.skill_records.get(skill_name) or {}
             blocks.append(record.get("brief") or "")
+            if len(blocks) >= limit:
+                break
         return "\n\n".join([block for block in blocks if block])
 
     def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):

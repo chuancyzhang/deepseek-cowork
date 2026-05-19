@@ -202,6 +202,21 @@ def apple_tool_button_style(active=False):
     )
 
 
+def apple_ghost_icon_button_style(radius=17):
+    return (
+        "QToolButton { "
+        "background: transparent; border: none; "
+        f"border-radius: {radius}px; color: {DesignTokens.text_secondary};"
+        "} "
+        "QToolButton:hover { "
+        f"background: rgba(255, 255, 255, 0.68); color: {DesignTokens.text_primary};"
+        "} "
+        "QToolButton:pressed { "
+        f"background: {DesignTokens.bg_hover};"
+        "} "
+    )
+
+
 def apple_panel_style(radius=14, bg=None):
     bg = bg or DesignTokens.bg_card
     return (
@@ -210,17 +225,45 @@ def apple_panel_style(radius=14, bg=None):
     )
 
 
-def apple_code_edit_style(bg=None, radius=12):
-    bg = bg or DesignTokens.bg_code
+def apple_section_surface_style(radius=16, bg=None):
+    bg = bg or "rgba(255, 255, 255, 0.62)"
+    return f"background: {bg}; border: none; border-radius: {radius}px;"
+
+
+def apple_segmented_button_style():
+    return f"""
+        QPushButton {{
+            background: transparent;
+            border: none;
+            border-radius: 12px;
+            color: {DesignTokens.text_secondary};
+            padding: 7px 12px;
+            font-size: 11px;
+            font-weight: 700;
+        }}
+        QPushButton:hover {{
+            background: rgba(255, 255, 255, 0.72);
+            color: {DesignTokens.text_primary};
+        }}
+        QPushButton:checked {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.primary};
+        }}
+    """
+
+
+def apple_code_edit_style(bg=None, radius=12, subtle=False, padding=9):
+    bg = bg or (DesignTokens.bg_secondary if subtle else DesignTokens.bg_code)
+    border_rule = "border: none;" if subtle else f"border: 1px solid {DesignTokens.border};"
     return f"""
         QTextEdit {{
-            border: 1px solid {DesignTokens.border};
+            {border_rule}
             border-radius: {radius}px;
             background: {bg};
             color: {DesignTokens.text_primary};
             font-family: 'SF Mono', 'Cascadia Mono', 'Consolas', 'Microsoft YaHei UI', monospace;
             font-size: 11px;
-            padding: 9px;
+            padding: {padding}px;
             line-height: 1.45;
         }}
     """
@@ -256,13 +299,15 @@ def apple_tree_style():
     """
 
 
-def apple_list_style():
+def apple_list_style(border=True, bg=None, radius=14, padding=6):
+    bg = bg or (DesignTokens.bg_card if border else "transparent")
+    border_rule = f"border: 1px solid {DesignTokens.border};" if border else "border: none;"
     return f"""
         QListWidget {{
-            border: 1px solid {DesignTokens.border};
-            border-radius: 14px;
-            background: {DesignTokens.bg_card};
-            padding: 6px;
+            {border_rule}
+            border-radius: {radius}px;
+            background: {bg};
+            padding: {padding}px;
             outline: none;
         }}
         QListWidget::item {{
@@ -4262,9 +4307,9 @@ class SubAgentMonitor(QWidget):
         self.tabs.setDocumentMode(True)
         self.tabs.setStyleSheet(f"""
             QTabWidget::pane {{
-                border: 1px solid {DesignTokens.border};
-                border-radius: 14px;
-                background: {DesignTokens.bg_card};
+                border: none;
+                border-radius: 16px;
+                background: rgba(255, 255, 255, 0.56);
             }}
             QTabBar::tab {{
                 background: transparent;
@@ -4513,10 +4558,10 @@ class SubAgentMonitor(QWidget):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
-        text_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_main, radius=0))
+        text_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12))
         layout.addWidget(text_edit)
         
         title = agent_id if not agent_name else f"{agent_name}"
@@ -5468,8 +5513,8 @@ class MainWindow(QMainWindow):
         self.right_sidebar = QFrame(main_container)
         self.right_sidebar.setObjectName("RightSidebar")
         self.right_sidebar.setStyleSheet(
-            f"QFrame#RightSidebar {{ background-color: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border}; border-radius: 22px; }}"
+            f"QFrame#RightSidebar {{ background-color: {DesignTokens.bg_glass}; "
+            "border: none; border-radius: 22px; }}"
         )
         self.right_sidebar.setVisible(False)
         add_soft_shadow(self.right_sidebar, blur=42, y_offset=12, alpha=34)
@@ -5477,21 +5522,21 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(self.right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-        
+
         right_header = QFrame()
         right_header.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.bg_card}; border-bottom: 1px solid {DesignTokens.border}; "
+            "QFrame { background: rgba(255, 255, 255, 0.46); border: none; "
             "border-top-left-radius: 22px; border-top-right-radius: 22px; }"
         )
         right_header_layout = QHBoxLayout(right_header)
-        right_header_layout.setContentsMargins(16, 14, 12, 14)
+        right_header_layout.setContentsMargins(18, 16, 14, 12)
         self.right_title_label = QLabel("任务上下文")
-        self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
+        self.right_title_label.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary};")
         self.right_desc_label = QLabel("查看文件与执行步骤")
         self.right_desc_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         right_title_box = QVBoxLayout()
         right_title_box.setContentsMargins(0, 0, 0, 0)
-        right_title_box.setSpacing(2)
+        right_title_box.setSpacing(4)
         right_title_box.addWidget(self.right_title_label)
         right_title_box.addWidget(self.right_desc_label)
         right_header_layout.addLayout(right_title_box, 1)
@@ -5500,7 +5545,7 @@ class MainWindow(QMainWindow):
         self.right_close_btn.setToolTip("收起上下文")
         self.right_close_btn.setCursor(Qt.PointingHandCursor)
         self.right_close_btn.setFixedSize(34, 34)
-        self.right_close_btn.setStyleSheet(apple_tool_button_style(False))
+        self.right_close_btn.setStyleSheet(apple_ghost_icon_button_style())
         self.right_close_btn.clicked.connect(self.hide_context_drawer)
         right_header_layout.addWidget(self.right_close_btn)
         right_layout.addWidget(right_header)
@@ -5539,20 +5584,17 @@ class MainWindow(QMainWindow):
         # Preview Area in Workspace Tab
         preview_container = QWidget()
         preview_layout = QVBoxLayout(preview_container)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.setSpacing(0)
-        
+        preview_layout.setContentsMargins(12, 12, 12, 12)
+        preview_layout.setSpacing(10)
+
         r_preview_header = QFrame()
-        r_preview_header.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.bg_secondary}; border-top: 1px solid {DesignTokens.separator}; "
-            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
-        )
+        r_preview_header.setStyleSheet(apple_section_surface_style(radius=16))
         r_preview_header_layout = QHBoxLayout(r_preview_header)
-        r_preview_header_layout.setContentsMargins(12, 8, 10, 8)
+        r_preview_header_layout.setContentsMargins(12, 10, 10, 10)
         r_preview_header_layout.setSpacing(8)
         preview_title_box = QVBoxLayout()
         preview_title_box.setContentsMargins(0, 0, 0, 0)
-        preview_title_box.setSpacing(1)
+        preview_title_box.setSpacing(2)
         self.preview_title_label = QLabel("内容预览")
         self.preview_title_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 12px;")
         self.preview_meta_label = QLabel("选择文件查看内容")
@@ -5585,14 +5627,18 @@ class MainWindow(QMainWindow):
             btn.setEnabled(False)
             r_preview_header_layout.addWidget(btn)
         preview_layout.addWidget(r_preview_header)
-        
+
         self.preview_stack = QStackedWidget()
+        self.preview_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
         self.preview_text = ReadOnlyTextEdit()
         # self.preview_text.setReadOnly(True) # Handled by class
-        self.preview_text.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_main, radius=0))
+        self.preview_text.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=14, subtle=True, padding=12))
         self.preview_text.setPlaceholderText("点击文件预览内容")
         self.preview_image = QLabel()
         self.preview_image.setAlignment(Qt.AlignCenter)
+        self.preview_image.setStyleSheet(
+            f"background: {DesignTokens.bg_secondary}; border-radius: 14px; color: {DesignTokens.text_secondary};"
+        )
         self.preview_stack.addWidget(self.preview_text)
         self.preview_stack.addWidget(self.preview_image)
         self.preview_stack.setCurrentWidget(self.preview_text)
@@ -5611,98 +5657,169 @@ class MainWindow(QMainWindow):
         # Observability
         self.tool_details_tab = QWidget()
         td_layout = QVBoxLayout(self.tool_details_tab)
-        td_layout.setContentsMargins(12, 12, 12, 12)
+        td_layout.setContentsMargins(14, 12, 14, 14)
         td_layout.setSpacing(10)
+
+        step_section = QFrame()
+        step_section.setStyleSheet(apple_section_surface_style(radius=18))
+        step_section_layout = QVBoxLayout(step_section)
+        step_section_layout.setContentsMargins(12, 12, 12, 10)
+        step_section_layout.setSpacing(8)
         self.step_intro_label = QLabel("本轮步骤")
         self.step_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        td_layout.addWidget(self.step_intro_label)
+        step_section_layout.addWidget(self.step_intro_label)
 
         self.step_list = QListWidget()
-        self.step_list.setStyleSheet(apple_list_style())
+        self.step_list.setStyleSheet(apple_list_style(border=False, bg="transparent", radius=12, padding=2))
         self.step_list.itemClicked.connect(self.on_step_item_clicked)
-        self.step_list.setMinimumHeight(112)
-        td_layout.addWidget(self.step_list, 1)
+        self.step_list.setMinimumHeight(96)
+        self.step_list.setMaximumHeight(144)
+        step_section_layout.addWidget(self.step_list)
+        td_layout.addWidget(step_section)
 
-        obs_prompt_label = QLabel("系统提示词")
-        obs_prompt_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
-        td_layout.addWidget(obs_prompt_label)
+        self.OBS_SECTION_PROMPT = 0
+        self.OBS_SECTION_LOG = 1
+        self.OBS_SECTION_DETAILS = 2
+        self.observability_section_index = self.OBS_SECTION_PROMPT
+
+        observability_segment_bar = QFrame()
+        observability_segment_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.55)"))
+        observability_segment_layout = QHBoxLayout(observability_segment_bar)
+        observability_segment_layout.setContentsMargins(4, 4, 4, 4)
+        observability_segment_layout.setSpacing(4)
+        self.observability_segment_buttons = []
+        for index, title in enumerate(("系统提示词", "工具调用与返回", "工具详情")):
+            btn = QPushButton(title)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(30)
+            btn.setStyleSheet(apple_segmented_button_style())
+            btn.clicked.connect(lambda checked=False, i=index: self.set_observability_section(i))
+            observability_segment_layout.addWidget(btn)
+            self.observability_segment_buttons.append(btn)
+        td_layout.addWidget(observability_segment_bar)
+
+        self.observability_content_stack = QStackedWidget()
+        self.observability_content_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
+
+        prompt_page = QWidget()
+        prompt_layout = QVBoxLayout(prompt_page)
+        prompt_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_layout.setSpacing(0)
 
         self.observability_prompt_edit = ReadOnlyTextEdit()
         self.observability_prompt_edit.setPlaceholderText("等待本轮系统提示词...")
-        self.observability_prompt_edit.setStyleSheet(apple_code_edit_style())
-        td_layout.addWidget(self.observability_prompt_edit, 2)
+        self.observability_prompt_edit.setStyleSheet(
+            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
+        )
+        prompt_layout.addWidget(self.observability_prompt_edit)
+        self.observability_content_stack.addWidget(prompt_page)
 
-        obs_log_label = QLabel("工具调用与返回")
-        obs_log_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
-        td_layout.addWidget(obs_log_label)
+        log_page = QWidget()
+        log_layout = QVBoxLayout(log_page)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(0)
 
         self.observability_log_edit = ReadOnlyTextEdit()
         self.observability_log_edit.setPlaceholderText("工具调用和返回内容会按时间顺序显示...")
-        self.observability_log_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_main))
-        td_layout.addWidget(self.observability_log_edit, 3)
-        
-        td_header = QLabel("工具调用详情")
-        td_header.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary};")
-        td_header.setVisible(True)
-        td_layout.addWidget(td_header)
-        
-        # Tool ID / Name
+        self.observability_log_edit.setStyleSheet(
+            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
+        )
+        log_layout.addWidget(self.observability_log_edit)
+        self.observability_content_stack.addWidget(log_page)
+
+        details_page = QWidget()
+        details_layout = QVBoxLayout(details_page)
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(10)
+
+        details_info_bar = QFrame()
+        details_info_bar.setStyleSheet(apple_section_surface_style(radius=16))
+        details_info_layout = QVBoxLayout(details_info_bar)
+        details_info_layout.setContentsMargins(12, 10, 12, 10)
+        details_info_layout.setSpacing(2)
         self.td_info_label = QLabel("选择左侧工具卡片查看详情")
         self.td_info_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        self.td_info_label.setVisible(True)
-        td_layout.addWidget(self.td_info_label)
-        
+        self.td_info_label.setWordWrap(True)
+        details_info_layout.addWidget(self.td_info_label)
+
         self.td_meta_label = QLabel("")
-        self.td_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; margin-bottom: 4px;")
+        self.td_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
         self.td_meta_label.setVisible(False)
-        td_layout.addWidget(self.td_meta_label)
-        
-        # Args
+        self.td_meta_label.setWordWrap(True)
+        details_info_layout.addWidget(self.td_meta_label)
+        details_layout.addWidget(details_info_bar)
+
+        self.td_detail_splitter = SmartSplitter(Qt.Vertical)
+        self.td_detail_splitter.setChildrenCollapsible(False)
+
+        td_args_section = QWidget()
+        td_args_layout = QVBoxLayout(td_args_section)
+        td_args_layout.setContentsMargins(0, 0, 0, 0)
+        td_args_layout.setSpacing(8)
         td_args_label = QLabel("参数")
-        td_args_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary}; margin-top: 8px;")
-        td_args_label.setVisible(True)
-        td_layout.addWidget(td_args_label)
-        
+        td_args_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
+        td_args_layout.addWidget(td_args_label)
         self.td_args_edit = ReadOnlyTextEdit()
-        # self.td_args_edit.setReadOnly(True)
-        self.td_args_edit.setStyleSheet(apple_code_edit_style())
-        self.td_args_edit.setVisible(True)
-        td_layout.addWidget(self.td_args_edit)
-        
+        self.td_args_edit.setStyleSheet(
+            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
+        )
+        td_args_layout.addWidget(self.td_args_edit)
+
+        td_result_section = QWidget()
+        td_result_layout = QVBoxLayout(td_result_section)
+        td_result_layout.setContentsMargins(0, 0, 0, 0)
+        td_result_layout.setSpacing(8)
         td_result_header = QWidget()
         td_result_header_layout = QHBoxLayout(td_result_header)
         td_result_header_layout.setContentsMargins(0, 0, 0, 0)
         td_result_header_layout.setSpacing(8)
         td_result_label = QLabel("结果")
-        td_result_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary}; margin-top: 8px;")
+        td_result_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
         td_result_header_layout.addWidget(td_result_label)
         td_result_header_layout.addStretch()
         self.td_copy_result_btn = QPushButton("复制结果")
         self.td_copy_result_btn.setCursor(Qt.PointingHandCursor)
         self.td_copy_result_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
-        self.td_copy_result_btn.setFixedHeight(26)
-        self.td_copy_result_btn.setStyleSheet(apple_button_style("secondary", radius=13))
+        self.td_copy_result_btn.setMinimumWidth(112)
+        self.td_copy_result_btn.setFixedHeight(28)
+        self.td_copy_result_btn.setStyleSheet(apple_button_style("secondary", radius=14))
         self.td_copy_result_btn.clicked.connect(self.copy_tool_result)
         td_result_header_layout.addWidget(self.td_copy_result_btn)
-        td_result_header.setVisible(True)
-        td_layout.addWidget(td_result_header)
-        
+        td_result_layout.addWidget(td_result_header)
+
         self.td_result_edit = ReadOnlyTextEdit()
-        # self.td_result_edit.setReadOnly(True)
-        self.td_result_edit.setStyleSheet(apple_code_edit_style())
-        self.td_result_edit.setVisible(True)
-        td_layout.addWidget(self.td_result_edit)
+        self.td_result_edit.setStyleSheet(
+            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
+        )
+        td_result_layout.addWidget(self.td_result_edit)
+
+        self.td_detail_splitter.addWidget(td_args_section)
+        self.td_detail_splitter.addWidget(td_result_section)
+        self.td_detail_splitter.setStretchFactor(0, 2)
+        self.td_detail_splitter.setStretchFactor(1, 3)
+        self.td_detail_splitter.setSizes([180, 260])
+        details_layout.addWidget(self.td_detail_splitter, 1)
+        self.observability_content_stack.addWidget(details_page)
+        td_layout.addWidget(self.observability_content_stack, 1)
+        self.set_observability_section(self.OBS_SECTION_PROMPT)
         
         self.right_stack.addWidget(self.tool_details_tab)
 
         # Sub-Agent Monitor
         self.sub_agent_tab = QWidget()
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
-        sub_agent_layout.setContentsMargins(12, 12, 12, 12)
-        sub_agent_layout.setSpacing(8)
+        sub_agent_layout.setContentsMargins(14, 12, 14, 14)
+        sub_agent_layout.setSpacing(10)
+        sub_agent_intro_card = QFrame()
+        sub_agent_intro_card.setStyleSheet(apple_section_surface_style(radius=16))
+        sub_agent_intro_layout = QVBoxLayout(sub_agent_intro_card)
+        sub_agent_intro_layout.setContentsMargins(12, 10, 12, 10)
+        sub_agent_intro_layout.setSpacing(0)
         self.sub_agent_intro_label = QLabel("实时状态与执行日志")
         self.sub_agent_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        sub_agent_layout.addWidget(self.sub_agent_intro_label)
+        sub_agent_intro_layout.addWidget(self.sub_agent_intro_label)
+        sub_agent_layout.addWidget(sub_agent_intro_card)
         self.sub_agent_monitor = SubAgentMonitor()
         sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
         self.right_stack.addWidget(self.sub_agent_tab)
@@ -6004,7 +6121,7 @@ class MainWindow(QMainWindow):
         if not parent:
             return
         margin = 16
-        width = min(390, max(320, int(parent.width() * 0.36)))
+        width = min(460, max(360, int(parent.width() * 0.42)))
         height = max(120, parent.height() - (margin * 2))
         self.right_sidebar.setGeometry(parent.width() - width - margin, margin, width, height)
         if self.right_sidebar.isVisible():
@@ -6068,6 +6185,18 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(apple_tool_button_style(active or hinted))
             color = DesignTokens.primary if active or hinted else DesignTokens.text_secondary
             btn.setIcon(qta.icon(icons.get(tab_index, "fa5s.circle"), color=color))
+
+    def set_observability_section(self, index):
+        if not hasattr(self, "observability_content_stack"):
+            return
+        count = self.observability_content_stack.count()
+        if count <= 0:
+            return
+        index = max(0, min(index, count - 1))
+        self.observability_section_index = index
+        self.observability_content_stack.setCurrentIndex(index)
+        for btn_index, btn in enumerate(getattr(self, "observability_segment_buttons", [])):
+            btn.setChecked(btn_index == index)
 
     def show_prompt_tool_menu(self):
         menu = QMenu(self)
@@ -9250,6 +9379,7 @@ class MainWindow(QMainWindow):
         # 2. Open Drawer & Switch Tab for explicit tool-detail requests.
         if switch_tab:
             self.show_context_drawer(self.RIGHT_TAB_OBSERVABILITY)
+            self.set_observability_section(self.OBS_SECTION_DETAILS)
         else:
             self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         

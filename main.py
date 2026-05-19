@@ -128,6 +128,7 @@ SCROLL_FLUSH_INTERVAL_MS = 24
 SCROLL_BOTTOM_THRESHOLD_PX = 36
 STREAM_RENDER_INTERVAL_SEC = 0.12
 STREAM_PLAIN_TEXT_THRESHOLD = 2400
+UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
 
 def set_stylesheet_if_changed(widget, stylesheet):
@@ -5376,6 +5377,7 @@ class MainWindow(QMainWindow):
         self.daemon_port = self.config_manager.get("daemon_port", DEFAULT_PORT)
         self.daemon_client = None
         self.daemon_available = False
+        self.daemon_bootstrapping = False
         self.daemon_process = None
         self.daemon_runtime_signature = get_runtime_signature()
         self.gateway_process = None
@@ -5383,6 +5385,8 @@ class MainWindow(QMainWindow):
         self.tray_icon = None
         self.daemon_timer = None
         self.single_instance_server = None
+        self._background_services_started = False
+        self._background_services_scheduled = False
         
         # Animation Throttling
         self.last_message_time = 0
@@ -6081,9 +6085,6 @@ class MainWindow(QMainWindow):
         
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
-        self.setup_daemon_client()
-        self.start_daemon_monitor()
-        self.setup_tray()
         QApplication.instance().installEventFilter(self)
         self.position_context_drawer()
 
@@ -6106,6 +6107,12 @@ class MainWindow(QMainWindow):
             if not in_drawer and not in_rail:
                 self.hide_context_drawer()
         return super().eventFilter(obj, event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._background_services_scheduled:
+            self._background_services_scheduled = True
+            QTimer.singleShot(0, self.start_background_services)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and getattr(self, "right_drawer_open", False):
@@ -6288,7 +6295,12 @@ class MainWindow(QMainWindow):
         profile = self.config_manager.get_model_profile()
         provider_text = profile.get("provider_display_name") if profile else self.config_manager.get("llm_provider", "openai")
         model_name = profile.get("display_name") or profile.get("model_name") if profile else self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
-        connection_text = "Daemon Ready" if getattr(self, "daemon_available", False) else "Local Agent"
+        if getattr(self, "daemon_available", False):
+            connection_text = "Daemon Ready"
+        elif getattr(self, "daemon_bootstrapping", False):
+            connection_text = "Connecting"
+        else:
+            connection_text = "Local Agent"
         self.model_badge.setText(f"{provider_text} | {model_name} | {connection_text}")
 
         if self.config_manager.get_god_mode():
@@ -6566,11 +6578,31 @@ class MainWindow(QMainWindow):
         card = state.tool_cards[tool_id]
         self.show_tool_details(tool_id, card.args, card.result, meta=card.meta, switch_tab=True)
 
-    def setup_daemon_client(self):
-        self.daemon_client = DaemonClient(self.daemon_host, self.daemon_port)
-        self.try_connect_daemon(allow_start=True, retries=6)
+    def start_background_services(self):
+        if self._background_services_started:
+            return
+        self._background_services_started = True
+        self.daemon_bootstrapping = True
+        self.refresh_context_badges()
+        try:
+            self.setup_daemon_client(retries=6)
+            self.start_daemon_monitor()
+            self.setup_tray()
+        finally:
+            self.daemon_bootstrapping = False
+            self.refresh_context_badges()
+
+    def setup_daemon_client(self, retries=6):
+        self.daemon_client = DaemonClient(
+            self.daemon_host,
+            self.daemon_port,
+            timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+        )
+        self.try_connect_daemon(allow_start=True, retries=retries)
 
     def start_daemon_monitor(self):
+        if self.daemon_timer:
+            return
         self.daemon_timer = QTimer(self)
         self.daemon_timer.setInterval(5000)
         self.daemon_timer.timeout.connect(self.ensure_daemon_connection)
@@ -6588,7 +6620,11 @@ class MainWindow(QMainWindow):
 
     def try_connect_daemon(self, allow_start=False, retries=0):
         if not self.daemon_client:
-            self.daemon_client = DaemonClient(self.daemon_host, self.daemon_port)
+            self.daemon_client = DaemonClient(
+                self.daemon_host,
+                self.daemon_port,
+                timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+            )
         ping_payload = self.daemon_client.ping()
         connected = bool(ping_payload)
         if connected and not self._daemon_signature_matches(ping_payload):

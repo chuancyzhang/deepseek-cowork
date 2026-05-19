@@ -92,13 +92,6 @@ class SkillManager:
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             self.skills_dirs.append(os.path.join(repo_root, "skills"))
             self.skills_dirs.append(os.path.join(repo_root, "ai_skills"))
-            dist_dir = os.path.join(repo_root, "dist")
-            if os.path.exists(dist_dir):
-                for item in os.listdir(dist_dir):
-                    for folder in ("skills", "ai_skills"):
-                        candidate = os.path.join(dist_dir, item, folder)
-                        if os.path.isdir(candidate):
-                            self.skills_dirs.append(candidate)
 
         self.tools = {}
         self.tool_definitions = []
@@ -126,16 +119,6 @@ class SkillManager:
                 if os.path.isdir(candidate) and candidate not in self.skills_dirs:
                     self.skills_dirs.append(candidate)
             return
-
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dist_dir = os.path.join(repo_root, "dist")
-        if not os.path.exists(dist_dir):
-            return
-        for item in os.listdir(dist_dir):
-            for folder in ("skills", "ai_skills"):
-                candidate = os.path.join(dist_dir, item, folder)
-                if os.path.isdir(candidate) and candidate not in self.skills_dirs:
-                    self.skills_dirs.append(candidate)
 
     def _parse_frontmatter_value(self, raw):
         raw = (raw or "").strip()

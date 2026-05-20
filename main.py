@@ -3168,6 +3168,12 @@ class SkillsCenterDialog(QDialog):
         toggle_btn.clicked.connect(lambda checked=False, n=skill["name"], e=not enabled: self.toggle_skill(n, e))
         controls_col.addWidget(toggle_btn)
 
+        export_btn = QPushButton("导出")
+        export_btn.setObjectName("SecondaryBtn")
+        export_btn.setFixedWidth(90)
+        export_btn.clicked.connect(lambda checked=False, s=skill: self.export_skill(s))
+        controls_col.addWidget(export_btn)
+
         if str(skill.get("risk_level") or skill.get("security_level") or "").lower() == "high":
             explain_btn = QPushButton("查看风险")
             explain_btn.setObjectName("GhostBtn")
@@ -3189,7 +3195,24 @@ class SkillsCenterDialog(QDialog):
         self.refresh_list()
 
     def import_skill(self):
-        path = QFileDialog.getExistingDirectory(self, "选择能力目录（包含 SKILL.md）")
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("导入自定义能力")
+        dialog.setText("选择要导入的来源类型。")
+        zip_btn = dialog.addButton("ZIP 文件", QMessageBox.AcceptRole)
+        dir_btn = dialog.addButton("文件夹", QMessageBox.AcceptRole)
+        dialog.addButton(QMessageBox.Cancel)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        path = ""
+        if clicked == zip_btn:
+            path, _selected_filter = QFileDialog.getOpenFileName(
+                self,
+                "选择能力 ZIP 文件",
+                "",
+                "ZIP 文件 (*.zip)",
+            )
+        elif clicked == dir_btn:
+            path = QFileDialog.getExistingDirectory(self, "选择能力目录（包含 SKILL.md）")
         if path:
             success, msg = self.skill_manager.import_skill(path)
             if success:
@@ -3197,6 +3220,28 @@ class SkillsCenterDialog(QDialog):
                 self.refresh_list()
             else:
                 QMessageBox.warning(self, "能力中心", msg)
+
+    def export_skill(self, skill):
+        skill_name = str(skill.get("name") or "").strip()
+        if not skill_name:
+            QMessageBox.warning(self, "能力中心", "无法识别要导出的能力名称。")
+            return
+        default_name = f"{skill_name}.zip"
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出能力",
+            default_name,
+            "ZIP 文件 (*.zip)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        success, msg = self.skill_manager.export_skill(skill_name, path)
+        if success:
+            QMessageBox.information(self, "能力中心", msg)
+        else:
+            QMessageBox.warning(self, "能力中心", msg)
 
 
 class SessionSkillPickerDialog(QDialog):

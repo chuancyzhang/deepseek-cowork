@@ -7,10 +7,12 @@ import shutil
 import sys
 import time
 import uuid
+import tempfile
+import zipfile
 
 from .env_utils import ensure_package_installed, get_app_data_dir
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
-from .skill_adapter import adapt_skill_directory, discover_skill_artifacts
+from .skill_adapter import EXCLUDED_DIRS, adapt_skill_directory, discover_skill_artifacts
 from .tool_registry import ToolRegistry
 from .clarify_mode import normalize_selected_skill_names
 
@@ -967,6 +969,92 @@ class SkillManager:
         os.makedirs(candidate, exist_ok=True)
         return candidate
 
+    def _find_skill_path(self, skill_name):
+        normalized_name = str(skill_name or "").strip()
+        if not normalized_name:
+            return None
+        for skills_dir in self.skills_dirs:
+            candidate = os.path.join(skills_dir, normalized_name)
+            if os.path.isdir(candidate):
+                return candidate
+        return None
+
+    def _read_skill_name_from_path(self, source_path):
+        skill_json_path = os.path.join(source_path, "skill.json")
+        if os.path.isfile(skill_json_path):
+            try:
+                with open(skill_json_path, "r", encoding="utf-8-sig") as f:
+                    payload = json.load(f)
+                skill_name = str((payload or {}).get("name") or "").strip()
+                if skill_name:
+                    return skill_name
+            except Exception:
+                pass
+        skill_md_path = os.path.join(source_path, "SKILL.md")
+        if os.path.isfile(skill_md_path):
+            meta, _body = self._parse_skill_md_content(skill_md_path)
+            skill_name = str(meta.get("name") or "").strip()
+            if skill_name:
+                return skill_name
+        return os.path.basename(os.path.normpath(source_path))
+
+    def _extract_zip_to_tempdir(self, source_path):
+        temp_dir = tempfile.mkdtemp(prefix="cowork-skill-import-")
+        try:
+            with zipfile.ZipFile(source_path, "r") as archive:
+                for member in archive.infolist():
+                    target_path = os.path.abspath(os.path.join(temp_dir, member.filename))
+                    if os.path.commonpath([temp_dir, target_path]) != temp_dir:
+                        raise ValueError("ZIP contains unsafe paths")
+                archive.extractall(temp_dir)
+            return temp_dir
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
+    def _resolve_import_source_dir(self, extracted_root):
+        if not os.path.isdir(extracted_root):
+            raise ValueError("Extracted skill package is not a directory")
+        entries = [
+            entry for entry in os.listdir(extracted_root)
+            if entry not in {".DS_Store", "__MACOSX"}
+        ]
+        markers = {"SKILL.md", "skill.json", "impl.py", "scripts", "assets", "references", "experience"}
+        if any(entry in markers for entry in entries):
+            return extracted_root
+        child_dirs = [entry for entry in entries if os.path.isdir(os.path.join(extracted_root, entry))]
+        if len(child_dirs) == 1:
+            return os.path.join(extracted_root, child_dirs[0])
+        raise ValueError("ZIP must contain a skill folder or skill files at the root")
+
+    def export_skill(self, skill_name, destination_zip_path):
+        skill_path = self._find_skill_path(skill_name)
+        if not skill_path:
+            return False, f"Skill '{skill_name}' not found."
+        destination_zip_path = str(destination_zip_path or "").strip()
+        if not destination_zip_path:
+            return False, "Destination ZIP path is required."
+        destination_dir = os.path.dirname(destination_zip_path) or "."
+        try:
+            os.makedirs(destination_dir, exist_ok=True)
+            archive_root = os.path.basename(os.path.normpath(skill_path))
+            with zipfile.ZipFile(destination_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for root, dirs, filenames in os.walk(skill_path):
+                    dirs[:] = [name for name in dirs if name not in EXCLUDED_DIRS]
+                    rel_root = os.path.relpath(root, skill_path)
+                    for filename in filenames:
+                        if filename == ".DS_Store":
+                            continue
+                        source_file = os.path.join(root, filename)
+                        if rel_root == ".":
+                            archive_path = os.path.join(archive_root, filename)
+                        else:
+                            archive_path = os.path.join(archive_root, rel_root, filename)
+                        archive.write(source_file, arcname=archive_path)
+            return True, f"Skill '{skill_name}' exported to {destination_zip_path}"
+        except Exception as e:
+            return False, f"Export failed: {e}"
+
     def _write_skill_md(self, md_path, meta, body):
         preferred = [
             "name",
@@ -1115,15 +1203,29 @@ class SkillManager:
         return all_skills
 
     def import_skill(self, source_path, source_format="auto"):
-        if not os.path.isdir(source_path):
-            return False, "Source is not a directory"
-        skill_name = os.path.basename(source_path)
+        temp_dir = None
+        resolved_source_path = source_path
+        if os.path.isfile(source_path):
+            if os.path.splitext(source_path)[1].lower() != ".zip":
+                return False, "Source must be a directory or ZIP file"
+            try:
+                temp_dir = self._extract_zip_to_tempdir(source_path)
+                resolved_source_path = self._resolve_import_source_dir(temp_dir)
+            except zipfile.BadZipFile:
+                return False, "Import failed: ZIP file is invalid."
+            except Exception as e:
+                return False, f"Import failed: {e}"
+        elif not os.path.isdir(source_path):
+            return False, "Source must be a directory or ZIP file"
+        skill_name = self._read_skill_name_from_path(resolved_source_path)
         target_dir = self._default_writable_skill_root()
         target_path = os.path.join(target_dir, skill_name)
         if os.path.exists(target_path):
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
             return False, f"Skill '{skill_name}' already exists"
         try:
-            result = adapt_skill_directory(source_path, target_path, skill_name=skill_name, source_format=source_format)
+            result = adapt_skill_directory(resolved_source_path, target_path, skill_name=skill_name, source_format=source_format)
             dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
             if not dependency_status.get("ok"):
                 message = result.get("message") or f"Skill '{skill_name}' imported successfully"
@@ -1131,6 +1233,9 @@ class SkillManager:
             return True, result.get("message") or f"Skill '{skill_name}' imported successfully"
         except Exception as e:
             return False, f"Import failed: {e}"
+        finally:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     def update_skill(self, skill_name, description=None, instructions=None, experience=None, replace_experience=False):
         skill_path = None

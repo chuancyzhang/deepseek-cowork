@@ -5,6 +5,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -294,6 +295,187 @@ class TestSkillSystemV2(unittest.TestCase):
             self.assertEqual(record["spec"]["references"], ["notes.md"])
             self.assertEqual(record["spec"]["experience_policy"]["entry_storage"], "experience/entries.jsonl")
             self.assertEqual(record["spec"]["disclosure_level_defaults"]["default_prompt_level"], "brief")
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+
+    def test_export_skill_creates_zip_and_skips_cache_directories(self):
+        skill_dir = os.path.join(self.skills_dir, "portable-guide")
+        os.makedirs(os.path.join(skill_dir, "__pycache__"), exist_ok=True)
+        os.makedirs(os.path.join(skill_dir, "build"), exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: portable-guide\ndescription: Portable shell notes\nkind: knowledge\n---\n"
+                "# Skill Purpose\nUse this skill for shell portability notes.\n"
+            )
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "portable-guide",
+                    "kind": "knowledge",
+                    "description": "Portable shell notes",
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        with open(os.path.join(skill_dir, "notes.md"), "w", encoding="utf-8") as f:
+            f.write("notes\n")
+        with open(os.path.join(skill_dir, "__pycache__", "cached.pyc"), "wb") as f:
+            f.write(b"compiled")
+        with open(os.path.join(skill_dir, "build", "artifact.txt"), "w", encoding="utf-8") as f:
+            f.write("artifact\n")
+
+        sm = self._build_manager()
+        zip_path = os.path.join(self.temp_dir, "portable-guide.zip")
+        success, message = sm.export_skill("portable-guide", zip_path)
+
+        self.assertTrue(success, message)
+        self.assertTrue(os.path.isfile(zip_path))
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            names = set(archive.namelist())
+        self.assertIn("portable-guide/SKILL.md", names)
+        self.assertIn("portable-guide/skill.json", names)
+        self.assertIn("portable-guide/notes.md", names)
+        self.assertNotIn("portable-guide/__pycache__/cached.pyc", names)
+        self.assertNotIn("portable-guide/build/artifact.txt", names)
+
+    def test_exported_zip_can_be_imported_back_with_original_skill_name(self):
+        source_root = tempfile.mkdtemp(dir=self.temp_dir)
+        target_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            source_skills_dir = os.path.join(source_root, "skills")
+            source_ai_skills_dir = os.path.join(source_root, "ai_skills")
+            os.makedirs(source_skills_dir, exist_ok=True)
+            os.makedirs(source_ai_skills_dir, exist_ok=True)
+            source_skill_dir = os.path.join(source_skills_dir, "portable-guide")
+            os.makedirs(source_skill_dir, exist_ok=True)
+            with open(os.path.join(source_skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "---\nname: portable-guide\ndescription: Portable shell notes\nkind: knowledge\n---\n"
+                    "# Skill Purpose\nUse this skill for shell portability notes.\n"
+                )
+            with open(os.path.join(source_skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 2,
+                        "name": "portable-guide",
+                        "kind": "knowledge",
+                        "description": "Portable shell notes",
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            with open(os.path.join(source_skill_dir, "notes.md"), "w", encoding="utf-8") as f:
+                f.write("notes\n")
+
+            source_manager = SkillManager(workspace_dir=source_root)
+            source_manager.skills_dirs = [source_skills_dir, source_ai_skills_dir]
+            source_manager.load_skills()
+
+            zip_path = os.path.join(self.temp_dir, "renamed-package.zip")
+            success, message = source_manager.export_skill("portable-guide", zip_path)
+            self.assertTrue(success, message)
+
+            target_skills_dir = os.path.join(target_root, "skills")
+            target_ai_skills_dir = os.path.join(target_root, "ai_skills")
+            os.makedirs(target_skills_dir, exist_ok=True)
+            os.makedirs(target_ai_skills_dir, exist_ok=True)
+            target_manager = SkillManager(workspace_dir=target_root)
+            target_manager.skills_dirs = [target_skills_dir, target_ai_skills_dir]
+            target_manager.load_skills()
+
+            success, message = target_manager.import_skill(zip_path)
+            self.assertTrue(success, message)
+            target_manager.load_skills()
+            self.assertIn("portable-guide", target_manager.skill_records)
+            imported_dir = os.path.join(target_ai_skills_dir, "portable-guide")
+            self.assertTrue(os.path.isfile(os.path.join(imported_dir, "SKILL.md")))
+            self.assertTrue(os.path.isfile(os.path.join(imported_dir, "skill.json")))
+            self.assertTrue(os.path.isfile(os.path.join(imported_dir, "notes.md")))
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+            shutil.rmtree(target_root, ignore_errors=True)
+
+    def test_import_skill_accepts_flat_zip_root(self):
+        source_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            flat_dir = os.path.join(source_root, "flat-root")
+            os.makedirs(flat_dir, exist_ok=True)
+            with open(os.path.join(flat_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "---\nname: flat-zip-skill\ndescription: Flat ZIP skill\nkind: knowledge\n---\n"
+                    "# Skill Purpose\nUse this skill from a flat ZIP package.\n"
+                )
+            with open(os.path.join(flat_dir, "skill.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 2,
+                        "name": "flat-zip-skill",
+                        "kind": "knowledge",
+                        "description": "Flat ZIP skill",
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            with open(os.path.join(flat_dir, "notes.md"), "w", encoding="utf-8") as f:
+                f.write("flat zip notes\n")
+
+            zip_path = os.path.join(self.temp_dir, "flat-zip-skill.zip")
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(os.path.join(flat_dir, "SKILL.md"), arcname="SKILL.md")
+                archive.write(os.path.join(flat_dir, "skill.json"), arcname="skill.json")
+                archive.write(os.path.join(flat_dir, "notes.md"), arcname="notes.md")
+
+            sm = self._build_manager()
+            success, message = sm.import_skill(zip_path)
+            self.assertTrue(success, message)
+            sm.load_skills()
+            self.assertIn("flat-zip-skill", sm.skill_records)
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+
+    def test_import_skill_rejects_existing_name_from_zip(self):
+        skill_dir = os.path.join(self.ai_skills_dir, "portable-guide")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: portable-guide\ndescription: Existing skill\nkind: knowledge\n---\n"
+                "# Skill Purpose\nExisting skill.\n"
+            )
+
+        source_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            zip_skill_dir = os.path.join(source_root, "portable-guide")
+            os.makedirs(zip_skill_dir, exist_ok=True)
+            with open(os.path.join(zip_skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    "---\nname: portable-guide\ndescription: Imported skill\nkind: knowledge\n---\n"
+                    "# Skill Purpose\nImported skill.\n"
+                )
+            with open(os.path.join(zip_skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 2,
+                        "name": "portable-guide",
+                        "kind": "knowledge",
+                        "description": "Imported skill",
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            zip_path = os.path.join(self.temp_dir, "portable-guide-conflict.zip")
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.write(os.path.join(zip_skill_dir, "SKILL.md"), arcname="portable-guide/SKILL.md")
+                archive.write(os.path.join(zip_skill_dir, "skill.json"), arcname="portable-guide/skill.json")
+
+            sm = self._build_manager()
+            success, message = sm.import_skill(zip_path)
+            self.assertFalse(success)
+            self.assertIn("already exists", message)
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
 

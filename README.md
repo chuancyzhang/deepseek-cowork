@@ -29,7 +29,7 @@ Current app version: **4.7.8**.
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, SOP steps, observability, and sub-agent status.
-*   **Session Controls**: Attach files, mention configured agents, bind a session SOP, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
+*   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session SOP, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
 *   **Sub-Agent Monitor**: Observe parallel workers and their statuses without leaving the current task.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 

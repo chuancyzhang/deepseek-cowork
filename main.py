@@ -3600,7 +3600,11 @@ class AutoResizingInputEdit(QTextEdit):
                 event.ignore() 
                 return
             elif os.path.isfile(path):
-                self.insertPlainText(path)
+                window = self.window()
+                if window and hasattr(window, "_add_prompt_files"):
+                    window._add_prompt_files([path])
+                else:
+                    self.insertPlainText(path)
 
             event.acceptProposedAction()
             return
@@ -4016,13 +4020,84 @@ class SystemToast(QFrame):
         """)
         add_soft_shadow(self, blur=16, y_offset=4, alpha=12)
 
+
+def file_chip_icon_name(path):
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    mapping = {
+        ".doc": "fa5s.file-word",
+        ".docx": "fa5s.file-word",
+        ".ppt": "fa5s.file-powerpoint",
+        ".pptx": "fa5s.file-powerpoint",
+        ".xls": "fa5s.file-excel",
+        ".xlsx": "fa5s.file-excel",
+        ".pdf": "fa5s.file-pdf",
+        ".txt": "fa5s.file-alt",
+        ".md": "fa5s.file-alt",
+        ".csv": "fa5s.file-csv",
+        ".json": "fa5s.file-code",
+        ".py": "fa5s.file-code",
+        ".js": "fa5s.file-code",
+        ".ts": "fa5s.file-code",
+        ".png": "fa5s.file-image",
+        ".jpg": "fa5s.file-image",
+        ".jpeg": "fa5s.file-image",
+        ".gif": "fa5s.file-image",
+        ".webp": "fa5s.file-image",
+        ".zip": "fa5s.file-archive",
+    }
+    return mapping.get(ext, "fa5s.file")
+
+
+class FileChip(QFrame):
+    removeRequested = Signal(str)
+
+    def __init__(self, path, removable=False, parent=None):
+        super().__init__(parent)
+        self.path = os.path.normpath(str(path or ""))
+        self.setObjectName("FileChip")
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setStyleSheet(
+            f"QFrame#FileChip {{ background: rgba(255, 255, 255, 0.96); border: 1px solid {DesignTokens.border}; "
+            f"border-radius: 16px; }}"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(6)
+
+        icon_label = QLabel()
+        icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
+        layout.addWidget(icon_label)
+
+        name = os.path.basename(self.path) or self.path
+        text_label = QLabel(name)
+        text_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 500;")
+        text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        layout.addWidget(text_label)
+
+        if removable:
+            remove_btn = QToolButton()
+            remove_btn.setCursor(Qt.PointingHandCursor)
+            remove_btn.setAutoRaise(True)
+            remove_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_tertiary))
+            remove_btn.setIconSize(QSize(10, 10))
+            remove_btn.setStyleSheet(
+                f"QToolButton {{ border: none; padding: 0; color: {DesignTokens.text_tertiary}; }}"
+                f"QToolButton:hover {{ color: {DesignTokens.text_primary}; }}"
+            )
+            remove_btn.clicked.connect(lambda: self.removeRequested.emit(self.path))
+            layout.addWidget(remove_btn)
+
+        self.setToolTip(self.path)
+
 class ChatBubble(QFrame):
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
-    def __init__(self, role, text, thinking=None, duration=None):
+    def __init__(self, role, text, thinking=None, duration=None, attachments=None, attachment_hint="用户添加的文件"):
         super().__init__()
         self.role = role
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
+        attachments = list(attachments or [])
         
         # Main Horizontal Layout (Avatar | Content)
         main_layout = QHBoxLayout(self)
@@ -4036,37 +4111,60 @@ class ChatBubble(QFrame):
             content_wrapper = QWidget()
             cw_layout = QVBoxLayout(content_wrapper)
             cw_layout.setContentsMargins(0, 0, 0, 0)
-            
+            cw_layout.setSpacing(6 if attachments and text else 4)
+
+            if attachments:
+                attachment_group = QWidget()
+                attachment_group_layout = QVBoxLayout(attachment_group)
+                attachment_group_layout.setContentsMargins(0, 0, 0, 0)
+                attachment_group_layout.setSpacing(4)
+
+                attachment_hint_label = QLabel(attachment_hint)
+                attachment_hint_label.setAlignment(Qt.AlignRight)
+                attachment_hint_label.setStyleSheet(
+                    f"color: {DesignTokens.info_text}; font-size: 11px; font-weight: 600; padding-right: 2px;"
+                )
+                attachment_group_layout.addWidget(attachment_hint_label)
+
+                chip_row = QWidget()
+                chip_row_layout = QHBoxLayout(chip_row)
+                chip_row_layout.setContentsMargins(0, 0, 0, 0)
+                chip_row_layout.setSpacing(8)
+                chip_row_layout.addStretch()
+                for attachment in attachments:
+                    chip_row_layout.addWidget(FileChip(attachment.get("path") or "", removable=False))
+                attachment_group_layout.addWidget(chip_row)
+                cw_layout.addWidget(attachment_group, 0, Qt.AlignRight)
+
             # Bubble Frame
-            bubble_frame = QFrame()
-            bubble_frame.setStyleSheet(f"""
-                QFrame {{
-                    background: {DesignTokens.bg_user_bubble};
-                    border-radius: 17px;
-                    border-bottom-right-radius: 7px;
-                }}
-            """)
-            bubble_layout = QVBoxLayout(bubble_frame)
-            bubble_layout.setContentsMargins(14, 8, 14, 8)
-            
-            content_label = QLabel(text)
-            content_label.setWordWrap(True)
-            content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            content_label.setStyleSheet(
-                "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
-                "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
-            )
-            apply_selection_palette(content_label, "#ffffff", "#0b57d0")
-            
-            # Smart Width: If text is long, force a minimum width to avoid narrow tall bubbles
-            fm = QFontMetrics(content_label.font())
-            # Check if text is long enough to warrant a wider bubble
-            if len(text) > 50 or fm.horizontalAdvance(text) > 400:
-                content_label.setMinimumWidth(400)
-                
-            bubble_layout.addWidget(content_label)
-            
-            cw_layout.addWidget(bubble_frame)
+            if text:
+                bubble_frame = QFrame()
+                bubble_frame.setStyleSheet(f"""
+                    QFrame {{
+                        background: {DesignTokens.bg_user_bubble};
+                        border-radius: 17px;
+                        border-bottom-right-radius: 7px;
+                    }}
+                """)
+                bubble_layout = QVBoxLayout(bubble_frame)
+                bubble_layout.setContentsMargins(14, 8, 14, 8)
+
+                content_label = QLabel(text)
+                content_label.setWordWrap(True)
+                content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                content_label.setStyleSheet(
+                    "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
+                    "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
+                )
+                apply_selection_palette(content_label, "#ffffff", "#0b57d0")
+
+                # Smart Width: If text is long, force a minimum width to avoid narrow tall bubbles
+                fm = QFontMetrics(content_label.font())
+                if len(text) > 50 or fm.horizontalAdvance(text) > 400:
+                    content_label.setMinimumWidth(400)
+
+                bubble_layout.addWidget(content_label)
+                cw_layout.addWidget(bubble_frame, 0, Qt.AlignRight)
             
             # Add to main
             main_layout.addStretch() # Push everything right
@@ -5345,6 +5443,7 @@ class SubAgentMonitorWindow(QDialog):
 class SessionState:
     def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll):
         self.session_id = session_id
+        self.prompt_files = []
         self.messages = []
         self.render_items = []
         self.tool_cards = {}
@@ -6903,6 +7002,29 @@ class MainWindow(QMainWindow):
         input_card_layout = QVBoxLayout(input_card)
         input_card_layout.setContentsMargins(14, 10, 14, 10)
         input_card_layout.setSpacing(8)
+        self.prompt_files_section = QWidget()
+        prompt_files_section_layout = QVBoxLayout(self.prompt_files_section)
+        prompt_files_section_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_files_section_layout.setSpacing(4)
+        self.prompt_files_hint = QLabel("用户添加的文件")
+        self.prompt_files_hint.setStyleSheet(
+            f"color: {DesignTokens.info_text}; font-size: 11px; font-weight: 600; padding-left: 2px;"
+        )
+        prompt_files_section_layout.addWidget(self.prompt_files_hint)
+        self.prompt_files_scroll = QScrollArea()
+        self.prompt_files_scroll.setWidgetResizable(True)
+        self.prompt_files_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.prompt_files_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.prompt_files_scroll.setFixedHeight(40)
+        self.prompt_files_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.prompt_files_container = QWidget()
+        self.prompt_files_row = QHBoxLayout(self.prompt_files_container)
+        self.prompt_files_row.setContentsMargins(0, 0, 0, 0)
+        self.prompt_files_row.setSpacing(8)
+        self.prompt_files_scroll.setWidget(self.prompt_files_container)
+        prompt_files_section_layout.addWidget(self.prompt_files_scroll)
+        self.prompt_files_section.setVisible(False)
+        input_card_layout.addWidget(self.prompt_files_section)
         input_card_layout.addWidget(self.input_field)
 
         prompt_toolbar = QHBoxLayout()
@@ -7108,12 +7230,80 @@ class MainWindow(QMainWindow):
             ("clarify_mode", "反问模式"),
         ]
 
-    def _append_files_to_input(self, paths):
-        file_paths = [
-            os.path.normpath(path)
-            for path in (paths or [])
-            if path and os.path.isfile(path)
+    def _normalize_prompt_file_paths(self, paths):
+        normalized = []
+        seen = set()
+        for path in paths or []:
+            if not path or not os.path.isfile(path):
+                continue
+            norm = os.path.normpath(path)
+            key = os.path.normcase(norm)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(norm)
+        return normalized
+
+    def _prompt_file_items(self, paths):
+        items = []
+        seen = set()
+        for raw_path in paths or []:
+            path = os.path.normpath(str(raw_path or "").strip())
+            if not path:
+                continue
+            key = os.path.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"path": path, "name": os.path.basename(path) or path})
+        return items
+
+    def _current_prompt_files(self, session_id=None):
+        state = self.get_session(session_id)
+        return list(getattr(state, "prompt_files", []) or []) if state else []
+
+    def _set_prompt_files(self, paths, session_id=None, refresh=True):
+        state = self.get_session(session_id)
+        normalized = self._normalize_prompt_file_paths(paths)
+        if state:
+            state.prompt_files = normalized
+        if refresh and (session_id is None or session_id == self.current_session_id):
+            self.refresh_prompt_file_chips(session_id)
+        return normalized
+
+    def refresh_prompt_file_chips(self, session_id=None):
+        if not hasattr(self, "prompt_files_section") or not hasattr(self, "prompt_files_row"):
+            return
+        files = self._current_prompt_files(session_id)
+        while self.prompt_files_row.count():
+            item = self.prompt_files_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not files:
+            self.prompt_files_section.setVisible(False)
+            return
+        self.prompt_files_hint.setText(f"用户添加的文件 ({len(files)})")
+        for path in files:
+            chip = FileChip(path, removable=True)
+            chip.removeRequested.connect(self._remove_prompt_file)
+            self.prompt_files_row.addWidget(chip)
+        self.prompt_files_row.addStretch()
+        self.prompt_files_section.setVisible(True)
+
+    def _remove_prompt_file(self, path):
+        remaining = [
+            item
+            for item in self._current_prompt_files()
+            if os.path.normcase(item) != os.path.normcase(os.path.normpath(path))
         ]
+        self._set_prompt_files(remaining)
+
+    def _clear_prompt_files(self, session_id=None):
+        self._set_prompt_files([], session_id=session_id, refresh=True)
+
+    def _add_prompt_files(self, paths):
+        file_paths = self._normalize_prompt_file_paths(paths)
         if not file_paths or not hasattr(self, "input_field"):
             return []
 
@@ -7122,9 +7312,8 @@ class MainWindow(QMainWindow):
             if parent_dir:
                 self.load_workspace(parent_dir)
 
-        current_text = self.input_field.toPlainText().rstrip()
-        segments = [segment for segment in (current_text, "\n".join(file_paths)) if segment]
-        self.input_field.setPlainText("\n".join(segments))
+        existing = self._current_prompt_files()
+        self._set_prompt_files(existing + file_paths)
         self.input_field.moveCursor(QTextCursor.End)
         self.input_field.ensureCursorVisible()
         self.input_field.setFocus()
@@ -7132,6 +7321,9 @@ class MainWindow(QMainWindow):
             self.input_field.adjustHeight()
         self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
         return file_paths
+
+    def _append_files_to_input(self, paths):
+        return self._add_prompt_files(paths)
 
     def select_files_for_prompt(self):
         start_dir = self.workspace_dir or self.config_manager.get("default_workspace", "") or ""
@@ -7141,7 +7333,82 @@ class MainWindow(QMainWindow):
             start_dir,
             "所有文件 (*.*)",
         )
-        self._append_files_to_input(file_paths)
+        self._add_prompt_files(file_paths)
+
+    def _build_user_added_files_prompt(self, file_paths):
+        normalized = self._normalize_prompt_file_paths(file_paths)
+        if not normalized:
+            return ""
+        lines = [
+            "[用户添加的文件]",
+            "以下文件由用户通过“添加文件”手动附加，请优先视为本轮任务的重要输入：",
+        ]
+        for path in normalized:
+            lines.append(f"- 文件名: {os.path.basename(path) or path}")
+            lines.append(f"  路径: {path}")
+        return "\n".join(lines)
+
+    def _build_user_message_payload(self, user_text, file_paths):
+        display_text = str(user_text or "").strip()
+        normalized_files = self._normalize_prompt_file_paths(file_paths)
+        content_blocks = []
+        if normalized_files:
+            content_blocks.append(self._build_user_added_files_prompt(normalized_files))
+        if display_text:
+            content_blocks.append(display_text)
+        content = "\n\n".join([block for block in content_blocks if block]).strip()
+        content_parts = []
+        if display_text:
+            content_parts.append({"type": "text", "text": display_text})
+        for path in normalized_files:
+            content_parts.append(
+                {
+                    "type": "input_file",
+                    "path": path,
+                    "name": os.path.basename(path) or path,
+                    "source": "user_added",
+                }
+            )
+        meta = {}
+        if display_text:
+            meta["display_content"] = display_text
+        if normalized_files:
+            meta["user_added_files"] = normalized_files
+        return {
+            "content": content,
+            "display_content": display_text,
+            "attachments": self._prompt_file_items(normalized_files),
+            "content_parts": content_parts or None,
+            "meta": meta or None,
+        }
+
+    def _message_user_attachments(self, message):
+        if not isinstance(message, dict):
+            return []
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        meta_paths = meta.get("user_added_files")
+        if isinstance(meta_paths, list):
+            return self._prompt_file_items(meta_paths)
+        attachments = []
+        for part in message.get("content_parts") or []:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type") or "").strip().lower() != "input_file":
+                continue
+            path = str(part.get("path") or "").strip()
+            if not path:
+                continue
+            attachments.append(path)
+        return self._prompt_file_items(attachments)
+
+    def _message_display_content(self, message):
+        if not isinstance(message, dict):
+            return ""
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        display = meta.get("display_content")
+        if display is not None:
+            return str(display)
+        return str(message.get("content") or "")
 
     def _should_block_send_for_sop(self, state):
         return bool(state and is_sop_awaiting_confirmation(getattr(state, "sop_run", None)))
@@ -7964,18 +8231,7 @@ class MainWindow(QMainWindow):
                 # Switch workspace
                 self.load_workspace(path)
             else:
-                # Add file path to input or load parent workspace if none
-                if self.workspace_dir:
-                    current_text = self.input_field.toPlainText()
-                    if current_text:
-                        self.input_field.setText(current_text + " " + path)
-                    else:
-                        self.input_field.setText(path)
-                else:
-                    # No workspace selected, load parent dir
-                    parent_dir = os.path.dirname(path)
-                    self.load_workspace(parent_dir)
-                    self.input_field.setText(path)
+                self._add_prompt_files([path])
             
             event.acceptProposedAction()
 
@@ -8018,6 +8274,7 @@ class MainWindow(QMainWindow):
         self.refresh_context_badges(session_id)
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
+        self.refresh_prompt_file_chips(session_id)
         self._render_sub_agent_monitor_for_state(state)
 
     def normalize_session_ui(self, state):
@@ -8143,7 +8400,11 @@ class MainWindow(QMainWindow):
         title = "新对话"
         for msg in messages:
             if msg.get("role") == "user":
-                content = msg.get("content") or ""
+                content = self._message_display_content(msg).strip()
+                if not content:
+                    attachments = self._message_user_attachments(msg)
+                    if attachments:
+                        content = attachments[0].get("name") or attachments[0].get("path") or ""
                 if content: title = content[:15] + "..." if len(content) > 15 else content
                 break
         return title
@@ -8216,6 +8477,7 @@ class MainWindow(QMainWindow):
     def _reset_session_history_state(self, state):
         self.clear_chat_layout(state.chat_layout)
         state.empty_state = None
+        state.prompt_files = []
         state.messages = []
         state.render_items = []
         state.tool_cards = {}
@@ -9092,7 +9354,13 @@ class MainWindow(QMainWindow):
             item_type = item.get("type")
             if item_type == "user":
                 message = item.get("message") if isinstance(item.get("message"), dict) else {}
-                self.add_chat_bubble("User", message.get("content") or "", index=current_idx, animate=animate)
+                self.add_chat_bubble(
+                    "User",
+                    self._message_display_content(message),
+                    index=current_idx,
+                    animate=animate,
+                    attachments=self._message_user_attachments(message),
+                )
                 if current_idx is not None:
                     current_idx += 1
                 state.last_agent_bubble = None
@@ -9240,7 +9508,13 @@ class MainWindow(QMainWindow):
             
             if role == 'user':
                 finalize_active_bubble()
-                self.add_chat_bubble('User', content, index=current_idx, animate=animate)
+                self.add_chat_bubble(
+                    'User',
+                    self._message_display_content(msg),
+                    index=current_idx,
+                    animate=animate,
+                    attachments=self._message_user_attachments(msg),
+                )
                 if current_idx is not None: current_idx += 1
                 state.last_agent_bubble = None
                 
@@ -9382,7 +9656,7 @@ class MainWindow(QMainWindow):
         if first_dir and not file_paths:
             self.load_workspace(first_dir)
         else:
-            self._append_files_to_input(file_paths)
+            self._add_prompt_files(file_paths)
         event.acceptProposedAction()
 
     def new_conversation(self):
@@ -10528,20 +10802,39 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "SOP 等待确认", "当前步骤已完成，请先在右侧 SOP 抽屉中确认、重跑或标记不适用。")
             self.show_context_drawer(self.RIGHT_TAB_SOP)
             return
-        user_text = self.input_field.toPlainText().strip()
-        if not user_text: return
-        mentioned_profiles, delegated_text = self._extract_agent_mentions(user_text)
+        raw_user_text = self.input_field.toPlainText().strip()
+        prompt_files = self._current_prompt_files()
+        if not raw_user_text and not prompt_files:
+            return
+        mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
         if mentioned_profiles and not delegated_text:
             QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return
-        now = time.time()
-        if user_text == self._last_submit_text and (now - self._last_submit_ts) < 0.8:
+        payload = self._build_user_message_payload(raw_user_text, prompt_files)
+        user_text = payload.get("content") or ""
+        if not user_text:
             return
-        self._last_submit_text = user_text
+        delegated_payload = self._build_user_message_payload(delegated_text, prompt_files).get("content") or delegated_text
+        now = time.time()
+        submit_signature = json.dumps(
+            {"text": raw_user_text, "files": self._normalize_prompt_file_paths(prompt_files)},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if submit_signature == self._last_submit_text and (now - self._last_submit_ts) < 0.8:
+            return
+        self._last_submit_text = submit_signature
         self._last_submit_ts = now
 
-        self.add_chat_bubble("User", user_text, animate=False, force_scroll=True)
+        self.add_chat_bubble(
+            "User",
+            payload.get("display_content") or "",
+            animate=False,
+            force_scroll=True,
+            attachments=payload.get("attachments") or [],
+        )
         self.input_field.clear()
+        self._clear_prompt_files()
 
         if not state: return
         state.step_records = []
@@ -10559,7 +10852,12 @@ class MainWindow(QMainWindow):
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
         current_turn_id = state.active_turn_id
-        state.messages.append({"role": "user", "content": user_text})
+        message_payload = {"role": "user", "content": user_text}
+        if payload.get("content_parts"):
+            message_payload["content_parts"] = payload.get("content_parts")
+        if payload.get("meta"):
+            message_payload["meta"] = payload.get("meta")
+        state.messages.append(message_payload)
         state.render_items = build_conversation_render_items(state.messages)
         run_mode = RUN_MODE_EXECUTION
         if state.clarify_mode_enabled:
@@ -10586,7 +10884,7 @@ class MainWindow(QMainWindow):
         self.update_session_tab_title(state.session_id)
         if mentioned_profiles:
             self.refresh_sop_controls(state.session_id)
-            self._dispatch_agent_profiles(state, user_text, delegated_text, mentioned_profiles, summon_source="mention")
+            self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
             return
         sop_default_profile = self._resolve_sop_default_profile(state)
         if sop_default_profile:
@@ -10817,7 +11115,7 @@ class MainWindow(QMainWindow):
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
         self.process_ui_events(force=True)
 
-    def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True, force_scroll=False):
+    def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True, force_scroll=False, attachments=None):
         state = self.get_current_session()
         if not state: return
         
@@ -10832,7 +11130,7 @@ class MainWindow(QMainWindow):
             animate = False
         self.last_message_time = now
             
-        bubble = ChatBubble(role, text, thinking, duration)
+        bubble = ChatBubble(role, text, thinking, duration, attachments=attachments)
         
         if index is not None:
             state.chat_layout.insertWidget(index, bubble)

@@ -5976,6 +5976,14 @@ class MainWindow(QMainWindow):
         self.workspace_dir = None
         self.right_drawer_open = False
         self.right_drawer_tab = self.RIGHT_TAB_FILES
+        self.main_layout_default_margins = (40, 32, 40, 32)
+        self.main_content_default_margins = (0, 0, 0, 0)
+        self.context_drawer_margin = 16
+        self.context_drawer_gap = 16
+        self.context_drawer_min_width = 220
+        self.context_drawer_preferred_min_width = 360
+        self.context_drawer_max_width = 460
+        self.context_drawer_min_content_width = 420
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
         
@@ -6118,7 +6126,7 @@ class MainWindow(QMainWindow):
         root_layout.setSpacing(0)
         
         self.main_splitter = SmartSplitter(Qt.Horizontal)
-        self.main_splitter.splitterMoved.connect(lambda *_: self.position_context_drawer())
+        self.main_splitter.splitterMoved.connect(lambda *_: self.sync_context_drawer_layout())
         root_layout.addWidget(self.main_splitter)
 
         # --- Sidebar ---
@@ -6618,7 +6626,7 @@ class MainWindow(QMainWindow):
 
         # Main Layout Construction
         layout = QVBoxLayout(main_container)
-        layout.setContentsMargins(40, 32, 40, 32)
+        layout.setContentsMargins(*self.main_layout_default_margins)
         layout.setSpacing(20)
 
         # Top Bar
@@ -6710,6 +6718,12 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.context_rail)
         
         layout.addLayout(top_bar)
+
+        content_area = QWidget()
+        self.main_content_layout = QVBoxLayout(content_area)
+        self.main_content_layout.setContentsMargins(*self.main_content_default_margins)
+        self.main_content_layout.setSpacing(20)
+        layout.addWidget(content_area, 1)
         
         self.recent_workspaces = self.config_manager.get("recent_workspaces", [])
 
@@ -6719,7 +6733,7 @@ class MainWindow(QMainWindow):
         self.session_tabs.setTabsClosable(True)
         self.session_tabs.currentChanged.connect(self.on_session_tab_changed)
         self.session_tabs.tabCloseRequested.connect(self.close_session_tab)
-        layout.addWidget(self.session_tabs, 3)
+        self.main_content_layout.addWidget(self.session_tabs, 3)
 
         # Input Area
         input_card = QFrame()
@@ -6859,7 +6873,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.model_select_combo)
         prompt_toolbar.addWidget(self.action_btn)
         input_card_layout.addLayout(prompt_toolbar)
-        layout.addWidget(input_card)
+        self.main_content_layout.addWidget(input_card)
 
         # Init Data
         self.data_dir = get_app_data_dir()
@@ -6880,7 +6894,7 @@ class MainWindow(QMainWindow):
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
         QApplication.instance().installEventFilter(self)
-        self.position_context_drawer()
+        self.sync_context_drawer_layout()
 
     def process_ui_events(self, force=False):
         import time
@@ -6915,18 +6929,56 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
-    def position_context_drawer(self):
-        if not hasattr(self, "right_sidebar") or not hasattr(self, "main_splitter"):
-            return
+    def _compute_context_drawer_geometry(self):
+        if not hasattr(self, "right_sidebar"):
+            return None
         parent = self.right_sidebar.parentWidget()
         if not parent:
-            return
-        margin = 16
-        width = min(460, max(360, int(parent.width() * 0.42)))
+            return None
+        margin = self.context_drawer_margin
+        width = max(self.context_drawer_preferred_min_width, int(parent.width() * 0.42))
+        width = min(self.context_drawer_max_width, width)
+        width_limit = parent.width() - self.main_layout_default_margins[0] - margin - self.context_drawer_gap - self.context_drawer_min_content_width
+        width = min(width, max(self.context_drawer_min_width, width_limit))
+        width = min(width, max(self.context_drawer_min_width, parent.width() - (margin * 2)))
         height = max(120, parent.height() - (margin * 2))
-        self.right_sidebar.setGeometry(parent.width() - width - margin, margin, width, height)
+        x = parent.width() - width - margin
+        return {
+            "margin": margin,
+            "width": width,
+            "height": height,
+            "x": x,
+            "y": margin,
+        }
+
+    def _apply_context_drawer_content_reserve(self, drawer_width=None):
+        if not hasattr(self, "main_content_layout"):
+            return
+        left, top, right, bottom = self.main_content_default_margins
+        reserved_right = right
+        if self.right_drawer_open and drawer_width:
+            reserved_right = max(
+                right,
+                drawer_width + self.context_drawer_margin + self.context_drawer_gap - self.main_layout_default_margins[2],
+            )
+        self.main_content_layout.setContentsMargins(left, top, reserved_right, bottom)
+
+    def sync_context_drawer_layout(self):
+        geometry = self._compute_context_drawer_geometry()
+        if geometry is None:
+            return
+        self._apply_context_drawer_content_reserve(geometry["width"])
+        self.right_sidebar.setGeometry(
+            geometry["x"],
+            geometry["y"],
+            geometry["width"],
+            geometry["height"],
+        )
         if self.right_sidebar.isVisible():
             self.right_sidebar.raise_()
+
+    def position_context_drawer(self):
+        self.sync_context_drawer_layout()
 
     def show_context_drawer(self, tab_index=None):
         if tab_index is None:
@@ -6939,7 +6991,7 @@ class MainWindow(QMainWindow):
         self.right_stack.setCurrentIndex(tab_index)
         self.update_context_drawer_header(tab_index)
         self.right_sidebar.setVisible(True)
-        self.position_context_drawer()
+        self.sync_context_drawer_layout()
         self.right_sidebar.raise_()
         self.update_context_rail_badges()
 
@@ -6961,6 +7013,7 @@ class MainWindow(QMainWindow):
             return
         self.right_drawer_open = False
         self.right_sidebar.setVisible(False)
+        self.sync_context_drawer_layout()
         self.update_context_rail_badges()
 
     def set_context_tab_hint(self, tab_index, available=True):

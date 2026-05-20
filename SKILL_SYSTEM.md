@@ -2,6 +2,8 @@
 
 ## Overview
 
+Current implementation sync: app version **4.7.8**.
+
 This project now treats the runtime as having only two first-class objects:
 
 - `tool`: a lightweight atomic executor the AI can call directly
@@ -17,6 +19,7 @@ The default rule is simple:
 - `skill` injects the minimum necessary experience, boundaries, and recommended tools
 - `workflow` is experience that has been organized into a recommended sequence of steps
 - `沉淀为 Skill` is the manual review path for turning a useful conversation into a skill update
+- Skill Center import/export is the portability path for moving skill packages between environments
 
 ## Core Concepts
 
@@ -35,6 +38,8 @@ Typical examples:
 Tools are operational. They do work and return results.
 
 In the current implementation, public functions from `impl.py` are still supported and are registered as directly callable tools.
+
+Tools may declare metadata such as `read_only`, `destructive`, `allowed_modes`, aliases, and search hints. This metadata controls lazy discovery, clarifying-mode visibility, selected-skill scope, and whether the tool can be used through `parallel_tools`.
 
 ### Experience
 
@@ -101,6 +106,20 @@ The runtime behavior is:
 
 This preserves a single execution surface: tools.
 
+### Read-Only Parallelism
+
+`parallel_tools` is an always-visible meta tool for one narrow case: several independent read-only calls should run concurrently.
+
+Rules:
+
+- every subcall must name a real tool
+- the tool must already be visible or discovered for the current mode
+- the tool must be allowed by the current selected-skill or agent-profile scope
+- the tool must be marked `read_only` and must not be destructive
+- writes, shell execution, package installation, approvals, user input, experience updates, and sub-agent management stay as normal single calls
+
+Results are returned in the same order as the input calls. If one subcall fails or is denied, the response reports a partial error without executing unsafe writes.
+
 ## Manual Feedback Loop
 
 The system now has a human-confirmed loop for promoting completed work into reusable knowledge:
@@ -109,6 +128,7 @@ The system now has a human-confirmed loop for promoting completed work into reus
 - `沉淀为 Skill` turns the current conversation into an editable skill draft before anything is saved.
 - New skills are written as `SKILL.md`, `skill.json`, optional `impl.py`, and optional structured entries under `experience/entries.jsonl`.
 - Existing skills can be updated by appending structured experience entries or rewriting the visible guidance.
+- Skill packages can be exported as ZIP archives and imported back from ZIP files or source folders.
 
 This path is intentionally manual. The model may propose reusable experience, but the user reviews and confirms the draft before it becomes part of the skill system.
 
@@ -159,6 +179,7 @@ The recommended skill structure is:
   references/          # optional
   impl.py              # optional tool source
   scripts/             # optional support files
+  assets/              # optional
 ```
 
 ### `SKILL.md`
@@ -244,6 +265,26 @@ Public functions in `impl.py` can still be registered as callable tools.
 However, `impl.py` is not the conceptual center of the skill system.
 It is just one way to provide tools.
 
+### ZIP Packages
+
+Skill Center export writes a ZIP archive rooted at the skill directory name.
+
+Export excludes cache and build-style directories such as `__pycache__`, `.venv`, `node_modules`, `dist`, and `build`.
+
+Import accepts:
+
+- a skill source folder
+- a ZIP whose root is a single skill folder
+- a ZIP whose root directly contains `SKILL.md`, `skill.json`, `impl.py`, `scripts`, `assets`, `references`, or `experience`
+
+Import safety rules:
+
+- ZIP paths are checked so they cannot escape the temporary extraction directory
+- the final skill name is read from `skill.json`, then `SKILL.md`, then the folder name
+- imported skills land in the writable `ai_skills` root
+- existing target names are rejected instead of overwritten
+- external formats are adapted into Cowork's experience-package model before loading
+
 ## Experience Ownership
 
 Experience must always belong to a skill.
@@ -276,6 +317,7 @@ Code and command execution:
 
 `command-tools` owns shell execution, workspace glob/grep search, and declared skill scripts.
 `system-tools` owns environment/app automation such as browser, desktop, and app launch flows.
+`meta-tools` owns `tool_search`, `parallel_tools`, and experience update helpers that help the model find and combine capabilities without widening the execution surface.
 
 AI and human interaction:
 - `interaction`
@@ -342,6 +384,13 @@ A simple task:
 - user asks to inspect a file
 - model directly calls file-related tools
 - no extra skill is injected unless needed
+
+A parallel read-only task:
+
+- user asks to compare several files or search several independent patterns
+- model discovers the needed read/search tools
+- model calls `parallel_tools` with read-only subcalls
+- results return in input order and the model synthesizes the answer
 
 A more complex task:
 

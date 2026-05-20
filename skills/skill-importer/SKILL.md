@@ -13,6 +13,8 @@ Use this skill when a user provides a folder and wants it converted into a reusa
 ## When to Use
 Use it to inspect a source folder, summarize its capabilities, suggest which lightweight tools are relevant, and generate skill metadata after user confirmation.
 
+Use Skill Center for user-facing imports. It can now accept either a source folder or a ZIP package; ZIP packages are unpacked safely and then routed through the same Cowork skill adaptation path.
+
 ## When Not to Use
 Do not use it for simple one-off file edits or when the user only wants an explanation of the folder contents.
 
@@ -21,8 +23,12 @@ Do not use it for simple one-off file edits or when the user only wants an expla
 
 `generate_skill_from_folder` copies the source folder into `ai_skills/<name>` and writes `SKILL.md` plus `skill.json` centered on explanation, tool refs, and recommended workflow.
 
+Skill Manager ZIP import supports flat-root packages and single-folder packages, reads the final skill name from `skill.json` or `SKILL.md`, rejects existing target names, and reloads skills after successful import.
+
 ## Constraints and Safety Rules
 Always preview before writing. Do not overwrite an existing generated skill unless the user has confirmed the update path.
+
+When importing ZIP packages, never trust archive paths directly. The current Skill Manager validates that extracted paths stay inside the temporary extraction directory before adapting the package.
 
 ## Common Pitfalls
 Folders often contain multiple scripts and partial documentation. Prefer documenting the smallest useful tools instead of turning the entire folder into one big executable workflow.

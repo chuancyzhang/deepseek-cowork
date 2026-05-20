@@ -67,3 +67,5 @@ Visits a specific URL and takes a screenshot.
 - This skill requires screen access permission to detect the active window.
 - It requires internet access to visit websites.
 - Screenshots are saved locally in the workspace.
+- Browser navigation and screenshots interact with external web state and should not be batched through `parallel_tools`.
+- For local app UI work, prefer the built-in right-drawer observability and file preview before reaching for browser automation.

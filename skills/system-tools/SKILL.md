@@ -28,6 +28,7 @@ This skill provides environment automation for app management, browser automatio
 - **App Tools**: Use when user asks to find/open applications or open files in target apps.
 - **Browser/Desktop Tools**: Use when user asks to automate browser pages or desktop windows via `system_automate`.
 - **Command/Search/Script Tasks**: Use the standalone `command-tools` skill for `bash` / `glob` / `grep` / `run_skill_script`.
+- **Parallelism**: Desktop, browser, app launch, and screenshot automation can change external state or rely on UI focus, so do not run it through `parallel_tools`.
 
 ## Unified Automation
 ### system_automate
@@ -37,3 +38,8 @@ Run multi-step automation with a single entry point. Steps are routed automatica
   - Web: `goto` / `click` / `fill` / `type` / `scroll` / `wait` / `screenshot`
   - Desktop: `focus_window` / `click_window` / `type` / `scroll_window` / `screenshot_window`
   - Apps: `index` / `find` / `launch` / `open_with`
+
+## Current Runtime Notes
+- The desktop app follows a compact right-drawer UI. Use app automation only when the user explicitly asks to interact with external apps or browser windows.
+- `build_app_index` and `find_app` are safer discovery steps before `launch_app` or `open_with`.
+- God Mode affects how far system automation can reach; without it, keep actions within normal workspace and app boundaries.

@@ -28,6 +28,7 @@ allowed-tools: [query_akshare_data]
 - 对时效性强的数据，回答时说明查询时间和数据源可能存在延迟。
 - 返回表格数据后，先检查 `ok`、`error`、`shape`、`columns`、`truncated`，再组织答复。
 - 数据仅供研究参考，不构成投资建议。
+- 多个彼此独立的 AKShare 查询可在当前模式允许时通过 `parallel_tools` 并行执行；不要并行执行需要用户确认或会修改环境的操作。
 
 ## Safety Boundaries
 
@@ -57,3 +58,7 @@ Returns JSON with:
 - `truncated`
 - `warning`
 - `error`
+
+## Current Runtime Notes
+- 金融行情、宏观指标和公司数据都属于时效性信息，回答时应说明查询时间和数据来源可能延迟。
+- 当用户询问投资、交易或决策建议时，只提供研究信息与风险提示，不承诺收益。

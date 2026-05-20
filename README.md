@@ -6,6 +6,8 @@
 
 Built by **deepseek-cowork team**.
 
+Current app version: **4.7.8**.
+
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
 ![App Screenshot 2](images/使用界面.png)
@@ -19,18 +21,22 @@ Built by **deepseek-cowork team**.
 ### 🔌 Skill System
 *   **Experience-First Skills**: Skills are treated as structured experience packages rather than a second execution protocol.
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
+*   **Portable Skill Packages**: Export a skill as a ZIP package and import it back from either a ZIP file or a source folder.
 *   **Structured Experience Capture**: Runtime lessons can be stored as structured entries and synced back into `SKILL.md`.
 *   **Conversation-to-Skill Loop**: Click `沉淀为 Skill` to turn the current conversation into a reviewed skill draft, then create a new skill or update an existing one.
+*   **Explicit Read-Only Parallelism**: `parallel_tools` runs independent read-only tool calls concurrently while preserving ordered results and refusing writes or destructive calls.
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
-*   **Workspace Sidebar**: File tree and previews without leaving the app.
-*   **Sub-Agent Monitor**: Observe parallel workers and their statuses.
+*   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, SOP steps, observability, and sub-agent status.
+*   **Session Controls**: Attach files, mention configured agents, bind a session SOP, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
+*   **Sub-Agent Monitor**: Observe parallel workers and their statuses without leaving the current task.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 
 ### 🛰️ Daemon & IM Gateway
 *   **Headless Daemon**: Background inference keeps UI responsive.
 *   **Enterprise IM (Feishu / DingTalk / WeCom smart bot)**: Send commands via IM with daily session rotation.
+*   **Context Overflow Recovery**: IM sessions can retry once with compressed context when the provider reports a context-length overflow.
 *   **Workspace Guardrails**: IM requests follow the same workspace limits unless God Mode is enabled.
 
 ## 📦 Installation
@@ -89,9 +95,13 @@ Examples:
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
+*   **Skill Center import/export** imports custom abilities from folders or ZIP packages and exports existing skills as portable ZIP archives.
 
 ### 5. Enterprise IM
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
+
+### 6. App Updates
+Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds can download, verify, stage, and restart into the new version; source runs only check and link to the release page.
 
 ## 🏗️ Architecture
 
@@ -100,6 +110,8 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feish
 *   **`core/daemon.py`**: Headless inference server.
 *   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
+*   **`core/sop_manager.py`**: Session-level SOP templates, step state, confirmation, rerun, and skip flow.
+*   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
 *   **`skills/`**: Built-in system skills.
 *   **`ai_skills/`**: AI or user-created skills.
 
@@ -109,6 +121,7 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feish
 - Skills are structured experience packages: guidance, boundaries, lessons learned, recommended workflows, and recommended tools.
 - New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
 - `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, and optional `impl.py` assets.
+- Skill packages can be exported as ZIP archives. ZIP import validates safe paths, supports both flat-root and folder-root packages, keeps the original skill name from metadata, and rejects name conflicts.
 - Skills remain hot-reloadable without restarting.
 
 ## 🔄 Agentic Workflow
@@ -116,12 +129,15 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feish
 - Streaming events: reasoning/content/tool_call/tool_result for live UI updates.
 - Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
 - Pause/Resume/Stop controls manage long operations safely.
+- Session SOPs constrain execution to the current step until the user confirms, reruns, or marks that step as not applicable.
+- Clarifying mode exposes only read-oriented exploration and routes real questions through the interaction tools before normal execution resumes.
 
 ## 🧠 Layered Memory & Context
 - System context: workspace, OS, Python, date, and operational rules.
 - Memories: optional `memories.md` auto-injected when present.
 - Long-term memory updates are manually triggered with `更新长期记忆`; processed history is tracked in `memories_update_state.json` so later runs focus on new or changed conversations.
 - Skill prompts: minimal experience briefs first, then fuller guidance only when needed.
+- Session-level selected skills and agent profiles narrow the allowed capability scope for the current task.
 - Progressive disclosure: references, structured experience entries, and larger directory context expand only when required.
 - History hygiene: reasoning content deduplicated per turn to avoid clutter.
 

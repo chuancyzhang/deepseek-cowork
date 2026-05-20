@@ -25,3 +25,7 @@ This skill exposes dedicated tools to manage persisted sub-agents in the current
 - These tools are only available to the main agent.
 - Sub-agents are not allowed to spawn or manage other sub-agents.
 - Agent records and transcripts are persisted in `ChatStorage` (`agents` and `agent_messages` tables).
+- Agent profiles in Settings can define reusable names, descriptions, system prompts, and selected skill scopes for session-level mentions.
+- Mentioning a configured agent from the prompt toolbar injects that profile into the current run context; the same selected-skill scope is enforced by tool visibility and tool calls.
+- SOP templates may reference a default agent profile. When a session SOP is active, the current step and agent profile travel together in run context.
+- Agent-management tools are not read-only and must not be invoked through `parallel_tools`.

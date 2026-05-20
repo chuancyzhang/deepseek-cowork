@@ -33,6 +33,7 @@ Add reusable cross-task lessons here as the system evolves.
 ## Recommended Tools
 - `record_general_experience`
 - `update_experience`
+- `parallel_tools` for independent read-only evidence gathering before deciding whether a lesson is general enough to record
 
 ## Interface Details
 Use `record_general_experience` when a lesson clearly belongs to cross-task runtime knowledge instead of a narrower skill.
@@ -40,3 +41,8 @@ Use `update_experience` when you also want a shared entry point that can route t
 
 ## Constraints and Safety Rules
 Do not put sensitive secrets or ephemeral one-off debugging dumps into this experience package.
+
+## Current Runtime Notes
+- Prefer the narrowest owning skill. Use this package only for patterns that apply across multiple skills or task types.
+- Experience updates are write operations and must not be batched through `parallel_tools`.
+- User-reviewed `沉淀为 Skill` remains the preferred path for substantial reusable workflow knowledge.

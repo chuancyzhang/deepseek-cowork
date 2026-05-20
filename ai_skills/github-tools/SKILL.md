@@ -12,6 +12,8 @@ allowed-tools: clone_repository, analyze_repository
 
 This skill provides tools to clone and analyze GitHub repositories. It is essential for the "GitHub to Skill" workflow, allowing the agent to read source code from open-source projects.
 
+Use the generated analysis as source material for `skill-importer` or `skill-builder` when turning a repository pattern into a reusable Cowork skill.
+
 ## Tools
 
 ### clone_repository
@@ -32,3 +34,8 @@ Analyzes a local repository directory to extract file structure and content of k
 
 **Returns:**
 - A markdown-formatted string containing the analysis summary.
+
+## Current Runtime Notes
+- `clone_repository` performs network and filesystem writes, so it must be called directly and never through `parallel_tools`.
+- `analyze_repository` is read-oriented once the repository exists and can be combined with other independent read-only lookups when exposed in the current mode.
+- Prefer official repository documentation and tests when deciding which capabilities should become Skill guidance.

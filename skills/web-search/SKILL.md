@@ -26,3 +26,8 @@ This skill provides a structured free web search pipeline and a markdown-first a
 - **Article Extraction**: `read_web_article` never treats raw HTML as a successful default response.
 - **Response Contract**: Callers should parse JSON and inspect `ok`, `error`, `provider_used` / `extractor_used`, `results`, and `content`.
 - **Fallback Order**: `markdown.new` → `defuddle.md` → `r.jina.ai` → `Scrapling`.
+
+## Current Runtime Notes
+- Web search and article reads are read-only and may be good candidates for `parallel_tools` when querying several independent pages or sources.
+- For volatile facts, prefer current web lookup and state the query/source timing in the answer.
+- Respect domain filters when the user asks for official sources or excludes a site.

@@ -21,6 +21,13 @@ Executes multiple independent read-only tool calls concurrently and returns orde
 - When you want one explicit tool call to fan out across multiple read-only tools.
 - Do not use it for writes, shell commands, approvals, user input, experience updates, or agent management.
 
+**Runtime rules:**
+- Each subcall must already be visible or discovered in the current run context.
+- Each subcall must be allowed by the current mode, selected-skill scope, and agent profile.
+- Each subcall must be marked read-only and non-destructive.
+- Results preserve the order of the input call list, even if faster calls finish earlier.
+- A denied or failed subcall returns a structured partial error; unsafe write tools are not executed.
+
 ### update_experience
 Records a successful "experience" or "lesson learned", or updates the description/instructions for a specific skill.
 This allows the skill to evolve by refining its capabilities and usage guide.

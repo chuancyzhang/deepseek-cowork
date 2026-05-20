@@ -22,6 +22,8 @@ Use this when you need to calculate data, process text, or perform tasks where n
 - **Sandboxed**: Code runs in the user's workspace.
 - **Security**: File operations are restricted to the workspace.
 - **Dependencies**: Standard library + installed packages (pandas, openpyxl, etc.) are available.
+- **Tool Choice**: Prefer `run_python_code` for data processing, calculations, structured text transforms, and lightweight file analysis; use `bash` only when the real shell or an existing CLI is needed.
+- **Parallelism**: Python execution and package installation are not read-only batch operations and must not be called through `parallel_tools`.
 
 ## God Mode (System Operations)
 When God Mode is enabled:
@@ -49,3 +51,8 @@ Installs a Python package using pip and hot-reloads the environment so it can be
   }
 }
 ```
+
+## Current Runtime Notes
+- The app injects sandbox runtime details into the system context, including Python, Node.js, Bash, and selected package availability.
+- Do not ask the user to install Python/Node/Bash merely because PATH looks empty; verify runtime availability through the sandbox context or direct tool output first.
+- In clarifying mode, use read-oriented tools first and avoid executing arbitrary Python unless normal execution has resumed.

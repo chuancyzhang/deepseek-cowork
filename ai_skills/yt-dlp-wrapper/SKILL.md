@@ -17,6 +17,7 @@ This skill wraps the powerful `yt-dlp` library to provide video downloading capa
 - **Auto Dependency Management**: Automatically detects and installs `yt-dlp` if it's missing in the current environment.
 - **Universal Support**: Works with thousands of video sites supported by yt-dlp.
 - **Smart Defaults**: Downloads the best available single format to avoid strict dependency on FFmpeg (though FFmpeg is recommended for best quality 1080p+ merges).
+- **Workspace Output**: Downloads should stay inside the selected workspace unless God Mode or an explicit user-approved path allows otherwise.
 
 ## Tools
 
@@ -29,3 +30,7 @@ Downloads a video or playlist from a given URL.
 
 **Returns:**
 - A status message indicating the filename and location of the downloaded file.
+
+## Current Runtime Notes
+- Downloading creates files and may use the network, so it must be called directly and never through `parallel_tools`.
+- Respect website terms, copyright, and user authorization before downloading media.

@@ -21,3 +21,9 @@ Read the current memories.md content.
 
 ### write_memories
 Append or replace content in memories.md.
+
+## Current Runtime Notes
+- `memories.md` is the long-term memory layer for stable preferences, durable project context, and reusable personal conventions.
+- The UI-level `更新长期记忆` flow performs batch history scanning, preview/edit, backup, and `memories_update_state.json` tracking; use these direct tools only when the model has a narrow memory edit to make during a conversation.
+- Do not store secrets, temporary debugging noise, or one-off implementation details.
+- Memory writes are not read-only and must not be run through `parallel_tools`.

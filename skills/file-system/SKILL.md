@@ -39,4 +39,9 @@ It handles both standard file operations and Office document processing.
 - **Sandboxed**: Access is restricted to the selected workspace unless God Mode is enabled.
 - **Pathing**: Prefer relative paths (e.g., `data.csv`, `subdir/config.json`).
 - **Search Split**: Use `glob` for path matching and `grep` for content matching.
+- **Read-Only Parallelism**: Multiple independent reads/searches can be grouped through `parallel_tools`; writes, updates, renames, and deletes must stay as direct single-tool calls.
 - **Dependencies**: Office operations require `python-docx`, `python-pptx`, `openpyxl`, `pypdf`.
+
+## Current Runtime Notes
+- Session-level selected skills or agent profiles may narrow which file tools are visible.
+- Clarifying mode permits read-oriented exploration only; modifying tools are hidden or denied until normal execution resumes.

@@ -50,6 +50,8 @@ def _humanize_skill_name(skill_name):
 
 
 class SkillManager:
+    ALWAYS_ALLOWED_SCOPE_TOOLS = {"tool_search", "parallel_tools"}
+
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
         "financial-data-akshare": "file-information-interaction",
@@ -711,7 +713,7 @@ class SkillManager:
             print(f"Error loading implementation {impl_path}: {e}")
 
     def _register_builtin_tools(self):
-        parameters_schema = {
+        search_parameters_schema = {
             "type": "object",
             "properties": {
                 "query": {
@@ -733,7 +735,7 @@ class SkillManager:
             "tool_search",
             self._tool_search,
             "Search deferred tools by keyword and make matched tools available on the next turn.",
-            parameters_schema,
+            search_parameters_schema,
             skill_name="builtin",
             kind="builtin_discovery",
             search_hint="discover deferred tools capabilities",
@@ -1442,7 +1444,7 @@ class SkillManager:
         if not allowed_skill_names:
             return True
         resolved_name = self.tool_registry.resolve_name(tool_name) or str(tool_name or "").strip()
-        if resolved_name == "tool_search":
+        if resolved_name in self.ALWAYS_ALLOWED_SCOPE_TOOLS:
             return True
         skill_name = self.tool_to_skill_map.get(resolved_name)
         if not skill_name:
@@ -1464,6 +1466,37 @@ class SkillManager:
             if self._is_tool_allowed_by_skill_scope(item.get("name"), run_context):
                 filtered.append(item)
         return filtered
+
+    def validate_tool_run_access(
+        self,
+        tool_name,
+        *,
+        run_context=None,
+        discovered_tool_names=None,
+        require_read_only=False,
+        deny_tool_names=None,
+    ):
+        record = self.tool_registry.get(tool_name)
+        resolved_name = record.name if record else str(tool_name or "").strip()
+        if not resolved_name or resolved_name not in self.tools:
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{tool_name}' not found."}
+        if not record:
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not registered."}
+        blocked = {str(item or "").strip() for item in (deny_tool_names or []) if str(item or "").strip()}
+        if resolved_name in blocked:
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not allowed in this context."}
+        if require_read_only and (not record.read_only or record.destructive):
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not a read-only tool."}
+        if not self._is_tool_allowed_by_skill_scope(resolved_name, run_context):
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not allowed for this agent profile."}
+        if not self._is_enterprise_tool_allowed(resolved_name, run_context):
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not available in this run context."}
+        run_mode = (run_context or {}).get("mode")
+        if not self.tool_registry.is_allowed(resolved_name, run_mode):
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not allowed in the current mode."}
+        if not self.tool_registry.is_visible(resolved_name, run_mode, discovered_tool_names):
+            return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' has not been discovered for this run."}
+        return {"ok": True, "name": resolved_name, "record": record, "error": ""}
 
     def get_tools_for_skill(self, skill_name):
         return list(self.skill_to_tools.get(skill_name) or [])
@@ -1540,7 +1573,9 @@ class SkillManager:
         resolved_name = record.name if record else str(name or "").strip()
         if resolved_name not in self.tools:
             return f"Error: Tool '{name}' not found."
-        run_context = context.get("run_context") if isinstance(context, dict) else None
+        effective_context = dict(context or {}) if isinstance(context, dict) else {}
+        effective_context.setdefault("skill_manager", self)
+        run_context = effective_context.get("run_context") if isinstance(effective_context, dict) else None
         if not self._is_tool_allowed_by_skill_scope(resolved_name, run_context):
             return f"Error: Tool '{name}' is not allowed for this agent profile."
         skill_name = self.tool_to_skill_map.get(resolved_name)
@@ -1557,8 +1592,8 @@ class SkillManager:
         args = dict(args or {})
         if "workspace_dir" in sig.parameters:
             args["workspace_dir"] = self.workspace_dir
-        if context and "_context" in sig.parameters:
-            args["_context"] = context
+        if "_context" in sig.parameters:
+            args["_context"] = effective_context
         try:
             return func(**args)
         except Exception as e:

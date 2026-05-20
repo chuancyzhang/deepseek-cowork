@@ -4,7 +4,7 @@ description: Meta skill for AI self-evolution. Invoke when recording lessons lea
 description_cn: 面向AI进化的元技能。用于沉淀经验教训并持续优化技能说明。
 type: system
 created_by: system
-allowed-tools: [update_experience]
+allowed-tools: [parallel_tools, update_experience]
 ---
 
 # Meta Tools
@@ -12,6 +12,14 @@ allowed-tools: [update_experience]
 Tools for the Agent to self-evolve through execution feedback.
 
 ## Tools
+
+### parallel_tools
+Executes multiple independent read-only tool calls concurrently and returns ordered results.
+
+**When to use:**
+- When several file reads, grep/glob searches, or data lookups are independent and can run in parallel.
+- When you want one explicit tool call to fan out across multiple read-only tools.
+- Do not use it for writes, shell commands, approvals, user input, experience updates, or agent management.
 
 ### update_experience
 Records a successful "experience" or "lesson learned", or updates the description/instructions for a specific skill.

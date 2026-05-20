@@ -93,7 +93,7 @@ import traceback
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
-                          QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen)
+                          QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem)
 from PySide6.QtWidgets import QProgressBar
@@ -136,6 +136,37 @@ QMenu::separator {
     margin: 6px 4px;
 }
 """
+
+
+def create_styled_menu(parent=None):
+    menu = QMenu(parent)
+    menu.setStyleSheet(MENU_STYLESHEET)
+    menu.setAttribute(Qt.WA_TranslucentBackground, True)
+    menu.setWindowFlag(Qt.FramelessWindowHint, True)
+    menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
+    return menu
+
+
+def apply_selection_palette(widget, highlight=None, highlighted_text=None):
+    palette = widget.palette()
+    palette.setColor(QPalette.Highlight, QColor(highlight or DesignTokens.primary_soft))
+    palette.setColor(QPalette.HighlightedText, QColor(highlighted_text or DesignTokens.text_primary))
+    widget.setPalette(palette)
+
+
+def configure_responsive_form_layout(form_layout):
+    form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+    form_layout.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
+    form_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+
+def build_form_row_label(text):
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+    label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+    return label
 
 HISTORY_MIGRATION_VERSION = 2
 CONTENT_FLUSH_INTERVAL_MS = 120
@@ -1763,7 +1794,9 @@ class SopTemplateManager(QWidget):
         layout.addLayout(body, 1)
 
         self.template_list = QListWidget()
-        self.template_list.setFixedWidth(220)
+        self.template_list.setMinimumWidth(180)
+        self.template_list.setMaximumWidth(280)
+        self.template_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.template_list.setStyleSheet(
             f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
             f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
@@ -1776,31 +1809,40 @@ class SopTemplateManager(QWidget):
         editor_card.setStyleSheet(
             f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 16px; }}"
         )
+        editor_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         editor_layout = QVBoxLayout(editor_card)
         editor_layout.setContentsMargins(18, 18, 18, 18)
         editor_layout.setSpacing(14)
         body.addWidget(editor_card, 1)
+        body.setStretch(0, 0)
+        body.setStretch(1, 1)
 
         form = QFormLayout()
         form.setSpacing(12)
+        configure_responsive_form_layout(form)
         self.template_id_input = QLineEdit()
+        self.template_id_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.template_id_input.setPlaceholderText("例如：office-file-first-placeholder")
         self.template_id_input.textChanged.connect(self._sync_current_template_from_fields)
         form.addRow("ID", self.template_id_input)
         self.template_name_input = QLineEdit()
+        self.template_name_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.template_name_input.setPlaceholderText("例如：办公文件优先（示例）")
         self.template_name_input.textChanged.connect(self._sync_current_template_from_fields)
         form.addRow("名称", self.template_name_input)
         self.template_desc_edit = QTextEdit()
+        self.template_desc_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.template_desc_edit.setFixedHeight(72)
         self.template_desc_edit.setPlaceholderText("描述这个 SOP 的目标和适用范围")
         self.template_desc_edit.textChanged.connect(self._sync_current_template_from_fields)
         form.addRow("描述", self.template_desc_edit)
         self.triggers_input = QLineEdit()
+        self.triggers_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.triggers_input.setPlaceholderText("用逗号分隔，例如：办公文件, 周报, 示例")
         self.triggers_input.textChanged.connect(self._sync_current_template_from_fields)
         form.addRow("触发词", self.triggers_input)
         self.default_agent_combo = QComboBox()
+        self.default_agent_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.default_agent_combo.currentIndexChanged.connect(self._sync_current_template_from_fields)
         form.addRow("默认智能体", self.default_agent_combo)
         editor_layout.addLayout(form)
@@ -1839,7 +1881,9 @@ class SopTemplateManager(QWidget):
         editor_layout.addLayout(step_body, 1)
 
         self.step_list = QListWidget()
-        self.step_list.setFixedWidth(220)
+        self.step_list.setMinimumWidth(180)
+        self.step_list.setMaximumWidth(280)
+        self.step_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.step_list.setStyleSheet(
             f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px; }}"
             f"QListWidget::item {{ padding: 8px 10px; color: {DesignTokens.text_primary}; }}"
@@ -1855,16 +1899,20 @@ class SopTemplateManager(QWidget):
         step_editor_layout = QFormLayout(step_editor)
         step_editor_layout.setContentsMargins(14, 14, 14, 14)
         step_editor_layout.setSpacing(12)
+        configure_responsive_form_layout(step_editor_layout)
         self.step_title_input = QLineEdit()
+        self.step_title_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.step_title_input.setPlaceholderText("例如：确认当前步骤目标")
         self.step_title_input.textChanged.connect(self._sync_current_step_from_fields)
         step_editor_layout.addRow("标题", self.step_title_input)
         self.step_instruction_edit = QTextEdit()
+        self.step_instruction_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.step_instruction_edit.setFixedHeight(96)
         self.step_instruction_edit.setPlaceholderText("写清楚这一小步允许做什么")
         self.step_instruction_edit.textChanged.connect(self._sync_current_step_from_fields)
         step_editor_layout.addRow("执行指令", self.step_instruction_edit)
         self.step_success_edit = QTextEdit()
+        self.step_success_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.step_success_edit.setFixedHeight(80)
         self.step_success_edit.setPlaceholderText("用户如何判断这一步已经完成")
         self.step_success_edit.textChanged.connect(self._sync_current_step_from_fields)
@@ -1873,6 +1921,8 @@ class SopTemplateManager(QWidget):
         self.step_allow_skip_check.toggled.connect(self._sync_current_step_from_fields)
         step_editor_layout.addRow("跳过", self.step_allow_skip_check)
         step_body.addWidget(step_editor, 1)
+        step_body.setStretch(0, 0)
+        step_body.setStretch(1, 1)
 
         helper = QLabel("SOP 激活后，每轮只会执行当前步骤；完成后需在抽屉中确认才能继续。")
         helper.setWordWrap(True)
@@ -2657,17 +2707,19 @@ class SettingsDialog(QDialog):
             group.setStyleSheet(group_style)
             form = QFormLayout(group)
             form.setSpacing(10)
+            configure_responsive_form_layout(form)
             enabled_check = QCheckBox("启用该渠道")
             enabled_check.setChecked(name in enabled_providers or bool(cfg.get("enabled")))
-            form.addRow("状态", enabled_check)
+            form.addRow(build_form_row_label("状态"), enabled_check)
             self.im_provider_checks[name] = enabled_check
             fields = {}
             for key, label, secret in rows:
                 editor = QLineEdit()
                 if secret:
                     editor.setEchoMode(QLineEdit.Password)
+                editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 editor.setText(str(cfg.get(key, "") or ""))
-                form.addRow(label, editor)
+                form.addRow(build_form_row_label(label), editor)
                 fields[key] = editor
             im_layout.addWidget(group)
             return fields
@@ -3296,6 +3348,7 @@ class AutoResizingLabel(QLabel):
         self.setWordWrap(True)
         self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.setCursor(Qt.IBeamCursor)
+        apply_selection_palette(self)
         # Use a transparent background and specific text color
         self.setStyleSheet(
             f"background: transparent; border: none; color: {DesignTokens.text_secondary}; "
@@ -3303,8 +3356,7 @@ class AutoResizingLabel(QLabel):
         )
 
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
 
         selected = self.selectedText() or ""
         selected_len = len(selected)
@@ -3338,10 +3390,10 @@ class ReadOnlyTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
+        apply_selection_palette(self)
 
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
 
         selected = self.textCursor().selectedText()
         selected_len = len(selected or "")
@@ -3420,16 +3472,37 @@ class AutoResizingInputEdit(QTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameStyle(QFrame.NoFrame)
-        self.textChanged.connect(self.adjustHeight)
+        self.textChanged.connect(self.scheduleAdjustHeight)
         self.setFixedHeight(40) # Initial height
         self.min_height = 40
         self.max_height = 150
         self.anim = None
-        
+        self._height_adjust_pending = False
+        apply_selection_palette(self)
+        QTimer.singleShot(0, self.adjustHeight)
+
+    def scheduleAdjustHeight(self):
+        if self._height_adjust_pending:
+            return
+        self._height_adjust_pending = True
+        QTimer.singleShot(0, self.adjustHeight)
+
     def adjustHeight(self):
+        self._height_adjust_pending = False
         doc_height = self.document().size().height()
+        doc_margin = int(self.document().documentMargin() * 2)
         margins = self.contentsMargins()
-        height = int(doc_height + margins.top() + margins.bottom())
+        viewport_margins = self.viewportMargins()
+        frame_width = self.frameWidth() * 2
+        height = int(
+            doc_height
+            + doc_margin
+            + margins.top()
+            + margins.bottom()
+            + viewport_margins.top()
+            + viewport_margins.bottom()
+            + frame_width
+        )
         
         # Clamp height
         if height < self.min_height:
@@ -3466,7 +3539,7 @@ class AutoResizingInputEdit(QTextEdit):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # self.adjustHeight() # Avoid recursive loop or double adjust
+        self.scheduleAdjustHeight()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -3489,8 +3562,7 @@ class AutoResizingInputEdit(QTextEdit):
         super().dropEvent(event)
     
     def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
         
         # Undo
         action_undo = QAction("撤销", self)
@@ -3935,7 +4007,11 @@ class ChatBubble(QFrame):
             content_label = QLabel(text)
             content_label.setWordWrap(True)
             content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            content_label.setStyleSheet("color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent;")
+            content_label.setStyleSheet(
+                "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
+                "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
+            )
+            apply_selection_palette(content_label, "#ffffff", "#0b57d0")
             
             # Smart Width: If text is long, force a minimum width to avoid narrow tall bubbles
             fm = QFontMetrics(content_label.font())
@@ -5915,6 +5991,8 @@ class MainWindow(QMainWindow):
                 background: {DesignTokens.bg_main};
                 font-size: 14px;
                 color: {DesignTokens.text_primary};
+                selection-background-color: #cfe0ff;
+                selection-color: {DesignTokens.text_primary};
             }}
             QTextEdit#MainInput:focus {{
                 border: 1px solid rgba(0, 122, 255, 0.28);
@@ -6932,14 +7010,48 @@ class MainWindow(QMainWindow):
             ("clarify_mode", "反问模式"),
         ]
 
+    def _append_files_to_input(self, paths):
+        file_paths = [
+            os.path.normpath(path)
+            for path in (paths or [])
+            if path and os.path.isfile(path)
+        ]
+        if not file_paths or not hasattr(self, "input_field"):
+            return []
+
+        if not self.workspace_dir:
+            parent_dir = os.path.dirname(file_paths[0])
+            if parent_dir:
+                self.load_workspace(parent_dir)
+
+        current_text = self.input_field.toPlainText().rstrip()
+        segments = [segment for segment in (current_text, "\n".join(file_paths)) if segment]
+        self.input_field.setPlainText("\n".join(segments))
+        self.input_field.moveCursor(QTextCursor.End)
+        self.input_field.ensureCursorVisible()
+        self.input_field.setFocus()
+        if hasattr(self.input_field, "adjustHeight"):
+            self.input_field.adjustHeight()
+        self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
+        return file_paths
+
+    def select_files_for_prompt(self):
+        start_dir = self.workspace_dir or self.config_manager.get("default_workspace", "") or ""
+        file_paths, _selected_filter = QFileDialog.getOpenFileNames(
+            self,
+            "选择文件",
+            start_dir,
+            "所有文件 (*.*)",
+        )
+        self._append_files_to_input(file_paths)
+
     def _should_block_send_for_sop(self, state):
         return bool(state and is_sop_awaiting_confirmation(getattr(state, "sop_run", None)))
 
     def show_prompt_tool_menu(self):
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
         add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加文件", self)
-        add_files.setEnabled(False)
+        add_files.triggered.connect(self.select_files_for_prompt)
         menu.addAction(add_files)
         add_agent_menu = menu.addMenu(qta.icon('fa5s.user-astronaut', color='#4b5563'), "添加智能体")
         self._populate_agent_menu(add_agent_menu)
@@ -8739,8 +8851,7 @@ class MainWindow(QMainWindow):
                 button.setStyleSheet(apple_history_title_style(is_current))
 
     def show_session_menu(self, session_id, anchor):
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
         rename_action = QAction("重命名", self)
         archive_action = QAction("归档", self)
         delete_action = QAction("删除", self)
@@ -9163,17 +9274,18 @@ class MainWindow(QMainWindow):
         urls = event.mimeData().urls()
         if not urls:
             return
-            
-        path = urls[0].toLocalFile()
-        if os.path.isdir(path):
-            # Switch workspace
-            self.load_workspace(path)
-        elif os.path.isfile(path):
-            # Add file path to input
-            if hasattr(self, 'input_field'):
-                current_text = self.input_field.toPlainText()
-                new_text = f"{current_text}\n{path}" if current_text else path
-                self.input_field.setText(new_text)
+
+        local_paths = [url.toLocalFile() for url in urls if url.isLocalFile()]
+        if not local_paths:
+            return
+
+        first_dir = next((path for path in local_paths if os.path.isdir(path)), "")
+        file_paths = [path for path in local_paths if os.path.isfile(path)]
+        if first_dir and not file_paths:
+            self.load_workspace(first_dir)
+        else:
+            self._append_files_to_input(file_paths)
+        event.acceptProposedAction()
 
     def new_conversation(self):
         self.create_new_session()
@@ -9404,8 +9516,7 @@ class MainWindow(QMainWindow):
         self.config_manager.set("recent_workspaces", self.recent_workspaces)
 
     def show_recent_menu(self):
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
         if not self.recent_workspaces:
             no_action = QAction("无最近记录", self)
             no_action.setEnabled(False)
@@ -9430,8 +9541,7 @@ class MainWindow(QMainWindow):
         if not index.isValid(): return
         path = self.file_model.filePath(index)
         if not os.path.exists(path): return
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
         
         open_action = QAction("打开", self)
         open_action.setIcon(qta.icon('fa5s.external-link-alt', color='#4b5563'))
@@ -9600,8 +9710,7 @@ class MainWindow(QMainWindow):
         profiles = self._available_agent_profiles()
         if not profiles:
             return
-        menu = QMenu(self)
-        menu.setStyleSheet(MENU_STYLESHEET)
+        menu = create_styled_menu(self)
         for profile in profiles:
             skill_count = len(profile.get("skill_names") or [])
             subtitle = profile.get("description") or (f"{skill_count} 个能力" if skill_count else "未限制能力")

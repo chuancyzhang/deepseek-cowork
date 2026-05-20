@@ -368,12 +368,12 @@ TOOL_EXPORTS = [
     {
         "name": "glob",
         "handler": glob,
-        "description": "Find workspace files by path or filename pattern.",
+        "description": "Find workspace files by path or filename pattern. For known filename fragments, prefer patterns like '*report*' instead of '**/report*' so root-level files are not missed.",
         "parameters": {
             "type": "object",
             "properties": {
-                "pattern": {"type": "string", "description": "Filename or path glob pattern."},
-                "path": {"type": "string", "description": "Workspace-relative directory to search."},
+                "pattern": {"type": "string", "description": "Filename or relative-path glob pattern. If you know part of the filename, prefer '*name*' such as '*AI 赋能数据分析*'; do not default to '**/name*' because that can miss files in the workspace root."},
+                "path": {"type": "string", "description": "Workspace-relative directory to search. Use this to narrow the search scope when the directory is known."},
                 "limit": {"type": "integer", "description": "Maximum number of results."},
             },
             "required": [],

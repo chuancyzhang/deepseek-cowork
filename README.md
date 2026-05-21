@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.7.8**.
+Current app version: **4.7.9**.
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
@@ -73,6 +73,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
 Artifacts are downloaded into `.runtime_downloads/` and extracted to `node_env/` and `git_bash_env/`.
+Packaged Windows builds resolve bundled runtimes from the app directory, including `_internal/git_bash_env/bin/bash.exe` for Git Bash. You can override detection with `COWORK_BASH_EXE`, `COWORK_GIT_BASH_DIR`, or `COWORK_BASH_DIR` when needed.
+The packaged Python sandbox should be built from the base interpreter rather than a virtualenv redirector, otherwise `run_python_code` may fail on machines that do not have the builder's Python installation path.
 
 ## 📖 Usage Guide
 

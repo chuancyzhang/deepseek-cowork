@@ -2,7 +2,7 @@
 
 ## Overview
 
-Current implementation sync: app version **4.7.8**.
+Current implementation sync: app version **4.7.9**.
 
 This project now treats the runtime as having only two first-class objects:
 

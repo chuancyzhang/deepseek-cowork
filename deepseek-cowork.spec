@@ -10,6 +10,7 @@ SPEC_DIR = os.path.dirname(os.path.abspath(_spec_arg)) if _spec_arg else os.getc
 ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
 
 python_prefix = sys.exec_prefix
+python_runtime_prefix = getattr(sys, "base_prefix", "") or python_prefix
 PYSIDE6_ROOT = os.path.join(python_prefix, "Lib", "site-packages", "PySide6")
 
 
@@ -133,7 +134,7 @@ def _collect_minimal_python_env(prefix):
     return datas
 
 
-python_env = _collect_minimal_python_env(python_prefix)
+python_env = _collect_minimal_python_env(python_runtime_prefix)
 
 
 def _env_flag(name, default=False):

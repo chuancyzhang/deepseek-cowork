@@ -16,6 +16,30 @@ def _norm(path):
     return os.path.abspath(path) if path else ""
 
 
+def _dedupe_paths(paths):
+    deduped = []
+    seen = set()
+    for path in paths:
+        if not path:
+            continue
+        normalized = _norm(path)
+        key = os.path.normcase(normalized)
+        if key in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(key)
+    return deduped
+
+
+def _simple_exec_env(extra_paths=None):
+    env = os.environ.copy()
+    if extra_paths:
+        env["PATH"] = os.pathsep.join(_dedupe_paths(list(extra_paths) + [env.get("PATH", "")]))
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def _is_frozen():
     return bool(getattr(sys, "frozen", False))
 
@@ -59,30 +83,52 @@ def _candidate_existing_file(paths):
     return ""
 
 
-def _candidate_runtime_dirs(name):
+def _candidate_runtime_dirs(name, env_var_names=None, dir_aliases=None):
     base = get_base_dir()
     dirs = []
-    env_dir = os.getenv(f"COWORK_{name.upper()}_DIR")
-    if env_dir:
-        dirs.append(env_dir)
-    dirs.extend(
-        [
-            os.path.join(base, f"{name}_env"),
-            os.path.join(base, "runtime", name),
-            os.path.join(base, "_internal", f"{name}_env"),
-            os.path.join(base, "_internal", "runtime", name),
-        ]
-    )
-    if hasattr(sys, "_MEIPASS"):
+    env_var_names = env_var_names or [f"COWORK_{name.upper()}_DIR"]
+    runtime_names = dir_aliases or [name]
+    for env_name in env_var_names:
+        env_dir = os.getenv(env_name)
+        if env_dir:
+            dirs.append(env_dir)
+    for runtime_name in runtime_names:
         dirs.extend(
             [
-                os.path.join(sys._MEIPASS, f"{name}_env"),
-                os.path.join(sys._MEIPASS, "runtime", name),
-                os.path.join(sys._MEIPASS, "_internal", f"{name}_env"),
-                os.path.join(sys._MEIPASS, "_internal", "runtime", name),
+                os.path.join(base, f"{runtime_name}_env"),
+                os.path.join(base, "runtime", runtime_name),
+                os.path.join(base, "_internal", f"{runtime_name}_env"),
+                os.path.join(base, "_internal", "runtime", runtime_name),
             ]
         )
-    return [_norm(path) for path in dirs if path]
+    if hasattr(sys, "_MEIPASS"):
+        for runtime_name in runtime_names:
+            dirs.extend(
+                [
+                    os.path.join(sys._MEIPASS, f"{runtime_name}_env"),
+                    os.path.join(sys._MEIPASS, "runtime", runtime_name),
+                    os.path.join(sys._MEIPASS, "_internal", f"{runtime_name}_env"),
+                    os.path.join(sys._MEIPASS, "_internal", "runtime", runtime_name),
+                ]
+            )
+    return _dedupe_paths(dirs)
+
+
+def _read_key_value_file(path):
+    data = {}
+    if not path or not os.path.isfile(path):
+        return data
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                data[key.strip()] = value.strip()
+    except Exception:
+        return {}
+    return data
 
 
 def _copy_runtime_dir(source, runtime_name):
@@ -117,6 +163,35 @@ def _runtime_file_candidates(runtime_name, executable_names):
     return candidates
 
 
+def _runtime_file_candidates_from_dirs(runtime_name, runtime_dirs, executable_names):
+    candidates = []
+    for runtime_dir in runtime_dirs:
+        runtime_dir = _copy_runtime_dir(runtime_dir, runtime_name)
+        for rel in executable_names:
+            candidates.append(os.path.join(runtime_dir, rel))
+    return candidates
+
+
+def _probe_executable(executable, args=None, extra_paths=None, timeout=8):
+    if not executable:
+        return "", ""
+    try:
+        out = subprocess.check_output(
+            [executable] + list(args or []),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+            env=_simple_exec_env(extra_paths=extra_paths),
+            **_no_window_kwargs(),
+        )
+        first_line = (out or "").strip().splitlines()[0] if out else ""
+        return first_line, ""
+    except Exception as exc:
+        return "", str(exc)
+
+
 def _resolve_python():
     env_python = os.getenv("COWORK_PYTHON_EXE")
     candidates = [env_python]
@@ -135,6 +210,32 @@ def _resolve_python():
         )
     )
     return _candidate_existing_file(candidates)
+
+
+def _validate_python_runtime(python_exe):
+    diagnostics = {
+        "pyvenv_cfg": {},
+        "error": "",
+    }
+    if not python_exe:
+        return "", diagnostics
+    runtime_dir = os.path.dirname(_norm(python_exe))
+    pyvenv_cfg = os.path.join(runtime_dir, "pyvenv.cfg")
+    diagnostics["pyvenv_cfg"] = _read_key_value_file(pyvenv_cfg)
+    if diagnostics["pyvenv_cfg"]:
+        _, error = _probe_executable(
+            python_exe,
+            ["--version"],
+            extra_paths=[runtime_dir, os.path.join(runtime_dir, "Scripts")],
+        )
+        if error:
+            diagnostics["error"] = (
+                "Bundled Python runtime is not executable. "
+                "The packaged python.exe appears to depend on an external base interpreter. "
+                f"Probe error: {error}"
+            )
+            return "", diagnostics
+    return python_exe, diagnostics
 
 
 def _resolve_pip(python_exe):
@@ -197,11 +298,20 @@ def _resolve_npx():
     return _candidate_existing_file(candidates)
 
 
-def _resolve_bash():
+def _bash_runtime_dirs():
+    return _candidate_runtime_dirs(
+        "git_bash",
+        env_var_names=["COWORK_GIT_BASH_DIR", "COWORK_BASH_DIR"],
+        dir_aliases=["git_bash", "bash"],
+    )
+
+
+def _bash_candidate_paths():
     candidates = [os.getenv("COWORK_BASH_EXE")]
     candidates.extend(
-        _runtime_file_candidates(
+        _runtime_file_candidates_from_dirs(
             "git_bash",
+            _bash_runtime_dirs(),
             [
                 os.path.join("bin", "bash.exe"),
                 os.path.join("usr", "bin", "bash.exe"),
@@ -213,7 +323,29 @@ def _resolve_bash():
     )
     if not _is_frozen():
         candidates.append(shutil.which("bash"))
-    return _candidate_existing_file(candidates)
+    return _dedupe_paths(candidates)
+
+
+def _resolve_bash():
+    candidates = _bash_candidate_paths()
+    return _candidate_existing_file(candidates), {
+        "searched_paths": candidates,
+        "env_overrides": {
+            "COWORK_BASH_EXE": _norm(os.getenv("COWORK_BASH_EXE")),
+            "COWORK_GIT_BASH_DIR": _norm(os.getenv("COWORK_GIT_BASH_DIR")),
+            "COWORK_BASH_DIR": _norm(os.getenv("COWORK_BASH_DIR")),
+        },
+    }
+
+
+def _bash_runtime_root(bash_exe):
+    exe_dir = os.path.dirname(_norm(bash_exe))
+    parent_dir = os.path.dirname(exe_dir)
+    if os.path.basename(exe_dir).lower() == "bin" and os.path.basename(parent_dir).lower() == "usr":
+        return os.path.dirname(parent_dir)
+    if os.path.basename(exe_dir).lower() == "bin":
+        return parent_dir
+    return parent_dir
 
 
 def ensure_sandbox_runtime():
@@ -222,19 +354,22 @@ def ensure_sandbox_runtime():
         return _RUNTIME_CACHE
 
     python_exe = _resolve_python()
+    python_exe, python_diagnostics = _validate_python_runtime(python_exe)
     pip_exe = _resolve_pip(python_exe)
     node_exe = _resolve_node()
     npm_exe = _resolve_npm()
     npx_exe = _resolve_npx()
-    bash_exe = _resolve_bash()
+    bash_exe, bash_diagnostics = _resolve_bash()
     _RUNTIME_CACHE = {
         "root": _sandbox_root(),
         "python": python_exe,
+        "python_diagnostics": python_diagnostics,
         "pip": pip_exe,
         "node": node_exe,
         "npm": npm_exe,
         "npx": npx_exe,
         "bash": bash_exe,
+        "bash_diagnostics": bash_diagnostics,
     }
     return _RUNTIME_CACHE
 
@@ -256,8 +391,14 @@ def _runtime_path_dirs(runtime):
         dirs.append(os.path.join(os.path.dirname(python_exe), "Scripts"))
     bash_exe = runtime.get("bash")
     if bash_exe:
-        bash_root = os.path.dirname(os.path.dirname(bash_exe))
-        dirs.extend([os.path.join(bash_root, "bin"), os.path.join(bash_root, "usr", "bin")])
+        bash_root = _bash_runtime_root(bash_exe)
+        dirs.extend(
+            [
+                os.path.join(bash_root, "bin"),
+                os.path.join(bash_root, "usr", "bin"),
+                os.path.join(bash_root, "mingw64", "bin"),
+            ]
+        )
     deduped = []
     seen = set()
     for path in dirs:
@@ -413,22 +554,8 @@ def run_skill_script_in_sandbox(skill_id, script_path, runtime, args=None, cwd=N
 
 
 def _run_version(executable, args):
-    if not executable:
-        return ""
-    try:
-        out = subprocess.check_output(
-            [executable] + args,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stderr=subprocess.STDOUT,
-            timeout=8,
-            env=build_sandbox_env(),
-            **_no_window_kwargs(),
-        )
-        return (out or "").strip().splitlines()[0] if out else ""
-    except Exception:
-        return ""
+    out, _ = _probe_executable(executable, args, extra_paths=_runtime_path_dirs(ensure_sandbox_runtime()))
+    return out
 
 
 def _node_script_command(script_path):
@@ -448,6 +575,7 @@ def get_runtime_snapshot():
             "available": bool(runtime.get("python")),
             "version": _run_version(runtime.get("python"), ["--version"]),
             "source": "sandbox" if _is_frozen() else "development",
+            "diagnostics": runtime.get("python_diagnostics", {}),
         },
         "node": {
             "path": runtime.get("node", ""),
@@ -460,6 +588,7 @@ def get_runtime_snapshot():
             "available": bool(runtime.get("bash")),
             "version": _run_version(runtime.get("bash"), ["--version"]),
             "source": "sandbox" if _is_frozen() else "development",
+            "diagnostics": runtime.get("bash_diagnostics", {}),
         },
     }
 

@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.7.8**。
+当前应用版本：**4.7.9**。
 
 ## 1. 产品概述 (Product Overview)
 
@@ -47,6 +47,7 @@ DeepSeek-V3.2 引入 **交错思维链 (Interleaved CoT)**，允许模型在思�
 *   **可执行文件**：直接运行，无需安装 Python。
 *   **源码运行**：建议使用虚拟环境 **.venv\Scripts\python**。
 *   **环境适配**：`env_utils` 在 Dev/EXE 模式下自动识别 Python 与 pip。
+*   **内置 Node.js / Git Bash**：Windows 打包版优先从应用目录解析 bundled runtime，Git Bash 默认查找 `_internal/git_bash_env/bin/bash.exe`，也支持 `COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR`、`COWORK_BASH_DIR` 覆盖。
 *   **应用更新**：设置页可检查 GitHub Releases；打包版支持下载、校验、暂存并通过独立更新器重启安装。
 
 ---

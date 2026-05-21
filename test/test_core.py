@@ -371,7 +371,7 @@ class TestEnvUtils(unittest.TestCase):
         try:
             python_dir = os.path.join(temp_dir, "python_env")
             node_dir = os.path.join(temp_dir, "node_env")
-            bash_dir = os.path.join(temp_dir, "git_bash_env", "bin")
+            bash_dir = os.path.join(temp_dir, "_internal", "git_bash_env", "bin")
             os.makedirs(python_dir, exist_ok=True)
             os.makedirs(node_dir, exist_ok=True)
             os.makedirs(bash_dir, exist_ok=True)

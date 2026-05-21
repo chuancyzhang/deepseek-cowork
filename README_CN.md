@@ -6,7 +6,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.7.8**。
+当前应用版本：**4.7.9**。
 
 ![应用截图1](images/首页.png)
 ![应用截图2](images/使用界面.png)
@@ -72,6 +72,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
 下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
+Windows 打包版会从应用目录解析内置运行时，其中 Git Bash 默认命中 `_internal/git_bash_env/bin/bash.exe`。如需覆盖探测结果，可设置 `COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
 
 ## 📖 使用指南
 

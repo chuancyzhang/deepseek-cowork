@@ -72,12 +72,13 @@ def get_python_runtime_snapshot():
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         checks = json.dumps(_RUNTIME_IMPORT_CHECKS, ensure_ascii=False)
         code = (
-            "import json,sys,importlib.util;"
-            f"checks={checks};"
-            "available=[];missing=[];"
-            "for pkg,mod in checks:"
-            " (available if importlib.util.find_spec(mod) else missing).append(pkg);"
-            "print(json.dumps({'version':sys.version.split()[0],'available':available,'missing':missing},ensure_ascii=False))"
+            "import json,sys,importlib.util\n"
+            f"checks={checks}\n"
+            "available=[]\n"
+            "missing=[]\n"
+            "for pkg,mod in checks:\n"
+            "    (available if importlib.util.find_spec(mod) else missing).append(pkg)\n"
+            "print(json.dumps({'version':sys.version.split()[0],'available':available,'missing':missing},ensure_ascii=False))\n"
         )
         from core.sandbox_runtime import build_sandbox_env
         output = subprocess.check_output(

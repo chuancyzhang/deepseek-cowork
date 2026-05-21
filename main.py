@@ -2608,11 +2608,25 @@ class AutomationTaskDialog(QDialog):
         self.task = dict(task or {})
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
-        layout = QVBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        root_layout.addWidget(scroll, 1)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
 
-        title = QLabel("新建自动化任务" if not self.task else "编辑自动化任务")
+        title = QLabel("新建定时任务" if not self.task else "编辑定时任务")
         title.setProperty("roleTitle", True)
         subtitle = QLabel("定时任务会按计划创建新任务，并结合任务模板一次性执行完整要求。")
         subtitle.setProperty("roleSubtitle", True)
@@ -2878,11 +2892,7 @@ class AutomationDialog(QDialog):
         title_box = QVBoxLayout()
         title = QLabel("自动化")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("配置和管理自动化任务，保留原有模板逻辑，并为模板补上定时执行与历史追踪。")
-        subtitle.setProperty("roleSubtitle", True)
-        subtitle.setWordWrap(True)
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
         self.create_task_btn = QPushButton("手动新建")
         self.create_task_btn.setObjectName("SecondaryBtn")
@@ -2904,6 +2914,8 @@ class AutomationDialog(QDialog):
         self.tasks_scroll = QScrollArea()
         self.tasks_scroll.setWidgetResizable(True)
         self.tasks_scroll.setFrameShape(QFrame.NoFrame)
+        self.tasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tasks_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.tasks_container = QWidget()
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setContentsMargins(0, 0, 0, 0)
@@ -2943,6 +2955,17 @@ class AutomationDialog(QDialog):
         templates_layout = QVBoxLayout(templates_tab)
         templates_layout.setContentsMargins(0, 12, 0, 0)
         templates_layout.setSpacing(0)
+        templates_scroll = QScrollArea()
+        templates_scroll.setWidgetResizable(True)
+        templates_scroll.setFrameShape(QFrame.NoFrame)
+        templates_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        templates_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        templates_layout.addWidget(templates_scroll)
+        templates_content = QWidget()
+        templates_scroll.setWidget(templates_content)
+        templates_content_layout = QVBoxLayout(templates_content)
+        templates_content_layout.setContentsMargins(0, 0, 0, 0)
+        templates_content_layout.setSpacing(12)
         skill_provider = (
             self._main._available_session_skills
             if self._main and hasattr(self._main, "_available_session_skills")
@@ -2960,9 +2983,9 @@ class AutomationDialog(QDialog):
             title_text="任务模板",
             noun="自动化",
             show_id_field=False,
-            helper_text="会话中的自动化会按步骤推进；定时任务会把整套模板作为完整执行说明。",
+            helper_text="",
         )
-        templates_layout.addWidget(self.sop_template_manager)
+        templates_content_layout.addWidget(self.sop_template_manager)
         self.tabs.addTab(templates_tab, "任务模板")
 
         actions = QHBoxLayout()
@@ -2979,6 +3002,7 @@ class AutomationDialog(QDialog):
 
         self.refresh_task_cards()
         self.refresh_history_list()
+        self.tabs.setCurrentIndex(0)
 
     def _current_templates(self):
         return self.sop_template_manager.get_templates()
@@ -3011,9 +3035,19 @@ class AutomationDialog(QDialog):
             if widget:
                 widget.deleteLater()
         if not self.tasks:
-            empty = QLabel("还没有已配置的自动化任务。点击右上角“手动新建”开始。")
-            empty.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; padding: 24px 8px;")
-            self.tasks_layout.addWidget(empty)
+            empty_card = QFrame()
+            empty_card.setStyleSheet(apple_section_surface_style(radius=16))
+            empty_layout = QVBoxLayout(empty_card)
+            empty_layout.setContentsMargins(18, 18, 18, 18)
+            empty_layout.setSpacing(12)
+            empty_title = QLabel("还没有任务")
+            empty_title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary};")
+            empty_btn = QPushButton("新建定时任务")
+            empty_btn.setObjectName("PrimaryBtn")
+            empty_btn.clicked.connect(self.create_task)
+            empty_layout.addWidget(empty_title)
+            empty_layout.addWidget(empty_btn, 0, Qt.AlignLeft)
+            self.tasks_layout.addWidget(empty_card)
             self.tasks_layout.addStretch()
             return
         for task in self.tasks:

@@ -12,10 +12,10 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ### 2.1 UI 层 (PySide6)
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互。
-*   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时主内容区自动预留宽度，避免遮挡对话。
+*   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时主内容区自动预留宽度，避免遮挡对话。子 Agent 开始运行时会自动切到该面板。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理。
-*   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。
+*   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。子 Agent 面板按时间线拆分显示任务输入、工具调用、工具结果、流式输出与最终输出。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
 
 ### 2.2 Agent Core
@@ -107,6 +107,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ## 8. 状态机流转 (Agentic Workflow)
 - **状态**：Idle → Thinking → ToolCalling → Observing → Answering → Completed。
 - **信号**：`thinking_signal`、`content_signal`、`tool_call_signal`、`tool_result_signal`、`agent_state_signal`。
+- **子 Agent 事件**：`agent_state_signal` 在保留状态语义的同时，补充 `input`、`tool_call`、`tool_result`、`content`、`completed` 等结构化字段，供右侧抽屉按节点渲染。
 - **控制**：`pause`、`resume`、`stop`；环路保护（重复思考/工具签名）确保安全收敛。
 - **实现要点**：流式解析四类事件，按需注入技能提示，结果写入历史后继续下一轮直至最终回答。
 - **会话自动化状态**：Active → Awaiting Confirmation → Active/Completed，用户可在 Awaiting 状态选择确认、重跑或跳过。

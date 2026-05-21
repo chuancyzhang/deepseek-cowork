@@ -31,6 +31,7 @@ class _FakeWorker:
         self.step_signal = _Signal()
         self.thinking_signal = _Signal()
         self.tool_call_signal = _Signal()
+        self.tool_result_signal = _Signal()
         self.finished_signal = _Signal()
         self._result_delay = result_delay
         self._running = False
@@ -117,6 +118,7 @@ class _QtEmitter(QObject):
     content_signal = Signal(str)
     output_signal = Signal(str)
     tool_call_signal = Signal(dict)
+    tool_result_signal = Signal(dict)
 
 
 class _QtWorker:
@@ -131,6 +133,7 @@ class _QtWorker:
         self.content_signal = self._emitter.content_signal
         self.output_signal = self._emitter.output_signal
         self.tool_call_signal = self._emitter.tool_call_signal
+        self.tool_result_signal = self._emitter.tool_result_signal
 
     def start(self):
         self._running = True
@@ -138,6 +141,17 @@ class _QtWorker:
         def _run():
             self.step_signal.emit("Turn 1: Requesting LLM...")
             self.output_signal.emit("Provider Start: test-provider")
+            self.tool_call_signal.emit({"id": "tool-1", "name": "read_file", "args": {"path": "demo.txt"}})
+            self.tool_result_signal.emit(
+                {
+                    "id": "tool-1",
+                    "name": "read_file",
+                    "args": {"path": "demo.txt"},
+                    "result": "{\"ok\": true}",
+                    "result_obj": {"ok": True},
+                    "meta": {"duration": 0.12},
+                }
+            )
             self.content_signal.emit("partial-output")
             self.finished_signal.emit(
                 {
@@ -356,7 +370,10 @@ class TestAgentManagerTools(unittest.TestCase):
         self.assertFalse(waited["timed_out"])
 
         statuses = [item.get("status") for item in capture.items]
+        self.assertIn("input", statuses)
         self.assertIn("log", statuses)
+        self.assertIn("tool_use", statuses)
+        self.assertIn("tool_result", statuses)
         self.assertIn("content", statuses)
         self.assertIn("completed", statuses)
 

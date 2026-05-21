@@ -396,11 +396,11 @@ def apple_list_style(border=True, bg=None, radius=14, padding=6):
 
 def status_color(status):
     status = (status or "").strip().lower()
-    if status in {"active", "running", "pending", "waiting_input", "log", "content"}:
+    if status in {"active", "running", "pending", "waiting_input", "log", "content", "input"}:
         return DesignTokens.status_running
     if status == "thinking":
         return DesignTokens.status_thinking
-    if status in {"tool", "tool_use"}:
+    if status in {"tool", "tool_use", "tool_result"}:
         return DesignTokens.status_tool
     if status in {"completed", "done"}:
         return DesignTokens.status_success
@@ -411,12 +411,14 @@ def status_color(status):
 
 def status_label_text(status):
     mapping = {
+        "input": "收到输入",
         "pending": "等待",
         "active": "运行中",
         "running": "运行中",
         "thinking": "思考中",
         "content": "输出中",
         "tool_use": "调用工具",
+        "tool_result": "工具结果",
         "log": "日志",
         "provider_log": "Provider",
         "provider_error": "Provider 异常",
@@ -591,6 +593,191 @@ def extract_related_paths(tool_name, args):
     if tool_name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx", "rename_file", "delete_file"}:
         return paths
     return []
+
+
+def preview_text(value, limit=220):
+    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def normalize_tool_arguments(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {"raw": value}
+    return {}
+
+
+def sub_agent_event_title(event):
+    status = str((event or {}).get("status") or "").strip().lower()
+    if status == "input":
+        return "任务输入"
+    if status == "thinking":
+        return "思考"
+    if status == "tool_use":
+        return f"调用工具 · {event.get('tool_name') or 'unknown'}"
+    if status == "tool_result":
+        return f"工具结果 · {event.get('tool_name') or 'unknown'}"
+    if status == "content":
+        return "输出片段"
+    if status == "provider_error":
+        return "Provider 异常"
+    if status in {"failed", "failed_recovered"}:
+        return "执行失败"
+    if status == "completed":
+        return "最终输出"
+    return status_label_text(status)
+
+
+def sub_agent_event_summary(event):
+    event = event or {}
+    status = str(event.get("status") or "").strip().lower()
+    if status == "input":
+        return preview_text(event.get("input_text") or event.get("content"))
+    if status == "thinking":
+        return preview_text(event.get("reasoning_delta") or event.get("content"))
+    if status == "tool_use":
+        args = normalize_tool_arguments(event.get("tool_args"))
+        action_title, action_detail = summarize_tool_action(event.get("tool_name") or "", args)
+        return preview_text(action_detail or action_title)
+    if status == "tool_result":
+        duration = event.get("duration")
+        duration_text = ""
+        if duration not in (None, ""):
+            try:
+                duration_text = f" ({float(duration):.1f}s)"
+            except Exception:
+                duration_text = ""
+        return preview_text((event.get("tool_result") or "") + duration_text)
+    if status == "content":
+        return preview_text(event.get("content_delta") or event.get("content"))
+    if status == "provider_log":
+        return preview_text(event.get("provider_message") or event.get("content"))
+    if status == "provider_error":
+        return preview_text(event.get("provider_message") or event.get("error") or event.get("content"))
+    if status in {"failed", "failed_recovered", "killed", "closed"}:
+        return preview_text(event.get("error") or event.get("content"))
+    if status == "completed":
+        return preview_text(event.get("output_text") or event.get("content"))
+    return preview_text(
+        event.get("content")
+        or event.get("log_content")
+        or event.get("task")
+        or event.get("provider_message")
+    )
+
+
+def build_sub_agent_history_events(agent_row, messages):
+    events = []
+    agent_row = agent_row or {}
+    agent_id = agent_row.get("id") or ""
+    agent_name = agent_row.get("name") or ""
+    terminal_status = agent_row.get("status") or "closed"
+    last_role = ""
+    tool_call_lookup = {}
+    normalized_messages = [msg for msg in (messages or []) if isinstance(msg, dict)]
+    for index, msg in enumerate(normalized_messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        created_at = int(msg.get("created_at") or agent_row.get("updated_at") or time.time())
+        if role == "user":
+            events.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "status": "input",
+                    "event_type": "input",
+                    "input_text": msg.get("content") or "",
+                    "content": msg.get("content") or "",
+                    "ts": created_at,
+                }
+            )
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                events.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "status": "tool_use",
+                        "event_type": "tool_call",
+                        "tool_call_id": call.get("id") or "",
+                        "tool_name": fn.get("name") or "",
+                        "tool_args": normalize_tool_arguments(fn.get("arguments")),
+                        "task": f"Tool: {fn.get('name') or 'unknown'}",
+                        "ts": created_at,
+                    }
+                )
+                tool_call_lookup[str(call.get("id") or "")] = {
+                    "tool_name": fn.get("name") or "",
+                    "tool_args": normalize_tool_arguments(fn.get("arguments")),
+                }
+            content = str(msg.get("content") or "").strip()
+            if content:
+                has_future_assistant = any(
+                    str(item.get("role") or "").strip().lower() == "assistant"
+                    and str(item.get("content") or "").strip()
+                    for item in normalized_messages[index + 1 :]
+                )
+                status = "completed" if terminal_status == "completed" and not has_future_assistant else "content"
+                events.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "status": status,
+                        "event_type": "output" if status == "completed" else "content",
+                        "content": content,
+                        "output_text": content if status == "completed" else "",
+                        "ts": created_at,
+                    }
+                )
+        elif role == "tool":
+            tool_meta = tool_call_lookup.get(str(msg.get("tool_call_id") or ""), {})
+            events.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "status": "tool_result",
+                    "event_type": "tool_result",
+                    "tool_call_id": msg.get("tool_call_id") or "",
+                    "tool_name": tool_meta.get("tool_name") or "",
+                    "tool_args": tool_meta.get("tool_args") or {},
+                    "tool_result": msg.get("content") or "",
+                    "tool_result_obj": msg.get("result_obj"),
+                    "duration": ((msg.get("meta") or {}).get("duration") if isinstance(msg.get("meta"), dict) else None),
+                    "content": msg.get("content") or "",
+                    "ts": created_at,
+                }
+            )
+        last_role = role
+
+    if not events:
+        summary = (agent_row.get("last_result") or agent_row.get("last_error") or "").strip()
+        if summary:
+            events.append(
+                {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "status": terminal_status,
+                    "event_type": terminal_status,
+                    "content": summary,
+                    "output_text": summary if terminal_status == "completed" else "",
+                    "error": summary if terminal_status != "completed" else "",
+                    "ts": int(agent_row.get("updated_at") or time.time()),
+                }
+            )
+    return events
 
 def readable_risk_level(value):
     text = (value or "").strip().lower()
@@ -5095,7 +5282,10 @@ class ChatBubble(QFrame):
             cursor.movePosition(QTextCursor.End)
             
             fmt = QTextCharFormat()
-            if status == "thinking":
+            if status == "input":
+                fmt.setForeground(QColor(DesignTokens.status_running))
+                fmt.setFontWeight(QFont.Bold)
+            elif status == "thinking":
                 fmt.setForeground(QColor(DesignTokens.accent_ai))
                 fmt.setFontItalic(True)
             elif status == "provider_log":
@@ -5106,6 +5296,8 @@ class ChatBubble(QFrame):
                 fmt.setFontWeight(QFont.Bold)
             elif status == "tool_use":
                 fmt.setForeground(QColor(DesignTokens.accent_tool))
+            elif status == "tool_result":
+                fmt.setForeground(QColor(DesignTokens.success_text))
             elif status == "completed":
                 fmt.setForeground(QColor(DesignTokens.success_text))
             elif status == "error":
@@ -5621,7 +5813,12 @@ class ToolCallCard(QFrame):
                 return text
             return text[: limit - 3] + "..."
         
-        if status == "pending":
+        if status == "input":
+            status_text = "收到输入"
+            style = apple_status_chip_style(status)
+            detail_text = _trim(state.get("input_text") or state.get("content") or "")
+            detail_style = f"color: {DesignTokens.status_running}; font-size: 10px;"
+        elif status == "pending":
             status_text = "等待"
             detail_text = _trim(task)
         elif status == "completed":
@@ -5670,6 +5867,11 @@ class ToolCallCard(QFrame):
             style = apple_status_chip_style(status)
             detail_text = _trim(task)
             detail_style = f"color: {DesignTokens.status_tool}; font-size: 10px;"
+        elif status == "tool_result":
+            status_text = "工具结果"
+            style = apple_status_chip_style(status)
+            detail_text = _trim(state.get("tool_result") or state.get("content") or "")
+            detail_style = f"color: {DesignTokens.success_text}; font-size: 10px;"
         elif status == "log":
             status_text = "日志"
             style = apple_status_chip_style(status, subtle=True)
@@ -5775,279 +5977,250 @@ class ToolCallCard(QFrame):
                 }}
             """)
 
+class SubAgentEventTile(QFrame):
+    def __init__(self, event, parent=None):
+        super().__init__(parent)
+        self.event = dict(event or {})
+        self._details_visible = False
+        self._details_text = self._build_details_text(self.event)
+
+        self.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
+            f"border-radius: 14px; }}"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(20, 20)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(2)
+
+        self.title_label = QLabel(sub_agent_event_title(self.event))
+        self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 700;")
+
+        self.summary_label = QLabel(sub_agent_event_summary(self.event))
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; line-height: 1.45;")
+
+        title_box.addWidget(self.title_label)
+        title_box.addWidget(self.summary_label)
+
+        right_box = QVBoxLayout()
+        right_box.setContentsMargins(0, 0, 0, 0)
+        right_box.setSpacing(4)
+
+        self.status_label = QLabel(status_label_text(self.event.get("status")))
+        self.status_label.setStyleSheet(apple_status_chip_style(self.event.get("status"), subtle=True))
+        self.status_label.setAlignment(Qt.AlignCenter)
+
+        ts_value = self.event.get("ts")
+        time_text = ""
+        if ts_value:
+            try:
+                time_text = datetime.fromtimestamp(int(ts_value)).strftime("%H:%M:%S")
+            except Exception:
+                time_text = ""
+        self.time_label = QLabel(time_text)
+        self.time_label.setAlignment(Qt.AlignRight)
+        self.time_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 10px;")
+
+        self.toggle_btn = QToolButton()
+        self.toggle_btn.setText("详情")
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.setStyleSheet(apple_ghost_icon_button_style(radius=10))
+        self.toggle_btn.setVisible(bool(self._details_text))
+        self.toggle_btn.clicked.connect(self.toggle_details)
+
+        right_box.addWidget(self.status_label, 0, Qt.AlignRight)
+        right_box.addWidget(self.time_label, 0, Qt.AlignRight)
+        right_box.addWidget(self.toggle_btn, 0, Qt.AlignRight)
+        right_box.addStretch()
+
+        head.addWidget(self.icon_label)
+        head.addLayout(title_box, 1)
+        head.addLayout(right_box)
+        layout.addLayout(head)
+
+        self.details_edit = QTextEdit()
+        self.details_edit.setReadOnly(True)
+        self.details_edit.setVisible(False)
+        self.details_edit.setStyleSheet(
+            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=12, subtle=True, padding=10)
+        )
+        self.details_edit.setPlainText(self._details_text)
+        self.details_edit.setMaximumHeight(180)
+        layout.addWidget(self.details_edit)
+
+        self._apply_icon()
+
+    def _apply_icon(self):
+        status = str(self.event.get("status") or "").strip().lower()
+        icon_name = "fa5s.circle"
+        color = status_color(status)
+        if status == "input":
+            icon_name = "fa5s.comment-dots"
+        elif status == "thinking":
+            icon_name = "fa5s.brain"
+        elif status == "tool_use":
+            icon_name = "fa5s.wrench"
+        elif status == "tool_result":
+            icon_name = "fa5s.check-circle"
+        elif status in {"content", "completed"}:
+            icon_name = "fa5s.file-alt"
+        elif status in {"failed", "failed_recovered", "killed", "provider_error"}:
+            icon_name = "fa5s.exclamation-circle"
+        elif status in {"pending", "running", "active"}:
+            icon_name = "fa5s.play-circle"
+        self.icon_label.setPixmap(qta.icon(icon_name, color=color).pixmap(16, 16))
+
+    def _build_details_text(self, event):
+        status = str((event or {}).get("status") or "").strip().lower()
+        if status == "input":
+            return str(event.get("input_text") or event.get("content") or "").strip()
+        if status == "tool_use":
+            args = normalize_tool_arguments(event.get("tool_args"))
+            return json.dumps(args, ensure_ascii=False, indent=2) if args else ""
+        if status == "tool_result":
+            payload = event.get("tool_result_obj")
+            if payload is not None:
+                try:
+                    return json.dumps(payload, ensure_ascii=False, indent=2)
+                except Exception:
+                    return str(payload)
+            return str(event.get("tool_result") or event.get("content") or "").strip()
+        if status in {"content", "completed"}:
+            return str(event.get("output_text") or event.get("content") or "").strip()
+        if status == "thinking":
+            return str(event.get("reasoning_delta") or event.get("content") or "").strip()
+        if status in {"provider_error", "failed", "failed_recovered", "killed", "closed"}:
+            return str(event.get("error") or event.get("content") or "").strip()
+        return str(
+            event.get("content")
+            or event.get("log_content")
+            or event.get("provider_message")
+            or ""
+        ).strip()
+
+    def toggle_details(self):
+        self._details_visible = not self._details_visible
+        self.details_edit.setVisible(self._details_visible)
+        self.toggle_btn.setText("收起" if self._details_visible else "详情")
+
+
+class SubAgentTimelineCard(QFrame):
+    def __init__(self, agent_id, agent_name="", parent=None):
+        super().__init__(parent)
+        self.agent_id = agent_id
+        self.agent_name = agent_name or agent_id
+        self.event_count = 0
+
+        self.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.74)"))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.robot", color=DesignTokens.primary).pixmap(16, 16))
+        head.addWidget(icon)
+
+        self.name_label = QLabel(self.agent_name)
+        self.name_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
+        head.addWidget(self.name_label)
+
+        self.count_label = QLabel("0 步")
+        self.count_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px;")
+        head.addWidget(self.count_label)
+        head.addStretch()
+
+        self.status_label = QLabel("等待")
+        self.status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
+        head.addWidget(self.status_label)
+        layout.addLayout(head)
+
+        self.timeline_layout = QVBoxLayout()
+        self.timeline_layout.setContentsMargins(4, 0, 0, 0)
+        self.timeline_layout.setSpacing(8)
+        layout.addLayout(self.timeline_layout)
+
+    def update_identity(self, agent_name=""):
+        if agent_name:
+            self.agent_name = agent_name
+            self.name_label.setText(agent_name)
+
+    def append_event(self, event):
+        self.event_count += 1
+        self.count_label.setText(f"{self.event_count} 步")
+        self.status_label.setText(status_label_text(event.get("status")))
+        self.status_label.setStyleSheet(apple_status_chip_style(event.get("status"), subtle=True))
+        self.timeline_layout.addWidget(SubAgentEventTile(event))
+
+
 class SubAgentMonitor(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.setStyleSheet(f"""
-            QTabWidget::pane {{
-                border: none;
-                border-radius: 16px;
-                background: rgba(255, 255, 255, 0.56);
-            }}
-            QTabBar::tab {{
-                background: transparent;
-                color: {DesignTokens.text_secondary};
-                padding: 7px 12px;
-                margin-right: 4px;
-                border-radius: 12px;
-                font-size: 11px;
-                font-weight: 600;
-            }}
-            QTabBar::tab:hover {{
-                background: {DesignTokens.bg_hover};
-                color: {DesignTokens.text_primary};
-            }}
-            QTabBar::tab:selected {{
-                background: {DesignTokens.primary_soft};
-                color: {DesignTokens.primary};
-            }}
-        """)
-        layout.addWidget(self.tabs)
-        
-        self.agents = {} # {agent_id: {"text_edit": QTextEdit}}
+        layout.setSpacing(0)
 
-    def reset(self):
-        self.tabs.clear()
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        layout.addWidget(self.scroll)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(10)
+        self.content_layout.addStretch()
+        self.scroll.setWidget(self.content)
+
         self.agents = {}
 
-    def update_log(self, agent_id, content, status, agent_name=""):
-        if agent_id not in self.agents:
-            self._create_agent_tab(agent_id, agent_name=agent_name)
-        elif agent_name:
-            self._set_agent_tab_title(agent_id, agent_name)
-            
-        widgets = self.agents[agent_id]
-        text_edit = widgets["text_edit"]
-        
-        # Timestamp
-        from datetime import datetime
-        ts = datetime.now().strftime("%H:%M:%S")
-        
-        # Determine format
-        if status == "pending":
-            # New task started, clear previous log
-            text_edit.clear()
-            
-            cursor = text_edit.textCursor()
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.text_primary))
-            fmt.setFontWeight(QFont.Bold)
-            fmt.setFontPointSize(12)
-            cursor.insertText(f"Task started at {ts}\n{content}\n\n", fmt)
-            text_edit.setTextCursor(cursor)
-            
-            # Update Tab Icon/Text
-            self._update_tab_status(agent_id, "running")
-            
-        elif status == "thinking" and content:
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.status_thinking))
-            fmt.setFontItalic(True)
-            fmt.setFontWeight(QFont.Normal)
-            fmt.setFontPointSize(11)
-            
-            cursor.insertText(content, fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-            
-            self._update_tab_status(agent_id, "thinking")
-        elif status == "content" and content:
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
+    def reset(self):
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.content_layout.addStretch()
+        self.agents = {}
 
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.success_text))
-            fmt.setFontItalic(False)
-            fmt.setFontWeight(QFont.Normal)
-            fmt.setFontPointSize(11)
+    def update_log(self, agent_id, content, status, agent_name="", event=None):
+        if not agent_id:
+            return
+        payload = dict(event or {})
+        payload.setdefault("agent_id", agent_id)
+        payload.setdefault("agent_name", agent_name or agent_id)
+        payload.setdefault("status", status or "running")
+        if content and not payload.get("content"):
+            payload["content"] = content
+        payload.setdefault("ts", int(time.time()))
 
-            cursor.insertText(content, fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
+        card = self.agents.get(agent_id)
+        if card is None:
+            card = SubAgentTimelineCard(agent_id, agent_name=payload.get("agent_name") or agent_id)
+            self.agents[agent_id] = card
+            self.content_layout.insertWidget(max(0, self.content_layout.count() - 1), card)
+        else:
+            card.update_identity(payload.get("agent_name") or agent_id)
+        card.append_event(payload)
 
-            self._update_tab_status(agent_id, "running")
-            
-        elif status == "log" and content:
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
-                cursor.insertText("\n")
-                
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.text_secondary))
-            fmt.setFontItalic(False)
-            fmt.setFontWeight(QFont.Normal)
-            fmt.setFontPointSize(10)
-            
-            cursor.insertText(f"[{ts}] {content}\n", fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-        elif status == "provider_log" and content:
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
-                cursor.insertText("\n")
-
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor("#0f766e"))
-            fmt.setFontWeight(QFont.Bold)
-            fmt.setFontPointSize(10)
-
-            cursor.insertText(f"[{ts}] {content}\n", fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-        elif status == "provider_error" and content:
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
-                cursor.insertText("\n")
-
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.error_text))
-            fmt.setFontWeight(QFont.Bold)
-            fmt.setFontPointSize(10)
-
-            cursor.insertText(f"[{ts}] {content}\n", fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-            self._update_tab_status(agent_id, "failed")
-            
-        elif status == "tool_use" and content:
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
-                cursor.insertText("\n")
-                
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.status_tool))
-            fmt.setFontWeight(QFont.Bold)
-            fmt.setFontItalic(False)
-            fmt.setFontPointSize(11)
-            
-            cursor.insertText(f"\n[{ts}] Action: {content}\n", fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-            
-            self._update_tab_status(agent_id, "tool")
-            
-        elif status in {"active", "running"}:
-            self._update_tab_status(agent_id, "running")
-
-        elif status == "waiting_input":
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            fmt = QTextCharFormat()
-            fmt.setForeground(QColor(DesignTokens.status_running))
-            fmt.setFontWeight(QFont.Bold)
-            fmt.setFontPointSize(11)
-            cursor.insertText(f"\n[{ts}] Waiting input\n", fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-            self._update_tab_status(agent_id, "running")
-
-        elif status == "completed":
-             cursor = text_edit.textCursor()
-             cursor.movePosition(QTextCursor.End)
-             if not text_edit.toPlainText().endswith("\n") and len(text_edit.toPlainText()) > 0:
-                cursor.insertText("\n")
-                
-             fmt = QTextCharFormat()
-             fmt.setForeground(QColor(DesignTokens.status_success))
-             fmt.setFontWeight(QFont.Bold)
-             fmt.setFontItalic(False)
-             fmt.setFontPointSize(12)
-             
-             cursor.insertText(f"\nCompleted at {ts}.\n", fmt)
-             final_text = (content or "").strip()
-             if final_text:
-                 body_fmt = QTextCharFormat()
-                 body_fmt.setForeground(QColor(DesignTokens.success_text))
-                 body_fmt.setFontPointSize(11)
-                 cursor.insertText(final_text + "\n", body_fmt)
-             text_edit.setTextCursor(cursor)
-             text_edit.ensureCursorVisible()
-             
-             self._update_tab_status(agent_id, "completed")
-        elif status in {"failed", "failed_recovered", "killed"}:
-             cursor = text_edit.textCursor()
-             cursor.movePosition(QTextCursor.End)
-             fmt = QTextCharFormat()
-             fmt.setForeground(QColor(DesignTokens.status_error))
-             fmt.setFontWeight(QFont.Bold)
-             fmt.setFontPointSize(11)
-             detail = (content or "").strip()
-             if detail:
-                 cursor.insertText(f"\nFailed at {ts}: {detail}\n", fmt)
-             else:
-                 cursor.insertText(f"\nFailed at {ts}\n", fmt)
-             text_edit.setTextCursor(cursor)
-             text_edit.ensureCursorVisible()
-             self._update_tab_status(agent_id, "failed")
-        elif status == "closed":
-             cursor = text_edit.textCursor()
-             cursor.movePosition(QTextCursor.End)
-             fmt = QTextCharFormat()
-             fmt.setForeground(QColor(DesignTokens.text_secondary))
-             fmt.setFontPointSize(11)
-             cursor.insertText(f"\n■ Closed at {ts}\n", fmt)
-             text_edit.setTextCursor(cursor)
-             text_edit.ensureCursorVisible()
-             self._update_tab_status(agent_id, "closed")
-
-    def _update_tab_status(self, agent_id, state):
-        tab_bar = self.tabs.tabBar()
-        for i in range(self.tabs.count()):
-            if tab_bar.tabData(i) == agent_id:
-                icon = None
-                if state == "running":
-                    icon = qta.icon('fa5s.play-circle', color=DesignTokens.status_running)
-                elif state == "thinking":
-                    icon = qta.icon('fa5s.brain', color=DesignTokens.status_thinking)
-                elif state == "tool":
-                    icon = qta.icon('fa5s.tools', color=DesignTokens.status_tool)
-                elif state == "completed":
-                    icon = qta.icon('fa5s.check-circle', color=DesignTokens.status_success)
-                elif state == "failed":
-                    icon = qta.icon('fa5s.exclamation-circle', color=DesignTokens.status_error)
-                elif state == "closed":
-                    icon = qta.icon('fa5s.stop-circle', color=DesignTokens.status_idle)
-                
-                if icon:
-                    self.tabs.setTabIcon(i, icon)
-                break
-
-    def _set_agent_tab_title(self, agent_id, agent_name=""):
-        tab_bar = self.tabs.tabBar()
-        title = agent_id if not agent_name else f"{agent_name}"
-        for i in range(self.tabs.count()):
-            if tab_bar.tabData(i) == agent_id:
-                self.tabs.setTabText(i, title)
-                return
-
-    def _create_agent_tab(self, agent_id, agent_name=""):
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        text_edit = QTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12))
-        layout.addWidget(text_edit)
-        
-        title = agent_id if not agent_name else f"{agent_name}"
-        index = self.tabs.addTab(tab, title)
-        self.tabs.tabBar().setTabData(index, agent_id)
-        self.agents[agent_id] = {"text_edit": text_edit}
-        if self.tabs.count() == 1:
-            self.tabs.setCurrentIndex(index)
+        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum()))
 
 class SubAgentMonitorWindow(QDialog):
     def __init__(self, parent=None):
@@ -7383,7 +7556,7 @@ class MainWindow(QMainWindow):
         sub_agent_intro_layout = QVBoxLayout(sub_agent_intro_card)
         sub_agent_intro_layout.setContentsMargins(12, 10, 12, 10)
         sub_agent_intro_layout.setSpacing(0)
-        self.sub_agent_intro_label = QLabel("实时状态与执行日志")
+        self.sub_agent_intro_label = QLabel("按子 Agent 展示输入、工具调用、结果与最终输出")
         self.sub_agent_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         sub_agent_intro_layout.addWidget(self.sub_agent_intro_label)
         sub_agent_layout.addWidget(sub_agent_intro_card)
@@ -9481,17 +9654,11 @@ class MainWindow(QMainWindow):
             agent_id = item.get("id") or ""
             if not agent_id:
                 continue
-            status = item.get("status") or "closed"
-            summary = item.get("last_result") or item.get("last_error") or ""
-            state.sub_agent_events.append(
-                {
-                    "agent_id": agent_id,
-                    "agent_name": item.get("name") or "",
-                    "status": status,
-                    "content": summary,
-                    "ts": int(item.get("updated_at") or time.time()),
-                }
-            )
+            try:
+                agent_messages = self.chat_storage.get_agent_messages(agent_id)
+            except Exception:
+                agent_messages = []
+            state.sub_agent_events.extend(build_sub_agent_history_events(item, agent_messages))
         if not state.messages:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
             if os.path.exists(history_path):
@@ -12165,13 +12332,12 @@ class MainWindow(QMainWindow):
         text = content or ""
         if status in {"thinking", "content"} and len((text or "").strip()) <= 1:
             return
-        event = {
-            "agent_id": data.get("agent_id") or "",
-            "agent_name": data.get("agent_name") or "",
-            "status": status,
-            "content": text,
-            "ts": int(time.time()),
-        }
+        event = dict(data)
+        event["agent_id"] = data.get("agent_id") or ""
+        event["agent_name"] = data.get("agent_name") or ""
+        event["status"] = status
+        event["content"] = text if text else event.get("content", "")
+        event["ts"] = int(data.get("ts") or time.time())
         if not event["agent_id"]:
             return
         if state.sub_agent_events:
@@ -12180,9 +12346,14 @@ class MainWindow(QMainWindow):
                 isinstance(last, dict)
                 and last.get("agent_id") == event["agent_id"]
                 and last.get("status") == event["status"]
+                and event["status"] in {"thinking", "content", "log", "provider_log"}
             ):
                 merged_text = (last.get("content") or "") + (event.get("content") or "")
                 last["content"] = merged_text[-240:]
+                if event.get("reasoning_delta"):
+                    last["reasoning_delta"] = ((last.get("reasoning_delta") or "") + event.get("reasoning_delta"))[-400:]
+                if event.get("content_delta"):
+                    last["content_delta"] = ((last.get("content_delta") or "") + event.get("content_delta"))[-400:]
                 last["ts"] = event["ts"]
                 if state.session_id == self.current_session_id:
                     self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
@@ -12205,13 +12376,19 @@ class MainWindow(QMainWindow):
                 continue
             status = event.get("status") or "running"
             content = event.get("content") or ""
-            self.sub_agent_monitor.update_log(agent_id, content, status, agent_name=event.get("agent_name") or "")
+            self.sub_agent_monitor.update_log(
+                agent_id,
+                content,
+                status,
+                agent_name=event.get("agent_name") or "",
+                event=event,
+            )
 
     def handle_agent_state(self, data, session_id=None):
         state = self.get_session(session_id)
         if not state: return
         status = data.get("status")
-        if status in {"thinking", "pending", "content", "provider_log"}:
+        if status in {"input", "thinking", "pending", "content", "provider_log", "tool_result"}:
             self.set_session_phase("Analyzing", state.session_id)
         elif status == "tool_use":
             self.set_session_phase("Executing", state.session_id)
@@ -12225,7 +12402,9 @@ class MainWindow(QMainWindow):
             card.update_agent_state(data)
 
         monitor_content = ""
-        if status == "thinking":
+        if status == "input":
+            monitor_content = data.get("input_text") or data.get("content") or ""
+        elif status == "thinking":
             monitor_content = data.get("reasoning_delta") or ""
         elif status == "content":
             monitor_content = data.get("content_delta") or ""
@@ -12237,12 +12416,14 @@ class MainWindow(QMainWindow):
             monitor_content = data.get("provider_message") or data.get("error") or ""
         elif status == "tool_use":
             monitor_content = data.get("task") or ""
+        elif status == "tool_result":
+            monitor_content = data.get("tool_result") or ""
         elif status == "pending":
             monitor_content = data.get("task") or ""
         elif status in {"failed", "failed_recovered", "killed"}:
             monitor_content = data.get("error") or data.get("content") or ""
         elif status == "completed":
-            monitor_content = data.get("content") or ""
+            monitor_content = data.get("output_text") or data.get("content") or ""
         elif status in {"failed", "failed_recovered", "killed", "closed"}:
             monitor_content = data.get("error") or data.get("content") or ""
         self._record_sub_agent_event(state, data, monitor_content)
@@ -12256,15 +12437,20 @@ class MainWindow(QMainWindow):
                     monitor_content,
                     status,
                     agent_name=data.get("agent_name") or "",
+                    event=data,
                 )
 
         # Update Sub-Agent Monitor (PiP in ChatBubble)
         if session_id == self.current_session_id:
+            if data.get("agent_id"):
+                self.show_context_drawer(self.RIGHT_TAB_SUB_AGENTS)
             agent_id = data.get("agent_id")
             
             if agent_id and state.last_agent_bubble:
                 content = None
-                if status == "thinking":
+                if status == "input":
+                    content = f"Input: {data.get('input_text') or data.get('content') or ''}\n"
+                elif status == "thinking":
                     content = data.get("reasoning_delta")
                 elif status == "content":
                     content = data.get("content_delta")
@@ -12276,6 +12462,8 @@ class MainWindow(QMainWindow):
                     content = data.get("provider_message") or data.get("error")
                 elif status == "tool_use":
                     content = data.get("task")
+                elif status == "tool_result":
+                    content = f"Tool result: {preview_text(data.get('tool_result') or '', limit=120)}\n"
                 elif status == "pending":
                     content = f"Task: {data.get('task')}\n"
                 elif status in {"running", "active"}:
@@ -12293,7 +12481,7 @@ class MainWindow(QMainWindow):
                     detail = (data.get("error") or "").strip()
                     content = f"\nKilled: {detail}" if detail else "\nKilled."
                     
-                if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error"]:
+                if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error", "tool_result", "input"]:
                     # Update log in bubble
                     if hasattr(state.last_agent_bubble, 'update_sub_agent_log'):
                         state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)

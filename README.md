@@ -28,10 +28,10 @@ Current app version: **4.7.9**.
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
-*   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status.
+*   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status, and auto-focuses the sub-agent panel when parallel workers start.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.
 *   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
-*   **Sub-Agent Monitor**: Observe parallel workers and their statuses without leaving the current task.
+*   **Sub-Agent Monitor**: Observe parallel workers in a structured timeline that separates task input, tool calls, tool results, streamed output, and final output without leaving the current task.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 
 ### 🛰️ Daemon & IM Gateway
@@ -136,7 +136,7 @@ Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds c
 
 ## 🔄 Agentic Workflow
 - Interleaved CoT: think → tool-call → observe → continue thinking → final answer.
-- Streaming events: reasoning/content/tool_call/tool_result for live UI updates.
+- Streaming events: reasoning/content/tool_call/tool_result, plus structured sub-agent state events for input, tool activity, results, and completion.
 - Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
 - Pause/Resume/Stop controls manage long operations safely.
 - Session automation templates constrain execution to the current step until the user confirms, reruns, or marks that step as not applicable.

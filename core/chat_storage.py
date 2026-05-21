@@ -681,7 +681,7 @@ class ChatStorage:
             rows = conn.execute(
                 """
                 SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
-                       result_obj, token_count, tool_call_id
+                       result_obj, token_count, tool_call_id, created_at
                 FROM agent_messages
                 WHERE agent_id = ?
                 ORDER BY position ASC
@@ -709,6 +709,8 @@ class ChatStorage:
                 msg["token_count"] = row["token_count"]
             if row["tool_call_id"] is not None:
                 msg["tool_call_id"] = row["tool_call_id"]
+            if row["created_at"] is not None:
+                msg["created_at"] = row["created_at"]
             messages.append(msg)
         normalized_messages = self.normalize_messages(messages)
         try:

@@ -40,9 +40,14 @@ def _json_copy(value, fallback):
     if value is None:
         return fallback
     try:
-        return json.loads(json.dumps(value, ensure_ascii=False))
+        copied = json.loads(json.dumps(value, ensure_ascii=False))
+        return fallback if copied is None else copied
     except Exception:
         return fallback
+
+
+def _event_timestamp():
+    return int(time.time())
 
 
 def _default_worker_factory(
@@ -172,6 +177,8 @@ class SessionAgentManager:
             "agent_id": record.agent_id,
             "agent_name": record.name or "",
             "status": status,
+            "event_type": str((extra or {}).get("event_type") or status or ""),
+            "ts": int((extra or {}).get("ts") or _event_timestamp()),
         }
         if record.source_tool_call_id:
             payload["tool_call_id"] = record.source_tool_call_id
@@ -307,13 +314,59 @@ class SessionAgentManager:
 
         def _on_tool_call(payload):
             tool_name = ""
+            tool_args = {}
+            tool_call_id = ""
             if isinstance(payload, dict):
                 tool_name = str(payload.get("name") or "")
+                tool_args = _json_copy(payload.get("args"), {})
+                tool_call_id = str(payload.get("id") or "")
             with self._lock:
                 latest = self._agents.get(agent_id)
                 if not latest:
                     return
-                self._emit_agent_state(latest, "tool_use", task=f"Tool: {tool_name or 'unknown'}")
+                self._emit_agent_state(
+                    latest,
+                    "tool_use",
+                    event_type="tool_call",
+                    task=f"Tool: {tool_name or 'unknown'}",
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name or "unknown",
+                    tool_args=tool_args,
+                )
+
+        def _on_tool_result(payload):
+            tool_name = ""
+            tool_args = {}
+            tool_call_id = ""
+            tool_result = ""
+            tool_result_obj = None
+            duration = None
+            if isinstance(payload, dict):
+                tool_name = str(payload.get("name") or "")
+                tool_args = _json_copy(payload.get("args"), {})
+                tool_call_id = str(payload.get("id") or "")
+                tool_result = str(payload.get("result") or "")
+                tool_result_obj = _json_copy(payload.get("result_obj"), None)
+                meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+                try:
+                    duration = float(meta.get("duration")) if meta.get("duration") is not None else None
+                except Exception:
+                    duration = None
+            with self._lock:
+                latest = self._agents.get(agent_id)
+                if not latest:
+                    return
+                self._emit_agent_state(
+                    latest,
+                    "tool_result",
+                    event_type="tool_result",
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name or "unknown",
+                    tool_args=tool_args,
+                    tool_result=tool_result,
+                    tool_result_obj=tool_result_obj,
+                    duration=duration,
+                )
 
         def _on_finished(result):
             self._on_worker_finished(agent_id, result if isinstance(result, dict) else {})
@@ -328,6 +381,8 @@ class SessionAgentManager:
             worker.output_signal.connect(_on_output, Qt.DirectConnection)
         if getattr(worker, "tool_call_signal", None):
             worker.tool_call_signal.connect(_on_tool_call, Qt.DirectConnection)
+        if getattr(worker, "tool_result_signal", None):
+            worker.tool_result_signal.connect(_on_tool_result, Qt.DirectConnection)
         if getattr(worker, "finished_signal", None):
             worker.finished_signal.connect(_on_finished, Qt.DirectConnection)
 
@@ -336,11 +391,14 @@ class SessionAgentManager:
         record.updated_at = now
         meta = {}
         if isinstance(record.meta, dict):
-            meta.update(_json_copy(record.meta, {}))
+            meta_copy = _json_copy(record.meta, {})
+            if isinstance(meta_copy, dict):
+                meta.update(meta_copy)
         if record.source_tool_call_id:
             meta["source_tool_call_id"] = record.source_tool_call_id
         if record.run_context:
-            meta["run_context"] = _json_copy(record.run_context, {})
+            run_context_copy = _json_copy(record.run_context, {})
+            meta["run_context"] = run_context_copy if isinstance(run_context_copy, dict) else {}
         self.chat_storage.upsert_agent(
             record.agent_id,
             conversation_id=record.conversation_id,
@@ -371,13 +429,19 @@ class SessionAgentManager:
             record.started_at = int(time.time())
         record.finished_at = 0
         self._persist_record_unlocked(record)
+        messages_copy = _json_copy(record.messages, [])
+        if not isinstance(messages_copy, list):
+            messages_copy = []
+        run_context_copy = _json_copy(record.run_context, {})
+        if not isinstance(run_context_copy, dict):
+            run_context_copy = {}
         worker = self.worker_factory(
-            _json_copy(record.messages, []),
+            messages_copy,
             self.config_manager,
             self.workspace_dir,
             record.agent_id,
             self.conversation_id,
-            _json_copy(record.run_context, {}),
+            run_context_copy,
         )
         record.worker = worker
         self._connect_worker_signals(record)
@@ -386,15 +450,24 @@ class SessionAgentManager:
         worker.start()
 
     def _append_user_input_unlocked(self, record, message):
+        created_at = _event_timestamp()
         msg = {
             "id": uuid.uuid4().hex,
             "role": "user",
             "content": message,
-            "created_at": int(time.time()),
+            "created_at": created_at,
         }
         record.messages.append(msg)
         record.messages = self.chat_storage.normalize_messages(record.messages)
         self.chat_storage.append_agent_messages(record.agent_id, [msg])
+        self._emit_agent_state(
+            record,
+            "input",
+            event_type="input",
+            input_text=str(message or ""),
+            content=str(message or ""),
+            ts=created_at,
+        )
 
     def _on_worker_finished(self, agent_id, result):
         with self._lock:
@@ -451,6 +524,7 @@ class SessionAgentManager:
             payload = {}
             if record.last_result:
                 payload["content"] = record.last_result
+                payload["output_text"] = record.last_result
             if record.last_error:
                 payload["error"] = record.last_error
             self._emit_agent_state(record, record.status, **payload)
@@ -497,6 +571,12 @@ class SessionAgentManager:
                 }
             )
             now = int(time.time())
+            run_context_copy = _json_copy(run_context, {})
+            if not isinstance(run_context_copy, dict):
+                run_context_copy = {}
+            meta_copy = _json_copy(meta, {})
+            if not isinstance(meta_copy, dict):
+                meta_copy = {}
             record = AgentRuntimeRecord(
                 agent_id=agent_id,
                 conversation_id=self.conversation_id,
@@ -507,12 +587,20 @@ class SessionAgentManager:
                 created_at=now,
                 updated_at=now,
                 source_tool_call_id=str(source_tool_call_id or ""),
-                run_context=_json_copy(run_context, {}),
-                meta=_json_copy(meta, {}),
+                run_context=run_context_copy,
+                meta=meta_copy,
                 messages=self.chat_storage.normalize_messages(base_messages),
             )
             self._agents[agent_id] = record
             self._persist_record_unlocked(record)
+            self._emit_agent_state(
+                record,
+                "input",
+                event_type="input",
+                input_text=text,
+                content=text,
+                ts=record.created_at,
+            )
             self._start_worker_unlocked(record)
             return {
                 "status": "spawned",

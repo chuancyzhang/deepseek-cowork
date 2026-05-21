@@ -54,14 +54,16 @@ class TestChatStorageAgents(unittest.TestCase):
         self.storage.replace_agent_messages(
             "agent-1",
             [
-                {"id": "m1", "role": "user", "content": "hello"},
-                {"id": "m2", "role": "assistant", "content": "world"},
+                {"id": "m1", "role": "user", "content": "hello", "created_at": 111},
+                {"id": "m2", "role": "assistant", "content": "world", "created_at": 222},
             ],
         )
         messages = self.storage.get_agent_messages("agent-1")
         self.assertEqual(len(messages), 2)
         self.assertEqual(messages[0]["content"], "hello")
         self.assertEqual(messages[1]["content"], "world")
+        self.assertEqual(messages[0]["created_at"], 111)
+        self.assertEqual(messages[1]["created_at"], 222)
 
         self.storage.append_agent_messages("agent-1", [{"id": "m3", "role": "user", "content": "next"}])
         messages = self.storage.get_agent_messages("agent-1")

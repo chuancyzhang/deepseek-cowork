@@ -28,8 +28,9 @@ Current app version: **4.7.9**.
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
-*   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, SOP steps, observability, and sub-agent status.
-*   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session SOP, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
+*   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status.
+*   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.
+*   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
 *   **Sub-Agent Monitor**: Observe parallel workers and their statuses without leaving the current task.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 
@@ -93,16 +94,22 @@ Examples:
 *   *"Summarize all PDFs in this folder into a single report."*
 *   *"Create a new skill to download videos using yt-dlp."*
 
-### 4. Close the Feedback Loop
+### 4. Manage Automation
+Open **自动化** from the sidebar:
+*   **Configured**: create scheduled automations, enable or pause them, run them immediately, and review the next run time.
+*   **Run History**: inspect completed, failed, interrupted, or missed runs and reopen the related task session.
+*   **Task Templates**: edit the former SOP templates without exposing manual template IDs; IDs are generated automatically.
+
+### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
 *   **Skill Center import/export** imports custom abilities from folders or ZIP packages and exports existing skills as portable ZIP archives.
 
-### 5. Enterprise IM
+### 6. Enterprise IM
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
 
-### 6. App Updates
+### 7. App Updates
 Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds can download, verify, stage, and restart into the new version; source runs only check and link to the release page.
 
 ## 🏗️ Architecture
@@ -112,7 +119,8 @@ Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds c
 *   **`core/daemon.py`**: Headless inference server.
 *   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
-*   **`core/sop_manager.py`**: Session-level SOP templates, step state, confirmation, rerun, and skip flow.
+*   **`core/sop_manager.py`**: Session-level automation templates, step state, confirmation, rerun, and skip flow.
+*   **`core/automation_manager.py`**: Scheduled automation task normalization, next-run calculation, execution prompt assembly, and run-history helpers.
 *   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
 *   **`skills/`**: Built-in system skills.
 *   **`ai_skills/`**: AI or user-created skills.
@@ -131,7 +139,8 @@ Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds c
 - Streaming events: reasoning/content/tool_call/tool_result for live UI updates.
 - Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
 - Pause/Resume/Stop controls manage long operations safely.
-- Session SOPs constrain execution to the current step until the user confirms, reruns, or marks that step as not applicable.
+- Session automation templates constrain execution to the current step until the user confirms, reruns, or marks that step as not applicable.
+- Scheduled automation tasks reuse the same templates but execute the full template as one timed task and write every run into the local history.
 - Clarifying mode exposes only read-oriented exploration and routes real questions through the interaction tools before normal execution resumes.
 
 ## 🧠 Layered Memory & Context

@@ -13,6 +13,11 @@ from .llm.deepseek import (
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
     should_migrate_legacy_model,
 )
+from .automation_manager import (
+    AUTOMATION_HISTORY_LIMIT,
+    normalize_automation_history,
+    normalize_automation_tasks,
+)
 from .sop_manager import default_sop_templates, normalize_sop_templates
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -55,6 +60,8 @@ class ConfigManager:
             "disabled_skills": [],
             "agent_profiles": self._default_agent_profiles(),
             "sop_templates": self._default_sop_templates(),
+            "automation_tasks": [],
+            "automation_run_history": [],
             "god_mode": False,
             "default_workspace": "",
             "im_gateway": {
@@ -138,6 +145,19 @@ class ConfigManager:
         )
         if normalized_sop_templates != self.config.get("sop_templates"):
             self.config["sop_templates"] = normalized_sop_templates
+            updated = True
+        normalized_automation_tasks = self._normalize_automation_tasks(
+            self.config.get("automation_tasks"),
+            valid_template_ids=[item.get("id") for item in normalized_sop_templates],
+        )
+        if normalized_automation_tasks != self.config.get("automation_tasks"):
+            self.config["automation_tasks"] = normalized_automation_tasks
+            updated = True
+        normalized_automation_history = self._normalize_automation_history(
+            self.config.get("automation_run_history")
+        )
+        if normalized_automation_history != self.config.get("automation_run_history"):
+            self.config["automation_run_history"] = normalized_automation_history
             updated = True
         updated = self._sync_legacy_model_fields(save=False) or updated
         if updated:
@@ -271,6 +291,12 @@ class ConfigManager:
 
     def _normalize_sop_templates(self, value):
         return normalize_sop_templates(value)
+
+    def _normalize_automation_tasks(self, value, valid_template_ids=None):
+        return normalize_automation_tasks(value, valid_template_ids=valid_template_ids)
+
+    def _normalize_automation_history(self, value):
+        return normalize_automation_history(value)
 
     def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None):
         source = dict(model or {})
@@ -721,6 +747,56 @@ class ConfigManager:
             if template.get("name") == identifier:
                 return template
         return None
+
+    def get_automation_tasks(self):
+        valid_template_ids = [item.get("id") for item in self.get_sop_templates()]
+        tasks = self._normalize_automation_tasks(
+            self.config.get("automation_tasks"),
+            valid_template_ids=valid_template_ids,
+        )
+        if tasks != self.config.get("automation_tasks"):
+            self.config["automation_tasks"] = tasks
+            self.save_config()
+        return json.loads(json.dumps(tasks, ensure_ascii=False))
+
+    def set_automation_tasks(self, tasks):
+        valid_template_ids = [item.get("id") for item in self.get_sop_templates()]
+        normalized = self._normalize_automation_tasks(tasks, valid_template_ids=valid_template_ids)
+        self.config["automation_tasks"] = normalized
+        self.save_config()
+
+    def get_automation_task(self, task_id_or_name):
+        identifier = str(task_id_or_name or "").strip()
+        if not identifier:
+            return None
+        tasks = self.get_automation_tasks()
+        for task in tasks:
+            if task.get("id") == identifier:
+                return task
+        for task in tasks:
+            if task.get("name") == identifier:
+                return task
+        return None
+
+    def get_automation_run_history(self):
+        history = self._normalize_automation_history(self.config.get("automation_run_history"))
+        if history != self.config.get("automation_run_history"):
+            self.config["automation_run_history"] = history
+            self.save_config()
+        return json.loads(json.dumps(history, ensure_ascii=False))
+
+    def set_automation_run_history(self, history):
+        normalized = self._normalize_automation_history(history)
+        self.config["automation_run_history"] = normalized
+        self.save_config()
+
+    def append_automation_run_history(self, record):
+        history = self.get_automation_run_history()
+        history.insert(0, record)
+        normalized = self._normalize_automation_history(history)[:AUTOMATION_HISTORY_LIMIT]
+        self.config["automation_run_history"] = normalized
+        self.save_config()
+        return normalized[0] if normalized else None
 
     def save_config(self):
         try:

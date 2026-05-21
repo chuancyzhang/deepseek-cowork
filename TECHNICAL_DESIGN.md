@@ -12,8 +12,9 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ### 2.1 UI 层 (PySide6)
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互。
-*   **右侧上下文抽屉**：文件、SOP、任务观测、子 Agent 监控以隐藏抽屉承载；展开时主内容区自动预留宽度，避免遮挡对话。
-*   **会话工具栏**：添加文件、智能体提及、SOP 绑定、指定能力、反问模式统一从输入区入口触发。
+*   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时主内容区自动预留宽度，避免遮挡对话。
+*   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
+*   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理。
 *   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
 
@@ -33,9 +34,10 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **显式只读并行**：`parallel_tools` 通过 `SkillManager.call_tool(..., require_read_only=True)` 执行子调用，保留顺序并遵守发现、模式和能力范围限制。
 *   **core/skill_from_conversation.py**：把当前会话转录为可复用 Skill 草稿，并负责新建或更新 Skill 文件。
 
-### 2.5 SOP、配置与存储
-*   **core/sop_manager.py**：规范化 SOP 模板和运行态，维护 step/run 状态，并生成当前步骤 Prompt 片段。
-*   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、工作区等设置。
+### 2.5 自动化、配置与存储
+*   **core/sop_manager.py**：规范化自动化模板和会话运行态，维护 step/run 状态，并生成当前步骤 Prompt 片段。
+*   **core/automation_manager.py**：规范化定时任务、计算 next run、生成完整执行提示词并维护运行历史记录结构。
+*   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、工作区、自动化任务与运行历史。
 *   **core/chat_storage.py**：历史对话持久化与按日归档。
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，校验解压结构并生成 Windows 更新脚本。
@@ -86,7 +88,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **系统层**：工作区、OS、Python 路径、日期、操作规范等基础上下文。
 - **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
 - **技能层**：首次调用技能时注入简版能力提示；按需注入技能完整说明与经验。
-- **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与 SOP 当前步骤，影响工具可见性与 Prompt 约束。
+- **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与自动化当前步骤，影响工具可见性与 Prompt 约束。
 - **历史层**：每轮清理/折叠思考内容以避免重复；仅保留必要字段满足 API 要求。
 
 ## 6. 运行模式与环境
@@ -107,7 +109,8 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **信号**：`thinking_signal`、`content_signal`、`tool_call_signal`、`tool_result_signal`、`agent_state_signal`。
 - **控制**：`pause`、`resume`、`stop`；环路保护（重复思考/工具签名）确保安全收敛。
 - **实现要点**：流式解析四类事件，按需注入技能提示，结果写入历史后继续下一轮直至最终回答。
-- **SOP 状态**：Active → Awaiting Confirmation → Active/Completed，用户可在 Awaiting 状态选择确认、重跑或跳过。
+- **会话自动化状态**：Active → Awaiting Confirmation → Active/Completed，用户可在 Awaiting 状态选择确认、重跑或跳过。
+- **定时任务状态**：Enabled/Paused + next_run_at；错过触发时记录为 missed，不自动补跑。
 
 ## 9. 目录结构
 

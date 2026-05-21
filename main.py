@@ -602,6 +602,13 @@ def preview_text(value, limit=220):
     return text[: limit - 3] + "..."
 
 
+def detail_text(value, limit=8000):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n...内容过长，已截断显示。"
+
+
 def normalize_tool_arguments(value):
     if isinstance(value, dict):
         return value
@@ -698,6 +705,7 @@ def build_sub_agent_history_events(agent_row, messages):
                     "input_text": msg.get("content") or "",
                     "content": msg.get("content") or "",
                     "ts": created_at,
+                    "from_history": True,
                 }
             )
         elif role == "assistant":
@@ -717,6 +725,7 @@ def build_sub_agent_history_events(agent_row, messages):
                         "tool_args": normalize_tool_arguments(fn.get("arguments")),
                         "task": f"Tool: {fn.get('name') or 'unknown'}",
                         "ts": created_at,
+                        "from_history": True,
                     }
                 )
                 tool_call_lookup[str(call.get("id") or "")] = {
@@ -740,6 +749,7 @@ def build_sub_agent_history_events(agent_row, messages):
                         "content": content,
                         "output_text": content if status == "completed" else "",
                         "ts": created_at,
+                        "from_history": True,
                     }
                 )
         elif role == "tool":
@@ -758,6 +768,7 @@ def build_sub_agent_history_events(agent_row, messages):
                     "duration": ((msg.get("meta") or {}).get("duration") if isinstance(msg.get("meta"), dict) else None),
                     "content": msg.get("content") or "",
                     "ts": created_at,
+                    "from_history": True,
                 }
             )
         last_role = role
@@ -775,6 +786,7 @@ def build_sub_agent_history_events(agent_row, messages):
                     "output_text": summary if terminal_status == "completed" else "",
                     "error": summary if terminal_status != "completed" else "",
                     "ts": int(agent_row.get("updated_at") or time.time()),
+                    "from_history": True,
                 }
             )
     return events
@@ -6016,7 +6028,7 @@ class SubAgentEventTile(QFrame):
         super().__init__(parent)
         self.event = dict(event or {})
         self._details_visible = False
-        self._details_text = self._build_details_text(self.event)
+        self._details_text = detail_text(self._build_details_text(self.event))
 
         self.setStyleSheet(
             f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
@@ -6215,6 +6227,12 @@ class SubAgentTimelineCard(QFrame):
             return
         self.timeline_layout.addWidget(tile)
 
+    def note_history_events(self, count, status="completed"):
+        self.event_count += max(int(count or 0), 0)
+        self.count_label.setText(f"{self.event_count} 步")
+        self.status_label.setText(status_label_text(status))
+        self.status_label.setStyleSheet(apple_status_chip_style(status, subtle=True))
+
 
 class SubAgentMonitor(QWidget):
     def __init__(self, parent=None):
@@ -6242,6 +6260,7 @@ class SubAgentMonitor(QWidget):
             item = self.content_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.setParent(None)
                 widget.deleteLater()
         self.content_layout.addStretch()
         self.agents = {}
@@ -6264,12 +6283,22 @@ class SubAgentMonitor(QWidget):
             self.content_layout.insertWidget(max(0, self.content_layout.count() - 1), card)
         else:
             card.update_identity(payload.get("agent_name") or agent_id)
+        if payload.get("from_history"):
+            card.note_history_events(1, payload.get("status") or status)
+            return
         try:
             card.append_event(payload)
         except Exception:
             return
 
-        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum()))
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self):
+        try:
+            bar = self.scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        except Exception:
+            return
 
 class SubAgentMonitorWindow(QDialog):
     def __init__(self, parent=None):
@@ -6946,6 +6975,8 @@ def resolve_app_icon_path():
     return ""
 
 class MainWindow(QMainWindow):
+    agent_state_ui_signal = Signal(dict, str)
+
     RIGHT_TAB_FILES = 0
     RIGHT_TAB_SOP = 1
     RIGHT_TAB_OBSERVABILITY = 2
@@ -6954,6 +6985,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepSeek Cowork")
+        self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
         
         # Set Window Icon
         icon_path = resolve_app_icon_path()
@@ -9357,7 +9389,8 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         self.refresh_prompt_file_chips(session_id)
-        self._render_sub_agent_monitor_for_state(state)
+        if getattr(state, "history_loaded", True):
+            self._render_sub_agent_monitor_for_state(state)
 
     def normalize_session_ui(self, state):
         if not state: return
@@ -9626,7 +9659,8 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(session_id)
         current_state = self.get_current_session()
         self.normalize_session_ui(current_state)
-        self._render_sub_agent_monitor_for_state(current_state)
+        if current_state and getattr(current_state, "history_loaded", True):
+            self._render_sub_agent_monitor_for_state(current_state)
 
         if ensure_loaded and not state.history_loaded and not state.history_loading:
             self.queue_session_history_load(session_id)
@@ -9749,7 +9783,7 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
-            self._render_sub_agent_monitor_for_state(state)
+            self._queue_render_sub_agent_monitor_for_state(state)
 
     def load_session(self, session_id):
         self.activate_session(session_id)
@@ -12416,24 +12450,46 @@ class MainWindow(QMainWindow):
     def _render_sub_agent_monitor_for_state(self, state):
         if not state or not hasattr(self, "sub_agent_monitor") or self.sub_agent_monitor is None:
             return
-        self.sub_agent_monitor.reset()
-        for event in state.sub_agent_events:
-            if not isinstance(event, dict):
-                continue
-            agent_id = event.get("agent_id")
-            if not agent_id:
-                continue
-            status = event.get("status") or "running"
-            content = event.get("content") or ""
-            self.sub_agent_monitor.update_log(
-                agent_id,
-                content,
-                status,
-                agent_name=event.get("agent_name") or "",
-                event=event,
-            )
+        try:
+            self.sub_agent_monitor.reset()
+            events = list(getattr(state, "sub_agent_events", []) or [])[-240:]
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                agent_id = event.get("agent_id")
+                if not agent_id:
+                    continue
+                status = event.get("status") or "running"
+                content = event.get("content") or ""
+                self.sub_agent_monitor.update_log(
+                    agent_id,
+                    content,
+                    status,
+                    agent_name=event.get("agent_name") or "",
+                    event=event,
+                )
+        except Exception:
+            return
+
+    def _queue_render_sub_agent_monitor_for_state(self, state):
+        if not state:
+            return
+        session_id = state.session_id
+        QTimer.singleShot(
+            50,
+            lambda sid=session_id: self._render_sub_agent_monitor_for_state(self.get_session(sid))
+            if sid == self.current_session_id
+            else None,
+        )
 
     def handle_agent_state(self, data, session_id=None):
+        if QThread.currentThread() is not self.thread():
+            payload = dict(data) if isinstance(data, dict) else {}
+            self.agent_state_ui_signal.emit(payload, str(session_id or ""))
+            return
+        self._handle_agent_state_ui(data, session_id)
+
+    def _handle_agent_state_ui(self, data, session_id=None):
         state = self.get_session(session_id)
         if not state: return
         status = data.get("status")

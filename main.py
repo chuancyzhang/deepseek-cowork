@@ -6068,11 +6068,11 @@ class SubAgentEventTile(QFrame):
         icon_name = "fa5s.circle"
         color = status_color(status)
         if status == "input":
-            icon_name = "fa5s.comment-dots"
+            icon_name = "fa5s.comments"
         elif status == "thinking":
             icon_name = "fa5s.brain"
         elif status == "tool_use":
-            icon_name = "fa5s.wrench"
+            icon_name = "fa5s.tools"
         elif status == "tool_result":
             icon_name = "fa5s.check-circle"
         elif status in {"content", "completed"}:
@@ -6167,7 +6167,19 @@ class SubAgentTimelineCard(QFrame):
         self.count_label.setText(f"{self.event_count} 步")
         self.status_label.setText(status_label_text(event.get("status")))
         self.status_label.setStyleSheet(apple_status_chip_style(event.get("status"), subtle=True))
-        self.timeline_layout.addWidget(SubAgentEventTile(event))
+        try:
+            tile = SubAgentEventTile(event)
+        except Exception:
+            fallback = QLabel(sub_agent_event_title(event) + " | " + sub_agent_event_summary(event))
+            fallback.setWordWrap(True)
+            fallback.setStyleSheet(
+                f"color: {DesignTokens.text_secondary}; font-size: 11px; "
+                f"background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
+                "border-radius: 12px; padding: 8px 10px;"
+            )
+            self.timeline_layout.addWidget(fallback)
+            return
+        self.timeline_layout.addWidget(tile)
 
 
 class SubAgentMonitor(QWidget):
@@ -6218,7 +6230,10 @@ class SubAgentMonitor(QWidget):
             self.content_layout.insertWidget(max(0, self.content_layout.count() - 1), card)
         else:
             card.update_identity(payload.get("agent_name") or agent_id)
-        card.append_event(payload)
+        try:
+            card.append_event(payload)
+        except Exception:
+            return
 
         QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(self.scroll.verticalScrollBar().maximum()))
 
@@ -12432,18 +12447,24 @@ class MainWindow(QMainWindow):
         if session_id == self.current_session_id and hasattr(self, "sub_agent_monitor") and self.sub_agent_monitor:
             agent_id = data.get("agent_id")
             if agent_id:
-                self.sub_agent_monitor.update_log(
-                    agent_id,
-                    monitor_content,
-                    status,
-                    agent_name=data.get("agent_name") or "",
-                    event=data,
-                )
+                try:
+                    self.sub_agent_monitor.update_log(
+                        agent_id,
+                        monitor_content,
+                        status,
+                        agent_name=data.get("agent_name") or "",
+                        event=data,
+                    )
+                except Exception:
+                    pass
 
         # Update Sub-Agent Monitor (PiP in ChatBubble)
         if session_id == self.current_session_id:
             if data.get("agent_id"):
-                self.show_context_drawer(self.RIGHT_TAB_SUB_AGENTS)
+                try:
+                    self.show_context_drawer(self.RIGHT_TAB_SUB_AGENTS)
+                except Exception:
+                    pass
             agent_id = data.get("agent_id")
             
             if agent_id and state.last_agent_bubble:
@@ -12484,11 +12505,17 @@ class MainWindow(QMainWindow):
                 if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error", "tool_result", "input"]:
                     # Update log in bubble
                     if hasattr(state.last_agent_bubble, 'update_sub_agent_log'):
-                        state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)
+                        try:
+                            state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)
+                        except Exception:
+                            pass
                 
                 # Update indicator status
                 if hasattr(state.last_agent_bubble, 'add_sub_agent_indicator'):
-                    state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
+                    try:
+                        state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
+                    except Exception:
+                        pass
 
         if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
             try:

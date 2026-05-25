@@ -16,6 +16,7 @@ from core.env_utils import get_app_data_dir, get_base_dir
 from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
 from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
+from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -323,6 +324,72 @@ class DaemonState:
             return 0
         return max(1, len(text) // 4)
 
+    def _estimate_message_token_count(self, message):
+        if not isinstance(message, dict):
+            return 0
+        parts = []
+        for key in ("role", "name", "content", "reasoning_content"):
+            value = message.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif value:
+                try:
+                    parts.append(json.dumps(value, ensure_ascii=False))
+                except Exception:
+                    parts.append(str(value))
+        for key in ("tool_calls", "function_call"):
+            value = message.get(key)
+            if value:
+                try:
+                    parts.append(json.dumps(value, ensure_ascii=False))
+                except Exception:
+                    parts.append(str(value))
+        return self._estimate_token_count("\n".join(parts))
+
+    def _estimate_messages_token_count(self, messages):
+        return sum(self._estimate_message_token_count(msg) for msg in messages or [])
+
+    def _selected_model_profile(self, run_context=None):
+        model_id = (run_context or {}).get("selected_model_id")
+        if hasattr(self.config_manager, "get_model_profile"):
+            try:
+                profile = self.config_manager.get_model_profile(model_id)
+                if isinstance(profile, dict):
+                    return profile
+            except Exception:
+                pass
+        return {
+            "model_name": self.config_manager.get("model_name", ""),
+            "base_url": self.config_manager.get("base_url", ""),
+        }
+
+    def _context_window_tokens(self, run_context=None):
+        profile = self._selected_model_profile(run_context)
+        model_name = profile.get("model_name") or ""
+        if is_deepseek_v4_model(model_name):
+            configured = self.config_manager.get(
+                "deepseek_v4_context_window_tokens",
+                DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS,
+            )
+            try:
+                return max(1, int(configured))
+            except Exception:
+                return DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+        configured = self.config_manager.get("context_window_tokens", 128000)
+        try:
+            return max(1, int(configured))
+        except Exception:
+            return 128000
+
+    def _context_budget_threshold(self, run_context=None):
+        ratio = self.config_manager.get("context_budget_ratio", 0.8)
+        try:
+            ratio = float(ratio)
+        except Exception:
+            ratio = 0.8
+        ratio = min(max(ratio, 0.1), 0.98)
+        return int(self._context_window_tokens(run_context) * ratio)
+
     def _snippet(self, value, limit=180):
         text = (value or "").strip().replace("\r", " ").replace("\n", " ")
         if len(text) <= limit:
@@ -335,6 +402,8 @@ class DaemonState:
         decisions = []
         pending = []
         preferences = []
+        file_changes = []
+        tool_results = []
         for msg in messages_slice:
             if not isinstance(msg, dict):
                 continue
@@ -355,9 +424,13 @@ class DaemonState:
                     actions.append(content)
                 if any(k in lower for k in ["决定", "采用", "方案", "策略", "改为"]) and len(decisions) < 8:
                     decisions.append(content)
+                if any(k in lower for k in ["文件", "写入", "修改", "创建", "删除", "移动", "rename", "write", "delete", "move"]) and len(file_changes) < 8:
+                    file_changes.append(content)
             elif role == "tool":
-                if len(actions) < 10:
-                    actions.append(f"工具结果: {content}")
+                if len(tool_results) < 10:
+                    tool_results.append(content)
+                if any(k in lower for k in ["file", "path", "文件", "目录", "写入", "修改", "created", "updated", "deleted"]) and len(file_changes) < 8:
+                    file_changes.append(content)
 
         def _section(title, items):
             if not items:
@@ -368,6 +441,8 @@ class DaemonState:
             _section("今日目标", goals),
             _section("已完成动作", actions),
             _section("关键决策与约束", decisions),
+            _section("文件与产物变更", file_changes),
+            _section("工具结果要点", tool_results),
             _section("未决问题与待确认项", pending),
             _section("用户偏好与约定", preferences),
         ]
@@ -379,22 +454,39 @@ class DaemonState:
             return text
         return text[:max_chars]
 
-    def _build_overflow_retry_messages(self, session_id, messages):
+    def _adjust_compress_end_for_tool_round(self, messages, compress_end):
+        while compress_end >= 0 and compress_end + 1 < len(messages):
+            next_msg = messages[compress_end + 1]
+            if not isinstance(next_msg, dict) or next_msg.get("role") != "tool":
+                break
+            compress_end -= 1
+        return compress_end
+
+    def _build_overflow_retry_messages(self, session_id, messages, run_context=None, force=False, reason="overflow"):
         enabled = self.config_manager.get("im_context_compression_enabled", True)
         if enabled is False:
             return None
         binding = self._get_im_binding_for_session(session_id)
         if not binding:
             return None
-        keep_turns = self.config_manager.get("im_summary_recent_keep_turns", 12)
+        total_tokens = self._estimate_messages_token_count(messages)
+        threshold = self._context_budget_threshold(run_context)
+        window_tokens = self._context_window_tokens(run_context)
+        if not force and total_tokens < threshold:
+            return None
+        keep_turns = self.config_manager.get(
+            "context_compression_recent_keep_turns",
+            self.config_manager.get("im_summary_recent_keep_turns", 12),
+        )
         try:
             keep_turns = int(keep_turns)
         except Exception:
-            keep_turns = 12
+            keep_turns = 40
         keep_turns = max(2, keep_turns)
         if len(messages) <= keep_turns:
             return None
         compress_end = len(messages) - keep_turns - 1
+        compress_end = self._adjust_compress_end_for_tool_round(messages, compress_end)
         if compress_end < 0:
             return None
         summary_row = self.chat_storage.get_im_daily_summary(
@@ -446,7 +538,7 @@ class DaemonState:
         )
         summary_message = {
             "role": "system",
-            "content": f"Daily Summary ({binding['summary_date']}):\n{merged_summary}",
+            "content": f"Context Summary ({binding['summary_date']}):\n{merged_summary}",
         }
         tail_messages = messages[compress_end + 1 :]
         retry_messages = [summary_message] + tail_messages
@@ -455,10 +547,15 @@ class DaemonState:
             + json.dumps(
                 {
                     "session_id": session_id,
-                    "hit_context_overflow": True,
+                    "reason": reason,
+                    "hit_context_overflow": force,
                     "compressed_message_count": compress_end + 1,
                     "summary_date": binding["summary_date"],
                     "source_message_upto_pos": compress_end,
+                    "estimated_tokens": total_tokens,
+                    "context_window_tokens": window_tokens,
+                    "budget_threshold_tokens": threshold,
+                    "kept_recent_turns": keep_turns,
                 },
                 ensure_ascii=False,
             )
@@ -476,15 +573,31 @@ class DaemonState:
         messages = self.get_session_messages(session_id)
         normalized_run_context = normalize_run_context(run_context)
         self.append_user_message_if_needed(messages, user_text)
+        worker_messages = (
+            self._build_overflow_retry_messages(
+                session_id,
+                messages,
+                run_context=normalized_run_context,
+                force=False,
+                reason="budget",
+            )
+            or messages
+        )
         result = self._run_worker_once(
             session_id,
-            messages,
+            worker_messages,
             workspace_dir,
             run_context=normalized_run_context,
         )
         retry_once = self.config_manager.get("im_context_overflow_retry_once", True)
         if retry_once is not False and self._is_context_overflow_error(result):
-            retry_messages = self._build_overflow_retry_messages(session_id, messages)
+            retry_messages = self._build_overflow_retry_messages(
+                session_id,
+                messages,
+                run_context=normalized_run_context,
+                force=True,
+                reason="overflow",
+            )
             if retry_messages:
                 retry_result = self._run_worker_once(
                     session_id,

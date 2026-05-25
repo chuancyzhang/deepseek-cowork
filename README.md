@@ -2,7 +2,7 @@
 
 [中文文档](README_CN.md) | [English](README.md)
 
-**DeepSeek Cowork** is a Windows desktop agent framework built on **DeepSeek-V3.2 Interleaved Chain-of-Thought**. It combines reasoning with tool use to plan, execute, and refine tasks across files, apps, and workflows in a secure desktop environment.(**This project is not an official DeepSeek development. It is a purely personal exploration driven by individual interest.**)
+**DeepSeek Cowork** is a Windows desktop agent framework built around **DeepSeek V4 thinking and tool-use workflows**. It combines reasoning with tool use to plan, execute, and refine tasks across files, apps, and workflows in a secure desktop environment.(**This project is not an official DeepSeek development. It is a purely personal exploration driven by individual interest.**)
 
 Built by **deepseek-cowork team**.
 
@@ -39,7 +39,7 @@ Current app version: **4.7.9**.
 ### 🛰️ Daemon & IM Gateway
 *   **Headless Daemon**: Background inference keeps UI responsive.
 *   **Enterprise IM (Feishu / DingTalk / WeCom smart bot)**: Send commands via IM with daily session rotation.
-*   **Context Overflow Recovery**: IM sessions can retry once with compressed context when the provider reports a context-length overflow.
+*   **Context Budgeting**: IM sessions use model-aware context budgets; DeepSeek V4 keeps long history up to a 1M-token window before compressing, while smaller models still compress conservatively and retry once on overflow.
 *   **Workspace Guardrails**: IM requests follow the same workspace limits unless God Mode is enabled.
 
 ## 📦 Installation
@@ -150,13 +150,13 @@ Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds c
 - Clarifying mode exposes only read-oriented exploration and routes real questions through the interaction tools before normal execution resumes.
 
 ## 🧠 Layered Memory & Context
-- System context: workspace, OS, Python, date, and operational rules.
+- System prompt layout: stable policies and tool strategy come first, while volatile status such as run mode, date, runtime paths, selected skills, and SOP state is placed later to improve DeepSeek context-cache stability.
 - Memories: optional `memories.md` auto-injected when present.
 - Long-term memory updates are manually triggered with `更新长期记忆`; processed history is tracked in `memories_update_state.json` so later runs focus on new or changed conversations.
 - Skill prompts: minimal experience briefs first, then fuller guidance only when needed.
 - Session-level selected skills and agent profiles narrow the allowed capability scope for the current task.
-- Progressive disclosure: references, structured experience entries, and larger directory context expand only when required.
-- History hygiene: reasoning content deduplicated per turn to avoid clutter.
+- Context budgeting: DeepSeek V4 Pro/Flash default to a 1,000,000-token window and only proactively compress near the configured budget threshold; non-V4 models use a smaller conservative window.
+- History hygiene: reasoning content is deduplicated per turn and DeepSeek thinking tool-call rounds keep the required `reasoning_content` replay fields.
 
 ## 🛠️ Extending
 Create a folder in `skills/` with:

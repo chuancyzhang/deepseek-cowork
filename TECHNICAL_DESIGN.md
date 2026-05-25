@@ -45,7 +45,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.6 企业 IM
 *   **core/im_gateway/**：多平台企业消息网关，接收飞书、钉钉与企业微信智能机器人事件并回传执行结果。
 *   **会话映射**：IM 会话与本地会话保持一致的工作区边界，并按 provider 区分会话来源。
-*   **溢出恢复**：Daemon 在 IM 绑定会话中可构造压缩后的历史上下文，对上下文长度错误自动重试一次。
+*   **上下文预算与溢出恢复**：Daemon 在 IM 绑定会话中按模型窗口估算上下文；DeepSeek V4 使用 1M token 预算，接近阈值才构造压缩历史，小窗口模型保守压缩，并对上下文长度错误自动重试一次。
 
 ## 3. 万物皆工具 (Everything Is a Tool)
 - 工具即 `impl.py` 中的函数，解析签名动态生成 JSON Schema，作为 LLM 可调用的函数接口。
@@ -86,11 +86,12 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 4.  若目标 `ai_skills/<name>` 已存在则拒绝覆盖；否则适配并重新加载技能。
 
 ## 5. 分层记忆与上下文处理
-- **系统层**：工作区、OS、Python 路径、日期、操作规范等基础上下文。
+- **系统层**：System Prompt 按稳定性排序，稳定策略、工具导航和思考规范靠前；工作区、运行模式、日期、runtime 路径、子 Agent、指定能力和 SOP 当前步骤等动态状态靠后，降低 DeepSeek context cache 前缀失效。
 - **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
 - **技能层**：首次调用技能时注入简版能力提示；按需注入技能完整说明与经验。
 - **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与自动化当前步骤，影响工具可见性与 Prompt 约束。
-- **历史层**：每轮清理/折叠思考内容以避免重复；仅保留必要字段满足 API 要求。
+- **历史层**：每轮清理/折叠思考内容以避免重复；DeepSeek thinking 工具调用回合保留 `reasoning_content`，避免多轮工具回放触发协议错误。
+- **压缩层**：DeepSeek V4 Pro/Flash 默认 `context_window_tokens=1000000`、`context_budget_ratio=0.8`、最近保留 40 轮；压缩切点会避开 assistant/tool 调用回合边界，避免留下孤立 tool result。
 
 ## 6. 运行模式与环境
 

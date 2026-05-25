@@ -730,28 +730,15 @@ class LLMWorker(QThread):
             or (self.run_context.get("channel") or "").strip().lower() in enterprise_channels
         )
 
-        context_lines = [
-            f"当前工作区: {self.workspace_dir}",
-            f"当前运行模式: {run_mode}",
-            f"操作系统: {platform.system()} {platform.release()}",
-            f"Python 版本: {sys.version.split()[0]}",
-            f"运行时 Python 版本: {runtime_snapshot.get('version') or '未知'}",
-            sandbox_env_line,
-            f"Python 路径: {python_exe or '沙盒 Python 路径解析失败'}",
-            f"Node.js 版本: {node_info.get('version') or '未知'}",
-            f"Node.js 路径: {node_info.get('path') or '沙盒 Node.js 路径解析失败'}",
-            f"Bash 版本: {bash_info.get('version') or '未知'}",
-            f"Bash 路径: {bash_info.get('path') or '沙盒 Bash 路径解析失败'}",
+        stable_policy_lines = [
+            "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于当前工作区。",
+            "能力: 你可以使用 'create_new_skill' 创建新的技能/工具。",
             "命令策略: 推荐的通用执行工具是 'run_python_code' 和 'bash'，其中优先使用 'run_python_code'。",
             "1. 可用 Python 完成的数据处理、批量文本处理、脚本化检查、计算和轻量文件分析，优先使用 'run_python_code'。",
             "2. 需要真实 shell 环境、项目命令、构建测试、git/node/npm/npx/bash 管道或现有 CLI 时，再使用 'bash'。",
             "3. 避免为了运行内联 Python 而套一层 'bash'；除非必须复用命令行入口，否则直接使用 'run_python_code'。",
             "判定策略: 不要仅依赖系统 PATH 或常见安装目录猜测 Node/Python 可用性，应先在沙盒中直接执行版本命令验证。",
-            package_line,
-            missing_line,
-            f"当前日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于此路径。",
-            "能力: 你可以使用 'create_new_skill' 创建新的技能/工具。",
+            "",
             "策略 [技能创建]:",
             "1. 鼓励创建新技能来封装可复用的任务（例如：特定的文件处理、复杂计算、数据转换、系统操作等）。",
             "2. 当你发现某个任务可能在未来被再次使用，或者通过代码实现比通过纯文本生成更可靠时，请果断创建技能。",
@@ -791,26 +778,28 @@ class LLMWorker(QThread):
             "3. 思考过程对用户是折叠的，用户主要阅读的是你的最终 Content 回复。",
         ]
         if enterprise_delivery_enabled:
-            context_lines.insert(
-                context_lines.index("策略 [元工具导航]:"),
+            stable_policy_lines.insert(
+                stable_policy_lines.index("策略 [元工具导航]:"),
                 "企业消息会话中，若需要交付文件、图片或链接，请使用 'publish_artifacts'。",
             )
-            context_lines.insert(
-                context_lines.index("7. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。"),
+            stable_policy_lines.insert(
+                stable_policy_lines.index("7. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。"),
                 "补充: 企业消息链路中可使用 'publish_artifacts' 交付文件或图片。",
             )
         else:
-            context_lines.insert(
-                context_lines.index("策略 [元工具导航]:"),
+            stable_policy_lines.insert(
+                stable_policy_lines.index("策略 [元工具导航]:"),
                 "普通桌面会话不要调用 'publish_artifacts'；若生成了本地文件或链接，请直接在最终回复里说明路径或地址。",
             )
+
+        capability_lines = []
         if available_tool_names:
             tool_lines = []
             chunk_size = 12
             for start in range(0, len(available_tool_names), chunk_size):
                 chunk = available_tool_names[start : start + chunk_size]
                 tool_lines.append("- " + ", ".join(f"`{name}`" for name in chunk))
-            context_lines.extend(
+            capability_lines.extend(
                 [
                     "",
                     "当前可用工具清单（仅以下工具真正暴露给你，可直接调用）:",
@@ -819,18 +808,69 @@ class LLMWorker(QThread):
                 ]
             )
         else:
-            context_lines.extend(
+            capability_lines.extend(
                 [
                     "",
                     "当前可用工具清单: 本轮未暴露任何工具。",
                 ]
             )
+
+        selected_skill_names = [
+            skill_name for skill_name in self._selected_skill_names()
+            if self.skill_manager.get_brief_skill_prompt(skill_name)
+        ]
+        try:
+            system_skills = self.skill_manager.get_system_prompts(
+                query_text=self._build_skill_query(current_messages),
+                exclude_skill_names=selected_skill_names,
+                allowed_skill_names=self._allowed_skill_names(),
+            )
+        except TypeError:
+            system_skills = self.skill_manager.get_system_prompts(
+                query_text=self._build_skill_query(current_messages),
+            )
+        if system_skills:
+            capability_lines.append("\n# Skill Capabilities & Guidelines")
+            capability_lines.append(system_skills)
+
+        memory_lines = []
+        memories_text = ""
+        if self.config_manager:
+            try:
+                history_dir = self.config_manager.get_chat_history_dir()
+                memories_path = os.path.join(history_dir, "memories.md")
+                if os.path.exists(memories_path):
+                    with open(memories_path, "r", encoding="utf-8") as f:
+                        memories_text = f.read().strip()
+            except Exception:
+                memories_text = ""
+        if memories_text:
+            memory_lines.append("\n# Memories\n" + memories_text)
+
+        dynamic_state_lines = [
+            "",
+            "# 当前运行状态",
+            f"当前工作区: {self.workspace_dir}",
+            f"当前运行模式: {run_mode}",
+            f"当前日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"操作系统: {platform.system()} {platform.release()}",
+            f"Python 版本: {sys.version.split()[0]}",
+            f"运行时 Python 版本: {runtime_snapshot.get('version') or '未知'}",
+            sandbox_env_line,
+            f"Python 路径: {python_exe or '沙盒 Python 路径解析失败'}",
+            f"Node.js 版本: {node_info.get('version') or '未知'}",
+            f"Node.js 路径: {node_info.get('path') or '沙盒 Node.js 路径解析失败'}",
+            f"Bash 版本: {bash_info.get('version') or '未知'}",
+            f"Bash 路径: {bash_info.get('path') or '沙盒 Bash 路径解析失败'}",
+            package_line,
+            missing_line,
+        ]
         if self._is_clarifying_mode():
             if clarifying_read_tools:
                 read_tool_line = "、".join(f"`{name}`" for name in clarifying_read_tools)
             else:
                 read_tool_line = "当前 tool schema 中未暴露工作区读取工具"
-            context_lines.extend(
+            dynamic_state_lines.extend(
                 [
                     "",
                     "策略 [反问模式]:",
@@ -846,20 +886,7 @@ class LLMWorker(QThread):
                 ]
             )
         if self.parent_agent_id:
-            context_lines.append(f"Note: You are a sub-agent (ID: {self.parent_agent_id}). Perform your assigned task efficiently.")
-
-        memories_text = ""
-        if self.config_manager:
-            try:
-                history_dir = self.config_manager.get_chat_history_dir()
-                memories_path = os.path.join(history_dir, "memories.md")
-                if os.path.exists(memories_path):
-                    with open(memories_path, "r", encoding="utf-8") as f:
-                        memories_text = f.read().strip()
-            except Exception:
-                memories_text = ""
-        if memories_text:
-            context_lines.append("\n# Memories\n" + memories_text)
+            dynamic_state_lines.append(f"Note: You are a sub-agent (ID: {self.parent_agent_id}). Perform your assigned task efficiently.")
 
         agent_profile_name = str(self.run_context.get("agent_profile_name") or "").strip()
         agent_description = str(self.run_context.get("agent_description") or "").strip()
@@ -872,12 +899,8 @@ class LLMWorker(QThread):
                 agent_lines.append(agent_description)
             if agent_system_prompt:
                 agent_lines.append(agent_system_prompt)
-            context_lines.append("\n" + "\n".join(agent_lines))
+            dynamic_state_lines.append("\n" + "\n".join(agent_lines))
 
-        selected_skill_names = [
-            skill_name for skill_name in self._selected_skill_names()
-            if self.skill_manager.get_brief_skill_prompt(skill_name)
-        ]
         if selected_skill_names:
             selected_skill_lines = [
                 f"- `{skill_name}`: {self.skill_manager.get_skill_display_name(skill_name)}"
@@ -887,7 +910,7 @@ class LLMWorker(QThread):
                 self.skill_manager.get_brief_skill_prompt(skill_name)
                 for skill_name in selected_skill_names
             ]
-            context_lines.extend(
+            dynamic_state_lines.extend(
                 [
                     "",
                     "# 用户指定能力",
@@ -901,21 +924,9 @@ class LLMWorker(QThread):
 
         sop_prompt_fragment = build_sop_prompt_fragment(self.run_context.get("sop_run"))
         if sop_prompt_fragment:
-            context_lines.extend(["", sop_prompt_fragment])
+            dynamic_state_lines.extend(["", sop_prompt_fragment])
 
-        try:
-            system_skills = self.skill_manager.get_system_prompts(
-                query_text=self._build_skill_query(current_messages),
-                exclude_skill_names=selected_skill_names,
-                allowed_skill_names=self._allowed_skill_names(),
-            )
-        except TypeError:
-            system_skills = self.skill_manager.get_system_prompts(
-                query_text=self._build_skill_query(current_messages),
-            )
-        if system_skills:
-            context_lines.append("\n# Skill Capabilities & Guidelines")
-            context_lines.append(system_skills)
+        context_lines = stable_policy_lines + capability_lines + memory_lines + dynamic_state_lines
         return "\n".join(context_lines)
 
     def run(self):

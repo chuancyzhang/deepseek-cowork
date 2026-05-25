@@ -17,6 +17,8 @@ from core.skill_manager import SkillManager
 from core.interaction import InteractionBridge, interaction_service, parse_interaction_reply
 from core import env_utils
 from core import sandbox_runtime
+from core.clarify_mode import RUN_MODE_EXECUTION
+from core.agent import LLMWorker
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.single_instance import (
     UiSingleInstanceServer,
@@ -62,6 +64,9 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)
         self.assertEqual(cm.get("deepseek_reasoning_effort"), DEFAULT_DEEPSEEK_REASONING_EFFORT)
         self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
+        self.assertEqual(cm.get("deepseek_v4_context_window_tokens"), 1000000)
+        self.assertEqual(cm.get("context_budget_ratio"), 0.8)
+        self.assertEqual(cm.get("context_compression_recent_keep_turns"), 40)
         self.assertTrue(cm.get("model_channels"))
         self.assertTrue(cm.get("model_provider_configs"))
         self.assertEqual(cm.get_selected_model_id(), "openai-default")
@@ -419,13 +424,28 @@ class TestEnvUtils(unittest.TestCase):
             self.assertIn("bundled Python runtime is missing", str(cm.exception))
 
 class _DaemonConfigStub:
-    def __init__(self, history_dir):
+    def __init__(self, history_dir, values=None, profile=None):
         self._history_dir = history_dir
+        self._values = dict(values or {})
+        self._profile = profile
     def get_chat_history_dir(self):
         os.makedirs(self._history_dir, exist_ok=True)
         return self._history_dir
     def get(self, key, default=None):
-        return default
+        return self._values.get(key, default)
+    def get_model_profile(self, model_id=None):
+        return self._profile
+
+
+class _PromptSkillManagerStub:
+    def get_tool_definitions(self, *args, **kwargs):
+        return []
+    def get_system_prompts(self, *args, **kwargs):
+        return ""
+    def get_brief_skill_prompt(self, skill_name):
+        return ""
+    def get_skill_display_name(self, skill_name):
+        return skill_name
 
 class TestInteractionService(unittest.TestCase):
     def setUp(self):
@@ -552,6 +572,130 @@ class TestDaemonState(unittest.TestCase):
     def test_is_context_overflow_error(self):
         self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
         self.assertFalse(self.state._is_context_overflow_error({"error": "network timeout"}))
+
+    def test_deepseek_v4_uses_large_context_budget(self):
+        state = DaemonState(
+            _DaemonConfigStub(
+                self.temp_dir,
+                values={"context_budget_ratio": 0.8},
+                profile={"model_name": "deepseek-v4-pro"},
+            )
+        )
+
+        self.assertEqual(state._context_window_tokens({"selected_model_id": "openai-default"}), 1000000)
+        self.assertEqual(state._context_budget_threshold({"selected_model_id": "openai-default"}), 800000)
+
+    def test_deepseek_v4_does_not_compress_under_budget(self):
+        state = DaemonState(
+            _DaemonConfigStub(
+                self.temp_dir,
+                values={"context_budget_ratio": 0.8},
+                profile={"model_name": "deepseek-v4-pro"},
+            )
+        )
+        session_id = "im-v4-under-budget"
+        im_key = build_im_session_key("u1", "chat-a", "2026-05-25")
+        state.chat_storage.upsert_im_session("feishu", im_key, session_id)
+        messages = [{"role": "user", "content": "x" * 800000}]
+
+        self.assertIsNone(state._build_overflow_retry_messages(session_id, messages, run_context={}, force=False))
+
+    def test_budget_compression_keeps_recent_tail_and_summary(self):
+        state = DaemonState(
+            _DaemonConfigStub(
+                self.temp_dir,
+                values={
+                    "context_window_tokens": 1000,
+                    "context_budget_ratio": 0.5,
+                    "context_compression_recent_keep_turns": 2,
+                },
+                profile={"model_name": "small-model"},
+            )
+        )
+        session_id = "im-budget-compress"
+        im_key = build_im_session_key("u1", "chat-b", "2026-05-25")
+        state.chat_storage.upsert_im_session("feishu", im_key, session_id)
+        messages = [
+            {"role": "user", "content": "目标 " + ("x" * 1000)},
+            {"role": "assistant", "content": "决定采用方案 A"},
+            {"role": "user", "content": "继续 " + ("y" * 1000)},
+            {"role": "assistant", "content": "完成处理"},
+        ]
+
+        compressed = state._build_overflow_retry_messages(session_id, messages, run_context={}, force=False)
+
+        self.assertIsNotNone(compressed)
+        self.assertEqual(compressed[0]["role"], "system")
+        self.assertIn("Context Summary", compressed[0]["content"])
+        self.assertEqual(compressed[-2:], messages[-2:])
+
+    def test_compression_boundary_keeps_tool_round_together(self):
+        state = DaemonState(
+            _DaemonConfigStub(
+                self.temp_dir,
+                values={
+                    "context_window_tokens": 1000,
+                    "context_budget_ratio": 0.5,
+                    "context_compression_recent_keep_turns": 2,
+                },
+                profile={"model_name": "small-model"},
+            )
+        )
+        session_id = "im-tool-boundary"
+        im_key = build_im_session_key("u1", "chat-c", "2026-05-25")
+        state.chat_storage.upsert_im_session("feishu", im_key, session_id)
+        tool_assistant = {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "need tool",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "demo", "arguments": "{}"},
+                }
+            ],
+        }
+        tool_result = {"role": "tool", "tool_call_id": "call-1", "content": "ok"}
+        messages = [
+            {"role": "user", "content": "old " + ("x" * 2500)},
+            {"role": "assistant", "content": "old answer"},
+            tool_assistant,
+            tool_result,
+            {"role": "assistant", "content": "done"},
+        ]
+
+        compressed = state._build_overflow_retry_messages(session_id, messages, run_context={}, force=False)
+
+        self.assertEqual(compressed[1], tool_assistant)
+        self.assertEqual(compressed[2], tool_result)
+
+
+class TestAgentSystemPrompt(unittest.TestCase):
+    def test_dynamic_status_is_after_stable_policy(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = LLMWorker.__new__(LLMWorker)
+            worker.workspace_dir = temp_dir
+            worker.run_context = {"mode": RUN_MODE_EXECUTION}
+            worker.tools = []
+            worker.parent_agent_id = ""
+            worker.skill_manager = _PromptSkillManagerStub()
+            worker.config_manager = _DaemonConfigStub(temp_dir)
+            prompt = worker._build_system_prompt(
+                current_messages=[],
+                runtime_snapshot={"version": "3.test", "python_exe": "python.exe"},
+                sandbox_snapshot={
+                    "python": {"available": True, "version": "3.test", "path": "python.exe"},
+                    "node": {"available": False},
+                    "bash": {"available": False},
+                },
+            )
+
+            self.assertLess(prompt.index("策略 [技能创建]:"), prompt.index("# 当前运行状态"))
+            self.assertLess(prompt.index("策略 [元工具导航]:"), prompt.index("当前运行模式: execution"))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 class TestSingleInstance(unittest.TestCase):

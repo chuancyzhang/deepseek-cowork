@@ -53,6 +53,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - 动态导入与依赖自修复：缺失依赖时尝试自动安装并重试加载，提升技能首用成功率。
 - 工具到技能映射：用于 UI 上报与提示注入。
 - 只读并行工具：`parallel_tools` 本身作为 always-allowed 元工具可默认暴露，但每个子调用必须是已发现、当前模式允许、能力范围允许且 `read_only=True` 的工具。
+- 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮不仅更新 provider 的 tool schema，也会重建基础 system prompt 中的“当前可用工具清单”，避免提示词仍停留在旧集合。
 
 ## 4. 数据流 (Data Flow)
 
@@ -108,6 +109,15 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **状态**：Idle → Thinking → ToolCalling → Observing → Answering → Completed。
 - **信号**：`thinking_signal`、`content_signal`、`tool_call_signal`、`tool_result_signal`、`agent_state_signal`。
 - **子 Agent 事件**：`agent_state_signal` 在保留状态语义的同时，补充 `input`、`tool_call`、`tool_result`、`content`、`completed` 等结构化字段，供右侧抽屉按节点渲染。
+- **子 Agent 生命周期**：模型任务完成时先写入结果与状态，`QThread.finished` 后再释放 worker 引用；若存在排队输入，旧线程完全退出后才启动下一轮，避免线程销毁或重启重叠导致崩溃。
+- **子 Agent 诊断日志**：UI 召唤入口、manager 生命周期、worker signal、pending input、清理与异常都会写入 `sub_agent_runtime.log`，位置为 `DeepSeekCowork` 应用数据目录或便携模式的 `user_data/`。
+- **子 Agent 观测 UI**：状态事件先写入会话事件队列并点亮右侧 `子 Agent` 徽标，不再自动打开抽屉；用户打开抽屉后先清空旧监控视图，再由主线程延迟队列批量渲染轻量摘要行，并限制最近事件窗口，避免事件风暴或 widget 构造影响主任务稳定性。
+- **抽屉点击命中保护**：`eventFilter` 对右侧抽屉和上下文 rail 采用全局坐标命中判断，而不是只依赖 Qt 祖先链；因此滚动区域 viewport、内部子控件和临时弹层不会被误判为抽屉外点击。
+- **抽屉隐藏诊断**：`hide_context_drawer` 会把关闭原因、来源控件类型、当前 tab 和命中判断写入 `sub_agent_runtime.log`，便于定位“点击后立即收起”类问题。
+- **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览，完整内容仍保留在会话状态与工具记录中，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
+- **UI 分段诊断**：`_handle_agent_state_ui` 会按 session lookup、phase update、tool card、event record、monitor render、bubble PiP、live-agent check、final status 等阶段写入 `ui_agent_state_stage_*` 日志，便于定位 UI 闪退前的最后分支。
+- **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
+- **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。
 - **控制**：`pause`、`resume`、`stop`；环路保护（重复思考/工具签名）确保安全收敛。
 - **实现要点**：流式解析四类事件，按需注入技能提示，结果写入历史后继续下一轮直至最终回答。
 - **会话自动化状态**：Active → Awaiting Confirmation → Active/Completed，用户可在 Awaiting 状态选择确认、重跑或跳过。

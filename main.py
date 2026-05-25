@@ -11,6 +11,7 @@ import uuid
 import glob
 import markdown
 import socket
+import threading
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
@@ -116,7 +117,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
 from PySide6.QtWidgets import QProgressBar
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime
 
 # Try importing OpenAI
 try:
@@ -196,6 +197,7 @@ STREAM_RENDER_INTERVAL_SEC = 0.12
 STREAM_PLAIN_TEXT_THRESHOLD = 2400
 UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
+SUB_AGENT_MONITOR_RENDER_LIMIT = 80
 
 def set_stylesheet_if_changed(widget, stylesheet):
     if widget.property("_cached_stylesheet") == stylesheet:
@@ -251,7 +253,69 @@ def apple_button_style(kind="secondary", radius=17, align="center"):
         "QPushButton:hover { "
         f"background: {DesignTokens.bg_secondary}; border-color: {DesignTokens.border_strong};"
         " } "
-    )
+)
+
+
+def log_sub_agent_runtime(event, **fields):
+    try:
+        payload = {"event": event}
+        payload.update(fields or {})
+        log_dir = get_app_data_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "sub_agent_runtime.log")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"[{ts}] {json.dumps(payload, ensure_ascii=False, default=str)}\n")
+    except Exception:
+        try:
+            print(f"[sub-agent-runtime] {event} {fields}")
+        except Exception:
+            return
+
+
+def sub_agent_log_path():
+    return os.path.join(get_app_data_dir(), "sub_agent_runtime.log")
+
+
+def _qt_object_alive(obj):
+    if obj is None:
+        return False
+    try:
+        obj.objectName()
+        return True
+    except RuntimeError:
+        return False
+    except Exception:
+        return True
+
+
+def _sub_agent_payload_content_len(payload):
+    if not isinstance(payload, dict):
+        return 0
+    total = 0
+    for key in (
+        "content",
+        "input_text",
+        "reasoning_delta",
+        "content_delta",
+        "log_content",
+        "provider_message",
+        "tool_result",
+        "output_text",
+        "error",
+    ):
+        value = payload.get(key)
+        if value is not None:
+            total += len(str(value))
+    return total
+
+
+def _safe_text_preview(text, limit=6000):
+    value = "" if text is None else str(text)
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"{value[:limit]}\n\n...[truncated {omitted} chars for UI safety]"
 
 
 def apple_tool_button_style(active=False):
@@ -4575,6 +4639,10 @@ class DaemonStreamWorker(QThread):
         self._sock = None
 
     def _abort_remote_session(self):
+        log_sub_agent_runtime(
+            "daemon_stream_worker_abort_remote",
+            session_id=self.session_id,
+        )
         try:
             self.client.stop_session(self.session_id)
         except Exception:
@@ -4582,6 +4650,10 @@ class DaemonStreamWorker(QThread):
 
     def abort(self):
         self._aborted = True
+        log_sub_agent_runtime(
+            "daemon_stream_worker_abort",
+            session_id=self.session_id,
+        )
         self._abort_remote_session()
         if self._sock:
             try:
@@ -4594,6 +4666,12 @@ class DaemonStreamWorker(QThread):
                 pass
 
     def run(self):
+        log_sub_agent_runtime(
+            "daemon_stream_worker_run_begin",
+            session_id=self.session_id,
+            workspace_dir=self.workspace_dir,
+            run_context_keys=sorted(list((self.run_context or {}).keys())),
+        )
         try:
             with socket.create_connection((self.client.host, self.client.port), timeout=self.client.send_timeout) as sock:
                 self._sock = sock
@@ -4642,23 +4720,47 @@ class DaemonStreamWorker(QThread):
                         result = msg.get("result") or {"error": "No response"}
                         if isinstance(result, dict):
                             result["_streamed"] = True
+                        log_sub_agent_runtime(
+                            "daemon_stream_worker_final",
+                            session_id=self.session_id,
+                            result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+                        )
                         self.finished_signal.emit(result, self.session_id)
                         return
                     elif msg.get("type") == "error":
                         result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
+                        log_sub_agent_runtime(
+                            "daemon_stream_worker_error_message",
+                            session_id=self.session_id,
+                            error=result.get("error"),
+                        )
                         self.finished_signal.emit(result, self.session_id)
                         return
                     elif msg.get("status") == "error":
                         result = {"error": msg.get("error") or "Daemon error", "_streamed": True}
+                        log_sub_agent_runtime(
+                            "daemon_stream_worker_status_error",
+                            session_id=self.session_id,
+                            error=result.get("error"),
+                        )
                         self.finished_signal.emit(result, self.session_id)
                         return
                     elif msg.get("status") == "ok" and "result" in msg:
                         result = msg.get("result") or {"error": "No response"}
                         if isinstance(result, dict):
                             result["_streamed"] = True
+                        log_sub_agent_runtime(
+                            "daemon_stream_worker_ok_result",
+                            session_id=self.session_id,
+                            result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+                        )
                         self.finished_signal.emit(result, self.session_id)
                         return
                 if not self._aborted:
+                    log_sub_agent_runtime(
+                        "daemon_stream_worker_reader_eof",
+                        session_id=self.session_id,
+                    )
                     self.finished_signal.emit({"error": "Daemon stream closed", "_streamed": True}, self.session_id)
         except Exception as e:
             if not self._aborted:
@@ -4666,8 +4768,18 @@ class DaemonStreamWorker(QThread):
                 if "timed out" in text.lower() or "timeout" in text.lower():
                     self._abort_remote_session()
                     text = "Confirmation timed out. Conversation interrupted."
+                log_sub_agent_runtime(
+                    "daemon_stream_worker_exception",
+                    session_id=self.session_id,
+                    error=text,
+                )
                 self.finished_signal.emit({"error": text, "_streamed": True}, self.session_id)
         finally:
+            log_sub_agent_runtime(
+                "daemon_stream_worker_run_end",
+                session_id=self.session_id,
+                aborted=self._aborted,
+            )
             self._sock = None
 
 class HistoryTitleButton(QLabel):
@@ -6026,9 +6138,9 @@ class ToolCallCard(QFrame):
 class SubAgentEventTile(QFrame):
     def __init__(self, event, parent=None):
         super().__init__(parent)
-        self.event = dict(event or {})
+        self.event_payload = dict(event or {})
         self._details_visible = False
-        self._details_text = detail_text(self._build_details_text(self.event))
+        self._details_text = detail_text(self._build_details_text(self.event_payload))
 
         self.setStyleSheet(
             f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
@@ -6051,10 +6163,10 @@ class SubAgentEventTile(QFrame):
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(2)
 
-        self.title_label = QLabel(sub_agent_event_title(self.event))
+        self.title_label = QLabel(sub_agent_event_title(self.event_payload))
         self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 700;")
 
-        self.summary_label = QLabel(sub_agent_event_summary(self.event))
+        self.summary_label = QLabel(sub_agent_event_summary(self.event_payload))
         self.summary_label.setWordWrap(True)
         self.summary_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; line-height: 1.45;")
 
@@ -6065,11 +6177,11 @@ class SubAgentEventTile(QFrame):
         right_box.setContentsMargins(0, 0, 0, 0)
         right_box.setSpacing(4)
 
-        self.status_label = QLabel(status_label_text(self.event.get("status")))
-        self.status_label.setStyleSheet(apple_status_chip_style(self.event.get("status"), subtle=True))
+        self.status_label = QLabel(status_label_text(self.event_payload.get("status")))
+        self.status_label.setStyleSheet(apple_status_chip_style(self.event_payload.get("status"), subtle=True))
         self.status_label.setAlignment(Qt.AlignCenter)
 
-        ts_value = self.event.get("ts")
+        ts_value = self.event_payload.get("ts")
         time_text = ""
         if ts_value:
             try:
@@ -6110,7 +6222,7 @@ class SubAgentEventTile(QFrame):
         self._apply_icon()
 
     def _apply_icon(self):
-        status = str(self.event.get("status") or "").strip().lower()
+        status = str(self.event_payload.get("status") or "").strip().lower()
         icon_name = "fa5s.circle"
         color = status_color(status)
         if status == "input":
@@ -6163,6 +6275,63 @@ class SubAgentEventTile(QFrame):
         self.toggle_btn.setText("收起" if self._details_visible else "详情")
 
 
+def sub_agent_event_time_text(event):
+    ts_value = (event or {}).get("ts")
+    if not ts_value:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(ts_value)).strftime("%H:%M:%S")
+    except Exception:
+        return ""
+
+
+class SubAgentEventSummaryRow(QFrame):
+    def __init__(self, event, parent=None):
+        super().__init__(parent)
+        self.event_payload = dict(event or {})
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self.setStyleSheet(
+            f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
+            "border-radius: 12px; }}"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(8)
+
+        self.title_label = QLabel(sub_agent_event_title(self.event_payload))
+        self.title_label.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 700;"
+        )
+        top_row.addWidget(self.title_label, 1)
+
+        meta_bits = [status_label_text(self.event_payload.get("status"))]
+        time_text = sub_agent_event_time_text(self.event_payload)
+        if time_text:
+            meta_bits.append(time_text)
+        self.meta_label = QLabel(" · ".join(bit for bit in meta_bits if bit))
+        self.meta_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.meta_label.setStyleSheet(
+            f"color: {status_color(self.event_payload.get('status'))}; font-size: 10px; font-weight: 600;"
+        )
+        top_row.addWidget(self.meta_label, 0)
+        layout.addLayout(top_row)
+
+        summary_text = sub_agent_event_summary(self.event_payload)
+        self.summary_label = QLabel(preview_text(summary_text, limit=280))
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; font-size: 11px; line-height: 1.4;"
+        )
+        self.summary_label.setVisible(bool(summary_text))
+        layout.addWidget(self.summary_label)
+
+
 class SubAgentTimelineCard(QFrame):
     def __init__(self, agent_id, agent_name="", parent=None):
         super().__init__(parent)
@@ -6180,8 +6349,8 @@ class SubAgentTimelineCard(QFrame):
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
 
-        icon = QLabel()
-        icon.setPixmap(qta.icon("fa5s.robot", color=DesignTokens.primary).pixmap(16, 16))
+        icon = QLabel("●")
+        icon.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 12px; font-weight: 700;")
         head.addWidget(icon)
 
         self.name_label = QLabel(self.agent_name)
@@ -6198,6 +6367,14 @@ class SubAgentTimelineCard(QFrame):
         head.addWidget(self.status_label)
         layout.addLayout(head)
 
+        self.notice_label = QLabel()
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setVisible(False)
+        self.notice_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 10px; padding-left: 2px;"
+        )
+        layout.addWidget(self.notice_label)
+
         self.timeline_layout = QVBoxLayout()
         self.timeline_layout.setContentsMargins(4, 0, 0, 0)
         self.timeline_layout.setSpacing(8)
@@ -6208,14 +6385,26 @@ class SubAgentTimelineCard(QFrame):
             self.agent_name = agent_name
             self.name_label.setText(agent_name)
 
+    def set_notice(self, text=""):
+        notice = str(text or "").strip()
+        self.notice_label.setText(notice)
+        self.notice_label.setVisible(bool(notice))
+
     def append_event(self, event):
         self.event_count += 1
         self.count_label.setText(f"{self.event_count} 步")
         self.status_label.setText(status_label_text(event.get("status")))
         self.status_label.setStyleSheet(apple_status_chip_style(event.get("status"), subtle=True))
         try:
-            tile = SubAgentEventTile(event)
+            tile = SubAgentEventSummaryRow(event)
         except Exception:
+            log_sub_agent_runtime(
+                "ui_sub_agent_event_row_failed",
+                agent_id=self.agent_id,
+                status=str((event or {}).get("status") or ""),
+                content_len=_sub_agent_payload_content_len(event),
+                traceback=traceback.format_exc(),
+            )
             fallback = QLabel(sub_agent_event_title(event) + " | " + sub_agent_event_summary(event))
             fallback.setWordWrap(True)
             fallback.setStyleSheet(
@@ -6239,7 +6428,16 @@ class SubAgentMonitor(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(8)
+
+        self.notice_label = QLabel()
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setVisible(False)
+        self.notice_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 11px; "
+            f"background: rgba(255, 255, 255, 0.62); border-radius: 12px; padding: 8px 10px;"
+        )
+        layout.addWidget(self.notice_label)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -6255,40 +6453,59 @@ class SubAgentMonitor(QWidget):
 
         self.agents = {}
 
+    def set_notice(self, text=""):
+        notice = str(text or "").strip()
+        self.notice_label.setText(notice)
+        self.notice_label.setVisible(bool(notice))
+
     def reset(self):
-        while self.content_layout.count():
-            item = self.content_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-        self.content_layout.addStretch()
-        self.agents = {}
+        try:
+            self.set_notice("")
+            while self.content_layout.count():
+                item = self.content_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self.content_layout.addStretch()
+            self.agents = {}
+        except Exception:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_reset_failed",
+                traceback=traceback.format_exc(),
+            )
 
     def update_log(self, agent_id, content, status, agent_name="", event=None):
         if not agent_id:
             return
-        payload = dict(event or {})
-        payload.setdefault("agent_id", agent_id)
-        payload.setdefault("agent_name", agent_name or agent_id)
-        payload.setdefault("status", status or "running")
-        if content and not payload.get("content"):
-            payload["content"] = content
-        payload.setdefault("ts", int(time.time()))
-
-        card = self.agents.get(agent_id)
-        if card is None:
-            card = SubAgentTimelineCard(agent_id, agent_name=payload.get("agent_name") or agent_id)
-            self.agents[agent_id] = card
-            self.content_layout.insertWidget(max(0, self.content_layout.count() - 1), card)
-        else:
-            card.update_identity(payload.get("agent_name") or agent_id)
-        if payload.get("from_history"):
-            card.note_history_events(1, payload.get("status") or status)
-            return
         try:
+            payload = dict(event or {})
+            payload.setdefault("agent_id", agent_id)
+            payload.setdefault("agent_name", agent_name or agent_id)
+            payload.setdefault("status", status or "running")
+            if content and not payload.get("content"):
+                payload["content"] = content
+            payload.setdefault("ts", int(time.time()))
+
+            card = self.agents.get(agent_id)
+            if card is None or not _qt_object_alive(card):
+                card = SubAgentTimelineCard(agent_id, agent_name=payload.get("agent_name") or agent_id)
+                self.agents[agent_id] = card
+                self.content_layout.insertWidget(max(0, self.content_layout.count() - 1), card)
+            else:
+                card.update_identity(payload.get("agent_name") or agent_id)
+            if payload.get("from_history"):
+                card.note_history_events(1, payload.get("status") or status)
+                return
             card.append_event(payload)
         except Exception:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_update_log_failed",
+                agent_id=agent_id,
+                status=status or "",
+                content_len=len(str(content or "")),
+                traceback=traceback.format_exc(),
+            )
             return
 
         QTimer.singleShot(0, self._scroll_to_bottom)
@@ -6298,6 +6515,10 @@ class SubAgentMonitor(QWidget):
             bar = self.scroll.verticalScrollBar()
             bar.setValue(bar.maximum())
         except Exception:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_scroll_failed",
+                traceback=traceback.format_exc(),
+            )
             return
 
 class SubAgentMonitorWindow(QDialog):
@@ -6356,6 +6577,7 @@ class SessionState:
         self.completed_turn_id = 0
         self.persisted_agents = []
         self.sub_agent_events = []
+        self.sub_agent_render_queued = False
         self.observability_events = []
         self.system_prompt_text = ""
         self.system_prompt_appends = []
@@ -7009,6 +7231,7 @@ class MainWindow(QMainWindow):
         self.context_drawer_min_content_width = 420
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
+        self._agent_state_ui_event_seq = 0
         
         # Apply Clean Light Theme manually for optimized components
         self.setStyleSheet(f"""
@@ -7959,17 +8182,95 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             self.last_ui_update_time = now
 
+    def _event_global_pos(self, event):
+        if event is None:
+            return None
+        try:
+            if hasattr(event, "globalPosition"):
+                position = event.globalPosition()
+                if position is not None:
+                    return position.toPoint()
+        except Exception:
+            pass
+        try:
+            if hasattr(event, "globalPos"):
+                position = event.globalPos()
+                if position is not None:
+                    return QPoint(position)
+        except Exception:
+            pass
+        return None
+
+    def _widget_matches_or_contains(self, root, obj):
+        if root is None or obj is None:
+            return False
+        try:
+            return obj is root or root.isAncestorOf(obj)
+        except Exception:
+            return False
+
+    def _widget_contains_global_pos(self, widget, global_pos):
+        if widget is None or global_pos is None:
+            return False
+        try:
+            if not _qt_object_alive(widget):
+                return False
+            local_pos = widget.mapFromGlobal(global_pos)
+            return widget.rect().contains(local_pos)
+        except Exception:
+            return False
+
+    def _is_transient_popup_widget(self, widget):
+        if widget is None:
+            return False
+        try:
+            if isinstance(widget, QMenu):
+                return True
+            return widget.windowType() in {Qt.Popup, Qt.ToolTip}
+        except Exception:
+            return False
+
+    def _classify_context_drawer_click(self, obj, event):
+        global_pos = self._event_global_pos(event)
+        right_sidebar = getattr(self, "right_sidebar", None)
+        context_rail = getattr(self, "context_rail", None)
+        in_drawer = self._widget_matches_or_contains(right_sidebar, obj)
+        in_rail = self._widget_matches_or_contains(context_rail, obj)
+        if not in_drawer:
+            in_drawer = self._widget_contains_global_pos(right_sidebar, global_pos)
+        if not in_rail:
+            in_rail = self._widget_contains_global_pos(context_rail, global_pos)
+        popup_widget = obj.window() if isinstance(obj, QWidget) else None
+        is_popup = self._is_transient_popup_widget(obj) or self._is_transient_popup_widget(popup_widget)
+        return {
+            "global_pos": global_pos,
+            "in_drawer": bool(in_drawer),
+            "in_rail": bool(in_rail),
+            "is_popup": bool(is_popup),
+        }
+
+    def _should_hide_context_drawer_for_click(self, obj, event):
+        if not getattr(self, "right_drawer_open", False):
+            return False, None
+        if event is None or event.type() != QEvent.MouseButtonPress or not isinstance(obj, QWidget):
+            return False, None
+        hit_test = self._classify_context_drawer_click(obj, event)
+        should_hide = not hit_test["in_drawer"] and not hit_test["in_rail"] and not hit_test["is_popup"]
+        return should_hide, hit_test
+
     def eventFilter(self, obj, event):
-        if (
-            getattr(self, "right_drawer_open", False)
-            and event.type() == QEvent.MouseButtonPress
-            and isinstance(obj, QWidget)
-            and obj.window() == self
-        ):
-            in_drawer = obj is self.right_sidebar or self.right_sidebar.isAncestorOf(obj)
-            in_rail = hasattr(self, "context_rail") and (obj is self.context_rail or self.context_rail.isAncestorOf(obj))
-            if not in_drawer and not in_rail:
-                self.hide_context_drawer()
+        should_hide, hit_test = self._should_hide_context_drawer_for_click(obj, event)
+        if should_hide:
+            source_window = obj.window() if isinstance(obj, QWidget) else None
+            if source_window is self or source_window is None:
+                self.hide_context_drawer(
+                    reason="outside_mouse_press",
+                    source_obj=obj,
+                    source_window=source_window,
+                    in_drawer=hit_test["in_drawer"],
+                    in_rail=hit_test["in_rail"],
+                    is_popup=hit_test["is_popup"],
+                )
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):
@@ -8042,14 +8343,64 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "right_stack"):
             return
         tab_index = max(0, min(tab_index, self.right_stack.count() - 1))
-        self.right_drawer_tab = tab_index
-        self.right_drawer_open = True
-        self.right_stack.setCurrentIndex(tab_index)
-        self.update_context_drawer_header(tab_index)
-        self.right_sidebar.setVisible(True)
-        self.sync_context_drawer_layout()
-        self.right_sidebar.raise_()
-        self.update_context_rail_badges()
+        log_sub_agent_runtime(
+            "ui_context_drawer_show_begin",
+            tab_index=tab_index,
+            current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            current_tab=getattr(self, "right_drawer_tab", None),
+            drawer_open=bool(getattr(self, "right_drawer_open", False)),
+        )
+        try:
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="set_flags", tab_index=tab_index)
+            self.right_drawer_tab = tab_index
+            self.right_drawer_open = True
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="set_flags", tab_index=tab_index)
+
+            if tab_index == self.RIGHT_TAB_OBSERVABILITY:
+                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_observability", tab_index=tab_index)
+                self.refresh_observability_view(self.current_session_id)
+                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_observability", tab_index=tab_index)
+            elif tab_index == self.RIGHT_TAB_SUB_AGENTS and hasattr(self, "sub_agent_monitor") and _qt_object_alive(self.sub_agent_monitor):
+                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="clear_sub_agent_monitor", tab_index=tab_index)
+                self.sub_agent_monitor.reset()
+                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="clear_sub_agent_monitor", tab_index=tab_index)
+
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="set_current_index", tab_index=tab_index)
+            self.right_stack.setCurrentIndex(tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="set_current_index", tab_index=tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="update_header", tab_index=tab_index)
+            self.update_context_drawer_header(tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="update_header", tab_index=tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="set_visible", tab_index=tab_index)
+            self.right_sidebar.setVisible(True)
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="set_visible", tab_index=tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="sync_layout", tab_index=tab_index)
+            self.sync_context_drawer_layout()
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="sync_layout", tab_index=tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="raise_sidebar", tab_index=tab_index)
+            self.right_sidebar.raise_()
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="raise_sidebar", tab_index=tab_index)
+            log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="update_badges", tab_index=tab_index)
+            self.update_context_rail_badges()
+            log_sub_agent_runtime("ui_context_drawer_stage_done", stage="update_badges", tab_index=tab_index)
+            if tab_index == self.RIGHT_TAB_SUB_AGENTS:
+                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="queue_sub_agent_render", tab_index=tab_index)
+                self._queue_render_sub_agent_monitor_for_state(self.get_current_session(), delay_ms=250)
+                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="queue_sub_agent_render", tab_index=tab_index)
+            log_sub_agent_runtime(
+                "ui_context_drawer_show_done",
+                tab_index=tab_index,
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+                drawer_open=bool(getattr(self, "right_drawer_open", False)),
+                drawer_tab=getattr(self, "right_drawer_tab", None),
+            )
+        except Exception:
+            log_sub_agent_runtime(
+                "ui_context_drawer_show_failed",
+                tab_index=tab_index,
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+                traceback=traceback.format_exc(),
+            )
 
     def update_context_drawer_header(self, tab_index):
         if not hasattr(self, "right_title_label") or not hasattr(self, "right_desc_label"):
@@ -8064,13 +8415,32 @@ class MainWindow(QMainWindow):
         self.right_title_label.setText(title)
         self.right_desc_label.setText(description)
 
-    def hide_context_drawer(self):
+    def hide_context_drawer(self, reason="manual", source_obj=None, source_window=None, in_drawer=None, in_rail=None, is_popup=None):
         if not hasattr(self, "right_sidebar"):
             return
+        log_sub_agent_runtime(
+            "ui_context_drawer_hide_begin",
+            reason=str(reason or "manual"),
+            current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            drawer_open=bool(getattr(self, "right_drawer_open", False)),
+            drawer_tab=getattr(self, "right_drawer_tab", None),
+            source_class=type(source_obj).__name__ if source_obj is not None else "",
+            source_window_class=type(source_window).__name__ if source_window is not None else "",
+            in_drawer=in_drawer,
+            in_rail=in_rail,
+            is_popup=is_popup,
+        )
         self.right_drawer_open = False
         self.right_sidebar.setVisible(False)
         self.sync_context_drawer_layout()
         self.update_context_rail_badges()
+        log_sub_agent_runtime(
+            "ui_context_drawer_hide_done",
+            reason=str(reason or "manual"),
+            current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            drawer_open=bool(getattr(self, "right_drawer_open", False)),
+            drawer_tab=getattr(self, "right_drawer_tab", None),
+        )
 
     def set_context_tab_hint(self, tab_index, available=True):
         if not hasattr(self, "context_available_tabs"):
@@ -8105,10 +8475,30 @@ class MainWindow(QMainWindow):
         if count <= 0:
             return
         index = max(0, min(index, count - 1))
-        self.observability_section_index = index
-        self.observability_content_stack.setCurrentIndex(index)
-        for btn_index, btn in enumerate(getattr(self, "observability_segment_buttons", [])):
-            btn.setChecked(btn_index == index)
+        log_sub_agent_runtime(
+            "ui_observability_section_begin",
+            index=index,
+            current_session_id=str(getattr(self, "current_session_id", "") or ""),
+        )
+        try:
+            self.observability_section_index = index
+            if index in {getattr(self, "OBS_SECTION_PROMPT", -1), getattr(self, "OBS_SECTION_LOG", -1)}:
+                self.refresh_observability_view(self.current_session_id)
+            self.observability_content_stack.setCurrentIndex(index)
+            for btn_index, btn in enumerate(getattr(self, "observability_segment_buttons", [])):
+                btn.setChecked(btn_index == index)
+            log_sub_agent_runtime(
+                "ui_observability_section_done",
+                index=index,
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            )
+        except Exception:
+            log_sub_agent_runtime(
+                "ui_observability_section_failed",
+                index=index,
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+                traceback=traceback.format_exc(),
+            )
 
     def _prompt_tool_menu_entries(self):
         return [
@@ -8721,11 +9111,38 @@ class MainWindow(QMainWindow):
             if isinstance(value, str):
                 text = value.strip()
                 if text.startswith("{") or text.startswith("["):
-                    return json.dumps(json.loads(text), indent=2, ensure_ascii=False)
-                return value
-            return json.dumps(value, indent=2, ensure_ascii=False)
+                    return _safe_text_preview(json.dumps(json.loads(text), indent=2, ensure_ascii=False), 2500)
+                return _safe_text_preview(value, 2500)
+            text = json.dumps(value, indent=2, ensure_ascii=False)
+            return _safe_text_preview(text, 2500)
         except Exception:
-            return str(value)
+            return _safe_text_preview(str(value), 2500)
+
+    def _set_observability_text(self, edit, text, field_name, limit=6000):
+        if not _qt_object_alive(edit):
+            log_sub_agent_runtime(
+                "ui_observability_text_widget_invalid",
+                field=field_name,
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            )
+            return
+        safe_text = _safe_text_preview(text, limit)
+        try:
+            edit.setPlainText(safe_text)
+            log_sub_agent_runtime(
+                "ui_observability_text_set",
+                field=field_name,
+                raw_len=len(str(text or "")),
+                safe_len=len(safe_text),
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            )
+        except Exception:
+            log_sub_agent_runtime(
+                "ui_observability_text_set_failed",
+                field=field_name,
+                raw_len=len(str(text or "")),
+                traceback=traceback.format_exc(),
+            )
 
     def _observability_time_text(self, ts):
         try:
@@ -8762,57 +9179,134 @@ class MainWindow(QMainWindow):
         return f"[{stamp}] {event_type or 'event'}\n{self._observability_pretty_json(event)}"
 
     def refresh_observability_view(self, session_id=None):
+        try:
+            on_ui_thread = QThread.currentThread() is self.thread()
+        except RuntimeError:
+            on_ui_thread = True
+        if not on_ui_thread:
+            QTimer.singleShot(0, lambda sid=session_id: self.refresh_observability_view(sid))
+            return
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
             return
-        prompt_text = getattr(state, "system_prompt_text", "") or ""
-        prompt_parts = []
-        if prompt_text:
-            prompt_parts.append(prompt_text)
-        for index, item in enumerate(getattr(state, "system_prompt_appends", []) or [], start=1):
-            if not isinstance(item, dict):
-                continue
-            source = item.get("source") or "system"
-            content = item.get("content") or ""
-            if content:
-                prompt_parts.append(f"\n\n# 追加系统消息 {index}: {source}\n{content}")
-        self.observability_prompt_edit.setPlainText("".join(prompt_parts))
+        if not (
+            hasattr(self, "observability_prompt_edit")
+            and hasattr(self, "observability_log_edit")
+            and _qt_object_alive(self.observability_prompt_edit)
+            and _qt_object_alive(self.observability_log_edit)
+        ):
+            log_sub_agent_runtime(
+                "ui_observability_widgets_unavailable",
+                session_id=getattr(state, "session_id", ""),
+            )
+            return
+        try:
+            prompt_text = getattr(state, "system_prompt_text", "") or ""
+            prompt_parts = []
+            if prompt_text:
+                prompt_parts.append(prompt_text)
+            for index, item in enumerate(getattr(state, "system_prompt_appends", []) or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                source = item.get("source") or "system"
+                content = item.get("content") or ""
+                if content:
+                    prompt_parts.append(f"\n\n# 追加系统消息 {index}: {source}\n{content}")
+            prompt_joined = "".join(prompt_parts)
+            self._set_observability_text(
+                self.observability_prompt_edit,
+                prompt_joined,
+                "system_prompt",
+                limit=6000,
+            )
 
-        log_parts = []
-        for event in getattr(state, "observability_events", []) or []:
-            if not isinstance(event, dict):
-                continue
-            if event.get("type") == "system_prompt":
-                continue
-            formatted = self._format_observability_event(event)
-            if formatted:
-                log_parts.append(formatted)
-        self.observability_log_edit.setPlainText("\n\n---\n\n".join(log_parts))
-        for edit in (self.observability_prompt_edit, self.observability_log_edit):
-            cursor = edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            edit.setTextCursor(cursor)
+            log_parts = []
+            for event in getattr(state, "observability_events", []) or []:
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "system_prompt":
+                    continue
+                formatted = self._format_observability_event(event)
+                if formatted:
+                    log_parts.append(formatted)
+            log_joined = "\n\n---\n\n".join(log_parts)
+            self._set_observability_text(
+                self.observability_log_edit,
+                log_joined,
+                "event_log",
+                limit=10000,
+            )
+            for edit in (self.observability_prompt_edit, self.observability_log_edit):
+                cursor = edit.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                edit.setTextCursor(cursor)
+            log_sub_agent_runtime(
+                "ui_observability_refresh_done",
+                session_id=state.session_id,
+                event_count=len(getattr(state, "observability_events", []) or []),
+                prompt_len=len(prompt_joined),
+                log_len=len(log_joined),
+            )
+        except Exception:
+            log_sub_agent_runtime(
+                "ui_observability_refresh_failed",
+                session_id=state.session_id,
+                traceback=traceback.format_exc(),
+            )
 
     def handle_observability_event(self, data, session_id=None):
+        try:
+            on_ui_thread = QThread.currentThread() is self.thread()
+        except RuntimeError:
+            on_ui_thread = True
+        if not on_ui_thread:
+            payload = dict(data) if isinstance(data, dict) else {}
+            QTimer.singleShot(0, lambda p=payload, sid=session_id: self.handle_observability_event(p, sid))
+            return
         if not isinstance(data, dict):
+            log_sub_agent_runtime(
+                "ui_observability_event_invalid",
+                session_id=str(session_id or ""),
+                data_type=type(data).__name__,
+            )
             return
         state = self.get_session(session_id)
         if not state:
+            log_sub_agent_runtime(
+                "ui_observability_missing_session",
+                session_id=str(session_id or ""),
+                event_type=data.get("type") or "",
+            )
             return
-        event = dict(data)
-        event.setdefault("timestamp", time.time())
-        event_type = event.get("type") or ""
-        if event_type == "system_prompt":
-            state.system_prompt_text = event.get("content") or ""
-        elif event_type == "system_prompt_append":
-            state.system_prompt_appends.append(event)
-        state.observability_events.append(event)
-        if len(state.observability_events) > 500:
-            state.observability_events = state.observability_events[-500:]
-        if state.session_id == self.current_session_id:
-            self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
-            self.refresh_observability_view(state.session_id)
-            self.refresh_context_badges(state.session_id)
+        try:
+            event = dict(data)
+            event.setdefault("timestamp", time.time())
+            event_type = event.get("type") or ""
+            if event_type == "system_prompt":
+                state.system_prompt_text = event.get("content") or ""
+            elif event_type == "system_prompt_append":
+                state.system_prompt_appends.append(event)
+            state.observability_events.append(event)
+            if len(state.observability_events) > 500:
+                state.observability_events = state.observability_events[-500:]
+            log_sub_agent_runtime(
+                "ui_observability_event_recorded",
+                session_id=state.session_id,
+                event_type=event_type,
+                content_len=_sub_agent_payload_content_len(event),
+                event_count=len(state.observability_events),
+            )
+            if state.session_id == self.current_session_id:
+                self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
+                self.refresh_observability_view(state.session_id)
+                self.refresh_context_badges(state.session_id)
+        except Exception:
+            log_sub_agent_runtime(
+                "ui_observability_event_failed",
+                session_id=state.session_id,
+                event_type=(data or {}).get("type") or "",
+                traceback=traceback.format_exc(),
+            )
 
     def on_step_item_clicked(self, item):
         tool_id = item.data(Qt.UserRole)
@@ -9389,8 +9883,12 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         self.refresh_prompt_file_chips(session_id)
-        if getattr(state, "history_loaded", True):
-            self._render_sub_agent_monitor_for_state(state)
+        if (
+            getattr(state, "history_loaded", True)
+            and getattr(self, "right_drawer_open", False)
+            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+        ):
+            self._queue_render_sub_agent_monitor_for_state(state)
 
     def normalize_session_ui(self, state):
         if not state: return
@@ -9659,8 +10157,13 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(session_id)
         current_state = self.get_current_session()
         self.normalize_session_ui(current_state)
-        if current_state and getattr(current_state, "history_loaded", True):
-            self._render_sub_agent_monitor_for_state(current_state)
+        if (
+            current_state
+            and getattr(current_state, "history_loaded", True)
+            and getattr(self, "right_drawer_open", False)
+            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+        ):
+            self._queue_render_sub_agent_monitor_for_state(current_state)
 
         if ensure_loaded and not state.history_loaded and not state.history_loading:
             self.queue_session_history_load(session_id)
@@ -11789,6 +12292,15 @@ class MainWindow(QMainWindow):
         return f"{base_name}-{uuid.uuid4().hex[:4]}"
 
     def _dispatch_agent_profiles(self, state, original_text, task_text, profiles, summon_source="mention"):
+        log_sub_agent_runtime(
+            "ui_dispatch_profiles_begin",
+            session_id=getattr(state, "session_id", ""),
+            profile_count=len(profiles or []),
+            summon_source=summon_source,
+            original_len=len(original_text or ""),
+            task_len=len(task_text or ""),
+            log_path=sub_agent_log_path(),
+        )
         agent_state_proxy = type(
             "_AgentStateProxy",
             (),
@@ -11803,6 +12315,12 @@ class MainWindow(QMainWindow):
                 agent_state_signal=agent_state_proxy,
             )
         except Exception as exc:
+            log_sub_agent_runtime(
+                "ui_dispatch_manager_init_failed",
+                session_id=getattr(state, "session_id", ""),
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
             QMessageBox.warning(self, "智能体召唤失败", f"无法初始化子智能体运行时：{exc}")
             return False
 
@@ -11818,6 +12336,7 @@ class MainWindow(QMainWindow):
 
         for profile in profiles:
             run_context = self._build_agent_profile_run_context(profile, state=state, summon_source=summon_source)
+            agent_name = self._build_summoned_agent_name(profile)
             meta = {
                 "agent_profile_id": profile.get("id") or "",
                 "agent_profile_name": profile.get("name") or "",
@@ -11825,17 +12344,45 @@ class MainWindow(QMainWindow):
                 "summon_source": summon_source,
             }
             try:
-                manager.spawn_agent(
+                log_sub_agent_runtime(
+                    "ui_dispatch_spawn_begin",
+                    session_id=state.session_id,
+                    profile_id=profile.get("id") or "",
+                    profile_name=profile.get("name") or "",
+                    agent_name=agent_name,
+                    selected_skill_names=run_context.get("selected_skill_names") or [],
+                    allowed_skill_names=run_context.get("allowed_skill_names") or [],
+                    snapshot_count=max(len(state.messages[:-1]), 0),
+                )
+                result = manager.spawn_agent(
                     message=task_text,
-                    name=self._build_summoned_agent_name(profile),
+                    name=agent_name,
                     fork_context=True,
                     current_messages_snapshot=state.messages[:-1],
                     parent_message_id="",
                     run_context=run_context,
                     meta=meta,
                 )
+                log_sub_agent_runtime(
+                    "ui_dispatch_spawn_done",
+                    session_id=state.session_id,
+                    profile_id=profile.get("id") or "",
+                    profile_name=profile.get("name") or "",
+                    agent_name=agent_name,
+                    agent_id=(result or {}).get("agent_id") if isinstance(result, dict) else "",
+                    status=(result or {}).get("status") if isinstance(result, dict) else "",
+                )
                 started_profiles.append(profile)
             except Exception as exc:
+                log_sub_agent_runtime(
+                    "ui_dispatch_spawn_failed",
+                    session_id=state.session_id,
+                    profile_id=profile.get("id") or "",
+                    profile_name=profile.get("name") or "",
+                    agent_name=agent_name,
+                    error=str(exc),
+                    traceback=traceback.format_exc(),
+                )
                 self.add_system_toast(
                     f"召唤智能体失败：{profile.get('name') or '未命名智能体'} - {exc}",
                     "error",
@@ -11844,6 +12391,11 @@ class MainWindow(QMainWindow):
                 )
 
         if not started_profiles:
+            log_sub_agent_runtime(
+                "ui_dispatch_no_profiles_started",
+                session_id=state.session_id,
+                profile_count=len(profiles or []),
+            )
             self.set_session_phase("Error", state.session_id)
             self.set_session_status("error", state.session_id, save=True)
             return False
@@ -11866,6 +12418,13 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.normalize_session_ui(state)
+        log_sub_agent_runtime(
+            "ui_dispatch_profiles_done",
+            session_id=state.session_id,
+            started_count=len(started_profiles),
+            summon_source=summon_source,
+            log_path=sub_agent_log_path(),
+        )
         return True
 
     def _append_summoned_agent_result(self, state, data):
@@ -12054,6 +12613,14 @@ class MainWindow(QMainWindow):
         )
 
     def show_tool_details(self, tool_id, args, result, meta=None, switch_tab=True):
+        log_sub_agent_runtime(
+            "ui_tool_details_begin",
+            tool_id=str(tool_id or ""),
+            switch_tab=bool(switch_tab),
+            args_len=len(str(args or "")),
+            result_len=len(str(result or "")),
+            current_session_id=str(getattr(self, "current_session_id", "") or ""),
+        )
         # 1. Update selection state in UI
         state = self.get_current_session()
         selected_card = None
@@ -12108,7 +12675,12 @@ class MainWindow(QMainWindow):
         except:
             args_text = str(args)
             
-        self.td_args_edit.setPlainText(args_text)
+        self._set_observability_text(
+            self.td_args_edit,
+            args_text,
+            "tool_args",
+            limit=8000,
+        )
         
         try:
             if selected_card and getattr(selected_card, "result_obj", None) is not None:
@@ -12128,7 +12700,19 @@ class MainWindow(QMainWindow):
         if not (res_text or "").strip() and selected_card and not getattr(selected_card, "is_finished", False):
             res_text = "(Running...)"
              
-        self.td_result_edit.setPlainText(res_text)
+        self._set_observability_text(
+            self.td_result_edit,
+            res_text,
+            "tool_result",
+            limit=12000,
+        )
+        log_sub_agent_runtime(
+            "ui_tool_details_done",
+            tool_id=str(tool_id or ""),
+            args_len=len(args_text or ""),
+            result_len=len(res_text or ""),
+            current_session_id=str(getattr(self, "current_session_id", "") or ""),
+        )
 
     def add_tool_card(self, data, session_id=None, index=None, animate=True):
         meta = data.get('meta') or {}
@@ -12339,16 +12923,16 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.llm_worker = state.llm_worker
         session_id = state.session_id
-        state.llm_worker.finished_signal.connect(lambda result, sid=session_id, tid=turn_id: self.handle_llm_response(result, sid, tid))
-        state.llm_worker.content_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
-        state.llm_worker.step_signal.connect(self.append_log)
-        state.llm_worker.thinking_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid))
-        state.llm_worker.skill_used_signal.connect(lambda name, sid=session_id: self.handle_skill_used(name, sid))
-        state.llm_worker.tool_call_signal.connect(lambda data, sid=session_id: self.add_tool_card(data, sid))
-        state.llm_worker.tool_result_signal.connect(lambda data, sid=session_id: self.update_tool_card(data, sid))
-        state.llm_worker.observability_signal.connect(lambda data, sid=session_id: self.handle_observability_event(data, sid))
-        state.llm_worker.output_signal.connect(lambda text, sid=session_id: self.handle_worker_output(text, sid))
-        state.llm_worker.agent_state_signal.connect(lambda data, sid=session_id: self.handle_agent_state(data, sid))
+        state.llm_worker.finished_signal.connect(lambda result, sid=session_id, tid=turn_id: self.handle_llm_response(result, sid, tid), Qt.QueuedConnection)
+        state.llm_worker.content_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_content_signal(text, sid, tid), Qt.QueuedConnection)
+        state.llm_worker.step_signal.connect(self.append_log, Qt.QueuedConnection)
+        state.llm_worker.thinking_signal.connect(lambda text, sid=session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)
+        state.llm_worker.skill_used_signal.connect(lambda name, sid=session_id: self.handle_skill_used(name, sid), Qt.QueuedConnection)
+        state.llm_worker.tool_call_signal.connect(lambda data, sid=session_id: self.add_tool_card(data, sid), Qt.QueuedConnection)
+        state.llm_worker.tool_result_signal.connect(lambda data, sid=session_id: self.update_tool_card(data, sid), Qt.QueuedConnection)
+        state.llm_worker.observability_signal.connect(lambda data, sid=session_id: self.handle_observability_event(data, sid), Qt.QueuedConnection)
+        state.llm_worker.output_signal.connect(lambda text, sid=session_id: self.handle_worker_output(text, sid), Qt.QueuedConnection)
+        state.llm_worker.agent_state_signal.connect(lambda data, sid=session_id: self.handle_agent_state(data, sid), Qt.QueuedConnection)
         state.llm_worker.start()
         
         if state.session_id == self.current_session_id:
@@ -12377,14 +12961,14 @@ class MainWindow(QMainWindow):
             self.workspace_dir,
             run_context=run_context,
         )
-        state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid))
-        state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid))
-        state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid))
-        state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid))
-        state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid))
-        state.daemon_worker.observability_signal.connect(lambda data, sid=state.session_id: self.handle_observability_event(data, sid))
-        state.daemon_worker.agent_state_signal.connect(lambda data, sid=state.session_id: self.handle_agent_state(data, sid))
-        state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid))
+        state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid), Qt.QueuedConnection)
+        state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)
+        state.daemon_worker.content_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_content_signal(text, sid, tid), Qt.QueuedConnection)
+        state.daemon_worker.tool_call_signal.connect(lambda data, sid=state.session_id: self.add_tool_card(data, sid), Qt.QueuedConnection)
+        state.daemon_worker.tool_result_signal.connect(lambda data, sid=state.session_id: self.update_tool_card(data, sid), Qt.QueuedConnection)
+        state.daemon_worker.observability_signal.connect(lambda data, sid=state.session_id: self.handle_observability_event(data, sid), Qt.QueuedConnection)
+        state.daemon_worker.agent_state_signal.connect(lambda data, sid=state.session_id: self.handle_agent_state(data, sid), Qt.QueuedConnection)
+        state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid), Qt.QueuedConnection)
         state.daemon_worker.start()
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
@@ -12450,17 +13034,54 @@ class MainWindow(QMainWindow):
     def _render_sub_agent_monitor_for_state(self, state):
         if not state or not hasattr(self, "sub_agent_monitor") or self.sub_agent_monitor is None:
             return
+        if not _qt_object_alive(self.sub_agent_monitor):
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_invalid",
+                session_id=getattr(state, "session_id", ""),
+            )
+            return
+        all_events = list(getattr(state, "sub_agent_events", []) or [])
+        events = all_events[-SUB_AGENT_MONITOR_RENDER_LIMIT:]
+        omitted_count = max(0, len(all_events) - len(events))
+        log_sub_agent_runtime(
+            "ui_sub_agent_monitor_render_begin",
+            session_id=getattr(state, "session_id", ""),
+            total_event_count=len(all_events),
+            render_event_count=len(events),
+            omitted_event_count=omitted_count,
+            drawer_open=bool(getattr(self, "right_drawer_open", False)),
+            drawer_tab=getattr(self, "right_drawer_tab", None),
+        )
         try:
             self.sub_agent_monitor.reset()
-            events = list(getattr(state, "sub_agent_events", []) or [])[-240:]
-            for event in events:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_render_reset_done",
+                session_id=getattr(state, "session_id", ""),
+            )
+            if omitted_count:
+                self.sub_agent_monitor.set_notice(
+                    f"为保证稳定性，仅显示最近 {len(events)} 条子 Agent 事件，已省略更早的 {omitted_count} 条。"
+                )
+            rendered_count = 0
+            skipped_count = 0
+            for index, event in enumerate(events, start=1):
                 if not isinstance(event, dict):
+                    skipped_count += 1
                     continue
                 agent_id = event.get("agent_id")
                 if not agent_id:
+                    skipped_count += 1
                     continue
                 status = event.get("status") or "running"
                 content = event.get("content") or ""
+                log_sub_agent_runtime(
+                    "ui_sub_agent_monitor_render_event_begin",
+                    session_id=getattr(state, "session_id", ""),
+                    agent_id=agent_id,
+                    status=status,
+                    render_index=index,
+                    content_len=len(str(content or "")),
+                )
                 self.sub_agent_monitor.update_log(
                     agent_id,
                     content,
@@ -12468,115 +13089,275 @@ class MainWindow(QMainWindow):
                     agent_name=event.get("agent_name") or "",
                     event=event,
                 )
+                rendered_count += 1
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_render_done",
+                session_id=state.session_id,
+                event_count=len(events),
+                rendered_event_count=rendered_count,
+                skipped_event_count=skipped_count,
+                agent_count=len(getattr(self.sub_agent_monitor, "agents", {}) or {}),
+                drawer_open=bool(getattr(self, "right_drawer_open", False)),
+                drawer_tab=getattr(self, "right_drawer_tab", None),
+            )
         except Exception:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_render_failed",
+                session_id=getattr(state, "session_id", ""),
+                traceback=traceback.format_exc(),
+            )
             return
 
-    def _queue_render_sub_agent_monitor_for_state(self, state):
+    def _flush_sub_agent_monitor_render(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_flush_skipped",
+                session_id=str(session_id or ""),
+                reason="missing_session",
+            )
+            return
+        state.sub_agent_render_queued = False
+        if session_id != self.current_session_id:
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_flush_skipped",
+                session_id=str(session_id or ""),
+                reason="not_current_session",
+                current_session_id=str(getattr(self, "current_session_id", "") or ""),
+            )
+            return
+        if not (
+            getattr(self, "right_drawer_open", False)
+            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+        ):
+            log_sub_agent_runtime(
+                "ui_sub_agent_monitor_flush_skipped",
+                session_id=str(session_id or ""),
+                reason="drawer_closed",
+                drawer_open=bool(getattr(self, "right_drawer_open", False)),
+                drawer_tab=getattr(self, "right_drawer_tab", None),
+            )
+            return
+        log_sub_agent_runtime(
+            "ui_sub_agent_monitor_flush_begin",
+            session_id=str(session_id or ""),
+            event_count=len(getattr(state, "sub_agent_events", []) or []),
+        )
+        self._render_sub_agent_monitor_for_state(state)
+
+    def _queue_render_sub_agent_monitor_for_state(self, state, delay_ms=120):
         if not state:
             return
-        session_id = state.session_id
+        if getattr(state, "sub_agent_render_queued", False):
+            return
+        state.sub_agent_render_queued = True
+        session_id = getattr(state, "session_id", "")
+        if not session_id:
+            state.sub_agent_render_queued = False
+            return
+        try:
+            delay_ms = max(0, int(delay_ms))
+        except Exception:
+            delay_ms = 120
         QTimer.singleShot(
-            50,
-            lambda sid=session_id: self._render_sub_agent_monitor_for_state(self.get_session(sid))
-            if sid == self.current_session_id
-            else None,
+            delay_ms,
+            lambda sid=session_id: self._flush_sub_agent_monitor_render(sid),
         )
 
     def handle_agent_state(self, data, session_id=None):
-        if QThread.currentThread() is not self.thread():
+        try:
+            on_ui_thread = QThread.currentThread() is self.thread()
+        except RuntimeError:
+            on_ui_thread = True
+        if not on_ui_thread:
             payload = dict(data) if isinstance(data, dict) else {}
+            log_sub_agent_runtime(
+                "ui_agent_state_queued_to_main",
+                session_id=str(session_id or ""),
+                agent_id=payload.get("agent_id") or "",
+                status=payload.get("status") or "",
+                event_type=payload.get("event_type") or "",
+            )
             self.agent_state_ui_signal.emit(payload, str(session_id or ""))
             return
         self._handle_agent_state_ui(data, session_id)
 
     def _handle_agent_state_ui(self, data, session_id=None):
+        self._agent_state_ui_event_seq = int(getattr(self, "_agent_state_ui_event_seq", 0)) + 1
+        ui_event_seq = self._agent_state_ui_event_seq
+        payload = dict(data) if isinstance(data, dict) else {}
+        status = payload.get("status") or ""
+        agent_id = payload.get("agent_id") or ""
+        event_type = payload.get("event_type") or ""
+
+        def _log_stage(stage, event_name="ui_agent_state_stage_begin", **extra):
+            fields = {
+                "ui_event_seq": ui_event_seq,
+                "stage": stage,
+                "thread_id": threading.get_ident(),
+                "session_id": str(session_id or ""),
+                "current_session_id": str(getattr(self, "current_session_id", "") or ""),
+                "agent_id": agent_id,
+                "agent_name": payload.get("agent_name") or "",
+                "status": status,
+                "event_type": event_type,
+                "content_len": _sub_agent_payload_content_len(payload),
+                "has_last_agent_bubble": False,
+                "drawer_open": bool(getattr(self, "right_drawer_open", False)),
+                "drawer_tab": getattr(self, "right_drawer_tab", None),
+            }
+            fields.update(extra or {})
+            log_sub_agent_runtime(event_name, **fields)
+
+        _log_stage("session_lookup", "ui_agent_state_stage_begin")
         state = self.get_session(session_id)
-        if not state: return
-        status = data.get("status")
-        if status in {"input", "thinking", "pending", "content", "provider_log", "tool_result"}:
-            self.set_session_phase("Analyzing", state.session_id)
-        elif status == "tool_use":
-            self.set_session_phase("Executing", state.session_id)
-        elif status == "provider_error":
-            self.set_session_phase("Error", state.session_id)
-        
-        # Update Tool Card
-        tool_call_id = data.get("tool_call_id")
-        if tool_call_id and tool_call_id in state.tool_cards:
-            card = state.tool_cards[tool_call_id]
-            card.update_agent_state(data)
+        if not state:
+            log_sub_agent_runtime(
+                "ui_agent_state_missing_session",
+                ui_event_seq=ui_event_seq,
+                session_id=str(session_id or ""),
+                agent_id=agent_id,
+                status=status,
+            )
+            return
+        _log_stage(
+            "session_lookup",
+            "ui_agent_state_stage_done",
+            session_id=state.session_id,
+            has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)),
+            is_current=state.session_id == self.current_session_id,
+        )
+        log_sub_agent_runtime(
+            "ui_agent_state_handle_begin",
+            ui_event_seq=ui_event_seq,
+            session_id=state.session_id,
+            agent_id=agent_id,
+            agent_name=payload.get("agent_name") or "",
+            status=status or "",
+            event_type=event_type,
+            content_len=_sub_agent_payload_content_len(payload),
+            has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)),
+            drawer_open=bool(getattr(self, "right_drawer_open", False)),
+            drawer_tab=getattr(self, "right_drawer_tab", None),
+            is_current=state.session_id == self.current_session_id,
+        )
 
         monitor_content = ""
-        if status == "input":
-            monitor_content = data.get("input_text") or data.get("content") or ""
-        elif status == "thinking":
-            monitor_content = data.get("reasoning_delta") or ""
-        elif status == "content":
-            monitor_content = data.get("content_delta") or ""
-        elif status == "log":
-            monitor_content = data.get("log_content") or ""
-        elif status == "provider_log":
-            monitor_content = data.get("provider_message") or ""
-        elif status == "provider_error":
-            monitor_content = data.get("provider_message") or data.get("error") or ""
-        elif status == "tool_use":
-            monitor_content = data.get("task") or ""
-        elif status == "tool_result":
-            monitor_content = data.get("tool_result") or ""
-        elif status == "pending":
-            monitor_content = data.get("task") or ""
-        elif status in {"failed", "failed_recovered", "killed"}:
-            monitor_content = data.get("error") or data.get("content") or ""
-        elif status == "completed":
-            monitor_content = data.get("output_text") or data.get("content") or ""
-        elif status in {"failed", "failed_recovered", "killed", "closed"}:
-            monitor_content = data.get("error") or data.get("content") or ""
-        self._record_sub_agent_event(state, data, monitor_content)
-        if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
-            self._append_summoned_agent_result(state, data)
-        if session_id == self.current_session_id and hasattr(self, "sub_agent_monitor") and self.sub_agent_monitor:
-            agent_id = data.get("agent_id")
-            if agent_id:
-                try:
-                    self.sub_agent_monitor.update_log(
-                        agent_id,
-                        monitor_content,
-                        status,
-                        agent_name=data.get("agent_name") or "",
-                        event=data,
-                    )
-                except Exception:
-                    pass
 
-        # Update Sub-Agent Monitor (PiP in ChatBubble)
-        if session_id == self.current_session_id:
-            if data.get("agent_id"):
-                try:
-                    self.show_context_drawer(self.RIGHT_TAB_SUB_AGENTS)
-                except Exception:
-                    pass
-            agent_id = data.get("agent_id")
-            
-            if agent_id and state.last_agent_bubble:
+        try:
+            _log_stage("phase_update", "ui_agent_state_stage_begin", session_id=state.session_id, has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)))
+            if status in {"input", "thinking", "pending", "content", "provider_log", "tool_result"}:
+                self.set_session_phase("Analyzing", state.session_id)
+            elif status == "tool_use":
+                self.set_session_phase("Executing", state.session_id)
+            elif status == "provider_error":
+                self.set_session_phase("Error", state.session_id)
+            _log_stage("phase_update", "ui_agent_state_stage_done", session_id=state.session_id, has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)))
+        except Exception:
+            _log_stage("phase_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+            raise
+
+        try:
+            _log_stage("tool_card_update", "ui_agent_state_stage_begin", session_id=state.session_id)
+            tool_call_id = payload.get("tool_call_id")
+            if tool_call_id and tool_call_id in state.tool_cards:
+                card = state.tool_cards[tool_call_id]
+                card.update_agent_state(payload)
+            _log_stage("tool_card_update", "ui_agent_state_stage_done", session_id=state.session_id, tool_call_id=tool_call_id or "")
+        except Exception:
+            _log_stage("tool_card_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+
+        try:
+            _log_stage("record_event", "ui_agent_state_stage_begin", session_id=state.session_id)
+            if status == "input":
+                monitor_content = payload.get("input_text") or payload.get("content") or ""
+            elif status == "thinking":
+                monitor_content = payload.get("reasoning_delta") or ""
+            elif status == "content":
+                monitor_content = payload.get("content_delta") or ""
+            elif status == "log":
+                monitor_content = payload.get("log_content") or ""
+            elif status == "provider_log":
+                monitor_content = payload.get("provider_message") or ""
+            elif status == "provider_error":
+                monitor_content = payload.get("provider_message") or payload.get("error") or ""
+            elif status == "tool_use":
+                monitor_content = payload.get("task") or ""
+            elif status == "tool_result":
+                monitor_content = payload.get("tool_result") or ""
+            elif status == "pending":
+                monitor_content = payload.get("task") or ""
+            elif status == "completed":
+                monitor_content = payload.get("output_text") or payload.get("content") or ""
+            elif status in {"failed", "failed_recovered", "killed", "closed"}:
+                monitor_content = payload.get("error") or payload.get("content") or ""
+            self._record_sub_agent_event(state, payload, monitor_content)
+            _log_stage(
+                "record_event",
+                "ui_agent_state_stage_done",
+                session_id=state.session_id,
+                monitor_content_len=len(str(monitor_content or "")),
+                event_count=len(getattr(state, "sub_agent_events", []) or []),
+            )
+        except Exception:
+            _log_stage("record_event", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+            raise
+
+        try:
+            _log_stage("drawer_hint", "ui_agent_state_stage_begin", session_id=state.session_id)
+            if state.session_id == self.current_session_id and agent_id:
+                self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
+            _log_stage("drawer_hint", "ui_agent_state_stage_done", session_id=state.session_id)
+        except Exception:
+            _log_stage("drawer_hint", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+
+        try:
+            _log_stage("sub_agent_monitor_update", "ui_agent_state_stage_begin", session_id=state.session_id)
+            if (
+                state.session_id == self.current_session_id
+                and getattr(self, "right_drawer_open", False)
+                and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SUB_AGENTS
+            ):
+                self._queue_render_sub_agent_monitor_for_state(state)
+            _log_stage(
+                "sub_agent_monitor_update",
+                "ui_agent_state_stage_done",
+                session_id=state.session_id,
+                render_queued=bool(getattr(state, "sub_agent_render_queued", False)),
+            )
+        except Exception:
+            _log_stage("sub_agent_monitor_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+
+        try:
+            _log_stage("summoned_result", "ui_agent_state_stage_begin", session_id=state.session_id)
+            if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
+                self._append_summoned_agent_result(state, payload)
+            _log_stage("summoned_result", "ui_agent_state_stage_done", session_id=state.session_id)
+        except Exception:
+            _log_stage("summoned_result", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+
+        try:
+            _log_stage("bubble_pip_update", "ui_agent_state_stage_begin", session_id=state.session_id, has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)))
+            if state.session_id == self.current_session_id and agent_id and state.last_agent_bubble and _qt_object_alive(state.last_agent_bubble):
                 content = None
                 if status == "input":
-                    content = f"Input: {data.get('input_text') or data.get('content') or ''}\n"
+                    content = f"Input: {payload.get('input_text') or payload.get('content') or ''}\n"
                 elif status == "thinking":
-                    content = data.get("reasoning_delta")
+                    content = payload.get("reasoning_delta")
                 elif status == "content":
-                    content = data.get("content_delta")
+                    content = payload.get("content_delta")
                 elif status == "log":
-                    content = data.get("log_content")
+                    content = payload.get("log_content")
                 elif status == "provider_log":
-                    content = data.get("provider_message")
+                    content = payload.get("provider_message")
                 elif status == "provider_error":
-                    content = data.get("provider_message") or data.get("error")
+                    content = payload.get("provider_message") or payload.get("error")
                 elif status == "tool_use":
-                    content = data.get("task")
+                    content = payload.get("task")
                 elif status == "tool_result":
-                    content = f"Tool result: {preview_text(data.get('tool_result') or '', limit=120)}\n"
+                    content = f"Tool result: {preview_text(payload.get('tool_result') or '', limit=120)}\n"
                 elif status == "pending":
-                    content = f"Task: {data.get('task')}\n"
+                    content = f"Task: {payload.get('task')}\n"
                 elif status in {"running", "active"}:
                     content = "Running...\n"
                 elif status == "waiting_input":
@@ -12584,31 +13365,27 @@ class MainWindow(QMainWindow):
                 elif status == "completed":
                     content = "\nDone."
                 elif status in {"failed", "failed_recovered"}:
-                    content = f"\nFailed: {data.get('content') or data.get('error') or ''}"
+                    content = f"\nFailed: {payload.get('content') or payload.get('error') or ''}"
                 elif status == "closed":
-                    detail = (data.get("error") or "").strip()
+                    detail = (payload.get("error") or "").strip()
                     content = f"\nClosed: {detail}" if detail else "\nClosed."
                 elif status == "killed":
-                    detail = (data.get("error") or "").strip()
+                    detail = (payload.get("error") or "").strip()
                     content = f"\nKilled: {detail}" if detail else "\nKilled."
-                    
-                if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error", "tool_result", "input"]:
-                    # Update log in bubble
-                    if hasattr(state.last_agent_bubble, 'update_sub_agent_log'):
-                        try:
-                            state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)
-                        except Exception:
-                            pass
-                
-                # Update indicator status
-                if hasattr(state.last_agent_bubble, 'add_sub_agent_indicator'):
-                    try:
-                        state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
-                    except Exception:
-                        pass
 
-        if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
-            try:
+                if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error", "tool_result", "input"]:
+                    if hasattr(state.last_agent_bubble, 'update_sub_agent_log'):
+                        state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)
+                if hasattr(state.last_agent_bubble, 'add_sub_agent_indicator'):
+                    state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
+            _log_stage("bubble_pip_update", "ui_agent_state_stage_done", session_id=state.session_id, has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)))
+        except Exception:
+            _log_stage("bubble_pip_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+
+        try:
+            _log_stage("live_agent_check", "ui_agent_state_stage_begin", session_id=state.session_id)
+            live_agents = []
+            if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
                 manager = get_agent_manager_registry().get_session_manager(
                     state.session_id,
                     chat_storage=self.chat_storage,
@@ -12616,28 +13393,46 @@ class MainWindow(QMainWindow):
                     workspace_dir=self.workspace_dir,
                 )
                 live_agents = manager.list_agent_summaries(status_filter=list(AGENT_LIVE_STATUSES))
-            except Exception:
-                live_agents = []
-            if not live_agents and not (
-                (state.llm_worker and state.llm_worker.isRunning())
-                or getattr(state, "daemon_running", False)
-            ):
-                if normalize_sop_run(getattr(state, "sop_run", None)) and status == "completed":
-                    content = data.get("content") or ""
-                    self._mark_sop_step_done_for_confirmation(
-                        state,
-                        executor="sub_agent",
-                        content=content,
-                        agent_profile={
-                            "id": data.get("agent_profile_id") or "",
-                            "name": data.get("agent_profile_name") or data.get("agent_name") or "",
-                        },
-                    )
-                    self.set_session_phase("Awaiting confirmation", state.session_id)
-                    self.set_session_status("draft", state.session_id, save=True)
-                else:
-                    self.set_session_phase("Completed", state.session_id)
-                    self.set_session_status("completed", state.session_id, save=True)
+            _log_stage("live_agent_check", "ui_agent_state_stage_done", session_id=state.session_id, live_count=len(live_agents))
+        except Exception:
+            _log_stage("live_agent_check", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+            live_agents = []
+
+        try:
+            _log_stage("final_status_update", "ui_agent_state_stage_begin", session_id=state.session_id)
+            if status in {"completed", "failed", "failed_recovered", "killed", "closed"}:
+                if not live_agents and not (
+                    (state.llm_worker and state.llm_worker.isRunning())
+                    or getattr(state, "daemon_running", False)
+                ):
+                    if normalize_sop_run(getattr(state, "sop_run", None)) and status == "completed":
+                        content = payload.get("content") or ""
+                        self._mark_sop_step_done_for_confirmation(
+                            state,
+                            executor="sub_agent",
+                            content=content,
+                            agent_profile={
+                                "id": payload.get("agent_profile_id") or "",
+                                "name": payload.get("agent_profile_name") or payload.get("agent_name") or "",
+                            },
+                        )
+                        self.set_session_phase("Awaiting confirmation", state.session_id)
+                        self.set_session_status("draft", state.session_id, save=True)
+                    else:
+                        self.set_session_phase("Completed", state.session_id)
+                        self.set_session_status("completed", state.session_id, save=True)
+            _log_stage("final_status_update", "ui_agent_state_stage_done", session_id=state.session_id)
+        except Exception:
+            _log_stage("final_status_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+
+        log_sub_agent_runtime(
+            "ui_agent_state_handle_done",
+            ui_event_seq=ui_event_seq,
+            session_id=state.session_id,
+            agent_id=agent_id,
+            status=status or "",
+            event_count=len(getattr(state, "sub_agent_events", []) or []),
+        )
 
     def handle_content_signal(self, text, session_id=None, turn_id=None):
         state = self.get_session(session_id)

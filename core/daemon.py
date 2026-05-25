@@ -81,6 +81,7 @@ class DaemonState:
         self.chat_storage = ChatStorage(db_path)
         self.sessions = {}
         self.active_workers = {}
+        self.detached_workers = {}
         self.lock = threading.Lock()
         self.suspended = False
         self.last_activity = time.time()
@@ -169,10 +170,52 @@ class DaemonState:
         with self.lock:
             if session_id in self.active_workers:
                 del self.active_workers[session_id]
+
+    def detach_worker_until_finished(self, session_id, worker, reason=""):
+        if not worker:
+            return False
+        key = id(worker)
+
+        def cleanup():
+            with self.lock:
+                self.detached_workers.pop(key, None)
+            _log_daemon(
+                f"detached worker finished session_id={session_id} "
+                f"worker_id={hex(key)} reason={reason}"
+            )
+
+        with self.lock:
+            self.detached_workers[key] = {
+                "session_id": session_id,
+                "worker": worker,
+                "reason": reason,
+                "created_at": time.time(),
+            }
+        try:
+            worker.finished.connect(cleanup, Qt.DirectConnection)
+        except Exception as e:
+            _log_daemon(f"detach worker connect finished failed session_id={session_id} error={e}")
+        try:
+            is_running = bool(worker.isRunning())
+        except Exception:
+            is_running = True
+        if not is_running:
+            cleanup()
+            return False
+        _log_daemon(
+            f"detached running worker session_id={session_id} "
+            f"worker_id={hex(key)} reason={reason}"
+        )
+        return True
     
     def stop_session(self, session_id):
         with self.lock:
             worker = self.active_workers.get(session_id)
+            detached = [
+                item.get("worker")
+                for item in self.detached_workers.values()
+                if item.get("session_id") == session_id
+            ]
         interaction_service.cancel_session_requests(session_id, reason="cancelled")
         self._close_live_subagents(session_id, force=True)
         if worker:
@@ -180,8 +223,12 @@ class DaemonState:
                 worker.stop()
             except Exception as e:
                 _log_daemon(f"stop_session worker.stop failed session_id={session_id} error={e}")
-            return True
-        return False
+        for detached_worker in detached:
+            try:
+                detached_worker.stop()
+            except Exception as e:
+                _log_daemon(f"stop_session detached worker.stop failed session_id={session_id} error={e}")
+        return bool(worker or detached)
 
     def _close_live_subagents(self, session_id, force=False):
         try:
@@ -537,21 +584,57 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             messages = state.get_session_messages(session_id)
             state.append_user_message_if_needed(messages, content)
             stream_lock = threading.Lock()
+            stream_closed = threading.Event()
+            worker_holder = {}
+
+            def cancel_stream_due_to_disconnect(reason):
+                if stream_closed.is_set():
+                    return
+                stream_closed.set()
+                _log_daemon(f"send_message_stream client disconnected session_id={session_id} reason={reason}")
+                try:
+                    interaction_service.cancel_session_requests(session_id, reason="client_disconnected")
+                except Exception as e:
+                    _log_daemon(f"client disconnect cancel interactions failed session_id={session_id} error={e}")
+                try:
+                    state._close_live_subagents(session_id, force=True)
+                except Exception as e:
+                    _log_daemon(f"client disconnect close sub-agents failed session_id={session_id} error={e}")
+                worker = worker_holder.get("worker")
+                if worker:
+                    try:
+                        worker.stop()
+                    except Exception as e:
+                        _log_daemon(f"client disconnect worker.stop failed session_id={session_id} error={e}")
+                state.clear_active_worker(session_id)
+                result_holder["result"] = {
+                    "error": "Daemon stream client disconnected.",
+                    "_streamed": True,
+                }
+                done.set()
 
             def send_stream(payload):
+                if stream_closed.is_set():
+                    return False
                 try:
                     with stream_lock:
+                        if stream_closed.is_set():
+                            return False
                         raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
                         self.wfile.write(raw)
                         self.wfile.flush()
+                    return True
                 except Exception as e:
                     _log_daemon(f"send_stream write failed session_id={session_id} payload_type={payload.get('type')} error={e}")
+                    cancel_stream_due_to_disconnect(str(e))
+                    return False
 
             result_holder = {}
             done = threading.Event()
             def on_finished(result):
                 result_holder["result"] = result
-                send_stream({"type": "final", "result": result})
+                if not stream_closed.is_set():
+                    send_stream({"type": "final", "result": result})
                 state.clear_active_worker(session_id)
                 done.set()
 
@@ -562,6 +645,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 session_id=session_id,
                 run_context=run_context,
             )
+            worker_holder["worker"] = worker
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
             worker.content_signal.connect(lambda text: send_stream({"type": "content", "delta": text}), Qt.DirectConnection)
             worker.tool_call_signal.connect(lambda data: send_stream({"type": "tool_call", "data": data}), Qt.DirectConnection)
@@ -583,7 +667,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             try:
                 worker.start()
                 done.wait()
-                worker.wait(2000)
+                if not worker.wait(2000):
+                    state.detach_worker_until_finished(
+                        session_id,
+                        worker,
+                        reason="stream_closed" if stream_closed.is_set() else "finished_wait_timeout",
+                    )
             finally:
                 try:
                     interaction_service.interaction_requested.disconnect(handle_interaction_request)

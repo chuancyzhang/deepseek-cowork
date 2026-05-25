@@ -1,11 +1,14 @@
 import json
+import os
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QObject, Qt, Signal
 from core.chat_storage import AGENT_TERMINAL_STATUSES, ChatStorage
+from core.env_utils import get_app_data_dir
 
 AGENT_MANAGEMENT_TOOLS = {
     "spawn_agent",
@@ -18,6 +21,48 @@ AGENT_MANAGEMENT_TOOLS = {
 AGENT_LIVE_STATUSES = {"queued", "running", "waiting_input"}
 
 
+def _short_debug_value(value, limit=240):
+    text = str(value or "")
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+    return text[:limit] + "..." if len(text) > limit else text
+
+
+def _debug_worker_summary(worker):
+    if worker is None:
+        return {"worker": None}
+    summary = {
+        "worker_class": worker.__class__.__name__,
+        "worker_id": hex(id(worker)),
+        "has_qthread_finished": bool(getattr(worker, "finished", None) is not None),
+        "has_finished_signal": bool(getattr(worker, "finished_signal", None) is not None),
+    }
+    try:
+        summary["is_running"] = bool(worker.isRunning())
+    except Exception as exc:
+        summary["is_running_error"] = _short_debug_value(exc)
+    return summary
+
+
+def _log_agent_runtime(event, **fields):
+    try:
+        payload = {
+            "event": event,
+            "thread_id": threading.get_ident(),
+        }
+        payload.update(fields or {})
+        log_dir = get_app_data_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "sub_agent_runtime.log")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"[{ts}] {json.dumps(payload, ensure_ascii=False, default=str)}\n")
+    except Exception:
+        try:
+            print(f"[sub-agent-runtime] {event} {fields}")
+        except Exception:
+            return
+
+
 class _ManagerEventBridge(QObject):
     step_message = Signal(str)
     agent_event = Signal(dict)
@@ -28,12 +73,12 @@ class _ManagerEventBridge(QObject):
         if owner_worker is not None:
             try:
                 self.step_message.connect(owner_worker.relay_agent_step, Qt.DirectConnection)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_agent_runtime("event_bridge_step_connect_failed", error=_short_debug_value(exc))
             try:
                 self.agent_event.connect(owner_worker.relay_agent_state, Qt.DirectConnection)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_agent_runtime("event_bridge_agent_connect_failed", error=_short_debug_value(exc))
 
 
 def _json_copy(value, fallback):
@@ -93,6 +138,9 @@ class AgentRuntimeRecord:
     worker: object = None
     messages: list = field(default_factory=list)
     pending_inputs: list = field(default_factory=list)
+    pending_restart: bool = False
+    worker_result_received: bool = False
+    worker_cleanup_pending: bool = False
     closing_requested: bool = False
     force_close: bool = False
 
@@ -131,6 +179,14 @@ class SessionAgentManager:
         self._condition = threading.Condition(self._lock)
         self._agents = {}
         self._loaded = False
+        _log_agent_runtime(
+            "manager_init",
+            conversation_id=self.conversation_id,
+            workspace_dir=self.workspace_dir,
+            has_step_signal=bool(self.step_signal),
+            has_agent_state_signal=bool(self.agent_state_signal),
+            owner_worker=owner_worker.__class__.__name__ if owner_worker is not None else "",
+        )
 
     def update_runtime_context(
         self,
@@ -155,6 +211,14 @@ class SessionAgentManager:
             if owner_worker is not None and owner_worker is not self.owner_worker:
                 self.owner_worker = owner_worker
                 self._event_bridge = _ManagerEventBridge(owner_worker=owner_worker)
+            _log_agent_runtime(
+                "manager_update_runtime_context",
+                conversation_id=self.conversation_id,
+                workspace_dir=self.workspace_dir,
+                has_step_signal=bool(self.step_signal),
+                has_agent_state_signal=bool(self.agent_state_signal),
+                owner_worker=self.owner_worker.__class__.__name__ if self.owner_worker is not None else "",
+            )
 
     def _emit_step(self, text):
         if not self.step_signal:
@@ -164,12 +228,13 @@ class SessionAgentManager:
             if self.step_signal:
                 self.step_signal.emit(str(text))
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_agent_runtime("emit_step_signal_failed", conversation_id=self.conversation_id, error=_short_debug_value(exc))
         if self._event_bridge is not None:
             try:
                 self._event_bridge.step_message.emit(str(text))
-            except Exception:
+            except Exception as exc:
+                _log_agent_runtime("emit_step_bridge_failed", conversation_id=self.conversation_id, error=_short_debug_value(exc))
                 return
 
     def _emit_agent_state(self, record, status, **extra):
@@ -195,12 +260,25 @@ class SessionAgentManager:
             if self.agent_state_signal:
                 self.agent_state_signal.emit(payload)
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_agent_runtime(
+                "emit_agent_state_signal_failed",
+                conversation_id=self.conversation_id,
+                agent_id=record.agent_id,
+                status=status,
+                error=_short_debug_value(exc),
+            )
         if self._event_bridge is not None:
             try:
                 self._event_bridge.agent_event.emit(payload)
-            except Exception:
+            except Exception as exc:
+                _log_agent_runtime(
+                    "emit_agent_state_bridge_failed",
+                    conversation_id=self.conversation_id,
+                    agent_id=record.agent_id,
+                    status=status,
+                    error=_short_debug_value(exc),
+                )
                 return
 
     def _ensure_conversation_row(self):
@@ -215,10 +293,18 @@ class SessionAgentManager:
         if self._loaded:
             return
         self._loaded = True
+        _log_agent_runtime("load_agents_from_storage_start", conversation_id=self.conversation_id)
         for row in self.chat_storage.list_agents(self.conversation_id):
             status = row.get("status") or "queued"
             if status not in AGENT_TERMINAL_STATUSES:
                 recovered = "failed_recovered" if status == "running" else "closed"
+                _log_agent_runtime(
+                    "recover_nonterminal_agent",
+                    conversation_id=self.conversation_id,
+                    agent_id=row.get("id") or "",
+                    old_status=status,
+                    new_status=recovered,
+                )
                 updated = self.chat_storage.set_agent_status(
                     row["id"],
                     recovered,
@@ -246,6 +332,11 @@ class SessionAgentManager:
             )
             if record.agent_id:
                 self._agents[record.agent_id] = record
+        _log_agent_runtime(
+            "load_agents_from_storage_done",
+            conversation_id=self.conversation_id,
+            known_count=len(self._agents),
+        )
 
     def _build_summary(self, record):
         return {
@@ -266,11 +357,21 @@ class SessionAgentManager:
     def _live_count_unlocked(self):
         return len([item for item in self._agents.values() if item.is_live()])
 
+    def _worker_has_thread_finished_signal(self, worker):
+        finished = getattr(worker, "finished", None)
+        return bool(finished is not None and hasattr(finished, "connect"))
+
     def _connect_worker_signals(self, record):
         worker = record.worker
         if worker is None:
             return
         agent_id = record.agent_id
+        _log_agent_runtime(
+            "connect_worker_signals_start",
+            conversation_id=self.conversation_id,
+            agent_id=agent_id,
+            **_debug_worker_summary(worker),
+        )
 
         def _on_step(message):
             with self._lock:
@@ -371,20 +472,41 @@ class SessionAgentManager:
         def _on_finished(result):
             self._on_worker_finished(agent_id, result if isinstance(result, dict) else {})
 
-        if getattr(worker, "step_signal", None):
-            worker.step_signal.connect(_on_step, Qt.DirectConnection)
-        if getattr(worker, "thinking_signal", None):
-            worker.thinking_signal.connect(_on_thinking, Qt.DirectConnection)
-        if getattr(worker, "content_signal", None):
-            worker.content_signal.connect(_on_content, Qt.DirectConnection)
-        if getattr(worker, "output_signal", None):
-            worker.output_signal.connect(_on_output, Qt.DirectConnection)
-        if getattr(worker, "tool_call_signal", None):
-            worker.tool_call_signal.connect(_on_tool_call, Qt.DirectConnection)
-        if getattr(worker, "tool_result_signal", None):
-            worker.tool_result_signal.connect(_on_tool_result, Qt.DirectConnection)
-        if getattr(worker, "finished_signal", None):
-            worker.finished_signal.connect(_on_finished, Qt.DirectConnection)
+        def _on_thread_finished():
+            self._on_worker_thread_finished(agent_id, worker)
+
+        try:
+            if getattr(worker, "step_signal", None):
+                worker.step_signal.connect(_on_step, Qt.DirectConnection)
+            if getattr(worker, "thinking_signal", None):
+                worker.thinking_signal.connect(_on_thinking, Qt.DirectConnection)
+            if getattr(worker, "content_signal", None):
+                worker.content_signal.connect(_on_content, Qt.DirectConnection)
+            if getattr(worker, "output_signal", None):
+                worker.output_signal.connect(_on_output, Qt.DirectConnection)
+            if getattr(worker, "tool_call_signal", None):
+                worker.tool_call_signal.connect(_on_tool_call, Qt.DirectConnection)
+            if getattr(worker, "tool_result_signal", None):
+                worker.tool_result_signal.connect(_on_tool_result, Qt.DirectConnection)
+            if getattr(worker, "finished_signal", None):
+                worker.finished_signal.connect(_on_finished, Qt.DirectConnection)
+            if self._worker_has_thread_finished_signal(worker):
+                worker.finished.connect(_on_thread_finished, Qt.DirectConnection)
+            _log_agent_runtime(
+                "connect_worker_signals_done",
+                conversation_id=self.conversation_id,
+                agent_id=agent_id,
+                has_thread_finished=self._worker_has_thread_finished_signal(worker),
+            )
+        except Exception as exc:
+            _log_agent_runtime(
+                "connect_worker_signals_failed",
+                conversation_id=self.conversation_id,
+                agent_id=agent_id,
+                error=_short_debug_value(exc),
+                traceback=traceback.format_exc(),
+            )
+            raise
 
     def _persist_record_unlocked(self, record):
         now = int(time.time())
@@ -421,9 +543,21 @@ class SessionAgentManager:
         if record.worker is not None:
             try:
                 if record.worker.isRunning():
+                    _log_agent_runtime(
+                        "start_worker_skip_already_running",
+                        conversation_id=self.conversation_id,
+                        agent_id=record.agent_id,
+                        status=record.status,
+                        **_debug_worker_summary(record.worker),
+                    )
                     return
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_agent_runtime(
+                    "start_worker_is_running_check_failed",
+                    conversation_id=self.conversation_id,
+                    agent_id=record.agent_id,
+                    error=_short_debug_value(exc),
+                )
         record.status = "running"
         if not record.started_at:
             record.started_at = int(time.time())
@@ -435,19 +569,75 @@ class SessionAgentManager:
         run_context_copy = _json_copy(record.run_context, {})
         if not isinstance(run_context_copy, dict):
             run_context_copy = {}
-        worker = self.worker_factory(
-            messages_copy,
-            self.config_manager,
-            self.workspace_dir,
-            record.agent_id,
-            self.conversation_id,
-            run_context_copy,
+        _log_agent_runtime(
+            "start_worker_factory_begin",
+            conversation_id=self.conversation_id,
+            agent_id=record.agent_id,
+            message_count=len(messages_copy),
+            workspace_dir=self.workspace_dir,
+            run_context_keys=sorted(list(run_context_copy.keys())),
         )
+        try:
+            worker = self.worker_factory(
+                messages_copy,
+                self.config_manager,
+                self.workspace_dir,
+                record.agent_id,
+                self.conversation_id,
+                run_context_copy,
+            )
+        except Exception as exc:
+            record.status = "failed"
+            record.last_error = str(exc)
+            record.finished_at = int(time.time())
+            self._persist_record_unlocked(record)
+            _log_agent_runtime(
+                "start_worker_factory_failed",
+                conversation_id=self.conversation_id,
+                agent_id=record.agent_id,
+                error=_short_debug_value(exc),
+                traceback=traceback.format_exc(),
+            )
+            self._emit_agent_state(record, "failed", error=record.last_error)
+            self._condition.notify_all()
+            raise
         record.worker = worker
+        record.pending_restart = False
+        record.worker_result_received = False
+        record.worker_cleanup_pending = False
         self._connect_worker_signals(record)
         self._emit_agent_state(record, "pending", task="Starting task")
         self._emit_agent_state(record, "running")
-        worker.start()
+        _log_agent_runtime(
+            "start_worker_start_begin",
+            conversation_id=self.conversation_id,
+            agent_id=record.agent_id,
+            **_debug_worker_summary(worker),
+        )
+        try:
+            worker.start()
+            _log_agent_runtime(
+                "start_worker_start_done",
+                conversation_id=self.conversation_id,
+                agent_id=record.agent_id,
+                **_debug_worker_summary(worker),
+            )
+        except Exception as exc:
+            record.status = "failed"
+            record.last_error = str(exc)
+            record.finished_at = int(time.time())
+            record.worker = None
+            self._persist_record_unlocked(record)
+            _log_agent_runtime(
+                "start_worker_start_failed",
+                conversation_id=self.conversation_id,
+                agent_id=record.agent_id,
+                error=_short_debug_value(exc),
+                traceback=traceback.format_exc(),
+            )
+            self._emit_agent_state(record, "failed", error=record.last_error)
+            self._condition.notify_all()
+            raise
 
     def _append_user_input_unlocked(self, record, message):
         created_at = _event_timestamp()
@@ -473,10 +663,29 @@ class SessionAgentManager:
         with self._lock:
             record = self._agents.get(agent_id)
             if not record:
+                _log_agent_runtime(
+                    "worker_finished_missing_record",
+                    conversation_id=self.conversation_id,
+                    agent_id=agent_id,
+                    result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+                )
                 self._condition.notify_all()
                 return
 
-            record.worker = None
+            worker = record.worker
+            record.worker_result_received = True
+            _log_agent_runtime(
+                "worker_finished_signal",
+                conversation_id=self.conversation_id,
+                agent_id=agent_id,
+                status_before=record.status,
+                result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+                generated_count=len(result.get("generated_messages", [])) if isinstance(result.get("generated_messages"), list) else 0,
+                content_preview=_short_debug_value(result.get("content") if isinstance(result, dict) else ""),
+                error_preview=_short_debug_value(result.get("error") if isinstance(result, dict) else ""),
+                pending_inputs=len(record.pending_inputs),
+                **_debug_worker_summary(worker),
+            )
             generated_messages = result.get("generated_messages", [])
             if isinstance(generated_messages, list) and generated_messages:
                 for item in generated_messages:
@@ -513,9 +722,23 @@ class SessionAgentManager:
                 record.last_result = str(result.get("content") or "")
 
             if record.pending_inputs and record.status not in {"closed", "killed"}:
-                next_input = record.pending_inputs.pop(0)
-                self._append_user_input_unlocked(record, next_input)
-                self._start_worker_unlocked(record)
+                if self._worker_has_thread_finished_signal(worker):
+                    record.pending_restart = True
+                    record.status = "waiting_input"
+                    record.worker_cleanup_pending = True
+                    self._persist_record_unlocked(record)
+                    self._emit_agent_state(record, "waiting_input")
+                    _log_agent_runtime(
+                        "worker_finished_defer_pending_restart",
+                        conversation_id=self.conversation_id,
+                        agent_id=agent_id,
+                        pending_inputs=len(record.pending_inputs),
+                    )
+                else:
+                    record.worker = None
+                    next_input = record.pending_inputs.pop(0)
+                    self._append_user_input_unlocked(record, next_input)
+                    self._start_worker_unlocked(record)
                 self._condition.notify_all()
                 return
 
@@ -528,6 +751,100 @@ class SessionAgentManager:
             if record.last_error:
                 payload["error"] = record.last_error
             self._emit_agent_state(record, record.status, **payload)
+            if self._worker_has_thread_finished_signal(worker):
+                record.worker_cleanup_pending = True
+            else:
+                record.worker = None
+            _log_agent_runtime(
+                "worker_finished_processed",
+                conversation_id=self.conversation_id,
+                agent_id=agent_id,
+                status=record.status,
+                pending_restart=record.pending_restart,
+                cleanup_pending=record.worker_cleanup_pending,
+                pending_inputs=len(record.pending_inputs),
+                has_worker=record.worker is not None,
+            )
+            self._condition.notify_all()
+
+    def _on_worker_thread_finished(self, agent_id, worker):
+        with self._lock:
+            record = self._agents.get(agent_id)
+            if not record:
+                _log_agent_runtime(
+                    "worker_thread_finished_missing_record",
+                    conversation_id=self.conversation_id,
+                    agent_id=agent_id,
+                    **_debug_worker_summary(worker),
+                )
+                self._condition.notify_all()
+                return
+            if record.worker is not worker:
+                _log_agent_runtime(
+                    "worker_thread_finished_stale_worker",
+                    conversation_id=self.conversation_id,
+                    agent_id=agent_id,
+                    current_worker_id=hex(id(record.worker)) if record.worker is not None else "",
+                    finished_worker_id=hex(id(worker)),
+                    status=record.status,
+                )
+                self._condition.notify_all()
+                return
+            _log_agent_runtime(
+                "worker_thread_finished",
+                conversation_id=self.conversation_id,
+                agent_id=agent_id,
+                status_before=record.status,
+                result_received=record.worker_result_received,
+                pending_restart=record.pending_restart,
+                pending_inputs=len(record.pending_inputs),
+                **_debug_worker_summary(worker),
+            )
+
+            if not record.worker_result_received and record.status not in AGENT_TERMINAL_STATUSES:
+                record.status = "failed"
+                record.last_error = "Agent thread exited before reporting a result."
+                record.finished_at = int(time.time())
+                self._persist_record_unlocked(record)
+                self._emit_agent_state(record, "failed", error=record.last_error)
+
+            record.worker = None
+            record.worker_cleanup_pending = False
+
+            try:
+                delete_later = getattr(worker, "deleteLater", None)
+                if callable(delete_later):
+                    delete_later()
+            except Exception as exc:
+                _log_agent_runtime(
+                    "worker_delete_later_failed",
+                    conversation_id=self.conversation_id,
+                    agent_id=agent_id,
+                    error=_short_debug_value(exc),
+                )
+
+            if record.pending_restart and record.pending_inputs and record.status not in {"closed", "killed"}:
+                record.pending_restart = False
+                next_input = record.pending_inputs.pop(0)
+                _log_agent_runtime(
+                    "worker_thread_finished_restart_pending",
+                    conversation_id=self.conversation_id,
+                    agent_id=agent_id,
+                    remaining_pending_inputs=len(record.pending_inputs),
+                )
+                self._append_user_input_unlocked(record, next_input)
+                self._start_worker_unlocked(record)
+                self._condition.notify_all()
+                return
+
+            record.pending_restart = False
+            _log_agent_runtime(
+                "worker_thread_finished_cleanup_done",
+                conversation_id=self.conversation_id,
+                agent_id=agent_id,
+                status=record.status,
+                pending_inputs=len(record.pending_inputs),
+            )
             self._condition.notify_all()
 
     def spawn_agent(
@@ -545,6 +862,14 @@ class SessionAgentManager:
         if not text:
             raise ValueError("message is required")
         with self._lock:
+            _log_agent_runtime(
+                "spawn_agent_begin",
+                conversation_id=self.conversation_id,
+                requested_name=str(name or ""),
+                fork_context=bool(fork_context),
+                message_len=len(text),
+                source_tool_call_id=str(source_tool_call_id or ""),
+            )
             self._load_from_storage_unlocked()
             self._ensure_conversation_row()
             if self._live_count_unlocked() >= self.max_live_agents:
@@ -602,6 +927,13 @@ class SessionAgentManager:
                 ts=record.created_at,
             )
             self._start_worker_unlocked(record)
+            _log_agent_runtime(
+                "spawn_agent_done",
+                conversation_id=self.conversation_id,
+                agent_id=record.agent_id,
+                name=record.name,
+                status=record.status,
+            )
             return {
                 "status": "spawned",
                 "agent_id": record.agent_id,
@@ -617,6 +949,14 @@ class SessionAgentManager:
             self._load_from_storage_unlocked()
             agent = self.chat_storage.resolve_agent_target(self.conversation_id, target)
             record = self._agents.get(agent["id"])
+            _log_agent_runtime(
+                "send_input_begin",
+                conversation_id=self.conversation_id,
+                agent_id=agent.get("id") or "",
+                target=str(target or ""),
+                message_len=len(text),
+                known_record=bool(record),
+            )
             if not record:
                 record = AgentRuntimeRecord(
                     agent_id=agent["id"],
@@ -643,14 +983,32 @@ class SessionAgentManager:
 
             record.pending_inputs.append(text)
             if record.worker is None:
+                _log_agent_runtime(
+                    "send_input_start_idle_agent",
+                    conversation_id=self.conversation_id,
+                    agent_id=record.agent_id,
+                    pending_inputs=len(record.pending_inputs),
+                )
                 if record.pending_inputs:
                     next_input = record.pending_inputs.pop(0)
                     self._append_user_input_unlocked(record, next_input)
                 self._start_worker_unlocked(record)
             else:
                 record.status = "waiting_input"
+                if record.worker_result_received or record.worker_cleanup_pending:
+                    record.pending_restart = True
                 self._persist_record_unlocked(record)
                 self._emit_agent_state(record, "waiting_input")
+                _log_agent_runtime(
+                    "send_input_queued_running_agent",
+                    conversation_id=self.conversation_id,
+                    agent_id=record.agent_id,
+                    pending_inputs=len(record.pending_inputs),
+                    pending_restart=record.pending_restart,
+                    cleanup_pending=record.worker_cleanup_pending,
+                    result_received=record.worker_result_received,
+                    **_debug_worker_summary(record.worker),
+                )
 
             self._condition.notify_all()
             return {
@@ -664,6 +1022,13 @@ class SessionAgentManager:
         timeout_seconds = max(float(timeout_ms or 0), 0.0) / 1000.0
         deadline = time.time() + timeout_seconds if timeout_seconds > 0 else None
         with self._lock:
+            _log_agent_runtime(
+                "wait_agent_begin",
+                conversation_id=self.conversation_id,
+                targets=targets,
+                timeout_ms=timeout_ms,
+                return_when=return_when,
+            )
             self._load_from_storage_unlocked()
             target_values = []
             if isinstance(targets, (list, tuple, set)):
@@ -714,6 +1079,13 @@ class SessionAgentManager:
                 completed, pending = _snapshot()
                 done = bool(completed) if mode == "any" else (len(pending) == 0)
                 if done:
+                    _log_agent_runtime(
+                        "wait_agent_done",
+                        conversation_id=self.conversation_id,
+                        completed_count=len(completed),
+                        pending_count=len(pending),
+                        timed_out=False,
+                    )
                     return {
                         "completed": completed,
                         "pending": pending,
@@ -729,6 +1101,13 @@ class SessionAgentManager:
                 self._condition.wait(timeout=remaining)
 
             completed, pending = _snapshot()
+            _log_agent_runtime(
+                "wait_agent_done",
+                conversation_id=self.conversation_id,
+                completed_count=len(completed),
+                pending_count=len(pending),
+                timed_out=timed_out,
+            )
             return {
                 "completed": completed,
                 "pending": pending,
@@ -740,6 +1119,14 @@ class SessionAgentManager:
             self._load_from_storage_unlocked()
             resolved = self.chat_storage.resolve_agent_target(self.conversation_id, target)
             record = self._agents.get(resolved["id"])
+            _log_agent_runtime(
+                "close_agent_begin",
+                conversation_id=self.conversation_id,
+                agent_id=resolved.get("id") or "",
+                force=bool(force),
+                reason=_short_debug_value(reason),
+                known_record=bool(record),
+            )
             if not record:
                 record = AgentRuntimeRecord(
                     agent_id=resolved["id"],
@@ -766,20 +1153,35 @@ class SessionAgentManager:
                     self._emit_agent_state(record, "log", log_content=close_reason)
                 try:
                     worker.stop()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_agent_runtime(
+                        "close_agent_worker_stop_failed",
+                        conversation_id=self.conversation_id,
+                        agent_id=record.agent_id,
+                        error=_short_debug_value(exc),
+                    )
                 try:
                     worker.quit()
                     worker.wait(300)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_agent_runtime(
+                        "close_agent_worker_quit_failed",
+                        conversation_id=self.conversation_id,
+                        agent_id=record.agent_id,
+                        error=_short_debug_value(exc),
+                    )
                 if force:
                     try:
                         if worker.isRunning():
                             worker.terminate()
                             worker.wait(300)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _log_agent_runtime(
+                            "close_agent_worker_terminate_failed",
+                            conversation_id=self.conversation_id,
+                            agent_id=record.agent_id,
+                            error=_short_debug_value(exc),
+                        )
                 if not worker.isRunning():
                     record.worker = None
                     record.status = "killed" if force else "closed"
@@ -798,6 +1200,13 @@ class SessionAgentManager:
                 payload["error"] = close_reason
             self._emit_agent_state(record, record.status, **payload)
             self._condition.notify_all()
+            _log_agent_runtime(
+                "close_agent_done",
+                conversation_id=self.conversation_id,
+                agent_id=record.agent_id,
+                status=record.status,
+                force=bool(force),
+            )
             return self._build_summary(record)
 
     def list_agent_summaries(self, status_filter=None):
@@ -856,6 +1265,7 @@ class AgentManagerRegistry:
         with self._lock:
             manager = self._managers.get(key)
             if manager is None:
+                _log_agent_runtime("registry_create_manager", conversation_id=key)
                 manager = SessionAgentManager(
                     key,
                     chat_storage=chat_storage,
@@ -868,6 +1278,7 @@ class AgentManagerRegistry:
                 )
                 self._managers[key] = manager
             else:
+                _log_agent_runtime("registry_reuse_manager", conversation_id=key)
                 manager.update_runtime_context(
                     chat_storage=chat_storage,
                     config_manager=config_manager,

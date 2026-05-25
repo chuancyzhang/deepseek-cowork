@@ -9,6 +9,7 @@ import platform
 import time
 import shutil
 import uuid
+import threading
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal, Slot, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
@@ -37,6 +38,22 @@ except ImportError:
 
 class SecurityError(Exception):
     pass
+
+
+_OPENAI_PROTOCOL_LOCK = threading.Lock()
+
+
+def _needs_openai_protocol_lock(provider):
+    return getattr(provider, "protocol_family", "") == "openai-compatible"
+
+
+def _acquire_openai_protocol_lock(worker):
+    waited = False
+    while not worker.is_stopped:
+        if _OPENAI_PROTOCOL_LOCK.acquire(timeout=0.1):
+            return waited
+        waited = True
+    return None
 
 def validate_code_safety(code, allowed_dir, god_mode=False):
     """AST 静态分析代码安全性"""
@@ -666,13 +683,7 @@ class LLMWorker(QThread):
                     parts.append(content.strip())
         return "\n".join(parts)
 
-    def run(self):
-        # Work on a copy of messages to handle multi-turn locally
-        # Keep reasoning_content only on prior assistant tool-call turns so DeepSeek
-        # can continue the same multi-round exchange without 400 errors.
-        current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
-        runtime_snapshot = get_python_runtime_snapshot()
-        sandbox_snapshot = get_runtime_snapshot()
+    def _build_system_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
         python_exe = runtime_snapshot.get("python_exe") or get_python_executable()
         python_info = sandbox_snapshot.get("python") or {}
         node_info = sandbox_snapshot.get("node") or {}
@@ -694,8 +705,16 @@ class LLMWorker(QThread):
             sandbox_env_line += f" 缺失: {', '.join(missing_runtimes)}。"
         available_packages = runtime_snapshot.get("available_packages", [])
         missing_packages = runtime_snapshot.get("missing_packages", [])
-        package_line = f"运行时库检测(可用): {', '.join(available_packages[:10])}" if available_packages else "运行时库检测(可用): 未检测到"
-        missing_line = f"运行时库检测(缺失): {', '.join(missing_packages[:10])}" if missing_packages else "运行时库检测(缺失): 无"
+        package_line = (
+            f"运行时库检测(可用): {', '.join(available_packages[:10])}"
+            if available_packages
+            else "运行时库检测(可用): 未检测到"
+        )
+        missing_line = (
+            f"运行时库检测(缺失): {', '.join(missing_packages[:10])}"
+            if missing_packages
+            else "运行时库检测(缺失): 无"
+        )
         run_mode = self._current_run_mode()
         available_tool_names = []
         for item in self.tools or []:
@@ -711,7 +730,6 @@ class LLMWorker(QThread):
             or (self.run_context.get("channel") or "").strip().lower() in enterprise_channels
         )
 
-        # Construct System Context
         context_lines = [
             f"当前工作区: {self.workspace_dir}",
             f"当前运行模式: {run_mode}",
@@ -770,7 +788,7 @@ class LLMWorker(QThread):
             "策略 [思考规范]:",
             "1. 你的思考过程 (Reasoning) 仅用于分析问题、规划步骤和反思结果。",
             "2. 严禁将最终给用户的回复（如任务总结、文件列表、结果汇报）放在思考过程中。",
-            "3. 思考过程对用户是折叠的，用户主要阅读的是你的最终 Content 回复。"
+            "3. 思考过程对用户是折叠的，用户主要阅读的是你的最终 Content 回复。",
         ]
         if enterprise_delivery_enabled:
             context_lines.insert(
@@ -778,7 +796,7 @@ class LLMWorker(QThread):
                 "企业消息会话中，若需要交付文件、图片或链接，请使用 'publish_artifacts'。",
             )
             context_lines.insert(
-                context_lines.index("6. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。"),
+                context_lines.index("7. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。"),
                 "补充: 企业消息链路中可使用 'publish_artifacts' 交付文件或图片。",
             )
         else:
@@ -885,7 +903,6 @@ class LLMWorker(QThread):
         if sop_prompt_fragment:
             context_lines.extend(["", sop_prompt_fragment])
 
-        # Append Skill-Specific Prompts (e.g. usage guidelines, learned experiences)
         try:
             system_skills = self.skill_manager.get_system_prompts(
                 query_text=self._build_skill_query(current_messages),
@@ -899,17 +916,16 @@ class LLMWorker(QThread):
         if system_skills:
             context_lines.append("\n# Skill Capabilities & Guidelines")
             context_lines.append(system_skills)
+        return "\n".join(context_lines)
 
-        system_prompt = "\n".join(context_lines)
-        self.observability_signal.emit({
-            "type": "system_prompt",
-            "content": system_prompt,
-            "timestamp": time.time(),
-            "run_mode": run_mode,
-        })
-        
-        # Insert System Message
-        current_messages.insert(0, {"role": "system", "content": system_prompt})
+    def run(self):
+        # Work on a copy of messages to handle multi-turn locally
+        # Keep reasoning_content only on prior assistant tool-call turns so DeepSeek
+        # can continue the same multi-round exchange without 400 errors.
+        current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
+        runtime_snapshot = get_python_runtime_snapshot()
+        sandbox_snapshot = get_runtime_snapshot()
+        current_messages.insert(0, {"role": "system", "content": ""})
         
         full_reasoning = ""
         final_content = ""
@@ -946,6 +962,19 @@ class LLMWorker(QThread):
                 self._refresh_tool_definitions()
             # -------------------------
 
+            system_prompt = self._build_system_prompt(
+                current_messages[1:],
+                runtime_snapshot,
+                sandbox_snapshot,
+            )
+            current_messages[0]["content"] = system_prompt
+            self.observability_signal.emit({
+                "type": "system_prompt",
+                "content": system_prompt,
+                "timestamp": time.time(),
+                "run_mode": self._current_run_mode(),
+            })
+
             # Reset reasoning for the current turn (for UI display)
             current_turn_reasoning = ""
 
@@ -979,82 +1008,95 @@ class LLMWorker(QThread):
                             f"{len(dropped_rounds)} DeepSeek tool-call history round(s) "
                             f"missing reasoning_content before replay ({dropped_calls} tool call(s))."
                         )
-                    stream = provider.chat_stream(sanitized_messages, tools=self.tools)
-                    
                     # Streaming Buffers
                     chunk_reasoning = ""
                     chunk_content = ""
                     tool_calls_buffer = {} # Index -> ToolCall object (dict)
                     provider_error_message = None
-                    
-                    for chunk in stream:
-                        # Check Pause/Stop during stream
-                        while self.is_paused:
-                             if self.is_stopped: break
-                             self.msleep(100)
-                        if self.is_stopped: break
-                        
-                        type_ = chunk.get("type")
-                        
-                        # 1. Handle Reasoning
-                        if type_ == "reasoning":
-                            r_content = chunk["content"]
-                            current_turn_reasoning += r_content
-                            full_reasoning += r_content
-                            self.thinking_signal.emit(r_content)
-                            
-                        # 2. Handle Content
-                        elif type_ == "content":
-                            c_content = chunk["content"]
-                            chunk_content += c_content
-                            self.content_signal.emit(c_content)
-                        
-                        # 3. Handle Tool Calls
-                        elif type_ == "tool_call":
-                            index = chunk.get("index", 0) # Default to 0 if not provided
-                            if index is None:
-                                index = 0
-                            chunk_function = chunk.get("function") or {}
-                            if not isinstance(chunk_function, dict):
-                                chunk_function = {}
-                            
-                            if index not in tool_calls_buffer:
-                                tool_calls_buffer[index] = {
-                                    "id": chunk.get("id") or "",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "",
-                                        "arguments": ""
+                    protocol_locked = False
+
+                    try:
+                        if _needs_openai_protocol_lock(provider):
+                            waited_for_protocol = _acquire_openai_protocol_lock(self)
+                            if waited_for_protocol is None:
+                                final_content = "⚠️ Operation stopped by user."
+                                break
+                            protocol_locked = True
+                            if waited_for_protocol:
+                                self.step_signal.emit("Provider Protocol: waited for OpenAI-compatible stream lock.")
+                        stream = provider.chat_stream(sanitized_messages, tools=self.tools)
+
+                        for chunk in stream:
+                            # Check Pause/Stop during stream
+                            while self.is_paused:
+                                 if self.is_stopped: break
+                                 self.msleep(100)
+                            if self.is_stopped: break
+
+                            type_ = chunk.get("type")
+
+                            # 1. Handle Reasoning
+                            if type_ == "reasoning":
+                                r_content = chunk["content"]
+                                current_turn_reasoning += r_content
+                                full_reasoning += r_content
+                                self.thinking_signal.emit(r_content)
+
+                            # 2. Handle Content
+                            elif type_ == "content":
+                                c_content = chunk["content"]
+                                chunk_content += c_content
+                                self.content_signal.emit(c_content)
+
+                            # 3. Handle Tool Calls
+                            elif type_ == "tool_call":
+                                index = chunk.get("index", 0) # Default to 0 if not provided
+                                if index is None:
+                                    index = 0
+                                chunk_function = chunk.get("function") or {}
+                                if not isinstance(chunk_function, dict):
+                                    chunk_function = {}
+
+                                if index not in tool_calls_buffer:
+                                    tool_calls_buffer[index] = {
+                                        "id": chunk.get("id") or "",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "",
+                                            "arguments": ""
+                                        }
                                     }
-                                }
 
-                            chunk_id = chunk.get("id")
-                            if chunk_id:
-                                tool_calls_buffer[index]["id"] = chunk_id
+                                chunk_id = chunk.get("id")
+                                if chunk_id:
+                                    tool_calls_buffer[index]["id"] = chunk_id
 
-                            chunk_name = chunk_function.get("name")
-                            if chunk_name:
-                                tool_calls_buffer[index]["function"]["name"] = str(chunk_name)
-                            
-                            # Append arguments
-                            if "arguments" in chunk_function:
-                                raw_arguments = chunk_function.get("arguments")
-                                if raw_arguments is None:
-                                    arguments_part = ""
-                                elif isinstance(raw_arguments, str):
-                                    arguments_part = raw_arguments
-                                else:
-                                    try:
-                                        arguments_part = json.dumps(raw_arguments, ensure_ascii=False)
-                                    except Exception:
-                                        arguments_part = str(raw_arguments)
-                                tool_calls_buffer[index]["function"]["arguments"] += arguments_part
-                        
-                        # 4. Handle Error
-                        elif type_ == "error":
-                            provider_error_message = chunk.get("content") or "Unknown error"
-                            self.step_signal.emit(f"Provider Error: {provider_error_message}")
-                            self.output_signal.emit(f"Provider Error: {provider_error_message}")
+                                chunk_name = chunk_function.get("name")
+                                if chunk_name:
+                                    tool_calls_buffer[index]["function"]["name"] = str(chunk_name)
+
+                                # Append arguments
+                                if "arguments" in chunk_function:
+                                    raw_arguments = chunk_function.get("arguments")
+                                    if raw_arguments is None:
+                                        arguments_part = ""
+                                    elif isinstance(raw_arguments, str):
+                                        arguments_part = raw_arguments
+                                    else:
+                                        try:
+                                            arguments_part = json.dumps(raw_arguments, ensure_ascii=False)
+                                        except Exception:
+                                            arguments_part = str(raw_arguments)
+                                    tool_calls_buffer[index]["function"]["arguments"] += arguments_part
+
+                            # 4. Handle Error
+                            elif type_ == "error":
+                                provider_error_message = chunk.get("content") or "Unknown error"
+                                self.step_signal.emit(f"Provider Error: {provider_error_message}")
+                                self.output_signal.emit(f"Provider Error: {provider_error_message}")
+                    finally:
+                        if protocol_locked:
+                            _OPENAI_PROTOCOL_LOCK.release()
 
                     end_time = time.time()
                     duration = end_time - start_time

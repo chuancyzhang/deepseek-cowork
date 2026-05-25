@@ -23,6 +23,8 @@ class LLMProvider(ABC):
         pass
 
 class OpenAIProvider(LLMProvider):
+    protocol_family = "openai-compatible"
+
     def __init__(
         self,
         api_key,

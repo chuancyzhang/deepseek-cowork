@@ -331,6 +331,106 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_llm_worker_refreshes_system_prompt_after_tool_search_discovery(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                discovered = set(kwargs.get("discovered_tool_names") or [])
+                names = ["tool_search"]
+                if "run_python_code" in discovered:
+                    names.append("run_python_code")
+                if "bash" in discovered:
+                    names.append("bash")
+                return [
+                    {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
+                    for name in names
+                ]
+
+            def is_tool_allowed(self, _name, _run_mode):
+                return True
+
+            def is_tool_visible(self, name, _run_mode, discovered_tool_names=None, run_context=None):
+                if name == "tool_search":
+                    return True
+                discovered = set(discovered_tool_names or [])
+                return name in discovered
+
+            def call_tool(self, name, args, context=None):
+                if name != "tool_search":
+                    return {"status": "error", "message": f"unexpected tool {name}"}
+                discovered = (context or {}).get("discovered_tool_names")
+                if hasattr(discovered, "update"):
+                    discovered.update(["run_python_code", "bash"])
+                return {
+                    "status": "ok",
+                    "discovered_tools": ["run_python_code", "bash"],
+                    "message": "Matched tools will be available on the next model turn.",
+                }
+
+            def check_for_updates(self):
+                return False
+
+            def get_skill_of_tool(self, _tool_name):
+                return None
+
+            def get_brief_skill_prompt(self, _skill_name):
+                return ""
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+        class _ProviderStub:
+            def __init__(self, calls):
+                self.calls = calls
+                self.provider_name = "test-provider"
+                self.model_name = "test-model"
+                self.base_url = ""
+                self.thinking_enabled = False
+
+            def chat_stream(self, messages, tools=None):
+                tool_names = [(item.get("function") or {}).get("name") for item in (tools or [])]
+                system_prompt = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
+                self.calls.append({"tool_names": tool_names, "system_prompt": system_prompt})
+                if len(self.calls) == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "tool-search-1",
+                        "function": {"name": "tool_search", "arguments": "{\"query\": \"python bash\"}"},
+                    }
+                    return
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        provider_calls = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_calls)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "need execution tools"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.run()
+
+            self.assertEqual(len(provider_calls), 2)
+            self.assertEqual(provider_calls[0]["tool_names"], ["tool_search"])
+            self.assertNotIn("run_python_code", provider_calls[0]["system_prompt"])
+            self.assertNotIn("bash", provider_calls[0]["system_prompt"])
+            self.assertIn("run_python_code", provider_calls[1]["tool_names"])
+            self.assertIn("bash", provider_calls[1]["tool_names"])
+            self.assertIn("run_python_code", provider_calls[1]["system_prompt"])
+            self.assertIn("bash", provider_calls[1]["system_prompt"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_clarifying_mode_filters_to_allowed_read_and_interaction_tools(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):

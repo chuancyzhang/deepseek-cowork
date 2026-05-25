@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QObject, QCoreApplication, Signal
+from PySide6.QtCore import QObject, QCoreApplication, QThread, Signal
 
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, SessionAgentManager
 from core.chat_storage import ChatStorage
@@ -186,6 +186,57 @@ class _QtWorker:
 
     def isRunning(self):
         return self._running
+
+
+class _DelayedFinishQThread(QThread):
+    finished_signal = Signal(dict)
+    step_signal = Signal(str)
+    thinking_signal = Signal(str)
+    content_signal = Signal(str)
+    output_signal = Signal(str)
+    tool_call_signal = Signal(dict)
+    tool_result_signal = Signal(dict)
+
+    def __init__(self, messages, finish_delay=0.25):
+        super().__init__()
+        self.messages = messages
+        self.finish_delay = finish_delay
+        self.custom_finished_event = threading.Event()
+        self.run_returned_event = threading.Event()
+
+    def run(self):
+        last_user = ""
+        for msg in reversed(self.messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                last_user = msg.get("content") or ""
+                break
+        self.finished_signal.emit(
+            {
+                "content": f"done:{last_user}",
+                "generated_messages": [
+                    {
+                        "id": f"delayed-{int(time.time() * 1000)}",
+                        "role": "assistant",
+                        "content": f"done:{last_user}",
+                    }
+                ],
+            }
+        )
+        self.custom_finished_event.set()
+        time.sleep(self.finish_delay)
+        self.run_returned_event.set()
+
+
+def _wait_until(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    app = QCoreApplication.instance()
+    while time.time() < deadline:
+        if predicate():
+            return True
+        if app:
+            app.processEvents()
+        time.sleep(0.01)
+    return bool(predicate())
 
 
 class TestAgentManagerTools(unittest.TestCase):
@@ -376,6 +427,79 @@ class TestAgentManagerTools(unittest.TestCase):
         self.assertIn("tool_result", statuses)
         self.assertIn("content", statuses)
         self.assertIn("completed", statuses)
+
+    def test_qthread_worker_is_retained_until_native_thread_finished(self):
+        workers = []
+
+        def _factory(messages, *_args, **_kwargs):
+            worker = _DelayedFinishQThread(messages, finish_delay=0.35)
+            workers.append(worker)
+            return worker
+
+        manager = SessionAgentManager(
+            self.conversation_id,
+            chat_storage=self.storage,
+            config_manager=self.config,
+            workspace_dir=self.temp_dir,
+            worker_factory=_factory,
+            max_live_agents=8,
+        )
+
+        spawned = manager.spawn_agent(message="qthread task", name="qthread-agent")
+        worker = workers[0]
+        self.assertTrue(worker.custom_finished_event.wait(1.0))
+
+        with manager._lock:
+            record = manager._agents[spawned["agent_id"]]
+            self.assertIs(record.worker, worker)
+            self.assertTrue(record.worker_result_received)
+            self.assertTrue(record.worker_cleanup_pending)
+            self.assertEqual(record.status, "completed")
+        self.assertTrue(worker.isRunning())
+
+        self.assertTrue(worker.wait(1500))
+        self.assertTrue(_wait_until(lambda: manager._agents[spawned["agent_id"]].worker is None))
+
+    def test_pending_input_waits_for_qthread_cleanup_before_restart(self):
+        workers = []
+        overlap_flags = []
+
+        def _factory(messages, *_args, **_kwargs):
+            if workers:
+                overlap_flags.append(workers[-1].isRunning())
+            worker = _DelayedFinishQThread(messages, finish_delay=0.35)
+            workers.append(worker)
+            return worker
+
+        manager = SessionAgentManager(
+            self.conversation_id,
+            chat_storage=self.storage,
+            config_manager=self.config,
+            workspace_dir=self.temp_dir,
+            worker_factory=_factory,
+            max_live_agents=8,
+        )
+
+        spawned = manager.spawn_agent(message="first qthread task", name="restart-agent")
+        first_worker = workers[0]
+        self.assertTrue(first_worker.custom_finished_event.wait(1.0))
+
+        queued = manager.send_input(spawned["agent_id"], "second qthread task")
+        self.assertEqual(queued["status"], "queued")
+        time.sleep(0.05)
+        self.assertEqual(len(workers), 1)
+        self.assertTrue(first_worker.isRunning())
+
+        self.assertTrue(first_worker.wait(1500))
+        self.assertTrue(_wait_until(lambda: len(workers) == 2, timeout=2.0))
+        waited = manager.wait_agent([spawned["agent_id"]], timeout_ms=3000, return_when="all")
+        self.assertFalse(waited["timed_out"])
+        for worker in workers:
+            worker.wait(1500)
+
+        self.assertEqual(overlap_flags, [False])
+        messages = self.storage.get_agent_messages(spawned["agent_id"])
+        self.assertTrue(any(msg.get("content") == "second qthread task" for msg in messages))
 
 
 if __name__ == "__main__":

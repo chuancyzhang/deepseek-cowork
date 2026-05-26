@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.7.9**。
+当前应用版本：**4.8.0**。
 
 ## 1. 产品概述 (Product Overview)
 

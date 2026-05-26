@@ -96,6 +96,7 @@ Examples:
 *   *"Scan this project for unused imports and remove them."*
 *   *"Summarize all PDFs in this folder into a single report."*
 *   *"Create a new skill to download videos using yt-dlp."*
+*   Use **从对话生成 SOP** in the input `+` menu to extract a complete SOP draft from the current conversation in one pass. Confirming saves it as a task template and binds it to the current session; feedback can regenerate the draft first.
 
 ### 4. Manage Automation
 Open **自动化** from the sidebar:
@@ -123,6 +124,7 @@ Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds c
 *   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
 *   **`core/sop_manager.py`**: Session-level automation templates, step state, confirmation, rerun, and skip flow.
+*   **`core/sop_from_conversation.py`**: Conversation-to-SOP draft generation with preview and revision.
 *   **`core/automation_manager.py`**: Scheduled automation task normalization, next-run calculation, execution prompt assembly, and run-history helpers.
 *   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
 *   **`skills/`**: Built-in system skills.

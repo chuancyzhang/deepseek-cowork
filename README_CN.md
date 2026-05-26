@@ -94,6 +94,7 @@ AI 在 execution 模式下默认可直接调用 `run_python_code`，无需先通
 *   *“扫描这个项目中未使用的 import 并移除。”*
 *   *“汇总文件夹里的所有 PDF 并生成报告。”*
 *   *“创建一个使用 yt-dlp 的视频下载技能。”*
+*   输入区 `+` 菜单中的 **从对话生成 SOP** 会从当前会话一次性提炼完整 SOP 草稿；确认后保存为任务模板并绑定到当前会话，也可以输入修改意见重新生成草稿。
 
 ### 4. 管理自动化
 打开左侧边栏的 **自动化**：
@@ -121,6 +122,7 @@ AI 在 execution 模式下默认可直接调用 `run_python_code`，无需先通
 *   **`core/im_gateway/`**：多平台企业消息网关与渠道适配。
 *   **`core/skill_manager.py`**：工具注册、经验包加载、相关性匹配与 Prompt 注入。
 *   **`core/sop_manager.py`**：会话级自动化模板、步骤状态、确认、重跑与跳过逻辑。
+*   **`core/sop_from_conversation.py`**：从当前会话生成可预览、可修订的 SOP 草稿。
 *   **`core/automation_manager.py`**：定时自动化任务的规范化、下次执行时间计算、执行提示词拼装与历史记录辅助函数。
 *   **`core/updater.py`**：GitHub Releases 检查、安装包校验、暂存和 Windows 重启更新器。
 *   **`skills/`**：内置系统技能。

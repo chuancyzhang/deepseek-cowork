@@ -53,6 +53,10 @@ from core.skill_from_conversation import (
     update_existing_skill_from_draft,
     validate_impl_py,
 )
+from core.sop_from_conversation import (
+    generate_sop_draft,
+    normalize_sop_draft,
+)
 from core.automation_manager import (
     AUTOMATION_HISTORY_STATUS_COMPLETED,
     AUTOMATION_HISTORY_STATUS_ERROR,
@@ -6987,6 +6991,68 @@ class ConversationSkillDraftWorker(QThread):
             })
 
 
+class ConversationSopDraftWorker(QThread):
+    progress_signal = Signal(str)
+    finished_signal = Signal(dict)
+
+    def __init__(
+        self,
+        config_manager,
+        session_id,
+        title,
+        messages,
+        meta=None,
+        previous_draft=None,
+        revision_feedback="",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.session_id = session_id
+        self.title = title
+        self.messages = list(messages or [])
+        self.meta = dict(meta or {})
+        self.previous_draft = dict(previous_draft or {})
+        self.revision_feedback = str(revision_feedback or "")
+
+    def run(self):
+        try:
+            if not self.messages:
+                self.finished_signal.emit({
+                    "ok": False,
+                    "session_id": self.session_id,
+                    "error": "当前会话没有可提炼 SOP 的消息。",
+                })
+                return
+            self.progress_signal.emit("正在整理当前会话记录")
+            transcript = render_session_transcript(
+                self.session_id,
+                self.title,
+                self.messages,
+                meta=self.meta,
+            )
+            self.progress_signal.emit("正在让模型提炼 SOP 草稿")
+            provider = LLMFactory.create_provider(self.config_manager)
+            draft = generate_sop_draft(
+                provider,
+                transcript,
+                fallback_title=self.title,
+                previous_draft=self.previous_draft,
+                revision_feedback=self.revision_feedback,
+            )
+            self.finished_signal.emit({
+                "ok": True,
+                "session_id": self.session_id,
+                "draft": draft,
+            })
+        except Exception as exc:
+            self.finished_signal.emit({
+                "ok": False,
+                "session_id": self.session_id,
+                "error": str(exc),
+            })
+
+
 class ConversationSkillOptionsDialog(QDialog):
     def __init__(self, skills, parent=None):
         super().__init__(parent)
@@ -7183,6 +7249,144 @@ class ConversationSkillPreviewDialog(QDialog):
         self.accept()
 
 
+class ConversationSopPreviewDialog(QDialog):
+    REVISION_RESULT = 2
+
+    def __init__(self, draft, parent=None):
+        super().__init__(parent)
+        self._revision_feedback = ""
+        self.setWindowTitle("SOP 草稿预览")
+        self.resize(820, 680)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        draft = normalize_sop_draft(draft)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("预览并确认即将生成的 SOP")
+        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
+        layout.addWidget(title)
+
+        hint = QLabel("确认后会保存为任务模板，并立即绑定到当前会话。也可以先提出修改意见，让模型重新整理一版。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        configure_responsive_form_layout(form)
+        self.name_input = QLineEdit(draft.get("name") or "")
+        self.description_edit = QTextEdit()
+        self.description_edit.setFixedHeight(84)
+        self.description_edit.setPlainText(draft.get("description") or "")
+        self.triggers_input = QLineEdit(", ".join(draft.get("triggers") or []))
+        form.addRow("名称", self.name_input)
+        form.addRow("描述", self.description_edit)
+        form.addRow("触发词", self.triggers_input)
+        layout.addLayout(form)
+
+        steps_label = QLabel("步骤")
+        steps_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        layout.addWidget(steps_label)
+
+        self.steps_editor = QTextEdit()
+        self.steps_editor.setPlainText(json.dumps(draft.get("steps") or [], ensure_ascii=False, indent=2))
+        self.steps_editor.setStyleSheet(
+            f"border: 1px solid {DesignTokens.border}; border-radius: 10px; "
+            f"background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; "
+            "font-family: 'Consolas', monospace; font-size: 12px; padding: 8px;"
+        )
+        layout.addWidget(self.steps_editor, 1)
+
+        self.error_label = QLabel("")
+        self.error_label.setWordWrap(True)
+        self.error_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
+        layout.addWidget(self.error_label)
+
+        button_row = QHBoxLayout()
+        revise_btn = QPushButton("提出修改意见")
+        revise_btn.setCursor(Qt.PointingHandCursor)
+        revise_btn.setObjectName("SecondaryBtn")
+        revise_btn.clicked.connect(self.request_revision)
+        button_row.addWidget(revise_btn)
+        button_row.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setCursor(Qt.PointingHandCursor)
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        confirm_btn = QPushButton("确认生成")
+        confirm_btn.setCursor(Qt.PointingHandCursor)
+        confirm_btn.setIcon(qta.icon('fa5s.check', color='#ffffff'))
+        confirm_btn.setStyleSheet(
+            f"background-color: {DesignTokens.primary}; color: white; border-radius: 12px; "
+            "padding: 8px 14px; font-weight: 700; border: none;"
+        )
+        confirm_btn.clicked.connect(self.validate_and_accept)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(confirm_btn)
+        layout.addLayout(button_row)
+
+    def _csv(self, text):
+        return [item.strip() for item in re.split(r"[,，\n]+", str(text or "")) if item.strip()]
+
+    def draft(self):
+        try:
+            steps = json.loads(self.steps_editor.toPlainText().strip() or "[]")
+        except Exception:
+            steps = []
+        return normalize_sop_draft(
+            {
+                "name": self.name_input.text().strip(),
+                "description": self.description_edit.toPlainText().strip(),
+                "triggers": self._csv(self.triggers_input.text()),
+                "steps": steps,
+            }
+        )
+
+    def revision_feedback(self):
+        return self._revision_feedback
+
+    def validate_and_accept(self):
+        if not self.name_input.text().strip():
+            self.error_label.setText("请填写 SOP 名称。")
+            return
+        try:
+            steps = json.loads(self.steps_editor.toPlainText().strip() or "[]")
+        except Exception as exc:
+            self.error_label.setText(f"步骤 JSON 格式不正确：{exc}")
+            return
+        if not isinstance(steps, list):
+            self.error_label.setText("步骤必须是 JSON 数组。")
+            return
+        draft = normalize_sop_draft(
+            {
+                "name": self.name_input.text().strip(),
+                "description": self.description_edit.toPlainText().strip(),
+                "triggers": self._csv(self.triggers_input.text()),
+                "steps": steps,
+            }
+        )
+        if not draft or not draft.get("steps"):
+            self.error_label.setText("至少需要一个有效步骤。")
+            return
+        self.accept()
+
+    def request_revision(self):
+        feedback, ok = QInputDialog.getMultiLineText(
+            self,
+            "修改 SOP 草稿",
+            "写下你希望调整的地方：",
+            "",
+        )
+        if not ok:
+            return
+        self._revision_feedback = str(feedback or "").strip()
+        if not self._revision_feedback:
+            self.error_label.setText("请先填写修改意见。")
+            return
+        self.done(self.REVISION_RESULT)
+
+
 def resolve_app_icon_path():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
@@ -7339,6 +7543,7 @@ class MainWindow(QMainWindow):
         self._last_memory_update_cutoff_at = None
         self._last_memory_update_transcripts = []
         self.conversation_skill_worker = None
+        self.conversation_sop_worker = None
         
         self.config_manager = ConfigManager()
         self.skill_manager = SkillManager(None, self.config_manager)
@@ -8505,6 +8710,7 @@ class MainWindow(QMainWindow):
             ("add_files", "添加文件"),
             ("add_agent", "添加智能体"),
             ("add_sop", "添加自动化"),
+            ("create_sop", "从对话生成 SOP"),
             ("select_skills", "指定能力"),
             ("clarify_mode", "反问模式"),
         ]
@@ -8702,6 +8908,12 @@ class MainWindow(QMainWindow):
         add_sop_action = QAction(qta.icon('fa5s.tasks', color='#4b5563'), "添加自动化", self)
         add_sop_action.triggered.connect(self.open_session_sop_picker)
         menu.addAction(add_sop_action)
+        create_sop_action = QAction(qta.icon('fa5s.magic', color='#4b5563'), "从对话生成 SOP", self)
+        create_sop_action.triggered.connect(self.start_conversation_sop_flow)
+        state = self.get_current_session()
+        sop_worker_running = bool(self.conversation_sop_worker and self.conversation_sop_worker.isRunning())
+        create_sop_action.setEnabled(bool(state and getattr(state, "messages", [])) and not sop_worker_running)
+        menu.addAction(create_sop_action)
         select_skills_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "指定能力", self)
         select_skills_action.triggered.connect(self.open_session_skill_picker)
         menu.addAction(select_skills_action)
@@ -11894,6 +12106,102 @@ class MainWindow(QMainWindow):
             self.add_system_toast("已标记不适用，自动化已完成。", "info", session_id=state.session_id, auto_close_ms=3200)
         else:
             self.add_system_toast("已标记不适用，自动化已推进到下一步。", "info", session_id=state.session_id, auto_close_ms=3200)
+
+    def start_conversation_sop_flow(self):
+        if self.conversation_sop_worker and self.conversation_sop_worker.isRunning():
+            self.add_system_toast("SOP 草稿正在生成中。", "info", auto_close_ms=3000)
+            return
+        state = self.get_current_session()
+        if not state or not getattr(state, "messages", []):
+            self.add_system_toast("当前会话没有可提炼 SOP 的内容。", "info", auto_close_ms=4000)
+            return
+        self._start_conversation_sop_worker(state)
+
+    def _start_conversation_sop_worker(self, state, previous_draft=None, revision_feedback=""):
+        if not state:
+            return
+        self.save_chat_history(session_id=state.session_id)
+        title = self._compute_session_title(state.messages) if state.messages else "新任务"
+        try:
+            meta = self.chat_storage.get_conversation_meta(state.session_id)
+        except Exception:
+            meta = {}
+        if self.workspace_dir:
+            meta["workspace_dir"] = self.workspace_dir
+        toast_text = "正在根据修改意见重新生成 SOP 草稿。" if revision_feedback else "开始根据当前会话生成 SOP 草稿。"
+        self.add_system_toast(toast_text, "info", session_id=state.session_id, auto_close_ms=3500)
+        self.conversation_sop_worker = ConversationSopDraftWorker(
+            self.config_manager,
+            state.session_id,
+            title,
+            state.messages,
+            meta=meta,
+            previous_draft=previous_draft,
+            revision_feedback=revision_feedback,
+            parent=self,
+        )
+        self.conversation_sop_worker.progress_signal.connect(self.handle_conversation_sop_progress)
+        self.conversation_sop_worker.finished_signal.connect(self.handle_conversation_sop_finished)
+        self.conversation_sop_worker.finished.connect(self.conversation_sop_worker.deleteLater)
+        self.conversation_sop_worker.start()
+
+    def handle_conversation_sop_progress(self, text):
+        self.add_system_toast(text, "info", auto_close_ms=2500)
+
+    def handle_conversation_sop_finished(self, result):
+        worker = self.conversation_sop_worker
+        self.conversation_sop_worker = None
+        if worker:
+            try:
+                worker.finished_signal.disconnect(self.handle_conversation_sop_finished)
+            except Exception:
+                pass
+
+        session_id = result.get("session_id") or self.current_session_id
+        state = self.get_session(session_id)
+        if not result.get("ok"):
+            self.add_system_toast(f"生成 SOP 草稿失败：{result.get('error') or '未知错误'}", "error", session_id=session_id, auto_close_ms=8000)
+            return
+        if not state:
+            self.add_system_toast("SOP 草稿已生成，但当前会话不存在。", "error", auto_close_ms=6000)
+            return
+
+        preview = ConversationSopPreviewDialog(result.get("draft") or {}, parent=self)
+        dialog_result = preview.exec()
+        if dialog_result == QDialog.Accepted:
+            draft = preview.draft()
+            self._save_conversation_sop_draft(state, draft)
+            return
+        if dialog_result == ConversationSopPreviewDialog.REVISION_RESULT:
+            self._start_conversation_sop_worker(
+                state,
+                previous_draft=preview.draft(),
+                revision_feedback=preview.revision_feedback(),
+            )
+            return
+        self.add_system_toast("已取消生成 SOP 草稿。", "info", session_id=state.session_id, auto_close_ms=4000)
+
+    def _save_conversation_sop_draft(self, state, draft):
+        normalized_draft = normalize_sop_draft(draft)
+        if not normalized_draft or not normalized_draft.get("steps"):
+            QMessageBox.warning(self, "生成 SOP", "SOP 草稿没有有效步骤，无法生成。")
+            return False
+        templates = self.config_manager.get_sop_templates()
+        templates.append(normalized_draft)
+        self.config_manager.set_sop_templates(templates)
+        saved_templates = self.config_manager.get_sop_templates()
+        saved_template = saved_templates[-1] if saved_templates else normalized_draft
+        sop_run = create_sop_run(saved_template)
+        if not sop_run:
+            QMessageBox.warning(self, "生成 SOP", "SOP 已保存，但无法绑定到当前会话。请检查模板步骤。")
+            return False
+        state.sop_run = sop_run
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        self.show_context_drawer(self.RIGHT_TAB_SOP)
+        self.add_system_toast("SOP 已生成并绑定到当前会话。", "success", session_id=state.session_id, auto_close_ms=4200)
+        return True
 
     def update_skill_capture_button_state(self):
         if not hasattr(self, "sidebar_skill_capture_btn"):

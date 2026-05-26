@@ -80,6 +80,12 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 3.  用户选择新建 Skill，或更新已有 Skill 的追加经验/重写说明策略。
 4.  保存时写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`，然后重新加载技能。
 
+**对话内创建 SOP**
+1.  用户在输入区 `+` 菜单点击 `从对话生成 SOP`。
+2.  `ConversationSopDraftWorker` 将当前会话渲染为转录文本，调用 `core/sop_from_conversation.py` 一次性生成完整 SOP 草稿。
+3.  用户在预览对话框中确认生成，或输入修改意见让模型基于上一版草稿重新生成。
+4.  确认后保存为任务模板，并通过现有 `create_sop_run()` 绑定到当前会话；后续执行仍复用原 SOP 状态机。
+
 **Skill ZIP 导入/导出**
 1.  导出时 `SkillManager.export_skill` 定位 Skill 目录，将内容压缩为以 Skill 目录名为根的 ZIP，并跳过 `__pycache__`、构建产物等排除目录。
 2.  导入时 `SkillManager.import_skill` 接受目录或 `.zip`，ZIP 会先解压到临时目录并校验路径不逃逸。
@@ -105,6 +111,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **热加载**：重置工具注册与提示集合，重新解析并加载实现。
 - **经验写回**：通过 `update_skill_experience` 追加经验到 `SKILL.md` 的 `experience` 字段，形成“执行—学习—再执行”的闭环。
 - **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill。
+- **对话生成 SOP**：输入区入口将当前会话提炼为可编辑 SOP 草稿，确认后保存为任务模板并绑定当前会话。
 - **迁移复用**：功能中心支持 ZIP 导出/导入，降低跨机器复用自定义能力的成本。
 
 ## 8. 状态机流转 (Agentic Workflow)

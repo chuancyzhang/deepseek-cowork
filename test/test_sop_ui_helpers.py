@@ -56,7 +56,7 @@ class TestSopUiHelpers(unittest.TestCase):
         entries = window._prompt_tool_menu_entries()
         self.assertEqual(
             [label for _key, label in entries],
-            ["添加文件", "添加智能体", "添加自动化", "指定能力", "反问模式"],
+            ["添加文件", "添加智能体", "添加自动化", "从对话生成 SOP", "指定能力", "反问模式"],
         )
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):
@@ -72,6 +72,66 @@ class TestSopUiHelpers(unittest.TestCase):
 
         self.assertFalse(window._should_block_send_for_sop(_State(active_run)))
         self.assertTrue(window._should_block_send_for_sop(_State(awaiting_run)))
+
+    def test_start_conversation_sop_flow_requires_messages(self):
+        window = MainWindow.__new__(MainWindow)
+        window.conversation_sop_worker = None
+        window.get_current_session = MagicMock(return_value=type("_Session", (), {"messages": []})())
+        window.add_system_toast = MagicMock()
+
+        window.start_conversation_sop_flow()
+
+        window.add_system_toast.assert_called_once()
+        self.assertIn("没有可提炼 SOP", window.add_system_toast.call_args.args[0])
+
+    def test_start_conversation_sop_flow_skips_when_worker_running(self):
+        window = MainWindow.__new__(MainWindow)
+        worker = MagicMock()
+        worker.isRunning.return_value = True
+        window.conversation_sop_worker = worker
+        window.add_system_toast = MagicMock()
+
+        window.start_conversation_sop_flow()
+
+        window.add_system_toast.assert_called_once()
+        self.assertIn("正在生成中", window.add_system_toast.call_args.args[0])
+
+    def test_save_conversation_sop_draft_saves_template_and_binds_run(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type("_Session", (), {"session_id": "session-1", "sop_run": None})()
+        stored_templates = []
+
+        config_manager = MagicMock()
+        config_manager.get_sop_templates.side_effect = lambda: list(stored_templates)
+
+        def set_templates(templates):
+            stored_templates[:] = templates
+
+        config_manager.set_sop_templates.side_effect = set_templates
+        window.config_manager = config_manager
+        window.save_chat_history = MagicMock()
+        window.refresh_sop_controls = MagicMock()
+        window.refresh_context_badges = MagicMock()
+        window.show_context_drawer = MagicMock()
+        window.add_system_toast = MagicMock()
+        window.RIGHT_TAB_SOP = MainWindow.RIGHT_TAB_SOP
+
+        ok = window._save_conversation_sop_draft(
+            state,
+            {
+                "name": "对话 SOP",
+                "description": "从当前对话提炼",
+                "steps": [{"title": "整理流程", "instructions": "输出完整 SOP"}],
+            },
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(stored_templates[0]["name"], "对话 SOP")
+        self.assertIsNotNone(state.sop_run)
+        self.assertEqual(state.sop_run["template_name"], "对话 SOP")
+        config_manager.set_sop_templates.assert_called_once()
+        window.save_chat_history.assert_called_once_with(session_id="session-1")
+        window.show_context_drawer.assert_called_once_with(MainWindow.RIGHT_TAB_SOP)
 
     def test_add_prompt_files_loads_workspace_and_tracks_attachments(self):
         class _InputField:

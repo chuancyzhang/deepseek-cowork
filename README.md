@@ -76,7 +76,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
 Artifacts are downloaded into `.runtime_downloads/` and extracted to `node_env/` and `git_bash_env/`.
-Packaged Windows builds resolve bundled runtimes from the app directory, including `_internal/git_bash_env/bin/bash.exe` for Git Bash. You can override detection with `COWORK_BASH_EXE`, `COWORK_GIT_BASH_DIR`, or `COWORK_BASH_DIR` when needed.
+Packaged Windows builds resolve bundled runtimes directly from the current app directory first, including `_internal/node_env/node.exe` and `_internal/git_bash_env/bin/bash.exe`. AppData `runtime_sandbox` remains the temp/cache/dependency root rather than the preferred executable runtime, so automatic upgrades use the newly unpacked `_internal` files. You can override detection with `COWORK_NODE_EXE`, `COWORK_NODE_DIR`, `COWORK_BASH_EXE`, `COWORK_GIT_BASH_DIR`, or `COWORK_BASH_DIR` when needed.
+Agents can execute JavaScript through `run_node_code`; the `bash` tool still prefers Git Bash, and on Windows falls back to `cmd.exe` if Git Bash is unavailable.
 The packaged Python sandbox should be built from the base interpreter rather than a virtualenv redirector, otherwise `run_python_code` may fail on machines that do not have the builder's Python installation path.
 
 ## 📖 Usage Guide

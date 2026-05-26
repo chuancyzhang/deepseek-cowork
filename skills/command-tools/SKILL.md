@@ -7,7 +7,7 @@ metadata:
   author: deepseek-cowork team
   version: "1.0"
 security_level: high
-allowed-tools: ["bash", "glob", "grep", "run_skill_script"]
+allowed-tools: ["bash", "glob", "grep", "run_node_code", "run_skill_script"]
 ---
 
 # Command Tools
@@ -31,9 +31,15 @@ allowed-tools: ["bash", "glob", "grep", "run_skill_script"]
    - 继续复用现有沙盒运行时和 skill 依赖准备流程。
    - 脚本可能产生副作用，因此保持普通单工具调用。
 
+4. `run_node_code`
+   - 使用沙盒 Node.js 在当前工作区执行 JavaScript 代码。
+   - 适合运行内联 JS、验证 Node.js 可用性、处理 JSON/前端构建相关的小脚本。
+   - 不属于只读并行工具，不能通过 `parallel_tools` 执行。
+
 ## 使用约定
 
 - 当需要运行 shell 命令时使用 `bash`。
+- 当只需要执行 JavaScript/Node.js 代码时优先使用 `run_node_code`，不要为了内联 JS 套一层 shell。
 - 当只需要路径或内容搜索时优先使用 `glob` / `grep`，不要用 shell 包一层。
 - `glob` 的递归遍历由工具本身完成；如果已知文件名片段，优先写 `*文件名片段*`，例如 `*AI 赋能数据分析*`。
 - 不要为了“搜索所有层级”默认写 `**/文件名*`；当前匹配语义下，这种写法可能漏掉工作区根目录文件。

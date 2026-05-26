@@ -83,6 +83,20 @@ def _candidate_existing_file(paths):
     return ""
 
 
+def _runtime_dir_layouts(base, runtime_name):
+    return [
+        os.path.join(base, "_internal", f"{runtime_name}_env"),
+        os.path.join(base, "_internal", "runtime", runtime_name),
+        os.path.join(base, f"{runtime_name}_env"),
+        os.path.join(base, "runtime", runtime_name),
+    ]
+
+
+def _cached_runtime_dirs(runtime_name):
+    root = os.path.join(_sandbox_root(), "runtimes", runtime_name)
+    return [root]
+
+
 def _candidate_runtime_dirs(name, env_var_names=None, dir_aliases=None):
     base = get_base_dir()
     dirs = []
@@ -92,25 +106,14 @@ def _candidate_runtime_dirs(name, env_var_names=None, dir_aliases=None):
         env_dir = os.getenv(env_name)
         if env_dir:
             dirs.append(env_dir)
-    for runtime_name in runtime_names:
-        dirs.extend(
-            [
-                os.path.join(base, f"{runtime_name}_env"),
-                os.path.join(base, "runtime", runtime_name),
-                os.path.join(base, "_internal", f"{runtime_name}_env"),
-                os.path.join(base, "_internal", "runtime", runtime_name),
-            ]
-        )
+    bases = [base]
     if hasattr(sys, "_MEIPASS"):
-        for runtime_name in runtime_names:
-            dirs.extend(
-                [
-                    os.path.join(sys._MEIPASS, f"{runtime_name}_env"),
-                    os.path.join(sys._MEIPASS, "runtime", runtime_name),
-                    os.path.join(sys._MEIPASS, "_internal", f"{runtime_name}_env"),
-                    os.path.join(sys._MEIPASS, "_internal", "runtime", runtime_name),
-                ]
-            )
+        bases.append(sys._MEIPASS)
+    for runtime_name in runtime_names:
+        for runtime_base in bases:
+            dirs.extend(_runtime_dir_layouts(runtime_base, runtime_name))
+    for runtime_name in runtime_names:
+        dirs.extend(_cached_runtime_dirs(runtime_name))
     return _dedupe_paths(dirs)
 
 
@@ -131,8 +134,32 @@ def _read_key_value_file(path):
     return data
 
 
-def _copy_runtime_dir(source, runtime_name):
+def _is_runtime_cache_dir(path):
+    cache_root = os.path.join(_sandbox_root(), "runtimes")
+    try:
+        return os.path.commonpath([_norm(cache_root), _norm(path)]) == _norm(cache_root)
+    except ValueError:
+        return False
+
+
+def _runtime_cache_is_valid(target, source_key=None, executable_names=None):
+    marker = os.path.join(target, ".cowork_runtime_source")
+    if not os.path.isdir(target) or not os.path.isfile(marker):
+        return False
+    if source_key is not None:
+        try:
+            with open(marker, "r", encoding="utf-8") as f:
+                if f.read().strip() != source_key:
+                    return False
+        except Exception:
+            return False
+    return any(os.path.isfile(os.path.join(target, rel)) for rel in executable_names or [])
+
+
+def _copy_runtime_dir(source, runtime_name, executable_names=None):
     if not source or not os.path.isdir(source) or not _is_frozen():
+        return source
+    if os.path.normcase(_norm(source)).startswith(os.path.normcase(os.path.join(_sandbox_root(), "runtimes"))):
         return source
     target = os.path.join(_sandbox_root(), "runtimes", runtime_name)
     marker = os.path.join(target, ".cowork_runtime_source")
@@ -140,10 +167,8 @@ def _copy_runtime_dir(source, runtime_name):
     if os.path.normcase(source_key) == os.path.normcase(_norm(target)):
         return source
     try:
-        if os.path.isdir(target) and os.path.isfile(marker):
-            with open(marker, "r", encoding="utf-8") as f:
-                if f.read().strip() == source_key:
-                    return target
+        if _runtime_cache_is_valid(target, source_key, executable_names):
+            return target
         if os.path.isdir(target):
             shutil.rmtree(target)
         shutil.copytree(source, target)
@@ -157,7 +182,8 @@ def _copy_runtime_dir(source, runtime_name):
 def _runtime_file_candidates(runtime_name, executable_names):
     candidates = []
     for runtime_dir in _candidate_runtime_dirs(runtime_name):
-        runtime_dir = _copy_runtime_dir(runtime_dir, runtime_name)
+        if _is_runtime_cache_dir(runtime_dir) and not _runtime_cache_is_valid(runtime_dir, executable_names=executable_names):
+            continue
         for rel in executable_names:
             candidates.append(os.path.join(runtime_dir, rel))
     return candidates
@@ -166,7 +192,8 @@ def _runtime_file_candidates(runtime_name, executable_names):
 def _runtime_file_candidates_from_dirs(runtime_name, runtime_dirs, executable_names):
     candidates = []
     for runtime_dir in runtime_dirs:
-        runtime_dir = _copy_runtime_dir(runtime_dir, runtime_name)
+        if _is_runtime_cache_dir(runtime_dir) and not _runtime_cache_is_valid(runtime_dir, executable_names=executable_names):
+            continue
         for rel in executable_names:
             candidates.append(os.path.join(runtime_dir, rel))
     return candidates
@@ -348,6 +375,15 @@ def _bash_runtime_root(bash_exe):
     return parent_dir
 
 
+def _resolve_cmd_exe():
+    candidates = [
+        os.getenv("ComSpec"),
+        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"),
+        "cmd.exe",
+    ]
+    return _candidate_existing_file(candidates)
+
+
 def ensure_sandbox_runtime():
     global _RUNTIME_CACHE
     if _RUNTIME_CACHE is not None:
@@ -470,6 +506,11 @@ def run_in_sandbox(command, cwd=None, skill_id=None, shell_kind="bash", stdin=No
         bash_exe = runtime.get("bash")
         if bash_exe:
             args = [bash_exe, "-lc", command]
+        elif os.name == "nt":
+            cmd_exe = _resolve_cmd_exe()
+            if not cmd_exe:
+                raise FileNotFoundError("Sandbox Bash runtime is missing and Windows cmd fallback is unavailable.")
+            args = [cmd_exe, "/d", "/s", "/c", str(command)]
         else:
             raise FileNotFoundError("Sandbox Bash runtime is missing.")
 

@@ -48,7 +48,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **可执行文件**：直接运行，无需安装 Python。
 *   **源码运行**：建议使用虚拟环境 **.venv\Scripts\python**。
 *   **环境适配**：`env_utils` 在 Dev/EXE 模式下自动识别 Python 与 pip。
-*   **内置 Node.js / Git Bash**：Windows 打包版优先从应用目录解析 bundled runtime，Git Bash 默认查找 `_internal/git_bash_env/bin/bash.exe`，也支持 `COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR`、`COWORK_BASH_DIR` 覆盖。
+*   **内置 Node.js / Git Bash**：Windows 打包版优先从当前应用目录的 `_internal/*_env` 直接解析 bundled runtime；AI 可通过 `run_node_code` 执行 JavaScript，`bash` 在 Git Bash 缺失时会退回 Windows `cmd.exe`。
 *   **应用更新**：设置页可检查 GitHub Releases；打包版支持下载、校验、暂存并通过独立更新器重启安装。
 
 ---

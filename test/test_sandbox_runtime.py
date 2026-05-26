@@ -89,6 +89,22 @@ class TestSandboxRuntime(unittest.TestCase):
         self.assertEqual(resolved, bash_exe)
         self.assertIn(bash_exe, diagnostics["searched_paths"])
 
+    def test_frozen_runtime_resolution_prefers_internal_runtime_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            legacy_node = os.path.join(temp_dir, "node_env", "node.exe")
+            internal_node = os.path.join(temp_dir, "_internal", "node_env", "node.exe")
+            for path in (legacy_node, internal_node):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("")
+
+            with patch("core.sandbox_runtime.get_base_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=os.path.join(temp_dir, "data")), \
+                 patch.object(sandbox_runtime.sys, "frozen", True, create=True):
+                resolved = sandbox_runtime._resolve_node()
+
+        self.assertEqual(resolved, internal_node)
+
     def test_resolve_bash_prefers_explicit_executable_over_runtime_dirs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             explicit_exe = os.path.join(temp_dir, "manual", "bash.exe")
@@ -126,6 +142,45 @@ class TestSandboxRuntime(unittest.TestCase):
         self.assertEqual(resolved, "")
         self.assertIn("external base interpreter", diagnostics["error"])
         self.assertEqual(diagnostics["pyvenv_cfg"]["executable"], "C:\\missing\\python.exe")
+
+    def test_run_in_sandbox_prefers_git_bash_when_available(self):
+        fake_runtime = {
+            "root": os.path.abspath("sandbox"),
+            "bash": os.path.normpath("C:\\runtime\\bash.exe"),
+            "python": "",
+            "node": "",
+            "npm": "",
+            "npx": "",
+        }
+        with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
+             patch("core.sandbox_runtime.build_sandbox_env", return_value={}), \
+             patch("core.sandbox_runtime.subprocess.Popen") as popen:
+            sandbox_runtime.run_in_sandbox("echo ok", cwd=os.getcwd(), shell_kind="bash")
+
+        args = popen.call_args.args[0]
+        self.assertEqual(args[:2], [fake_runtime["bash"], "-lc"])
+        self.assertEqual(args[2], "echo ok")
+
+    def test_run_in_sandbox_uses_cmd_fallback_when_git_bash_is_missing_on_windows(self):
+        fake_runtime = {
+            "root": os.path.abspath("sandbox"),
+            "bash": "",
+            "python": "",
+            "node": "",
+            "npm": "",
+            "npx": "",
+        }
+        cmd_exe = os.path.normpath("C:\\Windows\\System32\\cmd.exe")
+        with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
+             patch("core.sandbox_runtime.build_sandbox_env", return_value={}), \
+             patch("core.sandbox_runtime._resolve_cmd_exe", return_value=cmd_exe), \
+             patch("core.sandbox_runtime._no_window_kwargs", return_value={}), \
+             patch("core.sandbox_runtime.os.name", "nt"), \
+             patch("core.sandbox_runtime.subprocess.Popen") as popen:
+            sandbox_runtime.run_in_sandbox("node -v", cwd=os.getcwd(), shell_kind="bash")
+
+        args = popen.call_args.args[0]
+        self.assertEqual(args, [cmd_exe, "/d", "/s", "/c", "node -v"])
 
 
 if __name__ == "__main__":

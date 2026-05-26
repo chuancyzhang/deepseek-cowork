@@ -59,6 +59,7 @@ DESTRUCTIVE_PREFIXES = (
 EXECUTION_ONLY_TOOL_NAMES = {
     "bash",
     "run_python_code",
+    "run_node_code",
     "run_skill_script",
     "system_automate",
     "build_app_index",

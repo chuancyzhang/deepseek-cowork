@@ -86,6 +86,32 @@ class TestCommandTools(unittest.TestCase):
         self.assertEqual(kwargs["skill_id"], "command-tools")
         self.assertEqual(kwargs["shell_kind"], "bash")
 
+    def test_run_node_code_uses_node_runtime_and_workspace(self):
+        node_exe = os.path.normpath("C:\\runtime\\node.exe")
+        with patch.object(self.module, "get_runtime_executable", return_value=node_exe), \
+             patch.object(self.module, "run_in_sandbox", return_value=_FakeProcess(stdout=b"node ok\n", stderr=b"")) as run_mock:
+            result = self.module.run_node_code(self.workspace_dir, "console.log('node ok')")
+
+        self.assertEqual(result, "node ok\n")
+        args, kwargs = run_mock.call_args
+        command = args[0]
+        self.assertEqual(command[0], node_exe)
+        self.assertTrue(command[1].endswith(".js"))
+        self.assertEqual(kwargs["cwd"], self.workspace_dir)
+        self.assertEqual(kwargs["skill_id"], "command-tools")
+        self.assertEqual(kwargs["shell_kind"], "exec")
+
+    def test_run_node_code_reports_missing_node_runtime(self):
+        with patch.object(self.module, "get_runtime_executable", return_value=""):
+            result = self.module.run_node_code(self.workspace_dir, "console.log('x')")
+
+        self.assertIn("Bundled Node.js runtime is missing", result)
+
+    def test_run_node_code_is_exported(self):
+        export_names = {item["name"] for item in self.module.TOOL_EXPORTS}
+
+        self.assertIn("run_node_code", export_names)
+
 
 if __name__ == "__main__":
     unittest.main()

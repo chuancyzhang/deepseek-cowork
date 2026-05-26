@@ -75,7 +75,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
 下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
-Windows 打包版会从应用目录解析内置运行时，其中 Git Bash 默认命中 `_internal/git_bash_env/bin/bash.exe`。如需覆盖探测结果，可设置 `COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
+Windows 打包版会优先直接从当前应用目录解析内置运行时，包括 `_internal/node_env/node.exe` 与 `_internal/git_bash_env/bin/bash.exe`。AppData 下的 `runtime_sandbox` 继续作为临时、缓存和 skill 依赖目录，不再优先作为可执行运行时来源，因此自动升级后会使用新解压的 `_internal` 文件。如需覆盖探测结果，可设置 `COWORK_NODE_EXE`、`COWORK_NODE_DIR`、`COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
+AI 可通过 `run_node_code` 直接执行 JavaScript；`bash` 工具仍优先使用 Git Bash，Windows 上缺失 Git Bash 时会退回 `cmd.exe`。
 
 ## 📖 使用指南
 

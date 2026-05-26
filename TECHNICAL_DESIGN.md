@@ -21,7 +21,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.2 Agent Core
 *   **core/agent.py**：推理循环与工具调度，负责将用户输入转化为可执行任务。
 *   **core/interaction.py**：桥接 UI 与推理流程，统一消息与工具调用格式。
-*   **core/sandbox_runtime.py**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先命中 `_internal/*_env` 结构，并为沙盒命令注入对应 PATH；若发现 `python_env/python.exe` 只是依赖外部解释器的 venv redirector，会在运行时标记为不可用而不是继续误报。
+*   **core/sandbox_runtime.py**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先直接使用当前应用目录的 `_internal/*_env` 结构，并为沙盒命令注入对应 PATH；AppData `runtime_sandbox` 仅作为临时、缓存和 skill 依赖根目录。若发现 `python_env/python.exe` 只是依赖外部解释器的 venv redirector，会在运行时标记为不可用而不是继续误报；`bash` 执行层在 Windows 缺失 Git Bash 时退回 `cmd.exe`。
 
 ### 2.3 Daemon 与并发
 *   **core/daemon.py**：无头推理服务，分离 UI 与模型推理负载。

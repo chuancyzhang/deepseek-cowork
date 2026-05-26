@@ -4,10 +4,11 @@ import locale
 import os
 import re
 import subprocess
+import tempfile
 
 from PySide6.QtCore import QObject, Qt
 
-from core.sandbox_runtime import run_in_sandbox, run_skill_script_in_sandbox
+from core.sandbox_runtime import get_runtime_executable, run_in_sandbox, run_skill_script_in_sandbox
 
 DEFAULT_EXCLUDE_DIRS = {".git", ".idea", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 
@@ -148,6 +149,67 @@ def bash(workspace_dir, command, _context=None):
         return output if output else "(No output)"
     except Exception as e:
         return f"Error executing command: {str(e)}"
+
+
+def run_node_code(workspace_dir, code, _context=None):
+    """
+    Execute JavaScript code with the sandbox Node.js runtime.
+    """
+    if not workspace_dir:
+        return "Error: Workspace not selected."
+
+    node_exe = get_runtime_executable("node")
+    if not node_exe:
+        return "Error: Bundled Node.js runtime is missing. This package may be corrupted. Please reinstall the application."
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8") as handle:
+            handle.write(str(code or ""))
+            temp_path = handle.name
+    except Exception as e:
+        return f"Error creating temp file: {e}"
+
+    try:
+        abort_state = _init_abort_state(_context)
+        process = run_in_sandbox(
+            [node_exe, temp_path],
+            cwd=workspace_dir,
+            skill_id="command-tools",
+            shell_kind="exec",
+            text=False,
+        )
+        while True:
+            if abort_state["aborted"]:
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                return "Error: Execution aborted by user."
+            try:
+                output_raw, error_raw = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        output = _decode_bytes(output_raw) or ""
+        error = _decode_bytes(error_raw)
+        if error:
+            if output:
+                output += "\n"
+            output += f"STDERR:\n{error}"
+        return output if output.strip() else "(No output)"
+    except Exception as e:
+        return f"Error executing Node.js code: {str(e)}"
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 
 def _glob_internal(workspace_dir, pattern="*", path=".", limit=200, _context=None):
@@ -400,6 +462,21 @@ TOOL_EXPORTS = [
         "read_only": True,
         "allowed_modes": ["clarifying", "execution"],
         "search_hint": "grep search code text",
+    },
+    {
+        "name": "run_node_code",
+        "handler": run_node_code,
+        "description": "Execute JavaScript code with the sandbox Node.js runtime in the current workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "JavaScript code to execute with Node.js."},
+            },
+            "required": ["code"],
+        },
+        "allowed_modes": ["execution"],
+        "should_defer": True,
+        "search_hint": "node javascript js execute runtime script",
     },
     {
         "name": "run_skill_script",

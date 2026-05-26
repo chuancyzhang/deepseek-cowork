@@ -12,6 +12,7 @@ PARALLEL_TOOL_BLOCKLIST = {
     "write_memories",
     "bash",
     "run_python_code",
+    "run_node_code",
     "run_skill_script",
     "spawn_agent",
     "send_input",

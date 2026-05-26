@@ -58,6 +58,7 @@ class TestSopUiHelpers(unittest.TestCase):
             [label for _key, label in entries],
             ["添加文件", "添加智能体", "添加自动化", "从对话生成 SOP", "指定能力", "反问模式"],
         )
+        self.assertNotIn("能力中心", [label for _key, label in entries])
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):
         window = MainWindow.__new__(MainWindow)
@@ -72,6 +73,57 @@ class TestSopUiHelpers(unittest.TestCase):
 
         self.assertFalse(window._should_block_send_for_sop(_State(active_run)))
         self.assertTrue(window._should_block_send_for_sop(_State(awaiting_run)))
+
+    def test_clear_session_sop_removes_current_run_and_refreshes_ui(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "sop_run": create_sop_run(
+                    {
+                        "id": "office",
+                        "name": "Office",
+                        "steps": [{"title": "Step 1"}],
+                    }
+                ),
+            },
+        )()
+        window.RIGHT_TAB_SOP = MainWindow.RIGHT_TAB_SOP
+        window.right_drawer_open = True
+        window.right_drawer_tab = MainWindow.RIGHT_TAB_SOP
+        window.get_current_session = MagicMock(return_value=state)
+        window.save_chat_history = MagicMock()
+        window.refresh_sop_controls = MagicMock()
+        window.refresh_context_badges = MagicMock()
+        window.normalize_session_ui = MagicMock()
+        window.hide_context_drawer = MagicMock()
+        window.add_system_toast = MagicMock()
+
+        window.clear_session_sop()
+
+        self.assertIsNone(state.sop_run)
+        window.save_chat_history.assert_called_once_with(session_id="session-1")
+        window.refresh_sop_controls.assert_called_once_with("session-1")
+        window.refresh_context_badges.assert_called_once_with("session-1")
+        window.hide_context_drawer.assert_called_once_with(reason="sop_cleared")
+
+    def test_clear_session_selected_skills_removes_current_skills(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type("_Session", (), {"session_id": "session-1", "selected_skill_names": ["python-runner"]})()
+        window.get_session = MagicMock(return_value=state)
+        window.refresh_selected_skill_controls = MagicMock()
+        window.refresh_context_badges = MagicMock()
+        window.save_chat_history = MagicMock()
+        window.add_system_toast = MagicMock()
+
+        window.clear_session_selected_skills("session-1")
+
+        self.assertEqual(state.selected_skill_names, [])
+        window.save_chat_history.assert_called_once_with(session_id="session-1")
+        window.refresh_selected_skill_controls.assert_called_once_with("session-1")
+        window.refresh_context_badges.assert_called_once_with("session-1")
 
     def test_start_conversation_sop_flow_requires_messages(self):
         window = MainWindow.__new__(MainWindow)

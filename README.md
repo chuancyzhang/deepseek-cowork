@@ -30,7 +30,7 @@ Current app version: **4.8.0**.
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status; sub-agent activity lights the panel hint without forcing the drawer open.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.
-*   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar.
+*   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; active automation and selected-skill chips can be removed with one click.
 *   **Sub-Agent Monitor**: Observe parallel workers in a lightweight timeline summary for task input, tool calls, tool results, streamed output, and final output; opening the panel queues a short, main-thread render pass for UI stability.
 *   **Safe Sub-Agent Lifecycle**: Sub-agent completion, status streaming, and worker-thread cleanup are separated so parallel workers can finish or restart without destabilizing the desktop app.
 *   **Sub-Agent Runtime Log**: Lifecycle diagnostics are written to `sub_agent_runtime.log` under the `DeepSeekCowork` app data directory, or `user_data/` in portable mode.

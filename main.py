@@ -2977,11 +2977,7 @@ class AutomationDialog(QDialog):
         self.create_task_btn = QPushButton("手动新建")
         self.create_task_btn.setObjectName("SecondaryBtn")
         self.create_task_btn.clicked.connect(self.create_task)
-        self.bind_session_btn = QPushButton("在对话中创建")
-        self.bind_session_btn.setObjectName("PrimaryBtn")
-        self.bind_session_btn.clicked.connect(self.bind_template_to_session)
         header.addWidget(self.create_task_btn)
-        header.addWidget(self.bind_session_btn)
         layout.addLayout(header)
 
         self.tabs = QTabWidget()
@@ -3294,11 +3290,6 @@ class AutomationDialog(QDialog):
         if self._main and hasattr(self._main, "run_automation_task_now"):
             self._main.run_automation_task_now(task_id)
         self.refresh_history_list()
-
-    def bind_template_to_session(self):
-        self.save_changes()
-        if self._main and hasattr(self._main, "open_session_sop_picker"):
-            self._main.open_session_sop_picker()
 
     def open_selected_history_session(self):
         row = self.history_list.currentRow()
@@ -7387,6 +7378,76 @@ class ConversationSopPreviewDialog(QDialog):
         self.done(self.REVISION_RESULT)
 
 
+class SessionContextChip(QWidget):
+    clicked = Signal()
+    closeClicked = Signal()
+
+    def __init__(self, text="", icon=None, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(30)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.close_btn = QPushButton("×")
+        self.close_btn.setObjectName("ChipCloseButton")
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setFixedSize(26, 30)
+        self.close_btn.setToolTip("移除")
+        self.close_btn.clicked.connect(self.closeClicked.emit)
+        layout.addWidget(self.close_btn)
+
+        self.main_btn = QPushButton(text)
+        self.main_btn.setObjectName("ChipMainButton")
+        self.main_btn.setCursor(Qt.PointingHandCursor)
+        self.main_btn.setFixedHeight(30)
+        self.main_btn.clicked.connect(self.clicked.emit)
+        if icon is not None:
+            self.main_btn.setIcon(icon)
+        layout.addWidget(self.main_btn)
+
+        self._apply_style()
+
+    def _apply_style(self):
+        self.setStyleSheet(
+            f"QPushButton#ChipCloseButton {{ background: {DesignTokens.primary_soft}; "
+            f"color: {DesignTokens.primary}; border: 1px solid rgba(0, 122, 255, 0.22); "
+            "border-right: none; border-top-left-radius: 15px; border-bottom-left-radius: 15px; "
+            "padding: 0px; font-size: 13px; font-weight: 700; }}"
+            f"QPushButton#ChipMainButton {{ background: {DesignTokens.primary_soft}; "
+            f"color: {DesignTokens.primary}; border: 1px solid rgba(0, 122, 255, 0.22); "
+            "border-top-right-radius: 15px; border-bottom-right-radius: 15px; "
+            "padding: 4px 10px 4px 6px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            f"QPushButton#ChipCloseButton:hover, QPushButton#ChipMainButton:hover {{ "
+            f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
+            f"border-color: {DesignTokens.border}; }}"
+            "QPushButton:disabled { opacity: 0.55; }"
+        )
+
+    def setText(self, text):
+        self.main_btn.setText(str(text or ""))
+
+    def text(self):
+        return self.main_btn.text()
+
+    def setIcon(self, icon):
+        self.main_btn.setIcon(icon)
+
+    def setToolTip(self, text):
+        super().setToolTip(text)
+        self.main_btn.setToolTip(text)
+
+    def setCloseToolTip(self, text):
+        self.close_btn.setToolTip(text)
+
+    def setEnabled(self, enabled):
+        super().setEnabled(enabled)
+        self.close_btn.setEnabled(enabled)
+        self.main_btn.setEnabled(enabled)
+
+
 def resolve_app_icon_path():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
@@ -8231,35 +8292,23 @@ class MainWindow(QMainWindow):
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
-        self.sop_badge = QPushButton(" 自动化")
-        self.sop_badge.setIcon(qta.icon('fa5s.tasks', color=DesignTokens.primary))
+        self.sop_badge = SessionContextChip(" 自动化", qta.icon('fa5s.tasks', color=DesignTokens.primary))
         self.sop_badge.setToolTip("查看或调整当前会话自动化")
+        self.sop_badge.setCloseToolTip("移除当前会话自动化")
         self.sop_badge.setCursor(Qt.PointingHandCursor)
         self.sop_badge.setFixedHeight(30)
         self.sop_badge.setVisible(False)
-        self.sop_badge.setStyleSheet(
-            f"QPushButton {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-            f"border: 1px solid rgba(0, 122, 255, 0.22); border-radius: 15px; "
-            "padding: 4px 10px; font-size: 12px; font-weight: 600; text-align: left; }}"
-            f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
-            f"border-color: {DesignTokens.border}; }}"
-        )
         self.sop_badge.clicked.connect(lambda: self.show_context_drawer(self.RIGHT_TAB_SOP))
+        self.sop_badge.closeClicked.connect(self.clear_session_sop)
 
-        self.selected_skills_badge = QPushButton(" 已选能力")
-        self.selected_skills_badge.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
+        self.selected_skills_badge = SessionContextChip(" 已选能力", qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
         self.selected_skills_badge.setToolTip("查看或调整本会话指定能力")
+        self.selected_skills_badge.setCloseToolTip("移除本会话指定能力")
         self.selected_skills_badge.setCursor(Qt.PointingHandCursor)
         self.selected_skills_badge.setFixedHeight(30)
         self.selected_skills_badge.setVisible(False)
-        self.selected_skills_badge.setStyleSheet(
-            f"QPushButton {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-            f"border: 1px solid rgba(0, 122, 255, 0.22); border-radius: 15px; "
-            "padding: 4px 10px; font-size: 12px; font-weight: 600; text-align: left; }}"
-            f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
-            f"border-color: {DesignTokens.border}; }}"
-        )
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
+        self.selected_skills_badge.closeClicked.connect(self.clear_session_selected_skills)
 
         self.clarify_mode_badge = QPushButton("  反问模式")
         self.clarify_mode_badge.setIcon(qta.icon('fa5s.question-circle', color=DesignTokens.primary))
@@ -8918,10 +8967,6 @@ class MainWindow(QMainWindow):
         select_skills_action.triggered.connect(self.open_session_skill_picker)
         menu.addAction(select_skills_action)
         menu.addAction(self.clarify_mode_action)
-        menu.addSeparator()
-        manage_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "能力中心", self)
-        manage_action.triggered.connect(self.open_skills_center)
-        menu.addAction(manage_action)
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
     def refresh_model_selector(self):
@@ -12018,6 +12063,14 @@ class MainWindow(QMainWindow):
         self.refresh_selected_skill_controls(state.session_id)
         self.save_chat_history(session_id=state.session_id)
 
+    def clear_session_selected_skills(self, session_id=None):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state:
+            return
+        self.set_session_selected_skills([], session_id=state.session_id)
+        self.refresh_context_badges(state.session_id)
+        self.add_system_toast("已移除当前会话指定能力。", "info", session_id=state.session_id, auto_close_ms=2600)
+
     def open_session_skill_picker(self):
         state = self.get_current_session()
         if not state:
@@ -12057,6 +12110,22 @@ class MainWindow(QMainWindow):
             self.refresh_context_badges(state.session_id)
             self.show_context_drawer(self.RIGHT_TAB_SOP)
             self.add_system_toast("当前会话已绑定自动化。", "success", session_id=state.session_id, auto_close_ms=3200)
+
+    def clear_session_sop(self, session_id=None):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state:
+            return
+        state.sop_run = None
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        self.normalize_session_ui(state)
+        if (
+            getattr(self, "right_drawer_open", False)
+            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SOP
+        ):
+            self.hide_context_drawer(reason="sop_cleared")
+        self.add_system_toast("已移除当前会话自动化。", "info", session_id=state.session_id, auto_close_ms=2600)
 
     def confirm_current_sop_step(self):
         state = self.get_current_session()

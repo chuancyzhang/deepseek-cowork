@@ -338,9 +338,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             def get_tool_definitions(self, *args, **kwargs):
                 discovered = set(kwargs.get("discovered_tool_names") or [])
-                names = ["tool_search"]
-                if "run_python_code" in discovered:
-                    names.append("run_python_code")
+                names = ["tool_search", "run_python_code"]
                 if "bash" in discovered:
                     names.append("bash")
                 return [
@@ -352,7 +350,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 return True
 
             def is_tool_visible(self, name, _run_mode, discovered_tool_names=None, run_context=None):
-                if name == "tool_search":
+                if name in {"tool_search", "run_python_code"}:
                     return True
                 discovered = set(discovered_tool_names or [])
                 return name in discovered
@@ -362,10 +360,10 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     return {"status": "error", "message": f"unexpected tool {name}"}
                 discovered = (context or {}).get("discovered_tool_names")
                 if hasattr(discovered, "update"):
-                    discovered.update(["run_python_code", "bash"])
+                    discovered.update(["bash"])
                 return {
                     "status": "ok",
-                    "discovered_tools": ["run_python_code", "bash"],
+                    "discovered_tools": ["bash"],
                     "message": "Matched tools will be available on the next model turn.",
                 }
 
@@ -421,13 +419,13 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.run()
 
             self.assertEqual(len(provider_calls), 2)
-            self.assertEqual(provider_calls[0]["tool_names"], ["tool_search"])
-            self.assertNotIn("run_python_code", provider_calls[0]["system_prompt"])
-            self.assertNotIn("bash", provider_calls[0]["system_prompt"])
+            self.assertEqual(provider_calls[0]["tool_names"], ["tool_search", "run_python_code"])
+            self.assertIn("`run_python_code`", provider_calls[0]["system_prompt"])
+            self.assertNotIn("`bash`", provider_calls[0]["system_prompt"])
             self.assertIn("run_python_code", provider_calls[1]["tool_names"])
             self.assertIn("bash", provider_calls[1]["tool_names"])
-            self.assertIn("run_python_code", provider_calls[1]["system_prompt"])
-            self.assertIn("bash", provider_calls[1]["system_prompt"])
+            self.assertIn("`run_python_code`", provider_calls[1]["system_prompt"])
+            self.assertIn("`bash`", provider_calls[1]["system_prompt"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -22,6 +22,7 @@ Use this when you need to calculate data, process text, or perform tasks where n
 - **Sandboxed**: Code runs in the user's workspace.
 - **Security**: File operations are restricted to the workspace.
 - **Dependencies**: Standard library + installed packages (pandas, openpyxl, etc.) are available.
+- **Availability**: `run_python_code` is preloaded in execution mode and appears in the current tool list without a prior `tool_search`.
 - **Tool Choice**: Prefer `run_python_code` for data processing, calculations, structured text transforms, and lightweight file analysis; use `bash` only when the real shell or an existing CLI is needed.
 - **Parallelism**: Python execution and package installation are not read-only batch operations and must not be called through `parallel_tools`.
 

@@ -189,6 +189,29 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("tool_search", execution_initial)
         self.assertIn("parallel_tools", execution_initial)
 
+    def test_python_runner_visible_by_default_in_execution_mode(self):
+        self._copy_repo_skill("python-runner")
+        sm = self._build_manager()
+
+        execution_initial = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=set(),
+            )
+        }
+        clarifying_initial = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_CLARIFYING,
+                discovered_tool_names=set(),
+            )
+        }
+
+        self.assertIn("run_python_code", execution_initial)
+        self.assertNotIn("install_package", execution_initial)
+        self.assertNotIn("run_python_code", clarifying_initial)
+
     def test_parallel_tools_runs_read_only_calls_and_preserves_order(self):
         self._copy_repo_skill("meta-tools")
         skill_dir = os.path.join(self.skills_dir, "notes-tools")

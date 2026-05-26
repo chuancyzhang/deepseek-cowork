@@ -14,6 +14,7 @@ from .clarify_mode import (
 
 CORE_ALWAYS_LOAD_TOOLS = {
     "tool_search",
+    "run_python_code",
     "request_user_input",
     "request_user_approval",
     "read_memories",

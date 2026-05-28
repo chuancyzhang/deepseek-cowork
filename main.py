@@ -6,6 +6,7 @@ import time
 import ast
 import re
 import json
+import mimetypes
 import platform
 import uuid
 import glob
@@ -1431,6 +1432,10 @@ class ModelEditDialog(QDialog):
         self.model_name_input.setText(str(model.get("model_name") or ""))
         form.addRow("模型名称", self.model_name_input)
 
+        self.vision_check = QCheckBox("支持图片理解")
+        self.vision_check.setChecked(bool(model.get("supports_vision", False)))
+        form.addRow("多模态", self.vision_check)
+
         self.thinking_check = None
         self.reasoning_combo = None
         if provider_id == "openai":
@@ -1476,6 +1481,7 @@ class ModelEditDialog(QDialog):
             "id": existing_id or "",
             "display_name": display_name,
             "model_name": model_name,
+            "supports_vision": bool(self.vision_check and self.vision_check.isChecked()),
         }
         if self.provider_id == "openai":
             item["deepseek_thinking_enabled"] = bool(self.thinking_check and self.thinking_check.isChecked())
@@ -8807,6 +8813,74 @@ class MainWindow(QMainWindow):
             normalized.append(norm)
         return normalized
 
+    def _is_supported_image_attachment(self, path):
+        mime_type, _encoding = mimetypes.guess_type(path)
+        return str(mime_type or "").strip().lower() in {
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+        }
+
+    def _selected_model_supports_vision(self):
+        profile = self.config_manager.get_model_profile(self.config_manager.get_selected_model_id())
+        if not isinstance(profile, dict):
+            return False
+        return bool(profile.get("supports_vision", False))
+
+    def _resolve_text_image_references(self, user_text, existing_paths=None):
+        if not getattr(self, "workspace_dir", None):
+            return []
+        existing_keys = {
+            os.path.normcase(os.path.normpath(path))
+            for path in (existing_paths or [])
+        }
+        candidates = []
+        text = str(user_text or "")
+        for match in re.finditer(r"(?P<path>[^\s\"'，。；;：:]+?\.(?:png|jpg|jpeg|webp|gif))", text, re.IGNORECASE):
+            candidate = match.group("path").strip("()[]{}<>\"'`")
+            if candidate:
+                candidates.append(candidate)
+
+        resolved = []
+        seen = set(existing_keys)
+        workspace_root = os.path.abspath(self.workspace_dir)
+
+        def add_path(path):
+            normalized = os.path.normpath(os.path.abspath(path))
+            key = os.path.normcase(normalized)
+            if key in seen or not os.path.isfile(normalized) or not self._is_supported_image_attachment(normalized):
+                return
+            try:
+                if os.path.commonpath([workspace_root, normalized]) != workspace_root:
+                    return
+            except Exception:
+                return
+            seen.add(key)
+            resolved.append(normalized)
+
+        for candidate in candidates:
+            if os.path.isabs(candidate):
+                add_path(candidate)
+            else:
+                add_path(os.path.join(workspace_root, candidate))
+
+        missing_names = {
+            os.path.basename(candidate)
+            for candidate in candidates
+            if candidate and not os.path.isabs(candidate)
+        }
+        if missing_names:
+            scanned = 0
+            for root, _dirs, files in os.walk(workspace_root):
+                scanned += 1
+                if scanned > 800:
+                    break
+                for filename in files:
+                    if filename in missing_names:
+                        add_path(os.path.join(root, filename))
+        return resolved
+
     def _prompt_file_items(self, paths):
         items = []
         seen = set()
@@ -8911,9 +8985,14 @@ class MainWindow(QMainWindow):
             lines.append(f"  路径: {path}")
         return "\n".join(lines)
 
-    def _build_user_message_payload(self, user_text, file_paths):
+    def _build_user_message_payload(self, user_text, file_paths, supports_vision=False):
         display_text = str(user_text or "").strip()
         normalized_files = self._normalize_prompt_file_paths(file_paths)
+        referenced_images = self._resolve_text_image_references(display_text, normalized_files)
+        if referenced_images:
+            normalized_files = self._normalize_prompt_file_paths(normalized_files + referenced_images)
+        image_paths = [path for path in normalized_files if self._is_supported_image_attachment(path)]
+        regular_files = [path for path in normalized_files if path not in image_paths]
         content_blocks = []
         if normalized_files:
             content_blocks.append(self._build_user_added_files_prompt(normalized_files))
@@ -8923,7 +9002,16 @@ class MainWindow(QMainWindow):
         content_parts = []
         if display_text:
             content_parts.append({"type": "text", "text": display_text})
-        for path in normalized_files:
+        for path in image_paths:
+            content_parts.append(
+                {
+                    "type": "input_image",
+                    "path": path,
+                    "name": os.path.basename(path) or path,
+                    "source": "user_added",
+                }
+            )
+        for path in regular_files:
             content_parts.append(
                 {
                     "type": "input_file",
@@ -8937,6 +9025,11 @@ class MainWindow(QMainWindow):
             meta["display_content"] = display_text
         if normalized_files:
             meta["user_added_files"] = normalized_files
+        if image_paths:
+            meta["user_added_images"] = image_paths
+            meta["vision_requested"] = bool(supports_vision)
+        if referenced_images:
+            meta["workspace_referenced_images"] = referenced_images
         return {
             "content": content,
             "display_content": display_text,
@@ -13352,15 +13445,20 @@ class MainWindow(QMainWindow):
         if not raw_user_text and not prompt_files:
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
+        supports_vision = self._selected_model_supports_vision()
         if mentioned_profiles and not delegated_text:
             if state.session_id == self.current_session_id:
                 QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return False
-        payload = self._build_user_message_payload(raw_user_text, prompt_files)
+        payload = self._build_user_message_payload(raw_user_text, prompt_files, supports_vision=supports_vision)
         user_text = payload.get("content") or ""
         if not user_text:
             return False
-        delegated_payload = self._build_user_message_payload(delegated_text, prompt_files).get("content") or delegated_text
+        delegated_payload = self._build_user_message_payload(
+            delegated_text,
+            prompt_files,
+            supports_vision=supports_vision,
+        ).get("content") or delegated_text
         if check_duplicates:
             now = time.time()
             submit_signature = json.dumps(

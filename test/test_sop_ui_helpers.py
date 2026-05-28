@@ -266,6 +266,49 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertEqual(payload["content_parts"][1]["type"], "input_file")
         self.assertEqual(payload["content_parts"][1]["path"], os.path.normpath(file_path))
 
+    def test_build_user_message_payload_marks_images_when_vision_enabled(self):
+        window = MainWindow.__new__(MainWindow)
+        window.workspace_dir = None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "截图.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"png")
+
+            payload = window._build_user_message_payload("识别这张图的文字", [image_path], supports_vision=True)
+
+        self.assertEqual(payload["content_parts"][1]["type"], "input_image")
+        self.assertEqual(payload["meta"]["user_added_images"], [os.path.normpath(image_path)])
+        self.assertTrue(payload["meta"]["vision_requested"])
+
+    def test_build_user_message_payload_keeps_image_parts_when_vision_disabled(self):
+        window = MainWindow.__new__(MainWindow)
+        window.workspace_dir = None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "截图.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"png")
+
+            payload = window._build_user_message_payload("识别这张图的文字", [image_path], supports_vision=False)
+
+        self.assertEqual(payload["content_parts"][1]["type"], "input_image")
+
+    def test_build_user_message_payload_auto_attaches_named_workspace_image(self):
+        window = MainWindow.__new__(MainWindow)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            window.workspace_dir = temp_dir
+            image_path = os.path.join(temp_dir, "screenshot.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"png")
+
+            payload = window._build_user_message_payload("看看 screenshot.png", [], supports_vision=True)
+
+        self.assertEqual(payload["content_parts"][1]["type"], "input_image")
+        self.assertEqual(payload["content_parts"][1]["path"], os.path.normpath(os.path.abspath(image_path)))
+        self.assertEqual(payload["meta"]["workspace_referenced_images"], [os.path.normpath(os.path.abspath(image_path))])
+
     def test_select_files_for_prompt_forwards_dialog_selection(self):
         window = MainWindow.__new__(MainWindow)
         window.workspace_dir = ""

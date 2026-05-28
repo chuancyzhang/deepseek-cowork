@@ -718,6 +718,25 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_image_turn_hides_tool_search_without_prompt_changes(self):
+        worker = LLMWorker.__new__(LLMWorker)
+        worker.tools = [
+            {"type": "function", "function": {"name": "tool_search"}},
+            {"type": "function", "function": {"name": "read_file"}},
+        ]
+        tools = worker._tools_for_messages(
+            [
+                {
+                    "role": "user",
+                    "content": "你能看到这张图吗",
+                    "content_parts": [{"type": "input_image", "path": "demo.png"}],
+                }
+            ]
+        )
+
+        tool_names = [item["function"]["name"] for item in tools]
+        self.assertEqual(tool_names, ["read_file"])
+
 
 class TestSingleInstance(unittest.TestCase):
     def test_build_ui_server_name_is_stable_and_scoped(self):

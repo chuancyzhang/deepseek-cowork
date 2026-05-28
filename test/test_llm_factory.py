@@ -99,6 +99,7 @@ class TestLLMFactory(unittest.TestCase):
         )
         self.assertFalse(provider.thinking_enabled)
         self.assertEqual(provider.reasoning_effort, "max")
+        self.assertFalse(provider.supports_vision)
 
     def test_create_provider_uses_anthropic_profile(self):
         self.mock_config.get_model_profile.return_value = {
@@ -108,12 +109,14 @@ class TestLLMFactory(unittest.TestCase):
             "api_key": "anthropic_key",
             "base_url": "https://anthropic.url",
             "model_name": "claude-test",
+            "supports_vision": True,
         }
 
         provider = LLMFactory.create_provider(self.mock_config, "anthropic-profile")
 
         self.assertIsInstance(provider, AnthropicProvider)
         self.assertEqual(provider.model_name, "claude-test")
+        self.assertTrue(provider.supports_vision)
         self.anthropic_module.Anthropic.assert_called_with(
             api_key="anthropic_key",
             base_url="https://anthropic.url",

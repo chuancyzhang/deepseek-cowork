@@ -248,6 +248,7 @@ class MoonshotProvider(OpenAIProvider):
         clean = []
         for msg in messages:
             m = msg.copy()
+            content_parts = m.pop("content_parts", None)
             # Moonshot strictly does not support 'reasoning_content' or 'reasoning' fields
             m.pop("reasoning", None)
             m.pop("reasoning_content", None)
@@ -259,6 +260,14 @@ class MoonshotProvider(OpenAIProvider):
             # Filter out empty content if tool_calls are present (Standard OpenAI allows it, but being explicit is safer)
             if m.get("role") == "assistant" and "tool_calls" in m and not m.get("content"):
                 m["content"] = None # OpenAI SDK handles None as null, which is valid when tool_calls exist
+            elif (
+                self.supports_vision
+                and m.get("role") == "user"
+                and isinstance(content_parts, list)
+            ):
+                vision_content = _build_openai_vision_content(m.get("content") or "", content_parts)
+                if vision_content:
+                    m["content"] = vision_content
 
             clean.append(m)
         return clean

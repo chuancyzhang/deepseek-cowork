@@ -30,6 +30,7 @@ Current app version: **4.8.1**.
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
 *   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, keeps each project collapsed by default with only a short preview of conversations, and avoids a separate top-right workspace switcher.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status; sub-agent activity lights the panel hint without forcing the drawer open.
+*   **Vision Attachments**: Prompt-bar image attachments keep structured metadata and are sent as multimodal input only when the selected model enables `支持图片理解`.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.
 *   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; active automation and selected-skill chips can be removed with one click.
 *   **Sub-Agent Monitor**: Observe parallel workers in a lightweight timeline summary for task input, tool calls, tool results, streamed output, and final output; opening the panel queues a short, main-thread render pass for UI stability.
@@ -97,6 +98,7 @@ Examples:
 *   *"Scan this project for unused imports and remove them."*
 *   *"Summarize all PDFs in this folder into a single report."*
 *   *"Create a new skill to download videos using yt-dlp."*
+*   *"Read the text in this screenshot."* OCR-style extraction stays lightweight by using the selected vision model directly instead of adding a separate local OCR dependency.
 *   Use **从对话生成 SOP** in the input `+` menu to extract a complete SOP draft from the current conversation in one pass. Confirming saves it as a task template and binds it to the current session; feedback can regenerate the draft first.
 
 ### 4. Manage Automation

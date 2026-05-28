@@ -605,6 +605,34 @@ class LLMWorker(QThread):
                 return True
         return True
 
+    def _current_turn_has_image_input(self, messages):
+        for msg in reversed(messages or []):
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "user":
+                continue
+            for part in msg.get("content_parts") or []:
+                if (
+                    isinstance(part, dict)
+                    and str(part.get("type") or "").strip().lower() == "input_image"
+                ):
+                    return True
+            return False
+        return False
+
+    def _tools_for_messages(self, messages):
+        tools = list(self.tools or [])
+        if not self._current_turn_has_image_input(messages):
+            return tools
+        filtered = []
+        for item in tools:
+            function = item.get("function") if isinstance(item, dict) else None
+            name = function.get("name") if isinstance(function, dict) else ""
+            if name == "tool_search":
+                continue
+            filtered.append(item)
+        return filtered
+
     def _bind_agent_manager(self):
         if self.is_subagent:
             self.agent_manager = None
@@ -1037,7 +1065,10 @@ class LLMWorker(QThread):
                             protocol_locked = True
                             if waited_for_protocol:
                                 self.step_signal.emit("Provider Protocol: waited for OpenAI-compatible stream lock.")
-                        stream = provider.chat_stream(sanitized_messages, tools=self.tools)
+                        stream = provider.chat_stream(
+                            sanitized_messages,
+                            tools=self._tools_for_messages(sanitized_messages),
+                        )
 
                         for chunk in stream:
                             # Check Pause/Stop during stream

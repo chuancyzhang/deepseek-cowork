@@ -15,6 +15,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **项目式左侧栏**：本地文件夹作为项目，项目列表由用户配置、最近工作区和会话 `meta.workspace_dir` 合并而来；项目默认折叠，仅预览少量会话，选择项目即切换当前工作区，右上角不再提供独立切换入口。
 *   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时主内容区自动预留宽度，避免遮挡对话。子 Agent 开始运行时会自动切到该面板。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
+*   **多模态附件建模**：输入区把普通文件记录为 `input_file`，把 PNG/JPEG/WEBP/GIF 记录为 `input_image`；provider 在发送前再决定是否转换成视觉请求。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理。
 *   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。子 Agent 面板按时间线拆分显示任务输入、工具调用、工具结果、流式输出与最终输出。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
@@ -22,6 +23,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.2 Agent Core
 *   **core/agent.py**：推理循环与工具调度，负责将用户输入转化为可执行任务。
 *   **core/interaction.py**：桥接 UI 与推理流程，统一消息与工具调用格式。
+*   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。
 *   **core/sandbox_runtime.py**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先直接使用当前应用目录的 `_internal/*_env` 结构，并为沙盒命令注入对应 PATH；AppData `runtime_sandbox` 仅作为临时、缓存和 skill 依赖根目录。若发现 `python_env/python.exe` 只是依赖外部解释器的 venv redirector，会在运行时标记为不可用而不是继续误报；`bash` 执行层在 Windows 缺失 Git Bash 时退回 `cmd.exe`。
 
 ### 2.3 Daemon 与并发

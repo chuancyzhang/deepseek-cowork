@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+import tempfile
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             model_name=kwargs.get("model_name", "deepseek-v4-pro"),
             thinking_enabled=kwargs.get("thinking_enabled", True),
             reasoning_effort=kwargs.get("reasoning_effort", "high"),
+            supports_vision=kwargs.get("supports_vision", False),
         )
         self.assertIn("openai", sys.modules)
         return provider, client
@@ -170,6 +172,59 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         for chunk in chunks:
             if "arguments" in chunk["function"]:
                 self.assertIsNot(chunk["function"]["arguments"], None)
+
+    def test_prepare_messages_converts_input_image_parts_when_vision_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = os.path.join(temp_dir, "sample.png")
+            with open(image_path, "wb") as handle:
+                handle.write(
+                    bytes.fromhex(
+                        "89504E470D0A1A0A0000000D4948445200000001000000010802000000907753DE0000000C4944415408D763F8FFFF3F0005FE02FEA7B90D2F0000000049454E44AE426082"
+                    )
+                )
+
+            provider, _client = self._build_provider(
+                base_url="https://api.openai.com/v1",
+                model_name="gpt-4.1-mini",
+                supports_vision=True,
+            )
+            prepared = provider._prepare_messages(
+                [
+                    {
+                        "role": "user",
+                        "content": "Read this screenshot",
+                        "content_parts": [
+                            {"type": "text", "text": "Read this screenshot"},
+                            {"type": "input_image", "path": image_path, "name": "sample.png"},
+                        ],
+                    }
+                ]
+            )
+
+        self.assertIsInstance(prepared[0]["content"], list)
+        self.assertEqual(prepared[0]["content"][0], {"type": "text", "text": "Read this screenshot"})
+        self.assertEqual(prepared[0]["content"][1]["type"], "image_url")
+        self.assertTrue(prepared[0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_prepare_messages_ignores_input_image_parts_when_vision_disabled(self):
+        provider, _client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            supports_vision=False,
+        )
+        prepared = provider._prepare_messages(
+            [
+                {
+                    "role": "user",
+                    "content": "Path only",
+                    "content_parts": [
+                        {"type": "input_image", "path": "C:\\demo.png", "name": "demo.png"},
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(prepared[0]["content"], "Path only")
 
 
 class TestDeepSeekMessageSanitization(unittest.TestCase):

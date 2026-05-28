@@ -82,6 +82,7 @@ Packaged Windows builds resolve bundled runtimes directly from the current app d
 Agents get `run_python_code` in the default execution tool list so Python can be used without a prior `tool_search`; JavaScript execution still uses `run_node_code`, and the `bash` tool prefers Git Bash before falling back to `cmd.exe` on Windows.
 The packaged Python sandbox should be built from the base interpreter rather than a virtualenv redirector, otherwise `run_python_code` may fail on machines that do not have the builder's Python installation path.
 `install_package` for `python-runner` verifies imports inside the same sandbox runtime used by `run_python_code`. Third-party packages are persisted under AppData `runtime_sandbox/.../skills/python-runner/python/site-packages` so they survive restarts, and stale dependency cache entries are reinstalled automatically if the sandbox can no longer import them.
+The bundled Python runtime must also include platform extension modules from locations such as `DLLs/` on Windows; otherwise core modules like `_socket` are missing and `pip` cannot install packages inside `_internal/python_env`.
 
 ## 📖 Usage Guide
 

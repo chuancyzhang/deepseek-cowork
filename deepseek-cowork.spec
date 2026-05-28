@@ -101,6 +101,20 @@ def _collect_minimal_python_env(prefix):
     for name in ("python.exe", "pythonw.exe"):
         _add_data_file(datas, os.path.join(scripts_dir, name), f"python_env/{name}")
 
+    # Windows stdlib extension modules such as _socket and _ssl live outside Lib/.
+    # Without these .pyd files, the bundled runtime can start but pip/network code fails.
+    runtime_extension_dirs = [
+        ("DLLs", "python_env/DLLs"),
+        (os.path.join("Lib", "lib-dynload"), "python_env/Lib/lib-dynload"),
+    ]
+    for rel_src, dest_root in runtime_extension_dirs:
+        datas.extend(
+            _collect_tree(
+                os.path.join(prefix, rel_src),
+                dest_root,
+            )
+        )
+
     lib_dir = os.path.join(prefix, "Lib")
     datas.extend(
         _collect_tree(

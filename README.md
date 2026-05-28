@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.1**.
+Current app version: **4.8.2**.
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)

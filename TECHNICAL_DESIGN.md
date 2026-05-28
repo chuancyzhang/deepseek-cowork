@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.0**。
+当前应用版本：**4.8.1**。
 
 ## 1. 架构理念
 
@@ -12,6 +12,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ### 2.1 UI 层 (PySide6)
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互。
+*   **项目式左侧栏**：本地文件夹作为项目，项目列表由用户配置、最近工作区和会话 `meta.workspace_dir` 合并而来；项目默认折叠，仅预览少量会话，选择项目即切换当前工作区，右上角不再提供独立切换入口。
 *   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时主内容区自动预留宽度，避免遮挡对话。子 Agent 开始运行时会自动切到该面板。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理。
@@ -37,8 +38,8 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.5 自动化、配置与存储
 *   **core/sop_manager.py**：规范化自动化模板和会话运行态，维护 step/run 状态，并生成当前步骤 Prompt 片段。
 *   **core/automation_manager.py**：规范化定时任务、计算 next run、生成完整执行提示词并维护运行历史记录结构。
-*   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、工作区、自动化任务与运行历史。
-*   **core/chat_storage.py**：历史对话持久化与按日归档。
+*   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、项目列表、工作区、自动化任务与运行历史。
+*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组、无项目对话查询和项目会话归档。
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，校验解压结构并生成 Windows 更新脚本。
 

@@ -888,6 +888,58 @@ class ChatStorage:
             )
         return conversations
 
+    def list_conversations_by_workspace(self):
+        grouped = {}
+        for conversation in self.list_conversations():
+            meta = conversation.get("meta") or {}
+            workspace_dir = str(meta.get("workspace_dir") or "").strip()
+            if not workspace_dir:
+                continue
+            key = os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(workspace_dir))))
+            item = dict(conversation)
+            item["workspace_dir"] = os.path.normpath(os.path.abspath(os.path.expanduser(workspace_dir)))
+            grouped.setdefault(key, []).append(item)
+        return grouped
+
+    def list_unassigned_conversations(self):
+        result = []
+        for conversation in self.list_conversations():
+            meta = conversation.get("meta") or {}
+            if str(meta.get("workspace_dir") or "").strip():
+                continue
+            result.append(conversation)
+        return result
+
+    def archive_conversations_for_workspace(self, workspace_dir):
+        target = str(workspace_dir or "").strip()
+        if not target:
+            return 0
+        target_key = os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(target))))
+        archived = 0
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, title, status, meta FROM conversations").fetchall()
+            for row in rows:
+                meta = self._parse_json_dict(row["meta"])
+                row_workspace = str(meta.get("workspace_dir") or "").strip()
+                if not row_workspace:
+                    continue
+                row_key = os.path.normcase(os.path.normpath(os.path.abspath(os.path.expanduser(row_workspace))))
+                if row_key != target_key:
+                    continue
+                if meta.get("archived"):
+                    continue
+                meta["archived"] = True
+                conn.execute(
+                    "UPDATE conversations SET status = ?, meta = ? WHERE id = ?",
+                    (
+                        row["status"] or "completed",
+                        json.dumps(meta, ensure_ascii=False),
+                        row["id"],
+                    ),
+                )
+                archived += 1
+        return archived
+
     def search_conversations(self, query, limit=50):
         text = str(query or "").strip()
         if not text:

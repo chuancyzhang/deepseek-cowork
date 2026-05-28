@@ -71,6 +71,27 @@ class TestConfigManager(unittest.TestCase):
         self.assertTrue(cm.get("model_provider_configs"))
         self.assertEqual(cm.get_selected_model_id(), "openai-default")
 
+    def test_project_config_adds_renames_pins_and_hides(self):
+        cm = self._create_config_manager()
+        project_dir = os.path.join(self.temp_dir, "demo")
+        os.makedirs(project_dir)
+
+        project = cm.upsert_project(project_dir, name="Demo", pinned=True)
+        self.assertEqual(project["name"], "Demo")
+        self.assertTrue(project["pinned"])
+        self.assertEqual(len(cm.get_projects()), 1)
+
+        cm.upsert_project(project_dir, name="Renamed", pinned=False)
+        projects = cm.get_projects()
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["name"], "Renamed")
+        self.assertFalse(projects[0]["pinned"])
+
+        self.assertTrue(cm.hide_project(project_dir))
+        self.assertEqual(cm.get_projects(include_hidden=False), [])
+        self.assertTrue(cm.restore_project(project_dir))
+        self.assertEqual(len(cm.get_projects(include_hidden=False)), 1)
+
     def test_migrates_legacy_model_config_to_provider_group(self):
         cm = self._create_config_manager(
             {

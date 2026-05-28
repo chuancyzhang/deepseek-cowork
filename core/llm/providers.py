@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+import base64
+import mimetypes
 import os
 import json
 import time
@@ -22,6 +24,62 @@ class LLMProvider(ABC):
         """
         pass
 
+
+SUPPORTED_VISION_MIME_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+}
+
+
+def _guess_image_mime_type(path):
+    guessed, _encoding = mimetypes.guess_type(path)
+    guessed = str(guessed or "").strip().lower()
+    return guessed if guessed in SUPPORTED_VISION_MIME_TYPES else ""
+
+
+def _build_data_url_from_path(path):
+    mime_type = _guess_image_mime_type(path)
+    if not mime_type or not os.path.isfile(path):
+        return None
+    with open(path, "rb") as handle:
+        encoded = base64.b64encode(handle.read()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _extract_image_paths(content_parts):
+    image_paths = []
+    for part in content_parts or []:
+        if not isinstance(part, dict):
+            continue
+        if str(part.get("type") or "").strip().lower() != "input_image":
+            continue
+        path = str(part.get("path") or "").strip()
+        if path:
+            image_paths.append(path)
+    return image_paths
+
+
+def _build_openai_vision_content(text_content, content_parts):
+    content = []
+    if text_content:
+        content.append({"type": "text", "text": text_content})
+    for path in _extract_image_paths(content_parts):
+        data_url = _build_data_url_from_path(path)
+        if not data_url:
+            continue
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                    "detail": "auto",
+                },
+            }
+        )
+    return content
+
 class OpenAIProvider(LLMProvider):
     protocol_family = "openai-compatible"
 
@@ -32,6 +90,7 @@ class OpenAIProvider(LLMProvider):
         model_name,
         thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
         reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
+        supports_vision=False,
     ):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url)
@@ -39,6 +98,7 @@ class OpenAIProvider(LLMProvider):
         self.model_name = model_name
         self.thinking_enabled = bool(thinking_enabled)
         self.reasoning_effort = normalize_deepseek_reasoning_effort(reasoning_effort)
+        self.supports_vision = bool(supports_vision)
 
     def chat_stream(self, messages, tools=None):
         try:
@@ -124,6 +184,7 @@ class OpenAIProvider(LLMProvider):
         is_deepseek = bool(is_deepseek_request(self.model_name, self.base_url))
         for msg in messages:
             m = msg.copy()
+            content_parts = m.pop("content_parts", None)
             # Remove internal keys
             m.pop("reasoning", None)
             
@@ -145,6 +206,14 @@ class OpenAIProvider(LLMProvider):
             # When tool_calls exist, OpenAI-compatible APIs expect content to be null
             if m.get("role") == "assistant" and "tool_calls" in m and not m.get("content"):
                 m["content"] = None
+            elif (
+                self.supports_vision
+                and m.get("role") == "user"
+                and isinstance(content_parts, list)
+            ):
+                vision_content = _build_openai_vision_content(m.get("content") or "", content_parts)
+                if vision_content:
+                    m["content"] = vision_content
                 
             clean.append(m)
         return clean
@@ -161,6 +230,7 @@ class MoonshotProvider(OpenAIProvider):
         model_name,
         thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
         reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
+        supports_vision=False,
     ):
         # Ensure correct Base URL if user selects 'moonshot' but leaves default URL
         if not base_url or "api.openai.com" in base_url:
@@ -171,6 +241,7 @@ class MoonshotProvider(OpenAIProvider):
             model_name,
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
+            supports_vision=supports_vision,
         )
 
     def _prepare_messages(self, messages):
@@ -193,7 +264,7 @@ class MoonshotProvider(OpenAIProvider):
         return clean
 
 class AnthropicProvider(LLMProvider):
-    def __init__(self, api_key, base_url, model_name):
+    def __init__(self, api_key, base_url, model_name, supports_vision=False):
         import anthropic
         from anthropic import Anthropic
         # Anthropic SDK handles base_url differently usually, but we can pass it
@@ -211,6 +282,7 @@ class AnthropicProvider(LLMProvider):
         self.client = Anthropic(**client_kwargs)
         self.base_url = base_url
         self.model_name = model_name
+        self.supports_vision = bool(supports_vision)
 
     @staticmethod
     def _uses_bearer_auth(base_url):
@@ -277,6 +349,7 @@ class AnthropicProvider(LLMProvider):
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content")
+            content_parts = msg.get("content_parts")
             
             if role == "system":
                 system_prompt += content + "\n"
@@ -284,6 +357,12 @@ class AnthropicProvider(LLMProvider):
                 
             # Handle multi-modal content
             new_content = []
+            if (
+                self.supports_vision
+                and role == "user"
+                and isinstance(content_parts, list)
+            ):
+                content = _build_openai_vision_content(content or "", content_parts)
             if isinstance(content, str):
                 new_content = content
             elif isinstance(content, list):

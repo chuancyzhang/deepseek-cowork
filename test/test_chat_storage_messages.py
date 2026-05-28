@@ -238,6 +238,40 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertIn("conv-archived", storage.search_conversations("archived"))
         self.assertIn("conv-cjk", storage.search_conversations("截图"))
 
+    def test_project_grouping_and_unassigned_conversations(self):
+        storage = ChatStorage(self.db_path)
+        workspace = os.path.join(self.temp_dir, "workspace")
+        os.makedirs(workspace)
+        storage.save_conversation(
+            "project-conv",
+            [{"role": "user", "content": "project task"}],
+            title="Project task",
+            meta={"workspace_dir": workspace},
+        )
+        storage.save_conversation(
+            "plain-conv",
+            [{"role": "user", "content": "plain chat"}],
+            title="Plain chat",
+        )
+
+        grouped = storage.list_conversations_by_workspace()
+        workspace_key = os.path.normcase(os.path.normpath(os.path.abspath(workspace)))
+        self.assertEqual(grouped[workspace_key][0]["id"], "project-conv")
+        self.assertEqual([item["id"] for item in storage.list_unassigned_conversations()], ["plain-conv"])
+
+    def test_archive_conversations_for_workspace_only_archives_target(self):
+        storage = ChatStorage(self.db_path)
+        workspace = os.path.join(self.temp_dir, "workspace")
+        other_workspace = os.path.join(self.temp_dir, "other")
+        os.makedirs(workspace)
+        os.makedirs(other_workspace)
+        storage.save_conversation("target", [{"role": "user", "content": "a"}], meta={"workspace_dir": workspace})
+        storage.save_conversation("other", [{"role": "user", "content": "b"}], meta={"workspace_dir": other_workspace})
+
+        self.assertEqual(storage.archive_conversations_for_workspace(workspace), 1)
+        self.assertTrue(storage.get_conversation_meta("target").get("archived"))
+        self.assertFalse(storage.get_conversation_meta("other").get("archived"))
+
 
 if __name__ == "__main__":
     unittest.main()

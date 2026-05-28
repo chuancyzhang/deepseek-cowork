@@ -526,23 +526,22 @@ def apple_status_chip_style(status, subtle=False):
 def apple_search_field_style():
     return f"""
         QLineEdit {{
-            background: rgba(255, 255, 255, 0.72);
-            border: 1px solid {DesignTokens.border_subtle};
+            background: rgba(255, 255, 255, 0.52);
+            border: none;
             border-radius: 13px;
-            padding: 7px 10px;
+            padding: 8px 10px;
             color: {DesignTokens.text_primary};
             font-size: 12px;
         }}
         QLineEdit:focus {{
-            background: {DesignTokens.bg_main};
-            border-color: rgba(0, 122, 255, 0.32);
+            background: rgba(255, 255, 255, 0.82);
         }}
     """
 
 
 def apple_history_row_style(selected=False):
-    bg = "#dfeef2" if selected else "transparent"
-    hover = "#e6f2f5" if selected else "rgba(255, 255, 255, 0.42)"
+    bg = "rgba(232, 242, 255, 0.92)" if selected else "transparent"
+    hover = "rgba(255, 255, 255, 0.54)" if selected else "rgba(255, 255, 255, 0.34)"
     return (
         f"QFrame#HistoryRow {{ background: {bg}; border: none; border-radius: 12px; }}"
         f"QFrame#HistoryRow:hover {{ background: {hover}; border: none; }}"
@@ -562,6 +561,41 @@ def apple_history_group_style():
     return (
         f"color: {DesignTokens.text_tertiary}; font-size: 11px; font-weight: 700; "
         "letter-spacing: 0px; padding: 10px 8px 3px 8px; background: transparent;"
+    )
+
+
+def apple_sidebar_icon_button_style(active=False):
+    bg = rgba_from_hex(DesignTokens.primary, 0.14) if active else "transparent"
+    color = DesignTokens.primary if active else DesignTokens.text_secondary
+    return (
+        "QToolButton { "
+        f"background: {bg}; color: {color}; border: none; border-radius: 13px; padding: 0px;"
+        "} "
+        "QToolButton:hover { "
+        f"background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_primary};"
+        "} "
+    )
+
+
+def apple_inline_project_chip_style(active=False):
+    bg = rgba_from_hex(DesignTokens.primary, 0.10) if active else "rgba(255, 255, 255, 0.58)"
+    color = DesignTokens.success_text if active else DesignTokens.text_secondary
+    border = rgba_from_hex(DesignTokens.primary, 0.16) if active else "rgba(255, 255, 255, 0.0)"
+    return (
+        f"background: {bg}; color: {color}; border: 1px solid {border}; "
+        "border-radius: 12px; padding: 7px 12px; font-size: 12px; font-weight: 600;"
+    )
+
+
+def apple_disclosure_button_style():
+    return (
+        "QPushButton { "
+        f"background: transparent; color: {DesignTokens.text_secondary}; border: none; "
+        "border-radius: 10px; padding: 4px 10px; text-align: left; font-size: 11px; font-weight: 600;"
+        "} "
+        "QPushButton:hover { "
+        f"background: rgba(255, 255, 255, 0.42); color: {DesignTokens.text_primary};"
+        "} "
     )
 
 
@@ -4284,7 +4318,7 @@ class DragOverlay(QWidget):
         icon.setPixmap(qta.icon('fa5s.folder-open', color=DesignTokens.primary).pixmap(80, 80))
         icon.setAlignment(Qt.AlignCenter)
         
-        label = QLabel("松开鼠标以切换工作区")
+        label = QLabel("松开鼠标以切换项目")
         label.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 20px; font-weight: bold;")
         label.setAlignment(Qt.AlignCenter)
         
@@ -7582,6 +7616,12 @@ class MainWindow(QMainWindow):
         self.messages = []
         self.history_rows = {}
         self.history_buttons = {}
+        self.project_rows = {}
+        self.project_buttons = {}
+        self.project_preview_paths = set()
+        self.project_full_expanded_paths = set()
+        self.sidebar_sort_mode = "recent"
+        self.current_project_path = ""
         self._session_load_token_counter = 0
         self.tool_cards = {}
         self.pending_tool_results = {}
@@ -7607,6 +7647,7 @@ class MainWindow(QMainWindow):
         self.conversation_sop_worker = None
         
         self.config_manager = ConfigManager()
+        self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
         self.skill_manager = SkillManager(None, self.config_manager)
         self.skill_generator = SkillGenerator(self.config_manager)
         self.daemon_host = DEFAULT_HOST
@@ -7657,31 +7698,16 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(18, 24, 18, 24)
         sidebar_layout.setSpacing(14)
 
-        app_title = QLabel("DeepSeek Cowork")
-        app_title.setProperty("roleTitle", True)
-        sidebar_layout.addWidget(app_title)
-        
-        app_subtitle = QLabel("智能文件助手")
-        app_subtitle.setText("文件协作助手")
-        app_subtitle.setProperty("roleSubtitle", True)
-        sidebar_layout.addWidget(app_subtitle)
-
         new_chat_btn = QPushButton(" 新建对话")
-        new_chat_btn.setText(" 新任务")
-        new_chat_btn.setIcon(qta.icon('fa5s.plus', color='#ffffff'))
+        new_chat_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_primary))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
-        new_chat_btn.setStyleSheet(apple_button_style("primary", radius=18, align="left"))
+        new_chat_btn.setFixedHeight(36)
+        new_chat_btn.setStyleSheet(apple_button_style("ghost", radius=14, align="left"))
         new_chat_btn.clicked.connect(self.new_conversation)
         sidebar_layout.addWidget(new_chat_btn)
 
-        # History List
-        history_label = QLabel("历史会话")
-        history_label.setText("最近任务")
-        history_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; font-weight: 600; margin-top: 12px;")
-        sidebar_layout.addWidget(history_label)
-
         self.history_search_input = QLineEdit()
-        self.history_search_input.setPlaceholderText("搜索历史")
+        self.history_search_input.setPlaceholderText("搜索")
         self.history_search_input.setClearButtonEnabled(True)
         self.history_search_input.setFixedHeight(30)
         self.history_search_input.setStyleSheet(apple_search_field_style())
@@ -7691,6 +7717,32 @@ class MainWindow(QMainWindow):
         self.history_search_timer.timeout.connect(self.refresh_history_list)
         self.history_search_input.textChanged.connect(lambda *_: self.history_search_timer.start())
         sidebar_layout.addWidget(self.history_search_input)
+
+        project_header = QWidget()
+        project_header_layout = QHBoxLayout(project_header)
+        project_header_layout.setContentsMargins(0, 8, 0, 0)
+        project_header_layout.setSpacing(6)
+        project_label = QLabel("项目")
+        project_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px; font-weight: 600;")
+        project_header_layout.addWidget(project_label)
+        project_header_layout.addStretch()
+        self.sidebar_projects_menu_btn = QToolButton()
+        self.sidebar_projects_menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        self.sidebar_projects_menu_btn.setToolTip("项目与侧边栏选项")
+        self.sidebar_projects_menu_btn.setCursor(Qt.PointingHandCursor)
+        self.sidebar_projects_menu_btn.setFixedSize(28, 28)
+        self.sidebar_projects_menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
+        self.sidebar_projects_menu_btn.clicked.connect(self.show_sidebar_projects_menu)
+        self.sidebar_add_project_btn = QToolButton()
+        self.sidebar_add_project_btn.setIcon(qta.icon('fa5s.folder-plus', color=DesignTokens.text_secondary))
+        self.sidebar_add_project_btn.setToolTip("添加项目")
+        self.sidebar_add_project_btn.setCursor(Qt.PointingHandCursor)
+        self.sidebar_add_project_btn.setFixedSize(28, 28)
+        self.sidebar_add_project_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
+        self.sidebar_add_project_btn.clicked.connect(self.add_project_from_dialog)
+        project_header_layout.addWidget(self.sidebar_projects_menu_btn)
+        project_header_layout.addWidget(self.sidebar_add_project_btn)
+        sidebar_layout.addWidget(project_header)
 
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
@@ -7705,22 +7757,9 @@ class MainWindow(QMainWindow):
         self.history_layout.setSpacing(4)
         self.history_scroll.setWidget(self.history_container)
         sidebar_layout.addWidget(self.history_scroll, 1)
-
-        sidebar_footer_label = QLabel("设置")
-        sidebar_footer_label.setText("系统入口")
-        sidebar_footer_label.setProperty("roleSubtitle", True)
-        sidebar_layout.addWidget(sidebar_footer_label)
         
         sidebar_btn_style = apple_button_style("ghost", radius=14, align="left")
-        
-        sidebar_settings_btn = QPushButton(" 系统设置")
-        sidebar_settings_btn.setText(" 系统设置")
-        sidebar_settings_btn.setIcon(qta.icon('fa5s.cog', color='#4b5563'))
-        sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
-        sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
-        sidebar_settings_btn.clicked.connect(self.open_settings)
-        sidebar_layout.addWidget(sidebar_settings_btn)
-        
+
         sidebar_skills_btn = QPushButton(" 功能中心")
         sidebar_skills_btn.setText(" 能力中心")
         sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color='#4b5563'))
@@ -7749,6 +7788,14 @@ class MainWindow(QMainWindow):
         self.sidebar_skill_capture_btn.setStyleSheet(sidebar_btn_style)
         self.sidebar_skill_capture_btn.clicked.connect(self.start_conversation_skill_flow)
         sidebar_layout.addWidget(self.sidebar_skill_capture_btn)
+
+        sidebar_settings_btn = QPushButton(" 系统设置")
+        sidebar_settings_btn.setText(" 设置")
+        sidebar_settings_btn.setIcon(qta.icon('fa5s.cog', color='#4b5563'))
+        sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_settings_btn.clicked.connect(self.open_settings)
+        sidebar_layout.addWidget(sidebar_settings_btn)
 
         self.main_splitter.addWidget(sidebar)
 
@@ -8157,27 +8204,22 @@ class MainWindow(QMainWindow):
         title_label.setText("在工作区里完成一个任务")
         title_label.setProperty("roleTitle", True)
         subtitle_label = QLabel("选择工作区，描述你的需求，我会帮你完成文件操作。")
-        subtitle_label.setText("先确认当前工作区，再描述你要处理的文件、报告或整理任务。")
+        subtitle_label.setText("从左侧选择项目，再描述你要处理的文件、报告或整理任务。")
         subtitle_label.setProperty("roleSubtitle", True)
         title_box.addWidget(title_label)
         title_box.addWidget(subtitle_label)
         top_bar.addLayout(title_box)
         top_bar.addStretch()
         
-        # Workspace Selector
         ws_container = QFrame()
-        ws_container.setStyleSheet(
-            f"background: rgba(255, 255, 255, 0.86); border: 1px solid {DesignTokens.border}; "
-            "border-radius: 18px; padding: 4px;"
-        )
-        add_soft_shadow(ws_container, blur=18, y_offset=4, alpha=14)
+        ws_container.setStyleSheet("QFrame { background: transparent; border: none; }")
         ws_layout = QHBoxLayout(ws_container)
-        ws_layout.setContentsMargins(12, 10, 12, 10)
-        ws_layout.setSpacing(10)
+        ws_layout.setContentsMargins(0, 0, 0, 0)
+        ws_layout.setSpacing(0)
         
         self.ws_label = QLabel("当前文件夹: 未选择")
-        self.ws_label.setText("当前工作区：未选择")
-        self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 600;")
+        self.ws_label.setText("当前项目：未选择")
+        self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
         self.security_badge = QLabel("安全范围：仅工作区")
         self.security_badge.setStyleSheet(f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
         self.security_badge.hide()
@@ -8189,24 +8231,11 @@ class MainWindow(QMainWindow):
         self.phase_badge.hide()
         
         self.recent_btn = QPushButton()
-        self.recent_btn.setIcon(qta.icon('fa5s.history', color='#6b7280'))
-        self.recent_btn.setToolTip("最近使用的文件夹")
-        self.recent_btn.setFixedWidth(32)
-        self.recent_btn.setCursor(Qt.PointingHandCursor)
-        self.recent_btn.setStyleSheet("border: none; background: transparent;")
-        self.recent_btn.clicked.connect(self.show_recent_menu)
         self.recent_btn.hide()
-        
-        self.ws_btn = QPushButton(" 切换")
-        self.ws_btn.setText(" 切换工作区")
-        self.ws_btn.setIcon(qta.icon('fa5s.folder-open', color='#374151'))
-        self.ws_btn.setCursor(Qt.PointingHandCursor)
-        self.ws_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.ws_btn.clicked.connect(self.select_workspace)
+        self.ws_btn = QPushButton()
+        self.ws_btn.hide()
         
         ws_layout.addWidget(self.ws_label)
-        ws_layout.addStretch()
-        ws_layout.addWidget(self.ws_btn)
         top_bar.addWidget(ws_container)
 
         self.context_rail = QFrame()
@@ -9028,12 +9057,12 @@ class MainWindow(QMainWindow):
             self.input_field.setEnabled(True)
             self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             self.action_btn.setEnabled(True)
-            self.ws_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-weight: 600;")
+            self.ws_label.setStyleSheet(apple_inline_project_chip_style(True))
         else:
             self.input_field.setEnabled(True)
-            self.input_field.setPlaceholderText("先选择一个工作区，再开始描述你要处理的任务")
+            self.input_field.setPlaceholderText("先在左侧选择项目，再开始描述你要处理的任务")
             self.action_btn.setEnabled(False)
-            self.ws_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-weight: 500;")
+            self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
         self.refresh_context_badges()
 
     def refresh_context_badges(self, session_id=None):
@@ -10395,6 +10424,14 @@ class MainWindow(QMainWindow):
         state.chat_layout.insertWidget(0, placeholder)
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
+        try:
+            meta = self.chat_storage.get_conversation_meta(session_id)
+        except Exception:
+            meta = {}
+        session_workspace = self._normalize_project_path((meta or {}).get("workspace_dir"))
+        if session_workspace and os.path.isdir(session_workspace) and self._project_key(session_workspace) != self._project_key(self.workspace_dir):
+            self.load_workspace(session_workspace)
+
         state = self.sessions.get(session_id)
         if state is None:
             self.create_new_session(session_id=session_id, make_current=False)
@@ -10905,6 +10942,52 @@ class MainWindow(QMainWindow):
             return dt.strftime("%H:%M")
         return dt.strftime("%m-%d %H:%M")
 
+    def _normalize_project_path(self, path):
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        return os.path.normpath(os.path.abspath(os.path.expanduser(text)))
+
+    def _project_key(self, path):
+        normalized = self._normalize_project_path(path)
+        return os.path.normcase(normalized)
+
+    def _project_display_name(self, path, project_meta=None):
+        if isinstance(project_meta, dict) and str(project_meta.get("name") or "").strip():
+            return str(project_meta.get("name") or "").strip()
+        normalized = self._normalize_project_path(path)
+        return os.path.basename(normalized.rstrip(os.sep)) or normalized or "未命名项目"
+
+    def _format_project_session_age(self, updated_at):
+        if not updated_at:
+            return ""
+        try:
+            dt = datetime.fromtimestamp(int(updated_at))
+        except Exception:
+            return ""
+        now = datetime.now()
+        if dt.date() == now.date():
+            minutes = max(1, int((now - dt).total_seconds() // 60))
+            if minutes < 60:
+                return f"{minutes} 分"
+            return f"{max(1, minutes // 60)} 时"
+        days = max(1, (now.date() - dt.date()).days)
+        if days < 7:
+            return f"{days} 天"
+        weeks = max(1, days // 7)
+        return f"{weeks} 周"
+
+    def _conversation_workspace_path(self, conversation):
+        meta = (conversation or {}).get("meta") or {}
+        return self._normalize_project_path(meta.get("workspace_dir"))
+
+    def _sidebar_visible_project_paths(self):
+        paths = []
+        for path, row in self.project_rows.items():
+            if row and row.isVisible():
+                paths.append(path)
+        return paths
+
     def _add_history_group_label(self, text):
         label = QLabel(text)
         label.setStyleSheet(apple_history_group_style())
@@ -10971,10 +11054,334 @@ class MainWindow(QMainWindow):
         row_layout.addWidget(menu_btn, 0, Qt.AlignTop)
         return row, btn
 
+    def _make_project_session_row(self, entry, compact=True):
+        session_id = entry["id"]
+        selected = session_id == self.current_session_id
+        row = QFrame()
+        row.setObjectName("HistoryRow")
+        set_stylesheet_if_changed(row, apple_history_row_style(selected))
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(30 if compact else 10, 3, 6, 3)
+        row_layout.setSpacing(6)
+
+        title = entry.get("title") or "新任务"
+        btn = HistoryTitleButton(title)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setStyleSheet(apple_history_title_style(selected))
+        btn.clicked.connect(lambda sid=session_id: self.activate_session(sid))
+        row_layout.addWidget(btn, 1)
+
+        age = self._format_project_session_age(entry.get("updated_at"))
+        if age:
+            age_label = QLabel(age)
+            age_label.setStyleSheet(
+                f"color: {DesignTokens.text_tertiary}; font-size: 11px; background: transparent; border: none;"
+            )
+            row_layout.addWidget(age_label)
+
+        self.history_rows[session_id] = row
+        self.history_buttons[session_id] = btn
+        return row
+
+    def _make_project_row(self, project, sessions, query=""):
+        path = project.get("path") or ""
+        name = project.get("name") or self._project_display_name(path, project)
+        selected = self._project_key(path) == self._project_key(self.current_project_path or self.workspace_dir)
+        query_active = bool(query)
+        previewed = query_active or path in self.project_preview_paths or path in self.project_full_expanded_paths
+        fully_expanded = query_active or path in self.project_full_expanded_paths
+        row = QFrame()
+        row.setObjectName("ProjectRow")
+        row.setStyleSheet("QFrame#ProjectRow { background: transparent; border: none; }")
+        outer = QVBoxLayout(row)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+
+        header = QFrame()
+        header.setObjectName("HistoryRow")
+        set_stylesheet_if_changed(header, apple_history_row_style(selected))
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(6, 3, 4, 3)
+        header_layout.setSpacing(6)
+
+        icon_name = 'fa5s.folder-open' if selected else 'fa5s.folder'
+        project_btn = QPushButton(f" {name}")
+        project_btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+        project_btn.setCursor(Qt.PointingHandCursor)
+        project_btn.setToolTip(path)
+        project_btn.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
+        project_btn.clicked.connect(lambda checked=False, p=path, q=query_active: self.handle_project_click(p, query_active=q))
+        header_layout.addWidget(project_btn, 1)
+
+        new_btn = QToolButton()
+        new_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_secondary))
+        new_btn.setToolTip("在此项目中新建对话")
+        new_btn.setCursor(Qt.PointingHandCursor)
+        new_btn.setFixedSize(26, 26)
+        new_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
+        new_btn.clicked.connect(lambda checked=False, p=path: self.new_conversation_for_project(p))
+        header_layout.addWidget(new_btn)
+
+        menu_btn = QToolButton()
+        menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        menu_btn.setToolTip("项目操作")
+        menu_btn.setCursor(Qt.PointingHandCursor)
+        menu_btn.setFixedSize(26, 26)
+        menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
+        menu_btn.clicked.connect(lambda checked=False, p=path, btn_ref=menu_btn: self.show_project_menu(p, btn_ref))
+        header_layout.addWidget(menu_btn)
+        outer.addWidget(header)
+
+        if fully_expanded:
+            visible_sessions = sessions
+        elif previewed:
+            visible_sessions = sessions[:3]
+        else:
+            visible_sessions = []
+        for session in visible_sessions:
+            outer.addWidget(self._make_project_session_row(session))
+        if not query_active and len(sessions) > 3 and previewed and not fully_expanded:
+            expand_btn = QPushButton(" 展开显示")
+            expand_btn.setCursor(Qt.PointingHandCursor)
+            expand_btn.setStyleSheet(apple_disclosure_button_style())
+            expand_btn.clicked.connect(lambda checked=False, p=path: self.set_project_full_expanded(p, True))
+            outer.addWidget(expand_btn)
+        elif not query_active and len(sessions) > 3 and fully_expanded:
+            expand_btn = QPushButton(" 收起全部")
+            expand_btn.setCursor(Qt.PointingHandCursor)
+            expand_btn.setStyleSheet(apple_disclosure_button_style())
+            expand_btn.clicked.connect(lambda checked=False, p=path: self.set_project_full_expanded(p, False))
+            outer.addWidget(expand_btn)
+
+        self.project_rows[path] = row
+        self.project_buttons[path] = project_btn
+        return row
+
+    def handle_project_click(self, path, query_active=False):
+        normalized = self._normalize_project_path(path)
+        if not normalized:
+            return False
+        was_visible = (
+            normalized in self.project_preview_paths
+            or normalized in self.project_full_expanded_paths
+        )
+        if not self.select_project(normalized, refresh_sidebar=False):
+            return False
+        if query_active:
+            self.refresh_history_list()
+            return True
+        if was_visible:
+            self.project_preview_paths.discard(normalized)
+            self.project_full_expanded_paths.discard(normalized)
+            self.refresh_history_list()
+            return True
+        self.project_preview_paths.add(normalized)
+        self.project_full_expanded_paths.discard(normalized)
+        self.refresh_history_list()
+        return True
+
+    def select_project(self, path, refresh_sidebar=True):
+        normalized = self._normalize_project_path(path)
+        if not normalized:
+            return False
+        if not os.path.isdir(normalized):
+            QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
+            return False
+        self.current_project_path = normalized
+        self.config_manager.upsert_project(normalized)
+        self.load_workspace(normalized, refresh_sidebar=refresh_sidebar)
+        return True
+
+    def add_project_from_dialog(self):
+        directory = QFileDialog.getExistingDirectory(self, "添加项目")
+        if not directory:
+            return
+        project = self.config_manager.upsert_project(directory)
+        path = (project or {}).get("path") or self._normalize_project_path(directory)
+        self.current_project_path = path
+        self.load_workspace(path)
+        self.refresh_history_list()
+
+    def set_project_full_expanded(self, path, expanded, refresh=True):
+        normalized = self._normalize_project_path(path)
+        if normalized and expanded:
+            self.project_preview_paths.add(normalized)
+            self.project_full_expanded_paths.add(normalized)
+            if refresh:
+                self.refresh_history_list()
+            return
+        if normalized:
+            self.project_preview_paths.add(normalized)
+            self.project_full_expanded_paths.discard(normalized)
+            if refresh:
+                self.refresh_history_list()
+
+    def new_conversation_for_project(self, path):
+        if not self.select_project(path):
+            return
+        self.create_new_session()
+        self.refresh_history_list()
+
+    def show_project_menu(self, path, anchor):
+        normalized = self._normalize_project_path(path)
+        if not normalized:
+            return
+        project = None
+        for item in self.config_manager.get_projects(include_hidden=True):
+            if self._project_key(item.get("path")) == self._project_key(normalized):
+                project = item
+                break
+        project = project or {"path": normalized, "name": self._project_display_name(normalized)}
+        menu = create_styled_menu(self)
+
+        pinned = bool(project.get("pinned"))
+        pin_action = QAction("取消置顶项目" if pinned else "置顶项目", self)
+        pin_action.triggered.connect(lambda checked=False, p=normalized, value=not pinned: self.set_project_pinned(p, value))
+        menu.addAction(pin_action)
+
+        reveal_action = QAction("在资源管理器中打开", self)
+        reveal_action.triggered.connect(lambda checked=False, p=normalized: self.reveal_in_explorer(p))
+        menu.addAction(reveal_action)
+
+        worktree_action = QAction("创建永久工作树", self)
+        worktree_action.setEnabled(os.path.exists(os.path.join(normalized, ".git")))
+        worktree_action.triggered.connect(lambda checked=False, p=normalized: self.create_git_worktree_for_project(p))
+        menu.addAction(worktree_action)
+
+        rename_action = QAction("重命名项目", self)
+        rename_action.triggered.connect(lambda checked=False, p=normalized: self.rename_project(p))
+        menu.addAction(rename_action)
+
+        archive_action = QAction("归档对话", self)
+        archive_action.triggered.connect(lambda checked=False, p=normalized: self.archive_project_conversations(p))
+        menu.addAction(archive_action)
+
+        menu.addSeparator()
+        remove_action = QAction("移除", self)
+        remove_action.triggered.connect(lambda checked=False, p=normalized: self.remove_project(p))
+        menu.addAction(remove_action)
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def set_project_pinned(self, path, pinned):
+        self.config_manager.upsert_project(path, pinned=bool(pinned))
+        self.refresh_history_list()
+
+    def rename_project(self, path):
+        current = self._project_display_name(path)
+        text, ok = QInputDialog.getText(self, "重命名项目", "项目显示名称", text=current)
+        name = str(text or "").strip()
+        if not ok or not name:
+            return
+        self.config_manager.upsert_project(path, name=name)
+        self.refresh_history_list()
+
+    def remove_project(self, path):
+        self.config_manager.hide_project(path)
+        if self._project_key(path) == self._project_key(self.current_project_path):
+            self.current_project_path = ""
+            self.workspace_dir = None
+            self.ws_label.setText("当前项目：未选择")
+            self.ws_label.setToolTip("")
+            if hasattr(self, "file_model"):
+                self.file_model.setRootPath("")
+                self.file_tree.setRootIndex(self.file_model.index(""))
+            self.update_ui_state_for_workspace()
+        self.refresh_history_list()
+
+    def archive_project_conversations(self, path):
+        confirm = QMessageBox.question(self, "归档对话", "归档该项目下的所有对话？")
+        if confirm != QMessageBox.Yes:
+            return
+        count = self.chat_storage.archive_conversations_for_workspace(path)
+        self.add_system_toast(f"已归档 {count} 个对话。", "success" if count else "info", auto_close_ms=3200)
+        self.refresh_history_list()
+
+    def create_git_worktree_for_project(self, path):
+        target = QFileDialog.getExistingDirectory(self, "选择永久工作树目录的上级文件夹")
+        if not target:
+            return
+        branch_name, ok = QInputDialog.getText(self, "创建永久工作树", "新工作树分支/目录名", text="cowork-worktree")
+        branch_name = str(branch_name or "").strip()
+        if not ok or not branch_name:
+            return
+        worktree_path = os.path.join(target, branch_name)
+        try:
+            result = subprocess.run(
+                ["git", "-C", path, "worktree", "add", "-b", branch_name, worktree_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "创建永久工作树失败", str(exc))
+            return
+        if result.returncode != 0:
+            QMessageBox.warning(self, "创建永久工作树失败", (result.stderr or result.stdout or "git worktree add failed").strip())
+            return
+        self.config_manager.upsert_project(worktree_path)
+        self.refresh_history_list()
+        self.add_system_toast("永久工作树已创建并加入项目。", "success", auto_close_ms=3200)
+
+    def show_sidebar_projects_menu(self):
+        menu = create_styled_menu(self)
+        archive_action = QAction("归档所有聊天", self)
+        archive_action.triggered.connect(self.archive_visible_project_conversations)
+        menu.addAction(archive_action)
+        organize_action = QAction("整理侧边栏", self)
+        organize_action.triggered.connect(self.organize_sidebar_projects)
+        menu.addAction(organize_action)
+        menu.addSeparator()
+        recent_action = QAction("按最近活动排序", self)
+        recent_action.setCheckable(True)
+        recent_action.setChecked(self.sidebar_sort_mode == "recent")
+        recent_action.triggered.connect(lambda: self.set_sidebar_sort_mode("recent"))
+        menu.addAction(recent_action)
+        name_action = QAction("按项目名排序", self)
+        name_action.setCheckable(True)
+        name_action.setChecked(self.sidebar_sort_mode == "name")
+        name_action.triggered.connect(lambda: self.set_sidebar_sort_mode("name"))
+        menu.addAction(name_action)
+        menu.exec(self.sidebar_projects_menu_btn.mapToGlobal(self.sidebar_projects_menu_btn.rect().bottomLeft()))
+
+    def set_sidebar_sort_mode(self, mode):
+        self.sidebar_sort_mode = "name" if mode == "name" else "recent"
+        self.config_manager.set("sidebar_sort_mode", self.sidebar_sort_mode)
+        self.refresh_history_list()
+
+    def archive_visible_project_conversations(self):
+        paths = self._sidebar_visible_project_paths()
+        if not paths:
+            return
+        confirm = QMessageBox.question(self, "归档所有聊天", "归档当前侧边栏可见项目下的所有对话？")
+        if confirm != QMessageBox.Yes:
+            return
+        count = 0
+        for path in paths:
+            count += self.chat_storage.archive_conversations_for_workspace(path)
+        self.add_system_toast(f"已归档 {count} 个对话。", "success" if count else "info", auto_close_ms=3200)
+        self.refresh_history_list()
+
+    def organize_sidebar_projects(self):
+        projects = self.config_manager.get_projects(include_hidden=True)
+        restored = 0
+        cleaned = []
+        for project in projects:
+            if project.get("hidden") and os.path.isdir(project.get("path") or ""):
+                project["hidden"] = False
+                restored += 1
+            if os.path.isdir(project.get("path") or ""):
+                cleaned.append(project)
+        self.config_manager.set_projects(cleaned)
+        self.add_system_toast(f"侧边栏已整理，恢复 {restored} 个项目。", "success", auto_close_ms=3200)
+        self.refresh_history_list()
+
     def refresh_history_list(self):
         self.history_container.setUpdatesEnabled(False)
         self.history_rows = {}
         self.history_buttons = {}
+        self.project_rows = {}
+        self.project_buttons = {}
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
             if item.widget():
@@ -10984,13 +11391,27 @@ class MainWindow(QMainWindow):
         search_ids = None
         if query:
             try:
-                search_ids = set(self.chat_storage.search_conversations(query, limit=80))
+                search_ids = set(self.chat_storage.search_conversations(query, limit=200))
             except Exception:
                 search_ids = set()
 
-        entries = []
         conversations = self.chat_storage.list_conversations()
         conversation_ids = {c["id"] for c in conversations}
+        config_projects = self.config_manager.get_projects(include_hidden=True)
+        project_meta_by_key = {
+            self._project_key(project.get("path")): project
+            for project in config_projects
+            if project.get("path")
+        }
+        hidden_project_keys = {
+            self._project_key(project.get("path"))
+            for project in config_projects
+            if project.get("hidden") and project.get("path")
+        }
+
+        grouped = {}
+        unassigned_entries = []
+        latest_by_project = {}
 
         for conv in conversations:
             meta = conv.get("meta") or {}
@@ -11001,22 +11422,28 @@ class MainWindow(QMainWindow):
             if conv.get("im_provider") == "feishu":
                 ts = conv.get("updated_at")
                 title = f"飞书会话 {datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}" if ts else "飞书会话"
-            if query and session_id not in search_ids and query.lower() not in title.lower():
+            workspace_path = self._conversation_workspace_path(conv)
+            project_key = self._project_key(workspace_path)
+            if workspace_path and project_key in hidden_project_keys:
                 continue
-            status_text, status_color, _status_bg = session_status_text(
-                conv.get("status") or "draft",
-                conv.get("im_provider"),
-            )
+            project_meta = project_meta_by_key.get(project_key, {})
+            project_name = self._project_display_name(workspace_path, project_meta) if workspace_path else ""
+            matches_query = not query or session_id in (search_ids or set()) or query.lower() in title.lower() or query.lower() in project_name.lower()
+            if not matches_query:
+                continue
             updated_at = conv.get("updated_at")
-            entries.append({
+            entry = {
                 "id": session_id,
                 "title": title,
                 "updated_at": updated_at,
-                "group": self._history_group_title(updated_at),
-                "time_text": self._history_time_text(updated_at),
-                "status_text": status_text,
-                "status_color": status_color,
-            })
+                "status": conv.get("status") or "draft",
+                "workspace_dir": workspace_path,
+            }
+            if workspace_path:
+                grouped.setdefault(project_key, {"path": workspace_path, "sessions": []})["sessions"].append(entry)
+                latest_by_project[project_key] = max(int(latest_by_project.get(project_key) or 0), int(updated_at or 0))
+            else:
+                unassigned_entries.append(entry)
 
         history_dir = self.chat_history_dir
         if os.path.exists(history_dir):
@@ -11038,36 +11465,69 @@ class MainWindow(QMainWindow):
                         if query.lower() not in haystack.lower():
                             continue
                     updated_at = int(os.path.getmtime(file_path))
-                    entries.append({
+                    unassigned_entries.append({
                         "id": session_id,
                         "title": title,
                         "updated_at": updated_at,
-                        "group": self._history_group_title(updated_at),
-                        "time_text": self._history_time_text(updated_at),
-                        "status_text": "旧版",
-                        "status_color": DesignTokens.text_tertiary,
+                        "status": "legacy",
+                        "workspace_dir": "",
                     })
                 except Exception:
                     continue
 
-        entries.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
-        group_order = ["今天", "昨天", "近 7 天", "更早"]
-        rendered_any = False
-        for group_name in group_order:
-            group_entries = [entry for entry in entries if entry.get("group") == group_name]
-            if not group_entries:
+        for project in config_projects:
+            path = self._normalize_project_path(project.get("path"))
+            key = self._project_key(path)
+            if not path or key in hidden_project_keys:
                 continue
-            if not query:
-                self._add_history_group_label(group_name)
-            for entry in group_entries:
-                row, btn = self._make_history_row(entry)
+            if query and query.lower() not in self._project_display_name(path, project).lower() and key not in grouped:
+                continue
+            grouped.setdefault(key, {"path": path, "sessions": []})
+
+        for path in self.config_manager.get("recent_workspaces", []) or []:
+            normalized = self._normalize_project_path(path)
+            key = self._project_key(normalized)
+            if not normalized or key in hidden_project_keys:
+                continue
+            if query and query.lower() not in self._project_display_name(normalized).lower() and key not in grouped:
+                continue
+            grouped.setdefault(key, {"path": normalized, "sessions": []})
+
+        project_entries = []
+        for key, payload in grouped.items():
+            path = payload.get("path") or ""
+            meta = project_meta_by_key.get(key, {})
+            sessions = sorted(payload.get("sessions") or [], key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+            latest = latest_by_project.get(key) or max([int(item.get("updated_at") or 0) for item in sessions] or [int(meta.get("updated_at") or 0)])
+            project_entries.append({
+                "path": path,
+                "name": self._project_display_name(path, meta),
+                "pinned": bool(meta.get("pinned")),
+                "updated_at": latest,
+                "sessions": sessions,
+            })
+
+        if self.sidebar_sort_mode == "name":
+            project_entries.sort(key=lambda item: (not item.get("pinned"), item.get("name", "").lower()))
+        else:
+            project_entries.sort(key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0), item.get("name", "").lower()))
+
+        rendered_any = False
+        for project in project_entries:
+            row = self._make_project_row(project, project.get("sessions") or [], query=query)
+            self.history_layout.addWidget(row)
+            rendered_any = True
+
+        unassigned_entries.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+        if unassigned_entries:
+            self._add_history_group_label("对话")
+            for entry in unassigned_entries:
+                row = self._make_project_session_row(entry, compact=False)
                 self.history_layout.addWidget(row)
-                self.history_rows[entry["id"]] = row
-                self.history_buttons[entry["id"]] = btn
                 rendered_any = True
 
         if not rendered_any:
-            self._add_history_empty_state("没有匹配的历史任务" if query else "还没有历史任务")
+            self._add_history_empty_state("没有匹配的项目或对话" if query else "还没有项目，点击项目标题栏的文件夹按钮添加")
 
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
@@ -11082,6 +11542,9 @@ class MainWindow(QMainWindow):
             button = self.history_buttons.get(session_id)
             if button:
                 button.setStyleSheet(apple_history_title_style(is_current))
+        current_key = self._project_key(self.current_project_path or self.workspace_dir)
+        for path, button in self.project_buttons.items():
+            button.setIcon(qta.icon('fa5s.folder-open' if self._project_key(path) == current_key else 'fa5s.folder', color=DesignTokens.text_secondary))
 
     def show_session_menu(self, session_id, anchor):
         menu = create_styled_menu(self)
@@ -11533,6 +11996,9 @@ class MainWindow(QMainWindow):
         event.acceptProposedAction()
 
     def new_conversation(self):
+        if not self.workspace_dir:
+            QMessageBox.information(self, "新建对话", "请先在左侧添加或选择一个项目。")
+            return
         self.create_new_session()
         self.refresh_history_list()
 
@@ -11712,13 +12178,17 @@ class MainWindow(QMainWindow):
 
     def select_workspace(self):
         directory = QFileDialog.getExistingDirectory(self, "选择工作区")
-        if directory: self.load_workspace(directory)
+        if directory:
+            self.config_manager.upsert_project(directory)
+            self.load_workspace(directory)
 
-    def load_workspace(self, directory):
+    def load_workspace(self, directory, refresh_sidebar=True):
+        directory = self._normalize_project_path(directory)
         self.workspace_dir = directory
+        self.current_project_path = directory
         font_metrics = QFontMetrics(self.ws_label.font())
         display_path = font_metrics.elidedText(directory, Qt.ElideMiddle, 400)
-        self.ws_label.setText(f"当前工作区：{display_path}")
+        self.ws_label.setText(f"当前项目：{display_path}")
         self.ws_label.setToolTip(directory)
         self.config_manager.set("default_workspace", directory)
         self.update_recent_workspaces(directory)
@@ -11728,6 +12198,8 @@ class MainWindow(QMainWindow):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
             self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
+        if refresh_sidebar:
+            self.refresh_history_list()
 
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""

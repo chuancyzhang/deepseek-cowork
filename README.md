@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.0**.
+Current app version: **4.8.1**.
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
@@ -28,6 +28,7 @@ Current app version: **4.8.0**.
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
+*   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, keeps each project collapsed by default with only a short preview of conversations, and avoids a separate top-right workspace switcher.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status; sub-agent activity lights the panel hint without forcing the drawer open.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.
 *   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; active automation and selected-skill chips can be removed with one click.
@@ -88,8 +89,8 @@ Open **⚙️ Settings**:
 *   **Provider**: `openai` (DeepSeek compatible) or `anthropic`.
 *   **God Mode**: Toggle safety sandbox restrictions.
 
-### 2. Select Workspace
-Pick your working directory. The agent treats it as the boundary for file access.
+### 2. Select Project
+Add or select a local folder in the sidebar **项目** section. A project is the workspace boundary for file access, and new conversations are created inside the current project.
 
 ### 3. Start Automating
 Examples:

@@ -34,10 +34,20 @@ class LLMFactory:
                 if profile
                 else config_manager.get("deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT)
             ),
+            "supports_vision": (
+                profile.get("supports_vision", False)
+                if profile
+                else config_manager.get("supports_vision", False)
+            ),
         }
 
         if provider_type == "anthropic":
-            return AnthropicProvider(api_key, base_url, model_name)
+            return AnthropicProvider(
+                api_key,
+                base_url,
+                model_name,
+                supports_vision=deepseek_options["supports_vision"],
+            )
         elif provider_type in ["moonshot", "kimi"]:
             return MoonshotProvider(api_key, base_url, model_name, **deepseek_options)
         else:

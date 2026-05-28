@@ -65,6 +65,7 @@ class ConfigManager:
             "sop_templates": self._default_sop_templates(),
             "automation_tasks": [],
             "automation_run_history": [],
+            "projects": [],
             "god_mode": False,
             "default_workspace": "",
             "im_gateway": {
@@ -161,6 +162,10 @@ class ConfigManager:
         )
         if normalized_automation_history != self.config.get("automation_run_history"):
             self.config["automation_run_history"] = normalized_automation_history
+            updated = True
+        normalized_projects = self._normalize_projects(self.config.get("projects"))
+        if normalized_projects != self.config.get("projects"):
+            self.config["projects"] = normalized_projects
             updated = True
         updated = self._sync_legacy_model_fields(save=False) or updated
         if updated:
@@ -301,6 +306,51 @@ class ConfigManager:
     def _normalize_automation_history(self, value):
         return normalize_automation_history(value)
 
+    def _normalize_project_path(self, path):
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        return os.path.normpath(os.path.abspath(os.path.expanduser(text)))
+
+    def _project_key(self, path):
+        normalized = self._normalize_project_path(path)
+        return os.path.normcase(normalized)
+
+    def _normalize_project(self, project, used_paths=None):
+        used_paths = used_paths if used_paths is not None else set()
+        if not isinstance(project, dict):
+            return None
+        source = dict(project or {})
+        path = self._normalize_project_path(source.get("path"))
+        if not path:
+            return None
+        key = self._project_key(path)
+        if key in used_paths:
+            return None
+        used_paths.add(key)
+        name = str(source.get("name") or "").strip()
+        if not name:
+            name = os.path.basename(path.rstrip(os.sep)) or path
+        return {
+            "path": path,
+            "name": name,
+            "pinned": bool(source.get("pinned", False)),
+            "hidden": bool(source.get("hidden", False)),
+            "created_at": int(source.get("created_at") or time.time()),
+            "updated_at": int(source.get("updated_at") or time.time()),
+        }
+
+    def _normalize_projects(self, value):
+        if not isinstance(value, list):
+            return []
+        projects = []
+        used_paths = set()
+        for item in value:
+            normalized = self._normalize_project(item, used_paths=used_paths)
+            if normalized:
+                projects.append(normalized)
+        return projects
+
     def _normalize_model_entry(self, provider_id, model, index=0, id_prefix=None):
         source = dict(model or {})
         model_name = str(source.get("model_name") or source.get("name") or "").strip()
@@ -314,6 +364,7 @@ class ConfigManager:
             "id": model_id,
             "display_name": display_name or model_name,
             "model_name": model_name,
+            "supports_vision": bool(source.get("supports_vision", False)),
         }
         if provider_id == "openai":
             entry["deepseek_thinking_enabled"] = bool(
@@ -800,6 +851,101 @@ class ConfigManager:
         self.config["automation_run_history"] = normalized
         self.save_config()
         return normalized[0] if normalized else None
+
+    def get_projects(self, include_hidden=True):
+        projects = self._normalize_projects(self.config.get("projects"))
+        if projects != self.config.get("projects"):
+            self.config["projects"] = projects
+            self.save_config()
+        if not include_hidden:
+            projects = [item for item in projects if not item.get("hidden")]
+        return json.loads(json.dumps(projects, ensure_ascii=False))
+
+    def set_projects(self, projects):
+        self.config["projects"] = self._normalize_projects(projects)
+        self.save_config()
+
+    def upsert_project(self, path, name=None, pinned=None):
+        normalized_path = self._normalize_project_path(path)
+        if not normalized_path:
+            return None
+        now = int(time.time())
+        projects = self.get_projects(include_hidden=True)
+        key = self._project_key(normalized_path)
+        updated = None
+        for project in projects:
+            if self._project_key(project.get("path")) != key:
+                continue
+            if name is not None:
+                project["name"] = str(name or "").strip() or os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path
+            if pinned is not None:
+                project["pinned"] = bool(pinned)
+            project["hidden"] = False
+            project["path"] = normalized_path
+            project["updated_at"] = now
+            updated = project
+            break
+        if updated is None:
+            updated = {
+                "path": normalized_path,
+                "name": str(name or "").strip() or os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path,
+                "pinned": bool(pinned) if pinned is not None else False,
+                "hidden": False,
+                "created_at": now,
+                "updated_at": now,
+            }
+            projects.append(updated)
+        self.set_projects(projects)
+        return json.loads(json.dumps(updated, ensure_ascii=False))
+
+    def hide_project(self, path):
+        normalized_path = self._normalize_project_path(path)
+        if not normalized_path:
+            return False
+        projects = self.get_projects(include_hidden=True)
+        key = self._project_key(normalized_path)
+        changed = False
+        for project in projects:
+            if self._project_key(project.get("path")) != key:
+                continue
+            project["hidden"] = True
+            project["updated_at"] = int(time.time())
+            changed = True
+            break
+        if not changed:
+            now = int(time.time())
+            projects.append(
+                {
+                    "path": normalized_path,
+                    "name": os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path,
+                    "pinned": False,
+                    "hidden": True,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+            changed = True
+        self.set_projects(projects)
+        return changed
+
+    def restore_project(self, path):
+        normalized_path = self._normalize_project_path(path)
+        if not normalized_path:
+            return False
+        projects = self.get_projects(include_hidden=True)
+        key = self._project_key(normalized_path)
+        changed = False
+        for project in projects:
+            if self._project_key(project.get("path")) != key:
+                continue
+            project["hidden"] = False
+            project["updated_at"] = int(time.time())
+            changed = True
+            break
+        if changed:
+            self.set_projects(projects)
+            return True
+        return bool(self.upsert_project(normalized_path))
 
     def save_config(self):
         try:

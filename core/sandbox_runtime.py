@@ -661,7 +661,7 @@ def _write_dependency_status(skill_id, status):
         json.dump(status, f, ensure_ascii=False, indent=2)
 
 
-def install_skill_dependencies(skill_id, python_dependencies=None, node_dependencies=None):
+def install_skill_dependencies(skill_id, python_dependencies=None, node_dependencies=None, force=False):
     python_dependencies = [p for p in (python_dependencies or []) if isinstance(p, str) and p.strip()]
     node_dependencies = [p for p in (node_dependencies or []) if isinstance(p, str) and p.strip()]
     if not python_dependencies and not node_dependencies:
@@ -669,7 +669,7 @@ def install_skill_dependencies(skill_id, python_dependencies=None, node_dependen
 
     dep_hash = _dependency_hash(python_dependencies, node_dependencies)
     existing = _read_dependency_status(skill_id)
-    if existing.get("ok") and existing.get("hash") == dep_hash:
+    if not force and existing.get("ok") and existing.get("hash") == dep_hash:
         return {"ok": True, "message": "Dependencies already installed.", "installed": False}
 
     runtime = ensure_sandbox_runtime()

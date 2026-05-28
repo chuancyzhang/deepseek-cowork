@@ -81,6 +81,7 @@ Artifacts are downloaded into `.runtime_downloads/` and extracted to `node_env/`
 Packaged Windows builds resolve bundled runtimes directly from the current app directory first, including `_internal/node_env/node.exe` and `_internal/git_bash_env/bin/bash.exe`. AppData `runtime_sandbox` remains the temp/cache/dependency root rather than the preferred executable runtime, so automatic upgrades use the newly unpacked `_internal` files. You can override detection with `COWORK_NODE_EXE`, `COWORK_NODE_DIR`, `COWORK_BASH_EXE`, `COWORK_GIT_BASH_DIR`, or `COWORK_BASH_DIR` when needed.
 Agents get `run_python_code` in the default execution tool list so Python can be used without a prior `tool_search`; JavaScript execution still uses `run_node_code`, and the `bash` tool prefers Git Bash before falling back to `cmd.exe` on Windows.
 The packaged Python sandbox should be built from the base interpreter rather than a virtualenv redirector, otherwise `run_python_code` may fail on machines that do not have the builder's Python installation path.
+`install_package` for `python-runner` verifies imports inside the same sandbox runtime used by `run_python_code`. Third-party packages are persisted under AppData `runtime_sandbox/.../skills/python-runner/python/site-packages` so they survive restarts, and stale dependency cache entries are reinstalled automatically if the sandbox can no longer import them.
 
 ## 📖 Usage Guide
 

@@ -19,7 +19,7 @@ def install_package(package_name, import_name=None):
     """
     try:
         ensure_package_installed(package_name, import_name, skill_id="python-runner")
-        return f"Successfully installed and loaded '{package_name}'."
+        return f"Successfully installed and verified '{package_name}' for run_python_code."
     except Exception as e:
         return f"Failed to install '{package_name}': {e}"
 

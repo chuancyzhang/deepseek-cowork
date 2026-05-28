@@ -113,6 +113,40 @@ _RUNTIME_IMPORT_CHECKS = [
     ("lark-oapi", "lark_oapi"),
 ]
 
+
+def _inject_skill_python_path(skill_id):
+    from core.sandbox_runtime import build_sandbox_env
+    python_path = build_sandbox_env(skill_id=skill_id).get("PYTHONPATH", "")
+    for path in reversed([item for item in python_path.split(os.pathsep) if item]):
+        if os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def _sandbox_can_import(python_exe, import_name, skill_id=None):
+    if not python_exe:
+        return False
+    try:
+        import subprocess
+        from core.sandbox_runtime import build_sandbox_env
+        code = (
+            "import importlib,sys\n"
+            f"name={json.dumps(import_name)}\n"
+            "try:\n"
+            "    importlib.import_module(name)\n"
+            "except Exception:\n"
+            "    raise SystemExit(1)\n"
+            "raise SystemExit(0)\n"
+        )
+        subprocess.check_call(
+            [python_exe, "-X", "utf8", "-c", code],
+            env=build_sandbox_env(skill_id=skill_id),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception:
+        return False
+
 def _refresh_sys_path():
     import site
     try:
@@ -173,86 +207,88 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
     if not import_name:
         import_name = package_name
     cache_key = f"{skill_id or 'global'}:{import_name}"
-        
-    try:
-        importlib.import_module(import_name)
+    python_exe = get_python_executable()
+    if skill_id:
+        _inject_skill_python_path(skill_id)
+    sandbox_ready = _sandbox_can_import(python_exe, import_name, skill_id=skill_id)
+    if sandbox_ready:
         _INSTALL_SUCCESS.add(cache_key)
-    except ImportError:
-        if cache_key in _INSTALL_FAILED:
-            raise RuntimeError(_INSTALL_FAILED[cache_key])
+        _INSTALL_FAILED.pop(cache_key, None)
+        return
 
-        print(f"[System] Installing missing dependency: {package_name}...")
-        
-        # Determine the correct python executable
-        python_exe = get_python_executable()
-        if not python_exe:
-            msg = f"Failed to install {package_name}: bundled Python runtime is missing. This package may be corrupted."
-            _INSTALL_FAILED[cache_key] = msg
-            raise RuntimeError(msg)
+    if cache_key in _INSTALL_FAILED:
+        raise RuntimeError(_INSTALL_FAILED[cache_key])
 
-        try:
-            import subprocess
-            
-            # On Windows, we want to suppress the new window for the subprocess
-            startupinfo = None
-            if sys.platform == 'win32':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                
-            from core.sandbox_runtime import build_sandbox_env, install_skill_dependencies
-            if skill_id:
-                status = install_skill_dependencies(skill_id, python_dependencies=[package_name])
+    print(f"[System] Installing missing dependency: {package_name}...")
+
+    if not python_exe:
+        msg = f"Failed to install {package_name}: bundled Python runtime is missing. This package may be corrupted."
+        _INSTALL_FAILED[cache_key] = msg
+        raise RuntimeError(msg)
+
+    try:
+        import subprocess
+
+        # On Windows, we want to suppress the new window for the subprocess
+        startupinfo = None
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        from core.sandbox_runtime import build_sandbox_env, install_skill_dependencies
+        if skill_id:
+            status = install_skill_dependencies(skill_id, python_dependencies=[package_name])
+            if not status.get("ok"):
+                msg = status.get("message") or f"Failed to install {package_name}."
+                _INSTALL_FAILED[cache_key] = msg
+                raise RuntimeError(msg)
+            _inject_skill_python_path(skill_id)
+            if not _sandbox_can_import(python_exe, import_name, skill_id=skill_id):
+                status = install_skill_dependencies(skill_id, python_dependencies=[package_name], force=True)
                 if not status.get("ok"):
                     msg = status.get("message") or f"Failed to install {package_name}."
                     _INSTALL_FAILED[cache_key] = msg
                     raise RuntimeError(msg)
-                python_path = build_sandbox_env(skill_id=skill_id).get("PYTHONPATH", "")
-                for path in reversed([item for item in python_path.split(os.pathsep) if item]):
-                    if os.path.isdir(path) and path not in sys.path:
-                        sys.path.insert(0, path)
-            else:
-                subprocess.check_call(
-                    [python_exe, "-m", "pip", "install", package_name],
-                    startupinfo=startupinfo,
-                    env=build_sandbox_env(),
-                )
-            print(f"[System] Successfully installed {package_name}.")
-            
-            # 1. Invalidate caches to let importlib see the new package
-            importlib.invalidate_caches()
-            
-            # 2. Force site-packages reload and path update
-            _refresh_sys_path()
-            if python_exe and os.path.basename(python_exe).lower().startswith("python"):
-                if os.path.abspath(python_exe) != os.path.abspath(sys.executable):
-                    _attach_external_site_packages(python_exe)
-            
-            # 3. Verification & Retry
+                _inject_skill_python_path(skill_id)
+        else:
+            subprocess.check_call(
+                [python_exe, "-m", "pip", "install", package_name],
+                startupinfo=startupinfo,
+                env=build_sandbox_env(),
+            )
+        print(f"[System] Successfully installed {package_name}.")
+
+        importlib.invalidate_caches()
+        _refresh_sys_path()
+        if python_exe and os.path.basename(python_exe).lower().startswith("python"):
+            if os.path.abspath(python_exe) != os.path.abspath(sys.executable):
+                _attach_external_site_packages(python_exe)
+
+        if _sandbox_can_import(python_exe, import_name, skill_id=skill_id):
+            print(f"[System] Verified {import_name} is importable in sandbox runtime.")
+            _INSTALL_SUCCESS.add(cache_key)
+            _INSTALL_FAILED.pop(cache_key, None)
             try:
                 importlib.import_module(import_name)
-                print(f"[System] Verified {import_name} is importable.")
-                _INSTALL_SUCCESS.add(cache_key)
             except ImportError:
-                # Retry once more with explicit cache clearing
-                importlib.invalidate_caches()
-                try:
-                    importlib.import_module(import_name)
-                    print(f"[System] Verified {import_name} is importable (after retry).")
-                    _INSTALL_SUCCESS.add(cache_key)
-                except ImportError as e:
-                     # If we are in Frozen Mode, this is expected if sys.path is not shared
-                     if getattr(sys, 'frozen', False) and not skill_id:
-                          print(f"[System] Warning: {package_name} installed to external env. Restart required for in-process use.")
-                          _INSTALL_FAILED[cache_key] = f"Installed {package_name} but failed to load {import_name} in frozen mode. Restart required."
-                     else:
-                          # In Dev Mode, this is a real error
-                          _INSTALL_FAILED[cache_key] = f"Installed {package_name} but failed to load {import_name} dynamically. Error: {e}"
-                          raise RuntimeError(_INSTALL_FAILED[cache_key])
+                pass
+            return
 
-        except subprocess.CalledProcessError as e:
-            err = getattr(e, "output", None)
-            msg = f"Failed to install {package_name}: {str(e)}"
-            if err:
-                msg = f"{msg}\n{err}"
-            _INSTALL_FAILED[cache_key] = msg
-            raise RuntimeError(msg)
+        if getattr(sys, 'frozen', False) and not skill_id:
+            print(f"[System] Warning: {package_name} installed to external env. Restart required for in-process use.")
+            _INSTALL_FAILED[cache_key] = (
+                f"Installed {package_name} but the sandbox runtime still cannot import {import_name}. Restart required."
+            )
+        else:
+            _INSTALL_FAILED[cache_key] = (
+                f"Installed {package_name} but the sandbox runtime still cannot import {import_name}."
+            )
+            raise RuntimeError(_INSTALL_FAILED[cache_key])
+
+    except subprocess.CalledProcessError as e:
+        err = getattr(e, "output", None)
+        msg = f"Failed to install {package_name}: {str(e)}"
+        if err:
+            msg = f"{msg}\n{err}"
+        _INSTALL_FAILED[cache_key] = msg
+        raise RuntimeError(msg)

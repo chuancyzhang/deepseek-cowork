@@ -439,10 +439,47 @@ class TestEnvUtils(unittest.TestCase):
     def test_ensure_package_installed_reports_missing_runtime(self):
         env_utils._INSTALL_FAILED.clear()
         with patch.object(env_utils, "get_python_executable", return_value=""), \
-             patch.object(env_utils.importlib, "import_module", side_effect=ImportError()):
+             patch.object(env_utils, "_sandbox_can_import", return_value=False):
             with self.assertRaises(RuntimeError) as cm:
                 env_utils.ensure_package_installed("openpyxl")
             self.assertIn("bundled Python runtime is missing", str(cm.exception))
+
+    def test_ensure_package_installed_uses_sandbox_probe_instead_of_host_import(self):
+        env_utils._INSTALL_FAILED.clear()
+        env_utils._INSTALL_SUCCESS.clear()
+        with patch.object(env_utils, "get_python_executable", return_value="C:\\runtime\\python.exe"), \
+             patch.object(env_utils, "_inject_skill_python_path"), \
+             patch.object(env_utils, "_sandbox_can_import", side_effect=[False, True, True]) as sandbox_probe, \
+             patch("core.sandbox_runtime.install_skill_dependencies", return_value={"ok": True, "installed": True, "message": "ok"}) as installer, \
+             patch("core.sandbox_runtime.build_sandbox_env", return_value={"PYTHONPATH": "C:\\sandbox\\site-packages"}), \
+             patch.object(env_utils, "_refresh_sys_path"), \
+             patch.object(env_utils, "_attach_external_site_packages"), \
+             patch.object(env_utils.importlib, "import_module", return_value=object()):
+            env_utils.ensure_package_installed("Pillow", "PIL", skill_id="python-runner")
+
+        self.assertEqual(installer.call_count, 1)
+        self.assertEqual(sandbox_probe.call_count, 3)
+        self.assertIn("python-runner:PIL", env_utils._INSTALL_SUCCESS)
+
+    def test_ensure_package_installed_forces_reinstall_when_cached_skill_dependency_is_stale(self):
+        env_utils._INSTALL_FAILED.clear()
+        env_utils._INSTALL_SUCCESS.clear()
+        with patch.object(env_utils, "get_python_executable", return_value="C:\\runtime\\python.exe"), \
+             patch.object(env_utils, "_inject_skill_python_path"), \
+             patch.object(env_utils, "_sandbox_can_import", side_effect=[False, False, True]) as sandbox_probe, \
+             patch("core.sandbox_runtime.install_skill_dependencies", side_effect=[
+                 {"ok": True, "installed": False, "message": "Dependencies already installed."},
+                 {"ok": True, "installed": True, "message": "reinstalled"},
+             ]) as installer, \
+             patch("core.sandbox_runtime.build_sandbox_env", return_value={"PYTHONPATH": "C:\\sandbox\\site-packages"}), \
+             patch.object(env_utils, "_refresh_sys_path"), \
+             patch.object(env_utils, "_attach_external_site_packages"), \
+             patch.object(env_utils.importlib, "import_module", side_effect=ImportError()):
+            env_utils.ensure_package_installed("Pillow", "PIL", skill_id="python-runner")
+
+        self.assertEqual(sandbox_probe.call_count, 3)
+        self.assertEqual(installer.call_args_list[1].kwargs["force"], True)
+        self.assertIn("python-runner:PIL", env_utils._INSTALL_SUCCESS)
 
 class _DaemonConfigStub:
     def __init__(self, history_dir, values=None, profile=None):

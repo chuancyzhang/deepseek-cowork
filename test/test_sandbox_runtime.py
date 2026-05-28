@@ -182,6 +182,36 @@ class TestSandboxRuntime(unittest.TestCase):
         args = popen.call_args.args[0]
         self.assertEqual(args, [cmd_exe, "/d", "/s", "/c", "node -v"])
 
+    def test_install_skill_dependencies_force_bypasses_cached_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = os.path.join(temp_dir, "sandbox")
+            python_exe = os.path.join(temp_dir, "python", "python.exe")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("")
+
+            fake_runtime = {
+                "root": runtime_root,
+                "python": python_exe,
+                "pip": python_exe,
+                "node": "",
+                "npm": "",
+                "npx": "",
+                "bash": "",
+            }
+
+            with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.subprocess.check_output", return_value="installed") as check_output:
+                first = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"], force=True)
+                second = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"])
+                third = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"], force=True)
+
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["installed"])
+        self.assertTrue(third["installed"])
+        self.assertEqual(check_output.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

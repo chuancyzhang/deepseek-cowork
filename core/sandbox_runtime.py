@@ -454,6 +454,62 @@ def _skill_node_root(skill_id):
     return os.path.join(_skill_root(skill_id), "node")
 
 
+def _sandbox_python_bootstrap_dir(root):
+    path = os.path.join(root, "python_bootstrap")
+    os.makedirs(path, exist_ok=True)
+    sitecustomize_path = os.path.join(path, "sitecustomize.py")
+    content = (
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "if os.name == 'nt':\n"
+        "    raw = os.environ.get('COWORK_PYTHON_DLL_DIRS', '')\n"
+        "    for item in raw.split(os.pathsep):\n"
+        "        path = item.strip()\n"
+        "        if not path or not os.path.isdir(path):\n"
+        "            continue\n"
+        "        try:\n"
+        "            os.add_dll_directory(path)\n"
+        "        except (AttributeError, FileNotFoundError, OSError):\n"
+        "            continue\n"
+    )
+    with open(sitecustomize_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path
+
+
+def _python_runtime_root(python_exe):
+    if not python_exe:
+        return ""
+    return os.path.dirname(os.path.abspath(python_exe))
+
+
+def _collect_native_library_dirs(*roots):
+    dirs = []
+    for root in roots:
+        if not root or not os.path.isdir(root):
+            continue
+        root = os.path.abspath(root)
+        dirs.append(root)
+        for current_root, _subdirs, files in os.walk(root):
+            if any(name.lower().endswith((".dll", ".pyd")) for name in files):
+                dirs.append(current_root)
+    return _dedupe_paths(dirs)
+
+
+def _python_dll_dirs(runtime, skill_id=None):
+    python_exe = runtime.get("python")
+    runtime_root = _python_runtime_root(python_exe)
+    runtime_site_packages = os.path.join(runtime_root, "Lib", "site-packages") if runtime_root else ""
+    skill_site_packages = _skill_python_path(skill_id) if skill_id else ""
+    return _collect_native_library_dirs(
+        runtime_root,
+        os.path.join(runtime_root, "DLLs") if runtime_root else "",
+        runtime_site_packages,
+        skill_site_packages,
+    )
+
+
 def build_sandbox_env(workspace_dir=None, skill_id=None):
     runtime = ensure_sandbox_runtime()
     env = os.environ.copy()
@@ -463,27 +519,35 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
     os.makedirs(temp_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
 
+    bootstrap_dir = _sandbox_python_bootstrap_dir(root)
     path_dirs = _runtime_path_dirs(runtime)
-    env["PATH"] = os.pathsep.join(path_dirs + [env.get("PATH", "")])
+    dll_dirs = _python_dll_dirs(runtime, skill_id=skill_id)
+    env["PATH"] = os.pathsep.join(_dedupe_paths(path_dirs + dll_dirs) + [env.get("PATH", "")])
     env["COWORK_SANDBOX_ROOT"] = root
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    env["COWORK_PYTHON_DLL_DIRS"] = os.pathsep.join(dll_dirs)
     env["PIP_CACHE_DIR"] = os.path.join(cache_dir, "pip")
     env["npm_config_cache"] = os.path.join(cache_dir, "npm")
     env["npm_config_prefix"] = os.path.join(root, "node-prefix")
     env["TMP"] = temp_dir
     env["TEMP"] = temp_dir
 
+    pythonpath_entries = [bootstrap_dir]
     if skill_id:
         python_path = _skill_python_path(skill_id)
         node_root = _skill_node_root(skill_id)
         node_modules = os.path.join(node_root, "node_modules")
         os.makedirs(python_path, exist_ok=True)
         os.makedirs(node_root, exist_ok=True)
-        existing_pythonpath = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = os.pathsep.join([python_path, existing_pythonpath]) if existing_pythonpath else python_path
+        pythonpath_entries.append(python_path)
         env["NODE_PATH"] = node_modules
         env["npm_config_prefix"] = node_root
+
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join([item for item in pythonpath_entries if item])
 
     if workspace_dir:
         env["COWORK_WORKSPACE_DIR"] = os.path.abspath(workspace_dir)

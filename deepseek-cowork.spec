@@ -93,6 +93,11 @@ def _collect_minimal_python_env(prefix):
         "python314.dll",
         "vcruntime140.dll",
         "vcruntime140_1.dll",
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "concrt140.dll",
+        "vcomp140.dll",
     ]
     for name in root_candidates:
         _add_data_file(datas, os.path.join(prefix, name), f"python_env/{name}")

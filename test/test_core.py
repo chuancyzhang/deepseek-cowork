@@ -481,6 +481,47 @@ class TestEnvUtils(unittest.TestCase):
         self.assertEqual(installer.call_args_list[1].kwargs["force"], True)
         self.assertIn("python-runner:PIL", env_utils._INSTALL_SUCCESS)
 
+    def test_sandbox_import_probe_returns_traceback_details(self):
+        completed = subprocess.CompletedProcess(
+            args=["python"],
+            returncode=1,
+            stdout='{"ok": false, "error": "Traceback\\nImportError: boom"}\n',
+            stderr="",
+        )
+        with patch("core.sandbox_runtime.build_sandbox_env", return_value={"PYTHONPATH": "C:\\sandbox\\site-packages"}), \
+             patch("subprocess.run", return_value=completed):
+            probe = env_utils._sandbox_import_probe("C:\\runtime\\python.exe", "markitdown", skill_id="python-runner")
+
+        self.assertFalse(probe["ok"])
+        self.assertIn("ImportError: boom", probe["error"])
+
+    def test_ensure_package_installed_includes_import_probe_details_on_failure(self):
+        env_utils._INSTALL_FAILED.clear()
+        env_utils._INSTALL_SUCCESS.clear()
+        with patch.object(env_utils, "get_python_executable", return_value="C:\\runtime\\python.exe"), \
+             patch.object(env_utils, "_inject_skill_python_path"), \
+             patch.object(env_utils, "_sandbox_can_import", side_effect=[False, False, False]), \
+             patch("core.sandbox_runtime.install_skill_dependencies", side_effect=[
+                 {"ok": True, "installed": False, "message": "Dependencies already installed."},
+                 {"ok": True, "installed": True, "message": "reinstalled"},
+             ]), \
+             patch("core.sandbox_runtime.build_sandbox_env", return_value={"PYTHONPATH": "C:\\sandbox\\site-packages"}), \
+             patch.object(env_utils, "_refresh_sys_path"), \
+             patch.object(env_utils, "_attach_external_site_packages"), \
+             patch.object(env_utils, "_sandbox_import_probe", return_value={
+                 "ok": False,
+                 "returncode": 1,
+                 "stdout": "",
+                 "stderr": "",
+                 "error": "Traceback\\nImportError: DLL load failed",
+             }), \
+             patch.object(env_utils.importlib, "import_module", side_effect=ImportError()):
+            with self.assertRaises(RuntimeError) as cm:
+                env_utils.ensure_package_installed("markitdown", "markitdown", skill_id="python-runner")
+
+        self.assertIn("still cannot import markitdown", str(cm.exception))
+        self.assertIn("DLL load failed", str(cm.exception))
+
 class _DaemonConfigStub:
     def __init__(self, history_dir, values=None, profile=None):
         self._history_dir = history_dir

@@ -62,17 +62,25 @@ class TestSandboxRuntime(unittest.TestCase):
                         f.write("")
             os.makedirs(os.path.join(bash_root, "bin"), exist_ok=True)
             os.makedirs(os.path.join(bash_root, "mingw64", "bin"), exist_ok=True)
+            skill_site_packages = os.path.join(temp_dir, "runtime_sandbox", "v1", "skills", "demo-skill", "python", "site-packages")
+            os.makedirs(skill_site_packages, exist_ok=True)
+            with open(os.path.join(skill_site_packages, "demo_native.dll"), "w", encoding="utf-8") as f:
+                f.write("")
 
-            with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime):
+            with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir):
                 env = sandbox_runtime.build_sandbox_env(workspace_dir=temp_dir, skill_id="demo-skill")
-
-        self.assertIn(os.path.join("skills", "demo-skill", "python", "site-packages"), env["PYTHONPATH"])
-        self.assertTrue(env["NODE_PATH"].endswith(os.path.join("skills", "demo-skill", "node", "node_modules")))
-        self.assertEqual(env["COWORK_WORKSPACE_DIR"], os.path.abspath(temp_dir))
-        path_entries = env["PATH"].split(os.pathsep)
-        self.assertIn(os.path.join(bash_root, "bin"), path_entries)
-        self.assertIn(os.path.join(bash_root, "usr", "bin"), path_entries)
-        self.assertIn(os.path.join(bash_root, "mingw64", "bin"), path_entries)
+                bootstrap_dir = os.path.join(runtime_root, "python_bootstrap")
+                self.assertIn(os.path.join("skills", "demo-skill", "python", "site-packages"), env["PYTHONPATH"])
+                self.assertIn(bootstrap_dir, env["PYTHONPATH"])
+                self.assertTrue(env["NODE_PATH"].endswith(os.path.join("skills", "demo-skill", "node", "node_modules")))
+                self.assertEqual(env["COWORK_WORKSPACE_DIR"], os.path.abspath(temp_dir))
+                path_entries = env["PATH"].split(os.pathsep)
+                self.assertIn(os.path.join(bash_root, "bin"), path_entries)
+                self.assertIn(os.path.join(bash_root, "usr", "bin"), path_entries)
+                self.assertIn(os.path.join(bash_root, "mingw64", "bin"), path_entries)
+                self.assertIn(skill_site_packages, env["COWORK_PYTHON_DLL_DIRS"].split(os.pathsep))
+                self.assertTrue(os.path.isfile(os.path.join(bootstrap_dir, "sitecustomize.py")))
 
     def test_resolve_bash_detects_windows_frozen_internal_git_bash_layout(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -82,6 +90,7 @@ class TestSandboxRuntime(unittest.TestCase):
                 f.write("")
 
             with patch("core.sandbox_runtime.get_base_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=os.path.join(temp_dir, "data")), \
                  patch("core.sandbox_runtime._copy_runtime_dir", side_effect=lambda source, _name: source), \
                  patch.object(sandbox_runtime.sys, "frozen", True, create=True):
                 resolved, diagnostics = sandbox_runtime._resolve_bash()
@@ -120,6 +129,7 @@ class TestSandboxRuntime(unittest.TestCase):
             }
             with patch.dict(os.environ, env, clear=False), \
                  patch("core.sandbox_runtime.get_base_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=os.path.join(temp_dir, "data")), \
                  patch("core.sandbox_runtime._copy_runtime_dir", side_effect=lambda source, _name: source), \
                  patch.object(sandbox_runtime.sys, "frozen", True, create=True):
                 resolved, diagnostics = sandbox_runtime._resolve_bash()

@@ -122,30 +122,77 @@ def _inject_skill_python_path(skill_id):
             sys.path.insert(0, path)
 
 
-def _sandbox_can_import(python_exe, import_name, skill_id=None):
+def _summarize_import_probe(probe):
+    if not isinstance(probe, dict):
+        return ""
+    parts = []
+    error = (probe.get("error") or "").strip()
+    stderr = (probe.get("stderr") or "").strip()
+    stdout = (probe.get("stdout") or "").strip()
+    if error:
+        parts.append(error)
+    if stderr and stderr not in parts:
+        parts.append(stderr)
+    if stdout and stdout not in parts:
+        parts.append(stdout)
+    return "\n".join([item for item in parts if item])
+
+
+def _sandbox_import_probe(python_exe, import_name, skill_id=None):
     if not python_exe:
-        return False
+        return {"ok": False, "returncode": None, "stdout": "", "stderr": "", "error": "Sandbox Python runtime is missing."}
     try:
         import subprocess
         from core.sandbox_runtime import build_sandbox_env
         code = (
-            "import importlib,sys\n"
+            "import importlib,json,traceback\n"
             f"name={json.dumps(import_name)}\n"
+            "payload={'ok': True, 'error': ''}\n"
             "try:\n"
             "    importlib.import_module(name)\n"
             "except Exception:\n"
-            "    raise SystemExit(1)\n"
-            "raise SystemExit(0)\n"
+            "    payload['ok'] = False\n"
+            "    payload['error'] = traceback.format_exc()\n"
+            "print(json.dumps(payload, ensure_ascii=False))\n"
+            "raise SystemExit(0 if payload['ok'] else 1)\n"
         )
-        subprocess.check_call(
+        completed = subprocess.run(
             [python_exe, "-X", "utf8", "-c", code],
             env=build_sandbox_env(skill_id=skill_id),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
-        return True
-    except Exception:
-        return False
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        error = ""
+        ok = completed.returncode == 0
+        if stdout:
+            last_line = stdout.splitlines()[-1]
+            try:
+                payload = json.loads(last_line)
+                ok = bool(payload.get("ok"))
+                error = (payload.get("error") or "").strip()
+                stdout = "\n".join(stdout.splitlines()[:-1]).strip()
+            except Exception:
+                if not ok:
+                    error = stdout
+        elif not ok and stderr:
+            error = stderr
+        return {
+            "ok": ok,
+            "returncode": completed.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "error": error,
+        }
+    except Exception as exc:
+        return {"ok": False, "returncode": None, "stdout": "", "stderr": "", "error": str(exc)}
+
+
+def _sandbox_can_import(python_exe, import_name, skill_id=None):
+    return _sandbox_import_probe(python_exe, import_name, skill_id=skill_id).get("ok", False)
 
 def _refresh_sys_path():
     import site
@@ -274,16 +321,21 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
                 pass
             return
 
+        probe = _sandbox_import_probe(python_exe, import_name, skill_id=skill_id)
+        detail = _summarize_import_probe(probe)
         if getattr(sys, 'frozen', False) and not skill_id:
             print(f"[System] Warning: {package_name} installed to external env. Restart required for in-process use.")
             _INSTALL_FAILED[cache_key] = (
                 f"Installed {package_name} but the sandbox runtime still cannot import {import_name}. Restart required."
             )
         else:
-            _INSTALL_FAILED[cache_key] = (
-                f"Installed {package_name} but the sandbox runtime still cannot import {import_name}."
-            )
-            raise RuntimeError(_INSTALL_FAILED[cache_key])
+            message = f"Installed {package_name} but the sandbox runtime still cannot import {import_name}."
+            if detail:
+                message = f"{message}\n{detail}"
+            _INSTALL_FAILED[cache_key] = message
+            raise RuntimeError(message)
+        if detail:
+            _INSTALL_FAILED[cache_key] = f"{_INSTALL_FAILED[cache_key]}\n{detail}"
 
     except subprocess.CalledProcessError as e:
         err = getattr(e, "output", None)

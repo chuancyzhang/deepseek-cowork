@@ -260,6 +260,58 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(stored["name"], "写作助手")
         self.assertFalse(stored["enabled"])
 
+    def test_mcp_servers_are_normalized_and_persisted(self):
+        cm = self._create_config_manager(
+            {
+                "mcp_servers": [
+                    {
+                        "name": "Filesystem MCP",
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\demo"],
+                        "env": {"NODE_ENV": "production"},
+                    },
+                    {
+                        "name": "Remote Docs",
+                        "transport": "http",
+                        "url": "https://example.com/mcp",
+                        "headers": {"Authorization": "Bearer token"},
+                        "timeout_seconds": 99,
+                    },
+                ]
+            }
+        )
+
+        servers = cm.get_mcp_servers()
+
+        self.assertEqual(len(servers), 2)
+        self.assertEqual(servers[0]["transport"], "stdio")
+        self.assertEqual(servers[0]["command"], "npx")
+        self.assertEqual(servers[0]["env"]["NODE_ENV"], "production")
+        self.assertEqual(servers[1]["transport"], "streamable_http")
+        self.assertEqual(servers[1]["url"], "https://example.com/mcp")
+        self.assertEqual(servers[1]["headers"]["Authorization"], "Bearer token")
+
+        cm.set_mcp_servers(
+            [
+                {
+                    "id": "remote-docs",
+                    "name": "Remote Docs",
+                    "enabled": False,
+                    "transport": "streamable_http",
+                    "url": "https://docs.example/mcp",
+                    "headers": {"X-Token": "abc"},
+                    "timeout_seconds": 45,
+                }
+            ]
+        )
+        stored = cm.get_mcp_servers()
+        self.assertEqual(len(stored), 1)
+        self.assertFalse(stored[0]["enabled"])
+        self.assertEqual(stored[0]["id"], "remote-docs")
+        self.assertEqual(stored[0]["timeout_seconds"], 45)
+
     def test_sop_templates_are_normalized_and_persisted(self):
         cm = self._create_config_manager(
             {

@@ -313,7 +313,11 @@ a = Analysis(
         'qtawesome',
         'anthropic',
         'openai',
-        'lark_oapi'
+        'lark_oapi',
+        'mcp',
+        'mcp.client.stdio',
+        'mcp.client.streamable_http',
+        'httpx',
     ],
     hookspath=[],
     hooksconfig={},

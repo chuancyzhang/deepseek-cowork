@@ -3,6 +3,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -211,6 +212,77 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("run_python_code", execution_initial)
         self.assertNotIn("install_package", execution_initial)
         self.assertNotIn("run_python_code", clarifying_initial)
+
+    def test_skill_manager_registers_mcp_tools_from_config(self):
+        config_manager = MagicMock()
+        config_manager.is_skill_enabled.return_value = True
+        config_manager.get_mcp_servers.return_value = [
+            {
+                "id": "local-db",
+                "name": "Local DB",
+                "enabled": True,
+                "transport": "stdio",
+                "command": "demo-mcp",
+                "args": ["--workspace", self.temp_dir],
+                "env": {},
+                "headers": {},
+                "timeout_seconds": 30,
+            }
+        ]
+        with patch("core.skill_manager.mcp_package_available", return_value=True), patch(
+            "core.skill_manager.list_mcp_server_tools",
+            return_value={
+                "ok": True,
+                "tools": [
+                    {
+                        "name": "query-data",
+                        "description": "Query local database rows",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"sql": {"type": "string"}},
+                            "required": ["sql"],
+                        },
+                    }
+                ],
+            },
+        ), patch(
+            "core.skill_manager.call_mcp_tool",
+            return_value={"status": "ok", "text": "rows"},
+        ):
+            sm = SkillManager(workspace_dir=self.temp_dir, config_manager=config_manager)
+            sm.skills_dirs = [self.skills_dir]
+            sm.load_skills()
+
+            local_name = "mcp__local_db__query_data"
+            discovered = set()
+            result = sm.call_tool(
+                "tool_search",
+                {"query": "database mcp"},
+                context={
+                    "run_context": {"mode": RUN_MODE_EXECUTION},
+                    "discovered_tool_names": discovered,
+                },
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertIn(local_name, discovered)
+
+            definitions = {
+                item["function"]["name"]
+                for item in sm.get_tool_definitions(
+                    run_mode=RUN_MODE_EXECUTION,
+                    discovered_tool_names=discovered,
+                )
+            }
+            self.assertIn(local_name, definitions)
+            self.assertIn("mcp-server-local_db", sm.skill_records)
+            self.assertTrue(
+                any(skill.get("name") == "mcp-server-local_db" for skill in sm.get_all_skills())
+            )
+
+            tool_result = sm.call_tool(local_name, {"sql": "select 1"})
+            self.assertEqual(tool_result["status"], "ok")
+            self.assertEqual(tool_result["text"], "rows")
 
     def test_parallel_tools_runs_read_only_calls_and_preserves_order(self):
         self._copy_repo_skill("meta-tools")

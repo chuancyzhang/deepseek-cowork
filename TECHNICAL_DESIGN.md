@@ -23,6 +23,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.2 Agent Core
 *   **core/agent.py**：推理循环与工具调度，负责将用户输入转化为可执行任务。
 *   **core/interaction.py**：桥接 UI 与推理流程，统一消息与工具调用格式。
+*   **core/mcp_client.py**：封装 MCP `stdio` 与 Streamable HTTP 会话，负责连接测试、工具枚举与工具调用。
 *   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。
 *   **core/sandbox_runtime.py**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先直接使用当前应用目录的 `_internal/*_env` 结构，并为沙盒命令注入对应 PATH；AppData `runtime_sandbox` 仅作为临时、缓存和 skill 依赖根目录。若发现 `python_env/python.exe` 只是依赖外部解释器的 venv redirector，会在运行时标记为不可用而不是继续误报；`bash` 执行层在 Windows 缺失 Git Bash 时退回 `cmd.exe`。Skill 级 Python 依赖统一安装到 `runtime_sandbox/.../skills/<skill>/python/site-packages`，由沙盒 `PYTHONPATH` 注入；同时生成 bootstrap `sitecustomize.py`，并通过 `PATH` 与 `COWORK_PYTHON_DLL_DIRS` 暴露 bundled runtime 和 skill 目录中的原生 DLL 搜索路径。
 *   **core/env_utils.py**：`ensure_package_installed(...)` 不再只依赖主进程 `importlib` 判断是否已安装，而是用沙盒 Python 直接验证目标模块可导入。对于 `python-runner`，若依赖状态缓存显示已安装但沙盒实际无法导入，会强制重装一次以修复失真的缓存记录；若最终失败，则把沙盒 traceback 回传，便于定位 `ImportError` / DLL load failure。
@@ -42,7 +43,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.5 自动化、配置与存储
 *   **core/sop_manager.py**：规范化自动化模板和会话运行态，维护 step/run 状态，并生成当前步骤 Prompt 片段。
 *   **core/automation_manager.py**：规范化定时任务、计算 next run、生成完整执行提示词并维护运行历史记录结构。
-*   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、项目列表、工作区、自动化任务与运行历史。
+*   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、`mcp_servers`、项目列表、工作区、自动化任务与运行历史。
 *   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组、无项目对话查询和项目会话归档。
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，校验解压结构并生成 Windows 更新脚本。
@@ -57,6 +58,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - `SKILL.md`：前言 (frontmatter) 提供元数据与 allowed-tools，正文提供使用指引；`experience` 字段承载自进化经验并在调用前注入。
 - 动态导入与依赖自修复：缺失依赖时尝试自动安装并重试加载，提升技能首用成功率。
 - 工具到技能映射：用于 UI 上报与提示注入。
+- MCP 工具桥接：启用的 MCP server 会被注册成合成 skill，并把远端 tools 映射为带服务器前缀的延迟发现工具，继续复用 `tool_search`、工具可见性和调用链路。
 - 常驻执行工具：`run_python_code` 在 execution 模式下默认暴露，并进入基础 system prompt 的“当前可用工具清单”，无需先通过 `tool_search` 发现。
 - 只读并行工具：`parallel_tools` 本身作为 always-allowed 元工具可默认暴露，但每个子调用必须是已发现、当前模式允许、能力范围允许且 `read_only=True` 的工具。
 - 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮不仅更新 provider 的 tool schema，也会重建基础 system prompt 中的“当前可用工具清单”，避免提示词仍停留在旧集合。
@@ -102,6 +104,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
 - **技能层**：首次调用技能时注入简版能力提示；按需注入技能完整说明与经验。
 - **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与自动化当前步骤，影响工具可见性与 Prompt 约束。
+- **外部工具层**：MCP 配置存储在 `mcp_servers`，兼容 `type = "stdio"` / `type = "streamable_http"` 与 `startup_timeout_ms` 命名；当前只接入 MCP tools，不包含 resources 与 prompts。
 - **历史层**：每轮清理/折叠思考内容以避免重复；DeepSeek thinking 工具调用回合保留 `reasoning_content`，避免多轮工具回放触发协议错误。
 - **压缩层**：DeepSeek V4 Pro/Flash 默认 `context_window_tokens=1000000`、`context_budget_ratio=0.8`、最近保留 40 轮；压缩切点会避开 assistant/tool 调用回合边界，避免留下孤立 tool result。
 

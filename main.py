@@ -47,6 +47,14 @@ from core.memory_update import (
     read_memory_file,
     save_memory_file_with_backup,
 )
+from core.mcp_client import (
+    DEFAULT_MCP_TIMEOUT_SECONDS,
+    TRANSPORT_STDIO,
+    TRANSPORT_STREAMABLE_HTTP,
+    mcp_transport_label,
+    summarize_mcp_server,
+    test_mcp_server_connection,
+)
 from core.skill_from_conversation import (
     generate_skill_draft,
     render_session_transcript,
@@ -3349,6 +3357,382 @@ class AutomationDialog(QDialog):
         self.accept()
 
 
+class McpConnectionWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, server_config, parent=None):
+        super().__init__(parent)
+        self.server_config = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
+
+    def run(self):
+        try:
+            self.finished_signal.emit(test_mcp_server_connection(self.server_config))
+        except Exception as exc:
+            self.finished_signal.emit({"ok": False, "error": str(exc)})
+
+
+class McpServerEditDialog(QDialog):
+    def __init__(self, server=None, parent=None):
+        super().__init__(parent)
+        self.server = json.loads(json.dumps(server or {}, ensure_ascii=False))
+        self.setWindowTitle("MCP 服务器")
+        self.resize(560, 620)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        title = QLabel("配置 MCP 服务器")
+        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
+        layout.addWidget(title)
+
+        hint = QLabel("首版支持 stdio 和 Streamable HTTP，并先接入 MCP tools。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(hint)
+
+        form = QFormLayout()
+        form.setSpacing(12)
+        configure_responsive_form_layout(form)
+
+        self.enabled_check = QCheckBox("启用这个 MCP 服务器")
+        self.enabled_check.setChecked(bool(self.server.get("enabled", True)))
+        form.addRow("状态", self.enabled_check)
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("例如：Filesystem MCP")
+        self.name_input.setText(str(self.server.get("name") or ""))
+        form.addRow("名称", self.name_input)
+
+        self.transport_combo = QComboBox()
+        self.transport_combo.addItem("stdio", TRANSPORT_STDIO)
+        self.transport_combo.addItem("Streamable HTTP", TRANSPORT_STREAMABLE_HTTP)
+        transport = str(self.server.get("transport") or self.server.get("type") or TRANSPORT_STDIO)
+        transport_index = self.transport_combo.findData(
+            TRANSPORT_STREAMABLE_HTTP if transport == TRANSPORT_STREAMABLE_HTTP else TRANSPORT_STDIO
+        )
+        self.transport_combo.setCurrentIndex(transport_index if transport_index >= 0 else 0)
+        self.transport_combo.currentIndexChanged.connect(self._refresh_transport_stack)
+        form.addRow("传输方式", self.transport_combo)
+
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(5, 300)
+        self.timeout_spin.setValue(
+            int(
+                self.server.get("timeout_seconds")
+                or (int(self.server.get("startup_timeout_ms")) / 1000 if self.server.get("startup_timeout_ms") else 0)
+                or DEFAULT_MCP_TIMEOUT_SECONDS
+            )
+        )
+        self.timeout_spin.setSuffix(" 秒")
+        form.addRow("超时", self.timeout_spin)
+        layout.addLayout(form)
+
+        self.transport_stack = QStackedWidget()
+        layout.addWidget(self.transport_stack, 1)
+
+        stdio_page = QWidget()
+        stdio_layout = QFormLayout(stdio_page)
+        stdio_layout.setContentsMargins(0, 0, 0, 0)
+        stdio_layout.setSpacing(12)
+        configure_responsive_form_layout(stdio_layout)
+
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("例如：npx")
+        self.command_input.setText(str(self.server.get("command") or ""))
+        stdio_layout.addRow("命令", self.command_input)
+
+        self.args_edit = QTextEdit()
+        self.args_edit.setFixedHeight(76)
+        self.args_edit.setPlaceholderText("每行一个参数，例如：\n-y\n@modelcontextprotocol/server-filesystem\nD:\\\\workspace")
+        self.args_edit.setPlainText("\n".join(self.server.get("args") or []))
+        stdio_layout.addRow("参数", self.args_edit)
+
+        self.cwd_input = QLineEdit()
+        self.cwd_input.setPlaceholderText("可选：启动目录")
+        self.cwd_input.setText(str(self.server.get("cwd") or ""))
+        cwd_container = QWidget()
+        cwd_layout = QHBoxLayout(cwd_container)
+        cwd_layout.setContentsMargins(0, 0, 0, 0)
+        cwd_layout.setSpacing(8)
+        cwd_layout.addWidget(self.cwd_input, 1)
+        cwd_btn = QPushButton("选择")
+        cwd_btn.setObjectName("SecondaryBtn")
+        cwd_btn.clicked.connect(self._choose_cwd)
+        cwd_layout.addWidget(cwd_btn)
+        stdio_layout.addRow("工作目录", cwd_container)
+
+        self.env_edit = QTextEdit()
+        self.env_edit.setFixedHeight(90)
+        self.env_edit.setPlaceholderText("每行一个环境变量：KEY=VALUE")
+        self.env_edit.setPlainText(self._mapping_to_text(self.server.get("env"), separator="="))
+        stdio_layout.addRow("环境变量", self.env_edit)
+        self.transport_stack.addWidget(stdio_page)
+
+        http_page = QWidget()
+        http_layout = QFormLayout(http_page)
+        http_layout.setContentsMargins(0, 0, 0, 0)
+        http_layout.setSpacing(12)
+        configure_responsive_form_layout(http_layout)
+
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://example.com/mcp")
+        self.url_input.setText(str(self.server.get("url") or ""))
+        http_layout.addRow("URL", self.url_input)
+
+        self.headers_edit = QTextEdit()
+        self.headers_edit.setFixedHeight(120)
+        self.headers_edit.setPlaceholderText("每行一个 Header：Authorization: Bearer ...")
+        self.headers_edit.setPlainText(self._mapping_to_text(self.server.get("headers"), separator=": "))
+        http_layout.addRow("Headers", self.headers_edit)
+        self.transport_stack.addWidget(http_page)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("保存")
+        ok_btn.setObjectName("PrimaryBtn")
+        ok_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(ok_btn)
+        layout.addLayout(buttons)
+        self._refresh_transport_stack()
+
+    def _mapping_to_text(self, value, separator="="):
+        if not isinstance(value, dict):
+            return ""
+        return "\n".join(f"{key}{separator}{item}" for key, item in value.items())
+
+    def _parse_string_list(self, text):
+        values = []
+        for line in str(text or "").splitlines():
+            item = line.strip()
+            if item:
+                values.append(item)
+        return values
+
+    def _parse_mapping(self, text):
+        mapping = {}
+        for line in str(text or "").splitlines():
+            item = line.strip()
+            if not item:
+                continue
+            if "=" in item:
+                key, value = item.split("=", 1)
+            elif ":" in item:
+                key, value = item.split(":", 1)
+            else:
+                key, value = item, ""
+            key = key.strip()
+            if not key:
+                continue
+            mapping[key] = value.strip()
+        return mapping
+
+    def _choose_cwd(self):
+        directory = QFileDialog.getExistingDirectory(self, "选择 MCP 启动目录")
+        if directory:
+            self.cwd_input.setText(directory)
+
+    def _refresh_transport_stack(self):
+        transport = self.transport_combo.currentData()
+        self.transport_stack.setCurrentIndex(1 if transport == TRANSPORT_STREAMABLE_HTTP else 0)
+
+    def get_server_config(self):
+        timeout_seconds = int(self.timeout_spin.value())
+        transport = str(self.transport_combo.currentData() or TRANSPORT_STDIO)
+        return {
+            "id": str(self.server.get("id") or "").strip(),
+            "name": self.name_input.text().strip() or "MCP Server",
+            "enabled": self.enabled_check.isChecked(),
+            "transport": transport,
+            "type": transport,
+            "timeout_seconds": timeout_seconds,
+            "startup_timeout_ms": timeout_seconds * 1000,
+            "command": self.command_input.text().strip(),
+            "args": self._parse_string_list(self.args_edit.toPlainText()),
+            "cwd": self.cwd_input.text().strip(),
+            "env": self._parse_mapping(self.env_edit.toPlainText()),
+            "url": self.url_input.text().strip(),
+            "headers": self._parse_mapping(self.headers_edit.toPlainText()),
+        }
+
+    def accept(self):
+        server = self.get_server_config()
+        if not server.get("name"):
+            QMessageBox.warning(self, "MCP 服务器", "请填写服务器名称。")
+            return
+        if server.get("transport") == TRANSPORT_STDIO:
+            if not server.get("command"):
+                QMessageBox.warning(self, "MCP 服务器", "stdio 模式下请填写启动命令。")
+                return
+        elif not server.get("url"):
+            QMessageBox.warning(self, "MCP 服务器", "Streamable HTTP 模式下请填写 URL。")
+            return
+        self.server = server
+        super().accept()
+
+
+class McpServerManager(QWidget):
+    def __init__(self, servers, parent=None):
+        super().__init__(parent)
+        self.servers = json.loads(json.dumps(servers or [], ensure_ascii=False))
+        self.test_worker = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("MCP 服务器")
+        title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        toolbar.addWidget(title)
+        toolbar.addStretch()
+        for label, handler, icon_name in (
+            ("添加服务器", self.add_server, "fa5s.plus"),
+            ("编辑", self.edit_server, "fa5s.pen"),
+            ("删除", self.delete_server, "fa5s.trash-alt"),
+            ("测试连接", self.test_server, "fa5s.plug"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("SecondaryBtn")
+            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+            btn.clicked.connect(handler)
+            toolbar.addWidget(btn)
+        layout.addLayout(toolbar)
+
+        helper = QLabel("已启用的 MCP 服务器会在运行时注册为延迟发现工具，可通过 `tool_search` 找到。")
+        helper.setWordWrap(True)
+        helper.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(helper)
+
+        self.server_list = QListWidget()
+        self.server_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
+            f"QListWidget::item {{ padding: 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        self.server_list.currentRowChanged.connect(self._refresh_detail)
+        layout.addWidget(self.server_list, 1)
+
+        self.detail_label = QLabel()
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet(
+            f"background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 12px; "
+            f"padding: 12px; color: {DesignTokens.text_secondary}; font-size: 12px;"
+        )
+        layout.addWidget(self.detail_label)
+
+        self.status_label = QLabel("连接测试结果会显示在这里。")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(self.status_label)
+        self._refresh_list()
+
+    def _current_index(self):
+        row = self.server_list.currentRow()
+        if row < 0 or row >= len(self.servers):
+            return -1
+        return row
+
+    def _refresh_list(self):
+        self.server_list.blockSignals(True)
+        self.server_list.clear()
+        for server in self.servers:
+            title = str(server.get("name") or "MCP Server").strip()
+            state = "已启用" if server.get("enabled", True) else "已停用"
+            summary = summarize_mcp_server(server)
+            item = QListWidgetItem(f"{title}  ·  {mcp_transport_label(server.get('transport'))}  ·  {state}")
+            item.setToolTip(summary)
+            self.server_list.addItem(item)
+        self.server_list.blockSignals(False)
+        if self.server_list.count():
+            self.server_list.setCurrentRow(max(0, min(self.server_list.currentRow(), self.server_list.count() - 1)))
+        self._refresh_detail()
+
+    def _refresh_detail(self):
+        index = self._current_index()
+        if index < 0:
+            self.detail_label.setText("还没有配置 MCP 服务器。")
+            return
+        server = self.servers[index]
+        detail = [
+            f"名称：{server.get('name') or 'MCP Server'}",
+            f"传输：{mcp_transport_label(server.get('transport'))}",
+            f"状态：{'启用' if server.get('enabled', True) else '停用'}",
+            f"超时：{server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS} 秒",
+            f"连接：{summarize_mcp_server(server)}",
+        ]
+        self.detail_label.setText("\n".join(detail))
+
+    def add_server(self):
+        dialog = McpServerEditDialog(parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.servers.append(dialog.get_server_config())
+        self._refresh_list()
+        self.server_list.setCurrentRow(self.server_list.count() - 1)
+
+    def edit_server(self):
+        index = self._current_index()
+        if index < 0:
+            return
+        dialog = McpServerEditDialog(self.servers[index], self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        self.servers[index] = dialog.get_server_config()
+        self._refresh_list()
+        self.server_list.setCurrentRow(index)
+
+    def delete_server(self):
+        index = self._current_index()
+        if index < 0:
+            return
+        reply = QMessageBox.question(
+            self,
+            "删除 MCP 服务器",
+            "确定删除这个 MCP 服务器配置吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        del self.servers[index]
+        self._refresh_list()
+
+    def test_server(self):
+        index = self._current_index()
+        if index < 0:
+            return
+        if self.test_worker and self.test_worker.isRunning():
+            return
+        server = self.servers[index]
+        self.status_label.setText(f"正在测试 {server.get('name') or 'MCP Server'} ...")
+        self.test_worker = McpConnectionWorker(server, self)
+        self.test_worker.finished_signal.connect(self._handle_test_result)
+        self.test_worker.finished.connect(self.test_worker.deleteLater)
+        self.test_worker.start()
+
+    def _handle_test_result(self, result):
+        self.test_worker = None
+        if result.get("ok"):
+            tools = result.get("tools") or []
+            preview = "，".join(tools[:6]) if tools else "无 tools"
+            self.status_label.setText(f"连接成功，发现 {result.get('tool_count', 0)} 个工具：{preview}")
+            QMessageBox.information(self, "MCP 连接测试", self.status_label.text())
+            return
+        message = result.get("error") or "未知错误"
+        self.status_label.setText(f"连接失败：{message}")
+        QMessageBox.warning(self, "MCP 连接测试", message)
+
+    def get_servers(self):
+        return json.loads(json.dumps(self.servers, ensure_ascii=False))
+
+
 class AppUpdateWorker(QThread):
     progress_signal = Signal(str, int)
     finished_signal = Signal(dict)
@@ -3547,6 +3931,14 @@ class SettingsDialog(QDialog):
             "权限",
             "控制是否允许助手执行更高风险的本机操作。",
         )
+        mcp_page, mcp_layout = make_scroll_page(
+            "MCP",
+            "配置 MCP 服务器后，Agent 可以通过 MCP 协议发现并调用外部 tools。",
+        )
+        self.mcp_server_manager = McpServerManager(
+            self.config_manager.get_mcp_servers(),
+            parent=self,
+        )
         permission_group = QGroupBox("权限控制")
         permission_group.setStyleSheet(group_style)
         permission_group_layout = QVBoxLayout(permission_group)
@@ -3627,12 +4019,15 @@ class SettingsDialog(QDialog):
         agent_layout.addStretch()
         workspace_layout.addWidget(storage_group)
         workspace_layout.addStretch()
+        mcp_layout.addWidget(self.mcp_server_manager)
+        mcp_layout.addStretch()
         permission_page_layout.addWidget(permission_group)
         permission_page_layout.addStretch()
 
         add_settings_page("模型", "fa5s.brain", model_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
+        add_settings_page("MCP", "fa5s.plug", mcp_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("更新", "fa5s.download", update_page)
 
@@ -3947,6 +4342,7 @@ class SettingsDialog(QDialog):
             selected_model_id = all_model_ids[0] if all_model_ids else ""
         self.config_manager.set_model_channels(model_channels, selected_model_id)
         self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
+        self.config_manager.set_mcp_servers(self.mcp_server_manager.get_servers())
         self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
         self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -12461,7 +12857,10 @@ class MainWindow(QMainWindow):
         except Exception: pass
 
     def open_settings(self):
-        SettingsDialog(self.config_manager, self).exec()
+        dialog = SettingsDialog(self.config_manager, self)
+        result = dialog.exec()
+        if result == QDialog.Accepted:
+            self.skill_manager.load_skills()
         self.refresh_model_selector()
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()

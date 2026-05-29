@@ -92,6 +92,7 @@ The bundled Python runtime must also include platform extension modules from loc
 Open **⚙️ Settings**:
 *   **API Key**: DeepSeek or other provider key.
 *   **Provider**: `openai` (DeepSeek compatible) or `anthropic`.
+*   **MCP**: configure `stdio` or Streamable HTTP MCP servers. Enabled servers are registered as deferred external tools and discovered through `tool_search`.
 *   **God Mode**: Toggle safety sandbox restrictions.
 
 ### 2. Select Project
@@ -123,11 +124,18 @@ Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feish
 ### 7. App Updates
 Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds can download, verify, stage, and restart into the new version; source runs only check and link to the release page.
 
+### 8. MCP Servers
+Open **⚙️ Settings → MCP** to add MCP servers.
+*   `stdio`: configure command, args, cwd, env, and startup timeout.
+*   Streamable HTTP: configure URL, headers, and startup timeout.
+*   v1 scope is **tools only**. MCP resources and prompts are not wired into the agent yet.
+
 ## 🏗️ Architecture
 
 *   **`main.py`**: PySide6 desktop UI entry.
 *   **`core/agent.py`**: Reasoning loop and tool orchestration.
 *   **`core/daemon.py`**: Headless inference server.
+*   **`core/mcp_client.py`**: MCP transport bridge for `stdio` and Streamable HTTP tool discovery/calls.
 *   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
 *   **`core/sop_manager.py`**: Session-level automation templates, step state, confirmation, rerun, and skip flow.

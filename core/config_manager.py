@@ -18,6 +18,7 @@ from .automation_manager import (
     normalize_automation_history,
     normalize_automation_tasks,
 )
+from .mcp_client import DEFAULT_MCP_TIMEOUT_SECONDS, TRANSPORT_STDIO, normalize_mcp_transport
 from .sop_manager import default_sop_templates, normalize_sop_templates
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -65,6 +66,7 @@ class ConfigManager:
             "sop_templates": self._default_sop_templates(),
             "automation_tasks": [],
             "automation_run_history": [],
+            "mcp_servers": [],
             "projects": [],
             "god_mode": False,
             "default_workspace": "",
@@ -162,6 +164,10 @@ class ConfigManager:
         )
         if normalized_automation_history != self.config.get("automation_run_history"):
             self.config["automation_run_history"] = normalized_automation_history
+            updated = True
+        normalized_mcp_servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
+        if normalized_mcp_servers != self.config.get("mcp_servers"):
+            self.config["mcp_servers"] = normalized_mcp_servers
             updated = True
         normalized_projects = self._normalize_projects(self.config.get("projects"))
         if normalized_projects != self.config.get("projects"):
@@ -305,6 +311,90 @@ class ConfigManager:
 
     def _normalize_automation_history(self, value):
         return normalize_automation_history(value)
+
+    def _normalize_mcp_env_or_headers(self, value):
+        if isinstance(value, dict):
+            items = value.items()
+        elif isinstance(value, list):
+            items = []
+            for item in value:
+                if isinstance(item, dict):
+                    key = item.get("key") or item.get("name")
+                    if key is None:
+                        continue
+                    items.append((key, item.get("value")))
+        else:
+            return {}
+        normalized = {}
+        for key, item in items:
+            text_key = str(key or "").strip()
+            if not text_key:
+                continue
+            normalized[text_key] = str(item if item is not None else "")
+        return normalized
+
+    def _normalize_mcp_string_list(self, value):
+        if not isinstance(value, list):
+            return []
+        items = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                items.append(text)
+        return items
+
+    def _normalize_mcp_server(self, server, index=0, used_ids=None):
+        used_ids = used_ids if used_ids is not None else set()
+        if not isinstance(server, dict):
+            return None
+        source = dict(server or {})
+        transport = normalize_mcp_transport(source.get("transport", source.get("type")))
+        name = str(source.get("name") or f"MCP Server {index + 1}").strip() or f"MCP Server {index + 1}"
+        server_id = str(source.get("id") or "").strip() or f"mcp-{self._slug(name)}"
+        base_id = server_id
+        suffix = 2
+        while server_id in used_ids:
+            server_id = f"{base_id}-{suffix}"
+            suffix += 1
+        used_ids.add(server_id)
+        timeout_seconds = int(
+            source.get("timeout_seconds")
+            or (int(source.get("startup_timeout_ms")) / 1000 if source.get("startup_timeout_ms") else 0)
+            or DEFAULT_MCP_TIMEOUT_SECONDS
+        )
+        timeout_seconds = max(5, min(300, timeout_seconds))
+        args = self._normalize_mcp_string_list(source.get("args"))
+        env = self._normalize_mcp_env_or_headers(source.get("env"))
+        headers = self._normalize_mcp_env_or_headers(source.get("headers"))
+        cwd = str(source.get("cwd") or "").strip()
+        if cwd:
+            cwd = os.path.normpath(os.path.abspath(os.path.expanduser(cwd)))
+        return {
+            "id": server_id,
+            "name": name,
+            "enabled": bool(source.get("enabled", True)),
+            "transport": transport,
+            "type": transport,
+            "timeout_seconds": timeout_seconds,
+            "startup_timeout_ms": timeout_seconds * 1000,
+            "command": str(source.get("command") or "").strip(),
+            "args": args,
+            "cwd": cwd,
+            "env": env,
+            "url": str(source.get("url") or "").strip(),
+            "headers": headers,
+        }
+
+    def _normalize_mcp_servers(self, value):
+        if not isinstance(value, list):
+            return []
+        normalized = []
+        used_ids = set()
+        for index, item in enumerate(value):
+            entry = self._normalize_mcp_server(item, index=index, used_ids=used_ids)
+            if entry:
+                normalized.append(entry)
+        return normalized
 
     def _normalize_project_path(self, path):
         text = str(path or "").strip()
@@ -863,6 +953,17 @@ class ConfigManager:
 
     def set_projects(self, projects):
         self.config["projects"] = self._normalize_projects(projects)
+        self.save_config()
+
+    def get_mcp_servers(self):
+        servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
+        if servers != self.config.get("mcp_servers"):
+            self.config["mcp_servers"] = servers
+            self.save_config()
+        return json.loads(json.dumps(servers, ensure_ascii=False))
+
+    def set_mcp_servers(self, servers):
+        self.config["mcp_servers"] = self._normalize_mcp_servers(servers)
         self.save_config()
 
     def upsert_project(self, path, name=None, pinned=None):

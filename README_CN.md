@@ -90,6 +90,7 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 打开 **⚙️ 设置**：
 *   **API Key**：DeepSeek 或其他模型提供商密钥。
 *   **Provider**：`openai`（兼容 DeepSeek）或 `anthropic`。
+*   **MCP**：可配置 `stdio` 或 Streamable HTTP 的 MCP 服务器；启用后会作为延迟发现的外部工具接入 `tool_search`。
 *   **God Mode**：安全沙箱开关。
 
 ### 2. 选择项目
@@ -120,11 +121,18 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 ### 7. 应用更新
 打开 **⚙️ 设置 → 更新** 检查 GitHub Releases。打包版会下载、校验、解压暂存并通过独立更新器重启安装；源码运行模式只检查版本并提供 Releases 页面入口。
 
+### 8. MCP 服务器
+打开 **⚙️ 设置 → MCP** 添加 MCP 服务器。
+*   `stdio`：配置命令、参数、工作目录、环境变量和启动超时。
+*   Streamable HTTP：配置 URL、Headers 和启动超时。
+*   当前首版只接入 **tools**，暂不支持 MCP resources 和 prompts。
+
 ## 🏗️ 架构概览
 
 *   **`main.py`**：PySide6 桌面 UI 入口。
 *   **`core/agent.py`**：推理循环与工具调度。
 *   **`core/daemon.py`**：无头推理服务。
+*   **`core/mcp_client.py`**：MCP `stdio` / Streamable HTTP 传输桥接与工具调用封装。
 *   **`core/im_gateway/`**：多平台企业消息网关与渠道适配。
 *   **`core/skill_manager.py`**：工具注册、经验包加载、相关性匹配与 Prompt 注入。
 *   **`core/sop_manager.py`**：会话级自动化模板、步骤状态、确认、重跑与跳过逻辑。

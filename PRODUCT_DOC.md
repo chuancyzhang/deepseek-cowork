@@ -54,6 +54,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **Python 动态依赖**：`python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒 Python 中验证模块可导入；第三方包持久化到 AppData `runtime_sandbox` 的 skill 依赖目录，而不是直接写入 `_internal`。沙盒会额外注入 `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS`，让 Windows 原生扩展包能解析 DLL；如果仍然导入失败，会把真实 traceback 返回给用户。
 *   **打包完整性**：内置 Python 运行时除了 `Lib` 外，还必须包含 Windows 平台扩展目录（如 `DLLs`）以及常见 MSVC runtime DLL；否则 `_socket` 等核心模块缺失，内置 `pip` 或原生 wheel 无法加载。
 *   **应用更新**：设置页可检查 GitHub Releases；打包版支持下载、校验、暂存并通过独立更新器重启安装。
+*   **MCP 服务器**：设置页可配置 `stdio` 与 Streamable HTTP MCP 服务器；已启用服务器会以延迟发现工具的方式接入 Agent。
 
 ---
 
@@ -61,6 +62,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 
 1.  **配置与启动**
     *   设置 API Key 与 Provider（`openai` 或 `anthropic`）。
+    *   如需外部工具能力，可在设置页添加 MCP 服务器；首版只接入 MCP tools。
     *   在左侧栏添加或选择项目文件夹，项目即工作区。
 
 2.  **任务下达**
@@ -94,6 +96,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **Core**：
     *   `Agent`：推理与工具调度
     *   `SkillManager`：技能加载与经验注入
+    *   `mcp_client`：MCP `stdio` / Streamable HTTP 连接、工具枚举与工具调用封装
     *   `memory_update`：长期记忆批处理、备份写入与增量状态
     *   `skill_from_conversation`：会话转录、Skill 草稿生成与保存
     *   `sop_from_conversation`：从当前会话一次性提炼 SOP 草稿，支持预览、确认生成与按意见重写
@@ -125,6 +128,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 - `experience` 字段承载“学到的经验”，在技能被使用前自动注入提示，帮助模型少走弯路。
 - 动态导入与依赖自修复：首次加载缺依赖时尝试自动安装并重试，提升首次成功率。
 - 工具到技能映射用于 UI 展示与提示注入，让调用链路清晰透明。
+- MCP 工具桥接：已启用的 MCP server 会被映射为带服务器前缀的外部工具名，并继续走现有 `tool_search`、工具可见性和调用回路。
 - `run_python_code` 在 execution 模式下作为常驻执行工具写入当前可用工具清单，便于模型直接用 Python 做计算、文本处理和轻量文件分析。
 - `parallel_tools` 是显式并发入口，只允许已发现、当前模式可用、能力范围内的只读工具；对写入、破坏性、审批、用户输入、子 Agent 管理等调用直接拒绝。
 

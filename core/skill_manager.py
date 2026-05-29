@@ -11,6 +11,15 @@ import tempfile
 import zipfile
 
 from .env_utils import ensure_package_installed, get_app_data_dir
+from .mcp_client import (
+    build_mcp_skill_name,
+    build_mcp_tool_name,
+    call_mcp_tool,
+    list_mcp_server_tools,
+    mcp_package_available,
+    mcp_transport_label,
+    summarize_mcp_server,
+)
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
 from .skill_adapter import EXCLUDED_DIRS, adapt_skill_directory, discover_skill_artifacts
 from .tool_registry import ToolRegistry
@@ -53,6 +62,7 @@ def _humanize_skill_name(skill_name):
 
 class SkillManager:
     ALWAYS_ALLOWED_SCOPE_TOOLS = {"tool_search", "parallel_tools"}
+    MCP_SOURCE_FORMAT = "mcp_server"
 
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
@@ -631,14 +641,22 @@ class SkillManager:
             should_defer=export.get("should_defer") if "should_defer" in export else export.get("shouldDefer"),
             always_load=export.get("always_load") if "always_load" in export else export.get("alwaysLoad"),
             runtime_binding={
-                "type": "python_function",
-                "skill_name": skill_name,
-                "export_name": tool_name,
+                **{
+                    "type": "python_function",
+                    "skill_name": skill_name,
+                    "export_name": tool_name,
+                },
+                **(
+                    dict(export.get("runtime_binding"))
+                    if isinstance(export.get("runtime_binding"), dict)
+                    else {}
+                ),
             },
             skill_refs=[skill_name],
             metadata={
                 "requires_user_interaction": bool(export.get("requires_user_interaction")),
                 "result_format": str(export.get("result_format") or ""),
+                **(dict(export.get("metadata")) if isinstance(export.get("metadata"), dict) else {}),
             },
         )
         if not record:
@@ -661,13 +679,21 @@ class SkillManager:
             "should_defer": record.should_defer,
             "always_load": record.always_load,
             "runtime_binding": {
-                "type": "python_function",
-                "skill_name": skill_name,
-                "export_name": tool_name,
+                **{
+                    "type": "python_function",
+                    "skill_name": skill_name,
+                    "export_name": tool_name,
+                },
+                **(
+                    dict(export.get("runtime_binding"))
+                    if isinstance(export.get("runtime_binding"), dict)
+                    else {}
+                ),
             },
             "skill_refs": [skill_name],
             "requires_user_interaction": bool(export.get("requires_user_interaction")),
             "result_format": str(export.get("result_format") or ""),
+            "metadata": dict(export.get("metadata")) if isinstance(export.get("metadata"), dict) else {},
         }
 
     def _load_legacy_implementation(self, skill_name, impl_path):
@@ -877,6 +903,167 @@ class SkillManager:
             "prompt": prompt,
             "search_text": "\n".join([skill_name, meta["description"], body, " ".join(tool_refs), self._summarize_experience_entries(entries)]),
         }
+
+    def _build_mcp_skill_record(self, skill_name, server_config, tool_refs, dependency_status):
+        server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
+        transport = mcp_transport_label(server_config.get("transport"))
+        summary = summarize_mcp_server(server_config)
+        body = (
+            "# Skill Purpose\n"
+            "Expose tools from a configured MCP server.\n\n"
+            "## Interface Details\n"
+            f"- Transport: `{transport}`\n"
+            f"- Endpoint: `{summary}`\n"
+            "- Tools are discovered through `tool_search` and called like normal tools.\n"
+        )
+        meta = {
+            "name": skill_name,
+            "display_name": f"MCP / {server_name}",
+            "description": f"Configured MCP server '{server_name}' exposed as external tools.",
+            "description_cn": f"通过 MCP 协议接入的外部工具服务器：{server_name}。",
+            "created_by": "system",
+            "kind": "knowledge",
+            "allowed-tools": tool_refs,
+            "source_format": self.MCP_SOURCE_FORMAT,
+            "security_level": "medium",
+        }
+        spec = {
+            "version": 2,
+            "name": skill_name,
+            "kind": "knowledge",
+            "capability_group": "external-mcp",
+            "description": f"Configured MCP server '{server_name}' exposed as external tools.",
+            "description_cn": f"通过 MCP 协议接入的外部工具服务器：{server_name}。",
+            "tags": ["mcp", "external tools", transport, server_name],
+            "triggers": ["mcp", server_name, "external tool", "protocol server"],
+            "anti_triggers": [],
+            "tool_refs": tool_refs,
+            "references": [],
+            "script_refs": [],
+            "script_entries": [],
+            "asset_refs": [],
+            "python_dependencies": ["mcp"],
+            "node_dependencies": [],
+            "source_format": self.MCP_SOURCE_FORMAT,
+            "disclosure_level_defaults": {
+                "default_prompt_level": "brief",
+                "include_references": False,
+                "include_experience_entries": False,
+            },
+            "workflow": [
+                "Use tool_search to discover the MCP server tools you need.",
+                "Call the discovered MCP tools directly from the agent loop.",
+            ],
+        }
+        prompt = self._build_skill_prompt(skill_name, meta, body, spec, tool_refs, experience_entries=[], include_references=False)
+        return {
+            "name": skill_name,
+            "path": f"mcp://{server_config.get('id') or skill_name}",
+            "kind": "knowledge",
+            "meta": meta,
+            "spec": spec,
+            "tool_refs": list(tool_refs),
+            "body": body,
+            "experience_entries": [],
+            "brief": self._build_brief_prompt(skill_name, meta, spec, tool_refs),
+            "prompt": prompt,
+            "search_text": "\n".join([skill_name, server_name, transport, summary, " ".join(tool_refs), body]),
+            "dependency_status": dict(dependency_status or {"ok": True, "message": "MCP server configured."}),
+        }
+
+    def _register_mcp_tools_for_server(self, skill_name, server_config, tools_payload):
+        tool_refs = []
+        used_names = set(self.tools)
+        for tool in tools_payload or []:
+            remote_name = str(tool.get("name") or "").strip()
+            if not remote_name:
+                continue
+            local_name = build_mcp_tool_name(server_config.get("id"), remote_name)
+            base_name = local_name
+            suffix = 2
+            while local_name in used_names:
+                local_name = f"{base_name}_{suffix}"
+                suffix += 1
+            used_names.add(local_name)
+
+            def _handler(_arguments=None, _server=json.loads(json.dumps(server_config, ensure_ascii=False)), _remote_name=remote_name, **kwargs):
+                payload = dict(_arguments or {})
+                payload.update(kwargs)
+                return call_mcp_tool(_server, _remote_name, payload)
+
+            export = {
+                "name": local_name,
+                "handler": _handler,
+                "description": str(tool.get("description") or f"MCP tool '{remote_name}' from server '{server_config.get('name') or server_config.get('id')}'.").strip(),
+                "parameters": dict(tool.get("input_schema") or {"type": "object", "properties": {}, "required": []}),
+                "kind": "mcp_tool",
+                "aliases": [
+                    f"{server_config.get('id') or server_config.get('name')}.{remote_name}",
+                    f"{server_config.get('name') or server_config.get('id')}::{remote_name}",
+                ],
+                "search_hint": " ".join(
+                    part for part in [
+                        "mcp",
+                        str(server_config.get("name") or ""),
+                        str(server_config.get("id") or ""),
+                        remote_name,
+                        str(tool.get("description") or ""),
+                    ]
+                    if part
+                ),
+                "allowed_modes": ["execution"],
+                "should_defer": True,
+                "always_load": False,
+                "metadata": {
+                    "mcp_server_id": str(server_config.get("id") or ""),
+                    "mcp_server_name": str(server_config.get("name") or ""),
+                    "mcp_tool_name": remote_name,
+                    "mcp_transport": str(server_config.get("transport") or ""),
+                },
+            }
+            self._register_explicit_tool_export(skill_name, export)
+            if local_name in self.tools:
+                tool_refs.append(local_name)
+        return tool_refs
+
+    def _load_mcp_servers(self):
+        if not self.config_manager or not hasattr(self.config_manager, "get_mcp_servers"):
+            return
+        servers = self.config_manager.get_mcp_servers()
+        if not isinstance(servers, list):
+            return
+        package_ready = mcp_package_available()
+        for index, server_config in enumerate(servers):
+            if not isinstance(server_config, dict):
+                continue
+            skill_name = build_mcp_skill_name(server_config.get("id") or server_config.get("name") or f"server-{index + 1}")
+            if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):
+                continue
+            tool_refs = []
+            dependency_status = {"ok": True, "message": "MCP server is available."}
+            if not bool(server_config.get("enabled", True)):
+                dependency_status = {"ok": False, "message": "MCP server is disabled in settings."}
+            elif not package_ready:
+                dependency_status = {"ok": False, "message": "Python package 'mcp' is not installed."}
+            else:
+                result = list_mcp_server_tools(server_config)
+                if result.get("ok"):
+                    tool_refs = self._register_mcp_tools_for_server(skill_name, server_config, result.get("tools"))
+                    dependency_status = {
+                        "ok": True,
+                        "message": f"Loaded {len(tool_refs)} MCP tools.",
+                    }
+                else:
+                    dependency_status = {
+                        "ok": False,
+                        "message": result.get("error") or "Failed to connect to MCP server.",
+                    }
+            record = self._build_mcp_skill_record(skill_name, server_config, tool_refs, dependency_status)
+            self.loaded_skills_meta[skill_name] = record["meta"]
+            self.skill_prompts_brief.append(record["brief"])
+            self.skill_prompts_full[skill_name] = record["prompt"]
+            self.skill_records[skill_name] = record
+            self.skill_to_tools.setdefault(skill_name, list(tool_refs))
 
     def _load_skill_record(self, skill_name, skill_path):
         md_path = os.path.join(skill_path, "SKILL.md")
@@ -1200,6 +1387,35 @@ class SkillManager:
                 info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
                 all_skills.append(info)
                 seen.add(skill_name)
+        for skill_name, record in self.skill_records.items():
+            if skill_name in seen:
+                continue
+            if record.get("spec", {}).get("source_format") != self.MCP_SOURCE_FORMAT:
+                continue
+            info = {
+                "name": skill_name,
+                "display_name": record["meta"].get("display_name") or _humanize_skill_name(skill_name),
+                "path": record.get("path") or "",
+                "description": record["spec"].get("description") or record["meta"].get("description") or "No description available.",
+                "user_description": record["meta"].get("description_cn") or record["spec"].get("description_cn") or record["spec"].get("description") or record["meta"].get("description") or "暂无说明。",
+                "enabled": True,
+                "tools": list(record.get("tool_refs") or []),
+                "kind": record["kind"],
+                "capability_group": record["spec"].get("capability_group"),
+                "experience_count": len(record.get("experience_entries") or []),
+                "use_cases": record["spec"].get("triggers") or record["spec"].get("tags") or [],
+                "risk_level": record["meta"].get("security_level") or record["spec"].get("security_level") or "medium",
+                "dependency_status": record.get("dependency_status") or {"ok": True},
+                "script_refs": list(record["spec"].get("script_refs") or []),
+                "script_entries": list(record["spec"].get("script_entries") or []),
+                "source_format": record["spec"].get("source_format"),
+            }
+            if self.config_manager:
+                info["enabled"] = self.config_manager.is_skill_enabled(skill_name)
+            info.update({k: v for k, v in record["meta"].items() if k != "allowed-tools"})
+            info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
+            all_skills.append(info)
+            seen.add(skill_name)
         return all_skills
 
     def import_skill(self, source_path, source_format="auto"):
@@ -1445,6 +1661,7 @@ class SkillManager:
             self.skill_prompts_full[skill_name] = record["prompt"]
             self.skill_records[skill_name] = record
             self.skill_to_tools.setdefault(skill_name, list(record.get("tool_refs") or []))
+        self._load_mcp_servers()
 
     def _explicit_skill_matches(self, query_tokens):
         matches = []

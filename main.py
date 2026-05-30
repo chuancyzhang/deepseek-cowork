@@ -9136,13 +9136,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "main_content_layout"):
             return
         left, top, right, bottom = self.main_content_default_margins
-        reserved_right = right
-        if self.right_drawer_open and drawer_width:
-            reserved_right = max(
-                right,
-                drawer_width + self.context_drawer_margin + self.context_drawer_gap - self.main_layout_default_margins[2],
-            )
-        self.main_content_layout.setContentsMargins(left, top, reserved_right, bottom)
+        self.main_content_layout.setContentsMargins(left, top, right, bottom)
 
     def _clamp_int(self, value, minimum, maximum):
         minimum = int(minimum)
@@ -9151,13 +9145,17 @@ class MainWindow(QMainWindow):
             return maximum
         return max(minimum, min(maximum, int(value)))
 
-    def _conversation_available_width(self, drawer_width=None):
+    def _conversation_available_width(self, drawer_geometry=None):
         container = getattr(self, "main_container", None)
         if container is None:
             return DesignTokens.conversation_min_width
         available = container.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
-        if self.right_drawer_open and drawer_width:
-            available -= int(drawer_width) + self.context_drawer_gap
+        if self.right_drawer_open and isinstance(drawer_geometry, dict):
+            safe_right = int(drawer_geometry.get("x", container.width())) - self.context_drawer_gap
+            available = min(
+                available,
+                safe_right - self.main_layout_default_margins[0],
+            )
         return max(available, DesignTokens.conversation_min_width)
 
     def _iter_session_chat_bubbles(self):
@@ -9171,16 +9169,20 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, ChatBubble):
                     yield widget
 
-    def sync_conversation_widths(self, drawer_width=None):
-        available = self._conversation_available_width(drawer_width)
-        gutter = max(
-            DesignTokens.conversation_right_gutter_min,
-            int(available * DesignTokens.conversation_right_gutter_ratio),
-        )
-        target = min(
-            available - gutter,
-            int(available * DesignTokens.conversation_target_ratio),
-        )
+    def sync_conversation_widths(self, drawer_geometry=None):
+        available = self._conversation_available_width(drawer_geometry)
+        if self.right_drawer_open and isinstance(drawer_geometry, dict):
+            gutter = self._clamp_int(int(available * 0.05), 28, 72)
+            target = available - gutter
+        else:
+            gutter = max(
+                DesignTokens.conversation_right_gutter_min,
+                int(available * DesignTokens.conversation_right_gutter_ratio),
+            )
+            target = min(
+                available - gutter,
+                int(available * DesignTokens.conversation_target_ratio),
+            )
         conversation_width = self._clamp_int(
             target,
             DesignTokens.conversation_min_width,
@@ -9213,7 +9215,7 @@ class MainWindow(QMainWindow):
         if geometry is None:
             return
         self._apply_context_drawer_content_reserve(geometry["width"])
-        self.sync_conversation_widths(geometry["width"])
+        self.sync_conversation_widths(geometry)
         self.right_sidebar.setGeometry(
             geometry["x"],
             geometry["y"],

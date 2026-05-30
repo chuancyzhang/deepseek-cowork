@@ -77,6 +77,7 @@ def _normalize_step(step, index=0):
         "instructions": instructions,
         "success_criteria": success_criteria,
         "allow_skip": bool(step.get("allow_skip", False)),
+        "advance_mode": _string(step.get("advance_mode") or "inherit") or "inherit",
     }
 
 
@@ -112,6 +113,7 @@ def normalize_sop_draft(payload, fallback_title=""):
         "triggers": _string_list(source.get("triggers") or source.get("trigger_phrases")),
         "skill_names": _string_list(source.get("skill_names") or source.get("selected_skill_names")),
         "default_agent_profile_id": _string(source.get("default_agent_profile_id")),
+        "advance_mode": _string(source.get("advance_mode") or "manual"),
         "steps": steps,
     }
     normalized = normalize_sop_template(draft)
@@ -160,6 +162,7 @@ def build_sop_generation_messages(
   "triggers": ["触发词"],
   "skill_names": [],
   "default_agent_profile_id": "",
+  "advance_mode": "manual",
   "steps": [
     {{
       "title": "步骤标题",

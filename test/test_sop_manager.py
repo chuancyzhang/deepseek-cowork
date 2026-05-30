@@ -5,6 +5,8 @@ import unittest
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.sop_manager import (
+    SOP_ADVANCE_MODE_AUTO,
+    SOP_ADVANCE_MODE_MANUAL,
     SOP_RUN_STATUS_ACTIVE,
     SOP_RUN_STATUS_AWAITING_CONFIRMATION,
     SOP_RUN_STATUS_COMPLETED,
@@ -12,7 +14,10 @@ from core.sop_manager import (
     SOP_STEP_STATUS_COMPLETED,
     SOP_STEP_STATUS_PENDING,
     SOP_STEP_STATUS_SKIPPED,
+    append_step_output,
     build_sop_prompt_fragment,
+    build_step_execution_request,
+    complete_current_step,
     confirm_current_step,
     create_sop_run,
     default_sop_templates,
@@ -21,6 +26,7 @@ from core.sop_manager import (
     mark_step_running,
     normalize_sop_run,
     normalize_sop_templates,
+    resolve_step_advance_mode,
     rerun_current_step,
     skip_current_step,
 )
@@ -57,6 +63,7 @@ class TestSopManager(unittest.TestCase):
             {
                 "id": "office",
                 "name": "Office",
+                "advance_mode": "manual",
                 "description": "demo",
                 "steps": [
                     {"title": "Step 1", "instructions": "Do 1", "success_criteria": "Done 1"},
@@ -91,12 +98,50 @@ class TestSopManager(unittest.TestCase):
         self.assertEqual(run["status"], SOP_RUN_STATUS_COMPLETED)
         self.assertEqual(run["steps"][1]["status"], SOP_STEP_STATUS_SKIPPED)
 
+    def test_resolve_step_advance_mode_respects_template_and_step_override(self):
+        run = create_sop_run(
+            {
+                "id": "office",
+                "name": "Office",
+                "advance_mode": "auto",
+                "steps": [
+                    {"title": "Step 1", "advance_mode": "inherit"},
+                    {"title": "Step 2", "advance_mode": "manual"},
+                ],
+            }
+        )
+        self.assertEqual(resolve_step_advance_mode(run), SOP_ADVANCE_MODE_AUTO)
+        run = complete_current_step(run, auto_advanced=True)
+        self.assertEqual(run["current_step_index"], 1)
+        self.assertEqual(resolve_step_advance_mode(run), SOP_ADVANCE_MODE_MANUAL)
+
+    def test_build_step_execution_request_uses_original_goal_and_prior_outputs(self):
+        run = create_sop_run(
+            {
+                "id": "office",
+                "name": "Office",
+                "advance_mode": "manual",
+                "steps": [
+                    {"title": "Step 1", "instructions": "Do 1"},
+                    {"title": "Step 2", "instructions": "Do 2", "advance_mode": "auto"},
+                ],
+            }
+        )
+        run["original_user_request"] = "整理本周日报"
+        run = append_step_output(run, content="第一步已完成", executor="main_agent")
+        run = complete_current_step(run, auto_advanced=True)
+        payload = build_step_execution_request(run)
+        self.assertIn("整理本周日报", payload["content"])
+        self.assertIn("第一步已完成", payload["content"])
+        self.assertIn("Step 2", payload["display_content"])
+
     def test_prompt_fragment_mentions_current_step_and_strict_rules(self):
         run = normalize_sop_run(
             {
                 "template_id": "office",
                 "template_name": "Office",
                 "template_description": "Handle office tasks",
+                "template_advance_mode": "manual",
                 "current_step_index": 0,
                 "status": SOP_RUN_STATUS_ACTIVE,
                 "steps": [
@@ -104,6 +149,7 @@ class TestSopManager(unittest.TestCase):
                         "title": "Confirm scope",
                         "instructions": "Ask only scope questions",
                         "success_criteria": "Scope is clear",
+                        "advance_mode": "inherit",
                         "status": SOP_STEP_STATUS_PENDING,
                     }
                 ],
@@ -114,6 +160,7 @@ class TestSopManager(unittest.TestCase):
         self.assertIn("当前 SOP: Office", fragment)
         self.assertIn("当前步骤: 1/1 - Confirm scope", fragment)
         self.assertIn("本轮只允许完成当前步骤", fragment)
+        self.assertIn("人工确认", fragment)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.automation_manager import (
+    AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
     AUTOMATION_HISTORY_STATUS_MISSED,
     AUTOMATION_HISTORY_STATUS_RUNNING,
     AUTOMATION_SCHEDULE_DAILY,
@@ -131,8 +132,16 @@ class TestAutomationManager(unittest.TestCase):
                 "steps": [{"title": "收集信息", "instructions": "先读变更"}],
             },
         )
-        self.assertIn("请完整执行以下模板步骤", prompt)
+        self.assertIn("请按绑定的 SOP 状态机逐步执行当前步骤", prompt)
         self.assertIn("请汇总今天的重要更新", prompt)
+
+    def test_history_accepts_awaiting_confirmation_status(self):
+        history = normalize_automation_history(
+            [
+                {"id": "a", "task_name": "日报", "status": AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION, "started_at": 10},
+            ]
+        )
+        self.assertEqual(history[0]["status"], AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION)
 
 
 class TestAutomationConfigManager(unittest.TestCase):

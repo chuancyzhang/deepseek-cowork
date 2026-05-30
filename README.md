@@ -110,7 +110,7 @@ Examples:
 Open **自动化** from the sidebar:
 *   **Configured**: create scheduled automations, enable or pause them, run them immediately, and review the next run time.
 *   **Run History**: inspect completed, failed, interrupted, or missed runs and reopen the related task session.
-*   **Task Templates**: edit the former SOP templates without exposing manual template IDs; IDs are generated automatically.
+*   **Task Templates**: edit the former SOP templates without exposing manual template IDs; IDs are generated automatically, and both templates and steps can be set to manual confirmation or auto-advance.
 
 ### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:
@@ -138,7 +138,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 *   **`core/mcp_client.py`**: MCP transport bridge for `stdio` and Streamable HTTP tool discovery/calls.
 *   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
-*   **`core/sop_manager.py`**: Session-level automation templates, step state, confirmation, rerun, and skip flow.
+*   **`core/sop_manager.py`**: Session-level automation templates, per-step state, advance mode (`manual` / `auto`), confirmation, rerun, and skip flow.
 *   **`core/sop_from_conversation.py`**: Conversation-to-SOP draft generation with preview and revision.
 *   **`core/automation_manager.py`**: Scheduled automation task normalization, next-run calculation, execution prompt assembly, and run-history helpers.
 *   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
@@ -163,8 +163,8 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - Sub-agent drawer hide/show diagnostics now record structured reasons in `sub_agent_runtime.log`, making unexpected collapses much easier to trace.
 - Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
 - Pause/Resume/Stop controls manage long operations safely.
-- Session automation templates constrain execution to the current step until the user confirms, reruns, or marks that step as not applicable.
-- Scheduled automation tasks reuse the same templates but execute the full template as one timed task and write every run into the local history.
+- Session automation templates constrain execution to the current step; templates and individual steps can require manual confirmation or auto-advance, and the app dispatches one step at a time instead of sending the whole SOP as a single prompt block.
+- Scheduled automation tasks reuse the same templates, execute them as step-by-step runs, pause in `awaiting_confirmation` when a manual step is reached, and write every run into the local history.
 - Clarifying mode exposes only read-oriented exploration and routes real questions through the interaction tools before normal execution resumes.
 
 ## 🧠 Layered Memory & Context

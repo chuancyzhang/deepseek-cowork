@@ -67,6 +67,7 @@ from core.sop_from_conversation import (
     normalize_sop_draft,
 )
 from core.automation_manager import (
+    AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
     AUTOMATION_HISTORY_STATUS_COMPLETED,
     AUTOMATION_HISTORY_STATUS_ERROR,
     AUTOMATION_HISTORY_STATUS_INTERRUPTED,
@@ -106,10 +107,14 @@ from core.clarify_mode import (
     normalize_run_context,
 )
 from core.sop_manager import (
+    SOP_ADVANCE_MODE_AUTO,
     SOP_RUN_STATUS_AWAITING_CONFIRMATION,
     SOP_RUN_STATUS_COMPLETED,
     SOP_STEP_STATUS_AWAITING_CONFIRMATION,
+    append_step_output,
     build_sop_prompt_fragment,
+    build_step_execution_request,
+    complete_current_step,
     confirm_current_step,
     create_sop_run,
     get_current_step,
@@ -118,6 +123,7 @@ from core.sop_manager import (
     mark_step_awaiting_confirmation,
     mark_step_running,
     normalize_sop_run,
+    resolve_step_advance_mode,
     rerun_current_step,
     skip_current_step,
 )
@@ -2121,7 +2127,7 @@ class SopTemplateManager(QWidget):
         title_text="自动化模板",
         noun="自动化",
         show_id_field=False,
-        helper_text="自动化模板会约束会话按步骤执行；完成当前步骤后需要确认、重跑或标记不适用。",
+        helper_text="自动化模板会约束会话按步骤执行；可按模板或步骤配置为人工确认或自动推进，仍可重跑或标记不适用。",
     ):
         super().__init__(parent)
         self.skill_provider = skill_provider
@@ -2216,6 +2222,12 @@ class SopTemplateManager(QWidget):
         self.default_agent_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.default_agent_combo.currentIndexChanged.connect(self._sync_current_template_from_fields)
         form.addRow("默认智能体", self.default_agent_combo)
+        self.template_advance_mode_combo = QComboBox()
+        self.template_advance_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.template_advance_mode_combo.addItem("人工确认", "manual")
+        self.template_advance_mode_combo.addItem("自动推进", "auto")
+        self.template_advance_mode_combo.currentIndexChanged.connect(self._sync_current_template_from_fields)
+        form.addRow("推进方式", self.template_advance_mode_combo)
         editor_layout.addLayout(form)
 
         skills_label = QLabel(f"{self.noun}自带能力")
@@ -2291,6 +2303,13 @@ class SopTemplateManager(QWidget):
         self.step_allow_skip_check = QCheckBox("允许标记为不适用")
         self.step_allow_skip_check.toggled.connect(self._sync_current_step_from_fields)
         step_editor_layout.addRow("跳过", self.step_allow_skip_check)
+        self.step_advance_mode_combo = QComboBox()
+        self.step_advance_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.step_advance_mode_combo.addItem("继承模板", "inherit")
+        self.step_advance_mode_combo.addItem("人工确认", "manual")
+        self.step_advance_mode_combo.addItem("自动推进", "auto")
+        self.step_advance_mode_combo.currentIndexChanged.connect(self._sync_current_step_from_fields)
+        step_editor_layout.addRow("本步推进", self.step_advance_mode_combo)
         step_body.addWidget(step_editor, 1)
         step_body.setStretch(0, 0)
         step_body.setStretch(1, 1)
@@ -2402,6 +2421,8 @@ class SopTemplateManager(QWidget):
             self._reload_agent_profiles()
             combo_index = self.default_agent_combo.findData(str(template.get("default_agent_profile_id") or ""))
             self.default_agent_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+            advance_index = self.template_advance_mode_combo.findData(str(template.get("advance_mode") or "manual"))
+            self.template_advance_mode_combo.setCurrentIndex(advance_index if advance_index >= 0 else 0)
             self._reload_skill_options()
             self._refresh_step_list()
             if self.step_list.count():
@@ -2419,6 +2440,7 @@ class SopTemplateManager(QWidget):
             self.step_instruction_edit.setPlainText("")
             self.step_success_edit.setPlainText("")
             self.step_allow_skip_check.setChecked(False)
+            self.step_advance_mode_combo.setCurrentIndex(0)
         finally:
             self._loading_step = False
 
@@ -2432,6 +2454,8 @@ class SopTemplateManager(QWidget):
             self.step_instruction_edit.setPlainText(str(step.get("instructions") or ""))
             self.step_success_edit.setPlainText(str(step.get("success_criteria") or ""))
             self.step_allow_skip_check.setChecked(bool(step.get("allow_skip", False)))
+            combo_index = self.step_advance_mode_combo.findData(str(step.get("advance_mode") or "inherit"))
+            self.step_advance_mode_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
         finally:
             self._loading_step = False
 
@@ -2449,6 +2473,7 @@ class SopTemplateManager(QWidget):
         template["triggers"] = self._csv_to_list(self.triggers_input.text())
         template["skill_names"] = self._selected_skill_names_from_widgets()
         template["default_agent_profile_id"] = str(self.default_agent_combo.currentData() or "").strip()
+        template["advance_mode"] = str(self.template_advance_mode_combo.currentData() or "manual").strip() or "manual"
         template["updated_at"] = int(time.time())
         self._refresh_template_list()
         self.template_list.blockSignals(True)
@@ -2470,6 +2495,7 @@ class SopTemplateManager(QWidget):
         step["instructions"] = self.step_instruction_edit.toPlainText().strip()
         step["success_criteria"] = self.step_success_edit.toPlainText().strip()
         step["allow_skip"] = self.step_allow_skip_check.isChecked()
+        step["advance_mode"] = str(self.step_advance_mode_combo.currentData() or "inherit").strip() or "inherit"
         self.templates[template_index]["updated_at"] = int(time.time())
         self._refresh_step_list()
         self.step_list.blockSignals(True)
@@ -2506,12 +2532,14 @@ class SopTemplateManager(QWidget):
                 "triggers": [],
                 "skill_names": [],
                 "default_agent_profile_id": "",
+                "advance_mode": "manual",
                 "steps": [
                     {
                         "title": "步骤 1",
                         "instructions": "",
                         "success_criteria": "",
                         "allow_skip": False,
+                        "advance_mode": "inherit",
                     }
                 ],
                 "created_at": now,
@@ -2566,6 +2594,7 @@ class SopTemplateManager(QWidget):
                 "instructions": "",
                 "success_criteria": "",
                 "allow_skip": False,
+                "advance_mode": "inherit",
             }
         )
         self._refresh_step_list()
@@ -2635,6 +2664,7 @@ class SopTemplateManager(QWidget):
                         "instructions": instructions,
                         "success_criteria": success_criteria,
                         "allow_skip": bool(step.get("allow_skip", False)),
+                        "advance_mode": str(step.get("advance_mode") or "inherit").strip() or "inherit",
                     }
                 )
             default_agent_profile_id = str(template.get("default_agent_profile_id") or "").strip()
@@ -2652,6 +2682,7 @@ class SopTemplateManager(QWidget):
                         if skill_name in valid_skill_names
                     ],
                     "default_agent_profile_id": default_agent_profile_id,
+                    "advance_mode": str(template.get("advance_mode") or "manual").strip() or "manual",
                     "steps": steps,
                     "created_at": int(template.get("created_at") or int(time.time())),
                     "updated_at": int(time.time()),
@@ -2675,7 +2706,7 @@ class SessionSopPickerDialog(QDialog):
 
         title = QLabel("为当前会话添加自动化")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("选择后会把自动化模板绑定到当前会话。执行会按当前步骤推进，完成后需要在抽屉里确认。")
+        subtitle = QLabel("选择后会把自动化模板绑定到当前会话。执行会按当前步骤推进，并根据模板配置选择人工确认或自动进入下一步。")
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
         layout.addWidget(title)
@@ -3255,6 +3286,7 @@ class AutomationDialog(QDialog):
         self.history_list.clear()
         status_labels = {
             AUTOMATION_HISTORY_STATUS_RUNNING: "运行中",
+            AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION: "等待确认",
             AUTOMATION_HISTORY_STATUS_COMPLETED: "已完成",
             AUTOMATION_HISTORY_STATUS_ERROR: "失败",
             AUTOMATION_HISTORY_STATUS_INTERRUPTED: "已中断",
@@ -7061,6 +7093,7 @@ class SessionState:
         self.automation_task_id = ""
         self.automation_run_id = ""
         self.automation_trigger_source = ""
+        self.automation_template_id = ""
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -9930,10 +9963,13 @@ class MainWindow(QMainWindow):
         self.sop_intro_label.setText(intro)
 
         if current_step:
+            effective_mode = resolve_step_advance_mode(sop_run, current_step)
+            mode_text = "自动推进" if effective_mode == SOP_ADVANCE_MODE_AUTO else "人工确认"
             self.sop_current_step_label.setText(
                 f"当前步骤 {sop_run.get('current_step_index', 0) + 1} / {len(sop_run.get('steps') or [])}: {current_step.get('title') or '未命名步骤'}"
             )
-            self.sop_instruction_label.setText(current_step.get("instructions") or "未填写执行指令。")
+            instructions = current_step.get("instructions") or "未填写执行指令。"
+            self.sop_instruction_label.setText(f"{instructions}\n推进方式：{mode_text}")
             success_text = current_step.get("success_criteria") or "未填写成功标准。"
             self.sop_success_label.setText(f"成功标准：{success_text}")
         else:
@@ -9962,6 +9998,187 @@ class MainWindow(QMainWindow):
         self.save_chat_history(session_id=state.session_id)
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
+        return True
+
+    def _current_sop_template_for_state(self, state):
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run:
+            return None
+        return self.config_manager.get_sop_template(sop_run.get("template_id"))
+
+    def _mark_session_automation_awaiting_confirmation(self, state):
+        if not state or not getattr(state, "automation_run_id", ""):
+            return
+        summary = self._automation_summary_from_state(state)
+        self._finalize_automation_history_record(
+            state.automation_run_id,
+            AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
+            summary=summary,
+        )
+
+    def _dispatch_current_sop_step(
+        self,
+        state,
+        *,
+        linked_template=None,
+        create_user_bubble=True,
+        set_running=True,
+        submitted_at=None,
+    ):
+        if not state:
+            return False
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run or is_sop_completed(sop_run):
+            return False
+        step_payload = build_step_execution_request(sop_run)
+        step_content = str(step_payload.get("content") or "").strip()
+        if not step_content:
+            return False
+        step_display = str(step_payload.get("display_content") or "").strip() or step_content
+        current_step = get_current_step(sop_run)
+        current_step_index = int(sop_run.get("current_step_index", 0))
+        if set_running:
+            started_at = int(submitted_at or time.time())
+            state.sop_run = mark_step_running(
+                sop_run,
+                {
+                    "started_at": started_at,
+                    "executor": "main_agent",
+                    "trigger_message": step_content,
+                },
+            )
+            sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        message_meta = {
+            "display_content": step_display,
+            "sop_step_dispatch": True,
+            "sop_step_index": current_step_index,
+            "sop_step_title": (current_step or {}).get("title") or "",
+        }
+        state.messages.append(
+            {
+                "role": "user",
+                "content": step_content,
+                "meta": message_meta,
+            }
+        )
+        state.render_items = build_conversation_render_items(state.messages)
+        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        state.displayed_render_count = len(state.render_items)
+        if create_user_bubble and state.session_id == self.current_session_id:
+            self.add_chat_bubble("User", step_display, animate=False, force_scroll=True)
+
+        mentioned_profiles = []
+        delegated_payload = step_content
+        run_mode = RUN_MODE_EXECUTION
+        if state.clarify_mode_enabled:
+            state.clarify_phase = CLARIFY_MODE_EXPLORING
+            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            state.pending_clarify_questions = []
+            state.clarify_source_user_text = step_content
+            state.clarify_answers_context = []
+            run_mode = RUN_MODE_CLARIFYING
+        self.save_chat_history(session_id=state.session_id)
+        self.update_session_tab_title(state.session_id)
+        sop_default_profile = self._resolve_sop_default_profile(state)
+        if sop_default_profile:
+            self.refresh_sop_controls(state.session_id)
+            self._dispatch_agent_profiles(
+                state,
+                step_content,
+                delegated_payload,
+                [sop_default_profile],
+                summon_source="sop_default",
+            )
+            return True
+        template_default_profile = self._resolve_template_default_profile(linked_template)
+        if template_default_profile:
+            self._dispatch_agent_profiles(
+                state,
+                step_content,
+                delegated_payload,
+                [template_default_profile],
+                summon_source="automation_template",
+            )
+            return True
+        self.try_connect_daemon(allow_start=True, retries=4)
+        run_context = self._build_run_context(state, run_mode)
+        if self.daemon_available:
+            self.process_daemon_logic(step_content, turn_id=state.active_turn_id, run_context=run_context, session_id=state.session_id)
+        else:
+            self.process_agent_logic(step_content, turn_id=state.active_turn_id, run_context=run_context, session_id=state.session_id)
+        return True
+
+    def _continue_sop_after_step(self, state, *, create_user_bubble=True):
+        if not state:
+            return False
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run or is_sop_completed(sop_run):
+            self.set_session_phase("Completed", state.session_id)
+            self.set_session_status("completed", state.session_id, save=True)
+            return False
+        if getattr(state, "automation_run_id", ""):
+            self._finalize_automation_history_record(
+                state.automation_run_id,
+                AUTOMATION_HISTORY_STATUS_RUNNING,
+                summary=self._automation_summary_from_state(state),
+            )
+        state.step_records = []
+        state.changed_files = []
+        state.has_file_changes = False
+        state.pending_tool_results = {}
+        state.observability_events = []
+        state.system_prompt_text = ""
+        state.system_prompt_appends = []
+        self.refresh_change_list(state.session_id)
+        self.refresh_step_list(state.session_id)
+        self.refresh_observability_view(state.session_id)
+        self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
+        self.set_session_phase("Preparing", state.session_id)
+        self.set_session_status("running", state.session_id)
+        state.active_turn_id += 1
+        state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id - 1)
+        linked_template = self._current_sop_template_for_state(state)
+        return self._dispatch_current_sop_step(
+            state,
+            linked_template=linked_template,
+            create_user_bubble=create_user_bubble,
+            set_running=True,
+        )
+
+    def _finalize_sop_execution_step(self, state, *, executor="", content="", agent_profile=None):
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not sop_run or is_sop_completed(sop_run):
+            return False
+        execution_info = {
+            "finished_at": int(time.time()),
+            "executor": executor or ((sop_run.get("last_execution") or {}).get("executor") or "main_agent"),
+            "content": str(content or "").strip(),
+        }
+        if agent_profile:
+            execution_info["agent_profile_id"] = agent_profile.get("id") or ""
+            execution_info["agent_profile_name"] = agent_profile.get("name") or ""
+        sop_run = append_step_output(sop_run, content=content, executor=execution_info["executor"], status="completed")
+        advance_mode = resolve_step_advance_mode(sop_run)
+        if advance_mode == SOP_ADVANCE_MODE_AUTO:
+            state.sop_run = complete_current_step(sop_run, reason="auto_advanced", auto_advanced=True)
+            self.save_chat_history(session_id=state.session_id)
+            self.refresh_sop_controls(state.session_id)
+            self.refresh_context_badges(state.session_id)
+            if is_sop_completed(state.sop_run):
+                self.set_session_phase("Completed", state.session_id)
+                self.set_session_status("completed", state.session_id, save=True)
+                return True
+            self.set_session_phase("Preparing next step", state.session_id)
+            self.set_session_status("running", state.session_id, save=True)
+            QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
+            return True
+        state.sop_run = mark_step_awaiting_confirmation(sop_run, execution_info=execution_info)
+        self.save_chat_history(session_id=state.session_id)
+        self.refresh_sop_controls(state.session_id)
+        self.refresh_context_badges(state.session_id)
+        self._mark_session_automation_awaiting_confirmation(state)
+        self.set_session_phase("Awaiting confirmation", state.session_id)
+        self.set_session_status("draft", state.session_id, save=True)
         return True
 
     def refresh_clarify_controls(self, session_id=None):
@@ -10388,6 +10605,7 @@ class MainWindow(QMainWindow):
         state.automation_run_id = ""
         state.automation_task_id = ""
         state.automation_trigger_source = ""
+        state.automation_template_id = ""
 
     def run_automation_task_now(self, task_id):
         self._trigger_automation_task(task_id, trigger_source="manual", scheduled_at=0)
@@ -10428,6 +10646,10 @@ class MainWindow(QMainWindow):
         if not state:
             return False
         state.selected_skill_names = normalize_selected_skill_names(template.get("skill_names"))
+        state.sop_run = create_sop_run(template)
+        if state.sop_run:
+            state.sop_run["original_user_request"] = build_automation_execution_prompt(task, template)
+            state.sop_run["original_display_text"] = task.get("name") or template.get("name") or "自动化任务"
         prompt = build_automation_execution_prompt(task, template)
         history_record = make_automation_history_record(
             task,
@@ -10442,6 +10664,7 @@ class MainWindow(QMainWindow):
             state.automation_run_id = saved_record.get("id") or ""
         state.automation_task_id = str(task.get("id") or "")
         state.automation_trigger_source = trigger_source
+        state.automation_template_id = str(template.get("id") or "")
         self.activate_session(session_id)
         submitted = self._submit_session_request(
             state,
@@ -10460,6 +10683,7 @@ class MainWindow(QMainWindow):
             state.automation_run_id = ""
             state.automation_task_id = ""
             state.automation_trigger_source = ""
+            state.automation_template_id = ""
             return False
         if trigger_source == "manual":
             self.add_system_toast("自动化任务已启动。", "success", session_id=session_id, auto_close_ms=3200)
@@ -11069,6 +11293,7 @@ class MainWindow(QMainWindow):
         state.automation_task_id = ""
         state.automation_run_id = ""
         state.automation_trigger_source = ""
+        state.automation_template_id = ""
         state.changed_files = []
         state.step_records = []
         state.persisted_agents = []
@@ -13279,9 +13504,14 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
         if is_sop_completed(state.sop_run):
+            self.set_session_phase("Completed", state.session_id)
+            self.set_session_status("completed", state.session_id, save=True)
             self.add_system_toast("自动化已完成。", "success", session_id=state.session_id, auto_close_ms=3200)
         else:
+            self.set_session_phase("Preparing next step", state.session_id)
+            self.set_session_status("running", state.session_id, save=True)
             self.add_system_toast("已确认当前步骤，自动化已推进到下一步。", "success", session_id=state.session_id, auto_close_ms=3200)
+            QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
 
     def rerun_current_sop_step(self):
         state = self.get_current_session()
@@ -13294,7 +13524,10 @@ class MainWindow(QMainWindow):
         self.save_chat_history(session_id=state.session_id)
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
-        self.add_system_toast("当前步骤已恢复为待执行，可重新发送。", "info", session_id=state.session_id, auto_close_ms=3200)
+        self.set_session_phase("Preparing", state.session_id)
+        self.set_session_status("running", state.session_id, save=True)
+        self.add_system_toast("当前步骤已恢复为待执行，正在重新执行。", "info", session_id=state.session_id, auto_close_ms=3200)
+        QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
 
     def skip_current_sop_step(self):
         state = self.get_current_session()
@@ -13312,9 +13545,14 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
         if is_sop_completed(state.sop_run):
+            self.set_session_phase("Completed", state.session_id)
+            self.set_session_status("completed", state.session_id, save=True)
             self.add_system_toast("已标记不适用，自动化已完成。", "info", session_id=state.session_id, auto_close_ms=3200)
         else:
+            self.set_session_phase("Preparing next step", state.session_id)
+            self.set_session_status("running", state.session_id, save=True)
             self.add_system_toast("已标记不适用，自动化已推进到下一步。", "info", session_id=state.session_id, auto_close_ms=3200)
+            QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
 
     def start_conversation_sop_flow(self):
         if self.conversation_sop_worker and self.conversation_sop_worker.isRunning():
@@ -14070,7 +14308,6 @@ class MainWindow(QMainWindow):
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
-        current_turn_id = state.active_turn_id
         message_payload = {"role": "user", "content": user_text}
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
@@ -14078,6 +14315,27 @@ class MainWindow(QMainWindow):
             message_payload["meta"] = payload.get("meta")
         state.messages.append(message_payload)
         state.render_items = build_conversation_render_items(state.messages)
+        # Keep rendered-count in sync for live messages; otherwise load-more
+        # may re-render freshly added items as if they were unseen history.
+        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        state.displayed_render_count = len(state.render_items)
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if sop_run:
+            if not sop_run.get("original_user_request"):
+                sop_run["original_user_request"] = user_text
+            if not sop_run.get("original_display_text"):
+                sop_run["original_display_text"] = payload.get("display_content") or user_text
+            state.sop_run = sop_run
+        self.save_chat_history(session_id=state.session_id)
+        self.update_session_tab_title(state.session_id)
+        if sop_run:
+            self.refresh_sop_controls(state.session_id)
+            return self._dispatch_current_sop_step(
+                state,
+                linked_template=linked_template,
+                create_user_bubble=False,
+                set_running=True,
+            )
         run_mode = RUN_MODE_EXECUTION
         if state.clarify_mode_enabled:
             state.clarify_phase = CLARIFY_MODE_EXPLORING
@@ -14086,23 +14344,8 @@ class MainWindow(QMainWindow):
             state.clarify_source_user_text = user_text
             state.clarify_answers_context = []
             run_mode = RUN_MODE_CLARIFYING
-        # Keep rendered-count in sync for live messages; otherwise load-more
-        # may re-render freshly added items as if they were unseen history.
-        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
-        state.displayed_render_count = len(state.render_items)
-        if normalize_sop_run(getattr(state, "sop_run", None)):
-            state.sop_run = mark_step_running(
-                state.sop_run,
-                {
-                    "started_at": int(time.time()),
-                    "executor": "sub_agent" if mentioned_profiles else "main_agent",
-                    "trigger_message": user_text,
-                },
-            )
-        self.save_chat_history(session_id=state.session_id)
-        self.update_session_tab_title(state.session_id)
+        current_turn_id = state.active_turn_id
         if mentioned_profiles:
-            self.refresh_sop_controls(state.session_id)
             self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
             return True
         sop_default_profile = self._resolve_sop_default_profile(state)
@@ -14932,7 +15175,7 @@ class MainWindow(QMainWindow):
                 ):
                     if normalize_sop_run(getattr(state, "sop_run", None)) and status == "completed":
                         content = payload.get("content") or ""
-                        self._mark_sop_step_done_for_confirmation(
+                        self._finalize_sop_execution_step(
                             state,
                             executor="sub_agent",
                             content=content,
@@ -14941,8 +15184,6 @@ class MainWindow(QMainWindow):
                                 "name": payload.get("agent_profile_name") or payload.get("agent_name") or "",
                             },
                         )
-                        self.set_session_phase("Awaiting confirmation", state.session_id)
-                        self.set_session_status("draft", state.session_id, save=True)
                     else:
                         self.set_session_phase("Completed", state.session_id)
                         self.set_session_status("completed", state.session_id, save=True)
@@ -15315,13 +15556,12 @@ class MainWindow(QMainWindow):
             if clarify_active:
                 self.set_session_status("draft", state.session_id, save=True)
             else:
-                if self._mark_sop_step_done_for_confirmation(
+                if self._finalize_sop_execution_step(
                     state,
                     executor="main_agent",
                     content=content,
                 ):
-                    self.set_session_phase("Awaiting confirmation", state.session_id)
-                    self.set_session_status("draft", state.session_id, save=True)
+                    pass
                 else:
                     self.set_session_phase("Completed", state.session_id)
                     self.set_session_status("completed", state.session_id, save=True)
@@ -15357,9 +15597,8 @@ class MainWindow(QMainWindow):
                     code_text = state.last_agent_bubble.code_output_edit.toPlainText().strip()
                 except Exception:
                     code_text = ""
-            if self._mark_sop_step_done_for_confirmation(state, executor="main_agent", content=code_text):
-                self.set_session_phase("Awaiting confirmation", state.session_id)
-                self.set_session_status("draft", state.session_id, save=True)
+            if self._finalize_sop_execution_step(state, executor="main_agent", content=code_text):
+                pass
             else:
                 self.set_session_phase("Completed", state.session_id)
                 self.set_session_status("completed", state.session_id, save=True)

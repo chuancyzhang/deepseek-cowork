@@ -20,6 +20,7 @@ AUTOMATION_SCHEDULE_TYPES = {
 }
 
 AUTOMATION_HISTORY_STATUS_RUNNING = "running"
+AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION = "awaiting_confirmation"
 AUTOMATION_HISTORY_STATUS_COMPLETED = "completed"
 AUTOMATION_HISTORY_STATUS_ERROR = "error"
 AUTOMATION_HISTORY_STATUS_INTERRUPTED = "interrupted"
@@ -27,6 +28,7 @@ AUTOMATION_HISTORY_STATUS_MISSED = "missed"
 
 AUTOMATION_HISTORY_STATUSES = {
     AUTOMATION_HISTORY_STATUS_RUNNING,
+    AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
     AUTOMATION_HISTORY_STATUS_COMPLETED,
     AUTOMATION_HISTORY_STATUS_ERROR,
     AUTOMATION_HISTORY_STATUS_INTERRUPTED,
@@ -363,17 +365,5 @@ def build_automation_execution_prompt(task, template):
     custom_prompt = str(task.get("prompt") or "").strip()
     if custom_prompt:
         lines.extend(["任务要求:", custom_prompt])
-    steps = template.get("steps") or []
-    if steps:
-        lines.append("请完整执行以下模板步骤，不要只停留在第一步：")
-        for index, step in enumerate(steps, start=1):
-            title = str(step.get("title") or f"步骤 {index}").strip()
-            instructions = str(step.get("instructions") or "").strip()
-            success = str(step.get("success_criteria") or "").strip()
-            lines.append(f"{index}. {title}")
-            if instructions:
-                lines.append(f"   执行要求: {instructions}")
-            if success:
-                lines.append(f"   完成标准: {success}")
-    lines.append("完成后请直接给出最终结果与关键结论。")
+    lines.append("请按绑定的 SOP 状态机逐步执行当前步骤，直到流程完成、出现阻塞，或进入等待确认。")
     return "\n".join(lines)

@@ -32,10 +32,12 @@ class TestSopFromConversation(unittest.TestCase):
         )
 
         self.assertEqual(draft["name"], "文章整理 SOP")
+        self.assertEqual(draft["advance_mode"], "manual")
         self.assertEqual(draft["triggers"], ["文章整理", "SOP"])
         self.assertEqual(len(draft["steps"]), 2)
         self.assertEqual(draft["steps"][1]["title"], "输出 SOP")
         self.assertTrue(draft["steps"][1]["allow_skip"])
+        self.assertEqual(draft["steps"][0]["advance_mode"], "inherit")
 
     def test_normalize_sop_draft_uses_fallback_name(self):
         draft = normalize_sop_draft(
@@ -71,6 +73,7 @@ class TestSopFromConversation(unittest.TestCase):
         self.assertIn("旧 SOP", user_prompt)
         self.assertIn("步骤要更口语化", user_prompt)
         self.assertIn("不要把创建过程拆成逐步确认", user_prompt)
+        self.assertIn('"advance_mode": "manual"', user_prompt)
 
 
 if __name__ == "__main__":

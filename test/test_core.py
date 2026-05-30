@@ -319,6 +319,7 @@ class TestConfigManager(unittest.TestCase):
                     {
                         "name": "办公流程",
                         "description": "示例",
+                        "advance_mode": "auto",
                         "skill_names": ["browser-automation", "browser-automation", ""],
                         "triggers": ["办公", "办公", ""],
                         "steps": [
@@ -327,6 +328,7 @@ class TestConfigManager(unittest.TestCase):
                                 "instructions": "只确认目标",
                                 "success_criteria": "目标清楚",
                                 "allow_skip": False,
+                                "advance_mode": "manual",
                             },
                             {
                                 "title": "",
@@ -347,9 +349,11 @@ class TestConfigManager(unittest.TestCase):
 
         self.assertEqual(len(templates), 2)
         self.assertEqual(templates[0]["name"], "办公流程")
+        self.assertEqual(templates[0]["advance_mode"], "auto")
         self.assertEqual(templates[0]["skill_names"], ["browser-automation"])
         self.assertEqual(templates[0]["triggers"], ["办公"])
         self.assertEqual(len(templates[0]["steps"]), 1)
+        self.assertEqual(templates[0]["steps"][0]["advance_mode"], "manual")
         self.assertNotEqual(templates[0]["id"], templates[1]["id"])
 
         cm.set_sop_templates(
@@ -359,6 +363,7 @@ class TestConfigManager(unittest.TestCase):
                     "name": "Office Flow",
                     "description": "demo",
                     "default_agent_profile_id": "agent-review",
+                    "advance_mode": "manual",
                     "steps": [{"title": "Step 1", "instructions": "Do it"}],
                 }
             ]

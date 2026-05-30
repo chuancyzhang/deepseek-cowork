@@ -27,8 +27,8 @@ Current app version: **4.8.2**.
 *   **Explicit Read-Only Parallelism**: `parallel_tools` runs independent read-only tool calls concurrently while preserving ordered results and refusing writes or destructive calls.
 
 ### 🖥️ Desktop Experience
-*   **PySide6 UI**: Modern chat bubbles, markdown rendering, and tool-call cards.
-*   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, keeps each project collapsed by default with only a short preview of conversations, and avoids a separate top-right workspace switcher.
+*   **PySide6 UI**: A calmer blue-and-white desktop surface with modern chat bubbles, markdown rendering, tool-call cards, and a dynamically sized conversation column that keeps a Codex-like reading width across wide and narrow windows.
+*   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, keeps each project collapsed by default with only a short preview of conversations, and presents the list as a softer Apple-inspired panel with quieter inline action buttons.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status; sub-agent activity lights the panel hint without forcing the drawer open.
 *   **Vision Attachments**: Prompt-bar image attachments keep structured metadata and are sent as multimodal input only when the selected model enables `支持图片理解`.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.

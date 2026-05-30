@@ -4,7 +4,7 @@ import qdarktheme
 class DesignTokens:
     primary = "#007aff"
     primary_hover = "#0066d6"
-    primary_soft = "#e8f2ff"
+    primary_soft = "#eaf3ff"
     primary_gradient_start = "#4aa3ff"
     primary_gradient_end = "#007aff"
 
@@ -18,26 +18,26 @@ class DesignTokens:
     text_tertiary = "#a1a1a6"
     text_inverse = "#ffffff"
 
-    bg_app = "#f5f5f7"
+    bg_app = "#f3f5f8"
     bg_main = "#ffffff"
-    bg_secondary = "#f7f7f9"
-    bg_tertiary = "#ececf0"
-    bg_sidebar = "#fbfbfd"
+    bg_secondary = "#f5f6f8"
+    bg_tertiary = "#eceff3"
+    bg_sidebar = "#f4f8fc"
     bg_card = "#ffffff"
-    bg_card_subtle = "#fafafa"
-    bg_glass = "rgba(255, 255, 255, 0.88)"
-    bg_hover = "#f2f2f7"
-    bg_code = "#fbfbfd"
-    bg_sidebar_selected = "#e8f2ff"
-    bg_sidebar_hover = "#f2f2f7"
+    bg_card_subtle = "#fafbfd"
+    bg_glass = "rgba(255, 255, 255, 0.82)"
+    bg_hover = "#edf2f7"
+    bg_code = "#fafbfd"
+    bg_sidebar_selected = "#e6f0ff"
+    bg_sidebar_hover = "#eef3f8"
     bg_chat = "#ffffff"
     bg_user_bubble = "#007aff"
     bg_assistant_stream = "#ffffff"
 
-    border = "#d2d2d7"
-    border_strong = "#b8b8bf"
-    separator = "#e5e5ea"
-    border_subtle = "#ededf2"
+    border = "#d8dbe2"
+    border_strong = "#c6cad4"
+    separator = "#e7e9ef"
+    border_subtle = "#eef0f4"
 
     radius_sm = 8
     radius_md = 12
@@ -50,9 +50,21 @@ class DesignTokens:
     spacing_lg = 24
     spacing_xl = 32
 
-    shadow_sidebar = "0 18px 44px rgba(0, 0, 0, 0.08)"
-    shadow_card = "0 10px 30px rgba(0, 0, 0, 0.06)"
-    shadow_soft = "0 4px 14px rgba(0, 0, 0, 0.06)"
+    shadow_sidebar = "0 18px 38px rgba(15, 23, 42, 0.07)"
+    shadow_card = "0 12px 28px rgba(15, 23, 42, 0.06)"
+    shadow_soft = "0 6px 16px rgba(15, 23, 42, 0.06)"
+
+    sidebar_width = 272
+    conversation_min_width = 840
+    conversation_max_width = 1320
+    conversation_target_ratio = 0.82
+    conversation_right_gutter_ratio = 0.18
+    conversation_right_gutter_min = 120
+    message_min_width = 760
+    message_max_width = 980
+    user_bubble_min_width = 620
+    user_bubble_max_width = 820
+    user_bubble_ratio = 0.82
 
     success_bg = "#f0fdf4"
     success_text = "#166534"

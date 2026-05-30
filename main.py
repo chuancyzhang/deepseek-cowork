@@ -332,9 +332,9 @@ def _safe_text_preview(text, limit=6000):
 
 
 def apple_tool_button_style(active=False):
-    bg = DesignTokens.primary_soft if active else "rgba(255, 255, 255, 0.88)"
+    bg = DesignTokens.primary_soft if active else "rgba(255, 255, 255, 0.72)"
     color = DesignTokens.primary if active else DesignTokens.text_secondary
-    border = DesignTokens.primary if active else DesignTokens.border
+    border = DesignTokens.primary if active else DesignTokens.border_subtle
     return (
         "QToolButton { "
         f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 18px; "
@@ -535,25 +535,26 @@ def apple_status_chip_style(status, subtle=False):
 def apple_search_field_style():
     return f"""
         QLineEdit {{
-            background: rgba(255, 255, 255, 0.52);
-            border: none;
-            border-radius: 13px;
-            padding: 8px 10px;
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid {DesignTokens.border_subtle};
+            border-radius: 14px;
+            padding: 8px 12px;
             color: {DesignTokens.text_primary};
             font-size: 12px;
         }}
         QLineEdit:focus {{
-            background: rgba(255, 255, 255, 0.82);
+            background: rgba(255, 255, 255, 0.92);
+            border-color: {rgba_from_hex(DesignTokens.primary, 0.22)};
         }}
     """
 
 
 def apple_history_row_style(selected=False):
-    bg = "rgba(232, 242, 255, 0.92)" if selected else "transparent"
-    hover = "rgba(255, 255, 255, 0.54)" if selected else "rgba(255, 255, 255, 0.34)"
+    bg = "rgba(230, 240, 255, 0.90)" if selected else "rgba(255, 255, 255, 0.18)"
+    hover = "rgba(242, 247, 255, 0.98)" if selected else "rgba(255, 255, 255, 0.58)"
     return (
-        f"QFrame#HistoryRow {{ background: {bg}; border: none; border-radius: 12px; }}"
-        f"QFrame#HistoryRow:hover {{ background: {hover}; border: none; }}"
+        f"QFrame#HistoryRow {{ background: {bg}; border: 1px solid transparent; border-radius: 14px; }}"
+        f"QFrame#HistoryRow:hover {{ background: {hover}; border: 1px solid {DesignTokens.border_subtle}; }}"
     )
 
 
@@ -574,22 +575,43 @@ def apple_history_group_style():
 
 
 def apple_sidebar_icon_button_style(active=False):
-    bg = rgba_from_hex(DesignTokens.primary, 0.14) if active else "transparent"
+    bg = rgba_from_hex(DesignTokens.primary, 0.14) if active else "rgba(255, 255, 255, 0.22)"
     color = DesignTokens.primary if active else DesignTokens.text_secondary
     return (
         "QToolButton { "
-        f"background: {bg}; color: {color}; border: none; border-radius: 13px; padding: 0px;"
+        f"background: {bg}; color: {color}; border: 1px solid transparent; border-radius: 13px; padding: 0px;"
         "} "
         "QToolButton:hover { "
-        f"background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_primary};"
+        f"background: rgba(255, 255, 255, 0.72); color: {DesignTokens.text_primary}; border-color: {DesignTokens.border_subtle};"
+        "} "
+    )
+
+
+def apple_sidebar_action_button_style(selected=False):
+    color = DesignTokens.primary if selected else DesignTokens.text_tertiary
+    hover_color = DesignTokens.primary if selected else DesignTokens.text_secondary
+    border = rgba_from_hex(DesignTokens.primary, 0.14) if selected else "transparent"
+    bg = rgba_from_hex(DesignTokens.primary, 0.08) if selected else "transparent"
+    hover_bg = rgba_from_hex(DesignTokens.primary, 0.10) if selected else "rgba(255, 255, 255, 0.62)"
+    hover_border = rgba_from_hex(DesignTokens.primary, 0.22) if selected else DesignTokens.border_subtle
+    pressed_bg = rgba_from_hex(DesignTokens.primary, 0.16) if selected else "rgba(255, 255, 255, 0.82)"
+    return (
+        "QToolButton { "
+        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 11px; padding: 0px;"
+        "} "
+        "QToolButton:hover { "
+        f"background: {hover_bg}; color: {hover_color}; border-color: {hover_border};"
+        "} "
+        "QToolButton:pressed { "
+        f"background: {pressed_bg};"
         "} "
     )
 
 
 def apple_inline_project_chip_style(active=False):
-    bg = rgba_from_hex(DesignTokens.primary, 0.10) if active else "rgba(255, 255, 255, 0.58)"
+    bg = rgba_from_hex(DesignTokens.primary, 0.10) if active else "rgba(255, 255, 255, 0.72)"
     color = DesignTokens.success_text if active else DesignTokens.text_secondary
-    border = rgba_from_hex(DesignTokens.primary, 0.16) if active else "rgba(255, 255, 255, 0.0)"
+    border = rgba_from_hex(DesignTokens.primary, 0.16) if active else DesignTokens.border_subtle
     return (
         f"background: {bg}; color: {color}; border: 1px solid {border}; "
         "border-radius: 12px; padding: 7px 12px; font-size: 12px; font-weight: 600;"
@@ -5493,23 +5515,28 @@ class ChatBubble(QFrame):
     def __init__(self, role, text, thinking=None, duration=None, attachments=None, attachment_hint="用户添加的文件"):
         super().__init__()
         self.role = role
+        self.content_wrapper = None
+        self.user_bubble_frame = None
+        self.content_col = None
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         attachments = list(attachments or [])
         
         # Main Horizontal Layout (Avatar | Content)
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 3, 0, 3)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(0, 4, 0, 4)
+        main_layout.setSpacing(10)
         
         if role == "User":
             main_layout.setAlignment(Qt.AlignRight | Qt.AlignTop)
             
             # 1. Content Wrapper (to push content to right)
             content_wrapper = QWidget()
+            self.content_wrapper = content_wrapper
+            content_wrapper.setMaximumWidth(DesignTokens.message_max_width)
             cw_layout = QVBoxLayout(content_wrapper)
             cw_layout.setContentsMargins(0, 0, 0, 0)
-            cw_layout.setSpacing(6 if attachments and text else 4)
+            cw_layout.setSpacing(8 if attachments and text else 5)
 
             if attachments:
                 attachment_group = QWidget()
@@ -5537,15 +5564,17 @@ class ChatBubble(QFrame):
             # Bubble Frame
             if text:
                 bubble_frame = QFrame()
+                self.user_bubble_frame = bubble_frame
+                bubble_frame.setMaximumWidth(DesignTokens.user_bubble_max_width)
                 bubble_frame.setStyleSheet(f"""
                     QFrame {{
                         background: {DesignTokens.bg_user_bubble};
-                        border-radius: 17px;
-                        border-bottom-right-radius: 7px;
+                        border-radius: 19px;
+                        border-bottom-right-radius: 9px;
                     }}
                 """)
                 bubble_layout = QVBoxLayout(bubble_frame)
-                bubble_layout.setContentsMargins(14, 8, 14, 8)
+                bubble_layout.setContentsMargins(15, 10, 15, 10)
 
                 content_label = QLabel(text)
                 content_label.setWordWrap(True)
@@ -5555,11 +5584,6 @@ class ChatBubble(QFrame):
                     "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
                 )
                 apply_selection_palette(content_label, "#ffffff", "#0b57d0")
-
-                # Smart Width: If text is long, force a minimum width to avoid narrow tall bubbles
-                fm = QFontMetrics(content_label.font())
-                if len(text) > 50 or fm.horizontalAdvance(text) > 400:
-                    content_label.setMinimumWidth(400)
 
                 bubble_layout.addWidget(content_label)
                 cw_layout.addWidget(bubble_frame, 0, Qt.AlignRight)
@@ -5584,10 +5608,12 @@ class ChatBubble(QFrame):
             
             # Content Column
             content_col = QWidget()
-            content_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            self.content_col = content_col
+            content_col.setMaximumWidth(DesignTokens.message_max_width)
+            content_col.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             col_layout = QVBoxLayout(content_col)
             col_layout.setContentsMargins(0, 0, 0, 0)
-            col_layout.setSpacing(5)
+            col_layout.setSpacing(6)
             
             # 1. Thinking Section (DeepSeek Style - Grey Block)
             self.thinking_widget = QWidget()
@@ -5607,15 +5633,15 @@ class ChatBubble(QFrame):
                     background-color: transparent;
                     color: {DesignTokens.text_secondary};
                     border: none;
-                    border-radius: 10px;
-                    padding: 5px 8px;
+                    border-radius: 12px;
+                    padding: 6px 10px;
                     font-size: 12px;
                     font-weight: 600;
                     margin-bottom: 0px; /* Reduced to connect with container */
                 }}
-                QPushButton:hover {{ background-color: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; }}
+                QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.72); color: {DesignTokens.text_primary}; }}
                 QPushButton:checked {{ 
-                    background-color: {DesignTokens.bg_secondary}; 
+                    background-color: rgba(255, 255, 255, 0.78); 
                     color: {DesignTokens.text_primary}; 
                 }}
             """)
@@ -5627,11 +5653,11 @@ class ChatBubble(QFrame):
             self.think_container.setVisible(False)
             self.think_container.setStyleSheet(f"""
                 QWidget {{
-                    background: {DesignTokens.bg_secondary};
+                    background: rgba(255, 255, 255, 0.72);
                     border: 1px solid {DesignTokens.border_subtle};
                     margin-top: 2px;
                     margin-left: 0px;
-                    border-radius: 12px;
+                    border-radius: 14px;
                 }}
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
@@ -5728,6 +5754,14 @@ class ChatBubble(QFrame):
                 
             main_layout.addWidget(content_col)
             # main_layout.addStretch() # Removed to allow content to take full width
+
+    def apply_dynamic_widths(self, message_width, user_bubble_width):
+        if self.content_wrapper is not None:
+            self.content_wrapper.setMaximumWidth(max(0, int(message_width)))
+        if self.user_bubble_frame is not None:
+            self.user_bubble_frame.setMaximumWidth(max(0, int(user_bubble_width)))
+        if self.content_col is not None:
+            self.content_col.setMaximumWidth(max(0, int(message_width)))
 
     def _on_think_tick(self):
         if self.think_start_time is None: return
@@ -6233,12 +6267,14 @@ class ToolCallCard(QFrame):
         self.main_row.setCursor(Qt.PointingHandCursor)
         self.main_row.setStyleSheet(f"""
             QFrame {{
-                background-color: transparent;
-                border-radius: 6px;
-                padding: 4px;
+                background-color: rgba(255, 255, 255, 0.64);
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 14px;
+                padding: 6px 8px;
             }}
             QFrame:hover {{
-                background-color: {DesignTokens.bg_secondary};
+                background-color: rgba(255, 255, 255, 0.9);
+                border-color: {DesignTokens.border};
             }}
         """)
         # Make the whole card clickable
@@ -6264,8 +6300,8 @@ class ToolCallCard(QFrame):
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignCenter)
         self.icon_label.setStyleSheet(f"""
-            background-color: {DesignTokens.bg_secondary};
-            border: 1px solid {DesignTokens.border};
+            background-color: rgba(255, 255, 255, 0.94);
+            border: 1px solid {DesignTokens.border_subtle};
             border-radius: 12px; 
         """)
         
@@ -6302,13 +6338,14 @@ class ToolCallCard(QFrame):
         self.view_btn.setStyleSheet(f"""
             QPushButton {{
                 border: none;
-                border-radius: 4px;
+                border-radius: 10px;
                 color: {DesignTokens.text_tertiary};
                 font-size: 11px;
+                padding: 3px 6px;
             }}
             QPushButton:hover {{
                 color: {DesignTokens.primary};
-                background: {DesignTokens.bg_secondary};
+                background: rgba(255, 255, 255, 0.9);
             }}
         """)
         self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result), self.meta))
@@ -6494,10 +6531,10 @@ class ToolCallCard(QFrame):
         if not self.is_selected:
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: {DesignTokens.bg_main};
+                    background-color: rgba(255, 255, 255, 0.96);
                     border: 1px solid {DesignTokens.primary};
                     border-left: 3px solid {DesignTokens.primary};
-                    border-radius: 6px;
+                    border-radius: 14px;
                 }}
             """)
         super().focusInEvent(event)
@@ -6521,10 +6558,10 @@ class ToolCallCard(QFrame):
             # Selected: Blue Border + Light Blue BG
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: {DesignTokens.info_bg};
+                    background-color: rgba(234, 243, 255, 0.96);
                     border: 1px solid {DesignTokens.primary};
                     border-left: 3px solid {DesignTokens.primary};
-                    border-radius: 6px;
+                    border-radius: 14px;
                 }}
             """)
         else:
@@ -6532,14 +6569,14 @@ class ToolCallCard(QFrame):
             left_color = DesignTokens.success_accent if self.result else DesignTokens.text_tertiary
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: {DesignTokens.bg_main};
-                    border: 1px solid {DesignTokens.border};
+                    background-color: rgba(255, 255, 255, 0.72);
+                    border: 1px solid {DesignTokens.border_subtle};
                     border-left: 3px solid {left_color};
-                    border-radius: 6px;
+                    border-radius: 14px;
                 }}
                 QFrame:hover {{
-                    background-color: {DesignTokens.bg_secondary};
-                    border-color: {DesignTokens.text_secondary};
+                    background-color: rgba(255, 255, 255, 0.92);
+                    border-color: {DesignTokens.border};
                     border-left-color: {DesignTokens.text_secondary};
                 }}
             """)
@@ -6554,14 +6591,14 @@ class ToolCallCard(QFrame):
         if not self.is_selected:
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: {DesignTokens.bg_main};
-                    border: 1px solid {DesignTokens.border};
+                    background-color: rgba(255, 255, 255, 0.78);
+                    border: 1px solid {DesignTokens.border_subtle};
                     border-left: 3px solid {DesignTokens.success_accent};
-                    border-radius: 6px;
+                    border-radius: 14px;
                 }}
                 QFrame:hover {{
-                    background-color: {DesignTokens.bg_secondary};
-                    border-color: {DesignTokens.text_secondary};
+                    background-color: rgba(255, 255, 255, 0.92);
+                    border-color: {DesignTokens.border};
                     border-left-color: {DesignTokens.success_accent};
                 }}
             """)
@@ -7922,17 +7959,20 @@ class MainWindow(QMainWindow):
         self.workspace_dir = None
         self.right_drawer_open = False
         self.right_drawer_tab = self.RIGHT_TAB_FILES
-        self.main_layout_default_margins = (40, 32, 40, 32)
+        self.main_layout_default_margins = (32, 28, 32, 28)
         self.main_content_default_margins = (0, 0, 0, 0)
         self.context_drawer_margin = 16
         self.context_drawer_gap = 16
         self.context_drawer_min_width = 220
         self.context_drawer_preferred_min_width = 360
         self.context_drawer_max_width = 460
-        self.context_drawer_min_content_width = 420
+        self.context_drawer_min_content_width = DesignTokens.conversation_min_width
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
         self._agent_state_ui_event_seq = 0
+        self.dynamic_conversation_width = DesignTokens.conversation_min_width
+        self.dynamic_message_width = DesignTokens.message_min_width
+        self.dynamic_user_bubble_width = DesignTokens.user_bubble_min_width
         
         # Apply Clean Light Theme manually for optimized components
         self.setStyleSheet(f"""
@@ -7940,18 +7980,18 @@ class MainWindow(QMainWindow):
             QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 700; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
             QLabel[roleSubtitle="true"] {{ font-size: 13px; color: {DesignTokens.text_secondary}; }}
             QTextEdit#MainInput {{
-                padding: 12px 16px;
-                border-radius: 22px;
-                border: 1px solid transparent;
-                background: {DesignTokens.bg_main};
-                font-size: 14px;
+                padding: 14px 16px;
+                border-radius: 24px;
+                border: 1px solid {DesignTokens.border_subtle};
+                background: rgba(255, 255, 255, 0.94);
+                font-size: 15px;
                 color: {DesignTokens.text_primary};
                 selection-background-color: #cfe0ff;
                 selection-color: {DesignTokens.text_primary};
             }}
             QTextEdit#MainInput:focus {{
-                border: 1px solid rgba(0, 122, 255, 0.28);
-                background: {DesignTokens.bg_main};
+                border: 1px solid rgba(0, 122, 255, 0.22);
+                background: rgba(255, 255, 255, 0.98);
             }}
             QScrollArea {{ border: none; background: transparent; }}
             QTabWidget::pane {{ border: none; }}
@@ -8089,16 +8129,15 @@ class MainWindow(QMainWindow):
         # --- Sidebar ---
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        # sidebar.setMinimumWidth(200) # Removed to allow collapsing
-        # sidebar.setStyleSheet("background-color: #f9fafb; border-right: 1px solid #e5e7eb;")
-        sidebar.setStyleSheet("background-color: #eef8fb; border: none;")
-        
-        # Lower sidebar weight: Removed shadow
-        # sidebar.setGraphicsEffect(None) 
+        sidebar.setMinimumWidth(228)
+        sidebar.setStyleSheet(
+            f"background-color: {DesignTokens.bg_sidebar}; "
+            f"border-right: 1px solid {DesignTokens.separator};"
+        )
 
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(18, 24, 18, 24)
-        sidebar_layout.setSpacing(14)
+        sidebar_layout.setContentsMargins(16, 20, 16, 18)
+        sidebar_layout.setSpacing(12)
 
         new_chat_btn = QPushButton(" 新建对话")
         new_chat_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_primary))
@@ -8202,13 +8241,13 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(sidebar)
 
         # --- Main Content ---
-        main_container = QWidget()
-        main_container.setObjectName("MainContainer")
-        main_container.setMinimumWidth(400) # Protect main content
-        self.main_splitter.addWidget(main_container)
+        self.main_container = QWidget()
+        self.main_container.setObjectName("MainContainer")
+        self.main_container.setMinimumWidth(400) # Protect main content
+        self.main_splitter.addWidget(self.main_container)
 
         # Right Sidebar (Context Drawer)
-        self.right_sidebar = QFrame(main_container)
+        self.right_sidebar = QFrame(self.main_container)
         self.right_sidebar.setObjectName("RightSidebar")
         self.right_sidebar.setStyleSheet(
             f"QFrame#RightSidebar {{ background-color: {DesignTokens.bg_glass}; "
@@ -8592,10 +8631,10 @@ class MainWindow(QMainWindow):
         self.main_splitter.setStretchFactor(1, 1)
         
         # Set Initial Sizes (Sidebar: 260, Main: Flexible). The context drawer floats over main content.
-        self.main_splitter.setSizes([260, 1000])
+        self.main_splitter.setSizes([DesignTokens.sidebar_width, 1000])
 
         # Main Layout Construction
-        layout = QVBoxLayout(main_container)
+        layout = QVBoxLayout(self.main_container)
         layout.setContentsMargins(*self.main_layout_default_margins)
         layout.setSpacing(20)
 
@@ -8671,30 +8710,90 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(top_bar)
 
-        content_area = QWidget()
-        self.main_content_layout = QVBoxLayout(content_area)
-        self.main_content_layout.setContentsMargins(*self.main_content_default_margins)
-        self.main_content_layout.setSpacing(20)
-        layout.addWidget(content_area, 1)
+        self.content_area = QWidget()
+        self.content_area_layout = QVBoxLayout(self.content_area)
+        self.content_area_layout.setContentsMargins(*self.main_content_default_margins)
+        self.content_area_layout.setSpacing(0)
+        layout.addWidget(self.content_area, 1)
+
+        self.conversation_column = QWidget()
+        self.conversation_column.setObjectName("ConversationColumn")
+        self.conversation_column.setMinimumWidth(DesignTokens.conversation_min_width)
+        self.conversation_column.setMaximumWidth(DesignTokens.conversation_max_width)
+        self.conversation_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.conversation_column.setStyleSheet("QWidget#ConversationColumn { background: transparent; border: none; }")
+        self.main_content_layout = QVBoxLayout(self.conversation_column)
+        self.main_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_content_layout.setSpacing(18)
+
+        self.content_row = QWidget()
+        self.content_row_layout = QHBoxLayout(self.content_row)
+        self.content_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_row_layout.setSpacing(0)
+        self.content_row_layout.addWidget(self.conversation_column)
+        self.content_row_layout.addStretch(1)
+        self.content_area_layout.addWidget(self.content_row, 1)
         
         self.recent_workspaces = self.config_manager.get("recent_workspaces", [])
 
         # Chat Area
+        self.chat_row = QWidget()
+        self.chat_row_layout = QHBoxLayout(self.chat_row)
+        self.chat_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.chat_row_layout.setSpacing(0)
         self.session_tabs = QTabWidget()
+        self.session_tabs.setObjectName("SessionTabs")
         self.session_tabs.setDocumentMode(True)
         self.session_tabs.setTabsClosable(True)
+        self.session_tabs.setTabBarAutoHide(True)
+        self.session_tabs.setMinimumWidth(DesignTokens.conversation_min_width)
+        self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
+        self.session_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.session_tabs.setStyleSheet(
+            f"""
+            QTabWidget#SessionTabs::pane {{
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 28px;
+                background: rgba(255, 255, 255, 0.74);
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: rgba(255, 255, 255, 0.64);
+                border: 1px solid transparent;
+                padding: 8px 14px;
+                margin-right: 6px;
+                border-radius: 14px;
+                color: {DesignTokens.text_secondary};
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QTabBar::tab:hover {{
+                background: rgba(255, 255, 255, 0.9);
+                color: {DesignTokens.text_primary};
+            }}
+            QTabBar::tab:selected {{
+                background: {DesignTokens.primary_soft};
+                border-color: {rgba_from_hex(DesignTokens.primary, 0.16)};
+                color: {DesignTokens.primary};
+            }}
+            """
+        )
         self.session_tabs.currentChanged.connect(self.on_session_tab_changed)
         self.session_tabs.tabCloseRequested.connect(self.close_session_tab)
-        self.main_content_layout.addWidget(self.session_tabs, 3)
+        self.chat_row_layout.addWidget(self.session_tabs, 1)
+        self.chat_row_layout.addStretch(1)
+        self.main_content_layout.addWidget(self.chat_row, 1)
 
         # Input Area
-        input_card = QFrame()
-        input_card.setObjectName("ContentCard")
-        input_card.setStyleSheet(
-            f"QFrame#ContentCard {{ background: rgba(255, 255, 255, 0.92); "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 22px; }}"
+        self.input_card = QFrame()
+        self.input_card.setObjectName("ContentCard")
+        self.input_card.setMinimumWidth(DesignTokens.conversation_min_width)
+        self.input_card.setMaximumWidth(DesignTokens.conversation_max_width)
+        self.input_card.setStyleSheet(
+            f"QFrame#ContentCard {{ background: rgba(255, 255, 255, 0.88); "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 28px; }}"
         )
-        add_soft_shadow(input_card, blur=22, y_offset=6, alpha=10)
+        add_soft_shadow(self.input_card, blur=24, y_offset=8, alpha=12)
 
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
@@ -8718,8 +8817,8 @@ class MainWindow(QMainWindow):
         self.tool_menu_btn.setCursor(Qt.PointingHandCursor)
         self.tool_menu_btn.setFixedSize(36, 36)
         self.tool_menu_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; border: none; border-radius: 18px; }}"
-            f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; }}"
+            f"QPushButton {{ background: rgba(255, 255, 255, 0.74); border: 1px solid {DesignTokens.border_subtle}; border-radius: 18px; }}"
+            f"QPushButton:hover {{ background: rgba(255, 255, 255, 0.96); border-color: {DesignTokens.border}; }}"
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
@@ -8764,9 +8863,9 @@ class MainWindow(QMainWindow):
         self.model_select_combo.setMinimumWidth(150)
         self.model_select_combo.setMaximumWidth(260)
         self.model_select_combo.setStyleSheet(
-            f"QComboBox {{ border: none; background: transparent; color: {DesignTokens.text_secondary}; "
-            "font-size: 12px; padding: 4px 20px 4px 8px; }}"
-            f"QComboBox:hover {{ color: {DesignTokens.text_primary}; }}"
+            f"QComboBox {{ border: 1px solid transparent; background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_secondary}; "
+            "font-size: 12px; padding: 5px 22px 5px 10px; border-radius: 14px; }}"
+            f"QComboBox:hover {{ color: {DesignTokens.text_primary}; background: rgba(255, 255, 255, 0.88); border-color: {DesignTokens.border_subtle}; }}"
         )
         self.model_select_combo.currentIndexChanged.connect(self.on_model_selection_changed)
 
@@ -8795,9 +8894,9 @@ class MainWindow(QMainWindow):
         self.loop_hint.setVisible(False)
 
         # Input Layout
-        input_card_layout = QVBoxLayout(input_card)
-        input_card_layout.setContentsMargins(14, 10, 14, 10)
-        input_card_layout.setSpacing(8)
+        input_card_layout = QVBoxLayout(self.input_card)
+        input_card_layout.setContentsMargins(16, 12, 16, 12)
+        input_card_layout.setSpacing(10)
         self.prompt_files_section = QWidget()
         prompt_files_section_layout = QVBoxLayout(self.prompt_files_section)
         prompt_files_section_layout.setContentsMargins(0, 0, 0, 0)
@@ -8836,7 +8935,14 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.model_select_combo)
         prompt_toolbar.addWidget(self.action_btn)
         input_card_layout.addLayout(prompt_toolbar)
-        self.main_content_layout.addWidget(input_card)
+
+        self.input_row = QWidget()
+        self.input_row_layout = QHBoxLayout(self.input_row)
+        self.input_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.input_row_layout.setSpacing(0)
+        self.input_row_layout.addWidget(self.input_card, 0, Qt.AlignLeft)
+        self.input_row_layout.addStretch(1)
+        self.main_content_layout.addWidget(self.input_row)
 
         # Init Data
         self.data_dir = get_app_data_dir()
@@ -9005,11 +9111,76 @@ class MainWindow(QMainWindow):
             )
         self.main_content_layout.setContentsMargins(left, top, reserved_right, bottom)
 
+    def _clamp_int(self, value, minimum, maximum):
+        minimum = int(minimum)
+        maximum = int(maximum)
+        if maximum < minimum:
+            return maximum
+        return max(minimum, min(maximum, int(value)))
+
+    def _conversation_available_width(self, drawer_width=None):
+        container = getattr(self, "main_container", None)
+        if container is None:
+            return DesignTokens.conversation_min_width
+        available = container.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
+        if self.right_drawer_open and drawer_width:
+            available -= int(drawer_width) + self.context_drawer_gap
+        return max(available, DesignTokens.conversation_min_width)
+
+    def _iter_session_chat_bubbles(self):
+        for state in getattr(self, "sessions", {}).values():
+            chat_layout = getattr(state, "chat_layout", None)
+            if chat_layout is None:
+                continue
+            for index in range(chat_layout.count()):
+                item = chat_layout.itemAt(index)
+                widget = item.widget() if item is not None else None
+                if isinstance(widget, ChatBubble):
+                    yield widget
+
+    def sync_conversation_widths(self, drawer_width=None):
+        available = self._conversation_available_width(drawer_width)
+        gutter = max(
+            DesignTokens.conversation_right_gutter_min,
+            int(available * DesignTokens.conversation_right_gutter_ratio),
+        )
+        target = min(
+            available - gutter,
+            int(available * DesignTokens.conversation_target_ratio),
+        )
+        conversation_width = self._clamp_int(
+            target,
+            DesignTokens.conversation_min_width,
+            min(DesignTokens.conversation_max_width, available),
+        )
+        message_width = self._clamp_int(
+            conversation_width - 180,
+            DesignTokens.message_min_width,
+            min(DesignTokens.message_max_width, conversation_width - 80),
+        )
+        user_bubble_width = self._clamp_int(
+            int(message_width * DesignTokens.user_bubble_ratio),
+            DesignTokens.user_bubble_min_width,
+            min(DesignTokens.user_bubble_max_width, message_width),
+        )
+
+        self.dynamic_conversation_width = conversation_width
+        self.dynamic_message_width = message_width
+        self.dynamic_user_bubble_width = user_bubble_width
+
+        self.conversation_column.setFixedWidth(conversation_width)
+        self.session_tabs.setFixedWidth(conversation_width)
+        self.input_card.setFixedWidth(conversation_width)
+
+        for bubble in self._iter_session_chat_bubbles():
+            bubble.apply_dynamic_widths(message_width, user_bubble_width)
+
     def sync_context_drawer_layout(self):
         geometry = self._compute_context_drawer_geometry()
         if geometry is None:
             return
         self._apply_context_drawer_content_reserve(geometry["width"])
+        self.sync_conversation_widths(geometry["width"])
         self.right_sidebar.setGeometry(
             geometry["x"],
             geometry["y"],
@@ -10808,9 +10979,10 @@ class MainWindow(QMainWindow):
         is_fresh_session = session_id is None
         if session_id is None: session_id = uuid.uuid4().hex
         session_widget = QWidget()
+        session_widget.setStyleSheet("background: transparent;")
         session_layout = QVBoxLayout(session_widget)
         session_layout.setContentsMargins(0, 0, 0, 0)
-        session_layout.setSpacing(12)
+        session_layout.setSpacing(10)
 
         active_skills_label = QLabel("本次会话使用的功能: ")
         active_skills_label.setStyleSheet("color: #9ca3af; font-size: 11px; margin-left: 12px;")
@@ -10819,12 +10991,12 @@ class MainWindow(QMainWindow):
 
         chat_scroll = QScrollArea()
         chat_scroll.setWidgetResizable(True)
-        chat_scroll.setStyleSheet(f"QScrollArea {{ border: none; background: {DesignTokens.bg_chat}; }}")
+        chat_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         chat_container = QWidget()
-        chat_container.setStyleSheet(f"background: {DesignTokens.bg_chat};")
+        chat_container.setStyleSheet("background: transparent;")
         chat_layout = QVBoxLayout(chat_container)
-        chat_layout.setContentsMargins(20, 6, 20, 18) # Bottom padding
-        chat_layout.setSpacing(8) # Space between messages
+        chat_layout.setContentsMargins(22, 18, 26, 22)
+        chat_layout.setSpacing(10)
         
         # Add Empty State
         empty_state = EmptyStateWidget(self)
@@ -11602,21 +11774,25 @@ class MainWindow(QMainWindow):
         project_btn.clicked.connect(lambda checked=False, p=path, q=query_active: self.handle_project_click(p, query_active=q))
         header_layout.addWidget(project_btn, 1)
 
+        action_icon_size = QSize(12, 12)
+
         new_btn = QToolButton()
-        new_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_secondary))
+        new_btn.setIcon(qta.icon('fa5s.plus', color=DesignTokens.primary if selected else DesignTokens.text_tertiary))
         new_btn.setToolTip("在此项目中新建对话")
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.setFixedSize(26, 26)
-        new_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
+        new_btn.setIconSize(action_icon_size)
+        new_btn.setStyleSheet(apple_sidebar_action_button_style(selected))
         new_btn.clicked.connect(lambda checked=False, p=path: self.new_conversation_for_project(p))
         header_layout.addWidget(new_btn)
 
         menu_btn = QToolButton()
-        menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.primary if selected else DesignTokens.text_tertiary))
         menu_btn.setToolTip("项目操作")
         menu_btn.setCursor(Qt.PointingHandCursor)
         menu_btn.setFixedSize(26, 26)
-        menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
+        menu_btn.setIconSize(action_icon_size)
+        menu_btn.setStyleSheet(apple_sidebar_action_button_style(selected))
         menu_btn.clicked.connect(lambda checked=False, p=path, btn_ref=menu_btn: self.show_project_menu(p, btn_ref))
         header_layout.addWidget(menu_btn)
         outer.addWidget(header)
@@ -14108,7 +14284,7 @@ class MainWindow(QMainWindow):
         else:
             wrapper = QWidget()
             layout = QHBoxLayout(wrapper)
-            layout.setContentsMargins(48, 4, 16, 4)
+            layout.setContentsMargins(32, 4, 8, 4)
             layout.addWidget(card)
             layout.addStretch()
 
@@ -14216,6 +14392,7 @@ class MainWindow(QMainWindow):
         self.last_message_time = now
             
         bubble = ChatBubble(role, text, thinking, duration, attachments=attachments)
+        bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         
         if index is not None:
             state.chat_layout.insertWidget(index, bubble)
@@ -14255,6 +14432,7 @@ class MainWindow(QMainWindow):
         
         # Insert "Thinking" bubble
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
+        state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
@@ -14296,6 +14474,7 @@ class MainWindow(QMainWindow):
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
+        state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
@@ -14951,6 +15130,7 @@ class MainWindow(QMainWindow):
             state.temp_thinking_bubble = None
         else:
             bubble = ChatBubble("agent", "", thinking=result.get("reasoning"))
+            bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         
         state.last_agent_bubble = bubble

@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import os
 import time
+import copy
 import ast
 import re
 import json
@@ -684,6 +685,26 @@ def readable_risk_level(value):
     if text == "low":
         return ("低风险", DesignTokens.info_text)
     return ("常规", DesignTokens.text_secondary)
+
+
+def normalize_conversation_branch_meta(value):
+    if not isinstance(value, dict):
+        return None
+    parent_session_id = str(value.get("parent_session_id") or "").strip()
+    parent_message_id = str(value.get("parent_message_id") or "").strip()
+    if not parent_session_id or not parent_message_id:
+        return None
+    created_at = value.get("created_at")
+    try:
+        created_at = int(created_at) if created_at is not None else None
+    except Exception:
+        created_at = None
+    return {
+        "parent_session_id": parent_session_id,
+        "parent_message_id": parent_message_id,
+        "parent_title": str(value.get("parent_title") or "").strip(),
+        "created_at": created_at,
+    }
 
 
 def session_status_text(status, im_provider=None):
@@ -5984,13 +6005,27 @@ class FileChip(QFrame):
         self.setToolTip(self.path)
 
 class ChatBubble(QFrame):
+    branchRequested = Signal(str)
+
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
-    def __init__(self, role, text, thinking=None, duration=None, attachments=None, attachment_hint="用户添加的文件"):
+    def __init__(
+        self,
+        role,
+        text,
+        thinking=None,
+        duration=None,
+        attachments=None,
+        attachment_hint="用户添加的文件",
+        source_message_id="",
+    ):
         super().__init__()
         self.role = role
         self.content_wrapper = None
         self.user_bubble_frame = None
         self.content_col = None
+        self.source_message_id = str(source_message_id or "").strip()
+        self.branch_btn = None
+        self.branch_row_layout = None
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         attachments = list(attachments or [])
@@ -6060,6 +6095,15 @@ class ChatBubble(QFrame):
 
                 bubble_layout.addWidget(content_label)
                 cw_layout.addWidget(bubble_frame, 0, Qt.AlignRight)
+
+            if self.source_message_id:
+                action_row = QHBoxLayout()
+                action_row.setContentsMargins(0, 0, 2, 0)
+                action_row.setSpacing(6)
+                action_row.addStretch()
+                action_row.addWidget(self._create_branch_button())
+                self.branch_row_layout = action_row
+                cw_layout.addLayout(action_row)
             
             # Add to main
             main_layout.addStretch() # Push everything right
@@ -6188,6 +6232,9 @@ class ChatBubble(QFrame):
             copy_row = QHBoxLayout()
             copy_row.setContentsMargins(0, 0, 0, 0)
             copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
+            if self.source_message_id:
+                copy_row.addWidget(self._create_branch_button(), 0, Qt.AlignLeft)
+            self.branch_row_layout = copy_row
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
             
@@ -6227,6 +6274,41 @@ class ChatBubble(QFrame):
                 
             main_layout.addWidget(content_col)
             # main_layout.addStretch() # Removed to allow content to take full width
+
+    def _create_branch_button(self):
+        if self.branch_btn is not None:
+            return self.branch_btn
+        btn = QToolButton()
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setAutoRaise(True)
+        btn.setIcon(qta.icon("fa5s.code-branch", color=DesignTokens.text_tertiary))
+        btn.setIconSize(QSize(13, 13))
+        btn.setToolTip("从这里分支")
+        btn.setFixedSize(26, 26)
+        btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
+        btn.clicked.connect(self._emit_branch_request)
+        self.branch_btn = btn
+        return btn
+
+    def _emit_branch_request(self):
+        if self.source_message_id:
+            self.branchRequested.emit(self.source_message_id)
+
+    def set_source_message_id(self, source_message_id):
+        self.source_message_id = str(source_message_id or "").strip()
+        if not self.source_message_id:
+            if self.branch_btn is not None:
+                self.branch_btn.setVisible(False)
+            return
+        if self.branch_btn is None and self.branch_row_layout is not None:
+            if self.role == "User":
+                self.branch_btn = self._create_branch_button()
+                self.branch_row_layout.insertWidget(1, self.branch_btn)
+            else:
+                self.branch_btn = self._create_branch_button()
+                self.branch_row_layout.insertWidget(1, self.branch_btn, 0, Qt.AlignLeft)
+        if self.branch_btn is not None:
+            self.branch_btn.setVisible(True)
 
     def apply_dynamic_widths(self, message_width, user_bubble_width):
         if self.content_wrapper is not None:
@@ -7531,6 +7613,7 @@ class SessionState:
         self.clarify_answers_context = []
         self.selected_skill_names = []
         self.sop_run = None
+        self.conversation_branch = None
         self.completed_agent_result_ids = set()
         self.automation_task_id = ""
         self.automation_run_id = ""
@@ -10124,6 +10207,110 @@ class MainWindow(QMainWindow):
             return str(display)
         return str(message.get("content") or "")
 
+    def _new_message_id(self):
+        return uuid.uuid4().hex
+
+    def _session_branch_meta(self, state):
+        branch_meta = normalize_conversation_branch_meta(getattr(state, "conversation_branch", None))
+        if not branch_meta:
+            return {}
+        return {"conversation_branch": branch_meta}
+
+    def _assistant_source_message_id_from_messages(self, messages):
+        for msg in reversed(messages or []):
+            if not isinstance(msg, dict):
+                continue
+            if (msg.get("role") or "") != "assistant":
+                continue
+            message_id = str(msg.get("id") or "").strip()
+            if message_id:
+                return message_id
+        return ""
+
+    def _copy_forked_messages_upto(self, messages, message_id):
+        target_id = str(message_id or "").strip()
+        if not target_id:
+            return []
+        copied = []
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            original_id = str(msg.get("id") or "").strip()
+            msg_copy = copy.deepcopy(msg)
+            msg_copy["id"] = self._new_message_id()
+            copied.append(msg_copy)
+            if original_id == target_id:
+                return copied
+        return []
+
+    def _build_forked_session_meta(self, parent_record, parent_message_id):
+        parent_record = parent_record if isinstance(parent_record, dict) else {}
+        parent_meta = parent_record.get("meta") if isinstance(parent_record.get("meta"), dict) else {}
+        branch_meta = {
+            "parent_session_id": str(parent_record.get("id") or "").strip(),
+            "parent_message_id": str(parent_message_id or "").strip(),
+            "parent_title": str(parent_record.get("title") or "").strip(),
+            "created_at": int(time.time()),
+        }
+        copied_meta = {
+            "workspace_dir": parent_meta.get("workspace_dir") or self.workspace_dir or "",
+            "selected_skill_names": normalize_selected_skill_names(parent_meta.get("selected_skill_names")),
+            "conversation_branch": branch_meta,
+        }
+        return {key: value for key, value in copied_meta.items() if value not in (None, "", [], {})}
+
+    def fork_conversation_at_message(self, session_id, message_id):
+        session_id = str(session_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if not session_id or not message_id:
+            return False
+        self.save_chat_history(session_id=session_id)
+        parent_record = self.chat_storage.get_conversation_record(session_id) or {}
+        parent_messages = self.chat_storage.get_messages(session_id)
+        forked_messages = self._copy_forked_messages_upto(parent_messages, message_id)
+        if not forked_messages:
+            self.add_system_toast("找不到可分支的消息位置", "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+
+        fork_title_base = str(parent_record.get("title") or self._compute_session_title(forked_messages) or "新任务").strip()
+        fork_title = f"{fork_title_base} - 分支"
+        new_session_id = self._new_message_id()
+        fork_meta = self._build_forked_session_meta(parent_record, message_id)
+        self.chat_storage.save_conversation(
+            new_session_id,
+            forked_messages,
+            title=fork_title,
+            status="draft",
+            meta=fork_meta,
+        )
+
+        self.create_new_session(session_id=new_session_id, title=fork_title, make_current=False)
+        fork_state = self.get_session(new_session_id)
+        if fork_state:
+            fork_state.selected_skill_names = normalize_selected_skill_names(fork_meta.get("selected_skill_names"))
+            fork_state.run_phase = "待开始"
+            fork_state.session_status = "draft"
+            fork_state.has_file_changes = False
+            fork_state.changed_files = []
+            fork_state.clarify_mode_enabled = False
+            fork_state.clarify_phase = CLARIFY_MODE_DISABLED
+            fork_state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            fork_state.pending_clarify_questions = []
+            fork_state.clarify_source_user_text = ""
+            fork_state.clarify_answers_context = []
+            fork_state.sop_run = None
+            fork_state.completed_agent_result_ids = set()
+            fork_state.automation_task_id = ""
+            fork_state.automation_run_id = ""
+            fork_state.automation_trigger_source = ""
+            fork_state.automation_template_id = ""
+            fork_state.conversation_branch = normalize_conversation_branch_meta(fork_meta.get("conversation_branch"))
+
+        self.refresh_history_list()
+        self.activate_session(new_session_id)
+        self.add_system_toast("已创建分支会话", "success", session_id=new_session_id, auto_close_ms=3200)
+        return True
+
     def _should_block_send_for_sop(self, state):
         return bool(state and is_sop_awaiting_confirmation(getattr(state, "sop_run", None)))
 
@@ -10506,6 +10693,7 @@ class MainWindow(QMainWindow):
         if not state:
             return
         payload = dict(result or {})
+        message_id = self._new_message_id()
         executor_type = str(payload.get("executor_type") or "sop_executor").strip()
         ok = bool(payload.get("ok"))
         heading = "SOP 执行完成" if ok else "SOP 执行失败"
@@ -10513,6 +10701,7 @@ class MainWindow(QMainWindow):
         message_text = f"{heading}（{executor_type}）\n{content}"
         state.messages.append(
             {
+                "id": message_id,
                 "role": "assistant",
                 "content": message_text,
                 "meta": {
@@ -10526,7 +10715,13 @@ class MainWindow(QMainWindow):
         state.displayed_render_count = len(state.render_items)
         self.save_chat_history(session_id=state.session_id)
         if state.session_id == self.current_session_id:
-            self.add_chat_bubble("Assistant", message_text, animate=False, force_scroll=True)
+            self.add_chat_bubble(
+                "Assistant",
+                message_text,
+                animate=False,
+                force_scroll=True,
+                source_message_id=message_id,
+            )
 
     def _handle_sop_executor_finished(self, result, session_id):
         state = self.get_session(session_id)
@@ -10592,8 +10787,10 @@ class MainWindow(QMainWindow):
             "sop_step_title": (current_step or {}).get("title") or "",
             "sop_executor_type": executor_type,
         }
+        message_id = self._new_message_id()
         state.messages.append(
             {
+                "id": message_id,
                 "role": "user",
                 "content": step_content,
                 "meta": message_meta,
@@ -10603,7 +10800,13 @@ class MainWindow(QMainWindow):
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
         if create_user_bubble and state.session_id == self.current_session_id:
-            self.add_chat_bubble("User", step_display, animate=False, force_scroll=True)
+            self.add_chat_bubble(
+                "User",
+                step_display,
+                animate=False,
+                force_scroll=True,
+                source_message_id=message_id,
+            )
 
         if executor_type != SOP_EXECUTOR_AGENT:
             self.set_session_phase("Executing SOP step", state.session_id)
@@ -11850,6 +12053,7 @@ class MainWindow(QMainWindow):
         state.clarify_answers_context = []
         state.selected_skill_names = []
         state.sop_run = None
+        state.conversation_branch = None
         state.completed_agent_result_ids = set()
         state.automation_task_id = ""
         state.automation_run_id = ""
@@ -11951,6 +12155,9 @@ class MainWindow(QMainWindow):
             conversation_meta.get("selected_skill_names")
         )
         state.sop_run = normalize_sop_run(conversation_meta.get("sop_run"))
+        state.conversation_branch = normalize_conversation_branch_meta(
+            conversation_meta.get("conversation_branch")
+        )
         state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
         state.clarify_mode_state = normalize_clarify_phase(
             conversation_meta.get("clarify_mode_state"),
@@ -13147,6 +13354,7 @@ class MainWindow(QMainWindow):
                     index=current_idx,
                     animate=animate,
                     attachments=self._message_user_attachments(message),
+                    source_message_id=str(message.get("id") or "").strip(),
                 )
                 if current_idx is not None:
                     current_idx += 1
@@ -13160,7 +13368,14 @@ class MainWindow(QMainWindow):
             tool_calls = item.get("tool_calls") or []
             if not content and tool_calls:
                 content = "任务已处理完成，请查看上方思考过程。"
-            bubble = self.add_chat_bubble("Agent", "", thinking=None, index=current_idx, animate=animate)
+            bubble = self.add_chat_bubble(
+                "Agent",
+                "",
+                thinking=None,
+                index=current_idx,
+                animate=animate,
+                source_message_id=self._assistant_source_message_id_from_messages(item.get("messages") or []),
+            )
             if current_idx is not None:
                 current_idx += 1
             state.last_agent_bubble = bubble
@@ -13404,6 +13619,7 @@ class MainWindow(QMainWindow):
                 merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
                 merged_meta.update(self._session_selected_skills_meta(self.sessions.get(session_id)))
                 merged_meta.update(self._session_sop_meta(self.sessions.get(session_id)))
+                merged_meta.update(self._session_branch_meta(self.sessions.get(session_id)))
             try:
                 self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
@@ -13479,6 +13695,7 @@ class MainWindow(QMainWindow):
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         meta.update(self._session_sop_meta(state))
+        meta.update(self._session_branch_meta(state))
         try:
             self.chat_storage.save_conversation(
                 state.session_id,
@@ -14482,6 +14699,7 @@ class MainWindow(QMainWindow):
                 stop_text = f"{partial_content}\n\n{stop_text}"
             if existing_content != stop_text:
                 state.messages.append({
+                    "id": self._new_message_id(),
                     "role": "assistant",
                     "content": stop_text,
                     "reasoning": partial_thinking,
@@ -14766,8 +14984,10 @@ class MainWindow(QMainWindow):
             text = f"[自动化: {step.get('title') or '当前步骤'}] {text}"
         elif data.get("summon_source") == "automation_template":
             text = f"[自动化任务] {text}"
+        message_id = self._new_message_id()
         state.messages.append(
             {
+                "id": message_id,
                 "role": "assistant",
                 "content": text,
                 "meta": {
@@ -14784,7 +15004,13 @@ class MainWindow(QMainWindow):
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
         if state.session_id == self.current_session_id:
-            self.add_chat_bubble("agent", text, animate=False, force_scroll=False)
+            self.add_chat_bubble(
+                "agent",
+                text,
+                animate=False,
+                force_scroll=False,
+                source_message_id=message_id,
+            )
         self.save_chat_history(session_id=state.session_id)
 
     def _resolve_template_default_profile(self, template):
@@ -14828,6 +15054,7 @@ class MainWindow(QMainWindow):
         user_text = payload.get("content") or ""
         if not user_text:
             return False
+        user_message_id = self._new_message_id()
         delegated_payload = self._build_user_message_payload(
             delegated_text,
             prompt_files,
@@ -14851,6 +15078,7 @@ class MainWindow(QMainWindow):
                 animate=False,
                 force_scroll=True,
                 attachments=payload.get("attachments") or [],
+                source_message_id=user_message_id,
             )
             if clear_current_input:
                 self.input_field.clear()
@@ -14869,7 +15097,7 @@ class MainWindow(QMainWindow):
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
-        message_payload = {"role": "user", "content": user_text}
+        message_payload = {"id": user_message_id, "role": "user", "content": user_text}
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
         if payload.get("meta"):
@@ -15180,7 +15408,18 @@ class MainWindow(QMainWindow):
             self.show_tool_details(tool_id, card.args, result, meta=card.meta, switch_tab=False)
         self.process_ui_events(force=True)
 
-    def add_chat_bubble(self, role, text, thinking=None, duration=None, index=None, animate=True, force_scroll=False, attachments=None):
+    def add_chat_bubble(
+        self,
+        role,
+        text,
+        thinking=None,
+        duration=None,
+        index=None,
+        animate=True,
+        force_scroll=False,
+        attachments=None,
+        source_message_id="",
+    ):
         state = self.get_current_session()
         if not state: return
         
@@ -15195,7 +15434,17 @@ class MainWindow(QMainWindow):
             animate = False
         self.last_message_time = now
             
-        bubble = ChatBubble(role, text, thinking, duration, attachments=attachments)
+        bubble = ChatBubble(
+            role,
+            text,
+            thinking,
+            duration,
+            attachments=attachments,
+            source_message_id=source_message_id,
+        )
+        bubble.branchRequested.connect(
+            lambda msg_id, sid=state.session_id: self.fork_conversation_at_message(sid, msg_id)
+        )
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         
         if index is not None:
@@ -15990,6 +16239,7 @@ class MainWindow(QMainWindow):
         for msg in generated_messages or []:
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 tool_calls.extend(msg.get("tool_calls") or [])
+        assistant_source_message_id = self._assistant_source_message_id_from_messages(generated_messages)
 
         if not (content or "").strip() and not tool_calls:
             content = "任务已处理完成，请查看上方思考过程。"
@@ -16030,6 +16280,8 @@ class MainWindow(QMainWindow):
         else:
             bubble.update_thinking(duration=duration, is_final=True)
             bubble.set_main_content(content, content_parts=content_parts, final=True)
+        if assistant_source_message_id:
+            bubble.set_source_message_id(assistant_source_message_id)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:
@@ -16055,12 +16307,15 @@ class MainWindow(QMainWindow):
         elif isinstance(generated_messages_raw, list) and generated_messages_raw:
             pass
         else:
+            assistant_source_message_id = self._new_message_id()
             state.messages.append({
+                "id": assistant_source_message_id,
                 "role": role, 
                 "content": content,
                 "reasoning": reasoning,
                 "content_parts": content_parts
             })
+            bubble.set_source_message_id(assistant_source_message_id)
         state.messages = self.chat_storage.normalize_messages(state.messages)
         state.render_items = build_conversation_render_items(state.messages)
         if len(state.messages) > previous_message_count:

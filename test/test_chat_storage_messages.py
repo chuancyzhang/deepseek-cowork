@@ -51,6 +51,27 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual(messages[0]["content_parts"][0]["text"], "hello")
         self.assertEqual(messages[1]["meta"]["duration"], 0.5)
         self.assertEqual(messages[1]["result_obj"], {"ok": True})
+        self.assertTrue(messages[0]["id"])
+        self.assertTrue(messages[1]["id"])
+
+    def test_messages_without_ids_are_assigned_stable_ids(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation(
+            "conv-no-id",
+            [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "world"},
+            ],
+            title="no-id",
+        )
+
+        first_read = storage.get_messages("conv-no-id")
+        second_read = storage.get_messages("conv-no-id")
+
+        self.assertTrue(first_read[0]["id"])
+        self.assertTrue(first_read[1]["id"])
+        self.assertEqual(first_read[0]["id"], second_read[0]["id"])
+        self.assertEqual(first_read[1]["id"], second_read[1]["id"])
 
     def test_existing_database_is_migrated_with_new_message_columns(self):
         with sqlite3.connect(self.db_path) as conn:

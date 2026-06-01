@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import unittest
+import shutil
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -9,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
+from core.chat_storage import ChatStorage
 from main import (
     QApplication,
     AutomationTaskDialog,
@@ -402,6 +404,94 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertEqual(payload["content_parts"][1]["type"], "input_image")
         self.assertEqual(payload["content_parts"][1]["path"], os.path.normpath(os.path.abspath(image_path)))
         self.assertEqual(payload["meta"]["workspace_referenced_images"], [os.path.normpath(os.path.abspath(image_path))])
+
+    def test_fork_conversation_at_message_creates_clean_branch_session(self):
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        db_path = os.path.join(temp_dir, "chat_history.sqlite")
+        storage = ChatStorage(db_path)
+        workspace_dir = os.path.join(temp_dir, "workspace")
+        os.makedirs(workspace_dir)
+        parent_messages = [
+            {"id": "u1", "role": "user", "content": "first"},
+            {"id": "a1", "role": "assistant", "content": "reply"},
+            {"id": "u2", "role": "user", "content": "second"},
+        ]
+        storage.save_conversation(
+            "parent",
+            parent_messages,
+            title="Parent task",
+            status="running",
+            meta={
+                "workspace_dir": workspace_dir,
+                "selected_skill_names": ["python-runner"],
+                "sop_run": {"template_id": "demo"},
+            },
+        )
+
+        window = MainWindow.__new__(MainWindow)
+        window.chat_storage = storage
+        window.workspace_dir = workspace_dir
+        window.save_chat_history = MagicMock()
+        window.refresh_history_list = MagicMock()
+        window.activate_session = MagicMock()
+        window.add_system_toast = MagicMock()
+        window.sessions = {}
+
+        created_states = {}
+
+        def create_new_session(session_id=None, title=None, make_current=True):
+            state = type("_ForkState", (), {})()
+            state.session_id = session_id
+            state.selected_skill_names = []
+            state.run_phase = ""
+            state.session_status = ""
+            state.has_file_changes = True
+            state.changed_files = ["demo.py"]
+            state.clarify_mode_enabled = True
+            state.clarify_phase = "awaiting"
+            state.clarify_mode_state = "awaiting"
+            state.pending_clarify_questions = [{"id": "q1"}]
+            state.clarify_source_user_text = "source"
+            state.clarify_answers_context = ["answer"]
+            state.sop_run = {"template_id": "demo"}
+            state.completed_agent_result_ids = {"a"}
+            state.automation_task_id = "task"
+            state.automation_run_id = "run"
+            state.automation_trigger_source = "manual"
+            state.automation_template_id = "tpl"
+            state.conversation_branch = None
+            created_states[session_id] = state
+            return session_id
+
+        window.create_new_session = create_new_session
+        window.get_session = lambda session_id: created_states.get(session_id)
+
+        ok = window.fork_conversation_at_message("parent", "a1")
+
+        self.assertTrue(ok)
+        window.save_chat_history.assert_called_once_with(session_id="parent")
+        window.refresh_history_list.assert_called_once()
+        window.activate_session.assert_called_once()
+
+        new_session_id = window.activate_session.call_args.args[0]
+        new_record = storage.get_conversation_record(new_session_id)
+        new_messages = storage.get_messages(new_session_id)
+        new_state = created_states[new_session_id]
+
+        self.assertEqual([msg["role"] for msg in new_messages], ["user", "assistant"])
+        self.assertEqual([msg["content"] for msg in new_messages], ["first", "reply"])
+        self.assertNotEqual([msg["id"] for msg in new_messages], ["u1", "a1"])
+        self.assertEqual(new_record["status"], "draft")
+        self.assertEqual(new_record["title"], "Parent task - 分支")
+        self.assertEqual(new_record["meta"]["workspace_dir"], workspace_dir)
+        self.assertEqual(new_record["meta"]["selected_skill_names"], ["python-runner"])
+        self.assertEqual(new_record["meta"]["conversation_branch"]["parent_session_id"], "parent")
+        self.assertEqual(new_record["meta"]["conversation_branch"]["parent_message_id"], "a1")
+        self.assertEqual(new_state.selected_skill_names, ["python-runner"])
+        self.assertFalse(new_state.clarify_mode_enabled)
+        self.assertIsNone(new_state.sop_run)
+        self.assertEqual(new_state.conversation_branch["parent_session_id"], "parent")
 
     def test_select_files_for_prompt_forwards_dialog_selection(self):
         window = MainWindow.__new__(MainWindow)

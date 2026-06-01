@@ -367,6 +367,9 @@ class ChatStorage:
                 continue
             msg_copy = dict(msg)
             msg_id = msg_copy.get("id")
+            if not msg_id:
+                msg_id = uuid.uuid4().hex
+                msg_copy["id"] = msg_id
             if msg_id:
                 if msg_id in seen_ids:
                     continue

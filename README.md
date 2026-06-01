@@ -31,8 +31,9 @@ Current app version: **4.8.3**.
 *   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, keeps each project collapsed by default with only a short preview of conversations, and presents the list as a softer Apple-inspired panel with quieter inline action buttons.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, automation steps, observability, and sub-agent status; sub-agent activity lights the panel hint without forcing the drawer open.
 *   **Vision Attachments**: Prompt-bar image attachments keep structured metadata and are sent as multimodal input only when the selected model enables `支持图片理解`.
-*   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs.
+*   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs, with both cron-expression scheduling and guided quick configuration.
 *   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; active automation and selected-skill chips can be removed with one click.
+*   **System Status Toasts**: Chat-stream system hints render as compact Apple-style status pills with restrained color, short copy, and auto-dismiss behavior instead of heavy full-width notice boxes.
 *   **Sub-Agent Monitor**: Observe parallel workers in a lightweight timeline summary for task input, tool calls, tool results, streamed output, and final output; opening the panel queues a short, main-thread render pass for UI stability.
 *   **Safe Sub-Agent Lifecycle**: Sub-agent completion, status streaming, and worker-thread cleanup are separated so parallel workers can finish or restart without destabilizing the desktop app.
 *   **Sub-Agent Runtime Log**: Lifecycle diagnostics are written to `sub_agent_runtime.log` under the `DeepSeekCowork` app data directory, or `user_data/` in portable mode.
@@ -108,9 +109,9 @@ Examples:
 
 ### 4. Manage Automation
 Open **自动化** from the sidebar:
-*   **Configured**: create scheduled automations, enable or pause them, run them immediately, and review the next run time.
+*   **Configured**: create scheduled automations, enable or pause them, run them immediately, and review the next run time. Schedules support direct 5-field crontab syntax as well as guided daily/weekly/monthly/interval/once setup.
 *   **Run History**: inspect completed, failed, interrupted, or missed runs and reopen the related task session.
-*   **Task Templates**: edit the former SOP templates without exposing manual template IDs; IDs are generated automatically, and both templates and steps can be set to manual confirmation or auto-advance.
+*   **Task Templates**: edit the former SOP templates without exposing manual template IDs; IDs are generated automatically, templates and steps can be set to manual confirmation or auto-advance, and each step can run through the agent, an uploaded Python file, or a Bash command.
 
 ### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:
@@ -138,9 +139,9 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 *   **`core/mcp_client.py`**: MCP transport bridge for `stdio` and Streamable HTTP tool discovery/calls.
 *   **`core/im_gateway/`**: Multi-platform enterprise messaging gateway and channel adapters.
 *   **`core/skill_manager.py`**: Tool registry, experience package loading, relevance matching, and prompt injection.
-*   **`core/sop_manager.py`**: Session-level automation templates, per-step state, advance mode (`manual` / `auto`), confirmation, rerun, and skip flow.
+*   **`core/sop_manager.py`**: Session-level automation templates, per-step executor metadata, per-step state, advance mode (`manual` / `auto`), confirmation, rerun, and skip flow.
 *   **`core/sop_from_conversation.py`**: Conversation-to-SOP draft generation with preview and revision.
-*   **`core/automation_manager.py`**: Scheduled automation task normalization, next-run calculation, execution prompt assembly, and run-history helpers.
+*   **`core/automation_manager.py`**: Scheduled automation task normalization, cron / quick-schedule next-run calculation, execution prompt assembly, and run-history helpers.
 *   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
 *   **`skills/`**: Built-in system skills.
 *   **`ai_skills/`**: AI or user-created skills.
@@ -163,8 +164,8 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - Sub-agent drawer hide/show diagnostics now record structured reasons in `sub_agent_runtime.log`, making unexpected collapses much easier to trace.
 - Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
 - Pause/Resume/Stop controls manage long operations safely.
-- Session automation templates constrain execution to the current step; templates and individual steps can require manual confirmation or auto-advance, and the app dispatches one step at a time instead of sending the whole SOP as a single prompt block.
-- Scheduled automation tasks reuse the same templates, execute them as step-by-step runs, pause in `awaiting_confirmation` when a manual step is reached, and write every run into the local history.
+- Session automation templates constrain execution to the current step; templates and individual steps can require manual confirmation or auto-advance, and the app dispatches one step at a time instead of sending the whole SOP as a single prompt block. Each step can use the agent, an uploaded Python file, or a Bash command.
+- Scheduled automation tasks reuse the same templates, execute them as step-by-step runs, pause in `awaiting_confirmation` when a manual step is reached, and write every run into the local history. Cron syntax is parsed inside the app, so Windows builds do not depend on a system `crontab` service.
 - Clarifying mode exposes only read-oriented exploration and routes real questions through the interaction tools before normal execution resumes.
 
 ## 🧠 Layered Memory & Context

@@ -10,6 +10,7 @@ from core.automation_manager import (
     AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
     AUTOMATION_HISTORY_STATUS_MISSED,
     AUTOMATION_HISTORY_STATUS_RUNNING,
+    AUTOMATION_SCHEDULE_CRON,
     AUTOMATION_SCHEDULE_DAILY,
     AUTOMATION_SCHEDULE_INTERVAL,
     AUTOMATION_SCHEDULE_MONTHLY,
@@ -18,10 +19,13 @@ from core.automation_manager import (
     advance_task_to_next_run,
     build_automation_execution_prompt,
     compute_next_run_at,
+    cron_expression_from_legacy_schedule,
     describe_schedule,
     make_automation_history_record,
+    normalize_cron_expression,
     normalize_automation_history,
     normalize_automation_task,
+    validate_cron_expression,
 )
 from core.config_manager import ConfigManager
 
@@ -99,6 +103,45 @@ class TestAutomationManager(unittest.TestCase):
             now_ts=1716195600,
         )
         self.assertEqual(task["next_run_at"], 123456)
+
+    def test_compute_next_run_cron(self):
+        task = {
+            "schedule_type": AUTOMATION_SCHEDULE_CRON,
+            "cron_expression": "15 8 * * 1-5",
+        }
+        next_run = compute_next_run_at(task, now_ts=1716195600)
+        self.assertGreater(next_run, 1716195600)
+        self.assertEqual(describe_schedule(task), "Cron · 15 8 * * 1-5")
+
+    def test_cron_validation_and_normalization(self):
+        self.assertTrue(validate_cron_expression("15 8 * * 1-5"))
+        self.assertFalse(validate_cron_expression("invalid cron"))
+        self.assertEqual(normalize_cron_expression(""), "0 9 * * *")
+
+    def test_legacy_daily_schedule_keeps_type_and_generates_cron_expression(self):
+        task = normalize_automation_task(
+            {
+                "name": "每日简报",
+                "template_id": "tpl-1",
+                "schedule_type": AUTOMATION_SCHEDULE_DAILY,
+                "time_of_day": "07:30",
+            },
+            valid_template_ids=["tpl-1"],
+            now_ts=1716195600,
+        )
+        self.assertEqual(task["schedule_type"], AUTOMATION_SCHEDULE_DAILY)
+        self.assertEqual(task["cron_expression"], "30 7 * * *")
+        self.assertEqual(task["schedule_summary"], "每天 07:30")
+
+    def test_cron_expression_from_legacy_weekly_schedule(self):
+        expression = cron_expression_from_legacy_schedule(
+            {
+                "schedule_type": AUTOMATION_SCHEDULE_WEEKLY,
+                "time_of_day": "07:00",
+                "weekdays": [0, 2],
+            }
+        )
+        self.assertEqual(expression, "0 7 * * 1,3")
 
     def test_advance_task_to_next_run_updates_timestamp(self):
         task = normalize_automation_task(

@@ -73,6 +73,7 @@ from core.automation_manager import (
     AUTOMATION_HISTORY_STATUS_INTERRUPTED,
     AUTOMATION_HISTORY_STATUS_MISSED,
     AUTOMATION_HISTORY_STATUS_RUNNING,
+    AUTOMATION_SCHEDULE_CRON,
     AUTOMATION_RUN_GRACE_SECONDS,
     AUTOMATION_SCHEDULE_DAILY,
     AUTOMATION_SCHEDULE_INTERVAL,
@@ -82,9 +83,13 @@ from core.automation_manager import (
     DEFAULT_AUTOMATION_TIMER_INTERVAL_MS,
     advance_task_to_next_run,
     build_automation_execution_prompt,
+    compute_next_cron_run_at,
     compute_next_run_at,
+    cron_expression_from_legacy_schedule,
     describe_schedule,
     make_automation_history_record,
+    normalize_cron_expression,
+    validate_cron_expression,
 )
 from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_BASE_URL,
@@ -108,6 +113,9 @@ from core.clarify_mode import (
 )
 from core.sop_manager import (
     SOP_ADVANCE_MODE_AUTO,
+    SOP_EXECUTOR_AGENT,
+    SOP_EXECUTOR_BASH_COMMAND,
+    SOP_EXECUTOR_PYTHON_FILE,
     SOP_RUN_STATUS_AWAITING_CONFIRMATION,
     SOP_RUN_STATUS_COMPLETED,
     SOP_STEP_STATUS_AWAITING_CONFIRMATION,
@@ -127,6 +135,7 @@ from core.sop_manager import (
     rerun_current_step,
     skip_current_step,
 )
+from core.sop_executor import execute_sop_step
 import shutil
 import traceback
 import qtawesome as qta
@@ -1038,7 +1047,7 @@ class SafeApplication(QApplication):
             traceback.print_exc()
             if self.main_window:
                 try:
-                    self.main_window.add_system_toast("发生异常，但程序将继续运行。", "error")
+                    self.main_window.add_system_toast("程序遇到异常，已继续运行", "error")
                 except Exception:
                     pass
             return False
@@ -2310,6 +2319,68 @@ class SopTemplateManager(QWidget):
         self.step_advance_mode_combo.addItem("自动推进", "auto")
         self.step_advance_mode_combo.currentIndexChanged.connect(self._sync_current_step_from_fields)
         step_editor_layout.addRow("本步推进", self.step_advance_mode_combo)
+        self.step_executor_type_combo = QComboBox()
+        self.step_executor_type_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.step_executor_type_combo.addItem("Agent", SOP_EXECUTOR_AGENT)
+        self.step_executor_type_combo.addItem("Python 文件", SOP_EXECUTOR_PYTHON_FILE)
+        self.step_executor_type_combo.addItem("Bash 命令", SOP_EXECUTOR_BASH_COMMAND)
+        self.step_executor_type_combo.currentIndexChanged.connect(self._on_step_executor_type_changed)
+        step_editor_layout.addRow("执行器", self.step_executor_type_combo)
+
+        self.step_executor_stack = QStackedWidget()
+
+        agent_page = QWidget()
+        agent_layout = QVBoxLayout(agent_page)
+        agent_layout.setContentsMargins(0, 0, 0, 0)
+        agent_layout.setSpacing(6)
+        agent_hint = QLabel("使用当前会话 Agent/智能体能力执行本步。")
+        agent_hint.setWordWrap(True)
+        agent_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        agent_layout.addWidget(agent_hint)
+        agent_layout.addStretch()
+        self.step_executor_stack.addWidget(agent_page)
+
+        python_page = QWidget()
+        python_layout = QVBoxLayout(python_page)
+        python_layout.setContentsMargins(0, 0, 0, 0)
+        python_layout.setSpacing(8)
+        python_actions = QHBoxLayout()
+        python_actions.setContentsMargins(0, 0, 0, 0)
+        python_actions.setSpacing(8)
+        self.step_python_file_label = QLabel("未选择 Python 文件")
+        self.step_python_file_label.setWordWrap(True)
+        self.step_python_file_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.step_python_select_btn = QPushButton("上传 .py")
+        self.step_python_select_btn.setObjectName("SecondaryBtn")
+        self.step_python_select_btn.clicked.connect(self._choose_step_python_script)
+        self.step_python_clear_btn = QPushButton("移除")
+        self.step_python_clear_btn.setObjectName("SecondaryBtn")
+        self.step_python_clear_btn.clicked.connect(self._clear_step_python_script)
+        python_actions.addWidget(self.step_python_select_btn)
+        python_actions.addWidget(self.step_python_clear_btn)
+        python_actions.addStretch()
+        python_layout.addLayout(python_actions)
+        python_layout.addWidget(self.step_python_file_label)
+        self.step_executor_stack.addWidget(python_page)
+
+        bash_page = QWidget()
+        bash_layout = QVBoxLayout(bash_page)
+        bash_layout.setContentsMargins(0, 0, 0, 0)
+        bash_layout.setSpacing(8)
+        self.step_bash_command_edit = QTextEdit()
+        self.step_bash_command_edit.setFixedHeight(92)
+        self.step_bash_command_edit.setPlaceholderText("例如：python -m pytest -q")
+        self.step_bash_command_edit.textChanged.connect(self._sync_current_step_from_fields)
+        bash_layout.addWidget(self.step_bash_command_edit)
+        self.step_executor_stack.addWidget(bash_page)
+        step_editor_layout.addRow("执行参数", self.step_executor_stack)
+
+        self.step_timeout_spin = QSpinBox()
+        self.step_timeout_spin.setRange(1, 24 * 60 * 60)
+        self.step_timeout_spin.setValue(300)
+        self.step_timeout_spin.setSuffix(" 秒")
+        self.step_timeout_spin.valueChanged.connect(self._sync_current_step_from_fields)
+        step_editor_layout.addRow("超时", self.step_timeout_spin)
         step_body.addWidget(step_editor, 1)
         step_body.setStretch(0, 0)
         step_body.setStretch(1, 1)
@@ -2345,6 +2416,95 @@ class SopTemplateManager(QWidget):
             seen.add(value)
             values.append(value)
         return values
+
+    def _step_python_asset_root(self):
+        root = os.path.join(get_app_data_dir(), "sop_assets", "python")
+        os.makedirs(root, exist_ok=True)
+        return root
+
+    def _copy_python_script_asset(self, source_path):
+        source = os.path.abspath(str(source_path or ""))
+        if not source.lower().endswith(".py"):
+            raise ValueError("只支持上传 .py 文件。")
+        if not os.path.isfile(source):
+            raise FileNotFoundError("选择的 Python 文件不存在。")
+        asset_id = f"py-{uuid.uuid4().hex[:12]}"
+        filename = os.path.basename(source)
+        target_name = f"{asset_id}-{filename}"
+        target_path = os.path.join(self._step_python_asset_root(), target_name)
+        shutil.copy2(source, target_path)
+        return {
+            "asset_id": asset_id,
+            "filename": filename,
+            "path": os.path.normpath(target_path),
+            "source_path": os.path.normpath(source),
+        }
+
+    def _set_step_python_script_widgets(self, script):
+        script = script if isinstance(script, dict) else {}
+        filename = str(script.get("filename") or "").strip()
+        source_path = str(script.get("source_path") or "").strip()
+        if filename:
+            text = filename
+            if source_path:
+                text = f"{filename}\n来源：{source_path}"
+            self.step_python_file_label.setText(text)
+        else:
+            self.step_python_file_label.setText("未选择 Python 文件")
+        self.step_python_clear_btn.setEnabled(bool(filename))
+
+    def _refresh_step_executor_ui(self):
+        executor_type = str(self.step_executor_type_combo.currentData() or SOP_EXECUTOR_AGENT).strip()
+        page_index = {
+            SOP_EXECUTOR_AGENT: 0,
+            SOP_EXECUTOR_PYTHON_FILE: 1,
+            SOP_EXECUTOR_BASH_COMMAND: 2,
+        }.get(executor_type, 0)
+        self.step_executor_stack.setCurrentIndex(page_index)
+
+    def _on_step_executor_type_changed(self):
+        self._refresh_step_executor_ui()
+        self._sync_current_step_from_fields()
+
+    def _choose_step_python_script(self):
+        template_index = self._current_template_index
+        step_index = self._current_step_index
+        if template_index < 0 or step_index < 0:
+            return
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择 Python 文件",
+            "",
+            "Python Files (*.py)",
+        )
+        if not path:
+            return
+        try:
+            asset = self._copy_python_script_asset(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "上传 Python 文件", str(exc))
+            return
+        steps = self.templates[template_index].setdefault("steps", [])
+        if step_index >= len(steps):
+            return
+        steps[step_index]["python_script"] = asset
+        self.step_executor_type_combo.setCurrentIndex(
+            self.step_executor_type_combo.findData(SOP_EXECUTOR_PYTHON_FILE)
+        )
+        self._set_step_python_script_widgets(asset)
+        self._sync_current_step_from_fields()
+
+    def _clear_step_python_script(self):
+        template_index = self._current_template_index
+        step_index = self._current_step_index
+        if template_index < 0 or step_index < 0:
+            return
+        steps = self.templates[template_index].setdefault("steps", [])
+        if step_index >= len(steps):
+            return
+        steps[step_index]["python_script"] = {}
+        self._set_step_python_script_widgets({})
+        self._sync_current_step_from_fields()
 
     def _selected_skill_names_from_widgets(self):
         names = []
@@ -2441,6 +2601,11 @@ class SopTemplateManager(QWidget):
             self.step_success_edit.setPlainText("")
             self.step_allow_skip_check.setChecked(False)
             self.step_advance_mode_combo.setCurrentIndex(0)
+            self.step_executor_type_combo.setCurrentIndex(0)
+            self.step_bash_command_edit.setPlainText("")
+            self.step_timeout_spin.setValue(300)
+            self._set_step_python_script_widgets({})
+            self._refresh_step_executor_ui()
         finally:
             self._loading_step = False
 
@@ -2456,6 +2621,12 @@ class SopTemplateManager(QWidget):
             self.step_allow_skip_check.setChecked(bool(step.get("allow_skip", False)))
             combo_index = self.step_advance_mode_combo.findData(str(step.get("advance_mode") or "inherit"))
             self.step_advance_mode_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
+            executor_index = self.step_executor_type_combo.findData(str(step.get("executor_type") or SOP_EXECUTOR_AGENT))
+            self.step_executor_type_combo.setCurrentIndex(executor_index if executor_index >= 0 else 0)
+            self.step_bash_command_edit.setPlainText(str(step.get("bash_command") or ""))
+            self.step_timeout_spin.setValue(max(1, int(step.get("timeout_seconds") or 300)))
+            self._set_step_python_script_widgets(step.get("python_script"))
+            self._refresh_step_executor_ui()
         finally:
             self._loading_step = False
 
@@ -2496,6 +2667,10 @@ class SopTemplateManager(QWidget):
         step["success_criteria"] = self.step_success_edit.toPlainText().strip()
         step["allow_skip"] = self.step_allow_skip_check.isChecked()
         step["advance_mode"] = str(self.step_advance_mode_combo.currentData() or "inherit").strip() or "inherit"
+        step["executor_type"] = str(self.step_executor_type_combo.currentData() or SOP_EXECUTOR_AGENT).strip() or SOP_EXECUTOR_AGENT
+        step["python_script"] = dict(step.get("python_script") or {})
+        step["bash_command"] = self.step_bash_command_edit.toPlainText().strip()
+        step["timeout_seconds"] = int(self.step_timeout_spin.value())
         self.templates[template_index]["updated_at"] = int(time.time())
         self._refresh_step_list()
         self.step_list.blockSignals(True)
@@ -2540,6 +2715,10 @@ class SopTemplateManager(QWidget):
                         "success_criteria": "",
                         "allow_skip": False,
                         "advance_mode": "inherit",
+                        "executor_type": SOP_EXECUTOR_AGENT,
+                        "python_script": {},
+                        "bash_command": "",
+                        "timeout_seconds": 300,
                     }
                 ],
                 "created_at": now,
@@ -2595,6 +2774,10 @@ class SopTemplateManager(QWidget):
                 "success_criteria": "",
                 "allow_skip": False,
                 "advance_mode": "inherit",
+                "executor_type": SOP_EXECUTOR_AGENT,
+                "python_script": {},
+                "bash_command": "",
+                "timeout_seconds": 300,
             }
         )
         self._refresh_step_list()
@@ -2665,6 +2848,10 @@ class SopTemplateManager(QWidget):
                         "success_criteria": success_criteria,
                         "allow_skip": bool(step.get("allow_skip", False)),
                         "advance_mode": str(step.get("advance_mode") or "inherit").strip() or "inherit",
+                        "executor_type": str(step.get("executor_type") or SOP_EXECUTOR_AGENT).strip() or SOP_EXECUTOR_AGENT,
+                        "python_script": dict(step.get("python_script") or {}),
+                        "bash_command": str(step.get("bash_command") or "").strip(),
+                        "timeout_seconds": max(1, int(step.get("timeout_seconds") or 300)),
                     }
                 )
             default_agent_profile_id = str(template.get("default_agent_profile_id") or "").strip()
@@ -2833,6 +3020,12 @@ class AutomationTaskDialog(QDialog):
         self.enabled_check.setChecked(True)
         form.addRow("状态", self.enabled_check)
 
+        self.schedule_mode_combo = QComboBox()
+        self.schedule_mode_combo.addItem("快捷配置", "quick")
+        self.schedule_mode_combo.addItem("Cron 表达式", "cron")
+        self.schedule_mode_combo.currentIndexChanged.connect(self._on_schedule_mode_changed)
+        form.addRow("配置方式", self.schedule_mode_combo)
+
         self.schedule_type_combo = QComboBox()
         self.schedule_type_combo.addItem("每天", AUTOMATION_SCHEDULE_DAILY)
         self.schedule_type_combo.addItem("每周", AUTOMATION_SCHEDULE_WEEKLY)
@@ -2850,6 +3043,7 @@ class AutomationTaskDialog(QDialog):
         daily_layout.setSpacing(8)
         self.daily_time_input = QLineEdit()
         self.daily_time_input.setPlaceholderText("07:00")
+        self.daily_time_input.textChanged.connect(self._refresh_cron_preview)
         daily_layout.addWidget(self.daily_time_input)
         daily_layout.addStretch()
         self.schedule_stack.addWidget(daily_page)
@@ -2865,12 +3059,14 @@ class AutomationTaskDialog(QDialog):
         for index, label in enumerate(("一", "二", "三", "四", "五", "六", "日")):
             check = QCheckBox(f"周{label}")
             check.setProperty("weekdayIndex", index)
+            check.toggled.connect(self._refresh_cron_preview)
             self.weekday_checks.append(check)
             weekday_row.addWidget(check)
         weekday_row.addStretch()
         weekly_layout.addLayout(weekday_row)
         self.weekly_time_input = QLineEdit()
         self.weekly_time_input.setPlaceholderText("07:00")
+        self.weekly_time_input.textChanged.connect(self._refresh_cron_preview)
         weekly_layout.addWidget(self.weekly_time_input)
         self.schedule_stack.addWidget(weekly_page)
 
@@ -2881,8 +3077,10 @@ class AutomationTaskDialog(QDialog):
         self.monthly_day_spin = QSpinBox()
         self.monthly_day_spin.setRange(1, 31)
         self.monthly_day_spin.setValue(1)
+        self.monthly_day_spin.valueChanged.connect(self._refresh_cron_preview)
         self.monthly_time_input = QLineEdit()
         self.monthly_time_input.setPlaceholderText("09:00")
+        self.monthly_time_input.textChanged.connect(self._refresh_cron_preview)
         monthly_layout.addWidget(self.monthly_day_spin)
         monthly_layout.addWidget(self.monthly_time_input)
         monthly_layout.addStretch()
@@ -2895,6 +3093,7 @@ class AutomationTaskDialog(QDialog):
         self.interval_minutes_spin = QSpinBox()
         self.interval_minutes_spin.setRange(1, 24 * 60)
         self.interval_minutes_spin.setValue(60)
+        self.interval_minutes_spin.valueChanged.connect(self._refresh_cron_preview)
         interval_layout.addWidget(self.interval_minutes_spin)
         interval_layout.addWidget(QLabel("分钟"))
         interval_layout.addStretch()
@@ -2908,11 +3107,35 @@ class AutomationTaskDialog(QDialog):
         self.once_datetime_edit.setCalendarPopup(True)
         self.once_datetime_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.once_datetime_edit.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        self.once_datetime_edit.dateTimeChanged.connect(self._refresh_cron_preview)
         once_layout.addWidget(self.once_datetime_edit)
         once_layout.addStretch()
         self.schedule_stack.addWidget(once_page)
 
-        form.addRow("触发时间", self.schedule_stack)
+        self.schedule_mode_stack = QStackedWidget()
+        quick_page = QWidget()
+        quick_layout = QVBoxLayout(quick_page)
+        quick_layout.setContentsMargins(0, 0, 0, 0)
+        quick_layout.setSpacing(10)
+        quick_layout.addWidget(self.schedule_type_combo)
+        quick_layout.addWidget(self.schedule_stack)
+        self.schedule_mode_stack.addWidget(quick_page)
+
+        cron_page = QWidget()
+        cron_layout = QVBoxLayout(cron_page)
+        cron_layout.setContentsMargins(0, 0, 0, 0)
+        cron_layout.setSpacing(8)
+        self.cron_expression_input = QLineEdit()
+        self.cron_expression_input.setPlaceholderText("例如：15 8 * * 1-5")
+        self.cron_expression_input.textChanged.connect(self._refresh_cron_preview)
+        self.cron_preview_label = QLabel("")
+        self.cron_preview_label.setWordWrap(True)
+        self.cron_preview_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        cron_layout.addWidget(self.cron_expression_input)
+        cron_layout.addWidget(self.cron_preview_label)
+        self.schedule_mode_stack.addWidget(cron_page)
+
+        form.addRow("触发配置", self.schedule_mode_stack)
         layout.addLayout(form)
 
         preview_card = QFrame()
@@ -2980,6 +3203,7 @@ class AutomationTaskDialog(QDialog):
         self.prompt_edit.setPlainText(str(self.task.get("prompt") or "").strip())
         self.enabled_check.setChecked(bool(self.task.get("enabled", True)))
         schedule_type = str(self.task.get("schedule_type") or AUTOMATION_SCHEDULE_DAILY).strip()
+        self.schedule_mode_combo.setCurrentIndex(1 if schedule_type == AUTOMATION_SCHEDULE_CRON else 0)
         combo_index = self.schedule_type_combo.findData(schedule_type)
         if combo_index >= 0:
             self.schedule_type_combo.setCurrentIndex(combo_index)
@@ -2993,6 +3217,15 @@ class AutomationTaskDialog(QDialog):
         weekdays = set(self.task.get("weekdays") or [])
         for check in self.weekday_checks:
             check.setChecked(int(check.property("weekdayIndex")) in weekdays)
+        self.cron_expression_input.setText(
+            str(self.task.get("cron_expression") or cron_expression_from_legacy_schedule(self.task)).strip()
+        )
+        self._on_schedule_mode_changed()
+        self._refresh_cron_preview()
+
+    def _on_schedule_mode_changed(self):
+        cron_mode = str(self.schedule_mode_combo.currentData() or "quick") == "cron"
+        self.schedule_mode_stack.setCurrentIndex(1 if cron_mode else 0)
 
     def _on_schedule_type_changed(self):
         schedule_type = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
@@ -3004,6 +3237,49 @@ class AutomationTaskDialog(QDialog):
             AUTOMATION_SCHEDULE_ONCE: 4,
         }.get(schedule_type, 0)
         self.schedule_stack.setCurrentIndex(page_index)
+        self._refresh_cron_preview()
+
+    def _quick_schedule_payload(self):
+        payload = {}
+        schedule_type = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
+        payload["schedule_type"] = schedule_type
+        if schedule_type == AUTOMATION_SCHEDULE_DAILY:
+            payload["time_of_day"] = self.daily_time_input.text().strip() or "07:00"
+        elif schedule_type == AUTOMATION_SCHEDULE_WEEKLY:
+            payload["time_of_day"] = self.weekly_time_input.text().strip() or "07:00"
+            payload["weekdays"] = self._selected_weekdays()
+        elif schedule_type == AUTOMATION_SCHEDULE_MONTHLY:
+            payload["time_of_day"] = self.monthly_time_input.text().strip() or "09:00"
+            payload["day_of_month"] = int(self.monthly_day_spin.value())
+        elif schedule_type == AUTOMATION_SCHEDULE_INTERVAL:
+            payload["interval_minutes"] = int(self.interval_minutes_spin.value())
+        elif schedule_type == AUTOMATION_SCHEDULE_ONCE:
+            payload["one_time_at"] = int(self.once_datetime_edit.dateTime().toSecsSinceEpoch())
+        payload["cron_expression"] = (
+            ""
+            if schedule_type == AUTOMATION_SCHEDULE_ONCE
+            else cron_expression_from_legacy_schedule(payload)
+        )
+        return payload
+
+    def _refresh_cron_preview(self):
+        cron_mode = str(self.schedule_mode_combo.currentData() or "quick") == "cron"
+        if cron_mode:
+            raw_expression = self.cron_expression_input.text().strip()
+            if not validate_cron_expression(raw_expression):
+                self.cron_preview_label.setText("Cron 表达式无效，需要 5 段 crontab 语法。")
+                return
+            expression = raw_expression
+        else:
+            quick_payload = self._quick_schedule_payload()
+            if quick_payload.get("schedule_type") == AUTOMATION_SCHEDULE_ONCE:
+                when = self.once_datetime_edit.dateTime().toString("yyyy-MM-dd HH:mm")
+                self.cron_preview_label.setText(f"单次执行：{when}")
+                return
+            expression = str(quick_payload.get("cron_expression") or "").strip()
+        next_run_at = compute_next_cron_run_at(expression)
+        next_run_text = datetime.fromtimestamp(int(next_run_at)).strftime("%Y-%m-%d %H:%M")
+        self.cron_preview_label.setText(f"Cron：{expression}\n下次执行：{next_run_text}")
 
     def _refresh_template_preview(self):
         template = self._current_template() or {}
@@ -3029,27 +3305,33 @@ class AutomationTaskDialog(QDialog):
         if not str(self.template_combo.currentData() or "").strip():
             QMessageBox.warning(self, "自动化任务", "请选择一个任务模板。")
             return
+        if str(self.schedule_mode_combo.currentData() or "quick") == "cron":
+            if not validate_cron_expression(self.cron_expression_input.text().strip()):
+                QMessageBox.warning(self, "自动化任务", "请填写有效的 5 段 crontab 表达式。")
+                return
         self.accept()
 
     def task_payload(self):
         payload = dict(self.task)
+        for key in (
+            "time_of_day",
+            "weekdays",
+            "day_of_month",
+            "interval_minutes",
+            "interval_anchor_at",
+            "one_time_at",
+            "cron_expression",
+        ):
+            payload.pop(key, None)
         payload["name"] = self.name_input.text().strip()
         payload["template_id"] = str(self.template_combo.currentData() or "").strip()
         payload["prompt"] = self.prompt_edit.toPlainText().strip()
         payload["enabled"] = self.enabled_check.isChecked()
-        payload["schedule_type"] = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
-        if payload["schedule_type"] == AUTOMATION_SCHEDULE_DAILY:
-            payload["time_of_day"] = self.daily_time_input.text().strip() or "07:00"
-        elif payload["schedule_type"] == AUTOMATION_SCHEDULE_WEEKLY:
-            payload["time_of_day"] = self.weekly_time_input.text().strip() or "07:00"
-            payload["weekdays"] = self._selected_weekdays()
-        elif payload["schedule_type"] == AUTOMATION_SCHEDULE_MONTHLY:
-            payload["time_of_day"] = self.monthly_time_input.text().strip() or "09:00"
-            payload["day_of_month"] = int(self.monthly_day_spin.value())
-        elif payload["schedule_type"] == AUTOMATION_SCHEDULE_INTERVAL:
-            payload["interval_minutes"] = int(self.interval_minutes_spin.value())
-        elif payload["schedule_type"] == AUTOMATION_SCHEDULE_ONCE:
-            payload["one_time_at"] = int(self.once_datetime_edit.dateTime().toSecsSinceEpoch())
+        if str(self.schedule_mode_combo.currentData() or "quick") == "cron":
+            payload["schedule_type"] = AUTOMATION_SCHEDULE_CRON
+            payload["cron_expression"] = normalize_cron_expression(self.cron_expression_input.text().strip())
+        else:
+            payload.update(self._quick_schedule_payload())
         return payload
 
 
@@ -5422,55 +5704,72 @@ class SystemToast(QFrame):
     """System Notification in Chat Stream"""
     def __init__(self, text, type="info"):
         super().__init__()
-        self.setFrameShape(QFrame.StyledPanel)
-        
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setAlignment(Qt.AlignCenter)
-        
-        icon_label = QLabel()
+        self.setObjectName("SystemToast")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setMaximumWidth(min(DesignTokens.message_max_width - 120, 720))
+
+        icon_name = "fa5s.info-circle"
+        icon_color = DesignTokens.info_icon
+        tint_color = DesignTokens.toast_tint_info
         if type == "error":
-            icon_label.setPixmap(qta.icon('fa5s.times-circle', color=DesignTokens.error_icon).pixmap(16, 16))
-            bg_color = DesignTokens.error_bg
-            text_color = DesignTokens.error_text
-            border_color = DesignTokens.error_border
+            icon_name = "fa5s.exclamation-circle"
+            icon_color = DesignTokens.error_icon
+            tint_color = DesignTokens.toast_tint_error
         elif type == "success":
-            icon_label.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_icon).pixmap(16, 16))
-            bg_color = DesignTokens.success_bg
-            text_color = DesignTokens.success_text
-            border_color = DesignTokens.success_border
+            icon_name = "fa5s.check-circle"
+            icon_color = DesignTokens.success_icon
+            tint_color = DesignTokens.toast_tint_success
         elif type == "warning":
-            icon_label.setPixmap(qta.icon('fa5s.exclamation-triangle', color=DesignTokens.warning_icon).pixmap(16, 16))
-            bg_color = DesignTokens.warning_bg
-            text_color = DesignTokens.warning_text
-            border_color = DesignTokens.warning_border
-        else:
-            icon_label.setPixmap(qta.icon('fa5s.info-circle', color=DesignTokens.info_icon).pixmap(16, 16))
-            bg_color = DesignTokens.info_bg
-            text_color = DesignTokens.info_text
-            border_color = DesignTokens.info_border
-            
-        layout.addWidget(icon_label)
-        
+            icon_name = "fa5s.exclamation-triangle"
+            icon_color = DesignTokens.warning_icon
+            tint_color = DesignTokens.toast_tint_warning
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 12, 8)
+        layout.setSpacing(8)
+
+        icon_badge = QLabel()
+        icon_badge.setObjectName("SystemToastIconBadge")
+        icon_badge.setAlignment(Qt.AlignCenter)
+        icon_badge.setFixedSize(20, 20)
+        icon_badge.setPixmap(qta.icon(icon_name, color=icon_color).pixmap(12, 12))
+
+        layout.addWidget(icon_badge, 0, Qt.AlignVCenter)
+
         msg_label = QLabel(text)
-        msg_label.setStyleSheet(f"color: {text_color}; font-weight: 500; font-size: 13px; background: transparent;")
-        msg_label.setWordWrap(False)
+        msg_label.setObjectName("SystemToastText")
+        msg_label.setWordWrap(True)
         msg_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         msg_label.setTextInteractionFlags(Qt.NoTextInteraction)
-        msg_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        metrics = QFontMetrics(msg_label.font())
-        msg_label.setMinimumWidth(metrics.horizontalAdvance(text) + 8)
-        layout.addWidget(msg_label)
-        
-        self.setStyleSheet(f"""
-            QFrame {{
-                background-color: {bg_color};
-                border: 1px solid {border_color};
-                border-radius: 14px;
-                margin: 8px 40px;
+        msg_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        layout.addWidget(msg_label, 1)
+
+        self.setStyleSheet(
+            f"""
+            QFrame#SystemToast {{
+                background-color: {DesignTokens.toast_bg};
+                border: 1px solid {DesignTokens.toast_border};
+                border-radius: 16px;
             }}
-        """)
-        add_soft_shadow(self, blur=16, y_offset=4, alpha=12)
+            QLabel#SystemToastIconBadge {{
+                background-color: {tint_color};
+                border: 1px solid {rgba_from_hex(icon_color, 0.14)};
+                border-radius: 10px;
+            }}
+            QLabel#SystemToastText {{
+                color: {DesignTokens.text_primary};
+                font-size: 13px;
+                font-weight: 500;
+                background: transparent;
+            }}
+            """
+        )
+        add_soft_shadow(self, blur=18, y_offset=6, alpha=DesignTokens.toast_shadow_alpha)
+
+        self.message_label = msg_label
+        self.icon_badge = icon_badge
+        self.icon_label = icon_badge
 
 
 def file_chip_icon_name(path):
@@ -7051,6 +7350,7 @@ class SessionState:
         self.daemon_running = False
         self.daemon_worker = None
         self.code_worker = None
+        self.sop_executor_worker = None
         self.chat_layout = chat_layout
         self.active_skills_label = active_skills_label
         self.session_widget = session_widget
@@ -7548,6 +7848,20 @@ class ConversationSopDraftWorker(QThread):
                 "session_id": self.session_id,
                 "error": str(exc),
             })
+
+
+class SopStepExecutorWorker(QThread):
+    finished_signal = Signal(dict, str)
+
+    def __init__(self, session_id, sop_run, workspace_dir, parent=None):
+        super().__init__(parent)
+        self.session_id = str(session_id or "")
+        self.sop_run = json.loads(json.dumps(sop_run or {}, ensure_ascii=False))
+        self.workspace_dir = workspace_dir
+
+    def run(self):
+        result = execute_sop_step(self.sop_run, self.workspace_dir)
+        self.finished_signal.emit(result, self.session_id)
 
 
 class ConversationSkillOptionsDialog(QDialog):
@@ -10018,6 +10332,84 @@ class MainWindow(QMainWindow):
             summary=summary,
         )
 
+    def _start_sop_executor_worker(self, state):
+        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
+        if not state or not sop_run:
+            return False
+        worker = SopStepExecutorWorker(
+            state.session_id,
+            sop_run,
+            self.workspace_dir,
+            parent=self,
+        )
+        state.sop_executor_worker = worker
+        worker.finished_signal.connect(self._handle_sop_executor_finished)
+        worker.finished.connect(lambda sid=state.session_id: self._cleanup_sop_executor_worker(sid))
+        worker.start()
+        return True
+
+    def _cleanup_sop_executor_worker(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        worker = getattr(state, "sop_executor_worker", None)
+        if worker and not worker.isRunning():
+            try:
+                worker.deleteLater()
+            except Exception:
+                pass
+        state.sop_executor_worker = None
+
+    def _append_sop_executor_result_message(self, state, result):
+        if not state:
+            return
+        payload = dict(result or {})
+        executor_type = str(payload.get("executor_type") or "sop_executor").strip()
+        ok = bool(payload.get("ok"))
+        heading = "SOP 执行完成" if ok else "SOP 执行失败"
+        content = str(payload.get("content") or "").strip() or "(No output)"
+        message_text = f"{heading}（{executor_type}）\n{content}"
+        state.messages.append(
+            {
+                "role": "assistant",
+                "content": message_text,
+                "meta": {
+                    "sop_executor_result": True,
+                    "sop_executor_type": executor_type,
+                },
+            }
+        )
+        state.render_items = build_conversation_render_items(state.messages)
+        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
+        state.displayed_render_count = len(state.render_items)
+        self.save_chat_history(session_id=state.session_id)
+        if state.session_id == self.current_session_id:
+            self.add_chat_bubble("Assistant", message_text, animate=False, force_scroll=True)
+
+    def _handle_sop_executor_finished(self, result, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        payload = dict(result or {})
+        ok = bool(payload.get("ok"))
+        self._append_sop_executor_result_message(state, payload)
+        metadata = {
+            "executor_type": payload.get("executor_type") or "",
+            "exit_code": payload.get("exit_code"),
+            "stdout": payload.get("stdout") or "",
+            "stderr": payload.get("stderr") or "",
+            "error": payload.get("error") or "",
+            "duration_seconds": payload.get("duration_seconds"),
+        }
+        self._finalize_sop_execution_step(
+            state,
+            executor=payload.get("executor") or "sop_executor",
+            content=payload.get("content") or "",
+            output_status="completed" if ok else "error",
+            metadata=metadata,
+            allow_auto_advance=ok,
+        )
+
     def _dispatch_current_sop_step(
         self,
         state,
@@ -10039,13 +10431,14 @@ class MainWindow(QMainWindow):
         step_display = str(step_payload.get("display_content") or "").strip() or step_content
         current_step = get_current_step(sop_run)
         current_step_index = int(sop_run.get("current_step_index", 0))
+        executor_type = str((current_step or {}).get("executor_type") or SOP_EXECUTOR_AGENT).strip() or SOP_EXECUTOR_AGENT
         if set_running:
             started_at = int(submitted_at or time.time())
             state.sop_run = mark_step_running(
                 sop_run,
                 {
                     "started_at": started_at,
-                    "executor": "main_agent",
+                    "executor": "main_agent" if executor_type == SOP_EXECUTOR_AGENT else executor_type,
                     "trigger_message": step_content,
                 },
             )
@@ -10055,6 +10448,7 @@ class MainWindow(QMainWindow):
             "sop_step_dispatch": True,
             "sop_step_index": current_step_index,
             "sop_step_title": (current_step or {}).get("title") or "",
+            "sop_executor_type": executor_type,
         }
         state.messages.append(
             {
@@ -10068,6 +10462,11 @@ class MainWindow(QMainWindow):
         state.displayed_render_count = len(state.render_items)
         if create_user_bubble and state.session_id == self.current_session_id:
             self.add_chat_bubble("User", step_display, animate=False, force_scroll=True)
+
+        if executor_type != SOP_EXECUTOR_AGENT:
+            self.set_session_phase("Executing SOP step", state.session_id)
+            self.set_session_status("running", state.session_id)
+            return self._start_sop_executor_worker(state)
 
         mentioned_profiles = []
         delegated_payload = step_content
@@ -10147,7 +10546,17 @@ class MainWindow(QMainWindow):
             set_running=True,
         )
 
-    def _finalize_sop_execution_step(self, state, *, executor="", content="", agent_profile=None):
+    def _finalize_sop_execution_step(
+        self,
+        state,
+        *,
+        executor="",
+        content="",
+        agent_profile=None,
+        output_status="completed",
+        metadata=None,
+        allow_auto_advance=True,
+    ):
         sop_run = normalize_sop_run(getattr(state, "sop_run", None))
         if not sop_run or is_sop_completed(sop_run):
             return False
@@ -10156,12 +10565,20 @@ class MainWindow(QMainWindow):
             "executor": executor or ((sop_run.get("last_execution") or {}).get("executor") or "main_agent"),
             "content": str(content or "").strip(),
         }
+        if isinstance(metadata, dict):
+            execution_info.update(metadata)
         if agent_profile:
             execution_info["agent_profile_id"] = agent_profile.get("id") or ""
             execution_info["agent_profile_name"] = agent_profile.get("name") or ""
-        sop_run = append_step_output(sop_run, content=content, executor=execution_info["executor"], status="completed")
+        sop_run = append_step_output(
+            sop_run,
+            content=content,
+            executor=execution_info["executor"],
+            status=output_status,
+            metadata=metadata,
+        )
         advance_mode = resolve_step_advance_mode(sop_run)
-        if advance_mode == SOP_ADVANCE_MODE_AUTO:
+        if allow_auto_advance and advance_mode == SOP_ADVANCE_MODE_AUTO:
             state.sop_run = complete_current_step(sop_run, reason="auto_advanced", auto_advanced=True)
             self.save_chat_history(session_id=state.session_id)
             self.refresh_sop_controls(state.session_id)
@@ -10688,7 +11105,7 @@ class MainWindow(QMainWindow):
             state.automation_template_id = ""
             return False
         if trigger_source == "manual":
-            self.add_system_toast("自动化任务已启动。", "success", session_id=session_id, auto_close_ms=3200)
+            self.add_system_toast("自动化任务已启动", "success", session_id=session_id, auto_close_ms=3200)
         return True
 
     def check_automation_schedules(self):
@@ -12185,7 +12602,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         count = self.chat_storage.archive_conversations_for_workspace(path)
-        self.add_system_toast(f"已归档 {count} 个对话。", "success" if count else "info", auto_close_ms=3200)
+        self.add_system_toast(f"已归档 {count} 个对话", "success" if count else "info", auto_close_ms=3200)
         self.refresh_history_list()
 
     def create_git_worktree_for_project(self, path):
@@ -12213,7 +12630,7 @@ class MainWindow(QMainWindow):
             return
         self.config_manager.upsert_project(worktree_path)
         self.refresh_history_list()
-        self.add_system_toast("永久工作树已创建并加入项目。", "success", auto_close_ms=3200)
+        self.add_system_toast("永久工作树已创建并加入项目", "success", auto_close_ms=3200)
 
     def show_sidebar_projects_menu(self):
         menu = create_styled_menu(self)
@@ -12251,7 +12668,7 @@ class MainWindow(QMainWindow):
         count = 0
         for path in paths:
             count += self.chat_storage.archive_conversations_for_workspace(path)
-        self.add_system_toast(f"已归档 {count} 个对话。", "success" if count else "info", auto_close_ms=3200)
+        self.add_system_toast(f"已归档 {count} 个对话", "success" if count else "info", auto_close_ms=3200)
         self.refresh_history_list()
 
     def organize_sidebar_projects(self):
@@ -12265,7 +12682,7 @@ class MainWindow(QMainWindow):
             if os.path.isdir(project.get("path") or ""):
                 cleaned.append(project)
         self.config_manager.set_projects(cleaned)
-        self.add_system_toast(f"侧边栏已整理，恢复 {restored} 个项目。", "success", auto_close_ms=3200)
+        self.add_system_toast(f"侧边栏已整理，恢复 {restored} 个项目", "success", auto_close_ms=3200)
         self.refresh_history_list()
 
     def refresh_history_list(self):
@@ -12984,7 +13401,7 @@ class MainWindow(QMainWindow):
         self.memory_update_dialog.show_batch_result(data.get("content") or "", stats)
 
     def handle_memory_update_backgrounded(self):
-        self.add_system_toast("长期记忆正在后台更新。点击“正在更新记忆”可查看进度。", "info", auto_close_ms=5000)
+        self.add_system_toast("长期记忆正在后台更新，可在“正在更新记忆”查看进度", "info", auto_close_ms=5000)
 
     def handle_memory_update_dialog_finished(self, _result):
         if self.memory_update_worker and self.memory_update_worker.isRunning():
@@ -13057,7 +13474,7 @@ class MainWindow(QMainWindow):
             suffix = f"{suffix} 本次处理状态已在批次写入时记录。"
             if self.memory_update_dialog:
                 self.memory_update_dialog.mark_saved(f"长期记忆已保存到 memories.md。{suffix}")
-            self.add_system_toast(f"长期记忆已保存到 memories.md。{suffix}", "success", auto_close_ms=8000)
+            self.add_system_toast(f"长期记忆已保存到 memories.md{suffix}", "success", auto_close_ms=8000)
         except Exception as exc:
             if self.memory_update_dialog:
                 self.memory_update_dialog.show_error(f"保存长期记忆失败：{exc}")
@@ -13436,7 +13853,7 @@ class MainWindow(QMainWindow):
             return
         self.set_session_selected_skills([], session_id=state.session_id)
         self.refresh_context_badges(state.session_id)
-        self.add_system_toast("已移除当前会话指定能力。", "info", session_id=state.session_id, auto_close_ms=2600)
+        self.add_system_toast("已移除指定能力", "info", session_id=state.session_id, auto_close_ms=2600)
 
     def open_session_skill_picker(self):
         state = self.get_current_session()
@@ -13450,7 +13867,7 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec():
             self.set_session_selected_skills(dialog.selected_skill_names(), session_id=state.session_id)
-            self.add_system_toast("当前会话的指定能力已更新。", "success", session_id=state.session_id, auto_close_ms=3200)
+            self.add_system_toast("指定能力已更新", "success", session_id=state.session_id, auto_close_ms=3200)
 
     def open_session_sop_picker(self):
         state = self.get_current_session()
@@ -13476,7 +13893,7 @@ class MainWindow(QMainWindow):
             self.refresh_sop_controls(state.session_id)
             self.refresh_context_badges(state.session_id)
             self.show_context_drawer(self.RIGHT_TAB_SOP)
-            self.add_system_toast("当前会话已绑定自动化。", "success", session_id=state.session_id, auto_close_ms=3200)
+            self.add_system_toast("已绑定自动化", "success", session_id=state.session_id, auto_close_ms=3200)
 
     def clear_session_sop(self, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
@@ -13492,7 +13909,7 @@ class MainWindow(QMainWindow):
             and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SOP
         ):
             self.hide_context_drawer(reason="sop_cleared")
-        self.add_system_toast("已移除当前会话自动化。", "info", session_id=state.session_id, auto_close_ms=2600)
+        self.add_system_toast("已移除自动化", "info", session_id=state.session_id, auto_close_ms=2600)
 
     def confirm_current_sop_step(self):
         state = self.get_current_session()
@@ -13508,11 +13925,11 @@ class MainWindow(QMainWindow):
         if is_sop_completed(state.sop_run):
             self.set_session_phase("Completed", state.session_id)
             self.set_session_status("completed", state.session_id, save=True)
-            self.add_system_toast("自动化已完成。", "success", session_id=state.session_id, auto_close_ms=3200)
+            self.add_system_toast("自动化已完成", "success", session_id=state.session_id, auto_close_ms=3200)
         else:
             self.set_session_phase("Preparing next step", state.session_id)
             self.set_session_status("running", state.session_id, save=True)
-            self.add_system_toast("已确认当前步骤，自动化已推进到下一步。", "success", session_id=state.session_id, auto_close_ms=3200)
+            self.add_system_toast("已确认，进入下一步", "success", session_id=state.session_id, auto_close_ms=3200)
             QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
 
     def rerun_current_sop_step(self):
@@ -13528,7 +13945,7 @@ class MainWindow(QMainWindow):
         self.refresh_context_badges(state.session_id)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id, save=True)
-        self.add_system_toast("当前步骤已恢复为待执行，正在重新执行。", "info", session_id=state.session_id, auto_close_ms=3200)
+        self.add_system_toast("当前步骤已重置，正在重新执行", "info", session_id=state.session_id, auto_close_ms=3200)
         QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
 
     def skip_current_sop_step(self):
@@ -13549,20 +13966,20 @@ class MainWindow(QMainWindow):
         if is_sop_completed(state.sop_run):
             self.set_session_phase("Completed", state.session_id)
             self.set_session_status("completed", state.session_id, save=True)
-            self.add_system_toast("已标记不适用，自动化已完成。", "info", session_id=state.session_id, auto_close_ms=3200)
+            self.add_system_toast("已标记不适用，自动化已完成", "info", session_id=state.session_id, auto_close_ms=3200)
         else:
             self.set_session_phase("Preparing next step", state.session_id)
             self.set_session_status("running", state.session_id, save=True)
-            self.add_system_toast("已标记不适用，自动化已推进到下一步。", "info", session_id=state.session_id, auto_close_ms=3200)
+            self.add_system_toast("已标记不适用，进入下一步", "info", session_id=state.session_id, auto_close_ms=3200)
             QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
 
     def start_conversation_sop_flow(self):
         if self.conversation_sop_worker and self.conversation_sop_worker.isRunning():
-            self.add_system_toast("SOP 草稿正在生成中。", "info", auto_close_ms=3000)
+            self.add_system_toast("SOP 草稿生成中", "info", auto_close_ms=3000)
             return
         state = self.get_current_session()
         if not state or not getattr(state, "messages", []):
-            self.add_system_toast("当前会话没有可提炼 SOP 的内容。", "info", auto_close_ms=4000)
+            self.add_system_toast("当前会话还没有可提炼的 SOP 内容", "info", auto_close_ms=4000)
             return
         self._start_conversation_sop_worker(state)
 
@@ -13577,7 +13994,7 @@ class MainWindow(QMainWindow):
             meta = {}
         if self.workspace_dir:
             meta["workspace_dir"] = self.workspace_dir
-        toast_text = "正在根据修改意见重新生成 SOP 草稿。" if revision_feedback else "开始根据当前会话生成 SOP 草稿。"
+        toast_text = "正在根据修改意见重新生成 SOP 草稿" if revision_feedback else "正在根据当前会话生成 SOP 草稿"
         self.add_system_toast(toast_text, "info", session_id=state.session_id, auto_close_ms=3500)
         self.conversation_sop_worker = ConversationSopDraftWorker(
             self.config_manager,
@@ -13612,7 +14029,7 @@ class MainWindow(QMainWindow):
             self.add_system_toast(f"生成 SOP 草稿失败：{result.get('error') or '未知错误'}", "error", session_id=session_id, auto_close_ms=8000)
             return
         if not state:
-            self.add_system_toast("SOP 草稿已生成，但当前会话不存在。", "error", auto_close_ms=6000)
+            self.add_system_toast("SOP 草稿已生成，但当前会话不存在", "error", auto_close_ms=6000)
             return
 
         preview = ConversationSopPreviewDialog(result.get("draft") or {}, parent=self)
@@ -13628,7 +14045,7 @@ class MainWindow(QMainWindow):
                 revision_feedback=preview.revision_feedback(),
             )
             return
-        self.add_system_toast("已取消生成 SOP 草稿。", "info", session_id=state.session_id, auto_close_ms=4000)
+        self.add_system_toast("已取消生成 SOP 草稿", "info", session_id=state.session_id, auto_close_ms=4000)
 
     def _save_conversation_sop_draft(self, state, draft):
         normalized_draft = normalize_sop_draft(draft)
@@ -13649,7 +14066,7 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.show_context_drawer(self.RIGHT_TAB_SOP)
-        self.add_system_toast("SOP 已生成并绑定到当前会话。", "success", session_id=state.session_id, auto_close_ms=4200)
+        self.add_system_toast("SOP 已生成并绑定到当前会话", "success", session_id=state.session_id, auto_close_ms=4200)
         return True
 
     def update_skill_capture_button_state(self):
@@ -13669,7 +14086,7 @@ class MainWindow(QMainWindow):
             return
         state = self.get_current_session()
         if not state or not getattr(state, "messages", []):
-            self.add_system_toast("当前会话没有可沉淀的内容。", "info", auto_close_ms=4000)
+            self.add_system_toast("当前会话还没有可沉淀的内容", "info", auto_close_ms=4000)
             self.update_skill_capture_button_state()
             return
 
@@ -13691,7 +14108,7 @@ class MainWindow(QMainWindow):
         if self.workspace_dir:
             meta["workspace_dir"] = self.workspace_dir
 
-        self.add_system_toast("开始根据当前会话生成 Skill 草稿。", "info", auto_close_ms=3500)
+        self.add_system_toast("正在根据当前会话生成 Skill 草稿", "info", auto_close_ms=3500)
         self.conversation_skill_worker = ConversationSkillDraftWorker(
             self.config_manager,
             state.session_id,
@@ -13737,7 +14154,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if preview.exec() != QDialog.Accepted:
-            self.add_system_toast("已取消保存 Skill 草稿。", "info", auto_close_ms=4000)
+            self.add_system_toast("已取消保存 Skill 草稿", "info", auto_close_ms=4000)
             return
 
         draft = preview.draft()
@@ -13931,7 +14348,7 @@ class MainWindow(QMainWindow):
                 self.save_chat_history(session_id=state.session_id)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
-        self.add_system_toast("已强制停止当前任务", "warning", session_id=state.session_id)
+        self.add_system_toast("任务已停止", "warning", session_id=state.session_id)
         self.set_session_phase("Interrupted", state.session_id)
         self.set_session_status("interrupted", state.session_id, save=True)
         self.refresh_step_list(state.session_id)
@@ -14012,7 +14429,7 @@ class MainWindow(QMainWindow):
 
         is_current = state.session_id == self.current_session_id
         if is_current:
-            self.add_system_toast("反问已完成，等待用户确认", "info", session_id=state.session_id)
+            self.add_system_toast("反问已完成，等待确认", "info", session_id=state.session_id)
         state.render_items = build_conversation_render_items(state.messages)
         state.displayed_render_count = len(state.render_items)
         self.refresh_change_list(state.session_id)
@@ -14141,7 +14558,7 @@ class MainWindow(QMainWindow):
                     traceback=traceback.format_exc(),
                 )
                 self.add_system_toast(
-                    f"召唤智能体失败：{profile.get('name') or '未命名智能体'} - {exc}",
+                    f"智能体启动失败：{profile.get('name') or '未命名智能体'} - {exc}",
                     "error",
                     session_id=state.session_id,
                     auto_close_ms=6000,
@@ -14165,7 +14582,7 @@ class MainWindow(QMainWindow):
             summary_text = f"{summary_text}\n当前自动化步骤：{step.get('title') or '未命名步骤'}"
         state.last_agent_bubble = self.add_chat_bubble("agent", summary_text, animate=False, force_scroll=True)
         self.add_system_toast(
-            f"已启动 {len(started_profiles)} 个智能体，完成后会回填结果。",
+            f"已启动 {len(started_profiles)} 个智能体，结果会自动回填",
             "success",
             session_id=state.session_id,
             auto_close_ms=3500,
@@ -14655,7 +15072,7 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state: return
         toast = SystemToast(text, type)
-        state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast)
+        state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast, 0, Qt.AlignHCenter)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
         self.process_ui_events(force=True)
         if auto_close_ms: QTimer.singleShot(auto_close_ms, toast.deleteLater)
@@ -15383,7 +15800,7 @@ class MainWindow(QMainWindow):
 
         if "error" in result:
             self.append_log(f"Error: {result['error']}")
-            self.add_system_toast(f"Error: {result['error']}", "error", session_id=state.session_id)
+            self.add_system_toast(f"任务执行失败：{result['error']}", "error", session_id=state.session_id)
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
             bubble.set_main_content(f"⚠️ Error: {result['error']}", final=True)
@@ -15542,7 +15959,7 @@ class MainWindow(QMainWindow):
             god_mode = self.config_manager.get_god_mode()
             
             if god_mode:
-                 self.add_system_toast("⚠️ God Mode 已启用：正在执行高权限代码，请注意风险", "warning", session_id=state.session_id)
+                 self.add_system_toast("God Mode 已开启，正在执行高权限代码", "warning", session_id=state.session_id)
 
             state.code_worker = CodeWorker(code_block, self.workspace_dir, god_mode=god_mode)
             state.code_worker.output_signal.connect(lambda text, sid=state.session_id: self.handle_code_output(text, sid))

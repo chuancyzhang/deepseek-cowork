@@ -90,6 +90,14 @@ class DesignTokens:
     info_border = "#bfdbfe"
     info_icon = "#1e40af"
 
+    toast_bg = "rgba(255, 255, 255, 0.94)"
+    toast_border = "#dde3ec"
+    toast_shadow_alpha = 10
+    toast_tint_success = "#eefaf3"
+    toast_tint_error = "#fdf0f0"
+    toast_tint_warning = "#fff7ea"
+    toast_tint_info = "#eef5ff"
+
     muted_chip_bg = "#f0f0f3"
     muted_chip_text = "#636366"
 

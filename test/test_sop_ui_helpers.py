@@ -9,9 +9,20 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
-from main import QApplication, MainWindow, SubAgentEventSummaryRow, SubAgentEventTile, SubAgentMonitor
+from main import (
+    QApplication,
+    AutomationTaskDialog,
+    MainWindow,
+    SopTemplateManager,
+    SystemToast,
+    SubAgentEventSummaryRow,
+    SubAgentEventTile,
+    SubAgentMonitor,
+    SOP_EXECUTOR_BASH_COMMAND,
+    SOP_EXECUTOR_PYTHON_FILE,
+)
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtWidgets import QScrollArea, QWidget
+from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
 
 
 class _State:
@@ -134,7 +145,7 @@ class TestSopUiHelpers(unittest.TestCase):
         window.start_conversation_sop_flow()
 
         window.add_system_toast.assert_called_once()
-        self.assertIn("没有可提炼 SOP", window.add_system_toast.call_args.args[0])
+        self.assertIn("还没有可提炼的 SOP 内容", window.add_system_toast.call_args.args[0])
 
     def test_start_conversation_sop_flow_skips_when_worker_running(self):
         window = MainWindow.__new__(MainWindow)
@@ -146,7 +157,21 @@ class TestSopUiHelpers(unittest.TestCase):
         window.start_conversation_sop_flow()
 
         window.add_system_toast.assert_called_once()
-        self.assertIn("正在生成中", window.add_system_toast.call_args.args[0])
+        self.assertEqual("SOP 草稿生成中", window.add_system_toast.call_args.args[0])
+
+    def test_system_toast_uses_compact_wrapped_layout(self):
+        app = QApplication.instance() or QApplication([])
+        toast = SystemToast("已绑定自动化，正在等待下一步执行说明", "success")
+        app.processEvents()
+
+        self.assertEqual("SystemToast", toast.objectName())
+        self.assertLessEqual(toast.maximumWidth(), 720)
+        self.assertIs(toast.icon_label, toast.icon_badge)
+        self.assertTrue(toast.message_label.wordWrap())
+
+        text_label = toast.findChild(QLabel, "SystemToastText")
+        self.assertIsNotNone(text_label)
+        self.assertEqual("已绑定自动化，正在等待下一步执行说明", text_label.text())
 
     def test_save_conversation_sop_draft_saves_template_and_binds_run(self):
         window = MainWindow.__new__(MainWindow)
@@ -184,6 +209,75 @@ class TestSopUiHelpers(unittest.TestCase):
         config_manager.set_sop_templates.assert_called_once()
         window.save_chat_history.assert_called_once_with(session_id="session-1")
         window.show_context_drawer.assert_called_once_with(MainWindow.RIGHT_TAB_SOP)
+
+    def test_sop_template_manager_saves_step_executor_fields(self):
+        app = QApplication.instance() or QApplication([])
+        manager = SopTemplateManager(
+            [
+                {
+                    "id": "office",
+                    "name": "Office",
+                    "steps": [{"title": "Step 1"}],
+                }
+            ],
+            skill_provider=lambda: [],
+            agent_profile_provider=lambda: [],
+        )
+        manager.template_list.setCurrentRow(0)
+        manager.step_list.setCurrentRow(0)
+        app.processEvents()
+
+        manager.step_executor_type_combo.setCurrentIndex(
+            manager.step_executor_type_combo.findData(SOP_EXECUTOR_BASH_COMMAND)
+        )
+        manager.step_bash_command_edit.setPlainText("echo hi")
+        manager.step_timeout_spin.setValue(42)
+
+        templates = manager.get_templates()
+        self.assertEqual(templates[0]["steps"][0]["executor_type"], SOP_EXECUTOR_BASH_COMMAND)
+        self.assertEqual(templates[0]["steps"][0]["bash_command"], "echo hi")
+        self.assertEqual(templates[0]["steps"][0]["timeout_seconds"], 42)
+
+    def test_sop_template_manager_uploads_python_script_asset(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = os.path.join(temp_dir, "demo.py")
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write("print('ok')\n")
+            with patch("main.get_app_data_dir", return_value=temp_dir), patch(
+                "main.QFileDialog.getOpenFileName",
+                return_value=(script_path, "Python Files (*.py)"),
+            ):
+                manager = SopTemplateManager(
+                    [{"id": "office", "name": "Office", "steps": [{"title": "Step 1"}]}],
+                    skill_provider=lambda: [],
+                    agent_profile_provider=lambda: [],
+                )
+                manager.template_list.setCurrentRow(0)
+                manager.step_list.setCurrentRow(0)
+                app.processEvents()
+                manager._choose_step_python_script()
+
+                templates = manager.get_templates()
+                script = templates[0]["steps"][0]["python_script"]
+                self.assertEqual(templates[0]["steps"][0]["executor_type"], SOP_EXECUTOR_PYTHON_FILE)
+                self.assertEqual(script["filename"], "demo.py")
+                self.assertTrue(os.path.isfile(script["path"]))
+                self.assertEqual(script["source_path"], os.path.normpath(script_path))
+
+    def test_automation_task_dialog_returns_cron_payload(self):
+        app = QApplication.instance() or QApplication([])
+        dialog = AutomationTaskDialog(
+            [{"id": "tpl-1", "name": "Template", "steps": [{"title": "Step 1"}]}]
+        )
+        dialog.schedule_mode_combo.setCurrentIndex(dialog.schedule_mode_combo.findData("cron"))
+        dialog.cron_expression_input.setText("15 8 * * 1-5")
+        app.processEvents()
+
+        payload = dialog.task_payload()
+
+        self.assertEqual(payload["schedule_type"], "cron")
+        self.assertEqual(payload["cron_expression"], "15 8 * * 1-5")
 
     def test_add_prompt_files_loads_workspace_and_tracks_attachments(self):
         class _InputField:

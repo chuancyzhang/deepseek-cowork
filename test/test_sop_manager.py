@@ -7,6 +7,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.sop_manager import (
     SOP_ADVANCE_MODE_AUTO,
     SOP_ADVANCE_MODE_MANUAL,
+    SOP_EXECUTOR_AGENT,
+    SOP_EXECUTOR_BASH_COMMAND,
+    SOP_EXECUTOR_PYTHON_FILE,
     SOP_RUN_STATUS_ACTIVE,
     SOP_RUN_STATUS_AWAITING_CONFIRMATION,
     SOP_RUN_STATUS_COMPLETED,
@@ -57,6 +60,38 @@ class TestSopManager(unittest.TestCase):
         self.assertEqual(len(templates[0]["steps"]), 1)
         self.assertEqual(templates[0]["id"], "office")
         self.assertEqual(templates[1]["id"], "office-2")
+        self.assertEqual(templates[0]["steps"][0]["executor_type"], SOP_EXECUTOR_AGENT)
+
+    def test_sop_run_preserves_python_and_bash_executor_fields(self):
+        run = create_sop_run(
+            {
+                "id": "office",
+                "name": "Office",
+                "steps": [
+                    {
+                        "title": "Run Python",
+                        "executor_type": SOP_EXECUTOR_PYTHON_FILE,
+                        "python_script": {
+                            "asset_id": "py-1",
+                            "filename": "job.py",
+                            "path": "C:\\tmp\\job.py",
+                        },
+                        "timeout_seconds": 45,
+                    },
+                    {
+                        "title": "Run Bash",
+                        "executor_type": SOP_EXECUTOR_BASH_COMMAND,
+                        "bash_command": "echo hi",
+                        "timeout_seconds": 20,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(run["steps"][0]["executor_type"], SOP_EXECUTOR_PYTHON_FILE)
+        self.assertEqual(run["steps"][0]["python_script"]["filename"], "job.py")
+        self.assertEqual(run["steps"][0]["timeout_seconds"], 45)
+        self.assertEqual(run["steps"][1]["executor_type"], SOP_EXECUTOR_BASH_COMMAND)
+        self.assertEqual(run["steps"][1]["bash_command"], "echo hi")
 
     def test_sop_run_lifecycle_confirm_rerun_and_skip(self):
         run = create_sop_run(
@@ -134,6 +169,24 @@ class TestSopManager(unittest.TestCase):
         self.assertIn("整理本周日报", payload["content"])
         self.assertIn("第一步已完成", payload["content"])
         self.assertIn("Step 2", payload["display_content"])
+
+    def test_append_step_output_keeps_metadata(self):
+        run = create_sop_run(
+            {
+                "id": "office",
+                "name": "Office",
+                "steps": [{"title": "Step 1"}],
+            }
+        )
+        run = append_step_output(
+            run,
+            content="done",
+            executor="python_file",
+            status="error",
+            metadata={"exit_code": 2},
+        )
+        self.assertEqual(run["step_outputs"][0]["metadata"]["exit_code"], 2)
+        self.assertEqual(run["step_outputs"][0]["status"], "error")
 
     def test_prompt_fragment_mentions_current_step_and_strict_rules(self):
         run = normalize_sop_run(

@@ -1,11 +1,18 @@
 import calendar
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timedelta
 
+try:
+    from croniter import croniter
+except Exception:
+    croniter = None
+
 
 AUTOMATION_SCHEDULE_ONCE = "once"
+AUTOMATION_SCHEDULE_CRON = "cron"
 AUTOMATION_SCHEDULE_DAILY = "daily"
 AUTOMATION_SCHEDULE_WEEKLY = "weekly"
 AUTOMATION_SCHEDULE_MONTHLY = "monthly"
@@ -13,6 +20,7 @@ AUTOMATION_SCHEDULE_INTERVAL = "interval"
 
 AUTOMATION_SCHEDULE_TYPES = {
     AUTOMATION_SCHEDULE_ONCE,
+    AUTOMATION_SCHEDULE_CRON,
     AUTOMATION_SCHEDULE_DAILY,
     AUTOMATION_SCHEDULE_WEEKLY,
     AUTOMATION_SCHEDULE_MONTHLY,
@@ -90,6 +98,128 @@ def _candidate_for_month(year, month, day, hour, minute):
     return datetime(year, month, day, hour, minute)
 
 
+def _replace_cron_aliases(text, aliases):
+    result = str(text or "")
+    for alias, value in (aliases or {}).items():
+        result = re.sub(rf"\b{re.escape(alias)}\b", str(value), result)
+    return result
+
+
+def _parse_cron_part(part, min_value, max_value, names=None):
+    text = str(part or "").strip().lower()
+    if names:
+        text = _replace_cron_aliases(text, names)
+    if not text:
+        raise ValueError("empty cron field")
+    values = set()
+    for chunk in text.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            raise ValueError("empty cron item")
+        step = 1
+        if "/" in chunk:
+            chunk, step_text = chunk.split("/", 1)
+            step = int(step_text)
+            if step <= 0:
+                raise ValueError("cron step must be greater than 0")
+        if chunk == "*":
+            start, end = min_value, max_value
+        elif "-" in chunk:
+            start_text, end_text = chunk.split("-", 1)
+            start, end = int(start_text), int(end_text)
+        else:
+            start = end = int(chunk)
+        if start < min_value or end > max_value or start > end:
+            raise ValueError("cron value is out of range")
+        for value in range(start, end + 1, step):
+            values.add(value)
+    return values
+
+
+def normalize_cron_expression(value, fallback="0 9 * * *"):
+    text = str(value or "").strip()
+    if not text:
+        text = fallback
+    parts = text.split()
+    if len(parts) != 5:
+        return fallback
+    try:
+        _parse_cron_part(parts[0], 0, 59)
+        _parse_cron_part(parts[1], 0, 23)
+        _parse_cron_part(parts[2], 1, 31)
+        _parse_cron_part(parts[3], 1, 12)
+        _parse_cron_part(parts[4], 0, 7)
+    except Exception:
+        return fallback
+    return " ".join(parts)
+
+
+def validate_cron_expression(value):
+    text = str(value or "").strip()
+    return bool(text and normalize_cron_expression(text, fallback="") == text)
+
+
+def cron_expression_from_legacy_schedule(task):
+    source = dict(task or {})
+    schedule_type = str(source.get("schedule_type") or AUTOMATION_SCHEDULE_DAILY).strip().lower()
+    _time_text, hour, minute = _parse_time_of_day(source.get("time_of_day"))
+    if schedule_type == AUTOMATION_SCHEDULE_WEEKLY:
+        weekdays = _normalize_weekdays(source.get("weekdays"))
+        cron_weekdays = [str((weekday + 1) % 7) for weekday in weekdays]
+        return f"{minute} {hour} * * {','.join(cron_weekdays)}"
+    if schedule_type == AUTOMATION_SCHEDULE_MONTHLY:
+        try:
+            day_of_month = max(1, min(int(source.get("day_of_month") or 1), 31))
+        except Exception:
+            day_of_month = 1
+        return f"{minute} {hour} {day_of_month} * *"
+    if schedule_type == AUTOMATION_SCHEDULE_INTERVAL:
+        try:
+            interval_minutes = max(1, int(source.get("interval_minutes") or 60))
+        except Exception:
+            interval_minutes = 60
+        if interval_minutes < 60:
+            return f"*/{interval_minutes} * * * *"
+        if interval_minutes % 60 == 0 and interval_minutes // 60 <= 23:
+            return f"0 */{interval_minutes // 60} * * *"
+        return "*/59 * * * *"
+    return f"{minute} {hour} * * *"
+
+
+def _cron_matches(candidate, expression):
+    parts = expression.split()
+    minute_values = _parse_cron_part(parts[0], 0, 59)
+    hour_values = _parse_cron_part(parts[1], 0, 23)
+    day_values = _parse_cron_part(parts[2], 1, 31)
+    month_values = _parse_cron_part(parts[3], 1, 12)
+    weekday_values = _parse_cron_part(parts[4], 0, 7)
+    cron_weekday = (candidate.weekday() + 1) % 7
+    weekday_match = cron_weekday in weekday_values or (cron_weekday == 0 and 7 in weekday_values)
+    return (
+        candidate.minute in minute_values
+        and candidate.hour in hour_values
+        and candidate.day in day_values
+        and candidate.month in month_values
+        and weekday_match
+    )
+
+
+def compute_next_cron_run_at(expression, now_ts=None, after_ts=None):
+    now_ts = int(now_ts or time.time())
+    base_ts = int(after_ts if after_ts is not None else now_ts)
+    cron_expression = normalize_cron_expression(expression)
+    base_dt = datetime.fromtimestamp(base_ts)
+    if croniter:
+        return int(croniter(cron_expression, base_dt).get_next(datetime).timestamp())
+    candidate = base_dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    max_minutes = 366 * 24 * 60 * 5
+    for _index in range(max_minutes):
+        if _cron_matches(candidate, cron_expression):
+            return int(candidate.timestamp())
+        candidate += timedelta(minutes=1)
+    return int((base_dt + timedelta(days=1)).timestamp())
+
+
 def compute_next_run_at(task, now_ts=None, after_ts=None):
     source = dict(task or {})
     now_ts = int(now_ts or time.time())
@@ -104,6 +234,17 @@ def compute_next_run_at(task, now_ts=None, after_ts=None):
         except Exception:
             one_time_at = 0
         return one_time_at
+
+    if schedule_type == AUTOMATION_SCHEDULE_CRON:
+        return compute_next_cron_run_at(source.get("cron_expression"), now_ts=now_ts, after_ts=base_ts)
+
+    cron_expression = str(source.get("cron_expression") or "").strip()
+    if cron_expression and schedule_type in {
+        AUTOMATION_SCHEDULE_DAILY,
+        AUTOMATION_SCHEDULE_WEEKLY,
+        AUTOMATION_SCHEDULE_MONTHLY,
+    }:
+        return compute_next_cron_run_at(cron_expression, now_ts=now_ts, after_ts=base_ts)
 
     if schedule_type == AUTOMATION_SCHEDULE_INTERVAL:
         try:
@@ -179,6 +320,9 @@ def describe_schedule(task):
         except Exception:
             interval_minutes = 60
         return f"每隔 {interval_minutes} 分钟"
+    if schedule_type == AUTOMATION_SCHEDULE_CRON:
+        expression = normalize_cron_expression(source.get("cron_expression"))
+        return f"Cron · {expression}"
     time_text, _hour, _minute = _parse_time_of_day(source.get("time_of_day"))
     if schedule_type == AUTOMATION_SCHEDULE_WEEKLY:
         weekday_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -232,6 +376,10 @@ def normalize_automation_task(task, valid_template_ids=None, now_ts=None):
         "prompt": str(source.get("prompt") or "").strip(),
         "enabled": bool(source.get("enabled", True)),
         "schedule_type": schedule_type,
+        "cron_expression": normalize_cron_expression(
+            source.get("cron_expression")
+            or (cron_expression_from_legacy_schedule(source) if schedule_type != AUTOMATION_SCHEDULE_ONCE else "")
+        ),
         "time_of_day": time_text,
         "weekdays": _normalize_weekdays(source.get("weekdays")),
         "day_of_month": day_of_month,

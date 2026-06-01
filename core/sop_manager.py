@@ -18,6 +18,16 @@ SOP_ADVANCE_MODE_MANUAL = "manual"
 SOP_ADVANCE_MODE_AUTO = "auto"
 SOP_ADVANCE_MODE_INHERIT = "inherit"
 
+SOP_EXECUTOR_AGENT = "agent"
+SOP_EXECUTOR_PYTHON_FILE = "python_file"
+SOP_EXECUTOR_BASH_COMMAND = "bash_command"
+SOP_EXECUTOR_TYPES = {
+    SOP_EXECUTOR_AGENT,
+    SOP_EXECUTOR_PYTHON_FILE,
+    SOP_EXECUTOR_BASH_COMMAND,
+}
+DEFAULT_SOP_STEP_TIMEOUT_SECONDS = 300
+
 SOP_RUN_STATUSES = {
     SOP_RUN_STATUS_ACTIVE,
     SOP_RUN_STATUS_AWAITING_CONFIRMATION,
@@ -70,6 +80,30 @@ def _normalize_string_list(values):
     return normalized
 
 
+def _normalize_executor_type(value):
+    executor_type = str(value or SOP_EXECUTOR_AGENT).strip().lower()
+    return executor_type if executor_type in SOP_EXECUTOR_TYPES else SOP_EXECUTOR_AGENT
+
+
+def _normalize_timeout_seconds(value):
+    try:
+        timeout_seconds = int(value or DEFAULT_SOP_STEP_TIMEOUT_SECONDS)
+    except Exception:
+        timeout_seconds = DEFAULT_SOP_STEP_TIMEOUT_SECONDS
+    return max(1, min(timeout_seconds, 24 * 60 * 60))
+
+
+def _normalize_python_script(value):
+    if not isinstance(value, dict):
+        return {}
+    return {
+        "asset_id": str(value.get("asset_id") or "").strip(),
+        "filename": str(value.get("filename") or value.get("name") or "").strip(),
+        "path": str(value.get("path") or "").strip(),
+        "source_path": str(value.get("source_path") or "").strip(),
+    }
+
+
 def default_sop_templates():
     now = int(time.time())
     return [
@@ -110,12 +144,17 @@ def _normalize_sop_step(step, index=0):
     advance_mode = str(source.get("advance_mode") or SOP_ADVANCE_MODE_INHERIT).strip().lower()
     if advance_mode not in SOP_STEP_ADVANCE_MODES:
         advance_mode = SOP_ADVANCE_MODE_INHERIT
+    executor_type = _normalize_executor_type(source.get("executor_type"))
     return {
         "title": title or f"步骤 {index + 1}",
         "instructions": instructions,
         "success_criteria": success_criteria,
         "allow_skip": bool(source.get("allow_skip", False)),
         "advance_mode": advance_mode,
+        "executor_type": executor_type,
+        "python_script": _normalize_python_script(source.get("python_script")),
+        "bash_command": str(source.get("bash_command") or "").strip(),
+        "timeout_seconds": _normalize_timeout_seconds(source.get("timeout_seconds")),
     }
 
 
@@ -189,6 +228,10 @@ def normalize_sop_run(run):
                 "success_criteria": str(step.get("success_criteria") or "").strip(),
                 "allow_skip": bool(step.get("allow_skip", False)),
                 "advance_mode": advance_mode,
+                "executor_type": _normalize_executor_type(step.get("executor_type")),
+                "python_script": _normalize_python_script(step.get("python_script")),
+                "bash_command": str(step.get("bash_command") or "").strip(),
+                "timeout_seconds": _normalize_timeout_seconds(step.get("timeout_seconds")),
                 "status": str(step.get("status") or SOP_STEP_STATUS_PENDING).strip()
                 if str(step.get("status") or "").strip() in SOP_STEP_STATUSES
                 else SOP_STEP_STATUS_PENDING,
@@ -253,16 +296,17 @@ def normalize_sop_run(run):
             step_index = int(record.get("step_index"))
         except Exception:
             continue
-        run_obj["step_outputs"].append(
-            {
-                "step_index": step_index,
-                "title": str(record.get("title") or "").strip(),
-                "content": str(record.get("content") or "").strip(),
-                "executor": str(record.get("executor") or "").strip(),
-                "ts": int(record.get("ts") or 0),
-                "status": str(record.get("status") or "").strip(),
-            }
-        )
+        output_entry = {
+            "step_index": step_index,
+            "title": str(record.get("title") or "").strip(),
+            "content": str(record.get("content") or "").strip(),
+            "executor": str(record.get("executor") or "").strip(),
+            "ts": int(record.get("ts") or 0),
+            "status": str(record.get("status") or "").strip(),
+        }
+        if isinstance(record.get("metadata"), dict):
+            output_entry["metadata"] = _json_copy(record.get("metadata"), {})
+        run_obj["step_outputs"].append(output_entry)
     if status == SOP_RUN_STATUS_COMPLETED:
         for step in run_obj["steps"]:
             if step["status"] == SOP_STEP_STATUS_PENDING:
@@ -284,6 +328,10 @@ def create_sop_run(template):
                 "success_criteria": step.get("success_criteria") or "",
                 "allow_skip": bool(step.get("allow_skip", False)),
                 "advance_mode": step.get("advance_mode") or SOP_ADVANCE_MODE_INHERIT,
+                "executor_type": step.get("executor_type") or SOP_EXECUTOR_AGENT,
+                "python_script": _normalize_python_script(step.get("python_script")),
+                "bash_command": step.get("bash_command") or "",
+                "timeout_seconds": _normalize_timeout_seconds(step.get("timeout_seconds")),
                 "status": SOP_STEP_STATUS_PENDING,
                 "confirmed_at": 0,
                 "confirmation_action": "",
@@ -537,7 +585,7 @@ def build_sop_prompt_fragment(run):
     return "\n".join(lines)
 
 
-def append_step_output(run, content="", executor="", status="completed"):
+def append_step_output(run, content="", executor="", status="completed", metadata=None):
     normalized = normalize_sop_run(run)
     if not normalized:
         return normalized
@@ -547,16 +595,17 @@ def append_step_output(run, content="", executor="", status="completed"):
     current_index = normalized.get("current_step_index", 0)
     outputs = list(normalized.get("step_outputs") or [])
     outputs = [item for item in outputs if int(item.get("step_index", -1)) != current_index]
-    outputs.append(
-        {
-            "step_index": current_index,
-            "title": step.get("title") or f"步骤 {current_index + 1}",
-            "content": str(content or "").strip(),
-            "executor": str(executor or "").strip(),
-            "ts": int(time.time()),
-            "status": str(status or "").strip() or "completed",
-        }
-    )
+    output = {
+        "step_index": current_index,
+        "title": step.get("title") or f"步骤 {current_index + 1}",
+        "content": str(content or "").strip(),
+        "executor": str(executor or "").strip(),
+        "ts": int(time.time()),
+        "status": str(status or "").strip() or "completed",
+    }
+    if isinstance(metadata, dict):
+        output["metadata"] = _json_copy(metadata, {})
+    outputs.append(output)
     normalized["step_outputs"] = outputs
     return _touch_run(normalized)
 
@@ -600,6 +649,16 @@ def build_step_execution_request(run):
             "3. 完成时明确写出本步结果，方便系统决定是否推进。",
         ]
     )
+    executor_type = str(step.get("executor_type") or SOP_EXECUTOR_AGENT).strip()
+    if executor_type == SOP_EXECUTOR_PYTHON_FILE:
+        script = step.get("python_script") or {}
+        filename = str(script.get("filename") or script.get("path") or "").strip()
+        if filename:
+            lines.extend(["执行器:", f"Python 文件：{filename}"])
+    elif executor_type == SOP_EXECUTOR_BASH_COMMAND:
+        command = str(step.get("bash_command") or "").strip()
+        if command:
+            lines.extend(["执行器:", f"Bash 命令：{command}"])
     content = "\n".join(lines)
     return {
         "content": content,

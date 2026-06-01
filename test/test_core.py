@@ -7,6 +7,8 @@ import threading
 import time
 import json
 import subprocess
+import types
+from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
@@ -20,7 +22,7 @@ from core import sandbox_runtime
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.agent import LLMWorker
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
-from core.mcp_client import describe_mcp_import_error
+from core.mcp_client import describe_mcp_import_error, _open_streamable_http_transport
 from core.single_instance import (
     UiSingleInstanceServer,
     build_ui_server_name,
@@ -392,6 +394,86 @@ class TestConfigManager(unittest.TestCase):
             "Missing module: httpx_sse",
             describe_mcp_import_error(ModuleNotFoundError("No module named 'httpx_sse'", name="httpx_sse")),
         )
+
+    def test_open_streamable_http_transport_prefers_new_api(self):
+        calls = {}
+
+        class FakeAsyncClient:
+            def __init__(self, headers=None, follow_redirects=None, timeout=None):
+                calls["client_init"] = {
+                    "headers": headers,
+                    "follow_redirects": follow_redirects,
+                    "timeout": timeout,
+                }
+
+            async def __aenter__(self):
+                calls["client_entered"] = True
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                calls["client_exited"] = True
+
+        async def _new_client(url, http_client=None):
+            calls["new_api"] = {"url": url, "http_client": http_client}
+            yield ("read", "write", "session")
+
+        async def _old_client(*args, **kwargs):
+            raise AssertionError("legacy streamablehttp_client should not be used when new API exists")
+
+        fake_streamable_module = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_module.streamable_http_client = asynccontextmanager(_new_client)
+        fake_streamable_module.streamablehttp_client = asynccontextmanager(_old_client)
+        fake_httpx_module = types.ModuleType("httpx")
+        fake_httpx_module.AsyncClient = FakeAsyncClient
+
+        async def _exercise():
+            async with _open_streamable_http_transport("https://example.com/mcp", {"Authorization": "Bearer token"}, 12) as streams:
+                self.assertEqual(streams, ("read", "write", "session"))
+
+        with patch.dict(
+            sys.modules,
+            {
+                "mcp.client.streamable_http": fake_streamable_module,
+                "httpx": fake_httpx_module,
+            },
+        ):
+            asyncio.run(_exercise())
+
+        self.assertEqual(calls["client_init"]["headers"]["Authorization"], "Bearer token")
+        self.assertEqual(calls["client_init"]["timeout"], 12)
+        self.assertEqual(calls["new_api"]["url"], "https://example.com/mcp")
+        self.assertTrue(calls["client_entered"])
+        self.assertTrue(calls["client_exited"])
+
+    def test_open_streamable_http_transport_falls_back_to_legacy_api(self):
+        calls = {}
+
+        async def _old_client(url, headers=None, timeout=None, sse_read_timeout=None):
+            calls["legacy_api"] = {
+                "url": url,
+                "headers": headers,
+                "timeout": timeout,
+                "sse_read_timeout": sse_read_timeout,
+            }
+            yield ("legacy-read", "legacy-write", "legacy-session")
+
+        fake_streamable_module = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_module.streamablehttp_client = asynccontextmanager(_old_client)
+
+        async def _exercise():
+            async with _open_streamable_http_transport("https://legacy.example/mcp", {"X-Token": "abc"}, 18) as streams:
+                self.assertEqual(streams, ("legacy-read", "legacy-write", "legacy-session"))
+
+        with patch.dict(
+            sys.modules,
+            {"mcp.client.streamable_http": fake_streamable_module},
+        ):
+            asyncio.run(_exercise())
+
+        self.assertEqual(calls["legacy_api"]["url"], "https://legacy.example/mcp")
+        self.assertEqual(calls["legacy_api"]["headers"]["X-Token"], "abc")
+        self.assertEqual(calls["legacy_api"]["timeout"], 18)
+        self.assertEqual(calls["legacy_api"]["sse_read_timeout"], 18)
 
     def test_sop_templates_are_normalized_and_persisted(self):
         cm = self._create_config_manager(

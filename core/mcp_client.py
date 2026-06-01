@@ -176,6 +176,31 @@ def _tool_to_payload(tool):
 
 
 @asynccontextmanager
+async def _open_streamable_http_transport(url, headers, timeout_seconds):
+    try:
+        from mcp.client.streamable_http import streamable_http_client
+    except ImportError:
+        streamable_http_client = None
+    from mcp.client.streamable_http import streamablehttp_client
+
+    if streamable_http_client is not None:
+        import httpx
+
+        async with httpx.AsyncClient(headers=headers or None, follow_redirects=True, timeout=timeout_seconds) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as streams:
+                yield streams
+        return
+
+    async with streamablehttp_client(
+        url,
+        headers=headers or None,
+        timeout=timeout_seconds,
+        sse_read_timeout=timeout_seconds,
+    ) as streams:
+        yield streams
+
+
+@asynccontextmanager
 async def _open_mcp_session(server_config):
     transport = normalize_mcp_transport(server_config.get("transport", server_config.get("type")))
     timeout_seconds = _resolve_timeout_seconds(server_config)
@@ -183,7 +208,6 @@ async def _open_mcp_session(server_config):
     try:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
-        from mcp.client.streamable_http import streamablehttp_client
     except ImportError as exc:
         raise RuntimeError(describe_mcp_import_error(exc)) from exc
 
@@ -204,17 +228,11 @@ async def _open_mcp_session(server_config):
 
     url = str(server_config.get("url") or "").strip()
     headers = _stringify_mapping(server_config.get("headers"))
-    if headers:
-        import httpx
-
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=timeout_seconds) as http_client:
-            async with streamablehttp_client(url, http_client=http_client) as (read_stream, write_stream, _get_session_id):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await asyncio.wait_for(session.initialize(), timeout=timeout_seconds)
-                    yield session, timeout_seconds
-        return
-
-    async with streamablehttp_client(url) as (read_stream, write_stream, _get_session_id):
+    async with _open_streamable_http_transport(url, headers, timeout_seconds) as (
+        read_stream,
+        write_stream,
+        _get_session_id,
+    ):
         async with ClientSession(read_stream, write_stream) as session:
             await asyncio.wait_for(session.initialize(), timeout=timeout_seconds)
             yield session, timeout_seconds

@@ -4,6 +4,8 @@ import importlib.metadata as importlib_metadata
 import os
 import re
 import sys
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
 from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 block_cipher = None
@@ -101,10 +103,14 @@ def _extract_requirement_name(requirement):
     text = str(requirement or "").strip()
     if not text:
         return ""
-    if "; extra ==" in text.lower():
+    try:
+        parsed = Requirement(text)
+    except Exception:
+        match = re.match(r"^[A-Za-z0-9_.-]+", text)
+        return match.group(0) if match else ""
+    if parsed.marker and not parsed.marker.evaluate(default_environment()):
         return ""
-    match = re.match(r"^[A-Za-z0-9_.-]+", text)
-    return match.group(0) if match else ""
+    return parsed.name
 
 
 def _require_distribution(name):
@@ -163,19 +169,48 @@ def _distribution_top_level_imports(dist):
     names = set()
     top_level = dist.read_text("top_level.txt") or ""
     for raw_name in top_level.splitlines():
-        name = str(raw_name or "").strip()
+        name = str(raw_name or "").strip().replace("\\", ".").replace("/", ".")
+        if name.endswith(".py"):
+            name = name[:-3]
         if name:
             names.add(name)
     dist_name = str(dist.metadata.get("Name") or "").strip().replace("-", "_")
     if dist_name:
         names.add(dist_name)
-    return sorted(names)
+    valid = []
+    pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+    for name in sorted(names):
+        if pattern.match(name):
+            valid.append(name)
+    return valid
 
 
 def _collect_distribution_runtime_entries(site_packages, root_names):
     datas = []
     seen_entries = set()
     for dist in _resolve_distribution_closure(root_names):
+        dist_files = list(dist.files or [])
+        if dist_files:
+            for file_ref in dist_files:
+                try:
+                    src_path = os.path.abspath(str(dist.locate_file(file_ref)))
+                except Exception:
+                    continue
+                if not os.path.isfile(src_path):
+                    continue
+                try:
+                    if os.path.commonpath([site_packages, src_path]) != os.path.abspath(site_packages):
+                        continue
+                except ValueError:
+                    continue
+                rel_path = os.path.relpath(src_path, site_packages).replace("\\", "/")
+                key = os.path.normcase(rel_path)
+                if key in seen_entries:
+                    continue
+                seen_entries.add(key)
+                _add_data_file(datas, src_path, f"python_env/Lib/site-packages/{rel_path}")
+            continue
+
         for pattern in _distribution_entry_patterns(dist):
             matches = sorted(fnmatch.filter(os.listdir(site_packages), pattern)) if os.path.isdir(site_packages) else []
             for matched in matches:
@@ -193,6 +228,7 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 
 MCP_RUNTIME_DISTS = ["mcp"]
+MCP_ANALYSIS_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
 MCP_ANALYSIS_HIDDENIMPORTS = []
 MCP_DISTRIBUTIONS = []
@@ -212,7 +248,8 @@ except RuntimeError as exc:
             "Temporary bypass: set COWORK_ALLOW_MISSING_MCP=1 to build without bundled MCP support."
         ) from exc
 
-for dist in MCP_DISTRIBUTIONS:
+for dist_name in MCP_ANALYSIS_DISTS:
+    dist = _require_distribution(dist_name)
     dist_name = str(dist.metadata.get("Name") or "").strip()
     if dist_name:
         MCP_ANALYSIS_METADATA.extend(copy_metadata(dist_name))
@@ -275,7 +312,19 @@ def _collect_minimal_python_env(prefix):
         )
     )
 
-    site_packages = os.path.join(lib_dir, "site-packages")
+    site_packages_dirs = [path for path in (
+        os.path.join(python_prefix, "Lib", "site-packages"),
+        os.path.join(prefix, "Lib", "site-packages"),
+    ) if os.path.isdir(path)]
+    deduped_site_packages_dirs = []
+    seen_site_packages = set()
+    for path in site_packages_dirs:
+        normalized = os.path.normcase(os.path.abspath(path))
+        if normalized in seen_site_packages:
+            continue
+        seen_site_packages.add(normalized)
+        deduped_site_packages_dirs.append(path)
+
     minimal_site_packages = [
         "pip",
         "pip-*",
@@ -287,16 +336,18 @@ def _collect_minimal_python_env(prefix):
         "distlib",
         "distlib-*",
     ]
-    for item in minimal_site_packages:
-        for matched in sorted(fnmatch.filter(os.listdir(site_packages), item)) if os.path.isdir(site_packages) else []:
-            src_path = os.path.join(site_packages, matched)
-            dest_path = f"python_env/Lib/site-packages/{matched}"
-            if os.path.isdir(src_path):
-                datas.extend(_collect_tree(src_path, dest_path))
-            else:
-                _add_data_file(datas, src_path, dest_path)
+    for site_packages in deduped_site_packages_dirs:
+        for item in minimal_site_packages:
+            for matched in sorted(fnmatch.filter(os.listdir(site_packages), item)):
+                src_path = os.path.join(site_packages, matched)
+                dest_path = f"python_env/Lib/site-packages/{matched}"
+                if os.path.isdir(src_path):
+                    datas.extend(_collect_tree(src_path, dest_path))
+                else:
+                    _add_data_file(datas, src_path, dest_path)
 
-    datas.extend(_collect_distribution_runtime_entries(site_packages, MCP_RUNTIME_DISTS))
+    for site_packages in deduped_site_packages_dirs:
+        datas.extend(_collect_distribution_runtime_entries(site_packages, MCP_RUNTIME_DISTS))
 
     return datas
 

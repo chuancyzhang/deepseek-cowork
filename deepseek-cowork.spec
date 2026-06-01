@@ -17,6 +17,16 @@ python_runtime_prefix = getattr(sys, "base_prefix", "") or python_prefix
 PYSIDE6_ROOT = os.path.join(python_prefix, "Lib", "site-packages", "PySide6")
 
 
+def _env_flag(name, default=False):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+ALLOW_MISSING_MCP = _env_flag("COWORK_ALLOW_MISSING_MCP", False)
+
+
 def _add_data_file(store, src, dest):
     if not src or not os.path.isfile(src):
         return
@@ -101,9 +111,7 @@ def _require_distribution(name):
     try:
         return importlib_metadata.distribution(name)
     except importlib_metadata.PackageNotFoundError as exc:
-        raise RuntimeError(
-            f"Missing required build dependency '{name}'. Install it before packaging this release."
-        ) from exc
+        raise RuntimeError(f"Missing required build dependency '{name}'.") from exc
 
 
 def _resolve_distribution_closure(root_names):
@@ -187,10 +195,25 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 MCP_RUNTIME_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
 MCP_ANALYSIS_HIDDENIMPORTS = []
-MCP_DISTRIBUTIONS = _resolve_distribution_closure(MCP_RUNTIME_DISTS)
+MCP_DISTRIBUTIONS = []
+try:
+    MCP_DISTRIBUTIONS = _resolve_distribution_closure(MCP_RUNTIME_DISTS)
+except RuntimeError as exc:
+    if ALLOW_MISSING_MCP:
+        print(
+            "[WARN] MCP build dependency is missing. "
+            "Continuing without bundled MCP support because COWORK_ALLOW_MISSING_MCP=1. "
+            f"Details: {exc}"
+        )
+    else:
+        raise RuntimeError(
+            f"{exc} Install project dependencies first, for example: "
+            r"D:\code\cowork\.venv\Scripts\python.exe -m pip install -r requirements.txt. "
+            "Temporary bypass: set COWORK_ALLOW_MISSING_MCP=1 to build without bundled MCP support."
+        ) from exc
 
 for dist in MCP_DISTRIBUTIONS:
-    dist_name = str(dist.metadata.get("Name") or "").strip() or str(dist.metadata.get("Summary") or "").strip()
+    dist_name = str(dist.metadata.get("Name") or "").strip()
     if dist_name:
         MCP_ANALYSIS_METADATA.extend(copy_metadata(dist_name))
     for import_name in _distribution_top_level_imports(dist):
@@ -279,13 +302,6 @@ def _collect_minimal_python_env(prefix):
 
 
 python_env = _collect_minimal_python_env(python_runtime_prefix)
-
-
-def _env_flag(name, default=False):
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 ALLOW_MISSING_RUNTIMES = _env_flag("COWORK_ALLOW_MISSING_RUNTIMES", False)

@@ -106,14 +106,14 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
 - **技能层**：首次调用技能时注入简版能力提示；按需注入技能完整说明与经验。
 - **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与自动化当前步骤，影响工具可见性与 Prompt 约束。
-- **外部工具层**：MCP 配置存储在 `mcp_servers`，兼容 `type = "stdio"` / `type = "streamable_http"` 与 `startup_timeout_ms` 命名；当前只接入 MCP tools，不包含 resources 与 prompts。
+- **外部工具层**：MCP 配置存储在 `mcp_servers`，兼容 `type = "stdio"` / `type = "streamable_http"` 与 `startup_timeout_ms` 命名，也支持从 `mcpServers` / `mcp_servers` JSON 片段导入；当前只接入 MCP tools，不包含 resources 与 prompts。
 - **历史层**：每轮清理/折叠思考内容以避免重复；DeepSeek thinking 工具调用回合保留 `reasoning_content`，避免多轮工具回放触发协议错误。
 - **压缩层**：DeepSeek V4 Pro/Flash 默认 `context_window_tokens=1000000`、`context_budget_ratio=0.8`、最近保留 40 轮；压缩切点会避开 assistant/tool 调用回合边界，避免留下孤立 tool result。
 
 ## 6. 运行模式与环境
 
 *   **源码模式**：建议使用虚拟环境 **.venv\Scripts\python** 启动。
-*   **可执行模式**：PyInstaller 打包后由 `env_utils` 自动定位 Python 与 pip。
+*   **可执行模式**：PyInstaller 打包后由 `env_utils` 自动定位 Python 与 pip，并默认携带 MCP client 及其运行时依赖。
 *   **更新模式**：源码模式只检查 GitHub Releases；可执行模式可下载 ZIP、校验结构、暂存并通过独立脚本关闭旧进程后替换重启。
 
 ## 7. 动态技能加载与自我进化

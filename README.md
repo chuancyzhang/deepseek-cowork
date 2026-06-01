@@ -127,8 +127,10 @@ Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds c
 
 ### 8. MCP Servers
 Open **⚙️ Settings → MCP** to add MCP servers.
+*   Packaged builds bundle the MCP client runtime by default, so end users do not need to install `mcp` separately.
 *   `stdio`: configure command, args, cwd, env, and startup timeout.
 *   Streamable HTTP: configure URL, headers, and startup timeout.
+*   You can also import JSON snippets such as `{"mcpServers":{"showdoc":{"type":"streamable-http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer ..."}}}}`.
 *   v1 scope is **tools only**. MCP resources and prompts are not wired into the agent yet.
 
 ## 🏗️ Architecture

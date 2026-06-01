@@ -25,6 +25,173 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
 
 
+def _slug_config_value(value):
+    text = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip()).strip("-").lower()
+    return text or uuid.uuid4().hex[:8]
+
+
+def normalize_mcp_env_or_headers(value):
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, list):
+        items = []
+        for item in value:
+            if isinstance(item, dict):
+                key = item.get("key") or item.get("name")
+                if key is None:
+                    continue
+                items.append((key, item.get("value")))
+    else:
+        return {}
+    normalized = {}
+    for key, item in items:
+        text_key = str(key or "").strip()
+        if not text_key:
+            continue
+        normalized[text_key] = str(item if item is not None else "")
+    return normalized
+
+
+def normalize_mcp_string_list(value):
+    if not isinstance(value, list):
+        return []
+    items = []
+    for item in value:
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def normalize_mcp_server(server, index=0, used_ids=None):
+    used_ids = used_ids if used_ids is not None else set()
+    if not isinstance(server, dict):
+        return None
+    source = dict(server or {})
+    transport = normalize_mcp_transport(source.get("transport", source.get("type")))
+    name = str(source.get("name") or f"MCP Server {index + 1}").strip() or f"MCP Server {index + 1}"
+    server_id = str(source.get("id") or "").strip() or f"mcp-{_slug_config_value(name)}"
+    base_id = server_id
+    suffix = 2
+    while server_id in used_ids:
+        server_id = f"{base_id}-{suffix}"
+        suffix += 1
+    used_ids.add(server_id)
+    timeout_seconds = int(
+        source.get("timeout_seconds")
+        or (int(source.get("startup_timeout_ms")) / 1000 if source.get("startup_timeout_ms") else 0)
+        or DEFAULT_MCP_TIMEOUT_SECONDS
+    )
+    timeout_seconds = max(5, min(300, timeout_seconds))
+    args = normalize_mcp_string_list(source.get("args"))
+    env = normalize_mcp_env_or_headers(source.get("env"))
+    headers = normalize_mcp_env_or_headers(source.get("headers"))
+    cwd = str(source.get("cwd") or "").strip()
+    if cwd:
+        cwd = os.path.normpath(os.path.abspath(os.path.expanduser(cwd)))
+    return {
+        "id": server_id,
+        "name": name,
+        "enabled": bool(source.get("enabled", True)),
+        "transport": transport,
+        "type": transport,
+        "timeout_seconds": timeout_seconds,
+        "startup_timeout_ms": timeout_seconds * 1000,
+        "command": str(source.get("command") or "").strip(),
+        "args": args,
+        "cwd": cwd,
+        "env": env,
+        "url": str(source.get("url") or "").strip(),
+        "headers": headers,
+    }
+
+
+def normalize_mcp_servers(value):
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    used_ids = set()
+    for index, item in enumerate(value):
+        entry = normalize_mcp_server(item, index=index, used_ids=used_ids)
+        if entry:
+            normalized.append(entry)
+    return normalized
+
+
+def _looks_like_single_mcp_server(value):
+    if not isinstance(value, dict):
+        return False
+    keys = {str(key or "").strip() for key in value.keys()}
+    hint_keys = {
+        "id",
+        "name",
+        "enabled",
+        "transport",
+        "type",
+        "timeout_seconds",
+        "startup_timeout_ms",
+        "command",
+        "args",
+        "cwd",
+        "env",
+        "url",
+        "headers",
+    }
+    return bool(keys & hint_keys)
+
+
+def _coerce_named_mcp_servers(value, container_name):
+    if not isinstance(value, dict):
+        raise ValueError(f"`{container_name}` must be a JSON object.")
+    servers = []
+    for raw_name, raw_server in value.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        if not isinstance(raw_server, dict):
+            raise ValueError(f"`{container_name}.{name}` must be a JSON object.")
+        server = dict(raw_server)
+        if not str(server.get("id") or "").strip():
+            server["id"] = name
+        if not str(server.get("name") or "").strip():
+            server["name"] = name
+        servers.append(server)
+    return servers
+
+
+def parse_mcp_servers_json(value):
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid MCP JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+            ) from exc
+
+    if isinstance(payload, list):
+        return payload
+
+    if _looks_like_single_mcp_server(payload):
+        return [payload]
+
+    if not isinstance(payload, dict):
+        raise ValueError("MCP JSON must be an object, an array, or a single server object.")
+
+    if "mcpServers" in payload:
+        return _coerce_named_mcp_servers(payload.get("mcpServers"), "mcpServers")
+
+    if "mcp_servers" in payload:
+        nested = payload.get("mcp_servers")
+        if isinstance(nested, list):
+            return nested
+        if _looks_like_single_mcp_server(nested):
+            return [nested]
+        return _coerce_named_mcp_servers(nested, "mcp_servers")
+
+    raise ValueError("MCP JSON must contain `mcpServers`, `mcp_servers`, or a server list.")
+
+
 class ConfigManager:
     def __init__(self):
         self.config_file = "config.json"
@@ -248,8 +415,7 @@ class ConfigManager:
         return default_sop_templates()
 
     def _slug(self, value):
-        text = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or "").strip()).strip("-").lower()
-        return text or uuid.uuid4().hex[:8]
+        return _slug_config_value(value)
 
     def _make_model_id(self, provider_id, model_name):
         return f"{provider_id}-{self._slug(model_name)}"
@@ -313,88 +479,16 @@ class ConfigManager:
         return normalize_automation_history(value)
 
     def _normalize_mcp_env_or_headers(self, value):
-        if isinstance(value, dict):
-            items = value.items()
-        elif isinstance(value, list):
-            items = []
-            for item in value:
-                if isinstance(item, dict):
-                    key = item.get("key") or item.get("name")
-                    if key is None:
-                        continue
-                    items.append((key, item.get("value")))
-        else:
-            return {}
-        normalized = {}
-        for key, item in items:
-            text_key = str(key or "").strip()
-            if not text_key:
-                continue
-            normalized[text_key] = str(item if item is not None else "")
-        return normalized
+        return normalize_mcp_env_or_headers(value)
 
     def _normalize_mcp_string_list(self, value):
-        if not isinstance(value, list):
-            return []
-        items = []
-        for item in value:
-            text = str(item or "").strip()
-            if text:
-                items.append(text)
-        return items
+        return normalize_mcp_string_list(value)
 
     def _normalize_mcp_server(self, server, index=0, used_ids=None):
-        used_ids = used_ids if used_ids is not None else set()
-        if not isinstance(server, dict):
-            return None
-        source = dict(server or {})
-        transport = normalize_mcp_transport(source.get("transport", source.get("type")))
-        name = str(source.get("name") or f"MCP Server {index + 1}").strip() or f"MCP Server {index + 1}"
-        server_id = str(source.get("id") or "").strip() or f"mcp-{self._slug(name)}"
-        base_id = server_id
-        suffix = 2
-        while server_id in used_ids:
-            server_id = f"{base_id}-{suffix}"
-            suffix += 1
-        used_ids.add(server_id)
-        timeout_seconds = int(
-            source.get("timeout_seconds")
-            or (int(source.get("startup_timeout_ms")) / 1000 if source.get("startup_timeout_ms") else 0)
-            or DEFAULT_MCP_TIMEOUT_SECONDS
-        )
-        timeout_seconds = max(5, min(300, timeout_seconds))
-        args = self._normalize_mcp_string_list(source.get("args"))
-        env = self._normalize_mcp_env_or_headers(source.get("env"))
-        headers = self._normalize_mcp_env_or_headers(source.get("headers"))
-        cwd = str(source.get("cwd") or "").strip()
-        if cwd:
-            cwd = os.path.normpath(os.path.abspath(os.path.expanduser(cwd)))
-        return {
-            "id": server_id,
-            "name": name,
-            "enabled": bool(source.get("enabled", True)),
-            "transport": transport,
-            "type": transport,
-            "timeout_seconds": timeout_seconds,
-            "startup_timeout_ms": timeout_seconds * 1000,
-            "command": str(source.get("command") or "").strip(),
-            "args": args,
-            "cwd": cwd,
-            "env": env,
-            "url": str(source.get("url") or "").strip(),
-            "headers": headers,
-        }
+        return normalize_mcp_server(server, index=index, used_ids=used_ids)
 
     def _normalize_mcp_servers(self, value):
-        if not isinstance(value, list):
-            return []
-        normalized = []
-        used_ids = set()
-        for index, item in enumerate(value):
-            entry = self._normalize_mcp_server(item, index=index, used_ids=used_ids)
-            if entry:
-                normalized.append(entry)
-        return normalized
+        return normalize_mcp_servers(value)
 
     def _normalize_project_path(self, path):
         text = str(path or "").strip()

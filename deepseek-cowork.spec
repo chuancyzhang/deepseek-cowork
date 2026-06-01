@@ -1,7 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 import fnmatch
+import importlib.metadata as importlib_metadata
 import os
+import re
 import sys
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 block_cipher = None
 
@@ -80,6 +83,126 @@ def _collect_tree_for_analysis(src_root, dest_root, exclude_dirs=None, exclude_g
     return collected
 
 
+def _canonical_dist_name(name):
+    return re.sub(r"[-_.]+", "-", str(name or "").strip()).lower()
+
+
+def _extract_requirement_name(requirement):
+    text = str(requirement or "").strip()
+    if not text:
+        return ""
+    if "; extra ==" in text.lower():
+        return ""
+    match = re.match(r"^[A-Za-z0-9_.-]+", text)
+    return match.group(0) if match else ""
+
+
+def _require_distribution(name):
+    try:
+        return importlib_metadata.distribution(name)
+    except importlib_metadata.PackageNotFoundError as exc:
+        raise RuntimeError(
+            f"Missing required build dependency '{name}'. Install it before packaging this release."
+        ) from exc
+
+
+def _resolve_distribution_closure(root_names):
+    ordered = []
+    queue = [str(name or "").strip() for name in (root_names or []) if str(name or "").strip()]
+    seen = set()
+    while queue:
+        current = queue.pop(0)
+        key = _canonical_dist_name(current)
+        if not key or key in seen:
+            continue
+        dist = _require_distribution(current)
+        seen.add(key)
+        ordered.append(dist)
+        for requirement in dist.requires or []:
+            requirement_name = _extract_requirement_name(requirement)
+            if requirement_name:
+                queue.append(requirement_name)
+    return ordered
+
+
+def _distribution_entry_patterns(dist):
+    names = set()
+    dist_name = str(dist.metadata.get("Name") or "").strip()
+    if dist_name:
+        names.add(dist_name)
+        names.add(dist_name.replace("-", "_"))
+    top_level = dist.read_text("top_level.txt") or ""
+    for raw_name in top_level.splitlines():
+        name = str(raw_name or "").strip()
+        if name:
+            names.add(name)
+
+    patterns = []
+    for name in sorted(names):
+        patterns.extend(
+            [
+                name,
+                f"{name}.py",
+                f"{name}.pyd",
+                f"{name}-*",
+                f"{name.replace('_', '-')}-*",
+            ]
+        )
+    return patterns
+
+
+def _distribution_top_level_imports(dist):
+    names = set()
+    top_level = dist.read_text("top_level.txt") or ""
+    for raw_name in top_level.splitlines():
+        name = str(raw_name or "").strip()
+        if name:
+            names.add(name)
+    dist_name = str(dist.metadata.get("Name") or "").strip().replace("-", "_")
+    if dist_name:
+        names.add(dist_name)
+    return sorted(names)
+
+
+def _collect_distribution_runtime_entries(site_packages, root_names):
+    datas = []
+    seen_entries = set()
+    for dist in _resolve_distribution_closure(root_names):
+        for pattern in _distribution_entry_patterns(dist):
+            matches = sorted(fnmatch.filter(os.listdir(site_packages), pattern)) if os.path.isdir(site_packages) else []
+            for matched in matches:
+                key = os.path.normcase(matched)
+                if key in seen_entries:
+                    continue
+                seen_entries.add(key)
+                src_path = os.path.join(site_packages, matched)
+                dest_path = f"python_env/Lib/site-packages/{matched}"
+                if os.path.isdir(src_path):
+                    datas.extend(_collect_tree(src_path, dest_path))
+                else:
+                    _add_data_file(datas, src_path, dest_path)
+    return datas
+
+
+MCP_RUNTIME_DISTS = ["mcp"]
+MCP_ANALYSIS_METADATA = []
+MCP_ANALYSIS_HIDDENIMPORTS = []
+MCP_DISTRIBUTIONS = _resolve_distribution_closure(MCP_RUNTIME_DISTS)
+
+for dist in MCP_DISTRIBUTIONS:
+    dist_name = str(dist.metadata.get("Name") or "").strip() or str(dist.metadata.get("Summary") or "").strip()
+    if dist_name:
+        MCP_ANALYSIS_METADATA.extend(copy_metadata(dist_name))
+    for import_name in _distribution_top_level_imports(dist):
+        MCP_ANALYSIS_HIDDENIMPORTS.append(import_name)
+        try:
+            MCP_ANALYSIS_HIDDENIMPORTS.extend(collect_submodules(import_name))
+        except Exception:
+            continue
+
+MCP_ANALYSIS_HIDDENIMPORTS = sorted(set(MCP_ANALYSIS_HIDDENIMPORTS))
+
+
 def _collect_minimal_python_env(prefix):
     datas = []
 
@@ -149,6 +272,8 @@ def _collect_minimal_python_env(prefix):
                 datas.extend(_collect_tree(src_path, dest_path))
             else:
                 _add_data_file(datas, src_path, dest_path)
+
+    datas.extend(_collect_distribution_runtime_entries(site_packages, MCP_RUNTIME_DISTS))
 
     return datas
 
@@ -301,8 +426,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('skills', 'skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas,
-    hiddenimports=pyside6_hidden + [
+    datas=[('skills', 'skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas + MCP_ANALYSIS_METADATA,
+    hiddenimports=pyside6_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
         'docx',
         'pptx',
         'openpyxl',
@@ -314,9 +439,6 @@ a = Analysis(
         'anthropic',
         'openai',
         'lark_oapi',
-        'mcp',
-        'mcp.client.stdio',
-        'mcp.client.streamable_http',
         'httpx',
     ],
     hookspath=[],

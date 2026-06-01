@@ -55,6 +55,26 @@ def mcp_package_available():
     return True
 
 
+def describe_mcp_import_error(exc):
+    missing_name = str(getattr(exc, "name", "") or "").strip()
+    if missing_name == "mcp":
+        return "Python package 'mcp' is not installed in the current runtime."
+    if missing_name.startswith("mcp."):
+        return (
+            "Python package 'mcp' is incomplete in the current runtime. "
+            f"Missing submodule: {missing_name}."
+        )
+    if missing_name:
+        return (
+            "Python package 'mcp' or one of its dependencies is unavailable in the current runtime. "
+            f"Missing module: {missing_name}."
+        )
+    return (
+        "Python package 'mcp' or one of its dependencies is unavailable in the current runtime. "
+        f"Import error: {exc}"
+    )
+
+
 def _stringify_mapping(value):
     if not isinstance(value, dict):
         return {}
@@ -165,9 +185,7 @@ async def _open_mcp_session(server_config):
         from mcp.client.stdio import stdio_client
         from mcp.client.streamable_http import streamablehttp_client
     except ImportError as exc:
-        raise RuntimeError(
-            "Python package 'mcp' is not installed. Please install dependencies before using MCP servers."
-        ) from exc
+        raise RuntimeError(describe_mcp_import_error(exc)) from exc
 
     if transport == TRANSPORT_STDIO:
         env = os.environ.copy()

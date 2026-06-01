@@ -124,8 +124,10 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 
 ### 8. MCP 服务器
 打开 **⚙️ 设置 → MCP** 添加 MCP 服务器。
+*   打包版默认内置 MCP client 运行时，终端用户无需再单独安装 `mcp` 包。
 *   `stdio`：配置命令、参数、工作目录、环境变量和启动超时。
 *   Streamable HTTP：配置 URL、Headers 和启动超时。
+*   也支持直接导入 JSON 配置，例如 `{"mcpServers":{"showdoc":{"type":"streamable-http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer ..."}}}}`。
 *   当前首版只接入 **tools**，暂不支持 MCP resources 和 prompts。
 
 ## 🏗️ 架构概览

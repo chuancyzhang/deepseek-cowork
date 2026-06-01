@@ -14,7 +14,7 @@ import markdown
 import socket
 import threading
 from datetime import datetime, timedelta
-from core.config_manager import ConfigManager
+from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
 from core.skill_manager import SkillManager
 from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
 from core.skill_generator import SkillGenerator
@@ -3707,6 +3707,62 @@ class McpConnectionWorker(QThread):
             self.finished_signal.emit({"ok": False, "error": str(exc)})
 
 
+class McpJsonImportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("导入 MCP JSON")
+        self.resize(620, 520)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        title = QLabel("粘贴 MCP 配置 JSON")
+        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
+        layout.addWidget(title)
+
+        hint = QLabel("支持 `mcpServers`、`mcp_servers`，或直接粘贴服务器对象数组。命名对象键会自动映射为服务器 ID 和名称。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(hint)
+
+        self.editor = QTextEdit()
+        self.editor.setPlaceholderText(
+            '{\n'
+            '  "mcpServers": {\n'
+            '    "showdoc": {\n'
+            '      "type": "streamable-http",\n'
+            '      "url": "https://example.com/mcp",\n'
+            '      "headers": {\n'
+            '        "Authorization": "Bearer ..."\n'
+            '      }\n'
+            '    }\n'
+            '  }\n'
+            '}'
+        )
+        self.editor.setStyleSheet(
+            f"QTextEdit {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; "
+            f"border-radius: 12px; padding: 10px; color: {DesignTokens.text_primary}; }}"
+        )
+        layout.addWidget(self.editor, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("导入")
+        ok_btn.setObjectName("PrimaryBtn")
+        ok_btn.clicked.connect(self.accept)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(ok_btn)
+        layout.addLayout(buttons)
+
+    def json_text(self):
+        return self.editor.toPlainText().strip()
+
+
 class McpServerEditDialog(QDialog):
     def __init__(self, server=None, parent=None):
         super().__init__(parent)
@@ -3930,6 +3986,7 @@ class McpServerManager(QWidget):
         toolbar.addStretch()
         for label, handler, icon_name in (
             ("添加服务器", self.add_server, "fa5s.plus"),
+            ("导入 JSON", self.import_servers_from_json, "fa5s.file-import"),
             ("编辑", self.edit_server, "fa5s.pen"),
             ("删除", self.delete_server, "fa5s.trash-alt"),
             ("测试连接", self.test_server, "fa5s.plug"),
@@ -4012,6 +4069,91 @@ class McpServerManager(QWidget):
         self.servers.append(dialog.get_server_config())
         self._refresh_list()
         self.server_list.setCurrentRow(self.server_list.count() - 1)
+
+    def _find_duplicate_server_index(self, server):
+        target_id = str(server.get("id") or "").strip().lower()
+        target_name = str(server.get("name") or "").strip().lower()
+        for index, existing in enumerate(self.servers):
+            existing_id = str(existing.get("id") or "").strip().lower()
+            existing_name = str(existing.get("name") or "").strip().lower()
+            if target_id and existing_id == target_id:
+                return index
+            if target_name and existing_name == target_name:
+                return index
+        return -1
+
+    def import_servers_from_json(self):
+        dialog = McpJsonImportDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        raw_text = dialog.json_text()
+        if not raw_text:
+            QMessageBox.warning(self, "导入 MCP JSON", "请先粘贴 JSON 配置。")
+            return
+
+        try:
+            imported_servers = normalize_mcp_servers(parse_mcp_servers_json(raw_text))
+        except ValueError as exc:
+            QMessageBox.warning(self, "导入 MCP JSON", str(exc))
+            return
+
+        if not imported_servers:
+            QMessageBox.warning(self, "导入 MCP JSON", "没有解析到可导入的 MCP 服务器。")
+            return
+
+        duplicate_matches = []
+        new_servers = []
+        for server in imported_servers:
+            index = self._find_duplicate_server_index(server)
+            if index >= 0:
+                duplicate_matches.append((index, server))
+            else:
+                new_servers.append(server)
+
+        replace_duplicates = False
+        if duplicate_matches:
+            duplicate_names = "、".join(
+                str(server.get("name") or server.get("id") or "MCP Server")
+                for _index, server in duplicate_matches[:5]
+            )
+            if len(duplicate_matches) > 5:
+                duplicate_names += " 等"
+            reply = QMessageBox.question(
+                self,
+                "导入 MCP JSON",
+                (
+                    f"检测到 {len(duplicate_matches)} 个同名或同 ID 的服务器：{duplicate_names}。\n"
+                    "选择“是”替换已有配置，选择“否”只追加新的服务器，选择“取消”放弃导入。"
+                ),
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Cancel:
+                return
+            replace_duplicates = reply == QMessageBox.Yes
+
+        updated_servers = list(self.servers)
+        replaced_count = 0
+        if replace_duplicates:
+            for index, server in duplicate_matches:
+                updated_servers[index] = server
+                replaced_count += 1
+        updated_servers.extend(new_servers)
+        self.servers = normalize_mcp_servers(updated_servers)
+        self._refresh_list()
+        if self.server_list.count():
+            self.server_list.setCurrentRow(self.server_list.count() - 1)
+        imported_count = len(imported_servers)
+        added_count = len(new_servers)
+        skipped_count = len(duplicate_matches) - replaced_count
+        message = f"已导入 {imported_count} 个服务器，新增 {added_count} 个。"
+        if replaced_count:
+            message += f" 已替换 {replaced_count} 个重复配置。"
+        if skipped_count:
+            message += f" 已跳过 {skipped_count} 个重复配置。"
+        self.status_label.setText(message)
+        QMessageBox.information(self, "导入 MCP JSON", message)
 
     def edit_server(self):
         index = self._current_index()

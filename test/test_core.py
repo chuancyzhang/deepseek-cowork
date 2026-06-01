@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.config_manager import ConfigManager
+from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
 from core.skill_manager import SkillManager
 from core.interaction import InteractionBridge, interaction_service, parse_interaction_reply
 from core import env_utils
@@ -20,6 +20,7 @@ from core import sandbox_runtime
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.agent import LLMWorker
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
+from core.mcp_client import describe_mcp_import_error
 from core.single_instance import (
     UiSingleInstanceServer,
     build_ui_server_name,
@@ -311,6 +312,86 @@ class TestConfigManager(unittest.TestCase):
         self.assertFalse(stored[0]["enabled"])
         self.assertEqual(stored[0]["id"], "remote-docs")
         self.assertEqual(stored[0]["timeout_seconds"], 45)
+
+    def test_parse_mcp_servers_json_supports_named_mcpservers(self):
+        payload = parse_mcp_servers_json(
+            """
+            {
+              "mcpServers": {
+                "showdoc": {
+                  "type": "streamable-http",
+                  "url": "https://www.showdoc.com.cn/mcp.php",
+                  "headers": {
+                    "Authorization": "Bearer token"
+                  }
+                }
+              }
+            }
+            """
+        )
+        servers = normalize_mcp_servers(payload)
+
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0]["id"], "showdoc")
+        self.assertEqual(servers[0]["name"], "showdoc")
+        self.assertEqual(servers[0]["transport"], "streamable_http")
+        self.assertEqual(servers[0]["headers"]["Authorization"], "Bearer token")
+
+    def test_parse_mcp_servers_json_supports_mcp_servers_array(self):
+        payload = parse_mcp_servers_json(
+            {
+                "mcp_servers": [
+                    {
+                        "name": "Filesystem MCP",
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                        "env": [{"key": "NODE_ENV", "value": "production"}],
+                    }
+                ]
+            }
+        )
+        servers = normalize_mcp_servers(payload)
+
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0]["transport"], "stdio")
+        self.assertEqual(servers[0]["command"], "npx")
+        self.assertEqual(servers[0]["env"]["NODE_ENV"], "production")
+
+    def test_parse_mcp_servers_json_supports_direct_server_array(self):
+        payload = parse_mcp_servers_json(
+            [
+                {
+                    "id": "remote-docs",
+                    "name": "Remote Docs",
+                    "transport": "http",
+                    "url": "https://docs.example/mcp",
+                }
+            ]
+        )
+        servers = normalize_mcp_servers(payload)
+
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0]["id"], "remote-docs")
+        self.assertEqual(servers[0]["transport"], "streamable_http")
+        self.assertEqual(servers[0]["url"], "https://docs.example/mcp")
+
+    def test_parse_mcp_servers_json_rejects_invalid_payload(self):
+        with self.assertRaisesRegex(ValueError, "Invalid MCP JSON"):
+            parse_mcp_servers_json("{bad json}")
+
+        with self.assertRaisesRegex(ValueError, "must contain `mcpServers`, `mcp_servers`, or a server list"):
+            parse_mcp_servers_json({"unexpected": {"value": True}})
+
+    def test_describe_mcp_import_error_reports_missing_dependency(self):
+        self.assertIn(
+            "not installed",
+            describe_mcp_import_error(ModuleNotFoundError("No module named 'mcp'", name="mcp")),
+        )
+        self.assertIn(
+            "Missing module: httpx_sse",
+            describe_mcp_import_error(ModuleNotFoundError("No module named 'httpx_sse'", name="httpx_sse")),
+        )
 
     def test_sop_templates_are_normalized_and_persisted(self):
         cm = self._create_config_manager(

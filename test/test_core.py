@@ -8,6 +8,7 @@ import time
 import json
 import subprocess
 import types
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +62,30 @@ class TestConfigManager(unittest.TestCase):
         cm.config = {} # Reset
         cm.set("api_key", "sk-test")
         self.assertEqual(cm.get("api_key"), "sk-test")
+
+    def test_batch_save_coalesces_multiple_writes(self):
+        cm = self._create_config_manager()
+
+        with patch.object(cm, "_write_config") as write_mock:
+            with cm.batch_save():
+                cm.set("api_key", "sk-test")
+                cm.set("base_url", "https://example.com/v1")
+                cm.set_chat_history_dir(os.path.join(self.temp_dir, "history"))
+                cm.set_god_mode(True)
+
+        self.assertEqual(write_mock.call_count, 1)
+
+    def test_setters_skip_writes_when_values_do_not_change(self):
+        cm = self._create_config_manager()
+
+        with patch.object(cm, "_write_config") as write_mock:
+            cm.set("api_key", cm.get("api_key"))
+            cm.set_chat_history_dir(cm.get_chat_history_dir())
+            cm.set_god_mode(cm.get_god_mode())
+            cm.set_agent_profiles(cm.get_agent_profiles())
+            cm.set_mcp_servers(cm.get_mcp_servers())
+
+        self.assertEqual(write_mock.call_count, 0)
 
     def test_defaults_include_new_deepseek_settings(self):
         cm = self._create_config_manager()

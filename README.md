@@ -37,6 +37,7 @@ Current app version: **4.8.3**.
 *   **System Status Toasts**: Chat-stream system hints render as compact Apple-style status pills with restrained color, short copy, and auto-dismiss behavior instead of heavy full-width notice boxes.
 *   **Sub-Agent Monitor**: Observe parallel workers in a lightweight timeline summary for task input, tool calls, tool results, streamed output, and final output; opening the panel queues a short, main-thread render pass for UI stability.
 *   **Safe Sub-Agent Lifecycle**: Sub-agent completion, status streaming, and worker-thread cleanup are separated so parallel workers can finish or restart without destabilizing the desktop app.
+*   **Smoother Settings Saves**: The settings dialog batches model, MCP, agent, workspace, and IM configuration updates into a single disk write to reduce UI stalls during save.
 *   **Sub-Agent Runtime Log**: Lifecycle diagnostics are written to `sub_agent_runtime.log` under the `DeepSeekCowork` app data directory, or `user_data/` in portable mode.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 

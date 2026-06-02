@@ -4845,11 +4845,6 @@ class SettingsDialog(QDialog):
             return
         if selected_model_id not in all_model_ids:
             selected_model_id = all_model_ids[0] if all_model_ids else ""
-        self.config_manager.set_model_channels(model_channels, selected_model_id)
-        self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
-        self.config_manager.set_mcp_servers(self.mcp_server_manager.get_servers())
-        self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
-        self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
             reply = QMessageBox.question(
                 self,
@@ -4860,8 +4855,14 @@ class SettingsDialog(QDialog):
             )
             if reply != QMessageBox.Yes:
                 self.god_mode_check.setChecked(False)
-        self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-        self._save_im_gateway_config()
+        with self.config_manager.batch_save():
+            self.config_manager.set_model_channels(model_channels, selected_model_id)
+            self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
+            self.config_manager.set_mcp_servers(self.mcp_server_manager.get_servers())
+            self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
+            self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
+            self.config_manager.set_god_mode(self.god_mode_check.isChecked())
+            self._save_im_gateway_config()
         self.accept()
 
 
@@ -14278,6 +14279,8 @@ class MainWindow(QMainWindow):
         self.refresh_model_selector()
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()
+        if result == QDialog.Accepted and hasattr(self, "input_field") and self.input_field and self.input_field.isEnabled():
+            self.input_field.setFocus()
 
     def open_automation_center(self):
         AutomationDialog(self.config_manager, self).exec()

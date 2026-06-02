@@ -5,6 +5,7 @@ import shutil
 import re
 import uuid
 import time
+from contextlib import contextmanager
 from .env_utils import get_app_data_dir, get_base_dir
 from .llm.deepseek import (
     DEFAULT_DEEPSEEK_BASE_URL,
@@ -200,6 +201,8 @@ class ConfigManager:
         self.data_dir = get_app_data_dir()
         self.config_path = os.path.join(self.data_dir, self.config_file)
         self._loaded_config_keys = set()
+        self._save_batch_depth = 0
+        self._save_pending = False
         
         # Migration: Check if config exists in old location (base_dir)
         base_dir = get_base_dir()
@@ -253,16 +256,29 @@ class ConfigManager:
         return self.config.get("god_mode", False)
 
     def set_god_mode(self, enabled: bool):
-        self.config["god_mode"] = enabled
-        self.save_config()
+        self._set_config_value("god_mode", bool(enabled))
 
     def get_chat_history_dir(self):
         default_dir = os.path.join(self.data_dir, 'chat_history')
         return self.config.get("chat_history_dir", default_dir)
 
     def set_chat_history_dir(self, path):
+        if self.get_chat_history_dir() == path:
+            return False
         self.config["chat_history_dir"] = path
         self.save_config()
+        return True
+
+    @contextmanager
+    def batch_save(self):
+        self._save_batch_depth += 1
+        try:
+            yield self
+        finally:
+            self._save_batch_depth = max(0, self._save_batch_depth - 1)
+            if self._save_batch_depth == 0 and self._save_pending:
+                self._save_pending = False
+                self._write_config()
 
     def load_config(self):
         if os.path.exists(self.config_path):
@@ -945,6 +961,8 @@ class ConfigManager:
 
     def set_agent_profiles(self, profiles):
         normalized = self._normalize_agent_profiles(profiles)
+        if normalized == self.config.get("agent_profiles"):
+            return
         self.config["agent_profiles"] = normalized
         self.save_config()
 
@@ -970,6 +988,8 @@ class ConfigManager:
 
     def set_sop_templates(self, templates):
         normalized = self._normalize_sop_templates(templates)
+        if normalized == self.config.get("sop_templates"):
+            return
         self.config["sop_templates"] = normalized
         self.save_config()
 
@@ -1000,6 +1020,8 @@ class ConfigManager:
     def set_automation_tasks(self, tasks):
         valid_template_ids = [item.get("id") for item in self.get_sop_templates()]
         normalized = self._normalize_automation_tasks(tasks, valid_template_ids=valid_template_ids)
+        if normalized == self.config.get("automation_tasks"):
+            return
         self.config["automation_tasks"] = normalized
         self.save_config()
 
@@ -1025,6 +1047,8 @@ class ConfigManager:
 
     def set_automation_run_history(self, history):
         normalized = self._normalize_automation_history(history)
+        if normalized == self.config.get("automation_run_history"):
+            return
         self.config["automation_run_history"] = normalized
         self.save_config()
 
@@ -1046,7 +1070,10 @@ class ConfigManager:
         return json.loads(json.dumps(projects, ensure_ascii=False))
 
     def set_projects(self, projects):
-        self.config["projects"] = self._normalize_projects(projects)
+        normalized = self._normalize_projects(projects)
+        if normalized == self.config.get("projects"):
+            return
+        self.config["projects"] = normalized
         self.save_config()
 
     def get_mcp_servers(self):
@@ -1057,7 +1084,10 @@ class ConfigManager:
         return json.loads(json.dumps(servers, ensure_ascii=False))
 
     def set_mcp_servers(self, servers):
-        self.config["mcp_servers"] = self._normalize_mcp_servers(servers)
+        normalized = self._normalize_mcp_servers(servers)
+        if normalized == self.config.get("mcp_servers"):
+            return
+        self.config["mcp_servers"] = normalized
         self.save_config()
 
     def upsert_project(self, path, name=None, pinned=None):
@@ -1143,6 +1173,12 @@ class ConfigManager:
         return bool(self.upsert_project(normalized_path))
 
     def save_config(self):
+        if self._save_batch_depth > 0:
+            self._save_pending = True
+            return
+        self._write_config()
+
+    def _write_config(self):
         try:
             os.makedirs(self.data_dir, exist_ok=True)
             with open(self.config_path, 'w', encoding='utf-8') as f:
@@ -1150,12 +1186,18 @@ class ConfigManager:
         except Exception as e:
             print(f"Error saving config: {e}")
 
+    def _set_config_value(self, key, value):
+        if self.config.get(key) == value:
+            return False
+        self.config[key] = value
+        self.save_config()
+        return True
+
     def get(self, key, default=None):
         return self.config.get(key, default)
 
     def set(self, key, value):
-        self.config[key] = value
-        self.save_config()
+        return self._set_config_value(key, value)
 
     def is_skill_enabled(self, skill_name):
         return skill_name not in self.config.get("disabled_skills", [])

@@ -14,6 +14,7 @@ from core.chat_storage import ChatStorage
 from main import (
     QApplication,
     AutomationTaskDialog,
+    ChatBubble,
     MainWindow,
     SopTemplateManager,
     SystemToast,
@@ -24,7 +25,7 @@ from main import (
     SOP_EXECUTOR_PYTHON_FILE,
 )
 from PySide6.QtCore import QEvent, Qt
-from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
+from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QWidget
 
 
 class _State:
@@ -61,6 +62,17 @@ class _MousePressEventStub:
 
     def globalPos(self):
         return self._global_pos
+
+
+class _HistoryActionState:
+    def __init__(self, session_id="session-1", messages=None):
+        self.session_id = session_id
+        self.messages = list(messages or [])
+        self.history_loaded = True
+        self.history_loading = False
+        self.llm_worker = None
+        self.code_worker = None
+        self.daemon_running = False
 
 
 class TestSopUiHelpers(unittest.TestCase):
@@ -492,6 +504,157 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertFalse(new_state.clarify_mode_enabled)
         self.assertIsNone(new_state.sop_run)
         self.assertEqual(new_state.conversation_branch["parent_session_id"], "parent")
+        self.assertEqual(new_record["meta"]["conversation_branch"]["action"], "branch")
+
+    def test_chat_bubble_user_shows_edit_delete_and_branch_actions(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("User", "hello", source_message_id="u1")
+
+        self.assertIsNotNone(app)
+        self.assertIsNotNone(bubble.edit_btn)
+        self.assertIsNotNone(bubble.delete_btn)
+        self.assertIsNotNone(bubble.branch_btn)
+        self.assertFalse(bubble.edit_btn.isHidden())
+        self.assertFalse(bubble.delete_btn.isHidden())
+        self.assertFalse(bubble.branch_btn.isHidden())
+
+    def test_edit_user_message_from_branch_creates_new_session_and_resubmits(self):
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        db_path = os.path.join(temp_dir, "chat_history.sqlite")
+        storage = ChatStorage(db_path)
+        workspace_dir = os.path.join(temp_dir, "workspace")
+        os.makedirs(workspace_dir)
+        attachment_path = os.path.join(workspace_dir, "brief.txt")
+        with open(attachment_path, "w", encoding="utf-8") as handle:
+            handle.write("brief")
+        parent_messages = [
+            {"id": "u1", "role": "user", "content": "first"},
+            {"id": "a1", "role": "assistant", "content": "reply"},
+            {
+                "id": "u2",
+                "role": "user",
+                "content": "[用户添加的文件]\n\nsecond",
+                "content_parts": [
+                    {"type": "text", "text": "second"},
+                    {"type": "input_file", "path": attachment_path, "name": "brief.txt"},
+                ],
+                "meta": {
+                    "display_content": "second",
+                    "user_added_files": [attachment_path],
+                },
+            },
+            {"id": "a2", "role": "assistant", "content": "after second"},
+        ]
+        storage.save_conversation(
+            "parent",
+            parent_messages,
+            title="Parent task",
+            status="completed",
+            meta={"workspace_dir": workspace_dir, "selected_skill_names": ["python-runner"]},
+        )
+
+        window = MainWindow.__new__(MainWindow)
+        window.chat_storage = storage
+        window.workspace_dir = workspace_dir
+        window.save_chat_history = MagicMock()
+        window.refresh_history_list = MagicMock()
+        window.activate_session = MagicMock()
+        window.add_system_toast = MagicMock()
+        window._submit_session_request = MagicMock(return_value=True)
+        window.sessions = {}
+
+        parent_state = _HistoryActionState("parent", parent_messages)
+        created_states = {}
+
+        def create_new_session(session_id=None, title=None, make_current=True):
+            state = _HistoryActionState(session_id)
+            created_states[session_id] = state
+            return session_id
+
+        window.create_new_session = create_new_session
+        window.get_session = lambda session_id=None: created_states.get(session_id) or (parent_state if session_id == "parent" else None)
+
+        with patch("main.QInputDialog.getMultiLineText", return_value=("rewritten second", True)):
+            ok = window.edit_user_message_from_branch("parent", "u2")
+
+        self.assertTrue(ok)
+        window.save_chat_history.assert_called_once_with(session_id="parent")
+        window.refresh_history_list.assert_called_once()
+        window.activate_session.assert_called_once()
+        window._submit_session_request.assert_called_once()
+
+        new_session_id = window.activate_session.call_args.args[0]
+        new_record = storage.get_conversation_record(new_session_id)
+        new_messages = storage.get_messages(new_session_id)
+        submit_args = window._submit_session_request.call_args
+
+        self.assertEqual([msg["content"] for msg in new_messages], ["first", "reply"])
+        self.assertEqual(new_record["meta"]["conversation_branch"]["action"], "edit_user_message")
+        self.assertEqual(submit_args.args[0].session_id, new_session_id)
+        self.assertEqual(submit_args.args[1], "rewritten second")
+        self.assertEqual(submit_args.args[2], [attachment_path])
+        self.assertFalse(submit_args.kwargs["check_duplicates"])
+
+    def test_delete_user_message_from_branch_creates_new_session_without_resubmit(self):
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        db_path = os.path.join(temp_dir, "chat_history.sqlite")
+        storage = ChatStorage(db_path)
+        workspace_dir = os.path.join(temp_dir, "workspace")
+        os.makedirs(workspace_dir)
+        parent_messages = [
+            {"id": "u1", "role": "user", "content": "first"},
+            {"id": "a1", "role": "assistant", "content": "reply"},
+            {"id": "u2", "role": "user", "content": "second"},
+            {"id": "a2", "role": "assistant", "content": "after second"},
+        ]
+        storage.save_conversation(
+            "parent",
+            parent_messages,
+            title="Parent task",
+            status="completed",
+            meta={"workspace_dir": workspace_dir},
+        )
+
+        window = MainWindow.__new__(MainWindow)
+        window.chat_storage = storage
+        window.workspace_dir = workspace_dir
+        window.save_chat_history = MagicMock()
+        window.refresh_history_list = MagicMock()
+        window.activate_session = MagicMock()
+        window.add_system_toast = MagicMock()
+        window._submit_session_request = MagicMock()
+        window.input_field = MagicMock()
+        window.sessions = {}
+
+        parent_state = _HistoryActionState("parent", parent_messages)
+        created_states = {}
+
+        def create_new_session(session_id=None, title=None, make_current=True):
+            state = _HistoryActionState(session_id)
+            created_states[session_id] = state
+            return session_id
+
+        window.create_new_session = create_new_session
+        window.get_session = lambda session_id=None: created_states.get(session_id) or (parent_state if session_id == "parent" else None)
+
+        with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
+            ok = window.delete_user_message_from_branch("parent", "u2")
+
+        self.assertTrue(ok)
+        window.save_chat_history.assert_called_once_with(session_id="parent")
+        window.refresh_history_list.assert_called_once()
+        window.activate_session.assert_called_once()
+        window._submit_session_request.assert_not_called()
+        window.input_field.setFocus.assert_called_once()
+
+        new_session_id = window.activate_session.call_args.args[0]
+        new_record = storage.get_conversation_record(new_session_id)
+        new_messages = storage.get_messages(new_session_id)
+
+        self.assertEqual([msg["content"] for msg in new_messages], ["first", "reply"])
+        self.assertEqual(new_record["meta"]["conversation_branch"]["action"], "delete_user_message")
 
     def test_select_files_for_prompt_forwards_dialog_selection(self):
         window = MainWindow.__new__(MainWindow)

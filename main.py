@@ -699,12 +699,18 @@ def normalize_conversation_branch_meta(value):
         created_at = int(created_at) if created_at is not None else None
     except Exception:
         created_at = None
-    return {
+    action = str(value.get("action") or "").strip()
+    if action not in {"branch", "edit_user_message", "delete_user_message"}:
+        action = ""
+    branch_meta = {
         "parent_session_id": parent_session_id,
         "parent_message_id": parent_message_id,
         "parent_title": str(value.get("parent_title") or "").strip(),
         "created_at": created_at,
     }
+    if action:
+        branch_meta["action"] = action
+    return branch_meta
 
 
 def session_status_text(status, im_provider=None):
@@ -6006,6 +6012,8 @@ class FileChip(QFrame):
 
 class ChatBubble(QFrame):
     branchRequested = Signal(str)
+    editRequested = Signal(str)
+    deleteRequested = Signal(str)
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(
@@ -6025,6 +6033,8 @@ class ChatBubble(QFrame):
         self.content_col = None
         self.source_message_id = str(source_message_id or "").strip()
         self.branch_btn = None
+        self.edit_btn = None
+        self.delete_btn = None
         self.branch_row_layout = None
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
@@ -6101,6 +6111,8 @@ class ChatBubble(QFrame):
                 action_row.setContentsMargins(0, 0, 2, 0)
                 action_row.setSpacing(6)
                 action_row.addStretch()
+                action_row.addWidget(self._create_edit_button())
+                action_row.addWidget(self._create_delete_button())
                 action_row.addWidget(self._create_branch_button())
                 self.branch_row_layout = action_row
                 cw_layout.addLayout(action_row)
@@ -6278,35 +6290,73 @@ class ChatBubble(QFrame):
     def _create_branch_button(self):
         if self.branch_btn is not None:
             return self.branch_btn
+        btn = self._create_message_action_button("fa5s.code-branch", "从这里分支", self._emit_branch_request)
+        self.branch_btn = btn
+        return btn
+
+    def _create_edit_button(self):
+        if self.edit_btn is not None:
+            return self.edit_btn
+        btn = self._create_message_action_button("fa5s.pen", "编辑后重新生成", self._emit_edit_request)
+        self.edit_btn = btn
+        return btn
+
+    def _create_delete_button(self):
+        if self.delete_btn is not None:
+            return self.delete_btn
+        btn = self._create_message_action_button("fa5s.trash-alt", "删除并从这里继续", self._emit_delete_request)
+        self.delete_btn = btn
+        return btn
+
+    def _create_message_action_button(self, icon_name, tooltip, slot):
         btn = QToolButton()
         btn.setCursor(Qt.PointingHandCursor)
         btn.setAutoRaise(True)
-        btn.setIcon(qta.icon("fa5s.code-branch", color=DesignTokens.text_tertiary))
+        btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_tertiary))
         btn.setIconSize(QSize(13, 13))
-        btn.setToolTip("从这里分支")
+        btn.setToolTip(tooltip)
         btn.setFixedSize(26, 26)
         btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
-        btn.clicked.connect(self._emit_branch_request)
-        self.branch_btn = btn
+        btn.clicked.connect(slot)
         return btn
 
     def _emit_branch_request(self):
         if self.source_message_id:
             self.branchRequested.emit(self.source_message_id)
 
+    def _emit_edit_request(self):
+        if self.source_message_id:
+            self.editRequested.emit(self.source_message_id)
+
+    def _emit_delete_request(self):
+        if self.source_message_id:
+            self.deleteRequested.emit(self.source_message_id)
+
     def set_source_message_id(self, source_message_id):
         self.source_message_id = str(source_message_id or "").strip()
         if not self.source_message_id:
             if self.branch_btn is not None:
                 self.branch_btn.setVisible(False)
+            if self.edit_btn is not None:
+                self.edit_btn.setVisible(False)
+            if self.delete_btn is not None:
+                self.delete_btn.setVisible(False)
             return
         if self.branch_btn is None and self.branch_row_layout is not None:
             if self.role == "User":
+                self.edit_btn = self._create_edit_button()
+                self.branch_row_layout.insertWidget(1, self.edit_btn)
+                self.delete_btn = self._create_delete_button()
+                self.branch_row_layout.insertWidget(2, self.delete_btn)
                 self.branch_btn = self._create_branch_button()
-                self.branch_row_layout.insertWidget(1, self.branch_btn)
+                self.branch_row_layout.insertWidget(3, self.branch_btn)
             else:
                 self.branch_btn = self._create_branch_button()
                 self.branch_row_layout.insertWidget(1, self.branch_btn, 0, Qt.AlignLeft)
+        if self.edit_btn is not None:
+            self.edit_btn.setVisible(self.role == "User")
+        if self.delete_btn is not None:
+            self.delete_btn.setVisible(self.role == "User")
         if self.branch_btn is not None:
             self.branch_btn.setVisible(True)
 
@@ -10190,7 +10240,8 @@ class MainWindow(QMainWindow):
         for part in message.get("content_parts") or []:
             if not isinstance(part, dict):
                 continue
-            if str(part.get("type") or "").strip().lower() != "input_file":
+            part_type = str(part.get("type") or "").strip().lower()
+            if part_type not in {"input_file", "input_image"}:
                 continue
             path = str(part.get("path") or "").strip()
             if not path:
@@ -10215,6 +10266,42 @@ class MainWindow(QMainWindow):
         if not branch_meta:
             return {}
         return {"conversation_branch": branch_meta}
+
+    def _session_is_busy(self, state):
+        return bool(
+            state
+            and (
+                (getattr(state, "llm_worker", None) and state.llm_worker.isRunning())
+                or (getattr(state, "code_worker", None) and state.code_worker.isRunning())
+                or getattr(state, "daemon_running", False)
+            )
+        )
+
+    def _can_rewrite_session_from_message(self, state):
+        if not state:
+            return (False, "找不到当前会话。")
+        if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
+            return (False, "历史消息仍在加载，请稍后再试。")
+        if self._session_is_busy(state):
+            return (False, "当前会话正在运行，请先停止任务后再编辑或删除消息。")
+        return (True, "")
+
+    def _message_attachment_paths(self, message):
+        attachments = self._message_user_attachments(message)
+        return self._normalize_prompt_file_paths(
+            [item.get("path") for item in attachments if isinstance(item, dict) and item.get("path")]
+        )
+
+    def _find_message_by_id(self, messages, message_id):
+        target_id = str(message_id or "").strip()
+        if not target_id:
+            return None
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("id") or "").strip() == target_id:
+                return msg
+        return None
 
     def _assistant_source_message_id_from_messages(self, messages):
         for msg in reversed(messages or []):
@@ -10243,7 +10330,33 @@ class MainWindow(QMainWindow):
                 return copied
         return []
 
-    def _build_forked_session_meta(self, parent_record, parent_message_id):
+    def _copy_forked_messages_before(self, messages, message_id):
+        target_id = str(message_id or "").strip()
+        if not target_id:
+            return []
+        copied = []
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("id") or "").strip() == target_id:
+                return copied
+            msg_copy = copy.deepcopy(msg)
+            msg_copy["id"] = self._new_message_id()
+            copied.append(msg_copy)
+        return []
+
+    def _build_fork_title(self, parent_record, messages, prefer_parent_title=True):
+        parent_record = parent_record if isinstance(parent_record, dict) else {}
+        title_base = ""
+        if prefer_parent_title:
+            title_base = str(parent_record.get("title") or "").strip()
+        if not title_base:
+            title_base = str(self._compute_session_title(messages or []) or "").strip()
+        if not title_base:
+            title_base = "新对话"
+        return f"{title_base} - 分支"
+
+    def _build_forked_session_meta(self, parent_record, parent_message_id, action="branch"):
         parent_record = parent_record if isinstance(parent_record, dict) else {}
         parent_meta = parent_record.get("meta") if isinstance(parent_record.get("meta"), dict) else {}
         branch_meta = {
@@ -10252,12 +10365,71 @@ class MainWindow(QMainWindow):
             "parent_title": str(parent_record.get("title") or "").strip(),
             "created_at": int(time.time()),
         }
+        if action in {"branch", "edit_user_message", "delete_user_message"}:
+            branch_meta["action"] = action
         copied_meta = {
             "workspace_dir": parent_meta.get("workspace_dir") or self.workspace_dir or "",
             "selected_skill_names": normalize_selected_skill_names(parent_meta.get("selected_skill_names")),
             "conversation_branch": branch_meta,
         }
         return {key: value for key, value in copied_meta.items() if value not in (None, "", [], {})}
+
+    def _prepare_branch_session_state(self, state, messages, fork_meta):
+        if not state:
+            return
+        selected_skill_names = normalize_selected_skill_names(fork_meta.get("selected_skill_names"))
+        branch_meta = normalize_conversation_branch_meta(fork_meta.get("conversation_branch"))
+        if getattr(state, "chat_layout", None) is not None:
+            self._reset_session_history_state(state)
+            state.history_loading = False
+            state.history_loaded = True
+            state.messages = self.chat_storage.normalize_messages(copy.deepcopy(messages or []))
+            state.render_items = build_conversation_render_items(state.messages)
+            state.displayed_count = len(state.messages)
+            state.displayed_render_count = len(state.render_items)
+            if state.render_items:
+                self.render_render_items(state.render_items, state.session_id, animate=False)
+            else:
+                empty_state = EmptyStateWidget(self)
+                state.chat_layout.insertWidget(0, empty_state)
+                state.empty_state = empty_state
+        state.selected_skill_names = selected_skill_names
+        state.run_phase = "待开始"
+        state.session_status = "draft"
+        state.has_file_changes = False
+        state.changed_files = []
+        state.clarify_mode_enabled = False
+        state.clarify_phase = CLARIFY_MODE_DISABLED
+        state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+        state.pending_clarify_questions = []
+        state.clarify_source_user_text = ""
+        state.clarify_answers_context = []
+        state.sop_run = None
+        state.completed_agent_result_ids = set()
+        state.automation_task_id = ""
+        state.automation_run_id = ""
+        state.automation_trigger_source = ""
+        state.automation_template_id = ""
+        state.conversation_branch = branch_meta
+
+    def _create_branch_session(self, parent_record, parent_message_id, forked_messages, action="branch", prefer_parent_title=True):
+        parent_record = parent_record if isinstance(parent_record, dict) else {}
+        fork_title = self._build_fork_title(parent_record, forked_messages, prefer_parent_title=prefer_parent_title)
+        new_session_id = self._new_message_id()
+        fork_meta = self._build_forked_session_meta(parent_record, parent_message_id, action=action)
+        self.chat_storage.save_conversation(
+            new_session_id,
+            forked_messages,
+            title=fork_title,
+            status="draft",
+            meta=fork_meta,
+        )
+
+        self.create_new_session(session_id=new_session_id, title=fork_title, make_current=False)
+        self._prepare_branch_session_state(self.get_session(new_session_id), forked_messages, fork_meta)
+        self.refresh_history_list()
+        self.activate_session(new_session_id, ensure_loaded=False)
+        return new_session_id
 
     def fork_conversation_at_message(self, session_id, message_id):
         session_id = str(session_id or "").strip()
@@ -10271,44 +10443,105 @@ class MainWindow(QMainWindow):
         if not forked_messages:
             self.add_system_toast("找不到可分支的消息位置", "warning", session_id=session_id, auto_close_ms=3200)
             return False
-
-        fork_title_base = str(parent_record.get("title") or self._compute_session_title(forked_messages) or "新任务").strip()
-        fork_title = f"{fork_title_base} - 分支"
-        new_session_id = self._new_message_id()
-        fork_meta = self._build_forked_session_meta(parent_record, message_id)
-        self.chat_storage.save_conversation(
-            new_session_id,
-            forked_messages,
-            title=fork_title,
-            status="draft",
-            meta=fork_meta,
-        )
-
-        self.create_new_session(session_id=new_session_id, title=fork_title, make_current=False)
-        fork_state = self.get_session(new_session_id)
-        if fork_state:
-            fork_state.selected_skill_names = normalize_selected_skill_names(fork_meta.get("selected_skill_names"))
-            fork_state.run_phase = "待开始"
-            fork_state.session_status = "draft"
-            fork_state.has_file_changes = False
-            fork_state.changed_files = []
-            fork_state.clarify_mode_enabled = False
-            fork_state.clarify_phase = CLARIFY_MODE_DISABLED
-            fork_state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-            fork_state.pending_clarify_questions = []
-            fork_state.clarify_source_user_text = ""
-            fork_state.clarify_answers_context = []
-            fork_state.sop_run = None
-            fork_state.completed_agent_result_ids = set()
-            fork_state.automation_task_id = ""
-            fork_state.automation_run_id = ""
-            fork_state.automation_trigger_source = ""
-            fork_state.automation_template_id = ""
-            fork_state.conversation_branch = normalize_conversation_branch_meta(fork_meta.get("conversation_branch"))
-
-        self.refresh_history_list()
-        self.activate_session(new_session_id)
+        new_session_id = self._create_branch_session(parent_record, message_id, forked_messages, action="branch")
         self.add_system_toast("已创建分支会话", "success", session_id=new_session_id, auto_close_ms=3200)
+        return True
+
+    def edit_user_message_from_branch(self, session_id, message_id):
+        session_id = str(session_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if not session_id or not message_id:
+            return False
+        state = self.get_session(session_id)
+        allowed, message = self._can_rewrite_session_from_message(state)
+        if not allowed:
+            self.add_system_toast(message, "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+        source_message = self._find_message_by_id(getattr(state, "messages", []), message_id)
+        if not isinstance(source_message, dict) or (source_message.get("role") or "") != "user":
+            self.add_system_toast("只能编辑用户消息。", "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+
+        original_text = self._message_display_content(source_message)
+        edited_text, accepted = QInputDialog.getMultiLineText(
+            self,
+            "编辑消息",
+            "修改内容后会基于这里创建新分支，并重新生成后续回答。",
+            original_text,
+        )
+        if not accepted:
+            return False
+
+        self.save_chat_history(session_id=session_id)
+        parent_record = self.chat_storage.get_conversation_record(session_id) or {}
+        parent_messages = self.chat_storage.get_messages(session_id)
+        forked_messages = self._copy_forked_messages_before(parent_messages, message_id)
+        source_message = self._find_message_by_id(parent_messages, message_id)
+        if source_message is None:
+            self.add_system_toast("找不到要编辑的消息。", "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+        prompt_files = self._message_attachment_paths(source_message)
+        new_session_id = self._create_branch_session(
+            parent_record,
+            message_id,
+            forked_messages,
+            action="edit_user_message",
+            prefer_parent_title=False,
+        )
+        fork_state = self.get_session(new_session_id)
+        submitted = self._submit_session_request(
+            fork_state,
+            edited_text,
+            prompt_files,
+            check_duplicates=False,
+            clear_current_input=False,
+        )
+        if not submitted:
+            self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=new_session_id, auto_close_ms=3200)
+            return False
+        self.add_system_toast("已创建编辑分支并重新生成", "success", session_id=new_session_id, auto_close_ms=3200)
+        return True
+
+    def delete_user_message_from_branch(self, session_id, message_id):
+        session_id = str(session_id or "").strip()
+        message_id = str(message_id or "").strip()
+        if not session_id or not message_id:
+            return False
+        state = self.get_session(session_id)
+        allowed, message = self._can_rewrite_session_from_message(state)
+        if not allowed:
+            self.add_system_toast(message, "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+        source_message = self._find_message_by_id(getattr(state, "messages", []), message_id)
+        if not isinstance(source_message, dict) or (source_message.get("role") or "") != "user":
+            self.add_system_toast("只能删除用户消息。", "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+
+        confirm = QMessageBox.question(
+            self,
+            "确认删除消息",
+            "这会创建一个新分支，并删除这条用户消息及其后续内容。是否继续？",
+        )
+        if confirm != QMessageBox.Yes:
+            return False
+
+        self.save_chat_history(session_id=session_id)
+        parent_record = self.chat_storage.get_conversation_record(session_id) or {}
+        parent_messages = self.chat_storage.get_messages(session_id)
+        forked_messages = self._copy_forked_messages_before(parent_messages, message_id)
+        if source_message is None or self._find_message_by_id(parent_messages, message_id) is None:
+            self.add_system_toast("找不到要删除的消息。", "warning", session_id=session_id, auto_close_ms=3200)
+            return False
+        new_session_id = self._create_branch_session(
+            parent_record,
+            message_id,
+            forked_messages,
+            action="delete_user_message",
+            prefer_parent_title=False,
+        )
+        self.add_system_toast("已创建删除分支，请从这里继续输入。", "success", session_id=new_session_id, auto_close_ms=3200)
+        if hasattr(self, "input_field") and self.input_field:
+            self.input_field.setFocus()
         return True
 
     def _should_block_send_for_sop(self, state):
@@ -13355,6 +13588,7 @@ class MainWindow(QMainWindow):
                     animate=animate,
                     attachments=self._message_user_attachments(message),
                     source_message_id=str(message.get("id") or "").strip(),
+                    session_id=session_id,
                 )
                 if current_idx is not None:
                     current_idx += 1
@@ -13375,6 +13609,7 @@ class MainWindow(QMainWindow):
                 index=current_idx,
                 animate=animate,
                 source_message_id=self._assistant_source_message_id_from_messages(item.get("messages") or []),
+                session_id=session_id,
             )
             if current_idx is not None:
                 current_idx += 1
@@ -15419,8 +15654,9 @@ class MainWindow(QMainWindow):
         force_scroll=False,
         attachments=None,
         source_message_id="",
+        session_id=None,
     ):
-        state = self.get_current_session()
+        state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state: return
         
         # Hide Empty State if this is the first message
@@ -15444,6 +15680,12 @@ class MainWindow(QMainWindow):
         )
         bubble.branchRequested.connect(
             lambda msg_id, sid=state.session_id: self.fork_conversation_at_message(sid, msg_id)
+        )
+        bubble.editRequested.connect(
+            lambda msg_id, sid=state.session_id: self.edit_user_message_from_branch(sid, msg_id)
+        )
+        bubble.deleteRequested.connect(
+            lambda msg_id, sid=state.session_id: self.delete_user_message_from_branch(sid, msg_id)
         )
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         

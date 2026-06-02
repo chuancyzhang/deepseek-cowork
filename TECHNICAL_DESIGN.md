@@ -16,7 +16,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时以抽屉左边界作为主阅读区的安全边界，避免遮挡对话。子 Agent 开始运行时会自动切到该面板。
 *   **动态对话阅读列**：消息列表与输入栏会根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；抽屉打开后不再通过内部大边距重复压缩内容，而是保持接近 Codex 的舒适阅读比例。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
-*   **对话分支按钮**：已完成的用户/助手气泡会暴露 `分支` 图标按钮，点击后创建一个新的线性会话快照；首版不在同一会话内维护消息树。
+*   **对话分支按钮**：已完成的用户/助手气泡会暴露 `分支` 图标按钮，点击后创建一个新的线性会话快照；用户消息额外提供“编辑后重新生成”和“删除并继续”，两者都通过新分支承载，不在同一会话内改写历史。
 *   **系统提示条**：`add_system_toast(...)` 在聊天流中渲染紧凑状态条，居中插入、限制最大宽度、允许换行，颜色仅作为轻量状态提示而不是整块警示背景。
 *   **多模态附件建模**：输入区把普通文件记录为 `input_file`，把 PNG/JPEG/WEBP/GIF 记录为 `input_image`；provider 在发送前再决定是否转换成视觉请求。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理；定时计划支持快捷配置和 crontab 表达式双入口。
@@ -47,7 +47,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/sop_manager.py**：规范化自动化模板和会话运行态，维护 step/run 状态、步骤执行器元数据，并生成当前步骤 Prompt 片段。
 *   **core/automation_manager.py**：规范化定时任务、计算 cron / 快捷计划的 next run、生成完整执行提示词并维护运行历史记录结构。
 *   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、`mcp_servers`、项目列表、工作区、自动化任务与运行历史。
-*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组、无项目对话查询和项目会话归档；会话可通过 `meta.conversation_branch` 记录来源会话与来源消息。
+*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组、无项目对话查询和项目会话归档；会话可通过 `meta.conversation_branch` 记录来源会话、来源消息和分支动作类型。
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，校验解压结构并生成 Windows 更新脚本。
 

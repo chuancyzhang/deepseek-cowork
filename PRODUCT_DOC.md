@@ -58,14 +58,14 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **Python 动态依赖**：`python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒 Python 中验证模块可导入；第三方包持久化到 AppData `runtime_sandbox` 的 skill 依赖目录，而不是直接写入 `_internal`。沙盒会额外注入 `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS`，让 Windows 原生扩展包能解析 DLL；如果仍然导入失败，会把真实 traceback 返回给用户。
 *   **打包完整性**：内置 Python 运行时除了 `Lib` 外，还必须包含 Windows 平台扩展目录（如 `DLLs`）以及常见 MSVC runtime DLL；否则 `_socket` 等核心模块缺失，内置 `pip` 或原生 wheel 无法加载。
 *   **应用更新**：设置页可检查 GitHub Releases；打包版支持下载、校验、暂存并通过独立更新器重启安装。
-*   **MCP 服务器**：设置页可配置 `stdio` 与 Streamable HTTP MCP 服务器，也支持导入 `mcpServers` / `mcp_servers` JSON；已启用服务器会以延迟发现工具的方式接入 Agent。打包版默认内置 MCP client 运行时，无需额外安装 `mcp`。
+*   **MCP 服务器**：设置页以更接近 Apple 偏好设置的轻量分区承载 MCP 配置，术语保持 `MCP`、`stdio`、`Streamable HTTP`、`Headers`、`JSON` 等英文表达，也支持导入 `mcpServers` / `mcp_servers` JSON；已启用服务器会以延迟发现工具的方式接入 Agent。打包版默认内置 MCP client 运行时，无需额外安装 `mcp`。
 
 ---
 
 ## 3. 用户使用流程 (User Flow)
 
 1.  **配置与启动**
-    *   设置 API Key 与 Provider（`openai` 或 `anthropic`）。
+    *   在设置页按“模型与服务 / 智能体 / 工作区 / MCP / 企业消息 / 权限 / 更新”的偏好设置结构完成初始化。
     *   如需外部工具能力，可在设置页添加 MCP 服务器；首版只接入 MCP tools。
     *   在左侧栏添加或选择项目文件夹，项目即工作区。
 

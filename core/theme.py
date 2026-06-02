@@ -28,16 +28,24 @@ class DesignTokens:
     bg_glass = "rgba(255, 255, 255, 0.82)"
     bg_hover = "#edf2f7"
     bg_code = "#fafbfd"
+    bg_panel = "rgba(255, 255, 255, 0.72)"
+    bg_panel_strong = "rgba(255, 255, 255, 0.9)"
     bg_sidebar_selected = "#e6f0ff"
     bg_sidebar_hover = "#eef3f8"
     bg_chat = "#ffffff"
     bg_user_bubble = "#007aff"
     bg_assistant_stream = "#ffffff"
+    bg_settings_nav = "#eef2f6"
+    bg_settings_nav_selected = "#ffffff"
+    bg_settings_summary = "#f7fbff"
 
     border = "#d8dbe2"
     border_strong = "#c6cad4"
     separator = "#e7e9ef"
     border_subtle = "#eef0f4"
+    border_panel = "#d9e2ec"
+    border_settings_nav = "#d6dde7"
+    border_settings_summary = "#d7e7fb"
 
     radius_sm = 8
     radius_md = 12

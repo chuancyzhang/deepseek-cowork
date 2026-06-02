@@ -94,10 +94,11 @@ The bundled Python runtime must also include platform extension modules from loc
 
 ### 1. Configuration
 Open **⚙️ Settings**:
-*   **API Key**: DeepSeek or other provider key.
-*   **Provider**: `openai` (DeepSeek compatible) or `anthropic`.
-*   **MCP**: configure `stdio` or Streamable HTTP MCP servers. Enabled servers are registered as deferred external tools and discovered through `tool_search`.
-*   **God Mode**: Toggle safety sandbox restrictions.
+*   **Models & Services**: split providers or use-cases into separate model service cards, each with its own access key, base URL, and model list.
+*   **Agents**: save reusable working personas with their own prompt and skill scope.
+*   **Workspace**: set the default workspace and chat storage location so the app opens into a stable working context.
+*   **MCP**: configure `stdio` or Streamable HTTP MCP servers. MCP terms stay in English so they match official examples and JSON snippets.
+*   **Extended Permissions**: control whether the assistant may step outside the workspace sandbox for higher-risk actions.
 
 ### 2. Select Project
 Add or select a local folder in the sidebar **项目** section. A project is the workspace boundary for file access, and new conversations are created inside the current project.

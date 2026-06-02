@@ -397,13 +397,13 @@ def apple_panel_style(radius=14, bg=None):
 
 def apple_section_surface_style(radius=16, bg=None):
     bg = bg or "rgba(255, 255, 255, 0.62)"
-    return f"background: {bg}; border: none; border-radius: {radius}px;"
+    return f"QFrame {{ background: {bg}; border: none; border-radius: {radius}px; }}"
 
 
 def apple_outline_surface_style(radius=16, bg=None, border=None):
     bg = bg or "rgba(255, 255, 255, 0.78)"
     border = border or rgba_from_hex(DesignTokens.border_strong, 0.72)
-    return f"background: {bg}; border: 1px solid {border}; border-radius: {radius}px;"
+    return f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: {radius}px; }}"
 
 
 def apple_segmented_button_style():
@@ -705,10 +705,10 @@ def apple_settings_nav_style():
     return f"""
         QListWidget {{
             background: {DesignTokens.bg_settings_nav};
-            border: 1px solid {DesignTokens.border_settings_nav};
             border-radius: 18px;
             padding: 10px;
             outline: none;
+            border: none;
         }}
         QListWidget::item {{
             color: {DesignTokens.text_secondary};
@@ -721,7 +721,7 @@ def apple_settings_nav_style():
             background: {DesignTokens.bg_settings_nav_selected};
             color: {DesignTokens.text_primary};
             font-weight: 700;
-            border: 1px solid {DesignTokens.border_subtle};
+            border: none;
         }}
         QListWidget::item:hover {{
             background: rgba(255, 255, 255, 0.72);
@@ -732,7 +732,7 @@ def apple_settings_nav_style():
 
 def apple_settings_surface_style(radius=20):
     return (
-        f"background: {DesignTokens.bg_panel}; border: 1px solid {DesignTokens.border_panel}; "
+        f"background: {DesignTokens.bg_panel}; border: none; "
         f"border-radius: {radius}px;"
     )
 
@@ -792,7 +792,7 @@ def build_settings_surface(title="", subtitle="", radius=20):
     if subtitle:
         subtitle_label = QLabel(subtitle)
         subtitle_label.setWordWrap(True)
-        subtitle_label.setStyleSheet(apple_settings_inline_note_style())
+        subtitle_label.setStyleSheet(apple_settings_inline_note_style() + " background: transparent; border: none;")
         layout.addWidget(subtitle_label)
     return frame, layout
 
@@ -3186,7 +3186,7 @@ class SessionSopPickerDialog(QDialog):
         body.addWidget(self.template_list, 0)
 
         detail_card = QFrame()
-        detail_card.setStyleSheet(apple_outline_surface_style(radius=20))
+        detail_card.setStyleSheet(apple_section_surface_style(radius=20, bg="rgba(255, 255, 255, 0.76)"))
         detail_layout = QVBoxLayout(detail_card)
         detail_layout.setContentsMargins(18, 18, 18, 18)
         detail_layout.setSpacing(12)
@@ -3318,7 +3318,7 @@ class AutomationTaskDialog(QDialog):
         summary_row.setContentsMargins(0, 0, 0, 0)
         summary_row.setSpacing(10)
         status_card = QFrame()
-        status_card.setStyleSheet(apple_outline_surface_style(radius=16))
+        status_card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.74)"))
         status_layout = QVBoxLayout(status_card)
         status_layout.setContentsMargins(14, 12, 14, 12)
         status_layout.setSpacing(2)
@@ -3336,7 +3336,7 @@ class AutomationTaskDialog(QDialog):
         summary_row.addWidget(status_card, 1)
 
         guidance_card = QFrame()
-        guidance_card.setStyleSheet(apple_outline_surface_style(radius=16, bg="rgba(234, 243, 255, 0.9)"))
+        guidance_card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(234, 243, 255, 0.92)"))
         guidance_layout = QVBoxLayout(guidance_card)
         guidance_layout.setContentsMargins(14, 12, 14, 12)
         guidance_layout.setSpacing(2)
@@ -3351,7 +3351,7 @@ class AutomationTaskDialog(QDialog):
         layout.addLayout(summary_row)
 
         basics_card = QFrame()
-        basics_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        basics_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         basics_layout = QVBoxLayout(basics_card)
         basics_layout.setContentsMargins(16, 16, 16, 16)
         basics_layout.setSpacing(12)
@@ -3375,7 +3375,7 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(basics_card)
 
         schedule_card = QFrame()
-        schedule_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        schedule_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         schedule_card_layout = QVBoxLayout(schedule_card)
         schedule_card_layout.setContentsMargins(16, 16, 16, 16)
         schedule_card_layout.setSpacing(12)
@@ -3545,7 +3545,7 @@ class AutomationTaskDialog(QDialog):
 
         self.schedule_preview_card = QFrame()
         self.schedule_preview_card.setStyleSheet(
-            apple_outline_surface_style(radius=16, bg="rgba(255, 255, 255, 0.7)", border=DesignTokens.border_subtle)
+            apple_section_surface_style(radius=16, bg="rgba(247, 249, 252, 0.92)")
         )
         preview_meta_layout = QVBoxLayout(self.schedule_preview_card)
         preview_meta_layout.setContentsMargins(14, 12, 14, 12)
@@ -3558,7 +3558,7 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(schedule_card)
 
         preview_card = QFrame()
-        preview_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        preview_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         preview_layout = QVBoxLayout(preview_card)
         preview_layout.setContentsMargins(16, 16, 16, 16)
         preview_layout.setSpacing(8)
@@ -3575,7 +3575,7 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(preview_card)
 
         prompt_card = QFrame()
-        prompt_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        prompt_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         prompt_layout = QVBoxLayout(prompt_card)
         prompt_layout.setContentsMargins(16, 16, 16, 16)
         prompt_layout.setSpacing(10)
@@ -3895,7 +3895,7 @@ class AutomationDialog(QDialog):
         self.history_list.currentRowChanged.connect(self.refresh_history_details)
         history_layout.addWidget(self.history_list, 1)
         history_detail_card = QFrame()
-        history_detail_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        history_detail_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         history_detail_card.setMinimumWidth(280)
         history_detail_layout = QVBoxLayout(history_detail_card)
         history_detail_layout.setContentsMargins(16, 16, 16, 16)
@@ -3984,7 +3984,7 @@ class AutomationDialog(QDialog):
 
     def _build_overview_card(self, title, value):
         card = QFrame()
-        card.setStyleSheet(apple_outline_surface_style(radius=18))
+        card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(16, 14, 16, 14)
         card_layout.setSpacing(2)
@@ -4059,7 +4059,7 @@ class AutomationDialog(QDialog):
                 widget.deleteLater()
         if not self.tasks:
             empty_card = QFrame()
-            empty_card.setStyleSheet(apple_outline_surface_style(radius=18))
+            empty_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
             empty_layout = QVBoxLayout(empty_card)
             empty_layout.setContentsMargins(18, 18, 18, 18)
             empty_layout.setSpacing(8)
@@ -4080,7 +4080,7 @@ class AutomationDialog(QDialog):
             return
         for task in self.tasks:
             card = QFrame()
-            card.setStyleSheet(apple_outline_surface_style(radius=18, bg="rgba(255, 255, 255, 0.84)"))
+            card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.82)"))
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(16, 14, 16, 14)
             card_layout.setSpacing(12)
@@ -9150,7 +9150,7 @@ class ConversationSopPreviewDialog(QDialog):
         layout.addLayout(summary_row)
 
         basics_card = QFrame()
-        basics_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        basics_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         basics_layout = QVBoxLayout(basics_card)
         basics_layout.setContentsMargins(16, 16, 16, 16)
         basics_layout.setSpacing(12)
@@ -9169,7 +9169,7 @@ class ConversationSopPreviewDialog(QDialog):
         layout.addWidget(basics_card)
 
         steps_card = QFrame()
-        steps_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        steps_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
         steps_layout = QVBoxLayout(steps_card)
         steps_layout.setContentsMargins(16, 16, 16, 16)
         steps_layout.setSpacing(10)
@@ -9228,7 +9228,7 @@ class ConversationSopPreviewDialog(QDialog):
 
     def _build_summary_card(self, title, value):
         card = QFrame()
-        card.setStyleSheet(apple_outline_surface_style(radius=16, bg="rgba(255, 255, 255, 0.72)"))
+        card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.74)"))
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(14, 12, 14, 12)
         card_layout.setSpacing(2)
@@ -9893,7 +9893,7 @@ class MainWindow(QMainWindow):
         sop_tab_layout.setSpacing(10)
 
         sop_intro_card = QFrame()
-        sop_intro_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        sop_intro_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
         sop_intro_layout = QVBoxLayout(sop_intro_card)
         sop_intro_layout.setContentsMargins(14, 12, 14, 12)
         sop_intro_layout.setSpacing(6)
@@ -9914,7 +9914,7 @@ class MainWindow(QMainWindow):
         sop_tab_layout.addWidget(sop_intro_card)
 
         step_card = QFrame()
-        step_card.setStyleSheet(apple_outline_surface_style(radius=18, bg="rgba(255, 255, 255, 0.74)"))
+        step_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.74)"))
         step_layout = QVBoxLayout(step_card)
         step_layout.setContentsMargins(14, 14, 14, 14)
         step_layout.setSpacing(8)
@@ -9928,7 +9928,7 @@ class MainWindow(QMainWindow):
         sop_tab_layout.addWidget(step_card)
 
         sop_detail_card = QFrame()
-        sop_detail_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        sop_detail_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
         sop_detail_layout = QVBoxLayout(sop_detail_card)
         sop_detail_layout.setContentsMargins(14, 14, 14, 14)
         sop_detail_layout.setSpacing(8)

@@ -112,9 +112,11 @@ Examples:
 
 ### 4. Manage Automation
 Open **自动化** from the sidebar:
-*   **Configured**: create scheduled automations, enable or pause them, run them immediately, and review the next run time. Schedules support direct 5-field crontab syntax as well as guided daily/weekly/monthly/interval/once setup.
-*   **Run History**: inspect completed, failed, interrupted, or missed runs and reopen the related task session.
-*   **Task Templates**: edit the former SOP templates without exposing manual template IDs; IDs are generated automatically, templates and steps can be set to manual confirmation or auto-advance, and each step can run through the agent, an uploaded Python file, or a Bash command.
+*   **Automation Center** now opens with a compact overview, softer segmented navigation, and lighter task rows that surface enabled state, template, schedule, next run time, and quick actions without looking like a raw admin table.
+*   **Scheduled Task Editor** splits setup into clear sections for basics, schedule, template preview, and execution notes. Schedules still support direct 5-field crontab syntax as well as guided daily/weekly/monthly/interval/once setup.
+*   **Run History** presents a calmer detail view for completed, failed, interrupted, missed, or awaiting-confirmation runs, and can still reopen the related task session.
+*   **Task Templates** continue to hide manual template IDs by default; templates and steps can be set to manual confirmation or auto-advance, and each step can run through the agent, an uploaded Python file, or a Bash command.
+*   **Conversation Automation Entry Points** are more consistent: binding an automation to the current session, previewing a generated SOP draft, and inspecting the right-side automation drawer all use the same Apple-style surfaces and step summaries.
 
 ### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:

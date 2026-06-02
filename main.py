@@ -400,6 +400,12 @@ def apple_section_surface_style(radius=16, bg=None):
     return f"background: {bg}; border: none; border-radius: {radius}px;"
 
 
+def apple_outline_surface_style(radius=16, bg=None, border=None):
+    bg = bg or "rgba(255, 255, 255, 0.78)"
+    border = border or rgba_from_hex(DesignTokens.border_strong, 0.72)
+    return f"background: {bg}; border: 1px solid {border}; border-radius: {radius}px;"
+
+
 def apple_segmented_button_style():
     return f"""
         QPushButton {{
@@ -420,6 +426,45 @@ def apple_segmented_button_style():
             color: {DesignTokens.primary};
         }}
     """
+
+
+def apple_section_kicker_style():
+    return (
+        f"color: {DesignTokens.text_tertiary}; font-size: 11px; "
+        "font-weight: 700; letter-spacing: 0px; text-transform: uppercase;"
+    )
+
+
+def apple_section_title_style(size=16):
+    return f"font-size: {size}px; font-weight: 700; color: {DesignTokens.text_primary};"
+
+
+def apple_caption_style():
+    return f"color: {DesignTokens.text_secondary}; font-size: 12px; line-height: 1.5;"
+
+
+def apple_metric_value_style():
+    return f"color: {DesignTokens.text_primary}; font-size: 20px; font-weight: 700;"
+
+
+def apple_icon_action_button_style(kind="neutral"):
+    color = DesignTokens.text_secondary
+    hover = "rgba(255, 255, 255, 0.92)"
+    border = DesignTokens.border_subtle
+    if kind == "primary":
+        color = DesignTokens.primary
+        border = rgba_from_hex(DesignTokens.primary, 0.18)
+        hover = rgba_from_hex(DesignTokens.primary, 0.10)
+    elif kind == "danger":
+        color = DesignTokens.error_text
+        border = rgba_from_hex(DesignTokens.error_text, 0.12)
+        hover = rgba_from_hex(DesignTokens.error_text, 0.08)
+    return (
+        f"QToolButton {{ background: rgba(255, 255, 255, 0.74); color: {color}; "
+        f"border: 1px solid {border}; border-radius: 14px; padding: 0px; }}"
+        f" QToolButton:hover {{ background: {hover}; border-color: {DesignTokens.border}; color: {color}; }}"
+        f" QToolButton:pressed {{ background: {DesignTokens.bg_hover}; }}"
+    )
 
 
 def apple_code_edit_style(bg=None, radius=12, subtle=False, padding=9):
@@ -2962,7 +3007,7 @@ class SessionSopPickerDialog(QDialog):
     def __init__(self, templates, current_template_id="", parent=None):
         super().__init__(parent)
         self.setWindowTitle("为当前会话添加自动化")
-        self.resize(700, 520)
+        self.resize(780, 560)
         self.templates = list(templates or [])
         self.current_template_id = str(current_template_id or "").strip()
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
@@ -2979,12 +3024,15 @@ class SessionSopPickerDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(14)
+        layout.addLayout(body, 1)
+
         self.template_list = QListWidget()
-        self.template_list.setStyleSheet(
-            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
-            f"QListWidget::item {{ padding: 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
-            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
-        )
+        self.template_list.setMinimumWidth(260)
+        self.template_list.setMaximumWidth(320)
+        self.template_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=16, padding=6))
         for template in self.templates:
             item = QListWidgetItem(template.get("name") or "未命名自动化")
             item.setData(Qt.UserRole, template.get("id"))
@@ -2992,12 +3040,43 @@ class SessionSopPickerDialog(QDialog):
             desc = template.get("description") or "未填写描述"
             item.setToolTip(f"{desc}\n步骤数：{step_count}")
             self.template_list.addItem(item)
-        layout.addWidget(self.template_list, 1)
+        body.addWidget(self.template_list, 0)
 
-        self.detail_label = QLabel("选择一个自动化模板查看说明。")
+        detail_card = QFrame()
+        detail_card.setStyleSheet(apple_outline_surface_style(radius=20))
+        detail_layout = QVBoxLayout(detail_card)
+        detail_layout.setContentsMargins(18, 18, 18, 18)
+        detail_layout.setSpacing(12)
+        body.addWidget(detail_card, 1)
+
+        detail_kicker = QLabel("会话中的执行方式")
+        detail_kicker.setStyleSheet(apple_section_kicker_style())
+        detail_layout.addWidget(detail_kicker)
+
+        self.detail_title = QLabel("选择一个自动化模板")
+        self.detail_title.setStyleSheet(apple_section_title_style())
+        detail_layout.addWidget(self.detail_title)
+
+        self.detail_meta_label = QLabel("绑定后会从第一步开始执行。")
+        self.detail_meta_label.setWordWrap(True)
+        self.detail_meta_label.setStyleSheet(apple_caption_style())
+        detail_layout.addWidget(self.detail_meta_label)
+
+        self.detail_label = QLabel("这里会展示模板说明和步骤概览。")
         self.detail_label.setWordWrap(True)
-        self.detail_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(self.detail_label)
+        self.detail_label.setStyleSheet(apple_caption_style())
+        detail_layout.addWidget(self.detail_label)
+
+        steps_title = QLabel("步骤概览")
+        steps_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        detail_layout.addWidget(steps_title)
+
+        self.step_preview_list = QListWidget()
+        self.step_preview_list.setFocusPolicy(Qt.NoFocus)
+        self.step_preview_list.setStyleSheet(
+            apple_list_style(border=True, bg="rgba(255, 255, 255, 0.64)", radius=14, padding=4)
+        )
+        detail_layout.addWidget(self.step_preview_list, 1)
 
         actions = QHBoxLayout()
         cancel_btn = QPushButton("取消")
@@ -3024,17 +3103,27 @@ class SessionSopPickerDialog(QDialog):
     def refresh_details(self, index):
         template = self.templates[index] if 0 <= index < len(self.templates) else {}
         if not template:
-            self.detail_label.setText("选择一个自动化模板查看说明。")
+            self.detail_title.setText("选择一个自动化模板")
+            self.detail_meta_label.setText("绑定后会从第一步开始执行。")
+            self.detail_label.setText("这里会展示模板说明和步骤概览。")
+            self.step_preview_list.clear()
             return
         steps = template.get("steps") or []
-        preview = " -> ".join(
-            [str(step.get("title") or f"步骤 {i + 1}") for i, step in enumerate(steps[:4])]
-        )
-        if len(steps) > 4:
-            preview += " -> ..."
-        self.detail_label.setText(
-            f"{template.get('description') or '未填写描述'}\n步骤：{preview or '暂无步骤'}"
-        )
+        self.detail_title.setText(template.get("name") or "未命名自动化")
+        advance_mode = "自动推进" if str(template.get("advance_mode") or "manual") == "auto" else "人工确认"
+        trigger_text = summarize_list(template.get("triggers") or [], max_items=3, max_chars=18) or "未设置触发词"
+        self.detail_meta_label.setText(f"{len(steps)} 个步骤 · 默认 {advance_mode} · 触发词 {trigger_text}")
+        self.detail_label.setText(template.get("description") or "未填写描述")
+        self.step_preview_list.clear()
+        for idx, step in enumerate(steps):
+            mode = resolve_step_advance_mode(template, step)
+            mode_text = "自动推进" if mode == SOP_ADVANCE_MODE_AUTO else "人工确认"
+            item = QListWidgetItem(
+                qta.icon("fa5s.chevron-right", color=DesignTokens.primary),
+                f"{idx + 1}. {step.get('title') or f'步骤 {idx + 1}'}\n{mode_text}",
+            )
+            item.setToolTip(step.get("instructions") or "")
+            self.step_preview_list.addItem(item)
 
     def selected_template(self):
         item = self.template_list.currentItem()
@@ -3082,6 +3171,50 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.setSpacing(10)
+        status_card = QFrame()
+        status_card.setStyleSheet(apple_outline_surface_style(radius=16))
+        status_layout = QVBoxLayout(status_card)
+        status_layout.setContentsMargins(14, 12, 14, 12)
+        status_layout.setSpacing(2)
+        status_kicker = QLabel("任务状态")
+        status_kicker.setStyleSheet(apple_section_kicker_style())
+        status_layout.addWidget(status_kicker)
+        self.status_summary_label = QLabel("启用后会按计划自动创建新任务。")
+        self.status_summary_label.setStyleSheet(apple_caption_style())
+        self.status_summary_label.setWordWrap(True)
+        status_layout.addWidget(self.status_summary_label)
+        self.enabled_check = QCheckBox("启用该自动化任务")
+        self.enabled_check.setChecked(True)
+        self.enabled_check.toggled.connect(self._refresh_status_summary)
+        status_layout.addWidget(self.enabled_check)
+        summary_row.addWidget(status_card, 1)
+
+        guidance_card = QFrame()
+        guidance_card.setStyleSheet(apple_outline_surface_style(radius=16, bg="rgba(234, 243, 255, 0.9)"))
+        guidance_layout = QVBoxLayout(guidance_card)
+        guidance_layout.setContentsMargins(14, 12, 14, 12)
+        guidance_layout.setSpacing(2)
+        guidance_kicker = QLabel("创建方式")
+        guidance_kicker.setStyleSheet(apple_section_kicker_style())
+        guidance_layout.addWidget(guidance_kicker)
+        guidance_text = QLabel("适合先用快捷配置做稳定计划，需要精细控制时再切到 Cron。")
+        guidance_text.setStyleSheet(apple_caption_style())
+        guidance_text.setWordWrap(True)
+        guidance_layout.addWidget(guidance_text)
+        summary_row.addWidget(guidance_card, 1)
+        layout.addLayout(summary_row)
+
+        basics_card = QFrame()
+        basics_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        basics_layout = QVBoxLayout(basics_card)
+        basics_layout.setContentsMargins(16, 16, 16, 16)
+        basics_layout.setSpacing(12)
+        basics_kicker = QLabel("基础信息")
+        basics_kicker.setStyleSheet(apple_section_kicker_style())
+        basics_layout.addWidget(basics_kicker)
         form = QFormLayout()
         form.setSpacing(12)
         configure_responsive_form_layout(form)
@@ -3095,16 +3228,40 @@ class AutomationTaskDialog(QDialog):
             self.template_combo.addItem(template.get("name") or "未命名模板", template.get("id") or "")
         self.template_combo.currentIndexChanged.connect(self._refresh_template_preview)
         form.addRow("任务模板", self.template_combo)
+        basics_layout.addLayout(form)
+        layout.addWidget(basics_card)
 
-        self.enabled_check = QCheckBox("启用该自动化任务")
-        self.enabled_check.setChecked(True)
-        form.addRow("状态", self.enabled_check)
+        schedule_card = QFrame()
+        schedule_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        schedule_card_layout = QVBoxLayout(schedule_card)
+        schedule_card_layout.setContentsMargins(16, 16, 16, 16)
+        schedule_card_layout.setSpacing(12)
+        schedule_kicker = QLabel("触发计划")
+        schedule_kicker.setStyleSheet(apple_section_kicker_style())
+        schedule_card_layout.addWidget(schedule_kicker)
 
         self.schedule_mode_combo = QComboBox()
         self.schedule_mode_combo.addItem("快捷配置", "quick")
         self.schedule_mode_combo.addItem("Cron 表达式", "cron")
         self.schedule_mode_combo.currentIndexChanged.connect(self._on_schedule_mode_changed)
-        form.addRow("配置方式", self.schedule_mode_combo)
+        self.schedule_mode_combo.hide()
+
+        mode_bar = QFrame()
+        mode_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.76)"))
+        mode_layout = QHBoxLayout(mode_bar)
+        mode_layout.setContentsMargins(4, 4, 4, 4)
+        mode_layout.setSpacing(4)
+        self.schedule_mode_buttons = {}
+        for label, value in (("快捷配置", "quick"), ("Cron", "cron")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(30)
+            btn.setStyleSheet(apple_segmented_button_style())
+            btn.clicked.connect(lambda checked=False, data=value: self._set_schedule_mode(data))
+            mode_layout.addWidget(btn)
+            self.schedule_mode_buttons[value] = btn
+        schedule_card_layout.addWidget(mode_bar)
 
         self.schedule_type_combo = QComboBox()
         self.schedule_type_combo.addItem("每天", AUTOMATION_SCHEDULE_DAILY)
@@ -3113,7 +3270,7 @@ class AutomationTaskDialog(QDialog):
         self.schedule_type_combo.addItem("间隔执行", AUTOMATION_SCHEDULE_INTERVAL)
         self.schedule_type_combo.addItem("单次", AUTOMATION_SCHEDULE_ONCE)
         self.schedule_type_combo.currentIndexChanged.connect(self._on_schedule_type_changed)
-        form.addRow("触发方式", self.schedule_type_combo)
+        self.schedule_type_combo.hide()
 
         self.schedule_stack = QStackedWidget()
 
@@ -3197,7 +3354,33 @@ class AutomationTaskDialog(QDialog):
         quick_layout = QVBoxLayout(quick_page)
         quick_layout.setContentsMargins(0, 0, 0, 0)
         quick_layout.setSpacing(10)
-        quick_layout.addWidget(self.schedule_type_combo)
+        type_bar = QFrame()
+        type_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.76)"))
+        type_layout = QGridLayout(type_bar)
+        type_layout.setContentsMargins(4, 4, 4, 4)
+        type_layout.setHorizontalSpacing(4)
+        type_layout.setVerticalSpacing(4)
+        self.schedule_type_buttons = {}
+        for index, (label, value) in enumerate(
+            (
+                ("每天", AUTOMATION_SCHEDULE_DAILY),
+                ("每周", AUTOMATION_SCHEDULE_WEEKLY),
+                ("每月", AUTOMATION_SCHEDULE_MONTHLY),
+                ("间隔执行", AUTOMATION_SCHEDULE_INTERVAL),
+                ("单次", AUTOMATION_SCHEDULE_ONCE),
+            )
+        ):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(30)
+            btn.setStyleSheet(apple_segmented_button_style())
+            btn.clicked.connect(lambda checked=False, data=value: self._set_schedule_type(data))
+            row = 0 if index < 3 else 1
+            col = index if index < 3 else index - 3
+            type_layout.addWidget(btn, row, col)
+            self.schedule_type_buttons[value] = btn
+        quick_layout.addWidget(type_bar)
         quick_layout.addWidget(self.schedule_stack)
         self.schedule_mode_stack.addWidget(quick_page)
 
@@ -3210,35 +3393,61 @@ class AutomationTaskDialog(QDialog):
         self.cron_expression_input.textChanged.connect(self._refresh_cron_preview)
         self.cron_preview_label = QLabel("")
         self.cron_preview_label.setWordWrap(True)
-        self.cron_preview_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.cron_preview_label.setStyleSheet(apple_caption_style())
         cron_layout.addWidget(self.cron_expression_input)
         cron_layout.addWidget(self.cron_preview_label)
         self.schedule_mode_stack.addWidget(cron_page)
 
-        form.addRow("触发配置", self.schedule_mode_stack)
-        layout.addLayout(form)
+        schedule_card_layout.addWidget(self.schedule_mode_stack)
+
+        self.schedule_preview_card = QFrame()
+        self.schedule_preview_card.setStyleSheet(
+            apple_outline_surface_style(radius=16, bg="rgba(255, 255, 255, 0.7)", border=DesignTokens.border_subtle)
+        )
+        preview_meta_layout = QVBoxLayout(self.schedule_preview_card)
+        preview_meta_layout.setContentsMargins(14, 12, 14, 12)
+        preview_meta_layout.setSpacing(4)
+        preview_meta_kicker = QLabel("计划预览")
+        preview_meta_kicker.setStyleSheet(apple_section_kicker_style())
+        preview_meta_layout.addWidget(preview_meta_kicker)
+        preview_meta_layout.addWidget(self.cron_preview_label)
+        schedule_card_layout.addWidget(self.schedule_preview_card)
+        layout.addWidget(schedule_card)
 
         preview_card = QFrame()
-        preview_card.setStyleSheet(apple_section_surface_style(radius=16))
+        preview_card.setStyleSheet(apple_outline_surface_style(radius=18))
         preview_layout = QVBoxLayout(preview_card)
-        preview_layout.setContentsMargins(14, 12, 14, 12)
-        preview_layout.setSpacing(6)
-        preview_title = QLabel("模板说明")
-        preview_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        preview_layout.setContentsMargins(16, 16, 16, 16)
+        preview_layout.setSpacing(8)
+        preview_title = QLabel("模板预览")
+        preview_title.setStyleSheet(apple_section_kicker_style())
+        preview_layout.addWidget(preview_title)
+        self.template_preview_title = QLabel("等待选择模板")
+        self.template_preview_title.setStyleSheet(apple_section_title_style(size=15))
+        preview_layout.addWidget(self.template_preview_title)
         self.template_preview_label = QLabel("")
         self.template_preview_label.setWordWrap(True)
-        self.template_preview_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        preview_layout.addWidget(preview_title)
+        self.template_preview_label.setStyleSheet(apple_caption_style())
         preview_layout.addWidget(self.template_preview_label)
         layout.addWidget(preview_card)
 
-        prompt_label = QLabel("你希望助手做什么")
-        prompt_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        prompt_card = QFrame()
+        prompt_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        prompt_layout = QVBoxLayout(prompt_card)
+        prompt_layout.setContentsMargins(16, 16, 16, 16)
+        prompt_layout.setSpacing(10)
+        prompt_label = QLabel("执行补充说明")
+        prompt_label.setStyleSheet(apple_section_kicker_style())
+        prompt_layout.addWidget(prompt_label)
+        prompt_hint = QLabel("告诉助手这次自动化更关注什么，比如输出格式、过滤条件、优先级。")
+        prompt_hint.setStyleSheet(apple_caption_style())
+        prompt_hint.setWordWrap(True)
+        prompt_layout.addWidget(prompt_hint)
         self.prompt_edit = QTextEdit()
         self.prompt_edit.setPlaceholderText("补充本次自动化的执行要求、输出格式或关注重点。")
         self.prompt_edit.setFixedHeight(180)
-        layout.addWidget(prompt_label)
-        layout.addWidget(self.prompt_edit, 1)
+        prompt_layout.addWidget(self.prompt_edit)
+        layout.addWidget(prompt_card, 1)
 
         actions = QHBoxLayout()
         cancel_btn = QPushButton("取消")
@@ -3262,6 +3471,32 @@ class AutomationTaskDialog(QDialog):
             if str(template.get("id") or "").strip() == template_id:
                 return template
         return None
+
+    def _set_schedule_mode(self, value):
+        index = self.schedule_mode_combo.findData(value)
+        if index >= 0 and self.schedule_mode_combo.currentIndex() != index:
+            self.schedule_mode_combo.setCurrentIndex(index)
+
+    def _set_schedule_type(self, value):
+        index = self.schedule_type_combo.findData(value)
+        if index >= 0 and self.schedule_type_combo.currentIndex() != index:
+            self.schedule_type_combo.setCurrentIndex(index)
+
+    def _sync_schedule_mode_buttons(self):
+        current = str(self.schedule_mode_combo.currentData() or "quick")
+        for value, btn in self.schedule_mode_buttons.items():
+            btn.setChecked(value == current)
+
+    def _sync_schedule_type_buttons(self):
+        current = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
+        for value, btn in self.schedule_type_buttons.items():
+            btn.setChecked(value == current)
+
+    def _refresh_status_summary(self):
+        if self.enabled_check.isChecked():
+            self.status_summary_label.setText("任务会持续按计划执行，你也可以在中心里随时手动暂停。")
+        else:
+            self.status_summary_label.setText("先保存为停用状态，等规则确认后再启用也没问题。")
 
     def _set_time_value(self, editor, value, fallback="09:00"):
         editor.setText(str(value or fallback).strip() or fallback)
@@ -3302,10 +3537,13 @@ class AutomationTaskDialog(QDialog):
         )
         self._on_schedule_mode_changed()
         self._refresh_cron_preview()
+        self._refresh_status_summary()
 
     def _on_schedule_mode_changed(self):
         cron_mode = str(self.schedule_mode_combo.currentData() or "quick") == "cron"
         self.schedule_mode_stack.setCurrentIndex(1 if cron_mode else 0)
+        self._sync_schedule_mode_buttons()
+        self._refresh_cron_preview()
 
     def _on_schedule_type_changed(self):
         schedule_type = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
@@ -3317,6 +3555,7 @@ class AutomationTaskDialog(QDialog):
             AUTOMATION_SCHEDULE_ONCE: 4,
         }.get(schedule_type, 0)
         self.schedule_stack.setCurrentIndex(page_index)
+        self._sync_schedule_type_buttons()
         self._refresh_cron_preview()
 
     def _quick_schedule_payload(self):
@@ -3347,19 +3586,20 @@ class AutomationTaskDialog(QDialog):
         if cron_mode:
             raw_expression = self.cron_expression_input.text().strip()
             if not validate_cron_expression(raw_expression):
-                self.cron_preview_label.setText("Cron 表达式无效，需要 5 段 crontab 语法。")
+                self.cron_preview_label.setText("Cron 表达式暂时无效，需要 5 段 crontab 语法。")
                 return
             expression = raw_expression
         else:
             quick_payload = self._quick_schedule_payload()
             if quick_payload.get("schedule_type") == AUTOMATION_SCHEDULE_ONCE:
                 when = self.once_datetime_edit.dateTime().toString("yyyy-MM-dd HH:mm")
-                self.cron_preview_label.setText(f"单次执行：{when}")
+                self.cron_preview_label.setText(f"单次执行\n{when}")
                 return
             expression = str(quick_payload.get("cron_expression") or "").strip()
         next_run_at = compute_next_cron_run_at(expression)
         next_run_text = datetime.fromtimestamp(int(next_run_at)).strftime("%Y-%m-%d %H:%M")
-        self.cron_preview_label.setText(f"Cron：{expression}\n下次执行：{next_run_text}")
+        lead = "自定义 Cron" if cron_mode else "下次执行"
+        self.cron_preview_label.setText(f"{lead}\n{next_run_text}\n{expression}")
 
     def _refresh_template_preview(self):
         template = self._current_template() or {}
@@ -3369,6 +3609,7 @@ class AutomationTaskDialog(QDialog):
         )
         if len(steps) > 4:
             preview += " -> ..."
+        self.template_preview_title.setText(template.get("name") or "等待选择模板")
         self.template_preview_label.setText(
             f"{template.get('description') or '未填写描述'}\n步骤：{preview or '暂无步骤'}"
         )
@@ -3433,17 +3674,52 @@ class AutomationDialog(QDialog):
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
+        title_box.setSpacing(4)
         title = QLabel("自动化")
         title.setProperty("roleTitle", True)
+        subtitle = QLabel("把会话里的可复用流程沉淀成计划任务，安静地在后台替你推进。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
         title_box.addWidget(title)
+        title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
-        self.create_task_btn = QPushButton("手动新建")
-        self.create_task_btn.setObjectName("SecondaryBtn")
+        self.create_task_btn = QPushButton("新建定时任务")
+        self.create_task_btn.setIcon(qta.icon("fa5s.plus", color="#ffffff"))
+        self.create_task_btn.setObjectName("PrimaryBtn")
         self.create_task_btn.clicked.connect(self.create_task)
         header.addWidget(self.create_task_btn)
         layout.addLayout(header)
 
-        self.tabs = QTabWidget()
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.setSpacing(10)
+        self.configured_summary_card = self._build_overview_card("已配置任务", "0")
+        self.active_summary_card = self._build_overview_card("正在启用", "0")
+        self.template_summary_card = self._build_overview_card("任务模板", "0")
+        summary_row.addWidget(self.configured_summary_card, 1)
+        summary_row.addWidget(self.active_summary_card, 1)
+        summary_row.addWidget(self.template_summary_card, 1)
+        layout.addLayout(summary_row)
+
+        tab_bar = QFrame()
+        tab_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.78)"))
+        tab_bar_layout = QHBoxLayout(tab_bar)
+        tab_bar_layout.setContentsMargins(4, 4, 4, 4)
+        tab_bar_layout.setSpacing(4)
+        self.tab_buttons = []
+        for index, label in enumerate(("已配置", "执行历史", "任务模板")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setMinimumHeight(32)
+            btn.setStyleSheet(apple_segmented_button_style())
+            btn.clicked.connect(lambda checked=False, idx=index: self._set_tab_index(idx))
+            tab_bar_layout.addWidget(btn)
+            self.tab_buttons.append(btn)
+        layout.addWidget(tab_bar)
+
+        self.tabs = QStackedWidget()
+        self.tabs.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
         layout.addWidget(self.tabs, 1)
 
         configured_tab = QWidget()
@@ -3460,26 +3736,38 @@ class AutomationDialog(QDialog):
         self.tasks_layout.setContentsMargins(0, 0, 0, 0)
         self.tasks_layout.setSpacing(10)
         self.tasks_scroll.setWidget(self.tasks_container)
+        configured_hint = QLabel("定时任务更适合长期、稳定、可重复的流程。")
+        configured_hint.setStyleSheet(apple_caption_style())
+        configured_hint.setWordWrap(True)
+        configured_layout.addWidget(configured_hint)
         configured_layout.addWidget(self.tasks_scroll, 1)
-        self.tabs.addTab(configured_tab, "已配置")
+        self.tabs.addWidget(configured_tab)
 
         history_tab = QWidget()
-        history_layout = QVBoxLayout(history_tab)
+        history_layout = QHBoxLayout(history_tab)
         history_layout.setContentsMargins(0, 12, 0, 0)
-        history_layout.setSpacing(10)
+        history_layout.setSpacing(12)
         self.history_list = QListWidget()
         self.history_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=16, padding=6))
         self.history_list.currentRowChanged.connect(self.refresh_history_details)
         history_layout.addWidget(self.history_list, 1)
         history_detail_card = QFrame()
-        history_detail_card.setStyleSheet(apple_section_surface_style(radius=16))
+        history_detail_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        history_detail_card.setMinimumWidth(280)
         history_detail_layout = QVBoxLayout(history_detail_card)
-        history_detail_layout.setContentsMargins(14, 12, 14, 12)
+        history_detail_layout.setContentsMargins(16, 16, 16, 16)
         history_detail_layout.setSpacing(8)
+        history_kicker = QLabel("执行详情")
+        history_kicker.setStyleSheet(apple_section_kicker_style())
+        history_detail_layout.addWidget(history_kicker)
+        self.history_detail_title = QLabel("选择一条执行记录")
+        self.history_detail_title.setStyleSheet(apple_section_title_style(size=15))
+        history_detail_layout.addWidget(self.history_detail_title)
         self.history_detail_label = QLabel("选择一条执行记录查看详情。")
         self.history_detail_label.setWordWrap(True)
-        self.history_detail_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.history_detail_label.setStyleSheet(apple_caption_style())
         history_detail_layout.addWidget(self.history_detail_label)
+        history_detail_layout.addStretch()
         history_actions = QHBoxLayout()
         history_actions.addStretch()
         self.open_history_session_btn = QPushButton("打开关联任务")
@@ -3488,12 +3776,16 @@ class AutomationDialog(QDialog):
         history_actions.addWidget(self.open_history_session_btn)
         history_detail_layout.addLayout(history_actions)
         history_layout.addWidget(history_detail_card)
-        self.tabs.addTab(history_tab, "执行历史")
+        self.tabs.addWidget(history_tab)
 
         templates_tab = QWidget()
         templates_layout = QVBoxLayout(templates_tab)
         templates_layout.setContentsMargins(0, 12, 0, 0)
-        templates_layout.setSpacing(0)
+        templates_layout.setSpacing(10)
+        templates_hint = QLabel("模板负责定义流程本身，计划任务只负责什么时候触发。")
+        templates_hint.setStyleSheet(apple_caption_style())
+        templates_hint.setWordWrap(True)
+        templates_layout.addWidget(templates_hint)
         templates_scroll = QScrollArea()
         templates_scroll.setWidgetResizable(True)
         templates_scroll.setFrameShape(QFrame.NoFrame)
@@ -3525,7 +3817,7 @@ class AutomationDialog(QDialog):
             helper_text="",
         )
         templates_content_layout.addWidget(self.sop_template_manager)
-        self.tabs.addTab(templates_tab, "任务模板")
+        self.tabs.addWidget(templates_tab)
 
         actions = QHBoxLayout()
         close_btn = QPushButton("关闭")
@@ -3541,10 +3833,44 @@ class AutomationDialog(QDialog):
 
         self.refresh_task_cards()
         self.refresh_history_list()
-        self.tabs.setCurrentIndex(0)
+        self._refresh_overview_cards()
+        self._set_tab_index(0)
 
     def _current_templates(self):
         return self.sop_template_manager.get_templates()
+
+    def _build_overview_card(self, title, value):
+        card = QFrame()
+        card.setStyleSheet(apple_outline_surface_style(radius=18))
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(2)
+        kicker = QLabel(title)
+        kicker.setStyleSheet(apple_section_kicker_style())
+        card_layout.addWidget(kicker)
+        value_label = QLabel(value)
+        value_label.setProperty("summaryValue", True)
+        value_label.setStyleSheet(apple_metric_value_style())
+        card_layout.addWidget(value_label)
+        return card
+
+    def _set_summary_card_value(self, card, value):
+        labels = card.findChildren(QLabel)
+        if len(labels) >= 2:
+            labels[1].setText(str(value))
+
+    def _refresh_overview_cards(self):
+        self._set_summary_card_value(self.configured_summary_card, len(self.tasks))
+        self._set_summary_card_value(
+            self.active_summary_card,
+            len([task for task in self.tasks if task.get("enabled")]),
+        )
+        self._set_summary_card_value(self.template_summary_card, len(self._current_templates()))
+
+    def _set_tab_index(self, index):
+        self.tabs.setCurrentIndex(index)
+        for btn_index, btn in enumerate(self.tab_buttons):
+            btn.setChecked(btn_index == index)
 
     def _template_by_id(self, template_id):
         identifier = str(template_id or "").strip()
@@ -3567,6 +3893,21 @@ class AutomationDialog(QDialog):
         template_name = template.get("name") if template else "模板已删除"
         return f"{template_name} · {describe_schedule(task)}\n下次执行：{next_run_text}"
 
+    def _build_task_action_button(self, icon_name, tooltip, callback, kind="neutral"):
+        btn = QToolButton()
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedSize(30, 30)
+        btn.setToolTip(tooltip)
+        btn.setStyleSheet(apple_icon_action_button_style(kind))
+        icon_color = DesignTokens.text_secondary
+        if kind == "primary":
+            icon_color = DesignTokens.primary
+        elif kind == "danger":
+            icon_color = DesignTokens.error_text
+        btn.setIcon(qta.icon(icon_name, color=icon_color))
+        btn.clicked.connect(callback)
+        return btn
+
     def refresh_task_cards(self):
         while self.tasks_layout.count():
             item = self.tasks_layout.takeAt(0)
@@ -3575,73 +3916,85 @@ class AutomationDialog(QDialog):
                 widget.deleteLater()
         if not self.tasks:
             empty_card = QFrame()
-            empty_card.setStyleSheet(apple_section_surface_style(radius=16))
+            empty_card.setStyleSheet(apple_outline_surface_style(radius=18))
             empty_layout = QVBoxLayout(empty_card)
             empty_layout.setContentsMargins(18, 18, 18, 18)
-            empty_layout.setSpacing(12)
+            empty_layout.setSpacing(8)
             empty_title = QLabel("还没有任务")
-            empty_title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary};")
+            empty_title.setStyleSheet(apple_section_title_style(size=15))
+            empty_desc = QLabel("先创建一个稳定会重复发生的流程，比如日报、巡检、同步或清理。")
+            empty_desc.setStyleSheet(apple_caption_style())
+            empty_desc.setWordWrap(True)
             empty_btn = QPushButton("新建定时任务")
             empty_btn.setObjectName("PrimaryBtn")
             empty_btn.clicked.connect(self.create_task)
             empty_layout.addWidget(empty_title)
+            empty_layout.addWidget(empty_desc)
             empty_layout.addWidget(empty_btn, 0, Qt.AlignLeft)
             self.tasks_layout.addWidget(empty_card)
             self.tasks_layout.addStretch()
+            self._refresh_overview_cards()
             return
         for task in self.tasks:
             card = QFrame()
-            card.setStyleSheet(apple_section_surface_style(radius=16))
+            card.setStyleSheet(apple_outline_surface_style(radius=18, bg="rgba(255, 255, 255, 0.84)"))
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(16, 14, 16, 14)
-            card_layout.setSpacing(10)
+            card_layout.setSpacing(12)
             title_row = QHBoxLayout()
             title_row.setContentsMargins(0, 0, 0, 0)
             title_row.setSpacing(8)
             title = QLabel(task.get("name") or "未命名自动化")
-            title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary};")
+            title.setStyleSheet(apple_section_title_style(size=15))
             badge = QLabel("已启用" if task.get("enabled") else "已暂停")
-            badge.setStyleSheet(
-                f"color: {DesignTokens.primary if task.get('enabled') else DesignTokens.text_secondary}; "
-                f"background: {DesignTokens.primary_soft if task.get('enabled') else DesignTokens.bg_secondary}; "
-                "border-radius: 10px; padding: 2px 8px; font-size: 11px; font-weight: 600;"
-            )
+            badge_style = apple_status_chip_style("running" if task.get("enabled") else "pending", subtle=not task.get("enabled"))
+            badge.setStyleSheet(badge_style)
             title_row.addWidget(title)
             title_row.addWidget(badge)
             title_row.addStretch()
+            run_btn = QPushButton("立即执行")
+            run_btn.setStyleSheet(apple_button_style("primary" if task.get("enabled") else "secondary", radius=15))
+            run_btn.setMinimumHeight(30)
+            run_btn.clicked.connect(lambda checked=False, task_id=task.get("id"): self.run_task_now(task_id))
+            title_row.addWidget(run_btn)
             card_layout.addLayout(title_row)
             meta = QLabel(self._task_card_meta(task))
             meta.setWordWrap(True)
-            meta.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+            meta.setStyleSheet(apple_caption_style())
             card_layout.addWidget(meta)
             if task.get("prompt"):
                 prompt = QLabel(task.get("prompt") or "")
                 prompt.setWordWrap(True)
-                prompt.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+                prompt.setStyleSheet(apple_caption_style())
                 card_layout.addWidget(prompt)
             actions = QHBoxLayout()
             actions.setContentsMargins(0, 0, 0, 0)
             actions.setSpacing(8)
-            edit_btn = QPushButton("编辑")
-            edit_btn.setObjectName("SecondaryBtn")
-            edit_btn.clicked.connect(lambda checked=False, task_id=task.get("id"): self.edit_task(task_id))
-            run_btn = QPushButton("立即执行")
-            run_btn.setObjectName("SecondaryBtn")
-            run_btn.clicked.connect(lambda checked=False, task_id=task.get("id"): self.run_task_now(task_id))
-            toggle_btn = QPushButton("暂停" if task.get("enabled") else "启用")
-            toggle_btn.setObjectName("SecondaryBtn")
-            toggle_btn.clicked.connect(lambda checked=False, task_id=task.get("id"): self.toggle_task(task_id))
-            delete_btn = QPushButton("删除")
-            delete_btn.setObjectName("SecondaryBtn")
-            delete_btn.clicked.connect(lambda checked=False, task_id=task.get("id"): self.delete_task(task_id))
+            edit_btn = self._build_task_action_button(
+                "fa5s.pen",
+                "编辑任务",
+                lambda checked=False, task_id=task.get("id"): self.edit_task(task_id),
+            )
+            toggle_btn = self._build_task_action_button(
+                "fa5s.pause" if task.get("enabled") else "fa5s.play",
+                "暂停任务" if task.get("enabled") else "启用任务",
+                lambda checked=False, task_id=task.get("id"): self.toggle_task(task_id),
+                kind="primary" if not task.get("enabled") else "neutral",
+            )
+            delete_btn = self._build_task_action_button(
+                "fa5s.trash-alt",
+                "删除任务",
+                lambda checked=False, task_id=task.get("id"): self.delete_task(task_id),
+                kind="danger",
+            )
             actions.addWidget(edit_btn)
-            actions.addWidget(run_btn)
             actions.addWidget(toggle_btn)
             actions.addStretch()
             actions.addWidget(delete_btn)
             card_layout.addLayout(actions)
             self.tasks_layout.addWidget(card)
         self.tasks_layout.addStretch()
+        self._refresh_overview_cards()
 
     def refresh_history_list(self):
         self.history = list(self.config_manager.get_automation_run_history())
@@ -3656,7 +4009,18 @@ class AutomationDialog(QDialog):
         }
         for record in self.history:
             when_text = self._task_time_text(record.get("started_at") or record.get("scheduled_at"))
+            status = record.get("status")
+            icon_name = "fa5s.clock"
+            if status == AUTOMATION_HISTORY_STATUS_COMPLETED:
+                icon_name = "fa5s.check-circle"
+            elif status == AUTOMATION_HISTORY_STATUS_ERROR:
+                icon_name = "fa5s.exclamation-circle"
+            elif status == AUTOMATION_HISTORY_STATUS_RUNNING:
+                icon_name = "fa5s.play-circle"
+            elif status == AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION:
+                icon_name = "fa5s.pause-circle"
             item = QListWidgetItem(
+                qta.icon(icon_name, color=status_color(status or "")),
                 f"{record.get('task_name') or '未命名任务'} · {status_labels.get(record.get('status'), record.get('status') or '未知')}\n{when_text}"
             )
             item.setData(Qt.UserRole, record.get("id"))
@@ -3664,15 +4028,19 @@ class AutomationDialog(QDialog):
         if self.history_list.count():
             self.history_list.setCurrentRow(0)
         else:
+            self.history_detail_title.setText("还没有执行记录")
             self.history_detail_label.setText("还没有执行记录。")
             self.open_history_session_btn.setEnabled(False)
+        self._refresh_overview_cards()
 
     def refresh_history_details(self, index):
         record = self.history[index] if 0 <= index < len(self.history) else {}
         if not record:
+            self.history_detail_title.setText("选择一条执行记录")
             self.history_detail_label.setText("选择一条执行记录查看详情。")
             self.open_history_session_btn.setEnabled(False)
             return
+        self.history_detail_title.setText(record.get("task_name") or "未命名任务")
         lines = [
             f"任务：{record.get('task_name') or '未命名任务'}",
             f"模板：{record.get('template_name') or '未命名模板'}",
@@ -3699,7 +4067,7 @@ class AutomationDialog(QDialog):
         templates = self._current_templates()
         if not templates:
             QMessageBox.information(self, "自动化", "请先在“任务模板”里创建至少一个模板。")
-            self.tabs.setCurrentIndex(2)
+            self._set_tab_index(2)
             return
         dialog = AutomationTaskDialog(templates, parent=self)
         if dialog.exec():
@@ -8535,18 +8903,32 @@ class ConversationSopPreviewDialog(QDialog):
 
         draft = normalize_sop_draft(draft)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
         title = QLabel("预览并确认即将生成的 SOP")
-        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
+        title.setStyleSheet(apple_section_title_style())
         layout.addWidget(title)
 
         hint = QLabel("确认后会保存为任务模板，并立即绑定到当前会话。也可以先提出修改意见，让模型重新整理一版。")
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        hint.setStyleSheet(apple_caption_style())
         layout.addWidget(hint)
 
+        summary_row = QHBoxLayout()
+        summary_row.setContentsMargins(0, 0, 0, 0)
+        summary_row.setSpacing(10)
+        self.step_count_card = self._build_summary_card("步骤数", str(len(draft.get("steps") or [])))
+        self.trigger_count_card = self._build_summary_card("触发词", str(len(draft.get("triggers") or [])))
+        summary_row.addWidget(self.step_count_card, 1)
+        summary_row.addWidget(self.trigger_count_card, 1)
+        layout.addLayout(summary_row)
+
+        basics_card = QFrame()
+        basics_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        basics_layout = QVBoxLayout(basics_card)
+        basics_layout.setContentsMargins(16, 16, 16, 16)
+        basics_layout.setSpacing(12)
         form = QFormLayout()
         configure_responsive_form_layout(form)
         self.name_input = QLineEdit(draft.get("name") or "")
@@ -8554,23 +8936,41 @@ class ConversationSopPreviewDialog(QDialog):
         self.description_edit.setFixedHeight(84)
         self.description_edit.setPlainText(draft.get("description") or "")
         self.triggers_input = QLineEdit(", ".join(draft.get("triggers") or []))
+        self.triggers_input.textChanged.connect(self._refresh_step_preview_from_editor)
         form.addRow("名称", self.name_input)
         form.addRow("描述", self.description_edit)
         form.addRow("触发词", self.triggers_input)
-        layout.addLayout(form)
+        basics_layout.addLayout(form)
+        layout.addWidget(basics_card)
 
-        steps_label = QLabel("步骤")
-        steps_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
-        layout.addWidget(steps_label)
+        steps_card = QFrame()
+        steps_card.setStyleSheet(apple_outline_surface_style(radius=18))
+        steps_layout = QVBoxLayout(steps_card)
+        steps_layout.setContentsMargins(16, 16, 16, 16)
+        steps_layout.setSpacing(10)
+        steps_label = QLabel("步骤预览")
+        steps_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
+        steps_layout.addWidget(steps_label)
+
+        self.step_preview_list = QListWidget()
+        self.step_preview_list.setStyleSheet(
+            apple_list_style(border=True, bg="rgba(255, 255, 255, 0.64)", radius=14, padding=4)
+        )
+        steps_layout.addWidget(self.step_preview_list, 1)
+
+        self.toggle_raw_btn = QPushButton("高级编辑 JSON")
+        self.toggle_raw_btn.setObjectName("SecondaryBtn")
+        self.toggle_raw_btn.setCheckable(True)
+        self.toggle_raw_btn.toggled.connect(self._toggle_steps_editor)
+        steps_layout.addWidget(self.toggle_raw_btn, 0, Qt.AlignLeft)
 
         self.steps_editor = QTextEdit()
         self.steps_editor.setPlainText(json.dumps(draft.get("steps") or [], ensure_ascii=False, indent=2))
-        self.steps_editor.setStyleSheet(
-            f"border: 1px solid {DesignTokens.border}; border-radius: 10px; "
-            f"background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; "
-            "font-family: 'Consolas', monospace; font-size: 12px; padding: 8px;"
-        )
-        layout.addWidget(self.steps_editor, 1)
+        self.steps_editor.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_code, radius=14, subtle=False, padding=10))
+        self.steps_editor.setVisible(False)
+        self.steps_editor.textChanged.connect(self._refresh_step_preview_from_editor)
+        steps_layout.addWidget(self.steps_editor)
+        layout.addWidget(steps_card, 1)
 
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
@@ -8599,6 +8999,68 @@ class ConversationSopPreviewDialog(QDialog):
         button_row.addWidget(cancel_btn)
         button_row.addWidget(confirm_btn)
         layout.addLayout(button_row)
+        self._refresh_step_preview_from_editor()
+
+    def _build_summary_card(self, title, value):
+        card = QFrame()
+        card.setStyleSheet(apple_outline_surface_style(radius=16, bg="rgba(255, 255, 255, 0.72)"))
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(2)
+        label = QLabel(title)
+        label.setStyleSheet(apple_section_kicker_style())
+        card_layout.addWidget(label)
+        value_label = QLabel(value)
+        value_label.setStyleSheet(apple_metric_value_style())
+        card_layout.addWidget(value_label)
+        card._value_label = value_label
+        return card
+
+    def _update_summary_cards(self, steps):
+        step_count = len(steps)
+        trigger_count = len(self._csv(self.triggers_input.text()))
+        for card, value in ((self.step_count_card, str(step_count)), (self.trigger_count_card, str(trigger_count))):
+            if hasattr(card, "_value_label"):
+                card._value_label.setText(value)
+
+    def _toggle_steps_editor(self, checked):
+        self.steps_editor.setVisible(bool(checked))
+        self.toggle_raw_btn.setText("收起 JSON 编辑" if checked else "高级编辑 JSON")
+
+    def _refresh_step_preview_from_editor(self):
+        raw = self.steps_editor.toPlainText().strip() or "[]"
+        try:
+            steps = json.loads(raw)
+        except Exception:
+            self.step_preview_list.clear()
+            self.step_preview_list.addItem("JSON 暂时无法解析，修正后这里会恢复步骤预览。")
+            self._update_summary_cards([])
+            return
+        if not isinstance(steps, list):
+            self.step_preview_list.clear()
+            self.step_preview_list.addItem("步骤需要是 JSON 数组。")
+            self._update_summary_cards([])
+            return
+        normalized = normalize_sop_draft(
+            {
+                "name": self.name_input.text().strip(),
+                "description": self.description_edit.toPlainText().strip(),
+                "triggers": self._csv(self.triggers_input.text()),
+                "steps": steps,
+            }
+        )
+        items = normalized.get("steps") or []
+        self.step_preview_list.clear()
+        if not items:
+            self.step_preview_list.addItem("还没有有效步骤。")
+        for index, step in enumerate(items):
+            summary = step.get("success_criteria") or step.get("instructions") or "等待补充步骤说明"
+            item = QListWidgetItem(
+                qta.icon("fa5s.check-circle", color=DesignTokens.primary),
+                f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}\n{preview_text(summary, limit=80)}",
+            )
+            self.step_preview_list.addItem(item)
+        self._update_summary_cards(items)
 
     def _csv(self, text):
         return [item.strip() for item in re.split(r"[,，\n]+", str(text or "")) if item.strip()]
@@ -8667,17 +9129,17 @@ class SessionContextChip(QWidget):
 
     def __init__(self, text="", icon=None, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(30)
+        self.setFixedHeight(32)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(2)
 
         self.close_btn = QPushButton("×")
         self.close_btn.setObjectName("ChipCloseButton")
         self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setFixedSize(26, 30)
+        self.close_btn.setFixedSize(24, 24)
         self.close_btn.setToolTip("移除")
         self.close_btn.clicked.connect(self.closeClicked.emit)
         layout.addWidget(self.close_btn)
@@ -8685,7 +9147,7 @@ class SessionContextChip(QWidget):
         self.main_btn = QPushButton(text)
         self.main_btn.setObjectName("ChipMainButton")
         self.main_btn.setCursor(Qt.PointingHandCursor)
-        self.main_btn.setFixedHeight(30)
+        self.main_btn.setFixedHeight(32)
         self.main_btn.clicked.connect(self.clicked.emit)
         if icon is not None:
             self.main_btn.setIcon(icon)
@@ -8695,17 +9157,15 @@ class SessionContextChip(QWidget):
 
     def _apply_style(self):
         self.setStyleSheet(
-            f"QPushButton#ChipCloseButton {{ background: {DesignTokens.primary_soft}; "
-            f"color: {DesignTokens.primary}; border: 1px solid rgba(0, 122, 255, 0.22); "
-            "border-right: none; border-top-left-radius: 15px; border-bottom-left-radius: 15px; "
-            "padding: 0px; font-size: 13px; font-weight: 700; }}"
-            f"QPushButton#ChipMainButton {{ background: {DesignTokens.primary_soft}; "
-            f"color: {DesignTokens.primary}; border: 1px solid rgba(0, 122, 255, 0.22); "
-            "border-top-right-radius: 15px; border-bottom-right-radius: 15px; "
-            "padding: 4px 10px 4px 6px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            f"QPushButton#ChipCloseButton {{ background: rgba(255, 255, 255, 0.7); "
+            f"color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border_subtle}; "
+            "border-radius: 12px; padding: 0px; font-size: 12px; font-weight: 700; }}"
+            f"QPushButton#ChipMainButton {{ background: rgba(255, 255, 255, 0.78); "
+            f"color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border_subtle}; "
+            "border-radius: 16px; padding: 4px 12px 4px 8px; font-size: 12px; font-weight: 600; text-align: left; }}"
             f"QPushButton#ChipCloseButton:hover, QPushButton#ChipMainButton:hover {{ "
-            f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
-            f"border-color: {DesignTokens.border}; }}"
+            f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+            f"border-color: {rgba_from_hex(DesignTokens.primary, 0.22)}; }}"
             "QPushButton:disabled { opacity: 0.55; }"
         )
 
@@ -9208,35 +9668,57 @@ class MainWindow(QMainWindow):
         sop_tab_layout.setSpacing(10)
 
         sop_intro_card = QFrame()
-        sop_intro_card.setStyleSheet(apple_section_surface_style(radius=16))
+        sop_intro_card.setStyleSheet(apple_outline_surface_style(radius=18))
         sop_intro_layout = QVBoxLayout(sop_intro_card)
-        sop_intro_layout.setContentsMargins(12, 10, 12, 10)
-        sop_intro_layout.setSpacing(4)
+        sop_intro_layout.setContentsMargins(14, 12, 14, 12)
+        sop_intro_layout.setSpacing(6)
+        sop_intro_kicker = QLabel("当前会话自动化")
+        sop_intro_kicker.setStyleSheet(apple_section_kicker_style())
+        sop_intro_layout.addWidget(sop_intro_kicker)
+        self.sop_progress_label = QLabel("尚未绑定自动化")
+        self.sop_progress_label.setStyleSheet(apple_section_title_style(size=15))
+        self.sop_progress_label.setWordWrap(True)
+        sop_intro_layout.addWidget(self.sop_progress_label)
         self.sop_intro_label = QLabel("当前会话未绑定自动化")
-        self.sop_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.sop_intro_label.setStyleSheet(apple_caption_style())
         self.sop_intro_label.setWordWrap(True)
         sop_intro_layout.addWidget(self.sop_intro_label)
+        self.sop_status_label = QLabel("未启动")
+        self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
+        sop_intro_layout.addWidget(self.sop_status_label, 0, Qt.AlignLeft)
         sop_tab_layout.addWidget(sop_intro_card)
 
+        step_card = QFrame()
+        step_card.setStyleSheet(apple_outline_surface_style(radius=18, bg="rgba(255, 255, 255, 0.74)"))
+        step_layout = QVBoxLayout(step_card)
+        step_layout.setContentsMargins(14, 14, 14, 14)
+        step_layout.setSpacing(8)
+        step_title = QLabel("步骤进度")
+        step_title.setStyleSheet(apple_section_kicker_style())
+        step_layout.addWidget(step_title)
         self.sop_step_list = QListWidget()
         self.sop_step_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=14, padding=4))
         self.sop_step_list.setMinimumHeight(150)
-        sop_tab_layout.addWidget(self.sop_step_list)
+        step_layout.addWidget(self.sop_step_list)
+        sop_tab_layout.addWidget(step_card)
 
         sop_detail_card = QFrame()
-        sop_detail_card.setStyleSheet(apple_section_surface_style(radius=16))
+        sop_detail_card.setStyleSheet(apple_outline_surface_style(radius=18))
         sop_detail_layout = QVBoxLayout(sop_detail_card)
-        sop_detail_layout.setContentsMargins(12, 12, 12, 12)
+        sop_detail_layout.setContentsMargins(14, 14, 14, 14)
         sop_detail_layout.setSpacing(8)
+        sop_detail_kicker = QLabel("当前步骤")
+        sop_detail_kicker.setStyleSheet(apple_section_kicker_style())
+        sop_detail_layout.addWidget(sop_detail_kicker)
         self.sop_current_step_label = QLabel("当前步骤")
-        self.sop_current_step_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary};")
+        self.sop_current_step_label.setStyleSheet(apple_section_title_style(size=15))
         self.sop_current_step_label.setWordWrap(True)
         self.sop_instruction_label = QLabel("绑定自动化后，这里会显示当前步骤的执行要求。")
         self.sop_instruction_label.setWordWrap(True)
-        self.sop_instruction_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.sop_instruction_label.setStyleSheet(apple_caption_style())
         self.sop_success_label = QLabel("")
         self.sop_success_label.setWordWrap(True)
-        self.sop_success_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.sop_success_label.setStyleSheet(apple_caption_style())
         sop_detail_layout.addWidget(self.sop_current_step_label)
         sop_detail_layout.addWidget(self.sop_instruction_label)
         sop_detail_layout.addWidget(self.sop_success_label)
@@ -9245,7 +9727,7 @@ class MainWindow(QMainWindow):
         sop_actions = QHBoxLayout()
         sop_actions.setContentsMargins(0, 0, 0, 0)
         sop_actions.setSpacing(8)
-        self.sop_confirm_btn = QPushButton("确认完成")
+        self.sop_confirm_btn = QPushButton("确认并继续")
         self.sop_confirm_btn.setObjectName("PrimaryBtn")
         self.sop_confirm_btn.clicked.connect(self.confirm_current_sop_step)
         self.sop_rerun_btn = QPushButton("重跑本步")
@@ -10993,7 +11475,10 @@ class MainWindow(QMainWindow):
         )
         if not sop_run:
             self.sop_badge.setVisible(False)
+            self.sop_progress_label.setText("尚未绑定自动化")
             self.sop_intro_label.setText("当前会话未绑定自动化")
+            self.sop_status_label.setText("未启动")
+            self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
             self.sop_step_list.clear()
             self.sop_current_step_label.setText("当前步骤")
             self.sop_instruction_label.setText("绑定自动化后，这里会显示当前步骤的执行要求。")
@@ -11006,13 +11491,16 @@ class MainWindow(QMainWindow):
         current_step = get_current_step(sop_run)
         badge_text = f" 自动化 · {sop_run.get('template_name') or '未命名自动化'}"
         if current_step:
-            badge_text = f"{badge_text} · {current_step.get('title') or '当前步骤'}"
+            badge_text = f"{badge_text} · {preview_text(current_step.get('title') or '当前步骤', limit=16)}"
         self.sop_badge.setText(badge_text)
         self.sop_badge.setToolTip(
             f"当前自动化：{sop_run.get('template_name') or '未命名自动化'}"
         )
         self.sop_badge.setVisible(True)
         self.sop_badge.setEnabled(not running)
+        self.sop_progress_label.setText(
+            f"{sop_run.get('template_name') or '未命名自动化'} · 第 {min(sop_run.get('current_step_index', 0) + 1, max(len(sop_run.get('steps') or []), 1))} 步"
+        )
 
         self.sop_step_list.blockSignals(True)
         self.sop_step_list.clear()
@@ -11028,7 +11516,7 @@ class MainWindow(QMainWindow):
                 icon_color = DesignTokens.status_running
             item = QListWidgetItem(
                 qta.icon(icon_name, color=icon_color),
-                f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}",
+                f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}\n{status_label_text(status or ('active' if index == sop_run.get('current_step_index') else 'pending'))}",
             )
             item.setToolTip(step.get("success_criteria") or "")
             self.sop_step_list.addItem(item)
@@ -11039,8 +11527,18 @@ class MainWindow(QMainWindow):
         intro = sop_run.get("template_description") or "当前会话正在按自动化模板逐步执行。"
         if sop_run.get("status") == SOP_RUN_STATUS_COMPLETED:
             intro = f"{intro}\n当前自动化已完成。"
+            self.sop_status_label.setText("已完成")
+            self.sop_status_label.setStyleSheet(apple_status_chip_style("completed"))
         elif sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION:
             intro = f"{intro}\n当前步骤已完成，等待你确认。"
+            self.sop_status_label.setText("等待确认")
+            self.sop_status_label.setStyleSheet(apple_status_chip_style("pending"))
+        elif running:
+            self.sop_status_label.setText("执行中")
+            self.sop_status_label.setStyleSheet(apple_status_chip_style("running"))
+        else:
+            self.sop_status_label.setText("待推进")
+            self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
         self.sop_intro_label.setText(intro)
 
         if current_step:

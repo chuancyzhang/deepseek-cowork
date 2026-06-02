@@ -347,6 +347,16 @@ def _safe_text_preview(text, limit=6000):
     return f"{value[:limit]}\n\n...[truncated {omitted} chars for UI safety]"
 
 
+def _safe_text_tail_preview(text, limit=6000):
+    value = "" if text is None else str(text)
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    prefix = f"...[hidden {omitted} earlier chars for UI safety]\n\n"
+    tail_limit = max(limit - len(prefix), 0)
+    return prefix + value[-tail_limit:]
+
+
 def apple_tool_button_style(active=False):
     bg = DesignTokens.primary_soft if active else "rgba(255, 255, 255, 0.72)"
     color = DesignTokens.primary if active else DesignTokens.text_secondary
@@ -9126,7 +9136,22 @@ class MainWindow(QMainWindow):
         prompt_page = QWidget()
         prompt_layout = QVBoxLayout(prompt_page)
         prompt_layout.setContentsMargins(0, 0, 0, 0)
-        prompt_layout.setSpacing(0)
+        prompt_layout.setSpacing(8)
+
+        prompt_header = QWidget()
+        prompt_header_layout = QHBoxLayout(prompt_header)
+        prompt_header_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_header_layout.setSpacing(8)
+        prompt_header_layout.addStretch()
+        self.observability_copy_prompt_btn = QPushButton("复制全量")
+        self.observability_copy_prompt_btn.setCursor(Qt.PointingHandCursor)
+        self.observability_copy_prompt_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
+        self.observability_copy_prompt_btn.setMinimumWidth(112)
+        self.observability_copy_prompt_btn.setFixedHeight(28)
+        self.observability_copy_prompt_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        self.observability_copy_prompt_btn.clicked.connect(self.copy_observability_full_prompt)
+        prompt_header_layout.addWidget(self.observability_copy_prompt_btn)
+        prompt_layout.addWidget(prompt_header)
 
         self.observability_prompt_edit = ReadOnlyTextEdit()
         self.observability_prompt_edit.setPlaceholderText("等待本轮系统提示词...")
@@ -11289,6 +11314,16 @@ class MainWindow(QMainWindow):
             return
         safe_text = _safe_text_preview(text, limit)
         try:
+            current_text = edit.toPlainText()
+            if current_text == safe_text:
+                log_sub_agent_runtime(
+                    "ui_observability_text_unchanged",
+                    field=field_name,
+                    raw_len=len(str(text or "")),
+                    safe_len=len(safe_text),
+                    current_session_id=str(getattr(self, "current_session_id", "") or ""),
+                )
+                return
             edit.setPlainText(safe_text)
             log_sub_agent_runtime(
                 "ui_observability_text_set",
@@ -11304,6 +11339,27 @@ class MainWindow(QMainWindow):
                 raw_len=len(str(text or "")),
                 traceback=traceback.format_exc(),
             )
+
+    def _format_observability_prompt_append(self, item, index):
+        if not isinstance(item, dict):
+            return ""
+        source = item.get("source") or "system"
+        content = item.get("content") or ""
+        if not content:
+            return ""
+        return f"\n\n# 追加系统消息 {index}: {source}\n{content}"
+
+    def _build_observability_prompt_texts(self, state, preview_limit=6000):
+        prompt_text = getattr(state, "system_prompt_text", "") or ""
+        append_parts = []
+        for index, item in enumerate(getattr(state, "system_prompt_appends", []) or [], start=1):
+            formatted = self._format_observability_prompt_append(item, index)
+            if formatted:
+                append_parts.append(formatted)
+        full_text = "".join(([prompt_text] if prompt_text else []) + append_parts)
+        preview_source = "".join(append_parts) if append_parts else prompt_text
+        preview_text = _safe_text_tail_preview(preview_source, preview_limit)
+        return full_text, preview_text
 
     def _observability_time_text(self, ts):
         try:
@@ -11362,24 +11418,15 @@ class MainWindow(QMainWindow):
             )
             return
         try:
-            prompt_text = getattr(state, "system_prompt_text", "") or ""
-            prompt_parts = []
-            if prompt_text:
-                prompt_parts.append(prompt_text)
-            for index, item in enumerate(getattr(state, "system_prompt_appends", []) or [], start=1):
-                if not isinstance(item, dict):
-                    continue
-                source = item.get("source") or "system"
-                content = item.get("content") or ""
-                if content:
-                    prompt_parts.append(f"\n\n# 追加系统消息 {index}: {source}\n{content}")
-            prompt_joined = "".join(prompt_parts)
+            prompt_joined, prompt_preview = self._build_observability_prompt_texts(state, preview_limit=6000)
             self._set_observability_text(
                 self.observability_prompt_edit,
-                prompt_joined,
+                prompt_preview,
                 "system_prompt",
                 limit=6000,
             )
+            if hasattr(self, "observability_copy_prompt_btn") and _qt_object_alive(self.observability_copy_prompt_btn):
+                self.observability_copy_prompt_btn.setEnabled(bool(prompt_joined.strip()))
 
             log_parts = []
             for event in getattr(state, "observability_events", []) or []:
@@ -14206,6 +14253,18 @@ class MainWindow(QMainWindow):
         if not path:
             return
         QApplication.clipboard().setText(path)
+
+    def copy_observability_full_prompt(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        full_prompt, _ = self._build_observability_prompt_texts(state, preview_limit=6000)
+        if not full_prompt.strip():
+            return
+        QApplication.clipboard().setText(full_prompt)
+        if hasattr(self, "observability_copy_prompt_btn") and self.observability_copy_prompt_btn:
+            self.observability_copy_prompt_btn.setText("已复制")
+            QTimer.singleShot(1200, lambda: self.observability_copy_prompt_btn.setText("复制全量"))
 
     def copy_tool_result(self):
         text = self.td_result_edit.toPlainText().strip()

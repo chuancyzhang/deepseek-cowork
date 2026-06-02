@@ -751,6 +751,55 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertTrue(preview.startswith("x" * 12))
         self.assertIn("truncated", preview)
 
+    def test_observability_prompt_preview_prefers_append_content(self):
+        window = MainWindow.__new__(MainWindow)
+        state = _ObservabilityState()
+        state.system_prompt_text = "BASE-" + ("x" * 7000)
+        state.system_prompt_appends = [
+            {"source": "selected_skills", "content": "APPEND-CONTENT"},
+        ]
+
+        full_text, preview_text = window._build_observability_prompt_texts(state, preview_limit=200)
+
+        self.assertTrue(full_text.startswith(state.system_prompt_text))
+        self.assertIn("APPEND-CONTENT", full_text)
+        self.assertIn("APPEND-CONTENT", preview_text)
+        self.assertNotIn("BASE-", preview_text)
+
+    def test_observability_prompt_preview_keeps_tail_when_append_is_long(self):
+        window = MainWindow.__new__(MainWindow)
+        state = _ObservabilityState()
+        state.system_prompt_appends = [
+            {"source": "system", "content": ("a" * 400) + "TAIL-MARKER"},
+        ]
+
+        _, preview_text = window._build_observability_prompt_texts(state, preview_limit=120)
+
+        self.assertIn("TAIL-MARKER", preview_text)
+        self.assertIn("hidden", preview_text)
+        self.assertTrue(preview_text.startswith("...[hidden"))
+
+    def test_copy_observability_full_prompt_copies_complete_text(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        state = _ObservabilityState()
+        state.system_prompt_text = "BASE"
+        state.system_prompt_appends = [
+            {"source": "tool", "content": "APPEND"},
+        ]
+        clipboard = MagicMock()
+        button = MagicMock()
+        window.get_current_session = lambda: state
+        window.observability_copy_prompt_btn = button
+
+        with patch.object(QApplication, "clipboard", return_value=clipboard):
+            window.copy_observability_full_prompt()
+
+        copied_text = clipboard.setText.call_args[0][0]
+        self.assertIn("BASE", copied_text)
+        self.assertIn("APPEND", copied_text)
+        button.setText.assert_called_with("已复制")
+
     def test_show_context_drawer_refreshes_observability_safely(self):
         window = MainWindow.__new__(MainWindow)
         window.RIGHT_TAB_OBSERVABILITY = MainWindow.RIGHT_TAB_OBSERVABILITY

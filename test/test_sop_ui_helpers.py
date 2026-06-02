@@ -23,6 +23,8 @@ from main import (
     SubAgentMonitor,
     SOP_EXECUTOR_BASH_COMMAND,
     SOP_EXECUTOR_PYTHON_FILE,
+    skill_center_matches_filters,
+    summarize_skill_terms,
 )
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QWidget
@@ -38,6 +40,32 @@ class _AgentUiState:
         self.session_id = session_id
         self.sub_agent_events = []
         self.sub_agent_render_queued = False
+
+
+class SkillCenterHelperTests(unittest.TestCase):
+    def test_summarize_skill_terms_truncates_cleanly(self):
+        summary = summarize_skill_terms(
+            ["read_file", "write_file", "update_file", "rename_file"],
+            max_items=3,
+            max_chars=24,
+        )
+        self.assertTrue(summary.startswith("read_file"))
+        self.assertTrue(summary.endswith("…"))
+        self.assertNotIn("rename_file", summary)
+
+    def test_skill_center_matches_filters_supports_query_and_status(self):
+        skill = {
+            "name": "file-system",
+            "display_name": "文件整理与读写",
+            "user_description": "提供工作区内统一的文件发现、读取、写入能力",
+            "tools": ["read_file", "write_file"],
+            "use_cases": ["整理文件", "读取文档"],
+            "enabled": True,
+        }
+        self.assertTrue(skill_center_matches_filters(skill, query="read_file", status_filter="all"))
+        self.assertTrue(skill_center_matches_filters(skill, query="文件整理", status_filter="enabled"))
+        self.assertFalse(skill_center_matches_filters(skill, query="浏览器", status_filter="all"))
+        self.assertFalse(skill_center_matches_filters(skill, query="read_file", status_filter="disabled"))
         self.tool_cards = {}
         self.last_agent_bubble = None
         self.llm_worker = None

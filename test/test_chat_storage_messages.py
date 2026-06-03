@@ -73,6 +73,31 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual(first_read[0]["id"], second_read[0]["id"])
         self.assertEqual(first_read[1]["id"], second_read[1]["id"])
 
+    def test_save_conversation_appends_incrementally_and_falls_back_on_edit(self):
+        storage = ChatStorage(self.db_path)
+        first = {"id": "m1", "role": "user", "content": "hello"}
+        second = {"id": "m2", "role": "assistant", "content": "world"}
+
+        storage.save_conversation("conv-incremental", [dict(first)], title="demo")
+        storage.save_conversation("conv-incremental", [dict(first), dict(second)], title="demo")
+
+        messages = storage.get_messages("conv-incremental")
+        self.assertEqual([msg["id"] for msg in messages], ["m1", "m2"])
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, position FROM messages WHERE conversation_id = ? ORDER BY position",
+                ("conv-incremental",),
+            ).fetchall()
+        self.assertEqual(rows, [("m1", 0), ("m2", 1)])
+
+        edited_first = dict(first)
+        edited_first["content"] = "hello edited"
+        storage.save_conversation("conv-incremental", [edited_first, dict(second)], title="demo")
+
+        messages = storage.get_messages("conv-incremental")
+        self.assertEqual(messages[0]["content"], "hello edited")
+        self.assertEqual([msg["id"] for msg in messages], ["m1", "m2"])
+
     def test_existing_database_is_migrated_with_new_message_columns(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(

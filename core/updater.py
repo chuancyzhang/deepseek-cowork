@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import requests
 
 from core.app_version import APP_VERSION, is_newer_version
+from core.process_utils import subprocess_kwargs_no_window
 from core.env_utils import get_app_data_dir
 
 GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/chuancyzhang/deepseek-cowork/releases/latest"
@@ -535,6 +536,7 @@ def launch_windows_update_script(script_path):
             cwd=os.path.dirname(script_path),
             stdout=log_handle,
             stderr=log_handle,
+            **subprocess_kwargs_no_window(),
         )
     except Exception:
         if not os.path.exists(fallback_cmd):
@@ -545,9 +547,12 @@ def launch_windows_update_script(script_path):
         except Exception:
             pass
         subprocess.Popen(
-            ["cmd.exe", "/c", "start", "", fallback_cmd],
+            ["cmd.exe", "/c", fallback_cmd],
             close_fds=True,
             cwd=os.path.dirname(fallback_cmd),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_kwargs_no_window(),
         )
     finally:
         if log_handle:

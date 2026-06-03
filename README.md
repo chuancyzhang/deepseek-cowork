@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.3**.
+Current app version: **4.8.4**.
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
@@ -39,7 +39,9 @@ Current app version: **4.8.3**.
 *   **Sub-Agent Monitor**: Observe parallel workers in a lightweight timeline summary for task input, tool calls, tool results, streamed output, and final output; opening the panel queues a short, main-thread render pass for UI stability.
 *   **Safe Sub-Agent Lifecycle**: Sub-agent completion, status streaming, and worker-thread cleanup are separated so parallel workers can finish or restart without destabilizing the desktop app.
 *   **Smoother Settings Saves**: The settings dialog batches model, MCP, agent, workspace, and IM configuration updates into a single disk write to reduce UI stalls during save.
-*   **Sub-Agent Runtime Log**: Lifecycle diagnostics are written to `sub_agent_runtime.log` under the `DeepSeekCowork` app data directory, or `user_data/` in portable mode.
+*   **Smoother Launch & Run Actions**: Daemon connection now bootstraps in the background, so starting a task or running code no longer waits on repeated UI-thread connection retries.
+*   **Hidden Windows Console Launches**: Python, Bash, updater fallback, app launch, and system-tool subprocesses share a no-window launch path on Windows to avoid flashing CMD windows during normal use.
+*   **On-Demand Runtime Diagnostics**: High-frequency sub-agent lifecycle diagnostics are off by default; set `COWORK_RUNTIME_DEBUG_LOG=1` to write `sub_agent_runtime.log` under the app data directory, or `user_data/` in portable mode.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 
 ### 🛰️ Daemon & IM Gateway
@@ -170,7 +172,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - Sub-agent lifecycles keep result handling separate from Qt thread cleanup, preventing overlapping restarts while a worker is still winding down.
 - Sub-agent monitor events are collected first and rendered as lightweight summary rows after the user opens the drawer, avoiding widget churn during active streaming.
 - Context-drawer outside-click handling now uses drawer and rail hit-testing in global coordinates, so sub-agent panel children, scroll viewports, and transient popups do not immediately collapse the drawer.
-- Sub-agent drawer hide/show diagnostics now record structured reasons in `sub_agent_runtime.log`, making unexpected collapses much easier to trace.
+- When `COWORK_RUNTIME_DEBUG_LOG=1` is enabled, sub-agent drawer hide/show diagnostics record structured reasons in `sub_agent_runtime.log`, making unexpected collapses easier to trace without paying the logging cost during normal runs.
 - Loop guards: detect repeated thoughts or tool signatures to stop runaway loops.
 - Pause/Resume/Stop controls manage long operations safely.
 - Session automation templates constrain execution to the current step; templates and individual steps can require manual confirmation or auto-advance, and the app dispatches one step at a time instead of sending the whole SOP as a single prompt block. Each step can use the agent, an uploaded Python file, or a Bash command.

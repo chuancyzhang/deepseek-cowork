@@ -34,6 +34,7 @@ from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.app_version import APP_VERSION
+from core.process_utils import runtime_debug_logging_enabled, subprocess_kwargs_no_window
 from core.updater import (
     GITHUB_RELEASES_URL,
     create_windows_update_script,
@@ -291,6 +292,8 @@ def apple_button_style(kind="secondary", radius=17, align="center"):
 
 
 def log_sub_agent_runtime(event, **fields):
+    if not runtime_debug_logging_enabled():
+        return
     try:
         payload = {"event": event}
         payload.update(fields or {})
@@ -6459,6 +6462,71 @@ class DaemonStreamWorker(QThread):
             )
             self._sock = None
 
+
+class DaemonConnectWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(
+        self,
+        host,
+        port,
+        runtime_signature,
+        allow_start=False,
+        retries=0,
+        timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.host = host
+        self.port = port
+        self.runtime_signature = str(runtime_signature or "").strip()
+        self.allow_start = bool(allow_start)
+        self.retries = max(0, int(retries or 0))
+        self.timeout = timeout
+
+    def _signature_matches(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        remote = str(payload.get("signature") or "").strip()
+        return bool(remote and self.runtime_signature and remote == self.runtime_signature)
+
+    def _start_daemon_process(self):
+        python_exe = sys.executable
+        script_path = os.path.abspath(__file__)
+        return subprocess.Popen(
+            [python_exe, script_path, "--daemon", f"--daemon-port={self.port}"],
+            cwd=os.path.dirname(script_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_kwargs_no_window(),
+        )
+
+    def run(self):
+        payload = {"connected": False, "process": None}
+        client = DaemonClient(self.host, self.port, timeout=self.timeout)
+        ping_payload = client.ping()
+        connected = bool(ping_payload)
+        if connected and not self._signature_matches(ping_payload):
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            time.sleep(0.2)
+            connected = False
+        if not connected and self.allow_start:
+            try:
+                payload["process"] = self._start_daemon_process()
+            except Exception as exc:
+                payload["error"] = str(exc)
+            for _ in range(self.retries):
+                time.sleep(0.2)
+                retry_ping = client.ping()
+                if retry_ping and self._signature_matches(retry_ping):
+                    connected = True
+                    break
+        payload["connected"] = connected
+        self.finished_signal.emit(payload)
+
 class HistoryTitleButton(QLabel):
     clicked = Signal()
 
@@ -9553,6 +9621,7 @@ class MainWindow(QMainWindow):
         self.daemon_available = False
         self.daemon_bootstrapping = False
         self.daemon_process = None
+        self.daemon_connect_worker = None
         self.daemon_runtime_signature = get_runtime_signature()
         self.gateway_process = None
         self.gateway_log_file = None
@@ -11965,7 +12034,8 @@ class MainWindow(QMainWindow):
                 summon_source="automation_template",
             )
             return True
-        self.try_connect_daemon(allow_start=True, retries=4)
+        if not self.daemon_available:
+            self.queue_daemon_connection(allow_start=True, retries=4)
         run_context = self._build_run_context(state, run_mode)
         if self.daemon_available:
             self.process_daemon_logic(step_content, turn_id=state.active_turn_id, run_context=run_context, session_id=state.session_id)
@@ -12392,13 +12462,9 @@ class MainWindow(QMainWindow):
         self._background_services_started = True
         self.daemon_bootstrapping = True
         self.refresh_context_badges()
-        try:
-            self.setup_daemon_client(retries=6)
-            self.start_daemon_monitor()
-            self.setup_tray()
-        finally:
-            self.daemon_bootstrapping = False
-            self.refresh_context_badges()
+        self.setup_daemon_client(retries=6)
+        self.start_daemon_monitor()
+        self.setup_tray()
 
     def setup_daemon_client(self, retries=6):
         self.daemon_client = DaemonClient(
@@ -12406,7 +12472,46 @@ class MainWindow(QMainWindow):
             self.daemon_port,
             timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
         )
-        self.try_connect_daemon(allow_start=True, retries=retries)
+        self.queue_daemon_connection(allow_start=True, retries=retries)
+
+    def queue_daemon_connection(self, allow_start=False, retries=0):
+        worker = getattr(self, "daemon_connect_worker", None)
+        if worker and worker.isRunning():
+            return
+        if not self.daemon_client:
+            self.daemon_client = DaemonClient(
+                self.daemon_host,
+                self.daemon_port,
+                timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+            )
+        can_start = bool(allow_start)
+        if self.daemon_process and self.daemon_process.poll() is None:
+            can_start = False
+        self.daemon_bootstrapping = bool(allow_start)
+        self.refresh_context_badges()
+        worker = DaemonConnectWorker(
+            self.daemon_host,
+            self.daemon_port,
+            self.daemon_runtime_signature,
+            allow_start=can_start,
+            retries=retries,
+            timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+            parent=self,
+        )
+        self.daemon_connect_worker = worker
+        worker.finished_signal.connect(self.handle_daemon_connect_finished, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def handle_daemon_connect_finished(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
+        process = payload.get("process")
+        if process is not None:
+            self.daemon_process = process
+        self.daemon_available = bool(payload.get("connected"))
+        self.daemon_bootstrapping = False
+        self.daemon_connect_worker = None
+        self.refresh_context_badges()
 
     def start_daemon_monitor(self):
         if self.daemon_timer:
@@ -12417,7 +12522,7 @@ class MainWindow(QMainWindow):
         self.daemon_timer.start()
 
     def ensure_daemon_connection(self):
-        self.try_connect_daemon(allow_start=True, retries=0)
+        self.queue_daemon_connection(allow_start=True, retries=0)
 
     def start_automation_scheduler(self):
         if self.automation_timer:
@@ -12689,13 +12794,12 @@ class MainWindow(QMainWindow):
                 return
             python_exe = sys.executable
             script_path = os.path.abspath(__file__)
-            creationflags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
             self.daemon_process = subprocess.Popen(
                 [python_exe, script_path, "--daemon", f"--daemon-port={self.daemon_port}"],
                 cwd=os.path.dirname(script_path),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=creationflags
+                **subprocess_kwargs_no_window(),
             )
         except Exception:
             self.daemon_process = None
@@ -12704,7 +12808,6 @@ class MainWindow(QMainWindow):
         try:
             if self.gateway_process and self.gateway_process.poll() is None:
                 return
-            creationflags = subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
             env = os.environ.copy()
             if getattr(sys, 'frozen', False):
                 cmd = [sys.executable, "--im-gateway"]
@@ -12725,8 +12828,8 @@ class MainWindow(QMainWindow):
                 cwd=os.path.dirname(os.path.abspath(__file__)),
                 stdout=subprocess.DEVNULL,
                 stderr=self.gateway_log_file,
-                creationflags=creationflags,
-                env=env
+                env=env,
+                **subprocess_kwargs_no_window(),
             )
         except Exception:
             self.gateway_process = None
@@ -12821,6 +12924,9 @@ class MainWindow(QMainWindow):
         self.daemon_process = None
 
     def shutdown_workers(self):
+        if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
+            self.daemon_connect_worker.wait(1000)
+        self.daemon_connect_worker = None
         for session_id, state in list(self.sessions.items()):
             self._stop_live_subagents(state, force=True)
             if self.daemon_client and state.daemon_running and state.session_id:
@@ -12858,7 +12964,12 @@ class MainWindow(QMainWindow):
             pass
         if proc.poll() is None and platform.system() == "Windows":
             try:
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    **subprocess_kwargs_no_window(),
+                )
             except Exception:
                 pass
         try:
@@ -14111,6 +14222,7 @@ class MainWindow(QMainWindow):
                 text=True,
                 timeout=60,
                 check=False,
+                **subprocess_kwargs_no_window(),
             )
         except Exception as exc:
             QMessageBox.warning(self, "创建永久工作树失败", str(exc))
@@ -15105,7 +15217,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if platform.system() == "Windows":
-            subprocess.Popen(["explorer", "/select,", path])
+            subprocess.Popen(["explorer", "/select,", path], **subprocess_kwargs_no_window())
         else:
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
 
@@ -16303,7 +16415,8 @@ class MainWindow(QMainWindow):
         if template_default_profile:
             self._dispatch_agent_profiles(state, user_text, user_text, [template_default_profile], summon_source="automation_template")
             return True
-        self.try_connect_daemon(allow_start=True, retries=4)
+        if not self.daemon_available:
+            self.queue_daemon_connection(allow_start=True, retries=4)
         run_context = self._build_run_context(state, run_mode)
         if self.daemon_available:
             self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)

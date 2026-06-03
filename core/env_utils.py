@@ -3,6 +3,7 @@ import os
 import shutil
 import importlib
 import json
+from core.process_utils import subprocess_kwargs_no_window
 
 def get_base_dir():
     """Get the base directory of the application."""
@@ -66,10 +67,6 @@ def get_python_runtime_snapshot():
         return snapshot
     try:
         import subprocess
-        startupinfo = None
-        if sys.platform == "win32":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         checks = json.dumps(_RUNTIME_IMPORT_CHECKS, ensure_ascii=False)
         code = (
             "import json,sys,importlib.util\n"
@@ -86,8 +83,8 @@ def get_python_runtime_snapshot():
             text=True,
             encoding="utf-8",
             errors="replace",
-            startupinfo=startupinfo,
             env=build_sandbox_env(),
+            **subprocess_kwargs_no_window(),
         ).strip()
         data = json.loads(output)
         snapshot["version"] = data.get("version", "") or snapshot["version"]
@@ -163,6 +160,7 @@ def _sandbox_import_probe(python_exe, import_name, skill_id=None):
             text=True,
             encoding="utf-8",
             errors="replace",
+            **subprocess_kwargs_no_window(),
         )
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
@@ -225,6 +223,7 @@ def _get_external_site_packages(python_exe):
             [python_exe, "-c", "import json,site;print(json.dumps({'site': getattr(site,'getsitepackages',lambda:[])(), 'user': site.getusersitepackages()}))"],
             text=True,
             env=build_sandbox_env(),
+            **subprocess_kwargs_no_window(),
         )
         data = json.loads(output.strip())
         sites = data.get("site", []) or []
@@ -276,12 +275,6 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
     try:
         import subprocess
 
-        # On Windows, we want to suppress the new window for the subprocess
-        startupinfo = None
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
         from core.sandbox_runtime import build_sandbox_env, install_skill_dependencies
         if skill_id:
             status = install_skill_dependencies(skill_id, python_dependencies=[package_name])
@@ -300,8 +293,8 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
         else:
             subprocess.check_call(
                 [python_exe, "-m", "pip", "install", package_name],
-                startupinfo=startupinfo,
                 env=build_sandbox_env(),
+                **subprocess_kwargs_no_window(),
             )
         print(f"[System] Successfully installed {package_name}.")
 

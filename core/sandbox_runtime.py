@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 from core.env_utils import get_app_data_dir, get_base_dir
+from core.process_utils import subprocess_kwargs_no_window
 
 
 SANDBOX_VERSION = "v1"
@@ -45,14 +46,7 @@ def _is_frozen():
 
 
 def _no_window_kwargs():
-    if os.name != "nt":
-        return {}
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    return {
-        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        "startupinfo": startupinfo,
-    }
+    return subprocess_kwargs_no_window()
 
 
 def _sandbox_root():

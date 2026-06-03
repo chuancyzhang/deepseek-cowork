@@ -194,7 +194,7 @@ class TestUpdater(unittest.TestCase):
                     target_dir=self.temp_dir,
                 )
 
-    def test_launch_windows_update_script_does_not_hide_forms_window(self):
+    def test_launch_windows_update_script_does_not_use_windowstyle_hidden(self):
         script_path = os.path.join(self.temp_dir, "apply-update.ps1")
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write("")
@@ -209,7 +209,11 @@ class TestUpdater(unittest.TestCase):
         self.assertIn("-File", args)
         self.assertNotIn("-WindowStyle", args)
         self.assertNotIn("Hidden", args)
-        self.assertNotIn("creationflags", kwargs)
+        if os.name == "nt":
+            self.assertIn("creationflags", kwargs)
+            self.assertIn("startupinfo", kwargs)
+        else:
+            self.assertNotIn("creationflags", kwargs)
         self.assertEqual(kwargs.get("cwd"), self.temp_dir)
         self.assertIsNotNone(kwargs.get("stdout"))
         self.assertIsNotNone(kwargs.get("stderr"))

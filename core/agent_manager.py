@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Qt, Signal
 from core.chat_storage import AGENT_TERMINAL_STATUSES, ChatStorage
 from core.env_utils import get_app_data_dir
+from core.process_utils import runtime_debug_logging_enabled
 
 AGENT_MANAGEMENT_TOOLS = {
     "spawn_agent",
@@ -44,6 +45,8 @@ def _debug_worker_summary(worker):
 
 
 def _log_agent_runtime(event, **fields):
+    if not runtime_debug_logging_enabled():
+        return
     try:
         payload = {
             "event": event,

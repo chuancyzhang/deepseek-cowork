@@ -15,6 +15,7 @@ from collections import deque
 import urllib.request
 import urllib.parse
 from core.env_utils import ensure_package_installed, get_app_data_dir
+from core.process_utils import subprocess_kwargs_no_window
 from PySide6.QtCore import QObject, Qt
 
 _ACTION_WINDOW_STATE = {}
@@ -114,13 +115,7 @@ def _decode_bytes(raw):
         return str(raw)
 
 def _no_window_kwargs():
-    if os.name != "nt":
-        return {}
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return {"creationflags": creationflags, "startupinfo": startupinfo}
+    return subprocess_kwargs_no_window()
 
 def _standard_step_result(action, result, ok=True, chosen_strategy="", fallback_used=False, capability_notes="", artifacts=None, timings=None):
     return {
@@ -232,7 +227,7 @@ def _open_with_impl(file, app):
             app_path = resolved
     if not app_path:
         return f"Error: app not found for '{app}'. Consider building app index first."
-    subprocess.Popen([app_path, file])
+    subprocess.Popen([app_path, file], **_no_window_kwargs())
     return f"OK: opened {file} with {app_path}"
 
 def _open_url_impl(url):
@@ -323,7 +318,7 @@ def _ensure_cdp_ready(start_url, _context=None):
             start_url or "about:blank"
         ]
         try:
-            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_no_window_kwargs())
             launched = True
         except Exception as e:
             return "", f"cdp_launch_failed:{e}"
@@ -897,9 +892,9 @@ def _launch(path, args):
             args_list = args
         else:
             args_list = [str(args)]
-        subprocess.Popen([path] + args_list)
+        subprocess.Popen([path] + args_list, **_no_window_kwargs())
     else:
-        subprocess.Popen([path])
+        subprocess.Popen([path], **_no_window_kwargs())
 
 def system_automate(steps, workspace_dir=None, _context=None):
     if isinstance(steps, str):

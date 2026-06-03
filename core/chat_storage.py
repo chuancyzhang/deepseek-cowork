@@ -47,6 +47,12 @@ class ChatStorage:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
         return conn
 
     def _ensure_schema(self):
@@ -308,6 +314,79 @@ class ChatStorage:
             "last_result": row["last_result"],
             "meta": self._parse_json_dict(row["meta"]),
         }
+
+    def _message_row_to_dict(self, row):
+        msg = {"id": row["id"], "role": row["role"], "content": row["content"]}
+        if row["tool_calls"]:
+            msg["tool_calls"] = json.loads(row["tool_calls"])
+        if row["reasoning_content"] is not None:
+            msg["reasoning_content"] = row["reasoning_content"]
+            msg["reasoning"] = row["reasoning_content"]
+        content_parts = self._parse_json_value(row["content_parts"])
+        if isinstance(content_parts, list):
+            msg["content_parts"] = content_parts
+        meta = self._parse_json_value(row["meta"], default={})
+        if isinstance(meta, dict) and meta:
+            msg["meta"] = meta
+        result_obj = self._parse_json_value(row["result_obj"])
+        if result_obj is not None:
+            msg["result_obj"] = result_obj
+        if row["token_count"] is not None:
+            msg["token_count"] = row["token_count"]
+        if row["tool_call_id"] is not None:
+            msg["tool_call_id"] = row["tool_call_id"]
+        if "created_at" in row.keys() and row["created_at"] is not None:
+            msg["created_at"] = row["created_at"]
+        return msg
+
+    def _insert_message_row(self, conn, table_name, owner_column, owner_id, msg, index, now):
+        msg_id = msg.get("id") or uuid.uuid4().hex
+        msg["id"] = msg_id
+        tool_calls = msg.get("tool_calls")
+        tool_calls_json = (
+            json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
+        )
+        reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
+        content_parts_json = self._json_dumps(msg.get("content_parts"))
+        meta_json = self._json_dumps(msg.get("meta"))
+        result_obj_json = self._json_dumps(msg.get("result_obj"))
+        conn.execute(
+            f"""
+            INSERT INTO {table_name} (
+                id, {owner_column}, role, content, tool_calls, reasoning_content,
+                content_parts, meta, result_obj,
+                token_count, tool_call_id, position, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                msg_id,
+                owner_id,
+                msg.get("role"),
+                msg.get("content"),
+                tool_calls_json,
+                reasoning_content,
+                content_parts_json,
+                meta_json,
+                result_obj_json,
+                msg.get("token_count"),
+                msg.get("tool_call_id"),
+                index,
+                msg.get("created_at") or now,
+            ),
+        )
+
+    def _existing_messages_are_prefix(self, rows, normalized_messages):
+        if len(rows) > len(normalized_messages):
+            return False
+        for index, row in enumerate(rows):
+            current = self._message_row_to_dict(row)
+            incoming = normalized_messages[index]
+            if current.get("id") != incoming.get("id"):
+                return False
+            if self._message_signature(current) != self._message_signature(incoming):
+                return False
+        return True
 
     def _message_signature(self, message):
         if not isinstance(message, dict):
@@ -642,41 +721,39 @@ class ChatStorage:
         normalized_messages = self.normalize_messages(messages)
         now = int(time.time())
         with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                       result_obj, token_count, tool_call_id, created_at
+                FROM agent_messages
+                WHERE agent_id = ?
+                ORDER BY position ASC
+                """,
+                (agent_id,),
+            ).fetchall()
+            if rows and self._existing_messages_are_prefix(rows, normalized_messages):
+                start = len(rows)
+                for index, msg in enumerate(normalized_messages[start:], start=start):
+                    self._insert_message_row(
+                        conn,
+                        "agent_messages",
+                        "agent_id",
+                        agent_id,
+                        msg,
+                        index,
+                        now,
+                    )
+                return
             conn.execute("DELETE FROM agent_messages WHERE agent_id = ?", (agent_id,))
             for index, msg in enumerate(normalized_messages):
-                msg_id = msg.get("id") or uuid.uuid4().hex
-                tool_calls = msg.get("tool_calls")
-                tool_calls_json = (
-                    json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
-                )
-                reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
-                content_parts_json = self._json_dumps(msg.get("content_parts"))
-                meta_json = self._json_dumps(msg.get("meta"))
-                result_obj_json = self._json_dumps(msg.get("result_obj"))
-                conn.execute(
-                    """
-                    INSERT INTO agent_messages (
-                        id, agent_id, role, content, tool_calls, reasoning_content,
-                        content_parts, meta, result_obj,
-                        token_count, tool_call_id, position, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        msg_id,
-                        agent_id,
-                        msg.get("role"),
-                        msg.get("content"),
-                        tool_calls_json,
-                        reasoning_content,
-                        content_parts_json,
-                        meta_json,
-                        result_obj_json,
-                        msg.get("token_count"),
-                        msg.get("tool_call_id"),
-                        index,
-                        msg.get("created_at") or now,
-                    ),
+                self._insert_message_row(
+                    conn,
+                    "agent_messages",
+                    "agent_id",
+                    agent_id,
+                    msg,
+                    index,
+                    now,
                 )
 
     def get_agent_messages(self, agent_id):
@@ -693,28 +770,7 @@ class ChatStorage:
             ).fetchall()
         messages = []
         for row in rows:
-            msg = {"id": row["id"], "role": row["role"], "content": row["content"]}
-            if row["tool_calls"]:
-                msg["tool_calls"] = json.loads(row["tool_calls"])
-            if row["reasoning_content"] is not None:
-                msg["reasoning_content"] = row["reasoning_content"]
-                msg["reasoning"] = row["reasoning_content"]
-            content_parts = self._parse_json_value(row["content_parts"])
-            if isinstance(content_parts, list):
-                msg["content_parts"] = content_parts
-            meta = self._parse_json_value(row["meta"], default={})
-            if isinstance(meta, dict) and meta:
-                msg["meta"] = meta
-            result_obj = self._parse_json_value(row["result_obj"])
-            if result_obj is not None:
-                msg["result_obj"] = result_obj
-            if row["token_count"] is not None:
-                msg["token_count"] = row["token_count"]
-            if row["tool_call_id"] is not None:
-                msg["tool_call_id"] = row["tool_call_id"]
-            if row["created_at"] is not None:
-                msg["created_at"] = row["created_at"]
-            messages.append(msg)
+            messages.append(self._message_row_to_dict(row))
         normalized_messages = self.normalize_messages(messages)
         try:
             changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(
@@ -814,41 +870,39 @@ class ChatStorage:
         normalized_messages = self.normalize_messages(messages)
         now = int(time.time())
         with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                       result_obj, token_count, tool_call_id, created_at
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY position ASC
+                """,
+                (conversation_id,),
+            ).fetchall()
+            if rows and self._existing_messages_are_prefix(rows, normalized_messages):
+                start = len(rows)
+                for index, msg in enumerate(normalized_messages[start:], start=start):
+                    self._insert_message_row(
+                        conn,
+                        "messages",
+                        "conversation_id",
+                        conversation_id,
+                        msg,
+                        index,
+                        now,
+                    )
+                return
             conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
             for index, msg in enumerate(normalized_messages):
-                msg_id = msg.get("id") or uuid.uuid4().hex
-                tool_calls = msg.get("tool_calls")
-                tool_calls_json = (
-                    json.dumps(tool_calls, ensure_ascii=False) if tool_calls is not None else None
-                )
-                reasoning_content = msg.get("reasoning_content") or msg.get("reasoning")
-                content_parts_json = self._json_dumps(msg.get("content_parts"))
-                meta_json = self._json_dumps(msg.get("meta"))
-                result_obj_json = self._json_dumps(msg.get("result_obj"))
-                conn.execute(
-                    """
-                    INSERT INTO messages (
-                        id, conversation_id, role, content, tool_calls, reasoning_content,
-                        content_parts, meta, result_obj,
-                        token_count, tool_call_id, position, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        msg_id,
-                        conversation_id,
-                        msg.get("role"),
-                        msg.get("content"),
-                        tool_calls_json,
-                        reasoning_content,
-                        content_parts_json,
-                        meta_json,
-                        result_obj_json,
-                        msg.get("token_count"),
-                        msg.get("tool_call_id"),
-                        index,
-                        msg.get("created_at") or now,
-                    ),
+                self._insert_message_row(
+                    conn,
+                    "messages",
+                    "conversation_id",
+                    conversation_id,
+                    msg,
+                    index,
+                    now,
                 )
 
     def save_conversation(self, conversation_id, messages, title=None, status="active", meta=None):
@@ -1190,26 +1244,7 @@ class ChatStorage:
             ).fetchall()
         messages = []
         for row in rows:
-            msg = {"id": row["id"], "role": row["role"], "content": row["content"]}
-            if row["tool_calls"]:
-                msg["tool_calls"] = json.loads(row["tool_calls"])
-            if row["reasoning_content"] is not None:
-                msg["reasoning_content"] = row["reasoning_content"]
-                msg["reasoning"] = row["reasoning_content"]
-            content_parts = self._parse_json_value(row["content_parts"])
-            if isinstance(content_parts, list):
-                msg["content_parts"] = content_parts
-            meta = self._parse_json_value(row["meta"], default={})
-            if isinstance(meta, dict) and meta:
-                msg["meta"] = meta
-            result_obj = self._parse_json_value(row["result_obj"])
-            if result_obj is not None:
-                msg["result_obj"] = result_obj
-            if row["token_count"] is not None:
-                msg["token_count"] = row["token_count"]
-            if row["tool_call_id"] is not None:
-                msg["tool_call_id"] = row["tool_call_id"]
-            messages.append(msg)
+            messages.append(self._message_row_to_dict(row))
         normalized_messages = self.normalize_messages(messages)
         try:
             changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(

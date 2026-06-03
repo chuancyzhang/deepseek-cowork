@@ -786,7 +786,7 @@ def settings_status_chip(text, tone="neutral"):
     )
 
 
-def build_settings_surface(title="", subtitle="", radius=20):
+def build_settings_surface(title="", subtitle="", radius=20, show_subtitle=True):
     frame = QFrame()
     frame.setStyleSheet(apple_settings_surface_style(radius=radius))
     layout = QVBoxLayout(frame)
@@ -796,7 +796,7 @@ def build_settings_surface(title="", subtitle="", radius=20):
         title_label = QLabel(title)
         title_label.setStyleSheet(apple_settings_section_title_style())
         layout.addWidget(title_label)
-    if subtitle:
+    if subtitle and show_subtitle:
         subtitle_label = QLabel(subtitle)
         subtitle_label.setWordWrap(True)
         subtitle_label.setStyleSheet(apple_settings_inline_note_style() + " background: transparent; border: none;")
@@ -2057,11 +2057,7 @@ class ModelChannelManager(QWidget):
         title_box.setSpacing(4)
         title = QLabel("模型与服务")
         title.setStyleSheet(apple_settings_section_title_style())
-        subtitle = QLabel("把不同 provider 或不同用途的模型拆成独立服务，后续切换会更清楚。")
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet(apple_settings_inline_note_style())
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
         add_channel_btn = QPushButton("添加渠道")
@@ -2143,11 +2139,7 @@ class AgentProfileManager(QWidget):
         title_box.setSpacing(4)
         title = QLabel("智能体模板")
         title.setStyleSheet(apple_settings_section_title_style())
-        subtitle = QLabel("给常见任务预设角色说明和能力范围，能让会话入口更像产品功能而不是配置项。")
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet(apple_settings_inline_note_style())
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
 
@@ -4619,11 +4611,7 @@ class McpServerManager(QWidget):
         title_box.setSpacing(4)
         title = QLabel("MCP")
         title.setStyleSheet(apple_settings_section_title_style())
-        subtitle = QLabel("stdio / Streamable HTTP")
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet(apple_settings_inline_note_style())
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         toolbar.addLayout(title_box, 1)
         toolbar.addStretch()
         for label, handler, icon_name in (
@@ -4896,11 +4884,7 @@ class SettingsDialog(QDialog):
         title_box.setSpacing(6)
         title = QLabel("设置")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("把模型、工作区、MCP 和企业消息整理成更稳定的默认工作环境。")
-        subtitle.setWordWrap(True)
-        subtitle.setProperty("roleSubtitle", True)
         title_box.addWidget(title)
-        title_box.addWidget(subtitle)
         layout.addLayout(title_box)
 
         body_layout = QHBoxLayout()
@@ -4917,7 +4901,7 @@ class SettingsDialog(QDialog):
         self.content_stack = QStackedWidget()
         body_layout.addWidget(self.content_stack, 1)
 
-        def make_scroll_page(title, intro):
+        def make_scroll_page(title, intro=None):
             scroll_area = QScrollArea()
             scroll_area.setWidgetResizable(True)
             scroll_area.setFrameShape(QFrame.NoFrame)
@@ -4932,11 +4916,6 @@ class SettingsDialog(QDialog):
             header = QLabel(title)
             header.setProperty("roleTitle", True)
             page_header.addWidget(header)
-            if intro:
-                intro_label = QLabel(intro)
-                intro_label.setWordWrap(True)
-                intro_label.setStyleSheet(apple_settings_inline_note_style())
-                page_header.addWidget(intro_label)
             page_layout.addLayout(page_header)
 
             scroll_area.setWidget(content)
@@ -4977,6 +4956,7 @@ class SettingsDialog(QDialog):
             "工作区与存储",
             "默认工作区决定首次进入的任务范围；聊天记录目录会同时承载历史和长期记忆。",
             radius=20,
+            show_subtitle=False,
         )
         storage_layout = QFormLayout()
         storage_layout.setSpacing(12)
@@ -5050,6 +5030,7 @@ class SettingsDialog(QDialog):
             "扩展权限",
             "只有在你完全信任当前任务时，才建议打开这类突破工作区限制的执行能力。",
             radius=20,
+            show_subtitle=False,
         )
         permission_group_layout.setSpacing(14)
 
@@ -5079,6 +5060,7 @@ class SettingsDialog(QDialog):
             "GitHub Releases",
             "打包版可以下载、校验并重启安装；源码运行模式只负责检查并跳转到 Release 页面。",
             radius=20,
+            show_subtitle=False,
         )
         update_group_layout.setSpacing(12)
 
@@ -5154,7 +5136,7 @@ class SettingsDialog(QDialog):
 
         def add_provider_group(name, title_text, intro_text, rows):
             cfg = provider_cfg(name)
-            group, group_layout = build_settings_surface(title_text, intro_text, radius=18)
+            group, group_layout = build_settings_surface(title_text, intro_text, radius=18, show_subtitle=False)
             form = QFormLayout()
             form.setSpacing(10)
             configure_responsive_form_layout(form)
@@ -5199,6 +5181,7 @@ class SettingsDialog(QDialog):
             "网关控制",
             "保存后可直接启动或停止企业消息网关，日志会持续写到本地。",
             radius=18,
+            show_subtitle=False,
         )
         gateway_bar = QHBoxLayout()
         log_path = os.path.join(get_app_data_dir(), "im_gateway.log")

@@ -312,6 +312,40 @@ class SkillManager:
             "include_experience_entries": self._coerce_bool(normalized.get("include_experience_entries"), default=False),
         }
 
+    def _infer_execution_surface(self, spec):
+        script_entries = spec.get("script_entries") or []
+        tool_refs = spec.get("tool_refs") or []
+        if script_entries:
+            return "skill_script"
+        if tool_refs:
+            return "tool_refs"
+        return "knowledge"
+
+    def _infer_prompt_disclosure(self, spec):
+        prompt_disclosure = spec.get("prompt_disclosure")
+        source_format = str(spec.get("source_format") or "").strip().lower()
+        should_upgrade = source_format in {"agent_skill", "claude", "openclaw"} or bool(spec.get("script_entries"))
+        if isinstance(prompt_disclosure, str) and prompt_disclosure.strip():
+            normalized = prompt_disclosure.strip()
+            if normalized == "full_on_match" or not should_upgrade:
+                return normalized
+        return "full_on_match" if should_upgrade else "brief_only"
+
+    def _infer_preferred_script_name(self, spec):
+        script_entries = spec.get("script_entries") or []
+        if len(script_entries) != 1:
+            return ""
+        name = script_entries[0].get("name")
+        return str(name or "").strip()
+
+    def _script_execution_hint(self, spec):
+        if self._infer_execution_surface(spec) != "skill_script":
+            return ""
+        return (
+            "When this skill is matched, call `run_skill_script` with the listed script entry "
+            "instead of locating the skill directory or script path with `glob`, `grep`, or `bash`."
+        )
+
     def _normalize_experience_policy(self, spec):
         policy = spec.get("experience_policy") if isinstance(spec, dict) else spec
         normalized = policy if isinstance(policy, dict) else {}
@@ -361,6 +395,9 @@ class SkillManager:
             spec["workflow"] = []
         elif not isinstance(workflow, (str, list, dict)):
             spec["workflow"] = [str(workflow)]
+        spec["execution_surface"] = self._infer_execution_surface(spec)
+        spec["prompt_disclosure"] = self._infer_prompt_disclosure(spec)
+        spec["preferred_script_name"] = self._infer_preferred_script_name(spec)
         spec["experience_policy"] = self._normalize_experience_policy(spec)
         spec["disclosure_level_defaults"] = self._normalize_disclosure_defaults(spec)
         return spec
@@ -475,6 +512,7 @@ class SkillManager:
                     for item in script_entries[:12]
                 )
                 + "\nUse `command-tools.run_skill_script` to execute these scripts inside the sandbox runtime."
+                + "\nDo not use `glob`, `grep`, or `bash` just to locate this skill directory or script path when these entries are already listed."
             )
 
         dependency_lines = []
@@ -518,6 +556,9 @@ class SkillManager:
         script_entries = spec.get("script_entries") or []
         if script_entries:
             lines.append(f"scripts: {', '.join(item.get('name') for item in script_entries[:6] if item.get('name'))}")
+        script_execution_hint = self._script_execution_hint(spec)
+        if script_execution_hint:
+            lines.append(f"script-execution: {script_execution_hint}")
         frontmatter_exp = meta.get("experience")
         if isinstance(frontmatter_exp, list) and frontmatter_exp:
             lines.append(f"experience-highlights: {', '.join(frontmatter_exp[:3])}")
@@ -917,6 +958,10 @@ class SkillManager:
     def _skill_search_payload(self, record, score):
         spec = record.get("spec") or {}
         meta = record.get("meta") or {}
+        execution_surface = spec.get("execution_surface") or self._infer_execution_surface(spec)
+        preferred_script_name = spec.get("preferred_script_name") or self._infer_preferred_script_name(spec)
+        prompt_disclosure = spec.get("prompt_disclosure") or self._infer_prompt_disclosure(spec)
+        script_entries = list(spec.get("script_entries") or [])
         return {
             "name": record.get("name") or "",
             "display_name": meta.get("display_name") or meta.get("name") or record.get("name") or "",
@@ -925,7 +970,16 @@ class SkillManager:
             "capability_group": spec.get("capability_group") or "",
             "source_format": spec.get("source_format") or "",
             "tool_refs": list(record.get("tool_refs") or []),
-            "script_entries": list(spec.get("script_entries") or []),
+            "script_entries": script_entries,
+            "execution_surface": execution_surface,
+            "prompt_level": "full" if prompt_disclosure == "full_on_match" else "brief",
+            "preferred_tool": "run_skill_script" if execution_surface == "skill_script" and script_entries else "",
+            "preferred_skill_name": record.get("name") or "",
+            "preferred_script_name": preferred_script_name,
+            "script_candidates": [
+                item.get("name") for item in script_entries if isinstance(item.get("name"), str) and item.get("name").strip()
+            ],
+            "execution_hint": self._script_execution_hint(spec),
             "score": round(float(score), 3),
         }
 
@@ -1170,6 +1224,9 @@ class SkillManager:
         spec["asset_refs"] = artifact_info.get("asset_refs") or list(spec.get("asset_refs") or [])
         spec["references"] = explicit_references or artifact_info.get("references") or []
         tool_refs = list(spec.get("tool_refs") or [])
+        spec["execution_surface"] = self._infer_execution_surface(spec)
+        spec["prompt_disclosure"] = self._infer_prompt_disclosure(spec)
+        spec["preferred_script_name"] = self._infer_preferred_script_name(spec)
         experience_entries = self._load_experience_entries(skill_path, spec=spec)
         record = {
             "name": skill_name,
@@ -2030,6 +2087,41 @@ class SkillManager:
             if len(blocks) >= limit:
                 break
         return "\n\n".join([block for block in blocks if block])
+
+    def get_full_disclosure_skill_names(
+        self,
+        query_text=None,
+        limit=6,
+        preferred_skill_names=None,
+        exclude_skill_names=None,
+        allowed_skill_names=None,
+    ):
+        selected = []
+        allowed_scope = set(normalize_selected_skill_names(allowed_skill_names))
+        for skill_name in preferred_skill_names or []:
+            if (
+                skill_name in self.skill_records
+                and skill_name not in selected
+                and (not allowed_scope or skill_name in allowed_scope)
+            ):
+                selected.append(skill_name)
+        if query_text:
+            for skill_name in self.select_relevant_skills(query_text, limit=limit):
+                if skill_name not in selected and (not allowed_scope or skill_name in allowed_scope):
+                    selected.append(skill_name)
+        excluded = {name for name in (exclude_skill_names or []) if name}
+        matched = []
+        for skill_name in selected:
+            if skill_name in excluded:
+                continue
+            record = self.skill_records.get(skill_name) or {}
+            spec = record.get("spec") or {}
+            if (spec.get("prompt_disclosure") or self._infer_prompt_disclosure(spec)) != "full_on_match":
+                continue
+            matched.append(skill_name)
+            if len(matched) >= limit:
+                break
+        return matched
 
     def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):
         if not include_references and not include_entries:

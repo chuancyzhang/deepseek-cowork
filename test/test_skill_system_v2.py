@@ -520,11 +520,16 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(record["spec"]["script_refs"], [os.path.normpath("scripts\\hello.py")])
         self.assertEqual(record["spec"]["script_entries"][0]["runtime"], "python")
         self.assertEqual(record["spec"]["script_entries"][0]["name"], "hello")
+        self.assertEqual(record["spec"]["execution_surface"], "skill_script")
+        self.assertEqual(record["spec"]["prompt_disclosure"], "full_on_match")
+        self.assertEqual(record["spec"]["preferred_script_name"], "hello")
         tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
         self.assertNotIn("hello", tool_names)
         full_prompt = sm.get_full_skill_prompt("native-agent-skill") or ""
         self.assertIn("## Skill Scripts", full_prompt)
         self.assertIn("scripts\\hello.py", full_prompt)
+        self.assertIn("Do not use `glob`, `grep`, or `bash`", full_prompt)
+        self.assertIn("script-execution:", record["brief"])
 
     def test_skill_dependencies_are_preserved_and_prepared(self):
         skill_dir = os.path.join(self.skills_dir, "dependency-skill")

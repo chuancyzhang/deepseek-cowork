@@ -385,6 +385,10 @@ def _build_skill_json(skill_name, description, tool_refs, source_format, source_
     source_meta = _metadata_from_source_docs(source_path)
     title = source_meta.get("title") or skill_name.replace("-", " ")
     summary = source_meta.get("summary") or description
+    normalized_script_entries = (script_entries or [])[:50]
+    execution_surface = "skill_script" if normalized_script_entries else ("tool_refs" if tool_refs else "knowledge")
+    preferred_script_name = normalized_script_entries[0]["name"] if len(normalized_script_entries) == 1 else ""
+    prompt_disclosure = "full_on_match" if (source_format in {"agent_skill", "claude", "openclaw"} or normalized_script_entries) else "brief_only"
     tags = ["imported", "adapted", "external-skill", source_format]
     for item in (title, os.path.basename(os.path.normpath(source_path)).replace("_", " ")):
         for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", item or ""):
@@ -406,8 +410,11 @@ def _build_skill_json(skill_name, description, tool_refs, source_format, source_
         "references": references[:20],
         "tool_refs": tool_refs,
         "script_refs": (script_refs or [])[:50],
-        "script_entries": (script_entries or [])[:50],
+        "script_entries": normalized_script_entries,
         "asset_refs": (asset_refs or [])[:50],
+        "execution_surface": execution_surface,
+        "prompt_disclosure": prompt_disclosure,
+        "preferred_script_name": preferred_script_name,
         "experience_policy": {
             "entry_storage": "experience/entries.jsonl",
             "summary_sync": "frontmatter_experience",

@@ -165,6 +165,8 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
 - `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, and optional `impl.py` assets.
 - Skill packages can be exported as ZIP archives. ZIP import validates safe paths, supports both flat-root and folder-root packages, keeps the original skill name from metadata, and rejects name conflicts.
+- Imported / agent skills now use progressive disclosure: the agent starts with the brief, then appends the full skill prompt after the query or `tool_search` clearly matches that skill.
+- When a matched imported / agent skill exposes `script_entries`, `tool_search` returns `run_skill_script` as the preferred execution surface, so the agent should use the declared script entry instead of locating the skill directory with `glob` or `bash`.
 - Skills remain hot-reloadable without restarting.
 
 ## 🔄 Agentic Workflow

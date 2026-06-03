@@ -163,6 +163,8 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 - `沉淀为 Skill` 是人工确认的沉淀入口，会把会话经验转化为 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`。
 - Skill 可以导出为 ZIP 包；ZIP 导入会校验安全路径，支持平铺根目录、单文件夹根目录和包含多个子 Skill 的集合包，优先沿用元数据中的原 Skill 名称，并拒绝同名覆盖。
 - `tool_search` 现在除了延迟发现工具，也会返回匹配到的 AI skill 结果；对 skill 名、标题、触发词和正文摘要的匹配不区分大小写。
+- 对 imported / agent skill，系统默认采用延迟全文暴露：先注入 brief，命中 query 或被 `tool_search` 命中后，再在后续轮次追加完整 skill 内容。
+- 如果命中的 imported / agent skill 含 `script_entries`，`tool_search` 会返回 `run_skill_script` 作为首选执行入口；模型应直接按脚本入口执行，而不是再用 `glob` / `bash` 去定位 skill 目录。
 - 新技能仍然支持热加载，无需重启。
 - 当前源码已打通“提示模型记录经验 -> 调用 `update_experience` -> 持久化经验 -> 后续任务再次注入”的链路，因此 AI 在合适场景下可以主动调用经验工具。
 - 但这仍属于可用的第一版经验闭环：系统会鼓励并支持 AI 记录经验，不保证每次都会主动调用，也尚未内建经验验证、效果评估、生命周期治理等强反馈机制。

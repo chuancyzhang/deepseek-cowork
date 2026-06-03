@@ -496,12 +496,188 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             self.assertEqual(len(provider_calls), 2)
             self.assertEqual(provider_calls[0]["tool_names"], ["tool_search", "run_python_code"])
-            self.assertIn("`run_python_code`", provider_calls[0]["system_prompt"])
-            self.assertNotIn("`bash`", provider_calls[0]["system_prompt"])
+            self.assertIn("- `tool_search`, `run_python_code`", provider_calls[0]["system_prompt"])
+            self.assertNotIn("- `tool_search`, `run_python_code`, `bash`", provider_calls[0]["system_prompt"])
             self.assertIn("run_python_code", provider_calls[1]["tool_names"])
             self.assertIn("bash", provider_calls[1]["tool_names"])
-            self.assertIn("`run_python_code`", provider_calls[1]["system_prompt"])
-            self.assertIn("`bash`", provider_calls[1]["system_prompt"])
+            self.assertIn("- `tool_search`, `run_python_code`, `bash`", provider_calls[1]["system_prompt"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_injects_full_prompt_for_query_matched_script_skill(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_skill_of_tool(self, _tool_name):
+                return None
+
+            def get_system_prompts(self, *args, **kwargs):
+                return "[Experience Package] claim-expert\nscripts: validate_input"
+
+            def get_full_disclosure_skill_names(self, query_text=None, **_kwargs):
+                return ["claim-expert"] if "claim" in str(query_text or "").lower() else []
+
+            def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):
+                if skill_name != "claim-expert":
+                    return ""
+                return (
+                    "## Skill Scripts\n"
+                    "- `validate_input` -> `scripts/validate_input.py` (python)\n"
+                    "Use `command-tools.run_skill_script` to execute these scripts inside the sandbox runtime."
+                )
+
+        class _ProviderStub:
+            def __init__(self, calls):
+                self.calls = calls
+                self.provider_name = "test-provider"
+                self.model_name = "test-model"
+                self.base_url = ""
+                self.thinking_enabled = False
+
+            def chat_stream(self, messages, tools=None):
+                self.calls.append(
+                    {
+                        "system_messages": [
+                            item.get("content", "")
+                            for item in messages
+                            if isinstance(item, dict) and item.get("role") == "system"
+                        ]
+                    }
+                )
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        provider_calls = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_calls)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "please use the claim expert flow"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.run()
+
+            self.assertEqual(len(provider_calls), 1)
+            combined = "\n\n".join(provider_calls[0]["system_messages"])
+            self.assertIn("claim-expert", combined)
+            self.assertIn("run_skill_script", combined)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_injects_full_prompt_after_tool_search_skill_match(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [
+                    {"type": "function", "function": {"name": "tool_search", "description": "", "parameters": {}}}
+                ]
+
+            def is_tool_allowed(self, _name, _run_mode):
+                return True
+
+            def is_tool_visible(self, _name, _run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
+            def call_tool(self, name, args, context=None):
+                if name != "tool_search":
+                    return {"status": "error", "message": f"unexpected tool {name}"}
+                return {
+                    "status": "ok",
+                    "discovered_tools": [],
+                    "skills": [
+                        {
+                            "name": "claim-expert",
+                            "prompt_level": "full",
+                            "preferred_tool": "run_skill_script",
+                        }
+                    ],
+                    "message": "Matched tools will be available on the next model turn.",
+                }
+
+            def check_for_updates(self):
+                return False
+
+            def get_skill_of_tool(self, _tool_name):
+                return None
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_full_disclosure_skill_names(self, query_text=None, **_kwargs):
+                return []
+
+            def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):
+                if skill_name != "claim-expert":
+                    return ""
+                return (
+                    "## Skill Scripts\n"
+                    "- `validate_input` -> `scripts/validate_input.py` (python)\n"
+                    "Use `command-tools.run_skill_script` to execute these scripts inside the sandbox runtime."
+                )
+
+        class _ProviderStub:
+            def __init__(self, calls):
+                self.calls = calls
+                self.provider_name = "test-provider"
+                self.model_name = "test-model"
+                self.base_url = ""
+                self.thinking_enabled = False
+
+            def chat_stream(self, messages, tools=None):
+                self.calls.append(
+                    {
+                        "system_messages": [
+                            item.get("content", "")
+                            for item in messages
+                            if isinstance(item, dict) and item.get("role") == "system"
+                        ]
+                    }
+                )
+                if len(self.calls) == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "tool-search-1",
+                        "function": {"name": "tool_search", "arguments": "{\"query\": \"claim expert\"}"},
+                    }
+                    return
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        provider_calls = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_calls)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "help me find the right claim skill"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.run()
+
+            self.assertEqual(len(provider_calls), 2)
+            self.assertNotIn("validate_input", "\n\n".join(provider_calls[0]["system_messages"]))
+            self.assertIn("validate_input", "\n\n".join(provider_calls[1]["system_messages"]))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

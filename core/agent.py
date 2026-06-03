@@ -673,24 +673,35 @@ class LLMWorker(QThread):
         self.step_signal.emit("System: Stopping...")
         self.abort_signal.emit()
 
-    def _append_skill_prompts(self, tool_calls, current_messages, disclosed_skills):
+    def _append_skill_prompts_for_names(self, skill_names, current_messages, disclosed_skills, source="skill_prompt"):
         prompts = []
-        for tool in tool_calls or []:
-            skill_name = self.skill_manager.get_skill_of_tool(tool.function.name)
-            if skill_name and skill_name not in disclosed_skills:
-                prompt = self.skill_manager.get_full_skill_prompt(skill_name)
-                if prompt:
-                    prompts.append(prompt)
-                    disclosed_skills.add(skill_name)
+        for skill_name in skill_names or []:
+            if not skill_name or skill_name in disclosed_skills:
+                continue
+            prompt_getter = getattr(self.skill_manager, "get_full_skill_prompt", None)
+            if not callable(prompt_getter):
+                continue
+            prompt = prompt_getter(skill_name)
+            if prompt:
+                prompts.append(prompt)
+                disclosed_skills.add(skill_name)
         if prompts:
             content = "\n\n".join(prompts)
             current_messages.append({"role": "system", "content": content})
             self.observability_signal.emit({
                 "type": "system_prompt_append",
                 "content": content,
-                "source": "skill_prompt",
+                "source": source,
                 "timestamp": time.time(),
             })
+
+    def _append_skill_prompts(self, tool_calls, current_messages, disclosed_skills):
+        skill_names = []
+        for tool in tool_calls or []:
+            skill_name = self.skill_manager.get_skill_of_tool(tool.function.name)
+            if skill_name:
+                skill_names.append(skill_name)
+        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt")
 
     def _build_skill_query(self, messages):
         parts = []
@@ -700,6 +711,33 @@ class LLMWorker(QThread):
                 if isinstance(content, str) and content.strip():
                     parts.append(content.strip())
         return "\n".join(parts)
+
+    def _append_query_matched_skill_prompts(self, current_messages, disclosed_skills):
+        selector = getattr(self.skill_manager, "get_full_disclosure_skill_names", None)
+        if not callable(selector):
+            return
+        try:
+            skill_names = selector(
+                query_text=self._build_skill_query(current_messages),
+                allowed_skill_names=self._allowed_skill_names(),
+            )
+        except TypeError:
+            skill_names = selector(self._build_skill_query(current_messages))
+        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt_query_match")
+
+    def _append_tool_search_skill_prompts(self, result_obj, current_messages, disclosed_skills):
+        if not isinstance(result_obj, dict):
+            return
+        skill_names = []
+        for item in result_obj.get("skills") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("prompt_level") or "").strip().lower() != "full":
+                continue
+            skill_name = str(item.get("name") or item.get("preferred_skill_name") or "").strip()
+            if skill_name:
+                skill_names.append(skill_name)
+        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt_tool_search")
 
     def _build_system_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
         python_exe = runtime_snapshot.get("python_exe") or get_python_executable()
@@ -751,6 +789,7 @@ class LLMWorker(QThread):
         stable_policy_lines = [
             "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于当前工作区。",
             "能力: 你可以使用 'create_new_skill' 创建新的技能/工具。",
+            "Imported / agent script skill 规则: 如果你已经命中了包含 `script_entries` 的 imported/agent skill，优先调用 `run_skill_script`，不要再用 `glob`、`grep` 或 `bash` 去定位该 skill 目录或猜脚本路径。",
             "命令策略: 推荐的通用执行工具是 'run_python_code'、'run_node_code' 和 'bash'，其中优先使用最贴近任务语言的专用执行工具。",
             "1. 可用 Python 完成的数据处理、批量文本处理、脚本化检查、计算和轻量文件分析，优先使用 'run_python_code'。",
             "2. 可用 JavaScript/Node.js 完成的验证、JSON 处理、前端脚本和轻量代码执行，优先使用 'run_node_code'。",
@@ -991,6 +1030,7 @@ class LLMWorker(QThread):
                 self.step_signal.emit("System: Detecting skill updates... Reloading.")
                 self.skill_manager.load_skills()
                 self._refresh_tool_definitions()
+                disclosed_skills.clear()
             # -------------------------
 
             system_prompt = self._build_system_prompt(
@@ -999,6 +1039,7 @@ class LLMWorker(QThread):
                 sandbox_snapshot,
             )
             current_messages[0]["content"] = system_prompt
+            self._append_query_matched_skill_prompts(current_messages, disclosed_skills)
             self.observability_signal.emit({
                 "type": "system_prompt",
                 "content": system_prompt,
@@ -1448,6 +1489,8 @@ class LLMWorker(QThread):
                                 }
                             }
                             current_messages.append(tool_msg)
+                            if name == "tool_search":
+                                self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills)
                             generated_messages.append(tool_msg)
                             self.step_signal.emit(f"Tool Result: {result_text}")
                         # Loop continues to let LLM see tool results

@@ -779,6 +779,56 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["skills"], [])
 
+    def test_tool_search_returns_run_skill_script_hint_for_script_skills(self):
+        skill_dir = os.path.join(self.skills_dir, "claim-expert")
+        os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Claim Expert\n\nReview claim evidence and consistency.\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "claim-expert",
+                    "kind": "knowledge",
+                    "description": "Review claim evidence and consistency.",
+                    "tags": ["claim", "review"],
+                    "triggers": ["Claim Expert"],
+                    "source_format": "agent_skill",
+                    "script_entries": [
+                        {
+                            "name": "validate_input",
+                            "path": "scripts/validate_input.py",
+                            "runtime": "python",
+                            "description": "Validate the incoming claim payload.",
+                        }
+                    ],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        with open(os.path.join(skill_dir, "scripts", "validate_input.py"), "w", encoding="utf-8") as f:
+            f.write("print('ok')\n")
+
+        sm = self._build_manager()
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "claim expert"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["skills"][0]["name"], "claim-expert")
+        self.assertEqual(result["skills"][0]["prompt_level"], "full")
+        self.assertEqual(result["skills"][0]["preferred_tool"], "run_skill_script")
+        self.assertEqual(result["skills"][0]["preferred_skill_name"], "claim-expert")
+        self.assertEqual(result["skills"][0]["preferred_script_name"], "validate_input")
+        self.assertEqual(result["skills"][0]["execution_surface"], "skill_script")
+        self.assertIn("run_skill_script", result["skills"][0]["execution_hint"])
+
 
 if __name__ == "__main__":
     unittest.main()

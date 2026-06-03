@@ -621,17 +621,7 @@ class LLMWorker(QThread):
         return False
 
     def _tools_for_messages(self, messages):
-        tools = list(self.tools or [])
-        if not self._current_turn_has_image_input(messages):
-            return tools
-        filtered = []
-        for item in tools:
-            function = item.get("function") if isinstance(item, dict) else None
-            name = function.get("name") if isinstance(function, dict) else ""
-            if name == "tool_search":
-                continue
-            filtered.append(item)
-        return filtered
+        return list(self.tools or [])
 
     def _bind_agent_manager(self):
         if self.is_subagent:
@@ -1187,6 +1177,37 @@ class LLMWorker(QThread):
                             t_obj.function.arguments = t_data["function"]["arguments"]
                             
                             tool_calls.append(t_obj)
+
+                    invalid_tool_calls = [
+                        tool for tool in tool_calls
+                        if not str(getattr(tool.function, "name", "") or "").strip()
+                    ]
+                    if invalid_tool_calls:
+                        malformed_prompt = (
+                            "上一轮 provider 返回了缺少 function.name 的无效 tool_call。"
+                            "忽略任何原始参数片段或内部工具发现说明；"
+                            "如果需要工具，请仅发出带完整函数名的有效 tool_call，否则直接回答用户。"
+                        )
+                        self.step_signal.emit(
+                            "System: Provider emitted malformed tool calls without function.name; ignoring them."
+                        )
+                        self.output_signal.emit(
+                            "Tool Call Error: Provider returned malformed tool calls without function.name."
+                        )
+                        current_messages.append({
+                            "role": "system",
+                            "content": malformed_prompt,
+                        })
+                        self.observability_signal.emit({
+                            "type": "system_prompt_append",
+                            "content": malformed_prompt,
+                            "source": "invalid_tool_call_recovery",
+                            "timestamp": time.time(),
+                        })
+                    tool_calls = [
+                        tool for tool in tool_calls
+                        if str(getattr(tool.function, "name", "") or "").strip()
+                    ]
 
                     if tool_calls:
                         self._append_skill_prompts(tool_calls, current_messages, disclosed_skills)

@@ -293,6 +293,82 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_llm_worker_ignores_tool_calls_without_function_name(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [{"type": "function", "function": {"name": "tool_search", "description": "", "parameters": {}}}]
+
+            def is_tool_allowed(self, _name, _run_mode):
+                return True
+
+            def is_tool_visible(self, _name, _run_mode, discovered_tool_names=None, run_context=None):
+                return True
+
+            def check_for_updates(self):
+                return False
+
+            def get_skill_of_tool(self, _tool_name):
+                return None
+
+            def get_brief_skill_prompt(self, _skill_name):
+                return ""
+
+            def get_system_prompts(self, query_text="", limit=6, preferred_skill_names=None, exclude_skill_names=None):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, messages, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "bad-tool-1",
+                        "function": {"arguments": "{\"query\": \"document pdf docx\"}"},
+                    }
+                    return
+                yield {"type": "content", "content": "direct answer"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        results = []
+        try:
+            provider = _ProviderStub()
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "read this screenshot"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(lambda data: results.append(data))
+                worker.run()
+
+            self.assertEqual(provider.calls, 2)
+            self.assertTrue(results)
+            result = results[0]
+            self.assertEqual(result["content"], "direct answer")
+            assistant_messages = [msg for msg in result["generated_messages"] if msg.get("role") == "assistant"]
+            self.assertTrue(assistant_messages)
+            self.assertFalse(any(msg.get("tool_calls") for msg in assistant_messages))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_selected_skill_tools_are_visible_without_tool_search(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):

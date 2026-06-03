@@ -1041,7 +1041,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_image_turn_hides_tool_search_without_prompt_changes(self):
+    def test_image_turn_keeps_tool_search_available(self):
         worker = LLMWorker.__new__(LLMWorker)
         worker.tools = [
             {"type": "function", "function": {"name": "tool_search"}},
@@ -1058,7 +1058,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         )
 
         tool_names = [item["function"]["name"] for item in tools]
-        self.assertEqual(tool_names, ["read_file"])
+        self.assertEqual(tool_names, ["tool_search", "read_file"])
 
 
 class TestSingleInstance(unittest.TestCase):

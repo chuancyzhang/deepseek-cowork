@@ -85,6 +85,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
 Windows 打包版会优先直接从当前应用目录解析内置运行时，包括 `_internal/node_env/node.exe` 与 `_internal/git_bash_env/bin/bash.exe`。AppData 下的 `runtime_sandbox` 继续作为临时、缓存和 skill 依赖目录，不再优先作为可执行运行时来源，因此自动升级后会使用新解压的 `_internal` 文件。如需覆盖探测结果，可设置 `COWORK_NODE_EXE`、`COWORK_NODE_DIR`、`COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
 AI 在 execution 模式下默认可直接调用 `run_python_code`，无需先通过 `tool_search` 发现；JavaScript 仍通过 `run_node_code` 执行，`bash` 工具优先使用 Git Bash，Windows 上缺失 Git Bash 时会退回 `cmd.exe`。
+带截图或其他图片输入的回合也会保留 `tool_search` 发现链路，这样文档读取、浏览器辅助等延迟工具仍可按需被发现，而不会因为视觉输入而消失。
 `python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒运行时里验证导入是否成功。第三方包会持久化到 AppData 的 `runtime_sandbox/.../skills/python-runner/python/site-packages`，重启后仍可用；如果依赖缓存记录还在但沙盒已经无法导入，会自动触发重新安装。
 沙盒现在会注入 Python bootstrap `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS`，让 Windows 下带原生扩展的包可以从内置运行时和 skill 专属 `site-packages` 解析 DLL。
 如果安装后仍然导入失败，`install_package` 会返回沙盒里的真实 traceback，而不再只给出笼统的 “still cannot import” 提示。

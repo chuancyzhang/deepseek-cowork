@@ -7,6 +7,7 @@ import copy
 import ast
 import re
 import json
+import html
 import mimetypes
 import platform
 import uuid
@@ -215,6 +216,10 @@ def build_form_row_label(text):
     label.setWordWrap(True)
     label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+    label.setStyleSheet(
+        f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600; "
+        "background: transparent; border: none;"
+    )
     return label
 
 HISTORY_MIGRATION_VERSION = 2
@@ -537,7 +542,7 @@ def apple_list_style(border=True, bg=None, radius=14, padding=6):
         QListWidget::item:selected {{
             background: {DesignTokens.primary_soft};
             color: {DesignTokens.text_primary};
-            border: 1px solid #c9def8;
+            border: none;
         }}
     """
 
@@ -739,8 +744,7 @@ def apple_settings_surface_style(radius=20):
 
 def apple_settings_summary_card_style(accent=False):
     bg = DesignTokens.bg_settings_summary if accent else DesignTokens.bg_panel_strong
-    border = DesignTokens.border_settings_summary if accent else DesignTokens.border_panel
-    return f"background: {bg}; border: 1px solid {border}; border-radius: 18px;"
+    return f"background: {bg}; border: none; border-radius: 18px;"
 
 
 def apple_settings_inline_note_style():
@@ -1681,7 +1685,12 @@ class ModelEditDialog(QDialog):
         self._editing_existing = bool(model)
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
         self.resize(480, 340)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background: {DesignTokens.bg_app}; }}
+            QDialog QLabel {{ background: transparent; border: none; }}
+            """
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
@@ -1793,7 +1802,7 @@ class ModelChannelEditor(QFrame):
             f"""
             QFrame#ModelChannelEditor {{
                 background: {DesignTokens.bg_panel};
-                border: 1px solid {DesignTokens.border_panel};
+                border: none;
                 border-radius: 18px;
             }}
             QLabel#ChannelTitle {{
@@ -1893,7 +1902,7 @@ class ModelChannelEditor(QFrame):
         body_layout.addWidget(model_title)
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(104)
-        self.model_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
+        self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
         body_layout.addWidget(self.model_list)
 
         button_row = QHBoxLayout()
@@ -2165,7 +2174,7 @@ class AgentProfileManager(QWidget):
 
         self.profile_list = QListWidget()
         self.profile_list.setFixedWidth(236)
-        self.profile_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
+        self.profile_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
         self.profile_list.currentRowChanged.connect(self._on_profile_changed)
         body.addWidget(self.profile_list)
 
@@ -2200,7 +2209,7 @@ class AgentProfileManager(QWidget):
         self.system_prompt_edit = QTextEdit()
         self.system_prompt_edit.setFixedHeight(150)
         self.system_prompt_edit.setPlaceholderText("定义这个智能体的角色、输出风格、判断标准和工作边界")
-        self.system_prompt_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=False, padding=10))
+        self.system_prompt_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=10))
         self.system_prompt_edit.textChanged.connect(self._sync_current_profile_from_fields)
         editor_layout.addWidget(self.system_prompt_edit)
 
@@ -2208,7 +2217,7 @@ class AgentProfileManager(QWidget):
         skills_label.setStyleSheet(apple_settings_section_title_style())
         editor_layout.addWidget(skills_label)
         self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_panel_strong, radius=14, padding=4))
+        self.skill_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=4))
         self.skill_list.itemChanged.connect(lambda _item: self._sync_current_profile_from_fields())
         editor_layout.addWidget(self.skill_list, 1)
 
@@ -4303,7 +4312,12 @@ class McpJsonImportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Import MCP JSON")
         self.resize(640, 560)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background: {DesignTokens.bg_app}; }}
+            QDialog QLabel {{ background: transparent; border: none; }}
+            """
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
@@ -4335,7 +4349,7 @@ class McpJsonImportDialog(QDialog):
             '  }\n'
             '}'
         )
-        self.editor.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=False, padding=12))
+        self.editor.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=12))
         card_layout.addWidget(self.editor, 1)
         layout.addWidget(card, 1)
 
@@ -4362,7 +4376,12 @@ class McpServerEditDialog(QDialog):
         self._editing_existing = bool(server)
         self.setWindowTitle("MCP Server")
         self.resize(620, 700)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background: {DesignTokens.bg_app}; }}
+            QDialog QLabel {{ background: transparent; border: none; }}
+            """
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
@@ -4372,7 +4391,7 @@ class McpServerEditDialog(QDialog):
         header.setSpacing(4)
         title = QLabel("编辑 MCP Server" if self._editing_existing else "添加 MCP Server")
         title.setProperty("roleTitle", True)
-        hint = QLabel("保留 MCP 原始术语，让配置、调试和导入示例保持一致。当前只接入 MCP tools。")
+        hint = QLabel("MCP terms stay in English. Current scope: tools.")
         hint.setWordWrap(True)
         hint.setProperty("roleSubtitle", True)
         header.addWidget(title)
@@ -4440,7 +4459,7 @@ class McpServerEditDialog(QDialog):
         self.args_edit.setFixedHeight(76)
         self.args_edit.setPlaceholderText("每行一个参数，例如：\n-y\n@modelcontextprotocol/server-filesystem\nD:\\\\workspace")
         self.args_edit.setPlainText("\n".join(self.server.get("args") or []))
-        self.args_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=False, padding=10))
+        self.args_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
         stdio_layout.addRow(build_form_row_label("Args"), self.args_edit)
 
         self.cwd_input = QLineEdit()
@@ -4461,7 +4480,7 @@ class McpServerEditDialog(QDialog):
         self.env_edit.setFixedHeight(90)
         self.env_edit.setPlaceholderText("每行一个环境变量：KEY=VALUE")
         self.env_edit.setPlainText(self._mapping_to_text(self.server.get("env"), separator="="))
-        self.env_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=False, padding=10))
+        self.env_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
         stdio_layout.addRow(build_form_row_label("env"), self.env_edit)
         stdio_card_layout.addLayout(stdio_layout)
         stdio_page_layout.addWidget(stdio_card)
@@ -4486,7 +4505,7 @@ class McpServerEditDialog(QDialog):
         self.headers_edit.setFixedHeight(120)
         self.headers_edit.setPlaceholderText("每行一个 Header：Authorization: Bearer ...")
         self.headers_edit.setPlainText(self._mapping_to_text(self.server.get("headers"), separator=": "))
-        self.headers_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=False, padding=10))
+        self.headers_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
         http_layout.addRow(build_form_row_label("Headers"), self.headers_edit)
         http_card_layout.addLayout(http_layout)
         http_page_layout.addWidget(http_card)
@@ -4597,7 +4616,7 @@ class McpServerManager(QWidget):
         title_box.setSpacing(4)
         title = QLabel("MCP")
         title.setStyleSheet(apple_settings_section_title_style())
-        subtitle = QLabel("把可复用的外部能力接到本地工作流里，术语保持英文，方便直接对照官方示例。")
+        subtitle = QLabel("stdio / Streamable HTTP")
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet(apple_settings_inline_note_style())
         title_box.addWidget(title)
@@ -4618,13 +4637,8 @@ class McpServerManager(QWidget):
             toolbar.addWidget(btn)
         layout.addLayout(toolbar)
 
-        helper = QLabel("已启用的 MCP servers 会在运行时注册为延迟发现工具，可通过 `tool_search` 找到。")
-        helper.setWordWrap(True)
-        helper.setStyleSheet(apple_settings_inline_note_style())
-        layout.addWidget(helper)
-
         self.server_list = QListWidget()
-        self.server_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
+        self.server_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
         self.server_list.currentRowChanged.connect(self._refresh_detail)
         layout.addWidget(self.server_list, 1)
 
@@ -4632,12 +4646,12 @@ class McpServerManager(QWidget):
         self.detail_label.setWordWrap(True)
         self.detail_label.setTextFormat(Qt.RichText)
         self.detail_label.setStyleSheet(
-            f"background: {DesignTokens.bg_panel_strong}; border: 1px solid {DesignTokens.border_panel}; border-radius: 16px; "
-            f"padding: 14px; color: {DesignTokens.text_secondary}; font-size: 12px;"
+            f"background: transparent; border: none; padding: 4px 2px; "
+            f"color: {DesignTokens.text_secondary}; font-size: 12px;"
         )
         layout.addWidget(self.detail_label)
 
-        self.status_label = QLabel("连接测试结果会显示在这里。")
+        self.status_label = QLabel("Test result will appear here.")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(self.status_label)
@@ -4667,20 +4681,18 @@ class McpServerManager(QWidget):
     def _refresh_detail(self):
         index = self._current_index()
         if index < 0:
-            self.detail_label.setText("还没有配置 MCP server。")
+            self.detail_label.setText("No MCP server configured.")
             return
         server = self.servers[index]
         state_text = "Enabled" if server.get("enabled", True) else "Disabled"
-        state_tone = "success" if server.get("enabled", True) else "neutral"
         summary = summarize_mcp_server(server)
+        summary_html = html.escape(summary)
         self.detail_label.setText(
             "<div>"
-            f"<div style='font-size:14px;font-weight:700;color:{DesignTokens.text_primary};margin-bottom:6px;'>{server.get('name') or 'MCP Server'}</div>"
-            f"<div style='margin-bottom:8px;'>{settings_status_chip(state_text, state_tone)}&nbsp;&nbsp;{settings_status_chip(mcp_transport_label(server.get('transport')), 'primary')}</div>"
-            f"<div style='color:{DesignTokens.text_secondary};line-height:1.5;'>"
-            f"Timeout: {server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS} 秒<br>"
-            f"Summary: {summary}"
-            "</div></div>"
+            f"<span style='font-weight:700;color:{DesignTokens.text_primary};'>{html.escape(str(server.get('name') or 'MCP Server'))}</span>"
+            f"<span style='color:{DesignTokens.text_tertiary};'> · {html.escape(mcp_transport_label(server.get('transport')))} · {state_text} · Timeout {server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS}s</span>"
+            f"<div style='color:{DesignTokens.text_secondary};line-height:1.45;margin-top:4px;'>{summary_html}</div>"
+            "</div>"
         )
 
     def add_server(self):
@@ -4866,14 +4878,17 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(860, 560)
         self.config_manager = config_manager
         self._main = parent
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(
+            f"""
+            QDialog {{ background: {DesignTokens.bg_app}; }}
+            QDialog QLabel {{ background: transparent; border: none; }}
+            """
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(20)
 
-        header_layout = QHBoxLayout()
-        header_layout.setSpacing(18)
         title_box = QVBoxLayout()
         title_box.setSpacing(6)
         title = QLabel("设置")
@@ -4883,37 +4898,7 @@ class SettingsDialog(QDialog):
         subtitle.setProperty("roleSubtitle", True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
-        header_layout.addLayout(title_box, 1)
-
-        summary_strip = QWidget()
-        summary_layout = QHBoxLayout(summary_strip)
-        summary_layout.setContentsMargins(0, 0, 0, 0)
-        summary_layout.setSpacing(10)
-
-        def build_summary_card(label_text, accent=False):
-            card = QFrame()
-            card.setStyleSheet(apple_settings_summary_card_style(accent=accent))
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 12, 14, 12)
-            card_layout.setSpacing(4)
-            label = QLabel(label_text)
-            label.setStyleSheet(apple_settings_meta_style())
-            value = QLabel("--")
-            value.setStyleSheet(apple_settings_value_style())
-            meta = QLabel("")
-            meta.setStyleSheet(apple_settings_inline_note_style())
-            meta.setWordWrap(True)
-            card_layout.addWidget(label)
-            card_layout.addWidget(value)
-            card_layout.addWidget(meta)
-            summary_layout.addWidget(card)
-            return value, meta
-
-        self.summary_version_value, self.summary_version_meta = build_summary_card("当前版本", accent=True)
-        self.summary_workspace_value, self.summary_workspace_meta = build_summary_card("默认工作区")
-        self.summary_connections_value, self.summary_connections_meta = build_summary_card("连接概况")
-        header_layout.addWidget(summary_strip, 0)
-        layout.addLayout(header_layout)
+        layout.addLayout(title_box)
 
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
@@ -5052,7 +5037,7 @@ class SettingsDialog(QDialog):
         )
         mcp_page, mcp_layout = make_scroll_page(
             "MCP",
-            "连接 MCP servers 之后，Agent 可以按需发现并调用外部 tools。",
+            "stdio / Streamable HTTP",
         )
         self.mcp_server_manager = McpServerManager(
             self.config_manager.get_mcp_servers(),
@@ -5067,7 +5052,7 @@ class SettingsDialog(QDialog):
 
         permission_panel = QFrame()
         permission_panel.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.warning_panel_bg}; border: 1px solid {DesignTokens.warning_panel_border}; border-radius: 14px; }}"
+            f"QFrame {{ background: {DesignTokens.warning_panel_bg}; border: none; border-radius: 14px; }}"
         )
         permission_panel_layout = QVBoxLayout(permission_panel)
         permission_panel_layout.setContentsMargins(14, 14, 14, 14)
@@ -5108,7 +5093,7 @@ class SettingsDialog(QDialog):
         self.update_log_edit = QTextEdit()
         self.update_log_edit.setReadOnly(True)
         self.update_log_edit.setFixedHeight(96)
-        self.update_log_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=False, padding=10))
+        self.update_log_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=10))
         self.update_log_edit.setPlaceholderText("更新过程会显示在这里。")
         self.update_progress = QProgressBar()
         self.update_progress.setRange(0, 100)
@@ -5235,7 +5220,6 @@ class SettingsDialog(QDialog):
                 if hasattr(self._main, "start_gateway_process"):
                     self._main.start_gateway_process()
                 gateway_info.setText("网关状态：运行中\n日志：" + log_path)
-                self.refresh_settings_summary()
                 QMessageBox.information(self, "企业消息网关", "已启动企业消息网关。")
             except Exception:
                 QMessageBox.warning(self, "企业消息网关", "启动失败，请检查环境与依赖是否完整。")
@@ -5244,7 +5228,6 @@ class SettingsDialog(QDialog):
             if hasattr(self._main, "stop_gateway_process"):
                 self._main.stop_gateway_process()
             gateway_info.setText("网关状态：未运行\n日志：" + log_path)
-            self.refresh_settings_summary()
 
         def open_gateway_log():
             try:
@@ -5275,7 +5258,6 @@ class SettingsDialog(QDialog):
         add_settings_page("更新", "fa5s.download", update_page)
         self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
         self.nav_list.setCurrentRow(0)
-        self.refresh_settings_summary()
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -5292,30 +5274,8 @@ class SettingsDialog(QDialog):
     def refresh_current_version_label(self):
         self.update_current_label.setText(f"当前版本：{APP_VERSION}")
 
-    def refresh_settings_summary(self):
-        self.refresh_current_version_label()
-        self.summary_version_value.setText(APP_VERSION)
-        self.summary_version_meta.setText("打包版可直接检查并安装 GitHub Releases。")
-
-        workspace = self.default_ws_input.text().strip()
-        self.summary_workspace_value.setText(os.path.basename(workspace.rstrip("\\/")) or ("未设置" if not workspace else workspace))
-        self.summary_workspace_meta.setText(workspace or "还没有设置默认工作区。")
-
-        channel_count = len(self.model_channel_manager.get_channels())
-        mcp_count = len(self.mcp_server_manager.get_servers())
-        enabled_im = [
-            name
-            for name, checkbox in (self.im_provider_checks or {}).items()
-            if checkbox.isChecked()
-        ]
-        self.summary_connections_value.setText(f"{channel_count + mcp_count + len(enabled_im)}")
-        self.summary_connections_meta.setText(
-            f"{channel_count} 个模型服务 · {mcp_count} 个 MCP servers · {len(enabled_im)} 个企业消息渠道"
-        )
-
     def showEvent(self, event):
         self.refresh_current_version_label()
-        self.refresh_settings_summary()
         super().showEvent(event)
 
     def start_app_update(self):

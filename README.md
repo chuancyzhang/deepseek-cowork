@@ -94,6 +94,7 @@ The bundled Python runtime must also include platform extension modules from loc
 
 ### 1. Configuration
 Open **⚙️ Settings**:
+The settings window uses a left category list with lightweight borderless preference sections on the right.
 *   **Models & Services**: split providers or use-cases into separate model service cards, each with its own access key, base URL, and model list.
 *   **Agents**: save reusable working personas with their own prompt and skill scope.
 *   **Workspace**: set the default workspace and chat storage location so the app opens into a stable working context.

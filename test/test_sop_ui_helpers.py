@@ -16,6 +16,7 @@ from main import (
     AutomationTaskDialog,
     ChatBubble,
     MainWindow,
+    SkillsCenterDialog,
     SopTemplateManager,
     SystemToast,
     SubAgentEventSummaryRow,
@@ -71,6 +72,40 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.llm_worker = None
         self.daemon_running = True
         self.sop_run = None
+
+    def test_skill_center_copy_skill_name_copies_internal_name(self):
+        app = QApplication.instance() or QApplication([])
+        dialog = SkillsCenterDialog.__new__(SkillsCenterDialog)
+        clipboard = MagicMock()
+        button = MagicMock()
+
+        with patch.object(QApplication, "clipboard", return_value=clipboard), patch("main.QTimer.singleShot") as single_shot:
+            dialog.copy_skill_name("claim-expert", button)
+
+        clipboard.setText.assert_called_once_with("claim-expert")
+        button.setToolTip.assert_called_with("已复制")
+        self.assertEqual(single_shot.call_args.args[0], 1200)
+
+    def test_skill_center_card_title_is_selectable(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+
+        card = dialog._build_skill_card(
+            {
+                "name": "claim-expert",
+                "display_name": "Claim Expert",
+                "description": "Review claim evidence and consistency.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": [],
+            }
+        )
+
+        title_labels = [label for label in card.findChildren(QLabel) if label.text() == "Claim Expert"]
+        self.assertTrue(title_labels)
+        self.assertTrue(title_labels[0].textInteractionFlags() & Qt.TextSelectableByMouse)
 
 
 class _ObservabilityState:

@@ -5710,10 +5710,25 @@ class SkillsCenterDialog(QDialog):
         title = QLabel(skill.get("display_name") or skill.get("name", ""))
         title.setStyleSheet(f"font-size: 17px; font-weight: 700; color: {DesignTokens.text_primary};")
         title.setWordWrap(True)
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title_row.addWidget(title, 1)
+        copy_name_btn = QToolButton()
+        copy_name_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
+        copy_name_btn.setToolTip("复制技能名")
+        copy_name_btn.setCursor(Qt.PointingHandCursor)
+        copy_name_btn.setFixedSize(28, 28)
+        copy_name_btn.setStyleSheet(apple_tool_button_style(False))
+        copy_name_btn.clicked.connect(
+            lambda checked=False, n=str(skill.get("name") or "").strip(), btn=copy_name_btn: self.copy_skill_name(n, btn)
+        )
+        title_row.addWidget(copy_name_btn, 0, Qt.AlignTop)
         desc = QLabel(skill.get("user_description") or skill.get("description") or "暂无说明。")
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary}; line-height: 1.45;")
-        info_col.addWidget(title)
+        info_col.addLayout(title_row)
         info_col.addWidget(desc)
 
         use_cases = skill.get("use_cases") or []
@@ -5811,7 +5826,7 @@ class SkillsCenterDialog(QDialog):
                 "ZIP 文件 (*.zip)",
             )
         elif clicked == dir_btn:
-            path = QFileDialog.getExistingDirectory(self, "选择能力目录（包含 SKILL.md）")
+            path = QFileDialog.getExistingDirectory(self, "选择 Skill 目录或 Skill 集合目录")
         if path:
             success, msg = self.skill_manager.import_skill(path)
             if success:
@@ -5841,6 +5856,15 @@ class SkillsCenterDialog(QDialog):
             QMessageBox.information(self, "能力中心", msg)
         else:
             QMessageBox.warning(self, "能力中心", msg)
+
+    def copy_skill_name(self, skill_name, button=None):
+        skill_name = str(skill_name or "").strip()
+        if not skill_name:
+            return
+        QApplication.clipboard().setText(skill_name)
+        if button:
+            button.setToolTip("已复制")
+            QTimer.singleShot(1200, lambda: button.setToolTip("复制技能名"))
 
 
 class SessionSkillPickerDialog(QDialog):

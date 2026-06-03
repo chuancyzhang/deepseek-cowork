@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sys
@@ -691,6 +692,92 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             context={"run_context": run_context},
         )
         self.assertIn("not allowed", denied)
+
+    def test_tool_search_returns_case_insensitive_skill_matches_for_ai_skills(self):
+        skill_dir = os.path.join(self.skills_dir, "claim-expert")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Claim Expert\n\nReview claim evidence and consistency.\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "claim-expert",
+                    "kind": "knowledge",
+                    "description": "Review claim evidence and consistency.",
+                    "tags": ["claim", "review"],
+                    "triggers": ["Claim Expert", "claims review"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        sm = self._build_manager()
+        for query in ("CLAIM EXPERT", "claim-expert", "Claim Expert"):
+            result = sm.call_tool(
+                "tool_search",
+                {"query": query},
+                context={
+                    "run_context": {"mode": RUN_MODE_EXECUTION},
+                    "discovered_tool_names": set(),
+                },
+            )
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["discovered_tools"], [])
+            self.assertIn("skills", result)
+            self.assertEqual(result["skills"][0]["name"], "claim-expert")
+
+    def test_tool_search_skill_results_respect_allowed_skill_scope(self):
+        skill_dir = os.path.join(self.skills_dir, "claim-expert")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Claim Expert\n\nReview claim evidence and consistency.\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "claim-expert",
+                    "kind": "knowledge",
+                    "description": "Review claim evidence and consistency.",
+                    "tags": ["claim", "review"],
+                    "triggers": ["Claim Expert"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        other_dir = os.path.join(self.skills_dir, "other-skill")
+        os.makedirs(other_dir, exist_ok=True)
+        with open(os.path.join(other_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("# Other Skill\n\nSomething unrelated.\n")
+        with open(os.path.join(other_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "other-skill",
+                    "kind": "knowledge",
+                    "description": "Something unrelated.",
+                    "tags": ["other"],
+                    "triggers": ["Other Skill"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        sm = self._build_manager()
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "claim expert"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION, "allowed_skill_names": ["other-skill"]},
+                "discovered_tool_names": set(),
+            },
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["skills"], [])
 
 
 if __name__ == "__main__":

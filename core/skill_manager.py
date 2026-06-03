@@ -21,13 +21,23 @@ from .mcp_client import (
     summarize_mcp_server,
 )
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
-from .skill_adapter import EXCLUDED_DIRS, adapt_skill_directory, discover_skill_artifacts
+from .skill_adapter import (
+    EXCLUDED_DIRS,
+    adapt_skill_directory,
+    discover_importable_skill_dirs,
+    discover_skill_artifacts,
+)
 from .tool_registry import ToolRegistry
 from .clarify_mode import normalize_selected_skill_names
 
 
 def _tokenize(text):
-    return set(re.findall(r"[a-z0-9][a-z0-9_\-]+", (text or "").lower()))
+    return set(re.findall(r"[a-z0-9][a-z0-9_\-]+", str(text or "").casefold()))
+
+
+def _normalize_search_text(text):
+    lowered = str(text or "").casefold()
+    return re.sub(r"[^a-z0-9]+", "", lowered)
 
 
 def _json_copy(value, fallback):
@@ -809,6 +819,7 @@ class SkillManager:
         )
         results = self._filter_results_by_allowed_skills(results, run_context)
         results = self._filter_enterprise_tool_results(results, run_context)
+        skill_results = self._search_skills(query, limit=limit, run_context=run_context)
         if (
             self._is_enterprise_tool_allowed("publish_artifacts", run_context)
             and self._is_tool_allowed_by_skill_scope("publish_artifacts", run_context)
@@ -841,9 +852,81 @@ class SkillManager:
             "status": "ok",
             "query": query,
             "count": len(results),
+            "skill_count": len(skill_results),
             "discovered_tools": names,
             "tools": results,
+            "skills": skill_results,
             "message": "Matched tools will be available on the next model turn.",
+        }
+
+    def _skill_search_score(self, record, query_tokens, query_text):
+        spec = record.get("spec") or {}
+        meta = record.get("meta") or {}
+        search_text = "\n".join(
+            [
+                record.get("name", ""),
+                meta.get("display_name", ""),
+                meta.get("name", ""),
+                spec.get("description", ""),
+                meta.get("description", ""),
+                record.get("body", ""),
+                record.get("search_text", ""),
+            ]
+        )
+        search_tokens = _tokenize(search_text)
+        if not search_tokens:
+            return 0.0
+        score = 0.0
+        explicit_tokens = _tokenize(
+            " ".join(
+                [
+                    record.get("name", ""),
+                    meta.get("display_name", ""),
+                    meta.get("name", ""),
+                    " ".join(spec.get("tags") or []),
+                    " ".join(spec.get("triggers") or []),
+                ]
+            )
+        )
+        normalized_query = _normalize_search_text(query_text)
+        normalized_text = _normalize_search_text(search_text)
+        if normalized_query and normalized_text and normalized_query in normalized_text:
+            score += 10.0
+        score += len(query_tokens & explicit_tokens) * 8.0
+        score += len(query_tokens & search_tokens) * 3.0
+        anti_tokens = _tokenize(" ".join(spec.get("anti_triggers") or []))
+        score -= len(query_tokens & anti_tokens) * 20.0
+        return score
+
+    def _search_skills(self, query, limit=8, run_context=None):
+        query_tokens = _tokenize(query)
+        if not query_tokens and not _normalize_search_text(query):
+            return []
+        matches = []
+        for skill_name, record in self.skill_records.items():
+            if not self._is_skill_allowed_by_scope(skill_name, run_context):
+                continue
+            score = self._skill_search_score(record, query_tokens, query)
+            if score <= 0:
+                continue
+            matches.append((score, skill_name, record))
+        matches.sort(key=lambda item: (-item[0], item[1]))
+        max_results = max(1, int(limit or 8))
+        return [self._skill_search_payload(record, score) for score, _name, record in matches[:max_results]]
+
+    def _skill_search_payload(self, record, score):
+        spec = record.get("spec") or {}
+        meta = record.get("meta") or {}
+        return {
+            "name": record.get("name") or "",
+            "display_name": meta.get("display_name") or meta.get("name") or record.get("name") or "",
+            "description": spec.get("description") or meta.get("description") or "",
+            "kind": record.get("kind") or spec.get("kind") or "knowledge",
+            "capability_group": spec.get("capability_group") or "",
+            "source_format": spec.get("source_format") or "",
+            "tool_refs": list(record.get("tool_refs") or []),
+            "script_entries": list(spec.get("script_entries") or []),
+            "score": round(float(score), 3),
         }
 
     def is_tool_allowed(self, name, run_mode):
@@ -1111,6 +1194,7 @@ class SkillManager:
         record["search_text"] = "\n".join(
             [
                 skill_name,
+                meta.get("display_name", ""),
                 meta.get("description", ""),
                 spec.get("description", ""),
                 body,
@@ -1120,6 +1204,7 @@ class SkillManager:
                 " ".join(spec.get("script_refs") or []),
                 " ".join(item.get("name", "") for item in spec.get("script_entries") or []),
                 " ".join(item.get("runtime", "") for item in spec.get("script_entries") or []),
+                " ".join(os.path.basename(ref) for ref in spec.get("references") or [] if isinstance(ref, str)),
                 " ".join(spec.get("python_dependencies") or []),
                 " ".join(spec.get("node_dependencies") or []),
                 self._summarize_experience_entries(experience_entries, limit=10),
@@ -1212,7 +1297,45 @@ class SkillManager:
         child_dirs = [entry for entry in entries if os.path.isdir(os.path.join(extracted_root, entry))]
         if len(child_dirs) == 1:
             return os.path.join(extracted_root, child_dirs[0])
-        raise ValueError("ZIP must contain a skill folder or skill files at the root")
+        if child_dirs:
+            return extracted_root
+        raise ValueError("ZIP must contain a skill folder, skill collection, or skill files at the root")
+
+    def _format_import_summary_message(self, summary):
+        imported = summary.get("imported") or []
+        skipped = summary.get("skipped_existing") or []
+        failed = summary.get("failed") or []
+        lines = [
+            f"导入完成：{len(imported)} 个成功，{len(skipped)} 个跳过，{len(failed)} 个失败。"
+        ]
+        if imported:
+            lines.append("成功：" + "、".join(item.get("skill_name") or "" for item in imported[:8] if item.get("skill_name")))
+        if skipped:
+            lines.append("跳过：" + "、".join(item.get("skill_name") or "" for item in skipped[:8] if item.get("skill_name")))
+        if failed:
+            lines.append("失败：" + "、".join(item.get("skill_name") or "" for item in failed[:8] if item.get("skill_name")))
+        return "\n".join(lines)
+
+    def _import_single_skill_dir(self, source_path, source_format="auto"):
+        skill_name = self._read_skill_name_from_path(source_path)
+        target_dir = self._default_writable_skill_root()
+        target_path = os.path.join(target_dir, skill_name)
+        if os.path.exists(target_path):
+            return {
+                "status": "skipped_existing",
+                "skill_name": skill_name,
+                "message": f"Skill '{skill_name}' already exists",
+            }
+        result = adapt_skill_directory(source_path, target_path, skill_name=skill_name, source_format=source_format)
+        dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
+        message = result.get("message") or f"Skill '{skill_name}' imported successfully"
+        if not dependency_status.get("ok"):
+            message = f"{message}\nDependency setup incomplete: {dependency_status.get('message')}"
+        return {
+            "status": "imported",
+            "skill_name": skill_name,
+            "message": message,
+        }
 
     def export_skill(self, skill_name, destination_zip_path):
         skill_path = self._find_skill_path(skill_name)
@@ -1433,20 +1556,33 @@ class SkillManager:
                 return False, f"Import failed: {e}"
         elif not os.path.isdir(source_path):
             return False, "Source must be a directory or ZIP file"
-        skill_name = self._read_skill_name_from_path(resolved_source_path)
-        target_dir = self._default_writable_skill_root()
-        target_path = os.path.join(target_dir, skill_name)
-        if os.path.exists(target_path):
-            if temp_dir:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            return False, f"Skill '{skill_name}' already exists"
         try:
-            result = adapt_skill_directory(resolved_source_path, target_path, skill_name=skill_name, source_format=source_format)
-            dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
-            if not dependency_status.get("ok"):
-                message = result.get("message") or f"Skill '{skill_name}' imported successfully"
-                return True, f"{message}\nDependency setup incomplete: {dependency_status.get('message')}"
-            return True, result.get("message") or f"Skill '{skill_name}' imported successfully"
+            candidate_dirs = discover_importable_skill_dirs(resolved_source_path)
+            if not candidate_dirs:
+                return False, "Import failed: no importable skill directories were found."
+            if len(candidate_dirs) == 1:
+                result = self._import_single_skill_dir(candidate_dirs[0], source_format=source_format)
+                if result.get("status") == "skipped_existing":
+                    return False, result.get("message") or "Skill already exists"
+                return True, result.get("message") or f"Skill '{result.get('skill_name')}' imported successfully"
+
+            summary = {"imported": [], "skipped_existing": [], "failed": []}
+            for candidate_dir in candidate_dirs:
+                try:
+                    result = self._import_single_skill_dir(candidate_dir, source_format=source_format)
+                except Exception as e:
+                    result = {
+                        "status": "failed",
+                        "skill_name": self._read_skill_name_from_path(candidate_dir),
+                        "message": f"Import failed: {e}",
+                    }
+                summary[result.get("status") or "failed"].append(result)
+            success = bool(summary["imported"]) and not summary["failed"]
+            if summary["imported"] and not success:
+                success = True
+            if not summary["imported"] and not summary["skipped_existing"]:
+                success = False
+            return success, self._format_import_summary_message(summary)
         except Exception as e:
             return False, f"Import failed: {e}"
         finally:
@@ -1673,7 +1809,8 @@ class SkillManager:
 
     def select_relevant_skills(self, query_text, limit=5):
         query_tokens = _tokenize(query_text)
-        if not query_tokens:
+        normalized_query = _normalize_search_text(query_text)
+        if not query_tokens and not normalized_query:
             return []
         explicit = set(self._explicit_skill_matches(query_tokens))
         ranked = []
@@ -1688,6 +1825,9 @@ class SkillManager:
             score += len(query_tokens & triggers) * 12
             score += len(query_tokens & search_tokens) * 3
             score -= len(query_tokens & anti) * 20
+            normalized_search = _normalize_search_text(record["search_text"])
+            if normalized_query and normalized_search and normalized_query in normalized_search:
+                score += 10
             priority = spec.get("priority", 0)
             if isinstance(priority, int):
                 score += priority
@@ -1760,6 +1900,12 @@ class SkillManager:
         ctx = self._normalize_run_context_for_tools(run_context)
         allowed = normalize_selected_skill_names(ctx.get("allowed_skill_names"))
         return [name for name in allowed if name in self.skill_records]
+
+    def _is_skill_allowed_by_scope(self, skill_name, run_context):
+        allowed_skill_names = self._allowed_skill_names(run_context)
+        if not allowed_skill_names:
+            return True
+        return str(skill_name or "").strip() in allowed_skill_names
 
     def _is_tool_allowed_by_skill_scope(self, tool_name, run_context):
         allowed_skill_names = self._allowed_skill_names(run_context)

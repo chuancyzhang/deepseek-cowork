@@ -274,7 +274,9 @@ Export excludes cache and build-style directories such as `__pycache__`, `.venv`
 Import accepts:
 
 - a skill source folder
+- a skill collection folder that contains multiple child skills
 - a ZIP whose root is a single skill folder
+- a ZIP whose root is a skill collection folder
 - a ZIP whose root directly contains `SKILL.md`, `skill.json`, `impl.py`, `scripts`, `assets`, `references`, or `experience`
 
 Import safety rules:
@@ -283,7 +285,19 @@ Import safety rules:
 - the final skill name is read from `skill.json`, then `SKILL.md`, then the folder name
 - imported skills land in the writable `ai_skills` root
 - existing target names are rejected instead of overwritten
+- collection imports scan child directories recursively and import each detected skill independently
 - external formats are adapted into Cowork's experience-package model before loading
+
+### Skill Search
+
+`tool_search` still discovers deferred tools, but it now also returns matching skill records in a separate `skills` field.
+
+Rules:
+
+- tool discovery and skill discovery share the same query
+- skill matches are case-insensitive
+- pure knowledge skills appear only in `skills`; they are not treated as callable tools
+- if a matched skill owns real tools, those tools still flow through normal deferred-tool discovery
 
 ## Experience Ownership
 

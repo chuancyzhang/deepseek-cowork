@@ -479,6 +479,31 @@ class TestSkillSystemV2(unittest.TestCase):
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
 
+    def test_import_skill_collection_imports_multiple_external_skills(self):
+        source_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            collection_dir = os.path.join(source_root, "DianJin-SKILLS-main")
+            claim_dir = os.path.join(collection_dir, "claim-expert")
+            review_dir = os.path.join(collection_dir, "policy-review")
+            os.makedirs(claim_dir, exist_ok=True)
+            os.makedirs(review_dir, exist_ok=True)
+            with open(os.path.join(claim_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("# Claim Expert\n\nReview claim evidence and consistency.\n")
+            with open(os.path.join(review_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write("# Policy Review\n\nCheck policy wording and exceptions.\n")
+
+            sm = self._build_manager()
+            success, message = sm.import_skill(collection_dir)
+            self.assertTrue(success, message)
+            self.assertIn("2 个成功", message)
+
+            sm.load_skills()
+            self.assertIn("claim-expert", sm.skill_records)
+            self.assertIn("policy-review", sm.skill_records)
+            self.assertIn("claim-expert", sm.select_relevant_skills("CLAIM EXPERT", limit=5))
+        finally:
+            shutil.rmtree(source_root, ignore_errors=True)
+
     def test_agent_skill_directory_exposes_script_entries_without_registering_script_tools(self):
         skill_dir = os.path.join(self.skills_dir, "native-agent-skill")
         os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)
@@ -543,11 +568,12 @@ class TestSkillSystemV2(unittest.TestCase):
 
         self.assertIn("command-tools", sm.skill_records)
         record = sm.skill_records["command-tools"]
-        self.assertEqual(record["tool_refs"], ["bash", "glob", "grep", "run_skill_script"])
+        self.assertEqual(record["tool_refs"], ["bash", "glob", "grep", "run_node_code", "run_skill_script"])
         tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
         self.assertIn("bash", tool_names)
         self.assertIn("glob", tool_names)
         self.assertIn("grep", tool_names)
+        self.assertIn("run_node_code", tool_names)
         self.assertIn("run_skill_script", tool_names)
 
     def test_agent_manager_skill_exports_tool_first_surface(self):

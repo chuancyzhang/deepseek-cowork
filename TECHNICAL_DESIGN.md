@@ -43,7 +43,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.4 技能系统
 *   **core/skill_manager.py**：加载 `skills/` 与 `ai_skills/`，注入工具定义与经验。
 *   **经验回写**：执行结果可回写到 `SKILL.md`，形成自进化闭环。
-*   **能力包迁移**：支持从目录或 ZIP 导入 Skill，支持将已有 Skill 导出为 ZIP，并跳过缓存/构建目录。
+*   **能力包迁移**：支持从单个 Skill 目录、Skill 集合目录或 ZIP 导入 Skill，支持将已有 Skill 导出为 ZIP，并跳过缓存/构建目录。
 *   **显式只读并行**：`parallel_tools` 通过 `SkillManager.call_tool(..., require_read_only=True)` 执行子调用，保留顺序并遵守发现、模式和能力范围限制。
 *   **core/skill_from_conversation.py**：把当前会话转录为可复用 Skill 草稿，并负责新建或更新 Skill 文件。
 
@@ -68,7 +68,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - MCP 工具桥接：启用的 MCP server 会被注册成合成 skill，并把远端 tools 映射为带服务器前缀的延迟发现工具，继续复用 `tool_search`、工具可见性和调用链路。
 - 常驻执行工具：`run_python_code` 在 execution 模式下默认暴露，并进入基础 system prompt 的“当前可用工具清单”，无需先通过 `tool_search` 发现。
 - 只读并行工具：`parallel_tools` 本身作为 always-allowed 元工具可默认暴露，但每个子调用必须是已发现、当前模式允许、能力范围允许且 `read_only=True` 的工具。
-- 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮不仅更新 provider 的 tool schema，也会重建基础 system prompt 中的“当前可用工具清单”，避免提示词仍停留在旧集合。
+- 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮不仅更新 provider 的 tool schema，也会重建基础 system prompt 中的“当前可用工具清单”，避免提示词仍停留在旧集合；同一查询也会返回大小写不敏感匹配到的 AI skill 结果，供模型获取经验包上下文。
 
 ## 4. 数据流 (Data Flow)
 

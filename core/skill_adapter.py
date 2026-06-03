@@ -44,6 +44,58 @@ def _has_skill_json(source_path):
     return os.path.isfile(os.path.join(source_path, "skill.json"))
 
 
+def _safe_read_text(path, limit=4000):
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(limit)
+    except Exception:
+        return ""
+
+
+def _extract_title_and_summary(text):
+    lines = [line.strip() for line in str(text or "").splitlines()]
+    title = ""
+    body_lines = []
+    for line in lines:
+        if not line:
+            continue
+        if not title and line.startswith("#"):
+            title = line.lstrip("#").strip()
+            continue
+        body_lines.append(line)
+    summary = " ".join(body_lines).strip()
+    if len(summary) > 220:
+        summary = summary[:217].rstrip() + "..."
+    return title, summary
+
+
+def _metadata_from_source_docs(source_path):
+    skill_md_path = os.path.join(source_path, "SKILL.md")
+    claude_md_path = os.path.join(source_path, "CLAUDE.md")
+    readme_path = ""
+    for filename in ("README.md", "README.txt", "readme.md", "readme.txt"):
+        candidate = os.path.join(source_path, filename)
+        if os.path.isfile(candidate):
+            readme_path = candidate
+            break
+
+    primary_path = ""
+    if os.path.isfile(skill_md_path):
+        primary_path = skill_md_path
+    elif os.path.isfile(claude_md_path):
+        primary_path = claude_md_path
+    else:
+        primary_path = readme_path
+    content = _safe_read_text(primary_path)
+    title, summary = _extract_title_and_summary(content)
+    return {
+        "title": title,
+        "summary": summary,
+    }
+
+
 def _infer_script_runtime(path):
     ext = os.path.splitext((path or "").lower())[1]
     return SCRIPT_RUNTIME_MAP.get(ext, "bash")
@@ -190,6 +242,46 @@ def detect_external_skill_format(source_path):
     return "generic"
 
 
+def is_skill_source_dir(source_path):
+    if not os.path.isdir(source_path):
+        return False
+    if _has_skill_json(source_path):
+        return True
+    top_level = {name.lower() for name in os.listdir(source_path)}
+    if "skill.md" in top_level or "claude.md" in top_level:
+        return True
+    if "scripts" in top_level and ("assets" in top_level or "references" in top_level):
+        return True
+    return False
+
+
+def discover_importable_skill_dirs(source_path):
+    discovered = []
+    seen = set()
+
+    def _walk(path):
+        norm = os.path.normcase(os.path.abspath(path))
+        if norm in seen:
+            return
+        seen.add(norm)
+        if is_skill_source_dir(path):
+            discovered.append(path)
+            return
+        try:
+            entries = sorted(os.listdir(path))
+        except Exception:
+            return
+        for entry in entries:
+            if entry in EXCLUDED_DIRS or entry.startswith("."):
+                continue
+            child = os.path.join(path, entry)
+            if os.path.isdir(child):
+                _walk(child)
+
+    _walk(source_path)
+    return discovered
+
+
 def _collect_folder_summary(source_path):
     files = []
     references = []
@@ -290,14 +382,26 @@ def _build_skill_md(skill_name, description, tool_refs, source_format, source_ba
 
 
 def _build_skill_json(skill_name, description, tool_refs, source_format, source_path, references, script_refs=None, script_entries=None, asset_refs=None):
+    source_meta = _metadata_from_source_docs(source_path)
+    title = source_meta.get("title") or skill_name.replace("-", " ")
+    summary = source_meta.get("summary") or description
+    tags = ["imported", "adapted", "external-skill", source_format]
+    for item in (title, os.path.basename(os.path.normpath(source_path)).replace("_", " ")):
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", item or ""):
+            lowered = token.lower()
+            if len(lowered) >= 4 and lowered not in tags:
+                tags.append(lowered)
+    triggers = [skill_name.replace("-", " "), title, f"{source_format} skill", "imported skill"]
+    if summary and summary not in triggers:
+        triggers.append(summary)
     return {
         "version": 2,
         "name": skill_name,
         "kind": "knowledge",
         "capability_group": "knowledge",
         "description": description,
-        "tags": ["imported", "adapted", "external-skill", source_format],
-        "triggers": [skill_name.replace("-", " "), f"{source_format} skill", "imported skill"],
+        "tags": tags[:16],
+        "triggers": [item for item in triggers if isinstance(item, str) and item.strip()][:8],
         "anti_triggers": ["simple file edit"],
         "references": references[:20],
         "tool_refs": tool_refs,

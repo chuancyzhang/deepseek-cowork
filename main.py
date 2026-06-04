@@ -6857,6 +6857,7 @@ class ChatBubble(QFrame):
         self.role = role
         self.content_wrapper = None
         self.user_bubble_frame = None
+        self.user_content_edit = None
         self.content_col = None
         self.source_message_id = str(source_message_id or "").strip()
         self.branch_btn = None
@@ -6921,16 +6922,17 @@ class ChatBubble(QFrame):
                 bubble_layout = QVBoxLayout(bubble_frame)
                 bubble_layout.setContentsMargins(15, 10, 15, 10)
 
-                content_label = QLabel(text)
-                content_label.setWordWrap(True)
-                content_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                content_label.setStyleSheet(
+                content_edit = AutoResizingTextEdit()
+                self.user_content_edit = content_edit
+                content_edit.setPlainText(text)
+                content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                content_edit.setStyleSheet(
                     "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
                     "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
                 )
-                apply_selection_palette(content_label, "#ffffff", "#0b57d0")
+                apply_selection_palette(content_edit, "#ffffff", "#0b57d0")
 
-                bubble_layout.addWidget(content_label)
+                bubble_layout.addWidget(content_edit)
                 cw_layout.addWidget(bubble_frame, 0, Qt.AlignRight)
 
             if self.source_message_id:
@@ -7192,6 +7194,10 @@ class ChatBubble(QFrame):
             self.content_wrapper.setMaximumWidth(max(0, int(message_width)))
         if self.user_bubble_frame is not None:
             self.user_bubble_frame.setMaximumWidth(max(0, int(user_bubble_width)))
+        if self.user_content_edit is not None:
+            content_width = max(0, int(user_bubble_width) - 30)
+            self.user_content_edit.setFixedWidth(content_width)
+            self.user_content_edit.scheduleAdjustHeight()
         if self.content_col is not None:
             self.content_col.setMaximumWidth(max(0, int(message_width)))
 

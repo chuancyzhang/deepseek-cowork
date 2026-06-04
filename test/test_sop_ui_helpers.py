@@ -14,6 +14,7 @@ from core.chat_storage import ChatStorage
 from main import (
     QApplication,
     AutoResizingInputEdit,
+    AutoResizingTextEdit,
     AutomationTaskDialog,
     ChatBubble,
     MainWindow,
@@ -29,6 +30,7 @@ from main import (
     summarize_skill_terms,
 )
 from PySide6.QtCore import QEvent, Qt, QMimeData
+from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QWidget
 
 
@@ -607,6 +609,22 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertFalse(bubble.edit_btn.isHidden())
         self.assertFalse(bubble.delete_btn.isHidden())
         self.assertFalse(bubble.branch_btn.isHidden())
+
+    def test_chat_bubble_user_wraps_long_hyphenated_text_without_truncation(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("User", "macro-policy-analysis-demo-token", source_message_id="u1")
+
+        bubble.apply_dynamic_widths(760, 220)
+        bubble.show()
+        app.processEvents()
+
+        self.assertIsInstance(bubble.user_content_edit, AutoResizingTextEdit)
+        self.assertEqual(
+            bubble.user_content_edit.wordWrapMode(),
+            QTextOption.WrapAtWordBoundaryOrAnywhere,
+        )
+        self.assertLessEqual(bubble.user_content_edit.width(), 190)
+        self.assertGreater(bubble.user_content_edit.height(), 24)
 
     def test_edit_user_message_from_branch_creates_new_session_and_resubmits(self):
         temp_dir = tempfile.mkdtemp()

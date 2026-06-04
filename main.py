@@ -5469,6 +5469,9 @@ class SkillsCenterDialog(QDialog):
         self.search_text = ""
         self.status_filter = "all"
         self.current_tab_key = "builtin"
+        self.selection_mode = False
+        self.selected_skill_names = set()
+        self._grid_columns = 2
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
         layout = QVBoxLayout(self)
@@ -5487,6 +5490,14 @@ class SkillsCenterDialog(QDialog):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
+        self.select_btn = QPushButton("选择")
+        self.select_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        self.select_btn.clicked.connect(self.toggle_selection_mode)
+        self.export_selected_btn = QPushButton("导出")
+        self.export_selected_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        self.export_selected_btn.setIcon(qta.icon('fa5s.file-export', color=DesignTokens.text_secondary))
+        self.export_selected_btn.clicked.connect(self.export_selected_skills)
+        self.export_selected_btn.setEnabled(False)
         self.import_btn = QPushButton("导入自定义能力")
         self.import_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.import_btn.setIcon(qta.icon('fa5s.box-open', color=DesignTokens.text_secondary))
@@ -5495,6 +5506,8 @@ class SkillsCenterDialog(QDialog):
         self.refresh_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.refresh_btn.setIcon(qta.icon('fa5s.sync', color=DesignTokens.text_secondary))
         self.refresh_btn.clicked.connect(self.manual_refresh)
+        header.addWidget(self.select_btn)
+        header.addWidget(self.export_selected_btn)
         header.addWidget(self.import_btn)
         header.addWidget(self.refresh_btn)
         layout.addLayout(header)
@@ -5540,7 +5553,7 @@ class SkillsCenterDialog(QDialog):
         self.content_standard = QWidget()
         self.layout_content_standard = QVBoxLayout(self.content_standard)
         self.layout_content_standard.setContentsMargins(8, 8, 8, 8)
-        self.layout_content_standard.setSpacing(12)
+        self.layout_content_standard.setSpacing(10)
         self.layout_content_standard.addStretch()
         self.scroll_standard.setWidget(self.content_standard)
         self.layout_standard.addWidget(self.scroll_standard)
@@ -5554,7 +5567,7 @@ class SkillsCenterDialog(QDialog):
         self.content_ai = QWidget()
         self.layout_content_ai = QVBoxLayout(self.content_ai)
         self.layout_content_ai.setContentsMargins(8, 8, 8, 8)
-        self.layout_content_ai.setSpacing(12)
+        self.layout_content_ai.setSpacing(10)
         self.layout_content_ai.addStretch()
         self.scroll_ai.setWidget(self.content_ai)
         self.layout_ai.addWidget(self.scroll_ai)
@@ -5583,6 +5596,9 @@ class SkillsCenterDialog(QDialog):
 
     def refresh_list(self):
         self._all_skills = list(self.skill_manager.get_all_skills() or [])
+        available_names = {str(skill.get("name") or "").strip() for skill in self._all_skills}
+        self.selected_skill_names = {name for name in self.selected_skill_names if name in available_names}
+        self._refresh_selection_actions()
         self._render_skill_groups()
 
     def _clear_layout(self, layout):
@@ -5590,6 +5606,16 @@ class SkillsCenterDialog(QDialog):
             item = layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+            elif item.layout():
+                self._clear_child_layout(item.layout())
+
+    def _clear_child_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_child_layout(item.layout())
 
     def _set_scroll_area_chrome(self, scroll_area):
         scroll_area.setWidgetResizable(True)
@@ -5637,15 +5663,44 @@ class SkillsCenterDialog(QDialog):
             self._clear_layout(layout)
             tab_skills, filtered_skills = self._filtered_skills(tab_key)
             if filtered_skills:
-                for skill in filtered_skills:
-                    layout.insertWidget(layout.count() - 1, self._build_skill_card(skill))
+                layout.insertWidget(layout.count() - 1, self._build_skill_grid(filtered_skills))
             else:
                 layout.insertWidget(layout.count() - 1, self._build_empty_state(tab_key, bool(tab_skills)))
         self._refresh_count_label()
 
     def _refresh_count_label(self):
         total, visible = self._filtered_skills(self.current_tab_key)
-        self.count_label.setText(f"显示 {len(visible)} / {len(total)} 个能力")
+        selected_count = len(self.selected_skill_names)
+        selected_text = f"，已选 {selected_count}" if self.selection_mode else ""
+        self.count_label.setText(f"显示 {len(visible)} / {len(total)} 个能力{selected_text}")
+
+    def _current_column_count(self):
+        return 2 if self.width() >= 860 else 1
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not hasattr(self, "_tab_layouts"):
+            return
+        columns = self._current_column_count()
+        if columns != self._grid_columns:
+            self._grid_columns = columns
+            QTimer.singleShot(0, self._render_skill_groups)
+
+    def _build_skill_grid(self, skills):
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        columns = self._current_column_count()
+        self._grid_columns = columns
+        for index, skill in enumerate(skills):
+            row = index // columns
+            col = index % columns
+            grid.addWidget(self._build_skill_card(skill), row, col)
+        for col in range(columns):
+            grid.setColumnStretch(col, 1)
+        return container
 
     def _build_empty_state(self, tab_key, has_items):
         frame = QFrame()
@@ -5676,120 +5731,125 @@ class SkillsCenterDialog(QDialog):
             "border-radius: 11px; padding: 4px 10px; font-size: 11px; font-weight: 700;"
         )
 
+    def _switch_style(self):
+        return f"""
+        QCheckBox {{
+            spacing: 0px;
+            background: transparent;
+            border: none;
+        }}
+        QCheckBox::indicator {{
+            width: 42px;
+            height: 24px;
+            border-radius: 12px;
+            background: {DesignTokens.border_strong};
+            border: 1px solid {DesignTokens.border};
+        }}
+        QCheckBox::indicator:checked {{
+            background: {DesignTokens.success_accent};
+            border-color: {DesignTokens.success_accent};
+        }}
+        QCheckBox::indicator:hover {{
+            border-color: {DesignTokens.primary};
+        }}
+        """
+
     def _build_skill_card(self, skill):
         card = QFrame()
-        card.setObjectName("SkillCard")
+        card.setObjectName("SkillListItem")
         card.setStyleSheet(
-            f"QFrame#SkillCard {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 16px; }}"
+            f"QFrame#SkillListItem {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 10px; }}"
+            f"QFrame#SkillListItem:hover {{ background: {DesignTokens.bg_main}; border-color: {DesignTokens.border_strong}; }}"
         )
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        add_soft_shadow(card, blur=12, y_offset=3, alpha=10)
+        card.setMinimumHeight(92)
         card_layout = QHBoxLayout(card)
-        card_layout.setContentsMargins(20, 18, 20, 18)
-        card_layout.setSpacing(18)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(12)
+
+        skill_name = str(skill.get("name") or "").strip()
+        if self.selection_mode:
+            select_box = QCheckBox()
+            select_box.setChecked(skill_name in self.selected_skill_names)
+            select_box.setCursor(Qt.PointingHandCursor)
+            select_box.setStyleSheet(
+                f"QCheckBox {{ background: transparent; border: none; }}"
+                f"QCheckBox::indicator {{ width: 18px; height: 18px; }}"
+            )
+            select_box.clicked.connect(
+                lambda checked=False, n=skill_name: self.set_skill_selected(n, bool(checked))
+            )
+            card_layout.addWidget(select_box, 0, Qt.AlignVCenter)
 
         info_col = QVBoxLayout()
-        info_col.setSpacing(9)
+        info_col.setSpacing(5)
         title = QLabel(skill.get("display_name") or skill.get("name", ""))
-        title.setStyleSheet(f"font-size: 17px; font-weight: 700; color: {DesignTokens.text_primary};")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {DesignTokens.text_primary};")
         title.setWordWrap(True)
         title.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(8)
-        title_row.addWidget(title, 1)
-        copy_name_btn = QToolButton()
-        copy_name_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
-        copy_name_btn.setToolTip("复制技能名")
-        copy_name_btn.setCursor(Qt.PointingHandCursor)
-        copy_name_btn.setFixedSize(28, 28)
-        copy_name_btn.setStyleSheet(apple_tool_button_style(False))
-        copy_name_btn.clicked.connect(
-            lambda checked=False, n=str(skill.get("name") or "").strip(), btn=copy_name_btn: self.copy_skill_name(n, btn)
-        )
-        title_row.addWidget(copy_name_btn, 0, Qt.AlignTop)
         desc = QLabel(skill.get("user_description") or skill.get("description") or "暂无说明。")
         desc.setWordWrap(True)
-        desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary}; line-height: 1.45;")
-        info_col.addLayout(title_row)
+        desc.setMaximumHeight(38)
+        desc.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; line-height: 1.35;")
+        info_col.addWidget(title)
         info_col.addWidget(desc)
-
-        use_cases = skill.get("use_cases") or []
-        if use_cases:
-            use_text = summarize_skill_terms(use_cases, max_items=3, max_chars=64)
-            use_label = QLabel(f"适用场景：{use_text}")
-            use_label.setWordWrap(True)
-            use_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
-            info_col.addWidget(use_label)
 
         risk_text, risk_color = readable_risk_level(skill.get("risk_level") or skill.get("security_level"))
         tools = skill.get("tools") or []
-        if tools:
-            tool_label = QLabel("关联能力：" + summarize_skill_terms(tools, max_items=4, max_chars=68))
-            tool_label.setWordWrap(True)
-            tool_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_tertiary};")
-            info_col.addWidget(tool_label)
-
         meta_row = QHBoxLayout()
-        meta_row.setSpacing(8)
-        meta_row.setContentsMargins(0, 2, 0, 0)
+        meta_row.setSpacing(6)
+        meta_row.setContentsMargins(0, 1, 0, 0)
         risk_bg = rgba_from_hex(risk_color, 0.10)
         risk_border = rgba_from_hex(risk_color, 0.22)
         risk_label = QLabel(risk_text)
         risk_label.setStyleSheet(self._chip_style(risk_color, risk_bg, risk_border))
         meta_row.addWidget(risk_label, 0, Qt.AlignLeft)
+        if tools:
+            tool_label = QLabel(summarize_skill_terms(tools, max_items=3, max_chars=36))
+            tool_label.setStyleSheet(f"font-size: 11px; color: {DesignTokens.text_tertiary};")
+            meta_row.addWidget(tool_label, 0, Qt.AlignLeft)
         meta_row.addStretch()
-
-        if str(skill.get("risk_level") or skill.get("security_level") or "").lower() == "high":
-            explain_btn = QPushButton("查看风险")
-            explain_btn.setIcon(qta.icon('fa5s.info-circle', color=DesignTokens.text_secondary))
-            explain_btn.setStyleSheet(apple_button_style("ghost", radius=12))
-            explain_btn.clicked.connect(
-                lambda checked=False, s=skill: QMessageBox.information(
-                    self,
-                    "风险说明",
-                    f"{s.get('display_name') or s.get('name')} 可能会访问或修改工作区中的重要内容，请在确认用途后再启用。",
-                )
-            )
-            meta_row.addWidget(explain_btn, 0, Qt.AlignRight)
         info_col.addLayout(meta_row)
 
         card_layout.addLayout(info_col, 1)
 
-        controls_col = QVBoxLayout()
-        controls_col.setSpacing(10)
-        controls_col.setAlignment(Qt.AlignTop)
         enabled = bool(skill.get("enabled"))
-        status_chip = QLabel("已启用" if enabled else "已关闭")
-        status_chip.setAlignment(Qt.AlignCenter)
-        status_bg = DesignTokens.success_bg if enabled else DesignTokens.bg_secondary
-        status_fg = DesignTokens.success_text if enabled else DesignTokens.text_secondary
-        status_border = DesignTokens.success_border if enabled else DesignTokens.border_subtle
-        status_chip.setStyleSheet(self._chip_style(status_fg, status_bg, status_border))
-        status_chip.setFixedWidth(116)
-        controls_col.addWidget(status_chip, 0, Qt.AlignRight)
-
-        toggle_btn = QPushButton("关闭" if enabled else "启用")
-        toggle_btn.setFixedWidth(116)
-        toggle_btn.setStyleSheet(apple_button_style("secondary" if enabled else "primary", radius=14))
-        toggle_btn.clicked.connect(lambda checked=False, n=skill["name"], e=not enabled: self.toggle_skill(n, e))
-        controls_col.addWidget(toggle_btn, 0, Qt.AlignRight)
-
-        export_btn = QPushButton("导出")
-        export_btn.setFixedWidth(116)
-        export_btn.setStyleSheet(apple_button_style("secondary", radius=14))
-        export_btn.clicked.connect(lambda checked=False, s=skill: self.export_skill(s))
-        controls_col.addWidget(export_btn, 0, Qt.AlignRight)
-        controls_col.addStretch()
-        controls_wrap = QWidget()
-        controls_wrap.setFixedWidth(132)
-        controls_wrap.setLayout(controls_col)
-        card_layout.addWidget(controls_wrap, 0, Qt.AlignTop)
+        toggle = QCheckBox()
+        toggle.setChecked(enabled)
+        toggle.setCursor(Qt.PointingHandCursor)
+        toggle.setToolTip("关闭" if enabled else "启用")
+        toggle.setStyleSheet(self._switch_style())
+        toggle.clicked.connect(lambda checked=False, n=skill["name"]: self.toggle_skill(n, bool(checked)))
+        card_layout.addWidget(toggle, 0, Qt.AlignRight | Qt.AlignVCenter)
         return card
 
     def toggle_skill(self, name, enabled):
         self.config_manager.set_skill_enabled(name, enabled)
         self.refresh_list()
+
+    def toggle_selection_mode(self):
+        self.selection_mode = not self.selection_mode
+        if not self.selection_mode:
+            self.selected_skill_names.clear()
+        self._refresh_selection_actions()
+        self._render_skill_groups()
+
+    def _refresh_selection_actions(self):
+        selected_count = len(self.selected_skill_names)
+        self.select_btn.setText("取消" if self.selection_mode else "选择")
+        self.export_selected_btn.setEnabled(selected_count > 0)
+        self.export_selected_btn.setText(f"导出 {selected_count}" if selected_count else "导出")
+        self._refresh_count_label()
+
+    def set_skill_selected(self, skill_name, selected):
+        skill_name = str(skill_name or "").strip()
+        if not skill_name:
+            return
+        if selected:
+            self.selected_skill_names.add(skill_name)
+        else:
+            self.selected_skill_names.discard(skill_name)
+        self._refresh_selection_actions()
 
     def import_skill(self):
         dialog = QMessageBox(self)
@@ -5837,6 +5897,31 @@ class SkillsCenterDialog(QDialog):
         success, msg = self.skill_manager.export_skill(skill_name, path)
         if success:
             QMessageBox.information(self, "能力中心", msg)
+        else:
+            QMessageBox.warning(self, "能力中心", msg)
+
+    def export_selected_skills(self):
+        if not self.selected_skill_names:
+            QMessageBox.warning(self, "能力中心", "请先选择要导出的能力。")
+            return
+        default_name = "cowork-skills.zip"
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "导出所选能力",
+            default_name,
+            "ZIP 文件 (*.zip)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        success, msg = self.skill_manager.export_skill_collection(sorted(self.selected_skill_names), path)
+        if success:
+            QMessageBox.information(self, "能力中心", msg)
+            self.selection_mode = False
+            self.selected_skill_names.clear()
+            self._refresh_selection_actions()
+            self._render_skill_groups()
         else:
             QMessageBox.warning(self, "能力中心", msg)
 

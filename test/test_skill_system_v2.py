@@ -340,6 +340,54 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertNotIn("portable-guide/__pycache__/cached.pyc", names)
         self.assertNotIn("portable-guide/build/artifact.txt", names)
 
+    def test_export_skill_collection_creates_importable_multi_skill_zip(self):
+        for skill_name in ("portable-guide", "claim-helper"):
+            skill_dir = os.path.join(self.skills_dir, skill_name)
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    f"---\nname: {skill_name}\ndescription: {skill_name}\nkind: knowledge\n---\n"
+                    "# Skill Purpose\nUse this skill.\n"
+                )
+            with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 2,
+                        "name": skill_name,
+                        "kind": "knowledge",
+                        "description": skill_name,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+        sm = self._build_manager()
+        zip_path = os.path.join(self.temp_dir, "skill-collection.zip")
+        success, message = sm.export_skill_collection(["portable-guide", "claim-helper"], zip_path)
+
+        self.assertTrue(success, message)
+        with zipfile.ZipFile(zip_path, "r") as archive:
+            names = set(archive.namelist())
+        self.assertIn("portable-guide/SKILL.md", names)
+        self.assertIn("claim-helper/SKILL.md", names)
+
+        target_root = tempfile.mkdtemp(dir=self.temp_dir)
+        try:
+            target_manager = SkillManager(workspace_dir=target_root)
+            target_manager.skills_dirs = [
+                os.path.join(target_root, "skills"),
+                os.path.join(target_root, "ai_skills"),
+            ]
+            for path in target_manager.skills_dirs:
+                os.makedirs(path, exist_ok=True)
+            success, message = target_manager.import_skill(zip_path)
+            self.assertTrue(success, message)
+            self.assertTrue(os.path.isfile(os.path.join(target_root, "ai_skills", "portable-guide", "SKILL.md")))
+            self.assertTrue(os.path.isfile(os.path.join(target_root, "ai_skills", "claim-helper", "SKILL.md")))
+        finally:
+            shutil.rmtree(target_root, ignore_errors=True)
+
     def test_exported_zip_can_be_imported_back_with_original_skill_name(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)
         target_root = tempfile.mkdtemp(dir=self.temp_dir)

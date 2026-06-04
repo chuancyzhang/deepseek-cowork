@@ -43,7 +43,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.4 技能系统
 *   **core/skill_manager.py**：加载 `skills/` 与 `ai_skills/`，注入工具定义与经验。
 *   **经验回写**：执行结果可回写到 `SKILL.md`，形成自进化闭环。
-*   **能力包迁移**：支持从单个 Skill 目录、Skill 集合目录或 ZIP 导入 Skill，支持将已有 Skill 导出为 ZIP，并跳过缓存/构建目录。
+*   **能力包迁移**：支持从单个 Skill 目录、Skill 集合目录或 ZIP 导入 Skill，支持将已有 Skill 单独导出或多选导出为集合 ZIP，并跳过缓存/构建目录。
 *   **显式只读并行**：`parallel_tools` 通过 `SkillManager.call_tool(..., require_read_only=True)` 执行子调用，保留顺序并遵守发现、模式和能力范围限制。
 *   **core/skill_from_conversation.py**：把当前会话转录为可复用 Skill 草稿，并负责新建或更新 Skill 文件。
 
@@ -105,7 +105,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 4.  确认后保存为任务模板，并通过现有 `create_sop_run()` 绑定到当前会话；后续执行复用 SOP 状态机，但改为应用层逐步派发当前步骤，而不是整段提示词一次性交给模型。单步执行器可为 Agent、上传 Python 文件或 Bash 命令。
 
 **Skill ZIP 导入/导出**
-1.  导出时 `SkillManager.export_skill` 定位 Skill 目录，将内容压缩为以 Skill 目录名为根的 ZIP，并跳过 `__pycache__`、构建产物等排除目录。
+1.  导出时 `SkillManager.export_skill` 定位单个 Skill 目录，将内容压缩为以 Skill 目录名为根的 ZIP；批量导出时 `SkillManager.export_skill_collection` 将多个 Skill 根目录写入同一个集合 ZIP。两种导出都会跳过 `__pycache__`、构建产物等排除目录。
 2.  导入时 `SkillManager.import_skill` 接受目录或 `.zip`，ZIP 会先解压到临时目录并校验路径不逃逸。
 3.  系统解析平铺根目录或单 Skill 文件夹根目录，从 `skill.json` 或 `SKILL.md` 读取原始名称。
 4.  若目标 `ai_skills/<name>` 已存在则拒绝覆盖；否则适配并重新加载技能。
@@ -132,7 +132,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill。
 - **对话生成 SOP**：输入区入口将当前会话提炼为可编辑 SOP 草稿，确认后保存为任务模板并绑定当前会话。
 - **SOP 调度执行**：会话与定时自动化都只派发当前步骤；模板默认推进方式可设为人工确认或自动推进，步骤可覆盖模板默认值，完成后由状态机决定暂停、重跑、跳过或继续下一步。非 Agent 步骤通过沙盒 Python 或 Git Bash 直接执行，并把 stdout/stderr/exit code 写回运行态。
-- **迁移复用**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选与更轻量的 Apple 风格卡片视图，降低跨机器复用和日常管理自定义能力的成本。
+- **迁移复用**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选、无图标双列轻量列表和多选集合导出，降低跨机器复用和日常管理自定义能力的成本。
 
 ## 8. 状态机流转 (Agentic Workflow)
 - **状态**：Idle → Thinking → ToolCalling → Observing → Answering → Completed。

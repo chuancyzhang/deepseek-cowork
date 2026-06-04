@@ -129,7 +129,7 @@ Open **自动化** from the sidebar:
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
-*   **Skill Center import/export** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills as portable ZIP archives. The Skill Center also supports search, enabled-state filters, copying the internal skill name, and a clearer Apple-style card management view.
+*   **Skill Center import/export** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center also supports search, enabled-state filters, and an icon-free two-column lightweight list with right-side enable switches.
 
 ### 6. Enterprise IM
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
@@ -166,7 +166,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - Skills are structured experience packages: guidance, boundaries, lessons learned, recommended workflows, and recommended tools.
 - New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
 - `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, and optional `impl.py` assets.
-- Skill packages can be exported as ZIP archives. ZIP import validates safe paths, supports both flat-root and folder-root packages, keeps the original skill name from metadata, and rejects name conflicts.
+- Skill packages can be exported individually or as multi-skill collection ZIP archives. ZIP import validates safe paths, supports flat-root, folder-root, and collection packages, keeps the original skill name from metadata, and rejects name conflicts.
 - Imported / agent skills now use progressive disclosure: the agent starts with the brief, then appends the full skill prompt after the query or `tool_search` clearly matches that skill.
 - When a matched imported / agent skill exposes `script_entries`, `tool_search` returns `run_skill_script` as the preferred execution surface, so the agent should use the declared script entry instead of locating the skill directory with `glob` or `bash`.
 - Skills remain hot-reloadable without restarting.

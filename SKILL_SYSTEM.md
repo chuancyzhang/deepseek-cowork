@@ -267,7 +267,9 @@ It is just one way to provide tools.
 
 ### ZIP Packages
 
-Skill Center export writes a ZIP archive rooted at the skill directory name.
+Skill Center single-skill export writes a ZIP archive rooted at the skill directory name.
+
+Skill Center multi-select export writes a collection ZIP whose root contains one folder per selected skill. That collection ZIP can be imported through the same collection import path.
 
 Export excludes cache and build-style directories such as `__pycache__`, `.venv`, `node_modules`, `dist`, and `build`.
 

@@ -1404,21 +1404,63 @@ class SkillManager:
         destination_dir = os.path.dirname(destination_zip_path) or "."
         try:
             os.makedirs(destination_dir, exist_ok=True)
-            archive_root = os.path.basename(os.path.normpath(skill_path))
             with zipfile.ZipFile(destination_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for root, dirs, filenames in os.walk(skill_path):
-                    dirs[:] = [name for name in dirs if name not in EXCLUDED_DIRS]
-                    rel_root = os.path.relpath(root, skill_path)
-                    for filename in filenames:
-                        if filename == ".DS_Store":
-                            continue
-                        source_file = os.path.join(root, filename)
-                        if rel_root == ".":
-                            archive_path = os.path.join(archive_root, filename)
-                        else:
-                            archive_path = os.path.join(archive_root, rel_root, filename)
-                        archive.write(source_file, arcname=archive_path)
+                self._write_skill_archive_entries(archive, skill_path)
             return True, f"Skill '{skill_name}' exported to {destination_zip_path}"
+        except Exception as e:
+            return False, f"Export failed: {e}"
+
+    def _write_skill_archive_entries(self, archive, skill_path, archive_root=None):
+        archive_root = archive_root or os.path.basename(os.path.normpath(skill_path))
+        for root, dirs, filenames in os.walk(skill_path):
+            dirs[:] = [name for name in dirs if name not in EXCLUDED_DIRS]
+            rel_root = os.path.relpath(root, skill_path)
+            for filename in filenames:
+                if filename == ".DS_Store":
+                    continue
+                source_file = os.path.join(root, filename)
+                if rel_root == ".":
+                    archive_path = os.path.join(archive_root, filename)
+                else:
+                    archive_path = os.path.join(archive_root, rel_root, filename)
+                archive.write(source_file, arcname=archive_path)
+
+    def export_skill_collection(self, skill_names, destination_zip_path):
+        names = []
+        seen = set()
+        for skill_name in skill_names or []:
+            normalized = str(skill_name or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            names.append(normalized)
+        if not names:
+            return False, "Please select at least one skill to export."
+
+        resolved = []
+        skipped = []
+        for skill_name in names:
+            skill_path = self._find_skill_path(skill_name)
+            if skill_path and os.path.isdir(skill_path):
+                resolved.append((skill_name, skill_path))
+            else:
+                skipped.append(skill_name)
+        if not resolved:
+            return False, "No exportable skill directories were found."
+
+        destination_zip_path = str(destination_zip_path or "").strip()
+        if not destination_zip_path:
+            return False, "Destination ZIP path is required."
+        destination_dir = os.path.dirname(destination_zip_path) or "."
+        try:
+            os.makedirs(destination_dir, exist_ok=True)
+            with zipfile.ZipFile(destination_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for _skill_name, skill_path in resolved:
+                    self._write_skill_archive_entries(archive, skill_path)
+            message = f"Exported {len(resolved)} skill(s) to {destination_zip_path}"
+            if skipped:
+                message += f"\nSkipped non-exportable skills: {', '.join(skipped)}"
+            return True, message
         except Exception as e:
             return False, f"Export failed: {e}"
 

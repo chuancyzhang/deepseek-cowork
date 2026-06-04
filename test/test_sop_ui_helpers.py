@@ -31,7 +31,7 @@ from main import (
 )
 from PySide6.QtCore import QEvent, Qt, QMimeData
 from PySide6.QtGui import QTextOption
-from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QWidget
+from PySide6.QtWidgets import QCheckBox, QLabel, QMessageBox, QPushButton, QScrollArea, QWidget
 
 
 class _State:
@@ -135,6 +135,47 @@ class SkillCenterHelperTests(unittest.TestCase):
         title_labels = [label for label in card.findChildren(QLabel) if label.text() == "Claim Expert"]
         self.assertTrue(title_labels)
         self.assertTrue(title_labels[0].textInteractionFlags() & Qt.TextSelectableByMouse)
+
+    def test_skill_center_list_item_uses_switch_without_export_button(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+
+        item = dialog._build_skill_card(
+            {
+                "name": "claim-expert",
+                "display_name": "Claim Expert",
+                "description": "Review claim evidence and consistency.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": ["review_claim"],
+            }
+        )
+
+        self.assertEqual(item.objectName(), "SkillListItem")
+        self.assertTrue(item.findChildren(QCheckBox))
+        self.assertFalse([button for button in item.findChildren(QPushButton) if button.text() == "导出"])
+
+    def test_skill_center_selection_mode_adds_checkbox(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+        dialog.selection_mode = True
+
+        item = dialog._build_skill_card(
+            {
+                "name": "claim-expert",
+                "display_name": "Claim Expert",
+                "description": "Review claim evidence and consistency.",
+                "enabled": False,
+                "risk_level": "medium",
+                "tools": [],
+            }
+        )
+
+        self.assertGreaterEqual(len(item.findChildren(QCheckBox)), 2)
 
 
 class _ObservabilityState:

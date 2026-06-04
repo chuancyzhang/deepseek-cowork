@@ -11,6 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
 from core.chat_storage import ChatStorage
+from core.theme import DesignTokens
 from main import (
     QApplication,
     AppleSelectionCheck,
@@ -1048,6 +1049,74 @@ class TestSopUiHelpers(unittest.TestCase):
         window._queue_render_sub_agent_monitor_for_state.assert_called_once_with(state, delay_ms=250)
         self.assertTrue(window.right_drawer_open)
         self.assertEqual(window.right_drawer_tab, window.RIGHT_TAB_SUB_AGENTS)
+
+    def test_conversation_shell_metrics_center_without_drawer(self):
+        window = MainWindow.__new__(MainWindow)
+        window.right_drawer_open = False
+        window.main_container = MagicMock()
+        window.main_container.width.return_value = 1600
+        window.main_layout_default_margins = (32, 28, 32, 28)
+
+        metrics = window._compute_conversation_shell_metrics()
+
+        self.assertEqual(metrics["conversation_width"], 1105)
+        self.assertLessEqual(abs(metrics["left_spacer_width"] - metrics["right_spacer_width"]), 1)
+
+    def test_conversation_shell_metrics_shift_left_with_drawer(self):
+        window = MainWindow.__new__(MainWindow)
+        window.right_drawer_open = True
+        window.main_container = MagicMock()
+        window.main_container.width.return_value = 1600
+        window.main_layout_default_margins = (32, 28, 32, 28)
+        window.context_drawer_gap = 16
+
+        metrics = window._compute_conversation_shell_metrics({"x": 1216, "width": 368})
+
+        self.assertEqual(metrics["conversation_width"], 911)
+        self.assertLess(metrics["left_spacer_width"], metrics["right_spacer_width"])
+        self.assertEqual(metrics["drawer_width"], 368)
+
+    def test_compute_context_drawer_geometry_uses_stable_ratio(self):
+        window = MainWindow.__new__(MainWindow)
+        parent = MagicMock()
+        parent.width.return_value = 1600
+        parent.height.return_value = 980
+        window.right_sidebar = MagicMock()
+        window.right_sidebar.parentWidget.return_value = parent
+        window.main_layout_default_margins = (32, 28, 32, 28)
+        window.context_drawer_margin = 16
+        window.context_drawer_gap = 16
+        window.context_drawer_min_width = DesignTokens.drawer_min_width
+        window.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
+        window.context_drawer_max_width = DesignTokens.drawer_max_width
+        window.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
+
+        geometry = window._compute_context_drawer_geometry()
+
+        self.assertEqual(geometry["width"], 368)
+        self.assertEqual(geometry["x"], 1216)
+        self.assertEqual(geometry["height"], 948)
+
+    def test_set_observability_section_resyncs_context_layout(self):
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = "session-1"
+        window.OBS_SECTION_PROMPT = 0
+        window.OBS_SECTION_LOG = 1
+        window.OBS_SECTION_DETAILS = 2
+        window.observability_content_stack = MagicMock()
+        window.observability_content_stack.count.return_value = 3
+        window.refresh_observability_view = MagicMock()
+        window.sync_context_drawer_layout = MagicMock()
+        window.right_sidebar = MagicMock()
+        window.conversation_column = MagicMock()
+        window.session_tabs = MagicMock()
+        window.input_card = MagicMock()
+        window.observability_segment_buttons = [MagicMock(), MagicMock(), MagicMock()]
+
+        window.set_observability_section(window.OBS_SECTION_DETAILS)
+
+        window.observability_content_stack.setCurrentIndex.assert_called_once_with(window.OBS_SECTION_DETAILS)
+        window.sync_context_drawer_layout.assert_called_once()
 
     def test_queue_sub_agent_monitor_render_uses_configurable_delay(self):
         window = MainWindow.__new__(MainWindow)

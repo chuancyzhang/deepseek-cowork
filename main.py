@@ -10138,16 +10138,17 @@ class MainWindow(QMainWindow):
         self.main_content_default_margins = (0, 0, 0, 0)
         self.context_drawer_margin = 16
         self.context_drawer_gap = 16
-        self.context_drawer_min_width = 220
-        self.context_drawer_preferred_min_width = 360
-        self.context_drawer_max_width = 460
-        self.context_drawer_min_content_width = DesignTokens.conversation_min_width
+        self.context_drawer_min_width = DesignTokens.drawer_min_width
+        self.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
+        self.context_drawer_max_width = DesignTokens.drawer_max_width
+        self.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
         self._agent_state_ui_event_seq = 0
         self.dynamic_conversation_width = DesignTokens.conversation_min_width
         self.dynamic_message_width = DesignTokens.message_min_width
         self.dynamic_user_bubble_width = DesignTokens.user_bubble_min_width
+        self.dynamic_layout_metrics = {}
         
         # Apply Clean Light Theme manually for optimized components
         self.setStyleSheet(f"""
@@ -10466,6 +10467,7 @@ class MainWindow(QMainWindow):
         # Right Sidebar Pages
         self.right_stack = QStackedWidget()
         self.right_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
+        self.right_stack.currentChanged.connect(self._on_context_surface_changed)
         
         # Tab 1: Workspace Files
         self.workspace_tab = QWidget()
@@ -10697,6 +10699,7 @@ class MainWindow(QMainWindow):
 
         self.observability_content_stack = QStackedWidget()
         self.observability_content_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
+        self.observability_content_stack.currentChanged.connect(self._on_context_surface_changed)
 
         prompt_page = QWidget()
         prompt_layout = QVBoxLayout(prompt_page)
@@ -10943,8 +10946,15 @@ class MainWindow(QMainWindow):
         self.content_row_layout = QHBoxLayout(self.content_row)
         self.content_row_layout.setContentsMargins(0, 0, 0, 0)
         self.content_row_layout.setSpacing(0)
+        self.conversation_left_spacer = QWidget()
+        self.conversation_left_spacer.setFixedWidth(0)
+        self.conversation_left_spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.conversation_right_spacer = QWidget()
+        self.conversation_right_spacer.setFixedWidth(0)
+        self.conversation_right_spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.content_row_layout.addWidget(self.conversation_left_spacer)
         self.content_row_layout.addWidget(self.conversation_column)
-        self.content_row_layout.addStretch(1)
+        self.content_row_layout.addWidget(self.conversation_right_spacer)
         self.content_area_layout.addWidget(self.content_row, 1)
         
         self.recent_workspaces = self.config_manager.get("recent_workspaces", [])
@@ -11297,10 +11307,17 @@ class MainWindow(QMainWindow):
         if not parent:
             return None
         margin = self.context_drawer_margin
-        width = max(self.context_drawer_preferred_min_width, int(parent.width() * 0.42))
-        width = min(self.context_drawer_max_width, width)
-        width_limit = parent.width() - self.main_layout_default_margins[0] - margin - self.context_drawer_gap - self.context_drawer_min_content_width
-        width = min(width, max(self.context_drawer_min_width, width_limit))
+        content_width = parent.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
+        width = self._clamp_int(
+            int(content_width * DesignTokens.drawer_width_ratio),
+            self.context_drawer_preferred_min_width,
+            self.context_drawer_max_width,
+        )
+        width_limit = content_width - self.context_drawer_gap - self.context_drawer_min_content_width
+        if width_limit < self.context_drawer_preferred_min_width:
+            width = max(self.context_drawer_min_width, width_limit)
+        else:
+            width = min(width, width_limit)
         width = min(width, max(self.context_drawer_min_width, parent.width() - (margin * 2)))
         height = max(120, parent.height() - (margin * 2))
         x = parent.width() - width - margin
@@ -11325,18 +11342,70 @@ class MainWindow(QMainWindow):
             return maximum
         return max(minimum, min(maximum, int(value)))
 
-    def _conversation_available_width(self, drawer_geometry=None):
+    def _drawer_is_active(self, drawer_geometry=None):
+        return bool(self.right_drawer_open and isinstance(drawer_geometry, dict))
+
+    def _main_content_shell_width(self, drawer_geometry=None):
         container = getattr(self, "main_container", None)
         if container is None:
             return DesignTokens.conversation_min_width
         available = container.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
-        if self.right_drawer_open and isinstance(drawer_geometry, dict):
+        if self._drawer_is_active(drawer_geometry):
             safe_right = int(drawer_geometry.get("x", container.width())) - self.context_drawer_gap
             available = min(
                 available,
                 safe_right - self.main_layout_default_margins[0],
             )
-        return max(available, DesignTokens.conversation_min_width)
+        return max(available, 0)
+
+    def _conversation_available_width(self, drawer_geometry=None):
+        return max(self._main_content_shell_width(drawer_geometry), DesignTokens.conversation_min_width)
+
+    def _compute_conversation_shell_metrics(self, drawer_geometry=None):
+        shell_width = self._main_content_shell_width(drawer_geometry)
+        drawer_open = self._drawer_is_active(drawer_geometry)
+        if drawer_open:
+            conversation_width = self._clamp_int(
+                int(shell_width * DesignTokens.conversation_open_target_ratio),
+                DesignTokens.conversation_open_min_width,
+                min(DesignTokens.conversation_open_max_width, shell_width),
+            )
+        else:
+            conversation_width = self._clamp_int(
+                int(shell_width * DesignTokens.conversation_closed_target_ratio),
+                DesignTokens.conversation_closed_min_width,
+                min(DesignTokens.conversation_closed_max_width, shell_width),
+            )
+        conversation_width = self._clamp_int(
+            conversation_width,
+            DesignTokens.conversation_min_width,
+            min(DesignTokens.conversation_max_width, shell_width),
+        )
+        remaining = max(0, shell_width - conversation_width)
+        if drawer_open:
+            left_spacer_width = int(round(remaining * DesignTokens.conversation_open_left_spacer_ratio))
+            right_spacer_width = remaining - left_spacer_width
+        else:
+            left_spacer_width = remaining // 2
+            right_spacer_width = remaining - left_spacer_width
+        return {
+            "drawer_open": drawer_open,
+            "shell_width": shell_width,
+            "conversation_width": conversation_width,
+            "left_spacer_width": left_spacer_width,
+            "right_spacer_width": right_spacer_width,
+            "drawer_width": int((drawer_geometry or {}).get("width", 0) or 0),
+        }
+
+    def _apply_conversation_shell_metrics(self, metrics):
+        if not isinstance(metrics, dict):
+            return
+        left_spacer = getattr(self, "conversation_left_spacer", None)
+        if left_spacer is not None:
+            left_spacer.setFixedWidth(max(0, int(metrics.get("left_spacer_width", 0) or 0)))
+        right_spacer = getattr(self, "conversation_right_spacer", None)
+        if right_spacer is not None:
+            right_spacer.setFixedWidth(max(0, int(metrics.get("right_spacer_width", 0) or 0)))
 
     def _iter_session_chat_bubbles(self):
         for state in getattr(self, "sessions", {}).values():
@@ -11350,28 +11419,12 @@ class MainWindow(QMainWindow):
                     yield widget
 
     def sync_conversation_widths(self, drawer_geometry=None):
-        available = self._conversation_available_width(drawer_geometry)
-        if self.right_drawer_open and isinstance(drawer_geometry, dict):
-            gutter = self._clamp_int(int(available * 0.05), 28, 72)
-            target = available - gutter
-        else:
-            gutter = max(
-                DesignTokens.conversation_right_gutter_min,
-                int(available * DesignTokens.conversation_right_gutter_ratio),
-            )
-            target = min(
-                available - gutter,
-                int(available * DesignTokens.conversation_target_ratio),
-            )
-        conversation_width = self._clamp_int(
-            target,
-            DesignTokens.conversation_min_width,
-            min(DesignTokens.conversation_max_width, available),
-        )
+        metrics = self._compute_conversation_shell_metrics(drawer_geometry)
+        conversation_width = int(metrics.get("conversation_width", DesignTokens.conversation_min_width) or DesignTokens.conversation_min_width)
         message_width = self._clamp_int(
-            conversation_width - 180,
+            int(conversation_width * DesignTokens.message_width_ratio),
             DesignTokens.message_min_width,
-            min(DesignTokens.message_max_width, conversation_width - 80),
+            min(DesignTokens.message_max_width, conversation_width),
         )
         user_bubble_width = self._clamp_int(
             int(message_width * DesignTokens.user_bubble_ratio),
@@ -11379,10 +11432,12 @@ class MainWindow(QMainWindow):
             min(DesignTokens.user_bubble_max_width, message_width),
         )
 
+        self.dynamic_layout_metrics = metrics
         self.dynamic_conversation_width = conversation_width
         self.dynamic_message_width = message_width
         self.dynamic_user_bubble_width = user_bubble_width
 
+        self._apply_conversation_shell_metrics(metrics)
         self.conversation_column.setFixedWidth(conversation_width)
         self.session_tabs.setFixedWidth(conversation_width)
         self.input_card.setFixedWidth(conversation_width)
@@ -11404,6 +11459,12 @@ class MainWindow(QMainWindow):
         )
         if self.right_sidebar.isVisible():
             self.right_sidebar.raise_()
+
+    def _on_context_surface_changed(self, *_args):
+        required = ("right_sidebar", "conversation_column", "session_tabs", "input_card")
+        if any(not hasattr(self, name) for name in required):
+            return
+        self.sync_context_drawer_layout()
 
     def position_context_drawer(self):
         self.sync_context_drawer_layout()
@@ -11556,6 +11617,7 @@ class MainWindow(QMainWindow):
             if index in {getattr(self, "OBS_SECTION_PROMPT", -1), getattr(self, "OBS_SECTION_LOG", -1)}:
                 self.refresh_observability_view(self.current_session_id)
             self.observability_content_stack.setCurrentIndex(index)
+            self._on_context_surface_changed()
             for btn_index, btn in enumerate(getattr(self, "observability_segment_buttons", [])):
                 btn.setChecked(btn_index == index)
             log_sub_agent_runtime(

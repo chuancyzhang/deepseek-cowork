@@ -63,16 +63,27 @@ class DesignTokens:
     shadow_soft = "0 6px 16px rgba(15, 23, 42, 0.06)"
 
     sidebar_width = 272
+    drawer_min_width = 260
+    drawer_preferred_min_width = 340
+    drawer_max_width = 420
+    drawer_width_ratio = 0.24
+
     conversation_min_width = 840
-    conversation_max_width = 1320
-    conversation_target_ratio = 0.82
-    conversation_right_gutter_ratio = 0.18
-    conversation_right_gutter_min = 120
-    message_min_width = 760
-    message_max_width = 980
+    conversation_max_width = 1240
+    conversation_closed_min_width = 900
+    conversation_closed_max_width = 1240
+    conversation_closed_target_ratio = 0.72
+    conversation_open_min_width = 840
+    conversation_open_max_width = 1180
+    conversation_open_target_ratio = 0.78
+    conversation_open_left_spacer_ratio = 0.40
+
+    message_min_width = 720
+    message_max_width = 940
+    message_width_ratio = 0.80
     user_bubble_min_width = 620
     user_bubble_max_width = 820
-    user_bubble_ratio = 0.82
+    user_bubble_ratio = 0.84
 
     success_bg = "#f0fdf4"
     success_text = "#166534"

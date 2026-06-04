@@ -404,6 +404,26 @@ class TestSkillSystemV2(unittest.TestCase):
         read_back = sm.read_skill_file("custom-guide", "notes.md")
         self.assertEqual(read_back["content"], "hello")
 
+    def test_delete_skill_collection_only_deletes_user_skills(self):
+        builtin_dir = os.path.join(self.skills_dir, "builtin-guide")
+        custom_dir = os.path.join(self.ai_skills_dir, "custom-guide")
+        for skill_dir, skill_name in ((builtin_dir, "builtin-guide"), (custom_dir, "custom-guide")):
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    f"---\nname: {skill_name}\ndescription: {skill_name}\nkind: knowledge\n---\n"
+                    "# Skill Purpose\nUse this skill.\n"
+                )
+
+        sm = self._build_light_manager()
+        result = sm.delete_skill_collection(["builtin-guide", "custom-guide", "mcp-server-demo"])
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(os.path.exists(custom_dir))
+        self.assertTrue(os.path.exists(builtin_dir))
+        self.assertEqual(len(result["summary"]["deleted"]), 1)
+        self.assertEqual(len(result["summary"]["skipped"]), 2)
+
     def test_validate_skill_reports_invalid_json_and_missing_script(self):
         skill_dir = os.path.join(self.ai_skills_dir, "broken-guide")
         os.makedirs(skill_dir, exist_ok=True)

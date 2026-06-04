@@ -1336,6 +1336,24 @@ class SkillManager:
         skill_path = self._find_skill_path(skill_name)
         return bool(skill_path and os.path.basename(os.path.dirname(os.path.abspath(skill_path))) == "ai_skills")
 
+    def _find_user_skill_path(self, skill_name):
+        normalized_name = str(skill_name or "").strip()
+        if not normalized_name:
+            return None
+        for skills_dir in self.skills_dirs:
+            root = os.path.abspath(skills_dir)
+            if os.path.basename(root) != "ai_skills":
+                continue
+            candidate = os.path.abspath(os.path.join(root, normalized_name))
+            try:
+                if os.path.commonpath([root, candidate]) != root:
+                    continue
+            except ValueError:
+                continue
+            if os.path.isdir(candidate):
+                return candidate
+        return None
+
     def list_skill_files(self, skill_name):
         skill_path = self._find_skill_path(skill_name)
         if not skill_path:
@@ -1577,6 +1595,50 @@ class SkillManager:
             return True, message
         except Exception as e:
             return False, f"Export failed: {e}"
+
+    def delete_skill(self, skill_name):
+        normalized = str(skill_name or "").strip()
+        if not normalized:
+            return {"status": "skipped", "skill_name": normalized, "message": "Skill name is required."}
+        skill_path = self._find_user_skill_path(normalized)
+        if not skill_path:
+            return {
+                "status": "skipped",
+                "skill_name": normalized,
+                "message": f"Skill '{normalized}' is not a user skill in ai_skills.",
+            }
+        try:
+            shutil.rmtree(skill_path)
+            return {"status": "deleted", "skill_name": normalized, "message": f"Skill '{normalized}' deleted."}
+        except Exception as e:
+            return {"status": "failed", "skill_name": normalized, "message": f"Failed to delete '{normalized}': {e}"}
+
+    def delete_skill_collection(self, skill_names):
+        summary = {"deleted": [], "skipped": [], "failed": []}
+        seen = set()
+        for skill_name in skill_names or []:
+            normalized = str(skill_name or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result = self.delete_skill(normalized)
+            summary.setdefault(result.get("status") or "failed", []).append(result)
+        if summary["deleted"]:
+            self.load_skills()
+        lines = [
+            f"删除完成：{len(summary['deleted'])} 个已删除，{len(summary['skipped'])} 个跳过，{len(summary['failed'])} 个失败。"
+        ]
+        if summary["deleted"]:
+            lines.append("已删除：" + "、".join(item.get("skill_name") or "" for item in summary["deleted"][:8]))
+        if summary["skipped"]:
+            lines.append("已跳过：" + "、".join(item.get("skill_name") or "" for item in summary["skipped"][:8]))
+        if summary["failed"]:
+            lines.append("失败：" + "、".join(item.get("skill_name") or "" for item in summary["failed"][:8]))
+        return {
+            "ok": bool(summary["deleted"]) and not summary["failed"],
+            "summary": summary,
+            "message": "\n".join(lines),
+        }
 
     def _write_skill_md(self, md_path, meta, body):
         preferred = [

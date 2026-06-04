@@ -1443,6 +1443,58 @@ class SettingsDialog(QDialog):
 
         self.accept()
 
+class AppleSwitch(QCheckBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(52, 30)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setText("")
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        checked = self.isChecked()
+        track = QRect(2, 3, 48, 24)
+        track_color = QColor(DesignTokens.success_accent if checked else "#d1d5db")
+        if self.underMouse() and not checked:
+            track_color = QColor("#c4c9d3")
+        painter.setPen(QPen(QColor(DesignTokens.success_accent if checked else "#c7ccd5"), 1))
+        painter.setBrush(QBrush(track_color))
+        painter.drawRoundedRect(track, 12, 12)
+
+        knob_x = 27 if checked else 5
+        knob = QRect(knob_x, 5, 20, 20)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawEllipse(knob)
+
+
+class AppleSelectionCheck(QCheckBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(24, 24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setText("")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        circle = QRect(3, 3, 18, 18)
+        if self.isChecked():
+            painter.setPen(QPen(QColor(DesignTokens.primary), 1))
+            painter.setBrush(QBrush(QColor(DesignTokens.primary)))
+            painter.drawEllipse(circle)
+            painter.setPen(QPen(QColor("#ffffff"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(8, 12, 11, 15)
+            painter.drawLine(11, 15, 17, 9)
+            return
+        border = QColor(DesignTokens.primary if self.underMouse() else DesignTokens.border_strong)
+        painter.setPen(QPen(border, 1.5))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawEllipse(circle)
+
+
 class CapabilityWorkbenchDialog(QDialog):
     def __init__(self, skill, skill_manager, config_manager, parent=None):
         super().__init__(parent)
@@ -5944,26 +5996,20 @@ class SkillsCenterDialog(QDialog):
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
-        self.select_btn = QPushButton("选择")
-        self.select_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.select_btn.clicked.connect(self.toggle_selection_mode)
-        self.export_selected_btn = QPushButton("导出")
-        self.export_selected_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.export_selected_btn.setIcon(qta.icon('fa5s.file-export', color=DesignTokens.text_secondary))
-        self.export_selected_btn.clicked.connect(self.export_selected_skills)
-        self.export_selected_btn.setEnabled(False)
         self.import_btn = QPushButton("导入自定义能力")
         self.import_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.import_btn.setIcon(qta.icon('fa5s.box-open', color=DesignTokens.text_secondary))
         self.import_btn.clicked.connect(self.import_skill)
-        self.refresh_btn = QPushButton("刷新")
-        self.refresh_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.refresh_btn.setIcon(qta.icon('fa5s.sync', color=DesignTokens.text_secondary))
-        self.refresh_btn.clicked.connect(self.manual_refresh)
-        header.addWidget(self.select_btn)
-        header.addWidget(self.export_selected_btn)
+        self.more_btn = QPushButton("更多")
+        self.more_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        self.more_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        more_menu = QMenu(self)
+        refresh_action = QAction("刷新", self)
+        refresh_action.triggered.connect(self.manual_refresh)
+        more_menu.addAction(refresh_action)
+        self.more_btn.setMenu(more_menu)
         header.addWidget(self.import_btn)
-        header.addWidget(self.refresh_btn)
+        header.addWidget(self.more_btn)
         layout.addLayout(header)
 
         filters_row = QHBoxLayout()
@@ -5989,11 +6035,39 @@ class SkillsCenterDialog(QDialog):
             segmented_layout.addWidget(btn)
             self.filter_buttons[key] = btn
         filters_row.addWidget(segmented_frame, 0)
+        self.selection_toggle_btn = QPushButton("选择")
+        self.selection_toggle_btn.setStyleSheet(apple_button_style("ghost", radius=13))
+        self.selection_toggle_btn.clicked.connect(self.toggle_selection_mode)
+        filters_row.addWidget(self.selection_toggle_btn, 0)
 
         self.count_label = QLabel("")
         self.count_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         filters_row.addWidget(self.count_label, 0, Qt.AlignRight | Qt.AlignVCenter)
         layout.addLayout(filters_row)
+
+        self.selection_bar = QFrame()
+        self.selection_bar.setStyleSheet(apple_section_surface_style(radius=14, bg="rgba(255, 255, 255, 0.76)"))
+        selection_layout = QHBoxLayout(self.selection_bar)
+        selection_layout.setContentsMargins(12, 8, 12, 8)
+        selection_layout.setSpacing(10)
+        self.cancel_selection_btn = QPushButton("取消")
+        self.cancel_selection_btn.setStyleSheet(apple_button_style("secondary", radius=13))
+        self.cancel_selection_btn.clicked.connect(self.toggle_selection_mode)
+        self.selected_count_label = QLabel("已选 0")
+        self.selected_count_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; font-weight: 600;")
+        self.export_selected_btn = QPushButton("导出")
+        self.export_selected_btn.setStyleSheet(apple_button_style("secondary", radius=13))
+        self.export_selected_btn.clicked.connect(self.export_selected_skills)
+        self.delete_selected_btn = QPushButton("删除")
+        self.delete_selected_btn.setStyleSheet(apple_button_style("ghost", radius=13))
+        self.delete_selected_btn.clicked.connect(self.delete_selected_skills)
+        selection_layout.addWidget(self.cancel_selection_btn)
+        selection_layout.addWidget(self.selected_count_label)
+        selection_layout.addStretch()
+        selection_layout.addWidget(self.export_selected_btn)
+        selection_layout.addWidget(self.delete_selected_btn)
+        self.selection_bar.setVisible(False)
+        layout.addWidget(self.selection_bar)
 
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._handle_tab_changed)
@@ -6185,29 +6259,6 @@ class SkillsCenterDialog(QDialog):
             "border-radius: 11px; padding: 4px 10px; font-size: 11px; font-weight: 700;"
         )
 
-    def _switch_style(self):
-        return f"""
-        QCheckBox {{
-            spacing: 0px;
-            background: transparent;
-            border: none;
-        }}
-        QCheckBox::indicator {{
-            width: 42px;
-            height: 24px;
-            border-radius: 12px;
-            background: {DesignTokens.border_strong};
-            border: 1px solid {DesignTokens.border};
-        }}
-        QCheckBox::indicator:checked {{
-            background: {DesignTokens.success_accent};
-            border-color: {DesignTokens.success_accent};
-        }}
-        QCheckBox::indicator:hover {{
-            border-color: {DesignTokens.primary};
-        }}
-        """
-
     def _build_skill_card(self, skill):
         card = QFrame()
         card.setObjectName("SkillListItem")
@@ -6225,13 +6276,9 @@ class SkillsCenterDialog(QDialog):
         card.setCursor(Qt.PointingHandCursor)
         card.mousePressEvent = lambda event, s=dict(skill): self.handle_skill_item_clicked(s)
         if self.selection_mode:
-            select_box = QCheckBox()
+            select_box = AppleSelectionCheck()
+            select_box.setObjectName("SkillSelectionCheck")
             select_box.setChecked(skill_name in self.selected_skill_names)
-            select_box.setCursor(Qt.PointingHandCursor)
-            select_box.setStyleSheet(
-                f"QCheckBox {{ background: transparent; border: none; }}"
-                f"QCheckBox::indicator {{ width: 18px; height: 18px; }}"
-            )
             select_box.clicked.connect(
                 lambda checked=False, n=skill_name: self.set_skill_selected(n, bool(checked))
             )
@@ -6270,11 +6317,10 @@ class SkillsCenterDialog(QDialog):
         card_layout.addLayout(info_col, 1)
 
         enabled = bool(skill.get("enabled"))
-        toggle = QCheckBox()
+        toggle = AppleSwitch()
+        toggle.setObjectName("SkillEnableSwitch")
         toggle.setChecked(enabled)
-        toggle.setCursor(Qt.PointingHandCursor)
         toggle.setToolTip("关闭" if enabled else "启用")
-        toggle.setStyleSheet(self._switch_style())
         toggle.clicked.connect(lambda checked=False, n=skill["name"]: self.toggle_skill(n, bool(checked)))
         card_layout.addWidget(toggle, 0, Qt.AlignRight | Qt.AlignVCenter)
         return card
@@ -6292,9 +6338,15 @@ class SkillsCenterDialog(QDialog):
 
     def _refresh_selection_actions(self):
         selected_count = len(self.selected_skill_names)
-        self.select_btn.setText("取消" if self.selection_mode else "选择")
+        self.selection_toggle_btn.setVisible(not self.selection_mode)
+        self.import_btn.setVisible(not self.selection_mode)
+        self.more_btn.setVisible(not self.selection_mode)
+        self.selection_bar.setVisible(self.selection_mode)
+        self.selected_count_label.setText(f"已选 {selected_count}")
         self.export_selected_btn.setEnabled(selected_count > 0)
+        self.delete_selected_btn.setEnabled(selected_count > 0)
         self.export_selected_btn.setText(f"导出 {selected_count}" if selected_count else "导出")
+        self.delete_selected_btn.setText(f"删除 {selected_count}" if selected_count else "删除")
         self._refresh_count_label()
 
     def set_skill_selected(self, skill_name, selected):
@@ -6392,6 +6444,29 @@ class SkillsCenterDialog(QDialog):
             self._render_skill_groups()
         else:
             QMessageBox.warning(self, "能力中心", msg)
+
+    def delete_selected_skills(self):
+        if not self.selected_skill_names:
+            QMessageBox.warning(self, "能力中心", "请先选择要删除的能力。")
+            return
+        selected_count = len(self.selected_skill_names)
+        reply = QMessageBox.question(
+            self,
+            "删除自定义能力",
+            (
+                f"将尝试删除 {selected_count} 个已选能力中的用户自定义能力。\n"
+                "内置能力和 MCP 能力会自动跳过。删除会移除本地能力目录，无法在应用内撤销。是否继续？"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        result = self.skill_manager.delete_skill_collection(sorted(self.selected_skill_names))
+        QMessageBox.information(self, "删除自定义能力", result.get("message") or "删除完成。")
+        self.selection_mode = False
+        self.selected_skill_names.clear()
+        self.refresh_list()
 
     def copy_skill_name(self, skill_name, button=None):
         skill_name = str(skill_name or "").strip()

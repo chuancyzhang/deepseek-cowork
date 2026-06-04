@@ -43,7 +43,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 2.4 技能系统
 *   **core/skill_manager.py**：加载 `skills/` 与 `ai_skills/`，注入工具定义与经验。
 *   **经验回写**：执行结果可回写到 `SKILL.md`，形成自进化闭环。
-*   **能力包迁移与调试**：支持从单个 Skill 目录、Skill 集合目录或 ZIP 导入 Skill，支持将已有 Skill 单独导出或多选导出为集合 ZIP，并跳过缓存/构建目录；能力工作台限制写入 `ai_skills`，可验证 Skill 文件并调试 tools/scripts。
+*   **能力包迁移与调试**：支持从单个 Skill 目录、Skill 集合目录或 ZIP 导入 Skill，支持将已有 Skill 单独导出或多选导出为集合 ZIP，并跳过缓存/构建目录；能力工作台和批量删除限制在 `ai_skills`，可验证 Skill 文件并调试 tools/scripts。
 *   **显式只读并行**：`parallel_tools` 通过 `SkillManager.call_tool(..., require_read_only=True)` 执行子调用，保留顺序并遵守发现、模式和能力范围限制。
 *   **core/skill_from_conversation.py**：把当前会话转录为可复用 Skill 草稿，并负责新建或更新 Skill 文件。
 
@@ -132,7 +132,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill。
 - **对话生成 SOP**：输入区入口将当前会话提炼为可编辑 SOP 草稿，确认后保存为任务模板并绑定当前会话。
 - **SOP 调度执行**：会话与定时自动化都只派发当前步骤；模板默认推进方式可设为人工确认或自动推进，步骤可覆盖模板默认值，完成后由状态机决定暂停、重跑、跳过或继续下一步。非 Agent 步骤通过沙盒 Python 或 Git Bash 直接执行，并把 stdout/stderr/exit code 写回运行态。
-- **迁移复用与调试**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选、无图标双列轻量列表、多选集合导出和能力工作台；自定义 Skill 可编辑/验证/调试，内置 Skill 只读，MCP 能力可调试连接和 tool 调用。
+- **迁移复用与调试**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选、无图标双列轻量列表、Apple 风格滑动开关、选择模式批量导出/删除和能力工作台；自定义 Skill 可编辑/验证/调试/删除，内置 Skill 只读不可删除，MCP 能力可调试连接和 tool 调用。
 
 ## 8. 状态机流转 (Agentic Workflow)
 - **状态**：Idle → Thinking → ToolCalling → Observing → Answering → Completed。

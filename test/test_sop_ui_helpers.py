@@ -13,6 +13,8 @@ from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
 from core.chat_storage import ChatStorage
 from main import (
     QApplication,
+    AppleSelectionCheck,
+    AppleSwitch,
     AutoResizingInputEdit,
     AutoResizingTextEdit,
     AutomationTaskDialog,
@@ -31,7 +33,7 @@ from main import (
 )
 from PySide6.QtCore import QEvent, Qt, QMimeData
 from PySide6.QtGui import QTextOption
-from PySide6.QtWidgets import QCheckBox, QLabel, QMessageBox, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QScrollArea, QWidget
 
 
 class _State:
@@ -154,7 +156,7 @@ class SkillCenterHelperTests(unittest.TestCase):
         )
 
         self.assertEqual(item.objectName(), "SkillListItem")
-        self.assertTrue(item.findChildren(QCheckBox))
+        self.assertTrue(item.findChildren(AppleSwitch))
         self.assertFalse([button for button in item.findChildren(QPushButton) if button.text() == "导出"])
 
     def test_skill_center_selection_mode_adds_checkbox(self):
@@ -175,7 +177,8 @@ class SkillCenterHelperTests(unittest.TestCase):
             }
         )
 
-        self.assertGreaterEqual(len(item.findChildren(QCheckBox)), 2)
+        self.assertTrue(item.findChildren(AppleSelectionCheck))
+        self.assertTrue(item.findChildren(AppleSwitch))
 
     def test_skill_center_item_click_opens_workbench_in_normal_mode(self):
         app = QApplication.instance() or QApplication([])
@@ -206,6 +209,26 @@ class SkillCenterHelperTests(unittest.TestCase):
 
         workbench_cls.assert_not_called()
         self.assertIn("claim-expert", dialog.selected_skill_names)
+
+    def test_skill_center_selection_mode_shows_context_actions(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+
+        self.assertTrue(dialog.selection_bar.isHidden())
+        self.assertFalse(dialog.import_btn.isHidden())
+        dialog.toggle_selection_mode()
+
+        self.assertFalse(dialog.selection_bar.isHidden())
+        self.assertTrue(dialog.import_btn.isHidden())
+        self.assertTrue(dialog.more_btn.isHidden())
+        self.assertFalse(dialog.export_selected_btn.isEnabled())
+        self.assertFalse(dialog.delete_selected_btn.isEnabled())
+
+        dialog.set_skill_selected("claim-expert", True)
+        self.assertTrue(dialog.export_selected_btn.isEnabled())
+        self.assertTrue(dialog.delete_selected_btn.isEnabled())
 
 
 class _ObservabilityState:

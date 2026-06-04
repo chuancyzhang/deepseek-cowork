@@ -91,7 +91,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 5.  **经验沉淀**
     *   用户点击 `更新长期记忆`，系统扫描新增/变更历史会话，分批更新 `memories.md` 并记录 `memories_update_state.json`。
     *   用户点击 `沉淀为 Skill`，系统把当前会话提炼为 Skill 草稿，可新建 Skill 或更新已有 Skill，并在保存前预览编辑。
-    *   用户在功能中心可将 Skill 单独导出为 ZIP，也可多选后导出为集合 ZIP；导入继续支持 ZIP、单 Skill 文件夹或 Skill 集合文件夹。自定义 Skill 可在工作台中编辑文件、验证结构并调试 tools/scripts；内置 Skill 只读，MCP 能力可调试连接与 tool 调用。
+    *   用户在功能中心可将 Skill 单独导出为 ZIP，也可多选后导出为集合 ZIP；导入继续支持 ZIP、单 Skill 文件夹或 Skill 集合文件夹。自定义 Skill 可在工作台中编辑文件、验证结构、调试 tools/scripts，并可在选择模式批量删除；内置 Skill 只读不可删除，MCP 能力可调试连接与 tool 调用。
 
 ---
 
@@ -165,7 +165,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 - 热加载：重置工具注册与提示集合，重新解析技能文档，保证新增/修改技能即时可用。
 - 经验写回：通过 `update_skill_experience` 将运行经验追加到 `SKILL.md` 的 `experience`，形成“执行—学习—再执行”的持续闭环。
 - 会话沉淀：`沉淀为 Skill` 提供人工确认通道，把当前会话生成可编辑草稿，再写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`；已有 Skill 可选择追加经验或重写说明。
-- ZIP 迁移与调试：功能中心单独或批量导出 Skill 时会跳过缓存/构建目录；批量导出生成包含多个 Skill 根目录的集合 ZIP。导入 ZIP 时校验路径安全，支持平铺根目录、单 Skill 文件夹根目录或集合包，并以元数据中的 Skill 名称作为最终目录名。自定义 Skill 工作台限制写入 `ai_skills`，保存后验证并热重载；MCP 工作台复用现有 MCP client 调试 tools。
+- ZIP 迁移与调试：功能中心单独或批量导出 Skill 时会跳过缓存/构建目录；批量导出生成包含多个 Skill 根目录的集合 ZIP。导入 ZIP 时校验路径安全，支持平铺根目录、单 Skill 文件夹根目录或集合包，并以元数据中的 Skill 名称作为最终目录名。自定义 Skill 工作台和批量删除都限制在 `ai_skills`，保存后验证并热重载；MCP 工作台复用现有 MCP client 调试 tools。
 - 当前实现已经打通“系统提示鼓励记录经验 -> LLM 调用 `update_experience` -> `record_experience` 持久化 -> 热加载后续复用”的链路，因此 AI 在合适场景下可以真实调用经验工具，而不是停留在文档设想。
 - 同时，这一能力目前仍属于第一版闭环：系统支持并鼓励 AI 记录经验，但不保证每次都会主动调用，且尚未内建经验验证、效果评估、生命周期治理与检索权重自适应等更强反馈机制。
 

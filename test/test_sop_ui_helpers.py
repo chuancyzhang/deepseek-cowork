@@ -13,6 +13,7 @@ from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
 from core.chat_storage import ChatStorage
 from main import (
     QApplication,
+    AutoResizingInputEdit,
     AutomationTaskDialog,
     ChatBubble,
     MainWindow,
@@ -27,7 +28,7 @@ from main import (
     skill_center_matches_filters,
     summarize_skill_terms,
 )
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, Qt, QMimeData
 from PySide6.QtWidgets import QLabel, QMessageBox, QScrollArea, QWidget
 
 
@@ -72,6 +73,32 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.llm_worker = None
         self.daemon_running = True
         self.sop_run = None
+
+    def test_main_input_paste_prefers_plain_text_over_html(self):
+        app = QApplication.instance() or QApplication([])
+        edit = AutoResizingInputEdit()
+        mime = QMimeData()
+        mime.setHtml("<p><span style='font-size:24px;color:red;font-weight:bold'>粗体内容</span></p>")
+        mime.setText("纯文本内容")
+
+        edit.insertFromMimeData(mime)
+        app.processEvents()
+
+        self.assertEqual(edit.toPlainText(), "纯文本内容")
+        self.assertNotIn("color:red", edit.toHtml())
+        self.assertNotIn("font-size:24px", edit.toHtml())
+        self.assertNotIn("<span", edit.toHtml())
+
+    def test_main_input_paste_keeps_multiline_plain_text(self):
+        app = QApplication.instance() or QApplication([])
+        edit = AutoResizingInputEdit()
+        mime = QMimeData()
+        mime.setText("第一行\n第二行")
+
+        edit.insertFromMimeData(mime)
+        app.processEvents()
+
+        self.assertEqual(edit.toPlainText(), "第一行\n第二行")
 
     def test_skill_center_copy_skill_name_copies_internal_name(self):
         app = QApplication.instance() or QApplication([])

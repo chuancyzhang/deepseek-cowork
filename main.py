@@ -6132,6 +6132,17 @@ class AutoResizingInputEdit(QTextEdit):
         apply_selection_palette(self)
         QTimer.singleShot(0, self.adjustHeight)
 
+    def canInsertFromMimeData(self, source):
+        if source and source.hasText():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source):
+        if source and source.hasText():
+            self.insertPlainText(source.text())
+            return
+        super().insertFromMimeData(source)
+
     def scheduleAdjustHeight(self):
         if self._height_adjust_pending:
             return

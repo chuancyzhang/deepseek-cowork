@@ -129,7 +129,7 @@ Open **自动化** from the sidebar:
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
-*   **Skill Center import/export** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center also supports search, enabled-state filters, and an icon-free two-column lightweight list with right-side enable switches.
+*   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center also supports search, enabled-state filters, an icon-free two-column lightweight list, right-side enable switches, user-skill file editing/validation/tool debugging, read-only built-in skills, and MCP tool debugging.
 
 ### 6. Enterprise IM
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.

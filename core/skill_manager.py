@@ -9,6 +9,7 @@ import time
 import uuid
 import tempfile
 import zipfile
+import ast
 
 from .env_utils import ensure_package_installed, get_app_data_dir
 from .mcp_client import (
@@ -1307,6 +1308,119 @@ class SkillManager:
             if os.path.isdir(candidate):
                 return candidate
         return None
+
+    def _resolve_skill_file_path(self, skill_name, relative_path, *, require_writable=False):
+        skill_path = self._find_skill_path(skill_name)
+        if not skill_path:
+            return None, None, f"Skill '{skill_name}' not found."
+        root = os.path.abspath(skill_path)
+        if require_writable and os.path.basename(os.path.dirname(root)) != "ai_skills":
+            return root, None, "Only user skills in ai_skills can be edited."
+        rel = str(relative_path or "").strip().replace("\\", os.sep).replace("/", os.sep)
+        if not rel:
+            return root, None, "File path is required."
+        parts = [part for part in rel.split(os.sep) if part]
+        if any(part in {"..", "."} for part in parts):
+            return root, None, "File path cannot contain relative traversal."
+        if parts and parts[0] in EXCLUDED_DIRS:
+            return root, None, "Cache and build directories cannot be edited from Skill Center."
+        resolved = os.path.abspath(os.path.join(root, *parts))
+        try:
+            if os.path.commonpath([root, resolved]) != root:
+                return root, None, "File path is outside the skill directory."
+        except ValueError:
+            return root, None, "File path is outside the skill directory."
+        return root, resolved, ""
+
+    def is_skill_editable(self, skill_name):
+        skill_path = self._find_skill_path(skill_name)
+        return bool(skill_path and os.path.basename(os.path.dirname(os.path.abspath(skill_path))) == "ai_skills")
+
+    def list_skill_files(self, skill_name):
+        skill_path = self._find_skill_path(skill_name)
+        if not skill_path:
+            return {"ok": False, "error": f"Skill '{skill_name}' not found.", "files": [], "editable": False}
+        files = []
+        for root, dirs, filenames in os.walk(skill_path):
+            dirs[:] = [name for name in dirs if name not in EXCLUDED_DIRS and not name.startswith(".")]
+            rel_root = os.path.relpath(root, skill_path)
+            for filename in filenames:
+                if filename == ".DS_Store":
+                    continue
+                rel_path = filename if rel_root == "." else os.path.join(rel_root, filename)
+                files.append(rel_path.replace("\\", "/"))
+        files.sort(key=lambda item: (0 if item in {"SKILL.md", "skill.json", "impl.py"} else 1, item.lower()))
+        return {"ok": True, "error": "", "files": files, "editable": self.is_skill_editable(skill_name)}
+
+    def read_skill_file(self, skill_name, relative_path):
+        _root, path, error = self._resolve_skill_file_path(skill_name, relative_path)
+        if error:
+            return {"ok": False, "error": error, "content": ""}
+        if not os.path.isfile(path):
+            return {"ok": False, "error": "File not found.", "content": ""}
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                return {"ok": True, "error": "", "content": f.read()}
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "Only UTF-8 text files can be edited here.", "content": ""}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "content": ""}
+
+    def write_skill_file(self, skill_name, relative_path, content):
+        _root, path, error = self._resolve_skill_file_path(skill_name, relative_path, require_writable=True)
+        if error:
+            return {"ok": False, "error": error}
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(content or ""))
+            validation = self.validate_skill(skill_name)
+            self.load_skills()
+            if not validation.get("ok"):
+                return {"ok": True, "error": "", "validation": validation}
+            return {"ok": True, "error": "", "validation": validation}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def validate_skill(self, skill_name):
+        skill_path = self._find_skill_path(skill_name)
+        if not skill_path:
+            return {"ok": False, "issues": [f"Skill '{skill_name}' not found."]}
+        issues = []
+        md_path = os.path.join(skill_path, "SKILL.md")
+        if not os.path.isfile(md_path):
+            issues.append("SKILL.md is missing.")
+        skill_json_path = os.path.join(skill_path, "skill.json")
+        spec = {}
+        if os.path.isfile(skill_json_path):
+            try:
+                with open(skill_json_path, "r", encoding="utf-8-sig") as f:
+                    payload = json.load(f)
+                if not isinstance(payload, dict):
+                    issues.append("skill.json must contain a JSON object.")
+                else:
+                    spec = payload
+            except Exception as e:
+                issues.append(f"skill.json is invalid: {e}")
+        impl_path = os.path.join(skill_path, "impl.py")
+        if os.path.isfile(impl_path):
+            try:
+                with open(impl_path, "r", encoding="utf-8-sig") as f:
+                    ast.parse(f.read(), filename=impl_path)
+            except Exception as e:
+                issues.append(f"impl.py syntax check failed: {e}")
+        for ref_key in ("references", "script_refs", "asset_refs"):
+            for ref in spec.get(ref_key) or []:
+                if isinstance(ref, str) and ref.strip() and not os.path.exists(os.path.join(skill_path, ref)):
+                    issues.append(f"{ref_key} entry not found: {ref}")
+        for entry in spec.get("script_entries") or []:
+            if not isinstance(entry, dict):
+                issues.append("script_entries entries must be objects.")
+                continue
+            rel_path = str(entry.get("path") or "").strip()
+            if rel_path and not os.path.isfile(os.path.join(skill_path, rel_path)):
+                issues.append(f"script entry path not found: {rel_path}")
+        return {"ok": not issues, "issues": issues}
 
     def _read_skill_name_from_path(self, source_path):
         skill_json_path = os.path.join(source_path, "skill.json")

@@ -177,6 +177,36 @@ class SkillCenterHelperTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(item.findChildren(QCheckBox)), 2)
 
+    def test_skill_center_item_click_opens_workbench_in_normal_mode(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+        dialog.refresh_list = MagicMock()
+        fake_workbench = MagicMock()
+        fake_workbench.exec.return_value = None
+
+        with patch("main.CapabilityWorkbenchDialog", return_value=fake_workbench) as workbench_cls:
+            dialog.handle_skill_item_clicked({"name": "claim-expert", "display_name": "Claim Expert"})
+
+        workbench_cls.assert_called_once()
+        fake_workbench.exec.assert_called_once()
+        dialog.refresh_list.assert_called_once()
+
+    def test_skill_center_item_click_selects_in_selection_mode(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+        dialog.selection_mode = True
+        dialog._render_skill_groups = MagicMock()
+
+        with patch("main.CapabilityWorkbenchDialog") as workbench_cls:
+            dialog.handle_skill_item_clicked({"name": "claim-expert", "display_name": "Claim Expert"})
+
+        workbench_cls.assert_not_called()
+        self.assertIn("claim-expert", dialog.selected_skill_names)
+
 
 class _ObservabilityState:
     def __init__(self, session_id="session-1"):

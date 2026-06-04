@@ -54,6 +54,9 @@ from core.mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
     TRANSPORT_STDIO,
     TRANSPORT_STREAMABLE_HTTP,
+    build_mcp_skill_name,
+    call_mcp_tool,
+    list_mcp_server_tools,
     mcp_transport_label,
     summarize_mcp_server,
     test_mcp_server_connection,
@@ -1439,6 +1442,417 @@ class SettingsDialog(QDialog):
         self.config_manager.set_god_mode(self.god_mode_check.isChecked())
 
         self.accept()
+
+class CapabilityWorkbenchDialog(QDialog):
+    def __init__(self, skill, skill_manager, config_manager, parent=None):
+        super().__init__(parent)
+        self.skill = dict(skill or {})
+        self.skill_manager = skill_manager
+        self.config_manager = config_manager
+        self.skill_name = str(self.skill.get("name") or "").strip()
+        self.current_file_path = ""
+        self.tool_worker = None
+        self.mcp_worker = None
+        self.mcp_tools = []
+        self.setWindowTitle("能力工作台")
+        self.resize(980, 680)
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title = QLabel(self.skill.get("display_name") or self.skill_name or "能力工作台")
+        title.setProperty("roleTitle", True)
+        subtitle = QLabel(self._subtitle_text())
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addLayout(title_box, 1)
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        close_btn.clicked.connect(self.accept)
+        header.addWidget(close_btn)
+        layout.addLayout(header)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+        if self._is_mcp_skill():
+            self._build_mcp_tabs()
+        else:
+            self._build_skill_tabs()
+
+    def _subtitle_text(self):
+        if self._is_mcp_skill():
+            return "调试 MCP 连接、查看 tools，并用 JSON 参数直接调用 tool。"
+        if self.skill_manager.is_skill_editable(self.skill_name):
+            return "编辑用户能力文件、验证结构，并直接调试该能力暴露的工具或脚本。"
+        return "内置能力为只读模式，可查看文件并调试已暴露工具。"
+
+    def _is_mcp_skill(self):
+        return str(self.skill.get("source_format") or "") == SkillManager.MCP_SOURCE_FORMAT
+
+    def _format_payload(self, value):
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return json.dumps(parsed, ensure_ascii=False, indent=2)
+            except Exception:
+                return value
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(value)
+
+    def _parse_json_editor(self, editor, fallback):
+        raw = editor.toPlainText().strip()
+        if not raw:
+            return fallback
+        try:
+            return json.loads(raw)
+        except Exception as exc:
+            QMessageBox.warning(self, "JSON 参数", f"JSON 格式无效：{exc}")
+            return None
+
+    def _build_skill_tabs(self):
+        self._build_files_tab()
+        self._build_tool_debug_tab()
+        self._build_script_debug_tab()
+
+    def _build_files_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
+
+        splitter = QSplitter(Qt.Horizontal)
+        self.file_list = QListWidget()
+        self.file_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
+        self.file_list.currentTextChanged.connect(self._load_selected_skill_file)
+        splitter.addWidget(self.file_list)
+
+        editor_wrap = QWidget()
+        editor_layout = QVBoxLayout(editor_wrap)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.setSpacing(8)
+        self.file_status = QLabel("")
+        self.file_status.setStyleSheet(apple_settings_inline_note_style())
+        editor_layout.addWidget(self.file_status)
+        self.file_editor = QTextEdit()
+        self.file_editor.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        editor_layout.addWidget(self.file_editor, 1)
+        button_row = QHBoxLayout()
+        self.validate_btn = QPushButton("验证")
+        self.validate_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        self.validate_btn.clicked.connect(self.validate_current_skill)
+        self.save_file_btn = QPushButton("保存并重载")
+        self.save_file_btn.setStyleSheet(apple_button_style("primary", radius=14))
+        self.save_file_btn.clicked.connect(self.save_current_skill_file)
+        self.save_file_btn.setVisible(self.skill_manager.is_skill_editable(self.skill_name))
+        button_row.addStretch()
+        button_row.addWidget(self.validate_btn)
+        button_row.addWidget(self.save_file_btn)
+        editor_layout.addLayout(button_row)
+        splitter.addWidget(editor_wrap)
+        splitter.setSizes([260, 720])
+        layout.addWidget(splitter, 1)
+        self.tabs.addTab(page, "文件")
+        self.reload_skill_files()
+
+    def reload_skill_files(self):
+        payload = self.skill_manager.list_skill_files(self.skill_name)
+        self.file_list.clear()
+        if not payload.get("ok"):
+            self.file_status.setText(payload.get("error") or "无法读取能力文件。")
+            self.file_editor.setReadOnly(True)
+            return
+        for rel_path in payload.get("files") or []:
+            self.file_list.addItem(rel_path)
+        editable = bool(payload.get("editable"))
+        self.file_editor.setReadOnly(not editable)
+        self.file_status.setText("可编辑用户能力。" if editable else "只读：内置能力不能在这里修改。")
+        if self.file_list.count():
+            self.file_list.setCurrentRow(0)
+
+    def _load_selected_skill_file(self, rel_path):
+        self.current_file_path = str(rel_path or "").strip()
+        if not self.current_file_path:
+            return
+        payload = self.skill_manager.read_skill_file(self.skill_name, self.current_file_path)
+        if payload.get("ok"):
+            self.file_editor.setPlainText(payload.get("content") or "")
+            self.file_status.setText(self.current_file_path)
+        else:
+            self.file_editor.setPlainText("")
+            self.file_status.setText(payload.get("error") or "读取失败。")
+
+    def save_current_skill_file(self):
+        if not self.current_file_path:
+            return
+        result = self.skill_manager.write_skill_file(
+            self.skill_name,
+            self.current_file_path,
+            self.file_editor.toPlainText(),
+        )
+        if not result.get("ok"):
+            QMessageBox.warning(self, "保存能力", result.get("error") or "保存失败。")
+            return
+        validation = result.get("validation") or {}
+        if validation.get("ok", True):
+            QMessageBox.information(self, "保存能力", "已保存并重新加载能力。")
+        else:
+            QMessageBox.warning(self, "保存能力", "已保存，但验证发现问题：\n" + "\n".join(validation.get("issues") or []))
+
+    def validate_current_skill(self):
+        result = self.skill_manager.validate_skill(self.skill_name)
+        if result.get("ok"):
+            QMessageBox.information(self, "验证能力", "验证通过。")
+        else:
+            QMessageBox.warning(self, "验证能力", "\n".join(result.get("issues") or ["验证失败。"]))
+
+    def _build_tool_debug_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
+        self.tool_combo = QComboBox()
+        for tool_name in self.skill.get("tools") or []:
+            self.tool_combo.addItem(str(tool_name), str(tool_name))
+        self.tool_combo.currentIndexChanged.connect(self._refresh_tool_schema)
+        layout.addWidget(self.tool_combo)
+        self.tool_schema = QTextEdit()
+        self.tool_schema.setReadOnly(True)
+        self.tool_schema.setFixedHeight(130)
+        self.tool_schema.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.tool_schema)
+        self.tool_args = QTextEdit()
+        self.tool_args.setPlaceholderText('{\n  "arg": "value"\n}')
+        self.tool_args.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.tool_args, 1)
+        run_row = QHBoxLayout()
+        run_row.addStretch()
+        run_btn = QPushButton("运行 Tool")
+        run_btn.setStyleSheet(apple_button_style("primary", radius=14))
+        run_btn.clicked.connect(self.run_selected_tool)
+        run_row.addWidget(run_btn)
+        layout.addLayout(run_row)
+        self.tool_result = QTextEdit()
+        self.tool_result.setReadOnly(True)
+        self.tool_result.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.tool_result, 1)
+        self.tabs.addTab(page, "Tool 调试")
+        self._refresh_tool_schema()
+
+    def _refresh_tool_schema(self):
+        tool_name = str(self.tool_combo.currentData() or "")
+        record = self.skill_manager.get_tool_record(tool_name) if tool_name else None
+        schema = record.parameters_schema if record else {}
+        self.tool_schema.setPlainText(self._format_payload(schema))
+
+    def _confirm_high_risk_debug(self):
+        risk = str(self.skill.get("risk_level") or self.skill.get("security_level") or "").lower()
+        if risk != "high":
+            return True
+        reply = QMessageBox.question(
+            self,
+            "调试高风险能力",
+            "这个能力可能会访问或修改重要内容。确认要继续调试吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def run_selected_tool(self):
+        tool_name = str(self.tool_combo.currentData() or "")
+        if not tool_name:
+            QMessageBox.warning(self, "Tool 调试", "没有可调试的 tool。")
+            return
+        if not self._confirm_high_risk_debug():
+            return
+        args = self._parse_json_editor(self.tool_args, {})
+        if args is None:
+            return
+        self.tool_result.setPlainText("Running...")
+        self.tool_worker = SkillToolDebugWorker(self.skill_manager, tool_name, args, self)
+        self.tool_worker.finished_signal.connect(self._handle_tool_result)
+        self.tool_worker.finished.connect(self.tool_worker.deleteLater)
+        self.tool_worker.start()
+
+    def _handle_tool_result(self, result):
+        self.tool_worker = None
+        self.tool_result.setPlainText(self._format_payload(result.get("result") if result.get("ok") else result))
+
+    def _build_script_debug_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
+        self.script_combo = QComboBox()
+        for entry in self.skill.get("script_entries") or []:
+            if isinstance(entry, dict):
+                self.script_combo.addItem(str(entry.get("name") or entry.get("path") or "script"), dict(entry))
+        layout.addWidget(self.script_combo)
+        self.script_args = QTextEdit()
+        self.script_args.setPlaceholderText('["--flag", "value"]')
+        self.script_args.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.script_args, 1)
+        self.script_input = QTextEdit()
+        self.script_input.setPlaceholderText("stdin 文本，可留空")
+        self.script_input.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.script_input, 1)
+        row = QHBoxLayout()
+        self.script_timeout = QSpinBox()
+        self.script_timeout.setRange(5, 600)
+        self.script_timeout.setValue(120)
+        self.script_timeout.setSuffix(" 秒")
+        row.addWidget(QLabel("Timeout"))
+        row.addWidget(self.script_timeout)
+        row.addStretch()
+        run_btn = QPushButton("运行 Script")
+        run_btn.setStyleSheet(apple_button_style("primary", radius=14))
+        run_btn.clicked.connect(self.run_selected_script)
+        row.addWidget(run_btn)
+        layout.addLayout(row)
+        self.script_result = QTextEdit()
+        self.script_result.setReadOnly(True)
+        self.script_result.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.script_result, 1)
+        self.tabs.addTab(page, "Script 调试")
+
+    def run_selected_script(self):
+        entry = self.script_combo.currentData()
+        if not isinstance(entry, dict):
+            QMessageBox.warning(self, "Script 调试", "没有声明 script_entries。")
+            return
+        if not self._confirm_high_risk_debug():
+            return
+        args = self._parse_json_editor(self.script_args, [])
+        if args is None:
+            return
+        payload = {
+            "skill_name": self.skill_name,
+            "script_name": str(entry.get("name") or entry.get("path") or ""),
+            "args": args,
+            "input_text": self.script_input.toPlainText(),
+            "timeout_seconds": int(self.script_timeout.value()),
+        }
+        self.script_result.setPlainText("Running...")
+        self.tool_worker = SkillToolDebugWorker(self.skill_manager, "run_skill_script", payload, self)
+        self.tool_worker.finished_signal.connect(self._handle_script_result)
+        self.tool_worker.finished.connect(self.tool_worker.deleteLater)
+        self.tool_worker.start()
+
+    def _handle_script_result(self, result):
+        self.tool_worker = None
+        self.script_result.setPlainText(self._format_payload(result.get("result") if result.get("ok") else result))
+
+    def _mcp_server_config(self):
+        for server in self.config_manager.get_mcp_servers():
+            skill_name = build_mcp_skill_name(server.get("id") or server.get("name") or "")
+            if skill_name == self.skill_name:
+                return json.loads(json.dumps(server, ensure_ascii=False))
+        return {}
+
+    def _build_mcp_tabs(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
+        self.mcp_server = self._mcp_server_config()
+        summary = QLabel(summarize_mcp_server(self.mcp_server) if self.mcp_server else "未找到 MCP 配置。")
+        summary.setWordWrap(True)
+        summary.setStyleSheet(apple_settings_inline_note_style())
+        layout.addWidget(summary)
+        row = QHBoxLayout()
+        list_btn = QPushButton("连接并列出 Tools")
+        list_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        list_btn.clicked.connect(self.list_mcp_tools)
+        edit_btn = QPushButton("编辑配置")
+        edit_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        edit_btn.clicked.connect(self.edit_mcp_config)
+        row.addWidget(list_btn)
+        row.addWidget(edit_btn)
+        row.addStretch()
+        layout.addLayout(row)
+        self.mcp_tool_combo = QComboBox()
+        layout.addWidget(self.mcp_tool_combo)
+        self.mcp_args = QTextEdit()
+        self.mcp_args.setPlaceholderText('{\n  "arg": "value"\n}')
+        self.mcp_args.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.mcp_args, 1)
+        call_row = QHBoxLayout()
+        call_row.addStretch()
+        call_btn = QPushButton("调用 Tool")
+        call_btn.setStyleSheet(apple_button_style("primary", radius=14))
+        call_btn.clicked.connect(self.call_mcp_selected_tool)
+        call_row.addWidget(call_btn)
+        layout.addLayout(call_row)
+        self.mcp_result = QTextEdit()
+        self.mcp_result.setReadOnly(True)
+        self.mcp_result.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
+        layout.addWidget(self.mcp_result, 1)
+        self.tabs.addTab(page, "MCP 调试")
+
+    def list_mcp_tools(self):
+        if not self.mcp_server:
+            QMessageBox.warning(self, "MCP 调试", "未找到 MCP 配置。")
+            return
+        self.mcp_result.setPlainText("Connecting...")
+        self.mcp_worker = McpToolDebugWorker("list", self.mcp_server, parent=self)
+        self.mcp_worker.finished_signal.connect(self._handle_mcp_list_result)
+        self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
+        self.mcp_worker.start()
+
+    def _handle_mcp_list_result(self, result):
+        self.mcp_worker = None
+        self.mcp_tool_combo.clear()
+        if result.get("ok"):
+            for tool in result.get("tools") or []:
+                self.mcp_tool_combo.addItem(str(tool.get("name") or ""), tool)
+        self.mcp_result.setPlainText(self._format_payload(result))
+
+    def call_mcp_selected_tool(self):
+        tool = self.mcp_tool_combo.currentData()
+        tool_name = tool.get("name") if isinstance(tool, dict) else str(self.mcp_tool_combo.currentText() or "")
+        if not tool_name:
+            QMessageBox.warning(self, "MCP 调试", "请先列出并选择 tool。")
+            return
+        args = self._parse_json_editor(self.mcp_args, {})
+        if args is None:
+            return
+        self.mcp_result.setPlainText("Calling...")
+        self.mcp_worker = McpToolDebugWorker("call", self.mcp_server, tool_name, args, self)
+        self.mcp_worker.finished_signal.connect(self._handle_mcp_call_result)
+        self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
+        self.mcp_worker.start()
+
+    def _handle_mcp_call_result(self, result):
+        self.mcp_worker = None
+        self.mcp_result.setPlainText(self._format_payload(result))
+
+    def edit_mcp_config(self):
+        if not self.mcp_server:
+            QMessageBox.warning(self, "MCP 调试", "未找到 MCP 配置。")
+            return
+        dialog = McpServerEditDialog(self.mcp_server, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        updated = dialog.get_server_config()
+        servers = self.config_manager.get_mcp_servers()
+        target_id = str(self.mcp_server.get("id") or "").strip()
+        for index, server in enumerate(servers):
+            if str(server.get("id") or "").strip() == target_id:
+                servers[index] = updated
+                break
+        self.config_manager.set_mcp_servers(servers)
+        self.skill_manager.load_skills()
+        self.mcp_server = updated
+        QMessageBox.information(self, "MCP 调试", "MCP 配置已保存并重新加载。")
+
 
 class SkillsCenterDialog(QDialog):
     def __init__(self, skill_manager, config_manager, parent=None):
@@ -4302,6 +4716,46 @@ class McpConnectionWorker(QThread):
             self.finished_signal.emit({"ok": False, "error": str(exc)})
 
 
+class SkillToolDebugWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, skill_manager, tool_name, arguments, parent=None):
+        super().__init__(parent)
+        self.skill_manager = skill_manager
+        self.tool_name = str(tool_name or "")
+        self.arguments = json.loads(json.dumps(arguments or {}, ensure_ascii=False))
+
+    def run(self):
+        try:
+            result = self.skill_manager.call_tool(self.tool_name, self.arguments, context={})
+            self.finished_signal.emit({"ok": True, "result": result})
+        except Exception as exc:
+            self.finished_signal.emit({"ok": False, "error": str(exc)})
+
+
+class McpToolDebugWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, action, server_config, tool_name="", arguments=None, parent=None):
+        super().__init__(parent)
+        self.action = str(action or "")
+        self.server_config = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
+        self.tool_name = str(tool_name or "")
+        self.arguments = json.loads(json.dumps(arguments or {}, ensure_ascii=False))
+
+    def run(self):
+        try:
+            if self.action == "list":
+                self.finished_signal.emit(list_mcp_server_tools(self.server_config))
+                return
+            if self.action == "call":
+                self.finished_signal.emit(call_mcp_tool(self.server_config, self.tool_name, self.arguments))
+                return
+            self.finished_signal.emit({"ok": False, "error": "Unknown MCP debug action."})
+        except Exception as exc:
+            self.finished_signal.emit({"ok": False, "error": str(exc)})
+
+
 class McpJsonImportDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5768,6 +6222,8 @@ class SkillsCenterDialog(QDialog):
         card_layout.setSpacing(12)
 
         skill_name = str(skill.get("name") or "").strip()
+        card.setCursor(Qt.PointingHandCursor)
+        card.mousePressEvent = lambda event, s=dict(skill): self.handle_skill_item_clicked(s)
         if self.selection_mode:
             select_box = QCheckBox()
             select_box.setChecked(skill_name in self.selected_skill_names)
@@ -5850,6 +6306,18 @@ class SkillsCenterDialog(QDialog):
         else:
             self.selected_skill_names.discard(skill_name)
         self._refresh_selection_actions()
+
+    def handle_skill_item_clicked(self, skill):
+        skill_name = str((skill or {}).get("name") or "").strip()
+        if not skill_name:
+            return
+        if self.selection_mode:
+            self.set_skill_selected(skill_name, skill_name not in self.selected_skill_names)
+            self._render_skill_groups()
+            return
+        dialog = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
+        dialog.exec()
+        self.refresh_list()
 
     def import_skill(self):
         dialog = QMessageBox(self)

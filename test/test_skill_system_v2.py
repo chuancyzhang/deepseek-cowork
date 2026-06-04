@@ -30,6 +30,14 @@ class TestSkillSystemV2(unittest.TestCase):
         sm.load_skills()
         return sm
 
+    def _build_light_manager(self):
+        sm = SkillManager.__new__(SkillManager)
+        sm.workspace_dir = self.temp_dir
+        sm.config_manager = None
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills = lambda: None
+        return sm
+
     def _copy_repo_skill(self, skill_name):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         source_dir = os.path.join(repo_root, "skills", skill_name)
@@ -362,7 +370,7 @@ class TestSkillSystemV2(unittest.TestCase):
                     indent=2,
                 )
 
-        sm = self._build_manager()
+        sm = self._build_light_manager()
         zip_path = os.path.join(self.temp_dir, "skill-collection.zip")
         success, message = sm.export_skill_collection(["portable-guide", "claim-helper"], zip_path)
 
@@ -372,21 +380,42 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("portable-guide/SKILL.md", names)
         self.assertIn("claim-helper/SKILL.md", names)
 
-        target_root = tempfile.mkdtemp(dir=self.temp_dir)
-        try:
-            target_manager = SkillManager(workspace_dir=target_root)
-            target_manager.skills_dirs = [
-                os.path.join(target_root, "skills"),
-                os.path.join(target_root, "ai_skills"),
-            ]
-            for path in target_manager.skills_dirs:
-                os.makedirs(path, exist_ok=True)
-            success, message = target_manager.import_skill(zip_path)
-            self.assertTrue(success, message)
-            self.assertTrue(os.path.isfile(os.path.join(target_root, "ai_skills", "portable-guide", "SKILL.md")))
-            self.assertTrue(os.path.isfile(os.path.join(target_root, "ai_skills", "claim-helper", "SKILL.md")))
-        finally:
-            shutil.rmtree(target_root, ignore_errors=True)
+    def test_skill_center_file_editing_allows_only_ai_skills(self):
+        builtin_dir = os.path.join(self.skills_dir, "builtin-guide")
+        custom_dir = os.path.join(self.ai_skills_dir, "custom-guide")
+        for skill_dir, skill_name in ((builtin_dir, "builtin-guide"), (custom_dir, "custom-guide")):
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(
+                    f"---\nname: {skill_name}\ndescription: {skill_name}\nkind: knowledge\n---\n"
+                    "# Skill Purpose\nUse this skill.\n"
+                )
+
+        sm = self._build_light_manager()
+
+        self.assertFalse(sm.is_skill_editable("builtin-guide"))
+        self.assertTrue(sm.is_skill_editable("custom-guide"))
+        rejected = sm.write_skill_file("builtin-guide", "SKILL.md", "nope")
+        self.assertFalse(rejected["ok"])
+        escaped = sm.write_skill_file("custom-guide", "../outside.md", "nope")
+        self.assertFalse(escaped["ok"])
+        saved = sm.write_skill_file("custom-guide", "notes.md", "hello")
+        self.assertTrue(saved["ok"], saved)
+        read_back = sm.read_skill_file("custom-guide", "notes.md")
+        self.assertEqual(read_back["content"], "hello")
+
+    def test_validate_skill_reports_invalid_json_and_missing_script(self):
+        skill_dir = os.path.join(self.ai_skills_dir, "broken-guide")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: broken-guide\nkind: knowledge\n---\n# Skill Purpose\nBroken.\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            f.write("{bad json")
+
+        sm = self._build_light_manager()
+        result = sm.validate_skill("broken-guide")
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("skill.json is invalid" in item for item in result["issues"]))
 
     def test_exported_zip_can_be_imported_back_with_original_skill_name(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)

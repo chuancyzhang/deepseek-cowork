@@ -25,6 +25,7 @@ from main import (
     AutomationTaskDialog,
     ChatBubble,
     MainWindow,
+    SessionState,
     SkillsCenterDialog,
     SopTemplateManager,
     SystemToast,
@@ -33,12 +34,14 @@ from main import (
     SubAgentMonitor,
     SOP_EXECUTOR_BASH_COMMAND,
     SOP_EXECUTOR_PYTHON_FILE,
+    _MARKDOWN_RENDER_CACHE,
+    render_markdown_or_html_with_cache,
     skill_center_matches_filters,
     summarize_skill_terms,
 )
 from PySide6.QtCore import QEvent, Qt, QMimeData
 from PySide6.QtGui import QTextOption
-from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 
 class _State:
@@ -735,6 +738,61 @@ class TestSopUiHelpers(unittest.TestCase):
 
         self.assertIsInstance(bubble.content_edit, AutoResizingPlainTextEdit)
         self.assertEqual(bubble.content_edit.toPlainText().count("line"), 180)
+
+    def test_markdown_render_cache_reuses_same_text(self):
+        _MARKDOWN_RENDER_CACHE.clear()
+        with patch("main.markdown.markdown", return_value="<p>cached</p>") as markdown_mock:
+            first_mode, first_html = render_markdown_or_html_with_cache("**cached**", final=True)
+            second_mode, second_html = render_markdown_or_html_with_cache("**cached**", final=True)
+
+        self.assertEqual(first_mode, "html")
+        self.assertEqual(first_html, second_html)
+        markdown_mock.assert_called_once()
+
+    def test_chat_bubble_virtualization_hides_and_restores_content(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("User", "hello", source_message_id="u1")
+        bubble.show()
+        app.processEvents()
+
+        bubble.set_virtualized(True)
+        self.assertTrue(bubble.is_virtualized())
+        self.assertFalse(bubble.content_wrapper.isVisible())
+
+        bubble.set_virtualized(False)
+        app.processEvents()
+
+        self.assertFalse(bubble.is_virtualized())
+        self.assertTrue(bubble.content_wrapper.isVisible())
+
+    def test_virtualize_session_bubbles_skips_active_tail_bubble(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        scroll = QScrollArea()
+        scroll.setWidget(host)
+        state = SessionState("session-1", layout, QLabel(), QWidget(), scroll)
+        window.sessions = {"session-1": state}
+        window.get_session = lambda sid=None: state
+
+        bubbles = [ChatBubble("User", f"msg {index}") for index in range(52)]
+        for bubble in bubbles:
+            layout.addWidget(bubble)
+        state.last_agent_bubble = bubbles[-1]
+        for index, bubble in enumerate(bubbles):
+            bubble.move(0, index * 60)
+            bubble.resize(300, 40)
+
+        scroll.setWidgetResizable(True)
+        scroll.resize(320, 160)
+        scroll.show()
+        app.processEvents()
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+        window.virtualize_session_bubbles("session-1")
+
+        self.assertFalse(bubbles[-1].is_virtualized())
+        self.assertTrue(any(bubble.is_virtualized() for bubble in bubbles[:-10]))
 
     def test_edit_user_message_from_branch_creates_new_session_and_resubmits(self):
         temp_dir = tempfile.mkdtemp()

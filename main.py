@@ -15,6 +15,7 @@ import glob
 import markdown
 import socket
 import threading
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
 from core.skill_manager import SkillManager
@@ -243,6 +244,9 @@ LONG_TEXT_PLAIN_LINE_THRESHOLD = 120
 UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
 SUB_AGENT_MONITOR_RENDER_LIMIT = 80
+MARKDOWN_RENDER_CACHE_SIZE = 160
+CHAT_BUBBLE_VIRTUALIZATION_MIN_BUBBLES = 48
+CHAT_BUBBLE_VIRTUALIZATION_OVERSCAN_PX = 1800
 BACKGROUND_TRAY_START_DELAY_MS = 120
 BACKGROUND_DAEMON_PREWARM_DELAY_MS = 480
 BACKGROUND_DAEMON_MONITOR_DELAY_MS = 1800
@@ -289,6 +293,96 @@ def append_background_process_log(filename, message):
             handle.write(f"[{timestamp}] {message}\n")
     except Exception:
         pass
+
+
+_MARKDOWN_RENDER_CACHE = OrderedDict()
+
+
+def markdown_render_style():
+    return f"""
+    <style>
+       body {{
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           line-height: 1.62;
+           color: {DesignTokens.text_primary};
+           margin: 0;
+           font-size: 14px;
+       }}
+       p {{ margin-top: 0; margin-bottom: 12px; }}
+       pre {{
+           background-color: {DesignTokens.bg_code};
+           padding: 12px 14px;
+           border-radius: 12px;
+           border: 1px solid {DesignTokens.border_subtle};
+           white-space: pre-wrap;
+           margin-bottom: 12px;
+           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+       }}
+       code {{
+           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+           font-size: 90%;
+           padding: 0.2em 0.4em;
+           background-color: {DesignTokens.bg_secondary};
+           border-radius: 6px;
+       }}
+       h1, h2, h3 {{ color: {DesignTokens.text_primary}; font-weight: 700; margin-top: 22px; margin-bottom: 10px; }}
+       h1 {{ font-size: 1.42em; border-bottom: 1px solid {DesignTokens.border_subtle}; padding-bottom: 0.3em; }}
+       h2 {{ font-size: 1.22em; }}
+       h3 {{ font-size: 1.08em; }}
+       a {{ color: {DesignTokens.primary}; text-decoration: none; }}
+       blockquote {{
+           border-left: 3px solid {DesignTokens.border};
+           color: {DesignTokens.text_secondary};
+           padding-left: 1em;
+           margin: 0 0 16px 0;
+       }}
+       table {{
+           border-collapse: separate;
+           border-spacing: 0;
+           width: 100%;
+           margin-bottom: 16px;
+           font-size: 13px;
+           border: 1px solid {DesignTokens.border_subtle};
+           border-radius: 10px;
+           overflow: hidden;
+       }}
+       th, td {{
+           border-bottom: 1px solid {DesignTokens.border_subtle};
+           border-right: 1px solid {DesignTokens.border_subtle};
+           padding: 8px 12px;
+           text-align: left;
+       }}
+       th {{
+           background-color: {DesignTokens.bg_secondary};
+           font-weight: 600;
+           color: {DesignTokens.text_secondary};
+           border-bottom: 1px solid {DesignTokens.border_subtle};
+       }}
+       tr:last-child td {{ border-bottom: none; }}
+       tr:hover td {{ background-color: {DesignTokens.bg_card_subtle}; }}
+       th:last-child, td:last-child {{ border-right: none; }}
+    </style>
+    """
+
+
+def render_markdown_or_html_with_cache(text, final=False):
+    text = text or ""
+    raw_html = extract_renderable_html_response(text) if final else ""
+    cache_kind = "raw_html" if raw_html else "markdown"
+    cache_key = (cache_kind, text)
+    cached = _MARKDOWN_RENDER_CACHE.get(cache_key)
+    if cached is not None:
+        _MARKDOWN_RENDER_CACHE.move_to_end(cache_key)
+        return cached
+    if raw_html:
+        result = ("raw_html", markdown_render_style() + raw_html)
+    else:
+        html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
+        result = ("html", markdown_render_style() + html_content)
+    _MARKDOWN_RENDER_CACHE[cache_key] = result
+    while len(_MARKDOWN_RENDER_CACHE) > MARKDOWN_RENDER_CACHE_SIZE:
+        _MARKDOWN_RENDER_CACHE.popitem(last=False)
+    return result
 
 def set_stylesheet_if_changed(widget, stylesheet):
     if widget.property("_cached_stylesheet") == stylesheet:
@@ -7744,7 +7838,12 @@ class ChatBubble(QFrame):
         self.content_wrapper = None
         self.user_bubble_frame = None
         self.user_content_edit = None
+        self.content_edit = None
         self.content_col = None
+        self.avatar_container = None
+        self._virtualized = False
+        self._virtualized_height = 0
+        self._virtualized_visible_state = {}
         self.source_message_id = str(source_message_id or "").strip()
         self.branch_btn = None
         self.edit_btn = None
@@ -7842,6 +7941,7 @@ class ChatBubble(QFrame):
             # Avatar
             avatar = Avatar("Agent", 28)
             avatar_container = QWidget()
+            self.avatar_container = avatar_container
             avatar_layout = QVBoxLayout(avatar_container)
             avatar_layout.setContentsMargins(0, 3, 0, 0) # Top margin for alignment
             avatar_layout.setSpacing(0)
@@ -8007,6 +8107,38 @@ class ChatBubble(QFrame):
                 
             main_layout.addWidget(content_col)
             # main_layout.addStretch() # Removed to allow content to take full width
+
+    def set_virtualized(self, virtualized):
+        virtualized = bool(virtualized)
+        if self._virtualized == virtualized:
+            return
+        if virtualized:
+            height = self.height() if self.height() > 0 else self.sizeHint().height()
+            self._virtualized_height = max(32, int(height or 32))
+            self.setUpdatesEnabled(False)
+            self._virtualized_visible_state = {}
+            for widget in (self.content_wrapper, self.content_col, self.avatar_container):
+                if widget is not None:
+                    self._virtualized_visible_state[id(widget)] = widget.isVisible()
+                    widget.setVisible(False)
+            self.setFixedHeight(self._virtualized_height)
+            self._virtualized = True
+            return
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        for widget in (self.content_wrapper, self.content_col, self.avatar_container):
+            if widget is not None:
+                widget.setVisible(self._virtualized_visible_state.get(id(widget), True))
+        self._virtualized_visible_state = {}
+        self._virtualized = False
+        self.setUpdatesEnabled(True)
+        if self.user_content_edit is not None:
+            self.user_content_edit.scheduleAdjustHeight()
+        if self.content_edit is not None:
+            self.content_edit.scheduleAdjustHeight()
+
+    def is_virtualized(self):
+        return bool(self._virtualized)
 
     def _create_branch_button(self):
         if self.branch_btn is not None:
@@ -8474,84 +8606,13 @@ class ChatBubble(QFrame):
         content_widget = self._set_main_content_view_mode(render_mode)
 
         try:
-            # GitHub-like CSS for Markdown
-            style = f"""
-            <style>
-               body {{ 
-                   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-                   line-height: 1.62; 
-                   color: {DesignTokens.text_primary}; 
-                   margin: 0; 
-                   font-size: 14px;
-               }}
-               p {{ margin-top: 0; margin-bottom: 12px; }}
-               pre {{ 
-                   background-color: {DesignTokens.bg_code}; 
-                   padding: 12px 14px; 
-                   border-radius: 12px; 
-                   border: 1px solid {DesignTokens.border_subtle}; 
-                   white-space: pre-wrap; 
-                   margin-bottom: 12px;
-                   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-               }}
-               code {{ 
-                   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; 
-                   font-size: 90%; 
-                   padding: 0.2em 0.4em; 
-                   background-color: {DesignTokens.bg_secondary}; 
-                   border-radius: 6px; 
-               }}
-               h1, h2, h3 {{ color: {DesignTokens.text_primary}; font-weight: 700; margin-top: 22px; margin-bottom: 10px; }}
-               h1 {{ font-size: 1.42em; border-bottom: 1px solid {DesignTokens.border_subtle}; padding-bottom: 0.3em; }}
-               h2 {{ font-size: 1.22em; }}
-               h3 {{ font-size: 1.08em; }}
-               a {{ color: {DesignTokens.primary}; text-decoration: none; }}
-               blockquote {{ 
-                   border-left: 3px solid {DesignTokens.border}; 
-                   color: {DesignTokens.text_secondary}; 
-                   padding-left: 1em; 
-                   margin: 0 0 16px 0; 
-               }}
-               table {{ 
-                   border-collapse: separate; 
-                   border-spacing: 0; 
-                   width: 100%; 
-                   margin-bottom: 16px; 
-                   font-size: 13px; 
-                   border: 1px solid {DesignTokens.border_subtle};
-                   border-radius: 10px;
-                   overflow: hidden;
-               }}
-               th, td {{ 
-                   border-bottom: 1px solid {DesignTokens.border_subtle}; 
-                   border-right: 1px solid {DesignTokens.border_subtle}; 
-                   padding: 8px 12px; 
-                   text-align: left; 
-               }}
-               th {{ 
-                   background-color: {DesignTokens.bg_secondary}; 
-                   font-weight: 600; 
-                   color: {DesignTokens.text_secondary};
-                   border-bottom: 1px solid {DesignTokens.border_subtle};
-               }}
-               tr:last-child td {{ border-bottom: none; }}
-               tr:hover td {{ background-color: {DesignTokens.bg_card_subtle}; }}
-               th:last-child, td:last-child {{ border-right: none; }}
-            </style>
-            """
             content_widget.setUpdatesEnabled(False)
             if render_mode == "plain":
                 self._render_plain_stream_content(text)
                 render_mode = "plain"
             else:
-                raw_html = extract_renderable_html_response(text) if final else ""
-                if raw_html:
-                    content_widget.setHtml(style + raw_html)
-                    render_mode = "raw_html"
-                else:
-                    html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
-                    content_widget.setHtml(style + html_content)
-                    render_mode = "html"
+                render_mode, html_content = render_markdown_or_html_with_cache(text, final=final)
+                content_widget.setHtml(html_content)
         except Exception:
             plain_widget = self._set_main_content_view_mode("plain")
             plain_widget.setUpdatesEnabled(False)
@@ -9384,6 +9445,7 @@ class SessionState:
         self.pending_tool_results = {}
         self.current_content_buffer = ""
         self.current_thinking_buffer = ""
+        self.last_flushed_content_buffer = ""
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
         self.llm_worker = None
@@ -9413,6 +9475,8 @@ class SessionState:
         self.auto_scroll_enabled = True
         self.scroll_flush_timer = None
         self.pending_scroll_force = False
+        self.virtualization_timer = None
+        self.virtualization_active = False
         self.active_turn_id = 0
         self.completed_turn_id = 0
         self.persisted_agents = []
@@ -10551,6 +10615,7 @@ class MainWindow(QMainWindow):
         self.pending_tool_results = {}
         self.current_content_buffer = ""
         self.current_thinking_buffer = ""
+        self.last_flushed_content_buffer = ""
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
         self.llm_worker = None
@@ -14173,6 +14238,7 @@ class MainWindow(QMainWindow):
         state.pending_tool_results = self.pending_tool_results
         state.current_content_buffer = self.current_content_buffer
         state.current_thinking_buffer = self.current_thinking_buffer
+        state.last_flushed_content_buffer = getattr(self, "last_flushed_content_buffer", "")
 
     def set_current_session(self, session_id):
         state = self.sessions.get(session_id)
@@ -14183,6 +14249,7 @@ class MainWindow(QMainWindow):
         self.pending_tool_results = getattr(state, "pending_tool_results", {})
         self.current_content_buffer = state.current_content_buffer
         self.current_thinking_buffer = getattr(state, "current_thinking_buffer", "")
+        self.last_flushed_content_buffer = getattr(state, "last_flushed_content_buffer", "")
         self.temp_thinking_bubble = state.temp_thinking_bubble
         self.last_agent_bubble = state.last_agent_bubble
         self.llm_worker = state.llm_worker
@@ -14392,6 +14459,10 @@ class MainWindow(QMainWindow):
         state.scroll_flush_timer.setSingleShot(True)
         state.scroll_flush_timer.setInterval(SCROLL_FLUSH_INTERVAL_MS)
         state.scroll_flush_timer.timeout.connect(lambda sid=session_id: self.flush_session_scroll(sid))
+        state.virtualization_timer = QTimer(self)
+        state.virtualization_timer.setSingleShot(True)
+        state.virtualization_timer.setInterval(90)
+        state.virtualization_timer.timeout.connect(lambda sid=session_id: self.virtualize_session_bubbles(sid))
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
         state.history_loaded = is_fresh_session
@@ -14414,6 +14485,7 @@ class MainWindow(QMainWindow):
         state.pending_tool_results = {}
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
         state.pending_thinking_delta = ""
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
@@ -14446,6 +14518,7 @@ class MainWindow(QMainWindow):
         state.persisted_agents = []
         state.sub_agent_events = []
         state.sub_agent_history_loaded = False
+        state.virtualization_active = False
 
     def _show_session_loading_state(self, state, text="正在加载历史会话…"):
         self.clear_chat_layout(state.chat_layout)
@@ -14492,6 +14565,7 @@ class MainWindow(QMainWindow):
         initial_spans = spans[start_idx:]
         state.displayed_render_count = len(initial_spans)
         self._render_session_history_spans(state, initial_spans)
+        self.queue_session_bubble_virtualization(state.session_id)
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
         try:
@@ -15673,6 +15747,7 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
+        self.queue_session_bubble_virtualization(session_id)
         vbar = state.chat_scroll.verticalScrollBar() if getattr(state, "chat_scroll", None) else None
         if vbar is not None:
             distance_to_bottom = max(0, vbar.maximum() - value)
@@ -15687,6 +15762,62 @@ class MainWindow(QMainWindow):
         if state.displayed_render_count >= len(getattr(state, "render_items", []) or []):
             return
         self.load_more_history(session_id=session_id)
+
+    def queue_session_bubble_virtualization(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state or not getattr(state, "chat_scroll", None):
+            return
+        timer = getattr(state, "virtualization_timer", None)
+        if timer:
+            if not timer.isActive():
+                timer.start()
+            return
+        self.virtualize_session_bubbles(state.session_id)
+
+    def _eligible_virtualized_bubbles(self, state):
+        widgets = []
+        for index in range(state.chat_layout.count()):
+            item = state.chat_layout.itemAt(index)
+            widget = item.widget() if item is not None else None
+            if isinstance(widget, ChatBubble):
+                widgets.append(widget)
+        return widgets
+
+    def virtualize_session_bubbles(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state or not getattr(state, "chat_scroll", None):
+            return
+        bubbles = self._eligible_virtualized_bubbles(state)
+        if len(bubbles) < CHAT_BUBBLE_VIRTUALIZATION_MIN_BUBBLES:
+            for bubble in bubbles:
+                if bubble.is_virtualized():
+                    bubble.set_virtualized(False)
+            state.virtualization_active = False
+            return
+
+        viewport = state.chat_scroll.viewport()
+        vbar = state.chat_scroll.verticalScrollBar()
+        top = int(vbar.value()) - CHAT_BUBBLE_VIRTUALIZATION_OVERSCAN_PX
+        bottom = int(vbar.value()) + int(viewport.height()) + CHAT_BUBBLE_VIRTUALIZATION_OVERSCAN_PX
+        active_bubbles = {
+            id(getattr(state, "temp_thinking_bubble", None)),
+            id(getattr(state, "last_agent_bubble", None)),
+        }
+        tail_keep = 10
+        last_tail_index = max(0, len(bubbles) - tail_keep)
+
+        any_virtualized = False
+        for index, bubble in enumerate(bubbles):
+            if id(bubble) in active_bubbles or index >= last_tail_index:
+                should_virtualize = False
+            else:
+                widget_top = bubble.y()
+                widget_bottom = widget_top + max(bubble.height(), bubble.sizeHint().height(), 1)
+                should_virtualize = widget_bottom < top or widget_top > bottom
+            if should_virtualize:
+                any_virtualized = True
+            bubble.set_virtualized(should_virtualize)
+        state.virtualization_active = any_virtualized
 
     def request_session_scroll_to_bottom(self, session_id=None, force=False):
         state = self.get_session(session_id)
@@ -15712,6 +15843,7 @@ class MainWindow(QMainWindow):
             return
         vbar = state.chat_scroll.verticalScrollBar()
         vbar.setValue(vbar.maximum())
+        self.queue_session_bubble_virtualization(session_id)
 
     def flush_session_scroll(self, session_id):
         state = self.get_session(session_id)
@@ -15751,6 +15883,7 @@ class MainWindow(QMainWindow):
             else:
                 vbar.setValue(old_val + (new_max - old_max))
             state.displayed_render_count += len(spans_to_load)
+            self.queue_session_bubble_virtualization(state.session_id)
         finally:
             state.auto_loading_history = False
 
@@ -17143,6 +17276,7 @@ class MainWindow(QMainWindow):
                 self.save_chat_history(session_id=state.session_id)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
         self.add_system_toast("任务已停止", "warning", session_id=state.session_id)
         self.set_session_phase("Interrupted", state.session_id)
         self.set_session_status("interrupted", state.session_id, save=True)
@@ -17296,6 +17430,7 @@ class MainWindow(QMainWindow):
         started_profiles = []
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
         self.set_session_phase("Delegating", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
@@ -17899,6 +18034,7 @@ class MainWindow(QMainWindow):
         # Keep latest message in view when appending.
         if index is None:
             self.request_session_scroll_to_bottom(state.session_id, force=force_scroll)
+        self.queue_session_bubble_virtualization(state.session_id)
             
         return bubble
 
@@ -17922,6 +18058,7 @@ class MainWindow(QMainWindow):
             turn_id = state.active_turn_id
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
         self.set_session_phase("Preparing", state.session_id)
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
@@ -17966,6 +18103,7 @@ class MainWindow(QMainWindow):
             turn_id = state.active_turn_id
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
         self.set_session_phase("Preparing", state.session_id)
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
@@ -18512,10 +18650,13 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
+        if not final and state.current_content_buffer == getattr(state, "last_flushed_content_buffer", ""):
+            return
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.set_main_content(state.current_content_buffer, final=final)
         elif state.last_agent_bubble:
             state.last_agent_bubble.set_main_content(state.current_content_buffer, final=final)
+        state.last_flushed_content_buffer = state.current_content_buffer
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def flush_session_thinking(self, session_id):
@@ -18663,6 +18804,7 @@ class MainWindow(QMainWindow):
             self.request_session_scroll_to_bottom(state.session_id, force=False)
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
+            state.last_flushed_content_buffer = ""
             self.set_session_phase("Error", state.session_id)
             self.set_session_status("error", state.session_id, save=True)
             if is_current: self.normalize_session_ui(state)
@@ -18790,6 +18932,7 @@ class MainWindow(QMainWindow):
         self.save_chat_history(session_id=state.session_id)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
+        state.last_flushed_content_buffer = ""
         self.update_session_tab_title(state.session_id)
         clarify_active = bool(state.clarify_mode_enabled)
         if clarify_active:

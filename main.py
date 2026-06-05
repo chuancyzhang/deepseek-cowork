@@ -5990,7 +5990,7 @@ class SkillsCenterDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
         header.setSpacing(12)
         title_box = QVBoxLayout()
         title_box.setSpacing(6)
@@ -6001,31 +6001,36 @@ class SkillsCenterDialog(QDialog):
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
-        header.addLayout(title_box, 1)
+        header.addLayout(title_box)
+
+        header_actions = QHBoxLayout()
+        header_actions.setSpacing(10)
+        header_actions.addStretch()
         self.import_btn = QPushButton("导入自定义能力")
         self.import_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.import_btn.setIcon(qta.icon('fa5s.box-open', color=DesignTokens.text_secondary))
+        self.import_btn.setMinimumWidth(168)
         self.import_btn.clicked.connect(self.import_skill)
         self.more_btn = QPushButton("更多")
         self.more_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.more_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        self.more_btn.setMinimumWidth(104)
         more_menu = QMenu(self)
         refresh_action = QAction("刷新", self)
         refresh_action.triggered.connect(self.manual_refresh)
         more_menu.addAction(refresh_action)
         self.more_btn.setMenu(more_menu)
-        header.addWidget(self.import_btn)
-        header.addWidget(self.more_btn)
+        header_actions.addWidget(self.import_btn, 0, Qt.AlignRight)
+        header_actions.addWidget(self.more_btn, 0, Qt.AlignRight)
+        header.addLayout(header_actions)
         layout.addLayout(header)
 
-        filters_row = QHBoxLayout()
-        filters_row.setSpacing(12)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索能力名称、描述或工具")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setStyleSheet(apple_search_field_style())
         self.search_input.textChanged.connect(self._on_search_text_changed)
-        filters_row.addWidget(self.search_input, 1)
+        layout.addWidget(self.search_input)
 
         segmented_frame = QFrame()
         segmented_frame.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.76)"))
@@ -6040,14 +6045,22 @@ class SkillsCenterDialog(QDialog):
             btn.clicked.connect(lambda checked=False, value=key: self.set_status_filter(value))
             segmented_layout.addWidget(btn)
             self.filter_buttons[key] = btn
-        filters_row.addWidget(segmented_frame, 0)
+
         self.selection_toggle_btn = QPushButton("选择")
         self.selection_toggle_btn.setStyleSheet(apple_button_style("ghost", radius=13))
         self.selection_toggle_btn.clicked.connect(self.toggle_selection_mode)
-        filters_row.addWidget(self.selection_toggle_btn, 0)
 
         self.count_label = QLabel("")
         self.count_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        self.count_label.setMinimumWidth(0)
+        self.count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.count_label.setWordWrap(True)
+
+        filters_row = QHBoxLayout()
+        filters_row.setSpacing(12)
+        filters_row.addWidget(segmented_frame, 0)
+        filters_row.addWidget(self.selection_toggle_btn, 0)
+        filters_row.addStretch()
         filters_row.addWidget(self.count_label, 0, Qt.AlignRight | Qt.AlignVCenter)
         layout.addLayout(filters_row)
 
@@ -6086,7 +6099,7 @@ class SkillsCenterDialog(QDialog):
         self._set_scroll_area_chrome(self.scroll_standard)
         self.content_standard = QWidget()
         self.layout_content_standard = QVBoxLayout(self.content_standard)
-        self.layout_content_standard.setContentsMargins(8, 8, 8, 8)
+        self.layout_content_standard.setContentsMargins(8, 8, 8, 18)
         self.layout_content_standard.setSpacing(10)
         self.layout_content_standard.addStretch()
         self.scroll_standard.setWidget(self.content_standard)
@@ -6100,7 +6113,7 @@ class SkillsCenterDialog(QDialog):
         self._set_scroll_area_chrome(self.scroll_ai)
         self.content_ai = QWidget()
         self.layout_content_ai = QVBoxLayout(self.content_ai)
-        self.layout_content_ai.setContentsMargins(8, 8, 8, 8)
+        self.layout_content_ai.setContentsMargins(8, 8, 8, 18)
         self.layout_content_ai.setSpacing(10)
         self.layout_content_ai.addStretch()
         self.scroll_ai.setWidget(self.content_ai)
@@ -6209,7 +6222,7 @@ class SkillsCenterDialog(QDialog):
         self.count_label.setText(f"显示 {len(visible)} / {len(total)} 个能力{selected_text}")
 
     def _current_column_count(self):
-        return 2 if self.width() >= 860 else 1
+        return 2 if self.width() >= 980 else 1
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -6316,6 +6329,7 @@ class SkillsCenterDialog(QDialog):
         if tools:
             tool_label = QLabel(summarize_skill_terms(tools, max_items=3, max_chars=36))
             tool_label.setStyleSheet(f"font-size: 11px; color: {DesignTokens.text_tertiary};")
+            tool_label.setToolTip("、".join([str(item) for item in tools]))
             meta_row.addWidget(tool_label, 0, Qt.AlignLeft)
         meta_row.addStretch()
         info_col.addLayout(meta_row)
@@ -6830,8 +6844,10 @@ class AutoResizingInputEdit(QTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameStyle(QFrame.NoFrame)
+        self.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.textChanged.connect(self.scheduleAdjustHeight)
-        self.setFixedHeight(40) # Initial height
+        self.setFixedHeight(40)
         self.min_height = 40
         self.max_height = 150
         self.anim = None
@@ -6858,7 +6874,8 @@ class AutoResizingInputEdit(QTextEdit):
 
     def adjustHeight(self):
         self._height_adjust_pending = False
-        doc_height = self.document().size().height()
+        self.document().setTextWidth(max(0.0, float(self.viewport().width())))
+        doc_height = self.document().documentLayout().documentSize().height()
         doc_margin = int(self.document().documentMargin() * 2)
         margins = self.contentsMargins()
         viewport_margins = self.viewportMargins()
@@ -6872,8 +6889,6 @@ class AutoResizingInputEdit(QTextEdit):
             + viewport_margins.bottom()
             + frame_width
         )
-        
-        # Clamp height
         if height < self.min_height:
             height = self.min_height
         elif height > self.max_height:
@@ -7363,6 +7378,71 @@ class HistoryTitleButton(QLabel):
             return
         super().mouseReleaseEvent(event)
 
+
+class ElidedToolLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full_text = str(text or "")
+        self._display_text = ""
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setTextInteractionFlags(Qt.NoTextInteraction)
+        self._apply_elide()
+
+    def setFullText(self, text):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        self._apply_elide()
+
+    def fullText(self):
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        metrics = QFontMetrics(self.font())
+        available = max(36, self.contentsRect().width())
+        display = metrics.elidedText(self._full_text, Qt.ElideRight, available)
+        if display != self._display_text:
+            self._display_text = display
+            self.setText(display)
+
+
+class StatusPill(QFrame):
+    def __init__(self, text="", icon_name="fa5s.exclamation-circle", icon_color=None, parent=None):
+        super().__init__(parent)
+        icon_color = icon_color or DesignTokens.warning_icon
+        self.setObjectName("StatusPill")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(300)
+        self.setStyleSheet(
+            f"QFrame#StatusPill {{ background: {DesignTokens.warning_bg}; border: 1px solid {DesignTokens.warning_border}; "
+            f"border-radius: 14px; }}"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(6)
+
+        self.icon_label = QLabel()
+        self.icon_label.setPixmap(qta.icon(icon_name, color=icon_color).pixmap(12, 12))
+        layout.addWidget(self.icon_label, 0, Qt.AlignVCenter)
+
+        self.text_label = ElidedToolLabel(text)
+        self.text_label.setStyleSheet(
+            f"color: {DesignTokens.warning_text}; font-size: 11px; font-weight: 600;"
+        )
+        layout.addWidget(self.text_label, 1)
+
+    def setText(self, text):
+        self.text_label.setFullText(text)
+
+    def text(self):
+        return self.text_label.fullText()
+
 class EmptyStateWidget(QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -7482,8 +7562,11 @@ class SystemToast(QFrame):
         super().__init__()
         self.setObjectName("SystemToast")
         self.setFrameShape(QFrame.NoFrame)
-        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self.setMaximumWidth(min(DesignTokens.message_max_width - 120, 720))
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._applied_max_width = min(DesignTokens.message_max_width - 60, 720)
+        self._applied_min_width = DesignTokens.toast_min_width
+        self.setMinimumWidth(self._applied_min_width)
+        self.setMaximumWidth(self._applied_max_width)
 
         icon_name = "fa5s.info-circle"
         icon_color = DesignTokens.info_icon
@@ -7546,6 +7629,15 @@ class SystemToast(QFrame):
         self.message_label = msg_label
         self.icon_badge = icon_badge
         self.icon_label = icon_badge
+
+    def apply_dynamic_width(self, message_width):
+        target = max(DesignTokens.toast_min_width, min(int(message_width or 0), 720))
+        min_width = min(DesignTokens.toast_min_width, target)
+        self._applied_max_width = target
+        self._applied_min_width = min_width
+        self.setMinimumWidth(min_width)
+        self.setMaximumWidth(target)
+        self.updateGeometry()
 
 
 def file_chip_icon_name(path):
@@ -11310,11 +11402,7 @@ class MainWindow(QMainWindow):
         self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
         self.action_btn.clicked.connect(self.on_action_clicked)
         
-        self.loop_hint = QPushButton(" 循环中")
-        self.loop_hint.setText(" 处理中")
-        self.loop_hint.setIcon(qta.icon('fa5s.exclamation-circle', color='#ef4444'))
-        self.loop_hint.setFlat(True)
-        self.loop_hint.setStyleSheet(f"color: {DesignTokens.warning_text}; font-size: 11px; margin-right: 8px; border: none; text-align: left;")
+        self.loop_hint = StatusPill("处理中")
         self.loop_hint.setVisible(False)
 
         # Input Layout
@@ -11354,7 +11442,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.selected_skills_badge)
         prompt_toolbar.addWidget(self.clarify_mode_badge)
         prompt_toolbar.addWidget(self.pause_btn)
-        prompt_toolbar.addWidget(self.loop_hint)
+        prompt_toolbar.addWidget(self.loop_hint, 1)
         prompt_toolbar.addStretch()
         prompt_toolbar.addWidget(self.model_select_combo)
         prompt_toolbar.addWidget(self.action_btn)
@@ -11534,7 +11622,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "main_content_layout"):
             return
         left, top, right, bottom = self.main_content_default_margins
-        self.main_content_layout.setContentsMargins(left, top, right, bottom)
+        reserve = 0
+        if getattr(self, "right_drawer_open", False) and drawer_width:
+            reserve = max(0, int(drawer_width) + int(self.context_drawer_gap))
+        self.content_area_layout.setContentsMargins(left, top, reserve, bottom)
+        self.main_content_layout.setContentsMargins(0, 0, 0, 0)
 
     def _clamp_int(self, value, minimum, maximum):
         minimum = int(minimum)
@@ -11560,28 +11652,39 @@ class MainWindow(QMainWindow):
         return max(available, 0)
 
     def _conversation_available_width(self, drawer_geometry=None):
-        return max(self._main_content_shell_width(drawer_geometry), DesignTokens.conversation_min_width)
+        return max(self._main_content_shell_width(drawer_geometry), 0)
 
     def _compute_conversation_shell_metrics(self, drawer_geometry=None):
         shell_width = self._main_content_shell_width(drawer_geometry)
         drawer_open = self._drawer_is_active(drawer_geometry)
+        compact_min = (
+            DesignTokens.conversation_open_compact_min_width
+            if drawer_open else
+            DesignTokens.conversation_compact_min_width
+        )
+        max_conversation_width = min(DesignTokens.conversation_max_width, shell_width)
+        min_conversation_width = min(
+            DesignTokens.conversation_min_width if not drawer_open else DesignTokens.conversation_open_min_width,
+            max_conversation_width,
+        )
+        compact_conversation_width = min(compact_min, max_conversation_width)
         if drawer_open:
             conversation_width = self._clamp_int(
                 int(shell_width * DesignTokens.conversation_open_target_ratio),
-                DesignTokens.conversation_open_min_width,
+                compact_conversation_width,
                 min(DesignTokens.conversation_open_max_width, shell_width),
             )
         else:
             conversation_width = self._clamp_int(
                 int(shell_width * DesignTokens.conversation_closed_target_ratio),
-                DesignTokens.conversation_closed_min_width,
+                min(DesignTokens.conversation_closed_min_width, max_conversation_width),
                 min(DesignTokens.conversation_closed_max_width, shell_width),
             )
-        conversation_width = self._clamp_int(
-            conversation_width,
-            DesignTokens.conversation_min_width,
-            min(DesignTokens.conversation_max_width, shell_width),
-        )
+        conversation_width = min(conversation_width, max_conversation_width)
+        if not drawer_open and shell_width >= DesignTokens.conversation_min_width:
+            conversation_width = max(conversation_width, min_conversation_width)
+        else:
+            conversation_width = max(conversation_width, compact_conversation_width)
         remaining = max(0, shell_width - conversation_width)
         if drawer_open:
             left_spacer_width = int(round(remaining * DesignTokens.conversation_open_left_spacer_ratio))
@@ -11619,17 +11722,28 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, ChatBubble):
                     yield widget
 
+    def _iter_session_system_toasts(self):
+        for state in getattr(self, "sessions", {}).values():
+            chat_layout = getattr(state, "chat_layout", None)
+            if chat_layout is None:
+                continue
+            for index in range(chat_layout.count()):
+                item = chat_layout.itemAt(index)
+                widget = item.widget() if item is not None else None
+                if isinstance(widget, SystemToast):
+                    yield widget
+
     def sync_conversation_widths(self, drawer_geometry=None):
         metrics = self._compute_conversation_shell_metrics(drawer_geometry)
         conversation_width = int(metrics.get("conversation_width", DesignTokens.conversation_min_width) or DesignTokens.conversation_min_width)
         message_width = self._clamp_int(
             int(conversation_width * DesignTokens.message_width_ratio),
-            DesignTokens.message_min_width,
+            min(DesignTokens.message_compact_min_width, conversation_width),
             min(DesignTokens.message_max_width, conversation_width),
         )
         user_bubble_width = self._clamp_int(
             int(message_width * DesignTokens.user_bubble_ratio),
-            DesignTokens.user_bubble_min_width,
+            min(DesignTokens.user_bubble_compact_min_width, message_width),
             min(DesignTokens.user_bubble_max_width, message_width),
         )
 
@@ -11645,6 +11759,8 @@ class MainWindow(QMainWindow):
 
         for bubble in self._iter_session_chat_bubbles():
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
+        for toast in self._iter_session_system_toasts():
+            toast.apply_dynamic_width(message_width)
 
     def sync_context_drawer_layout(self):
         geometry = self._compute_context_drawer_geometry()
@@ -13077,6 +13193,8 @@ class MainWindow(QMainWindow):
             return
         state.run_phase = phase
         if state.session_id == self.current_session_id:
+            if hasattr(self, "loop_hint"):
+                self.loop_hint.setText(phase or "处理中")
             self.refresh_context_badges(state.session_id)
 
     def set_session_status(self, status, session_id=None, save=False):
@@ -14066,7 +14184,10 @@ class MainWindow(QMainWindow):
             self.action_btn.setEnabled(True)
             self.input_field.setEnabled(False)
             self.pause_btn.setVisible(bool(running))
-            self.loop_hint.setVisible(bool(running_daemon or running_code))
+            loop_text = getattr(state, "run_phase", "") or ("处理中" if (running_daemon or running_code) else "")
+            self.loop_hint.setText(loop_text or "处理中")
+            self.loop_hint.setToolTip(loop_text or "处理中")
+            self.loop_hint.setVisible(bool(running_daemon or running_code or loop_text))
             if paused:
                 self.pause_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.success_text))
                 self.pause_btn.setToolTip("继续")
@@ -17721,6 +17842,7 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state: return
         toast = SystemToast(text, type)
+        toast.apply_dynamic_width(self.dynamic_message_width)
         state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast, 0, Qt.AlignHCenter)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
         self.process_ui_events(force=True)

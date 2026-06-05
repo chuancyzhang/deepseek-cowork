@@ -69,21 +69,26 @@ class DesignTokens:
     drawer_width_ratio = 0.24
 
     conversation_min_width = 840
+    conversation_compact_min_width = 560
     conversation_max_width = 1240
     conversation_closed_min_width = 900
     conversation_closed_max_width = 1240
     conversation_closed_target_ratio = 0.72
     conversation_open_min_width = 840
+    conversation_open_compact_min_width = 560
     conversation_open_max_width = 1180
     conversation_open_target_ratio = 0.78
     conversation_open_left_spacer_ratio = 0.40
 
     message_min_width = 720
+    message_compact_min_width = 420
     message_max_width = 940
     message_width_ratio = 0.80
     user_bubble_min_width = 620
+    user_bubble_compact_min_width = 360
     user_bubble_max_width = 820
     user_bubble_ratio = 0.84
+    toast_min_width = 260
 
     success_bg = "#f0fdf4"
     success_text = "#166534"

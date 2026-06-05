@@ -22,7 +22,9 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **多模态附件建模**：输入区把普通文件记录为 `input_file`，把 PNG/JPEG/WEBP/GIF 记录为 `input_image`；provider 在发送前再决定是否转换成视觉请求。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理；定时计划支持快捷配置和 crontab 表达式双入口。
 *   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。子 Agent 面板按时间线拆分显示任务输入、工具调用、工具结果、流式输出与最终输出。
-*   **后台 daemon 连接**：UI 只发起短任务排队，不在点击开始或自动化分发时同步等待 daemon ping/retry；daemon 未就绪时当前请求立即走本地 worker。
+*   **后台 daemon 连接**：UI 只发起短任务排队，不在点击开始或自动化分发时同步等待 daemon ping/retry；daemon 请求会在后台合并，避免重复点击堆出多个启动任务；daemon 未就绪时当前请求立即走本地 worker。
+*   **分阶段后台启动**：主窗口先完成显示，再延后初始化托盘、daemon 预热、daemon monitor 和自动化调度，减少首屏阶段的同步负载。
+*   **后台进程单例锁**：daemon 与企业消息网关子进程在入口处通过文件锁保证唯一实例，即使多入口同时触发也只保留一个存活进程。
 *   **长对话轻量渲染**：长会话打开时不再先构造整段 render items；历史按跨度分页渲染，超长回复切换为纯文本视图，避免 `QTextEdit` 富文本重排拖慢滚动和切换会话。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。

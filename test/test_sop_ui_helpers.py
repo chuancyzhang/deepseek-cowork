@@ -13,6 +13,10 @@ from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
 from core.chat_storage import ChatStorage
 from core.theme import DesignTokens
 from main import (
+    BACKGROUND_AUTOMATION_START_DELAY_MS,
+    BACKGROUND_DAEMON_MONITOR_DELAY_MS,
+    BACKGROUND_DAEMON_PREWARM_DELAY_MS,
+    BACKGROUND_TRAY_START_DELAY_MS,
     QApplication,
     AppleSelectionCheck,
     AppleSwitch,
@@ -1156,6 +1160,76 @@ class TestSopUiHelpers(unittest.TestCase):
             window._queue_render_sub_agent_monitor_for_state(state, delay_ms=250)
 
         single_shot.assert_not_called()
+
+    def test_start_background_services_schedules_staged_tasks(self):
+        window = MainWindow.__new__(MainWindow)
+        window._background_services_started = False
+
+        with patch("main.QTimer.singleShot") as single_shot:
+            window.start_background_services()
+
+        self.assertTrue(window._background_services_started)
+        self.assertEqual(
+            [call.args[0] for call in single_shot.call_args_list],
+            [
+                BACKGROUND_TRAY_START_DELAY_MS,
+                BACKGROUND_DAEMON_PREWARM_DELAY_MS,
+                BACKGROUND_DAEMON_MONITOR_DELAY_MS,
+                BACKGROUND_AUTOMATION_START_DELAY_MS,
+            ],
+        )
+
+    def test_queue_daemon_connection_coalesces_pending_request_while_worker_running(self):
+        window = MainWindow.__new__(MainWindow)
+        window.daemon_connect_worker = MagicMock()
+        window.daemon_connect_worker.isRunning.return_value = True
+        window.daemon_connect_worker.allow_start = False
+        window.daemon_bootstrapping = False
+        window._pending_daemon_connect_allow_start = False
+        window._pending_daemon_connect_retries = 0
+        window.refresh_context_badges = MagicMock()
+
+        window.queue_daemon_connection(allow_start=True, retries=4)
+        window.queue_daemon_connection(allow_start=False, retries=6)
+
+        self.assertTrue(window._pending_daemon_connect_allow_start)
+        self.assertEqual(window._pending_daemon_connect_retries, 6)
+        self.assertTrue(window.daemon_bootstrapping)
+
+    def test_handle_daemon_connect_finished_drains_pending_request(self):
+        window = MainWindow.__new__(MainWindow)
+        window.daemon_host = "127.0.0.1"
+        window.daemon_port = 23333
+        window.daemon_runtime_signature = "sig"
+        window.daemon_client = None
+        window.daemon_process = None
+        window.daemon_connect_worker = MagicMock()
+        window._pending_daemon_connect_allow_start = True
+        window._pending_daemon_connect_retries = 6
+        window.refresh_context_badges = MagicMock()
+        worker = MagicMock()
+        worker.finished_signal = MagicMock()
+        worker.finished = MagicMock()
+
+        with patch("main.DaemonConnectWorker", return_value=worker):
+            window.handle_daemon_connect_finished({"connected": False})
+
+        self.assertIs(window.daemon_connect_worker, worker)
+        self.assertEqual(window._pending_daemon_connect_retries, 0)
+        self.assertFalse(window._pending_daemon_connect_allow_start)
+        self.assertTrue(window.daemon_bootstrapping)
+        worker.start.assert_called_once()
+
+    def test_start_gateway_process_skips_duplicate_start_while_bootstrapping(self):
+        window = MainWindow.__new__(MainWindow)
+        window.gateway_starting = True
+        window.gateway_process = None
+        window.gateway_log_file = None
+
+        with patch("main.subprocess.Popen") as popen:
+            window.start_gateway_process()
+
+        popen.assert_not_called()
 
     def test_render_sub_agent_monitor_truncates_to_stable_limit(self):
         window = MainWindow.__new__(MainWindow)

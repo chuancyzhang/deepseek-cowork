@@ -1,6 +1,6 @@
 import unittest
 
-from core.conversation_render import build_conversation_render_items
+from core.conversation_render import build_conversation_render_items, build_conversation_render_spans
 
 
 class TestConversationRender(unittest.TestCase):
@@ -95,6 +95,18 @@ class TestConversationRender(unittest.TestCase):
             ]
         )
         self.assertEqual(len(items[0]["content_parts"]), 2)
+
+    def test_build_conversation_render_spans_groups_non_user_clusters(self):
+        spans = build_conversation_render_spans(
+            [
+                {"id": "u1", "role": "user", "content": "hello"},
+                {"id": "a1", "role": "assistant", "content": "thinking"},
+                {"id": "t1", "role": "tool", "tool_call_id": "tool-1", "content": "ok"},
+                {"id": "a2", "role": "assistant", "content": "done"},
+                {"id": "u2", "role": "user", "content": "next"},
+            ]
+        )
+        self.assertEqual(spans, [{"start": 0, "end": 1}, {"start": 1, "end": 4}, {"start": 4, "end": 5}])
 
 
 if __name__ == "__main__":

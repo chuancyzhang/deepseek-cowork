@@ -17,7 +17,7 @@ from main import (
     AppleSelectionCheck,
     AppleSwitch,
     AutoResizingInputEdit,
-    AutoResizingTextEdit,
+    AutoResizingPlainTextEdit,
     AutomationTaskDialog,
     ChatBubble,
     MainWindow,
@@ -713,13 +713,24 @@ class TestSopUiHelpers(unittest.TestCase):
         bubble.show()
         app.processEvents()
 
-        self.assertIsInstance(bubble.user_content_edit, AutoResizingTextEdit)
+        self.assertIsInstance(bubble.user_content_edit, AutoResizingPlainTextEdit)
         self.assertEqual(
             bubble.user_content_edit.wordWrapMode(),
             QTextOption.WrapAtWordBoundaryOrAnywhere,
         )
         self.assertLessEqual(bubble.user_content_edit.width(), 190)
         self.assertGreater(bubble.user_content_edit.height(), 24)
+
+    def test_chat_bubble_agent_uses_plain_view_for_long_final_content(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("Agent", "")
+
+        bubble.set_main_content("line\n" * 180, final=True)
+        bubble.show()
+        app.processEvents()
+
+        self.assertIsInstance(bubble.content_edit, AutoResizingPlainTextEdit)
+        self.assertEqual(bubble.content_edit.toPlainText().count("line"), 180)
 
     def test_edit_user_message_from_branch_creates_new_session_and_resubmits(self):
         temp_dir = tempfile.mkdtemp()

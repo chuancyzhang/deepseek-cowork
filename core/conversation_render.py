@@ -140,3 +140,29 @@ def build_conversation_render_items(messages):
 
     flush_group()
     return items
+
+
+def build_conversation_render_spans(messages):
+    spans = []
+    group_start = None
+
+    def flush_group(end_index):
+        nonlocal group_start
+        if group_start is None:
+            return
+        spans.append({"start": group_start, "end": end_index})
+        group_start = None
+
+    for index, raw_message in enumerate(messages or []):
+        if not isinstance(raw_message, dict):
+            continue
+        role = raw_message.get("role") or ""
+        if role == "user":
+            flush_group(index)
+            spans.append({"start": index, "end": index + 1})
+            continue
+        if group_start is None:
+            group_start = index
+
+    flush_group(len(messages or []))
+    return spans

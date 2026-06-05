@@ -1222,6 +1222,47 @@ class ChatStorage:
             )
         return transcripts
 
+    def migrate_legacy_json_histories(self, remove_source=False):
+        history_dir = os.path.dirname(self.db_path)
+        if not os.path.isdir(history_dir):
+            return 0
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id FROM conversations").fetchall()
+        existing_ids = {row["id"] for row in rows}
+        migrated = 0
+        for filename in sorted(os.listdir(history_dir)):
+            if not (filename.startswith("chat_history_") and filename.endswith(".json")):
+                continue
+            session_id = filename[len("chat_history_") : -len(".json")]
+            if session_id in existing_ids:
+                continue
+            path = os.path.join(history_dir, filename)
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    raw_messages = json.load(handle)
+            except Exception:
+                continue
+            if not isinstance(raw_messages, list) or not raw_messages:
+                continue
+            messages = self.normalize_messages(raw_messages)
+            if not messages:
+                continue
+            self.save_conversation(
+                session_id,
+                messages,
+                title=self._legacy_title(messages),
+                status="legacy",
+                meta={"migrated_from_legacy_json": True},
+            )
+            existing_ids.add(session_id)
+            migrated += 1
+            if remove_source:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        return migrated
+
     def _legacy_title(self, messages):
         for message in messages:
             if message.get("role") == "user":

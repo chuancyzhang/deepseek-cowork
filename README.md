@@ -42,6 +42,8 @@ Current app version: **4.8.5**.
 *   **Safe Sub-Agent Lifecycle**: Sub-agent completion, status streaming, and worker-thread cleanup are separated so parallel workers can finish or restart without destabilizing the desktop app.
 *   **Smoother Settings Saves**: The settings dialog batches model, MCP, agent, workspace, and IM configuration updates into a single disk write to reduce UI stalls during save.
 *   **Smoother Launch & Run Actions**: Daemon connection now bootstraps in the background, so starting a task or running code no longer waits on repeated UI-thread connection retries.
+*   **Long Conversation Fast Path**: Opening or searching the sidebar now stays on the SQLite history index by default instead of scanning every legacy `chat_history_*.json` file on each refresh; older JSON sessions can be migrated manually from the sidebar menu.
+*   **Lightweight Long-Reply Rendering**: Very long assistant responses stay fully visible, but switch from Markdown HTML to a plain-text view once they become large enough to hurt scrolling or chat-open performance.
 *   **Hidden Windows Console Launches**: Python, Bash, updater fallback, app launch, and system-tool subprocesses share a no-window launch path on Windows to avoid flashing CMD windows during normal use.
 *   **On-Demand Runtime Diagnostics**: High-frequency sub-agent lifecycle diagnostics are off by default; set `COWORK_RUNTIME_DEBUG_LOG=1` to write `sub_agent_runtime.log` under the app data directory, or `user_data/` in portable mode.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.

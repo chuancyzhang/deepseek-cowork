@@ -98,6 +98,27 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual(messages[0]["content"], "hello edited")
         self.assertEqual([msg["id"] for msg in messages], ["m1", "m2"])
 
+    def test_migrate_legacy_json_histories_imports_missing_sessions(self):
+        storage = ChatStorage(self.db_path)
+        legacy_path = os.path.join(self.temp_dir, "chat_history_legacy-session.json")
+        with open(legacy_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                [
+                    {"role": "user", "content": "legacy hello"},
+                    {"role": "assistant", "content": "legacy world"},
+                ],
+                handle,
+                ensure_ascii=False,
+            )
+
+        migrated = storage.migrate_legacy_json_histories()
+
+        self.assertEqual(migrated, 1)
+        record = storage.get_conversation_record("legacy-session")
+        self.assertIsNotNone(record)
+        self.assertEqual(record["title"], "legacy hello")
+        self.assertTrue(record["meta"]["migrated_from_legacy_json"])
+
     def test_existing_database_is_migrated_with_new_message_columns(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(

@@ -28,7 +28,7 @@ from core.single_instance import (
     notify_existing_ui,
 )
 from core.chat_storage import ChatStorage
-from core.conversation_render import build_conversation_render_items
+from core.conversation_render import build_conversation_render_spans
 from core.html_render import extract_renderable_html_response
 from core.theme import apply_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
@@ -149,7 +149,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
+                               QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
 from PySide6.QtWidgets import QProgressBar
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime
 
@@ -233,6 +233,8 @@ SCROLL_FLUSH_INTERVAL_MS = 24
 SCROLL_BOTTOM_THRESHOLD_PX = 36
 STREAM_RENDER_INTERVAL_SEC = 0.12
 STREAM_PLAIN_TEXT_THRESHOLD = 2400
+LONG_TEXT_PLAIN_RENDER_THRESHOLD = 6000
+LONG_TEXT_PLAIN_LINE_THRESHOLD = 120
 UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
 SUB_AGENT_MONITOR_RENDER_LIMIT = 80
@@ -1397,7 +1399,9 @@ class SettingsDialog(QDialog):
         gateway_btn.setIcon(qta.icon('fa5s.play', color='#374151'))
         def start_gateway():
             try:
-                if hasattr(self._main, "try_connect_daemon"):
+                if hasattr(self._main, "queue_daemon_connection"):
+                    self._main.queue_daemon_connection(allow_start=True, retries=6)
+                elif hasattr(self._main, "try_connect_daemon"):
                     self._main.try_connect_daemon(allow_start=True, retries=6)
                 if hasattr(self._main, "start_gateway_process"):
                     self._main.start_gateway_process()
@@ -5707,7 +5711,9 @@ class SettingsDialog(QDialog):
         def start_gateway():
             try:
                 self._save_im_gateway_config()
-                if hasattr(self._main, "try_connect_daemon"):
+                if hasattr(self._main, "queue_daemon_connection"):
+                    self._main.queue_daemon_connection(allow_start=True, retries=6)
+                elif hasattr(self._main, "try_connect_daemon"):
                     self._main.try_connect_daemon(allow_start=True, retries=6)
                 if hasattr(self._main, "start_gateway_process"):
                     self._main.start_gateway_process()
@@ -6734,7 +6740,80 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         height = int(doc_height + margins.top() + margins.bottom())
         # 确保最小高度避免不可见，同时限制最大高度防止初始异常
         height = max(height, 24)
-        height = min(height, 2000)  # 限制最大高度为2000像素
+        height = min(height, 20000)
+        if self.height() != height:
+            self.setFixedHeight(height)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.adjustHeight()
+
+
+class ReadOnlyPlainTextEdit(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        apply_selection_palette(self)
+
+    def contextMenuEvent(self, event):
+        menu = create_styled_menu(self)
+
+        selected = self.textCursor().selectedText()
+        selected_len = len(selected or "")
+        status = QAction(f"已选中 {selected_len} 字符", self)
+        status.setEnabled(False)
+        menu.addAction(status)
+        menu.addSeparator()
+
+        action_copy = QAction("复制选中内容", self)
+        action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+        action_copy.setShortcut("Ctrl+C")
+        action_copy.setShortcutVisibleInContextMenu(True)
+        action_copy.triggered.connect(self.copy)
+        action_copy.setEnabled(self.textCursor().hasSelection())
+        menu.addAction(action_copy)
+
+        action_copy_all = QAction("复制全部内容", self)
+        action_copy_all.setIcon(qta.icon('fa5s.clone', color='#4b5563'))
+        action_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText() or ""))
+        action_copy_all.setEnabled(bool((self.toPlainText() or "").strip()))
+        menu.addAction(action_copy_all)
+
+        action_select_all = QAction("全选", self)
+        action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
+        action_select_all.triggered.connect(self.selectAll)
+        menu.addAction(action_select_all)
+
+        menu.exec(event.globalPos())
+
+
+class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFrameStyle(QFrame.NoFrame)
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.setFixedHeight(24)
+        self._height_adjust_pending = False
+        self.textChanged.connect(self.scheduleAdjustHeight)
+        self.setStyleSheet("background: transparent;")
+
+    def scheduleAdjustHeight(self):
+        if self._height_adjust_pending:
+            return
+        self._height_adjust_pending = True
+        QTimer.singleShot(0, self.adjustHeight)
+
+    def adjustHeight(self):
+        self._height_adjust_pending = False
+        doc_height = self.document().documentLayout().documentSize().height()
+        margins = self.contentsMargins()
+        frame = self.frameWidth() * 2
+        height = int(doc_height + margins.top() + margins.bottom() + frame + 4)
+        height = max(height, 24)
+        height = min(height, 20000)
         if self.height() != height:
             self.setFixedHeight(height)
 
@@ -7173,6 +7252,79 @@ class DaemonConnectWorker(QThread):
         payload["connected"] = connected
         self.finished_signal.emit(payload)
 
+
+class DaemonStatusWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(
+        self,
+        host,
+        port,
+        runtime_signature,
+        allow_start=False,
+        retries=0,
+        timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.host = host
+        self.port = port
+        self.runtime_signature = str(runtime_signature or "").strip()
+        self.allow_start = bool(allow_start)
+        self.retries = max(0, int(retries or 0))
+        self.timeout = timeout
+
+    def _signature_matches(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        remote = str(payload.get("signature") or "").strip()
+        return bool(remote and self.runtime_signature and remote == self.runtime_signature)
+
+    def _start_daemon_process(self):
+        python_exe = sys.executable
+        script_path = os.path.abspath(__file__)
+        return subprocess.Popen(
+            [python_exe, script_path, "--daemon", f"--daemon-port={self.port}"],
+            cwd=os.path.dirname(script_path),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **subprocess_kwargs_no_window(),
+        )
+
+    def run(self):
+        payload = {"connected": False, "process": None, "status_text": "守护进程未连接"}
+        client = DaemonClient(self.host, self.port, timeout=self.timeout)
+        ping_payload = client.ping()
+        connected = bool(ping_payload)
+        if connected and not self._signature_matches(ping_payload):
+            try:
+                client.shutdown()
+            except Exception:
+                pass
+            time.sleep(0.2)
+            connected = False
+        if not connected and self.allow_start:
+            try:
+                payload["process"] = self._start_daemon_process()
+            except Exception as exc:
+                payload["error"] = str(exc)
+            for _ in range(self.retries):
+                time.sleep(0.2)
+                retry_ping = client.ping()
+                if retry_ping and self._signature_matches(retry_ping):
+                    connected = True
+                    break
+        if connected:
+            status = client.status()
+            if status and status.get("status") == "ok":
+                state_text = "已休眠" if status.get("suspended") else "运行中"
+                sessions = status.get("sessions", 0)
+                payload["status_text"] = f"守护进程: {state_text} | 会话缓存: {sessions}"
+            else:
+                connected = False
+        payload["connected"] = connected
+        self.finished_signal.emit(payload)
+
 class HistoryTitleButton(QLabel):
     clicked = Signal()
 
@@ -7550,7 +7702,7 @@ class ChatBubble(QFrame):
                 bubble_layout = QVBoxLayout(bubble_frame)
                 bubble_layout.setContentsMargins(15, 10, 15, 10)
 
-                content_edit = AutoResizingTextEdit()
+                content_edit = AutoResizingPlainTextEdit()
                 self.user_content_edit = content_edit
                 content_edit.setPlainText(text)
                 content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -7663,9 +7815,15 @@ class ChatBubble(QFrame):
             col_layout.addWidget(self.thinking_widget)
             
             # 2. Main Content
-            self.content_edit = AutoResizingTextEdit()
-            self.content_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
-            col_layout.addWidget(self.content_edit)
+            self.content_rich_edit = AutoResizingTextEdit()
+            self.content_plain_edit = AutoResizingPlainTextEdit()
+            self.content_rich_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
+            self.content_plain_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
+            self.content_plain_edit.setVisible(False)
+            col_layout.addWidget(self.content_rich_edit)
+            col_layout.addWidget(self.content_plain_edit)
+            self.content_edit = self.content_rich_edit
+            self._main_content_view_mode = "rich"
             self.main_content_text = ""
             self._pending_main_content_text = ""
             self._pending_main_content_parts = None
@@ -8028,10 +8186,10 @@ class ChatBubble(QFrame):
         return status_color(status)
 
     def _create_log_viewer(self, agent_id):
-        text_edit = AutoResizingTextEdit()
+        text_edit = AutoResizingPlainTextEdit()
         text_edit.setReadOnly(True)
         text_edit.setStyleSheet(f"""
-            QTextEdit {{
+            QPlainTextEdit {{
                 border: none;
                 padding: 10px;
                 background: transparent;
@@ -8120,7 +8278,40 @@ class ChatBubble(QFrame):
             timer.stop()
         self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
         self.think_toggle_btn.setChecked(False)
-            
+
+    def _set_main_content_view_mode(self, mode):
+        target_mode = "plain" if mode == "plain" else "rich"
+        if self._main_content_view_mode == target_mode and self.content_edit is not None:
+            return self.content_edit
+        if target_mode == "plain":
+            self.content_rich_edit.setVisible(False)
+            self.content_plain_edit.setVisible(True)
+            self.content_edit = self.content_plain_edit
+        else:
+            self.content_plain_edit.setVisible(False)
+            self.content_rich_edit.setVisible(True)
+            self.content_edit = self.content_rich_edit
+        self._main_content_view_mode = target_mode
+        return self.content_edit
+
+    def _should_render_main_content_as_plain(self, text, content_parts=None, final=False):
+        if not text:
+            return False
+        if not final and len(text) >= STREAM_PLAIN_TEXT_THRESHOLD:
+            return True
+        if extract_renderable_html_response(text):
+            return False
+        if len(text) >= LONG_TEXT_PLAIN_RENDER_THRESHOLD:
+            return True
+        if text.count("\n") >= LONG_TEXT_PLAIN_LINE_THRESHOLD:
+            return True
+        text_parts = 0
+        if isinstance(content_parts, list):
+            for part in content_parts:
+                if isinstance(part, dict) and (part.get("type") or "").strip().lower() == "text":
+                    text_parts += 1
+        return text_parts > LONG_TEXT_PLAIN_LINE_THRESHOLD
+
     def set_main_content(self, text, content_parts=None, final=False):
         """设置对话气泡的主要内容，并合并高频流式渲染。"""
         text = text or ""
@@ -8168,6 +8359,13 @@ class ChatBubble(QFrame):
         )
         if already_rendered:
             return
+
+        render_mode = "plain" if self._should_render_main_content_as_plain(
+            text,
+            content_parts=content_parts,
+            final=final,
+        ) else "rich"
+        content_widget = self._set_main_content_view_mode(render_mode)
 
         try:
             # GitHub-like CSS for Markdown
@@ -8235,22 +8433,23 @@ class ChatBubble(QFrame):
                th:last-child, td:last-child {{ border-right: none; }}
             </style>
             """
-            self.content_edit.setUpdatesEnabled(False)
-            if not final and len(text) >= STREAM_PLAIN_TEXT_THRESHOLD:
+            content_widget.setUpdatesEnabled(False)
+            if render_mode == "plain":
                 self._render_plain_stream_content(text)
                 render_mode = "plain"
             else:
                 raw_html = extract_renderable_html_response(text) if final else ""
                 if raw_html:
-                    self.content_edit.setHtml(style + raw_html)
+                    content_widget.setHtml(style + raw_html)
                     render_mode = "raw_html"
                 else:
                     html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
-                    self.content_edit.setHtml(style + html_content)
+                    content_widget.setHtml(style + html_content)
                     render_mode = "html"
         except Exception:
-            self.content_edit.setUpdatesEnabled(False)
-            self.content_edit.setPlainText(text)
+            plain_widget = self._set_main_content_view_mode("plain")
+            plain_widget.setUpdatesEnabled(False)
+            plain_widget.setPlainText(text)
             render_mode = "plain"
         finally:
             self.content_edit.setUpdatesEnabled(True)
@@ -9112,6 +9311,7 @@ class SessionState:
         self.completed_turn_id = 0
         self.persisted_agents = []
         self.sub_agent_events = []
+        self.sub_agent_history_loaded = False
         self.sub_agent_render_queued = False
         self.observability_events = []
         self.system_prompt_text = ""
@@ -10275,6 +10475,7 @@ class MainWindow(QMainWindow):
         self.daemon_bootstrapping = False
         self.daemon_process = None
         self.daemon_connect_worker = None
+        self.daemon_status_worker = None
         self.daemon_runtime_signature = get_runtime_signature()
         self.gateway_process = None
         self.gateway_log_file = None
@@ -12037,15 +12238,12 @@ class MainWindow(QMainWindow):
             state.history_loading = False
             state.history_loaded = True
             state.messages = self.chat_storage.normalize_messages(copy.deepcopy(messages or []))
-            state.render_items = build_conversation_render_items(state.messages)
-            state.displayed_count = len(state.messages)
+            self._rebuild_session_render_spans(state)
             state.displayed_render_count = len(state.render_items)
-            if state.render_items:
-                self.render_render_items(state.render_items, state.session_id, animate=False)
+            if state.messages:
+                self.render_message_batch(state.messages, state.session_id, animate=False)
             else:
-                empty_state = EmptyStateWidget(self)
-                state.chat_layout.insertWidget(0, empty_state)
-                state.empty_state = empty_state
+                self._render_initial_session_history(state)
         state.selected_skill_names = selected_skill_names
         state.run_phase = "待开始"
         state.session_status = "draft"
@@ -12345,7 +12543,7 @@ class MainWindow(QMainWindow):
             self.context_available_tabs.add(self.RIGHT_TAB_SOP)
         if has_observability_context or has_context:
             self.context_available_tabs.add(self.RIGHT_TAB_OBSERVABILITY)
-        if state and getattr(state, "sub_agent_events", []):
+        if state and (getattr(state, "sub_agent_events", []) or getattr(state, "persisted_agents", [])):
             self.context_available_tabs.add(self.RIGHT_TAB_SUB_AGENTS)
         self.update_context_rail_badges()
         if state and state.session_id == self.current_session_id:
@@ -12612,7 +12810,7 @@ class MainWindow(QMainWindow):
                 },
             }
         )
-        state.render_items = build_conversation_render_items(state.messages)
+        self._rebuild_session_render_spans(state)
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
         self.save_chat_history(session_id=state.session_id)
@@ -12698,7 +12896,7 @@ class MainWindow(QMainWindow):
                 "meta": message_meta,
             }
         )
-        state.render_items = build_conversation_render_items(state.messages)
+        self._rebuild_session_render_spans(state)
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
         if create_user_bubble and state.session_id == self.current_session_id:
@@ -13603,19 +13801,49 @@ class MainWindow(QMainWindow):
         self.raise_()
 
     def get_daemon_status_text(self):
-        if not self.daemon_client:
-            return "守护进程未初始化"
-        self.try_connect_daemon(allow_start=False, retries=0)
-        status = self.daemon_client.status()
-        if not status or status.get("status") != "ok":
-            return "守护进程未连接"
-        state_text = "已休眠" if status.get("suspended") else "运行中"
-        sessions = status.get("sessions", 0)
-        return f"守护进程: {state_text} | 会话缓存: {sessions}"
+        if getattr(self, "daemon_bootstrapping", False):
+            return "守护进程连接中"
+        if getattr(self, "daemon_available", False):
+            return "守护进程在线"
+        return "守护进程未连接"
 
     def show_tray_status(self):
-        self.try_connect_daemon(allow_start=True, retries=2)
-        status = self.get_daemon_status_text()
+        worker = getattr(self, "daemon_status_worker", None)
+        if worker and worker.isRunning():
+            status = "守护进程状态查询中"
+            if self.tray_icon:
+                self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 3000)
+            else:
+                QMessageBox.information(self, "状态", status)
+            return
+        worker = DaemonStatusWorker(
+            self.daemon_host,
+            self.daemon_port,
+            self.daemon_runtime_signature,
+            allow_start=True,
+            retries=2,
+            timeout=UI_DAEMON_CONNECT_TIMEOUT_SEC,
+            parent=self,
+        )
+        self.daemon_status_worker = worker
+        worker.finished_signal.connect(self.handle_daemon_status_finished, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        status = "正在刷新守护进程状态"
+        if self.tray_icon:
+            self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 2000)
+        else:
+            QMessageBox.information(self, "状态", status)
+
+    def handle_daemon_status_finished(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
+        process = payload.get("process")
+        if process is not None:
+            self.daemon_process = process
+        self.daemon_available = bool(payload.get("connected"))
+        self.daemon_status_worker = None
+        self.refresh_context_badges()
+        status = str(payload.get("status_text") or self.get_daemon_status_text()).strip() or "守护进程状态未知"
         if self.tray_icon:
             self.tray_icon.showMessage("状态", status, QSystemTrayIcon.Information, 3000)
         else:
@@ -13641,6 +13869,9 @@ class MainWindow(QMainWindow):
         if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
             self.daemon_connect_worker.wait(1000)
         self.daemon_connect_worker = None
+        if self.daemon_status_worker and self.daemon_status_worker.isRunning():
+            self.daemon_status_worker.wait(1000)
+        self.daemon_status_worker = None
         for session_id, state in list(self.sessions.items()):
             self._stop_live_subagents(state, force=True)
             if self.daemon_client and state.daemon_running and state.session_id:
@@ -14029,6 +14260,7 @@ class MainWindow(QMainWindow):
         state.step_records = []
         state.persisted_agents = []
         state.sub_agent_events = []
+        state.sub_agent_history_loaded = False
 
     def _show_session_loading_state(self, state, text="正在加载历史会话…"):
         self.clear_chat_layout(state.chat_layout)
@@ -14039,6 +14271,42 @@ class MainWindow(QMainWindow):
             f"color: {DesignTokens.text_secondary}; font-size: 13px; padding: 32px 0;"
         )
         state.chat_layout.insertWidget(0, placeholder)
+
+    def _rebuild_session_render_spans(self, state):
+        state.render_items = build_conversation_render_spans(state.messages)
+        state.displayed_count = len(state.messages)
+        state.displayed_render_count = min(
+            max(int(getattr(state, "displayed_render_count", 0) or 0), 0),
+            len(state.render_items),
+        )
+
+    def _render_session_history_spans(self, state, spans, insert_index=None):
+        if not state or not spans:
+            return
+        start = spans[0].get("start", 0)
+        end = spans[-1].get("end", start)
+        if end <= start:
+            return
+        self.render_message_batch(
+            state.messages[start:end],
+            state.session_id,
+            insert_index=insert_index,
+            animate=False,
+        )
+
+    def _render_initial_session_history(self, state):
+        spans = getattr(state, "render_items", []) or []
+        if not spans:
+            empty_state = EmptyStateWidget(self)
+            state.chat_layout.insertWidget(0, empty_state)
+            state.empty_state = empty_state
+            state.displayed_render_count = 0
+            return
+        total = len(spans)
+        start_idx = max(0, total - HISTORY_RENDER_PAGE_SIZE)
+        initial_spans = spans[start_idx:]
+        state.displayed_render_count = len(initial_spans)
+        self._render_session_history_spans(state, initial_spans)
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
         try:
@@ -14148,17 +14416,8 @@ class MainWindow(QMainWindow):
             state.persisted_agents = self.chat_storage.list_agents(session_id)
         except Exception:
             state.persisted_agents = []
-        for item in state.persisted_agents or []:
-            if not isinstance(item, dict):
-                continue
-            agent_id = item.get("id") or ""
-            if not agent_id:
-                continue
-            try:
-                agent_messages = self.chat_storage.get_agent_messages(agent_id)
-            except Exception:
-                agent_messages = []
-            state.sub_agent_events.extend(build_sub_agent_history_events(item, agent_messages))
+        state.sub_agent_events = []
+        state.sub_agent_history_loaded = False
         if not state.messages:
             history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
             if os.path.exists(history_path):
@@ -14176,19 +14435,8 @@ class MainWindow(QMainWindow):
                 force_persist=loaded_from_json,
                 existing_meta=conversation_meta
             )
-        state.render_items = build_conversation_render_items(state.messages)
-        state.displayed_count = len(state.messages)
-
-        if state.render_items:
-            total = len(state.render_items)
-            start_idx = max(0, total - HISTORY_RENDER_PAGE_SIZE)
-            initial_items = state.render_items[start_idx:]
-            state.displayed_render_count = len(initial_items)
-            self.render_render_items(initial_items, session_id, animate=False)
-        else:
-            empty_state = EmptyStateWidget(self)
-            state.chat_layout.insertWidget(0, empty_state)
-            state.empty_state = empty_state
+        self._rebuild_session_render_spans(state)
+        self._render_initial_session_history(state)
 
         state.history_loaded = True
         state.history_loading = False
@@ -14956,6 +15204,9 @@ class MainWindow(QMainWindow):
         organize_action = QAction("整理侧边栏", self)
         organize_action.triggered.connect(self.organize_sidebar_projects)
         menu.addAction(organize_action)
+        migrate_action = QAction("迁移旧版 JSON 历史", self)
+        migrate_action.triggered.connect(self.migrate_legacy_json_histories)
+        menu.addAction(migrate_action)
         menu.addSeparator()
         recent_action = QAction("按最近活动排序", self)
         recent_action.setCheckable(True)
@@ -15001,6 +15252,44 @@ class MainWindow(QMainWindow):
         self.add_system_toast(f"侧边栏已整理，恢复 {restored} 个项目", "success", auto_close_ms=3200)
         self.refresh_history_list()
 
+    def _legacy_history_file_paths(self):
+        history_dir = self.chat_history_dir
+        if not os.path.isdir(history_dir):
+            return []
+        known_ids = {item.get("id") for item in self.chat_storage.list_conversations()}
+        paths = []
+        for path in sorted(glob.glob(os.path.join(history_dir, "chat_history_*.json"))):
+            session_id = os.path.basename(path).replace("chat_history_", "").replace(".json", "")
+            if session_id in known_ids:
+                continue
+            paths.append(path)
+        return paths
+
+    def migrate_legacy_json_histories(self):
+        files = self._legacy_history_file_paths()
+        if not files:
+            self.add_system_toast("没有待迁移的旧版 JSON 历史", "info", auto_close_ms=3200)
+            return
+        confirm = QMessageBox.question(
+            self,
+            "迁移旧版 JSON 历史",
+            f"发现 {len(files)} 份旧版 JSON 历史，迁移到 SQLite 后侧边栏会直接走快速路径。现在开始迁移？",
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        migrated = 0
+        try:
+            migrated = int(self.chat_storage.migrate_legacy_json_histories())
+        except Exception as exc:
+            QMessageBox.warning(self, "迁移失败", str(exc))
+            return
+        self.refresh_history_list()
+        self.add_system_toast(
+            f"已迁移 {migrated} 份旧版历史" if migrated else "没有新的旧版历史需要迁移",
+            "success" if migrated else "info",
+            auto_close_ms=3600,
+        )
+
     def refresh_history_list(self):
         self.history_container.setUpdatesEnabled(False)
         self.history_rows = {}
@@ -15021,7 +15310,6 @@ class MainWindow(QMainWindow):
                 search_ids = set()
 
         conversations = self.chat_storage.list_conversations()
-        conversation_ids = {c["id"] for c in conversations}
         config_projects = self.config_manager.get_projects(include_hidden=True)
         project_meta_by_key = {
             self._project_key(project.get("path")): project
@@ -15069,36 +15357,6 @@ class MainWindow(QMainWindow):
                 latest_by_project[project_key] = max(int(latest_by_project.get(project_key) or 0), int(updated_at or 0))
             else:
                 unassigned_entries.append(entry)
-
-        history_dir = self.chat_history_dir
-        if os.path.exists(history_dir):
-            files = glob.glob(os.path.join(history_dir, 'chat_history_*.json'))
-            files.sort(key=os.path.getmtime, reverse=True)
-            for file_path in files:
-                try:
-                    filename = os.path.basename(file_path)
-                    session_id = filename.replace('chat_history_', '').replace('.json', '')
-                    if session_id in conversation_ids:
-                        continue
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    if not data:
-                        continue
-                    title = self._compute_session_title(data)
-                    if query:
-                        haystack = title + "\n" + "\n".join(str(msg.get("content") or "") for msg in data if isinstance(msg, dict))
-                        if query.lower() not in haystack.lower():
-                            continue
-                    updated_at = int(os.path.getmtime(file_path))
-                    unassigned_entries.append({
-                        "id": session_id,
-                        "title": title,
-                        "updated_at": updated_at,
-                        "status": "legacy",
-                        "workspace_dir": "",
-                    })
-                except Exception:
-                    continue
 
         for project in config_projects:
             path = self._normalize_project_path(project.get("path"))
@@ -15152,7 +15410,16 @@ class MainWindow(QMainWindow):
                 rendered_any = True
 
         if not rendered_any:
-            self._add_history_empty_state("没有匹配的项目或对话" if query else "还没有项目，点击项目标题栏的文件夹按钮添加")
+            if query:
+                empty_text = "没有匹配的项目或对话"
+            else:
+                legacy_hint = bool(self._legacy_history_file_paths())
+                empty_text = (
+                    "检测到旧版 JSON 历史，可从项目菜单里执行“迁移旧版 JSON 历史”。"
+                    if legacy_hint
+                    else "还没有项目，点击项目标题栏的文件夹按钮添加"
+                )
+            self._add_history_empty_state(empty_text)
 
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
@@ -15287,18 +15554,18 @@ class MainWindow(QMainWindow):
             count_to_load = min(HISTORY_RENDER_PAGE_SIZE, remaining)
             start_idx = total - state.displayed_render_count - count_to_load
             end_idx = total - state.displayed_render_count
-            items_to_load = state.render_items[start_idx:end_idx]
+            spans_to_load = state.render_items[start_idx:end_idx]
             vbar = state.chat_scroll.verticalScrollBar()
             old_max = vbar.maximum()
             old_val = vbar.value()
-            self.render_render_items(items_to_load, state.session_id, insert_index=0, animate=False)
+            self._render_session_history_spans(state, spans_to_load, insert_index=0)
             self.process_ui_events(force=True)
             new_max = vbar.maximum()
             if old_val <= 5:
                 vbar.setValue(0)
             else:
                 vbar.setValue(old_val + (new_max - old_max))
-            state.displayed_render_count += count_to_load
+            state.displayed_render_count += len(spans_to_load)
         finally:
             state.auto_loading_history = False
 
@@ -16773,7 +17040,7 @@ class MainWindow(QMainWindow):
         is_current = state.session_id == self.current_session_id
         if is_current:
             self.add_system_toast("反问已完成，等待确认", "info", session_id=state.session_id)
-        state.render_items = build_conversation_render_items(state.messages)
+        self._rebuild_session_render_spans(state)
         state.displayed_render_count = len(state.render_items)
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
@@ -16983,7 +17250,7 @@ class MainWindow(QMainWindow):
             }
         )
         state.messages = self.chat_storage.normalize_messages(state.messages)
-        state.render_items = build_conversation_render_items(state.messages)
+        self._rebuild_session_render_spans(state)
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
         if state.session_id == self.current_session_id:
@@ -17086,7 +17353,7 @@ class MainWindow(QMainWindow):
         if payload.get("meta"):
             message_payload["meta"] = payload.get("meta")
         state.messages.append(message_payload)
-        state.render_items = build_conversation_render_items(state.messages)
+        self._rebuild_session_render_spans(state)
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
@@ -17600,9 +17867,30 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.set_context_tab_hint(self.RIGHT_TAB_SUB_AGENTS, True)
 
+    def _ensure_sub_agent_history_loaded(self, state):
+        if not state or getattr(state, "sub_agent_history_loaded", False):
+            return
+        existing_events = list(getattr(state, "sub_agent_events", []) or [])
+        events = []
+        for item in getattr(state, "persisted_agents", []) or []:
+            if not isinstance(item, dict):
+                continue
+            agent_id = item.get("id") or ""
+            if not agent_id:
+                continue
+            try:
+                agent_messages = self.chat_storage.get_agent_messages(agent_id)
+            except Exception:
+                agent_messages = []
+            events.extend(build_sub_agent_history_events(item, agent_messages))
+        merged_events = events + existing_events
+        state.sub_agent_events = merged_events[-800:] if len(merged_events) > 800 else merged_events
+        state.sub_agent_history_loaded = True
+
     def _render_sub_agent_monitor_for_state(self, state):
         if not state or not hasattr(self, "sub_agent_monitor") or self.sub_agent_monitor is None:
             return
+        self._ensure_sub_agent_history_loaded(state)
         if not _qt_object_alive(self.sub_agent_monitor):
             log_sub_agent_runtime(
                 "ui_sub_agent_monitor_invalid",
@@ -18308,7 +18596,7 @@ class MainWindow(QMainWindow):
             })
             bubble.set_source_message_id(assistant_source_message_id)
         state.messages = self.chat_storage.normalize_messages(state.messages)
-        state.render_items = build_conversation_render_items(state.messages)
+        self._rebuild_session_render_spans(state)
         if len(state.messages) > previous_message_count:
             newly_rendered = len(state.messages) - previous_message_count
             state.displayed_count = min(len(state.messages), state.displayed_count + newly_rendered)
@@ -18384,12 +18672,15 @@ class MainWindow(QMainWindow):
                 label.setStyleSheet("font-weight: bold; color: #333; margin-top: 8px; margin-left: 4px;")
                 state.last_agent_bubble.layout().addWidget(label)
                 
-                state.last_agent_bubble.code_output_edit = AutoResizingTextEdit()
+                state.last_agent_bubble.code_output_edit = AutoResizingPlainTextEdit()
                 state.last_agent_bubble.code_output_edit.setStyleSheet("color: #444; font-family: Consolas; background: #f8f9fa; border: 1px solid #eee; padding: 8px; border-radius: 4px; margin-left: 4px;")
                 state.last_agent_bubble.code_output_edit.setReadOnly(True)
                 state.last_agent_bubble.layout().addWidget(state.last_agent_bubble.code_output_edit)
             
-            state.last_agent_bubble.code_output_edit.append(text)
+            cursor = state.last_agent_bubble.code_output_edit.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText(text or "")
+            state.last_agent_bubble.code_output_edit.setTextCursor(cursor)
             state.last_agent_bubble.code_output_edit.adjustHeight()
             self.process_ui_events()
             self.request_session_scroll_to_bottom(state.session_id, force=False)

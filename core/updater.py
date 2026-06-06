@@ -460,7 +460,7 @@ $timer.Add_Tick({{
 
         Add-UpdateLog 'Preserved user_data directory.' 75
         Add-UpdateLog 'Starting updated application...' 90
-        Start-Process -FilePath (Join-Path $InstallDir $ExeName) -WorkingDirectory $InstallDir
+        Start-Process -FilePath (Join-Path $InstallDir $ExeName) -WorkingDirectory $InstallDir -WindowStyle Hidden
         Add-UpdateLog 'Update completed. This window will close automatically.' 100
         Start-Sleep -Seconds 2
         $form.Close()
@@ -470,7 +470,7 @@ $timer.Add_Tick({{
             try {{
                 Add-UpdateLog 'Attempting rollback...' 100
                 Invoke-Robocopy -RoboArgs @($BackupDir, $InstallDir, '/MIR', '/XD', (Join-Path $BackupDir 'user_data'), (Join-Path $InstallDir 'user_data'), 'user_data', '/NFL', '/NDL', '/NJH', '/NJS', '/NP') -FailureMessage 'Rollback failed'
-                Start-Process -FilePath (Join-Path $InstallDir $ExeName) -WorkingDirectory $InstallDir
+                Start-Process -FilePath (Join-Path $InstallDir $ExeName) -WorkingDirectory $InstallDir -WindowStyle Hidden
                 Add-UpdateLog 'Rolled back and restarted the previous version.' 100
             }} catch {{
                 Add-UpdateLog ("Rollback failed: " + $_.Exception.Message) 100

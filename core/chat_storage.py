@@ -3,6 +3,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 
 AGENT_TERMINAL_STATUSES = {
@@ -43,6 +44,7 @@ class ChatStorage:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._ensure_schema()
 
+    @contextmanager
     def _connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -53,7 +55,14 @@ class ChatStorage:
             conn.execute("PRAGMA synchronous=NORMAL")
         except sqlite3.Error:
             pass
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _ensure_schema(self):
         with self._connect() as conn:

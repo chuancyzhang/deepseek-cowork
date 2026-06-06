@@ -175,7 +175,7 @@ class TestUpdater(unittest.TestCase):
         self.assertIn("100", ps_content)
         self.assertIn("user_data", ps_content)
         self.assertIn("update.log", ps_content)
-        self.assertNotIn("-WindowStyle", ps_content)
+        self.assertIn("-WindowStyle Hidden", ps_content)
         self.assertIn("call :wait_pid 12345", cmd_content)
         self.assertIn("call :wait_pid 23456", cmd_content)
         self.assertIn("[10%%] Waiting for app to exit", cmd_content)
@@ -217,6 +217,27 @@ class TestUpdater(unittest.TestCase):
         self.assertEqual(kwargs.get("cwd"), self.temp_dir)
         self.assertIsNotNone(kwargs.get("stdout"))
         self.assertIsNotNone(kwargs.get("stderr"))
+
+    def test_create_windows_update_script_hides_relaunch_window(self):
+        install_dir = os.path.join(self.temp_dir, "install")
+        staged_dir = os.path.join(self.temp_dir, "staged")
+        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        os.makedirs(install_dir, exist_ok=True)
+        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
+            handle.write("")
+
+        with patch("core.updater.sys.platform", "win32"):
+            script_path = create_windows_update_script(
+                install_dir=install_dir,
+                staged_app_dir=staged_dir,
+                current_pid=12345,
+                target_dir=self.temp_dir,
+            )
+
+        with open(script_path, "r", encoding="utf-8-sig") as handle:
+            ps_content = handle.read()
+
+        self.assertIn("-WindowStyle Hidden", ps_content)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.5**。
+当前应用版本：**4.8.6**。
 
 ## 1. 架构理念
 
@@ -12,7 +12,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ### 2.1 UI 层 (PySide6)
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互，并根据窗口与抽屉状态动态计算主会话区宽度。
-*   **项目式左侧栏**：本地文件夹作为项目，项目列表由用户配置、最近工作区和会话 `meta.workspace_dir` 合并而来；项目默认折叠，仅预览少量会话，选择项目即切换当前工作区，右上角不再提供独立切换入口，视觉上采用更柔和的 Apple 风格浅色面板。
+*   **项目式左侧栏**：本地文件夹作为项目，项目列表由用户配置、最近工作区和会话 `meta.workspace_dir` 合并而来；项目默认折叠，仅预览少量会话，选择项目即切换当前工作区，右上角不再提供独立切换入口，视觉上采用更柔和的 Apple 风格浅色面板。无项目归属的 `对话` 分组也采用相同的预览/展开显示/收起全部节奏，避免长列表直接铺满侧栏。
 *   **右侧上下文抽屉**：文件、自动化步骤、任务观测、子 Agent 监控以隐藏抽屉承载；展开时以抽屉左边界作为主阅读区的安全边界，避免遮挡对话。抽屉宽度、主对话列宽度与左右留白现在统一由同一套三栏布局规则计算，并通过 `content_area_layout` 右侧预留空间保证切换文件 / 自动化 / 观测 / 子 Agent tab 或进入其子界面时几何稳定。子 Agent 开始运行时会自动切到该面板。
 *   **动态对话阅读列**：消息列表与输入栏会根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；关闭抽屉时主对话列居中，打开抽屉时主对话列按三栏比例左移，并同步更新消息区、用户气泡、输入卡片和系统提示条宽度，避免输入框、消息卡片和 drawer 子界面出现忽宽忽窄的跳变。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
@@ -25,9 +25,10 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **后台 daemon 连接**：UI 只发起短任务排队，不在点击开始或自动化分发时同步等待 daemon ping/retry；daemon 请求会在后台合并，避免重复点击堆出多个启动任务；daemon 未就绪时当前请求立即走本地 worker。
 *   **分阶段后台启动**：主窗口先完成显示，再延后初始化托盘、daemon 预热、daemon monitor 和自动化调度，减少首屏阶段的同步负载。
 *   **后台进程单例锁**：daemon 与企业消息网关子进程在入口处通过文件锁保证唯一实例，即使多入口同时触发也只保留一个存活进程。
-*   **长对话轻量渲染**：长会话打开时不再先构造整段 render items；历史按跨度分页渲染，超长回复切换为纯文本视图，避免 `QTextEdit` 富文本重排拖慢滚动和切换会话。
+*   **长对话轻量渲染**：长会话打开时不再先构造整段 render items；历史按跨度分页渲染，长回复流式阶段可临时走纯文本快路径，最终回复优先保留 Markdown / HTML 富文本渲染，仅极端巨大的普通文本才降级。
 *   **流式合并与渲染缓存**：正文和思考流按短定时器批量刷新；稳定 Markdown / HTML 结果进入 LRU 缓存，历史回放和最终响应不再重复转换。
 *   **聊天气泡虚拟化**：聊天区滚动时按视口 overscan 保留附近气泡，远离视口的历史气泡折叠成固定高度占位，恢复时复用原控件和缓存后的内容。
+*   **异步会话持久化**：`save_chat_history()` 只在 UI 线程里整理快照并入队，后台 `ChatSaveWorker` 按会话合并、500ms debounce 后写入 SQLite；分支、长期记忆更新、会话重命名/归档/删除和应用退出前显式 flush，避免异步保存带来的读取时序问题。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
 
@@ -38,7 +39,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。
 *   **core/sandbox_runtime.py**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先直接使用当前应用目录的 `_internal/*_env` 结构，并为沙盒命令注入对应 PATH；AppData `runtime_sandbox` 仅作为临时、缓存和 skill 依赖根目录。若发现 `python_env/python.exe` 只是依赖外部解释器的 venv redirector，会在运行时标记为不可用而不是继续误报；`bash` 执行层在 Windows 缺失 Git Bash 时退回 `cmd.exe`。Skill 级 Python 依赖统一安装到 `runtime_sandbox/.../skills/<skill>/python/site-packages`，由沙盒 `PYTHONPATH` 注入；同时生成 bootstrap `sitecustomize.py`，并通过 `PATH` 与 `COWORK_PYTHON_DLL_DIRS` 暴露 bundled runtime 和 skill 目录中的原生 DLL 搜索路径。
 *   **core/env_utils.py**：`ensure_package_installed(...)` 不再只依赖主进程 `importlib` 判断是否已安装，而是用沙盒 Python 直接验证目标模块可导入。对于 `python-runner`，若依赖状态缓存显示已安装但沙盒实际无法导入，会强制重装一次以修复失真的缓存记录；若最终失败，则把沙盒 traceback 回传，便于定位 `ImportError` / DLL load failure。
-*   **core/process_utils.py**：集中提供 Windows 无控制台窗口的 subprocess 参数与 runtime debug 日志开关，供 UI、updater、沙盒和系统技能复用，避免新增执行入口再次闪出 CMD。
+*   **core/process_utils.py**：集中提供 Windows 无控制台窗口的 subprocess 参数、进程单例锁和 runtime debug 日志开关，供 UI、updater、沙盒和系统技能复用，避免新增执行入口再次闪出 CMD。
 *   **deepseek-cowork.spec**：内置 `python_env` 除 `Lib/` 和最小 `site-packages` 外，还要包含 Windows `DLLs/` 或同类平台扩展目录，以及常见 MSVC runtime DLL；否则 `_socket`、`_ssl` 一类标准扩展缺失，或 native wheel 在 `_internal/python_env` 中无法加载。
 
 ### 2.3 Daemon 与并发
@@ -58,7 +59,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、`mcp_servers`、项目列表、工作区、自动化任务与运行历史。
 *   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组、无项目对话查询和项目会话归档；会话可通过 `meta.conversation_branch` 记录来源会话、来源消息和分支动作类型。SQLite 连接启用 WAL / busy timeout，并在普通追加路径下只写入新增消息，编辑、删除和迁移仍回退全量重写。旧版 `chat_history_*.json` 默认不再参与侧边栏刷新，而是通过手动迁移写回 SQLite。
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
-*   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，校验解压结构并生成 Windows 更新脚本。
+*   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，校验解压结构并生成 Windows 更新脚本；PowerShell GUI 更新脚本中的应用重启路径继续显式隐藏控制台窗口。
 
 ### 2.6 企业 IM
 *   **core/im_gateway/**：多平台企业消息网关，接收飞书、钉钉与企业微信智能机器人事件并回传执行结果。
@@ -137,7 +138,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill。
 - **对话生成 SOP**：输入区入口将当前会话提炼为可编辑 SOP 草稿，确认后保存为任务模板并绑定当前会话。
 - **SOP 调度执行**：会话与定时自动化都只派发当前步骤；模板默认推进方式可设为人工确认或自动推进，步骤可覆盖模板默认值，完成后由状态机决定暂停、重跑、跳过或继续下一步。非 Agent 步骤通过沙盒 Python 或 Git Bash 直接执行，并把 stdout/stderr/exit code 写回运行态。
-- **迁移复用与调试**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选、无图标双列轻量列表、Apple 风格滑动开关、选择模式批量导出/删除和能力工作台；自定义 Skill 可编辑/验证/调试/删除，内置 Skill 只读不可删除，MCP 能力可调试连接和 tool 调用。
+- **迁移复用与调试**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选、无图标双列轻量列表、Apple 风格滑动开关、选择模式批量导出/删除和能力工作台；能力中心拆分为 `内置能力`、`MCP`、`自定义能力` 三个 tab，自定义 Skill 可编辑/验证/调试/删除，内置 Skill 只读且不可关闭或删除，MCP 能力保留独立展示、连接调试和启停控制。
 
 ## 8. 状态机流转 (Agentic Workflow)
 - **状态**：Idle → Thinking → ToolCalling → Observing → Answering → Completed。

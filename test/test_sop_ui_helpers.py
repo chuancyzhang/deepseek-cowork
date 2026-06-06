@@ -36,6 +36,7 @@ from main import (
     SOP_EXECUTOR_PYTHON_FILE,
     _MARKDOWN_RENDER_CACHE,
     render_markdown_or_html_with_cache,
+    skill_center_tab_key,
     skill_center_matches_filters,
     summarize_skill_terms,
 )
@@ -57,6 +58,17 @@ class _AgentUiState:
 
 
 class SkillCenterHelperTests(unittest.TestCase):
+    def test_skill_center_tab_key_places_mcp_in_dedicated_tab(self):
+        self.assertEqual(
+            skill_center_tab_key({"name": "showdoc-mcp", "source_format": "mcp_server"}),
+            "mcp",
+        )
+        self.assertEqual(
+            skill_center_tab_key({"name": "claim-expert", "type": "ai_generated", "created_by": "ai"}),
+            "custom",
+        )
+        self.assertEqual(skill_center_tab_key({"name": "filesystem"}), "builtin")
+
     def test_summarize_skill_terms_truncates_cleanly(self):
         summary = summarize_skill_terms(
             ["read_file", "write_file", "update_file", "rename_file"],
@@ -167,6 +179,61 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.assertTrue(item.findChildren(AppleSwitch))
         self.assertFalse([button for button in item.findChildren(QPushButton) if button.text() == "导出"])
 
+    def test_skill_center_has_builtin_mcp_and_custom_tabs(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+
+        self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())], ["内置能力", "MCP", "自定义能力"])
+
+    def test_skill_center_builtin_switch_is_read_only(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        config_manager = MagicMock()
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+
+        item = dialog._build_skill_card(
+            {
+                "name": "filesystem",
+                "display_name": "Filesystem",
+                "description": "Built-in file access.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": ["read_file"],
+            }
+        )
+
+        toggle = item.findChildren(AppleSwitch)[0]
+        self.assertFalse(toggle.isEnabled())
+        toggle.click()
+        config_manager.set_skill_enabled.assert_not_called()
+
+    def test_skill_center_mcp_switch_remains_mutable(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        config_manager = MagicMock()
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+
+        item = dialog._build_skill_card(
+            {
+                "name": "showdoc-mcp",
+                "display_name": "MCP / showdoc",
+                "description": "Remote MCP tools.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": ["mcp_showdoc_list_items"],
+                "source_format": "mcp_server",
+            }
+        )
+
+        toggle = item.findChildren(AppleSwitch)[0]
+        self.assertTrue(toggle.isEnabled())
+        toggle.click()
+        config_manager.set_skill_enabled.assert_called_once_with("showdoc-mcp", False)
+
     def test_skill_center_selection_mode_adds_checkbox(self):
         app = QApplication.instance() or QApplication([])
         skill_manager = MagicMock()
@@ -270,6 +337,151 @@ class _HistoryActionState:
 
 
 class TestSopUiHelpers(unittest.TestCase):
+    def _build_history_sidebar_window(self, conversations, query=""):
+        window = MainWindow.__new__(MainWindow)
+        window.history_container = QWidget()
+        window.history_layout = QVBoxLayout(window.history_container)
+        window.history_rows = {}
+        window.history_buttons = {}
+        window.project_rows = {}
+        window.project_buttons = {}
+        window.project_preview_paths = set()
+        window.project_full_expanded_paths = set()
+        window.unassigned_history_full_expanded = False
+        window.current_session_id = ""
+        window.current_project_path = ""
+        window.workspace_dir = ""
+        window.sidebar_sort_mode = "recent"
+        window.chat_storage = MagicMock()
+        window.chat_storage.list_conversations.return_value = list(conversations)
+        window.chat_storage.search_conversations.return_value = [item["id"] for item in conversations]
+        window.config_manager = MagicMock()
+        window.config_manager.get_projects.return_value = []
+        window.config_manager.get.return_value = []
+        window._history_query_text = lambda: query
+        window._conversation_workspace_path = lambda conv: conv.get("workspace_dir")
+        window._project_key = lambda path: str(path or "")
+        window._project_display_name = lambda path, project=None: str((project or {}).get("name") or path or "")
+        window._normalize_project_path = lambda path: path or ""
+        window._legacy_history_file_paths = lambda: []
+        window._add_history_group_label = lambda text: window.history_layout.addWidget(QLabel(text))
+        window._add_history_empty_state = lambda text: window.history_layout.addWidget(QLabel(text))
+        window._make_project_row = lambda project, sessions, query="": QLabel(project.get("name") or "")
+        window.update_history_selection = MagicMock()
+
+        def _make_project_session_row(entry, compact=True):
+            row = QWidget()
+            row.setProperty("session_id", entry["id"])
+            return row
+
+        window._make_project_session_row = _make_project_session_row
+        return window
+
+    def _history_session_ids(self, window):
+        session_ids = []
+        for index in range(window.history_layout.count()):
+            item = window.history_layout.itemAt(index)
+            widget = item.widget()
+            if widget and widget.property("session_id"):
+                session_ids.append(widget.property("session_id"))
+        return session_ids
+
+    def _history_button_texts(self, window):
+        texts = []
+        for index in range(window.history_layout.count()):
+            item = window.history_layout.itemAt(index)
+            widget = item.widget()
+            if isinstance(widget, QPushButton):
+                texts.append(widget.text().strip())
+        return texts
+
+    def test_unassigned_conversations_default_to_preview_with_expand_button(self):
+        conversations = [
+            {"id": f"session-{idx}", "title": f"Task {idx}", "updated_at": 100 - idx, "status": "draft"}
+            for idx in range(5)
+        ]
+        window = self._build_history_sidebar_window(conversations)
+
+        window.refresh_history_list()
+
+        self.assertEqual(self._history_session_ids(window), ["session-0", "session-1", "session-2"])
+        self.assertIn("展开显示", self._history_button_texts(window))
+
+    def test_unassigned_conversations_expand_to_full_list(self):
+        conversations = [
+            {"id": f"session-{idx}", "title": f"Task {idx}", "updated_at": 100 - idx, "status": "draft"}
+            for idx in range(5)
+        ]
+        window = self._build_history_sidebar_window(conversations)
+        window.set_unassigned_history_full_expanded(True, refresh=False)
+
+        window.refresh_history_list()
+
+        self.assertEqual(
+            self._history_session_ids(window),
+            ["session-0", "session-1", "session-2", "session-3", "session-4"],
+        )
+        self.assertIn("收起全部", self._history_button_texts(window))
+
+    def test_unassigned_conversations_show_all_matches_during_search(self):
+        conversations = [
+            {"id": f"session-{idx}", "title": f"Task {idx}", "updated_at": 100 - idx, "status": "draft"}
+            for idx in range(5)
+        ]
+        window = self._build_history_sidebar_window(conversations, query="task")
+
+        window.refresh_history_list()
+
+        self.assertEqual(
+            self._history_session_ids(window),
+            ["session-0", "session-1", "session-2", "session-3", "session-4"],
+        )
+        self.assertNotIn("展开显示", self._history_button_texts(window))
+        self.assertNotIn("收起全部", self._history_button_texts(window))
+
+    def test_save_chat_history_enqueue_path_avoids_direct_db_write(self):
+        class _Worker:
+            def __init__(self):
+                self.requests = []
+
+            def enqueue(self, request):
+                self.requests.append(request)
+
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "messages": [{"id": "m1", "role": "user", "content": "hello"}],
+                "clarify_mode_enabled": False,
+                "pending_clarify_questions": [],
+                "selected_skill_names": [],
+                "sop_run": None,
+                "persisted_conversation_meta": {},
+                "run_phase": "Idle",
+                "session_status": "draft",
+                "has_file_changes": False,
+                "conversation_branch": None,
+            },
+        )()
+        window.workspace_dir = "D:/workspace"
+        window.chat_storage = MagicMock()
+        window.chat_save_worker = _Worker()
+        window.get_session = MagicMock(return_value=state)
+        window._compute_session_title = MagicMock(return_value="hello")
+        window._session_clarify_meta = MagicMock(return_value={})
+        window._session_selected_skills_meta = MagicMock(return_value={})
+        window._session_sop_meta = MagicMock(return_value={})
+        window._session_branch_meta = MagicMock(return_value={})
+        window.update_skill_capture_button_state = MagicMock()
+
+        result = window.save_chat_history(session_id="session-1")
+
+        self.assertTrue(result)
+        self.assertEqual(len(window.chat_save_worker.requests), 1)
+        window.chat_storage.save_conversation.assert_not_called()
+
     def test_prompt_tool_menu_order_helper_matches_spec(self):
         window = MainWindow.__new__(MainWindow)
         entries = window._prompt_tool_menu_entries()
@@ -728,16 +940,17 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertLessEqual(bubble.user_content_edit.width(), 190)
         self.assertGreater(bubble.user_content_edit.height(), 24)
 
-    def test_chat_bubble_agent_uses_plain_view_for_long_final_content(self):
+    def test_chat_bubble_agent_preserves_markdown_for_long_final_content(self):
         app = QApplication.instance() or QApplication([])
         bubble = ChatBubble("Agent", "")
 
-        bubble.set_main_content("line\n" * 180, final=True)
+        bubble.set_main_content("# Title\n\n" + ("- item\n" * 180), final=True)
         bubble.show()
         app.processEvents()
 
-        self.assertIsInstance(bubble.content_edit, AutoResizingPlainTextEdit)
-        self.assertEqual(bubble.content_edit.toPlainText().count("line"), 180)
+        self.assertNotIsInstance(bubble.content_edit, AutoResizingPlainTextEdit)
+        self.assertIn("Title", bubble.content_edit.toPlainText())
+        self.assertEqual(bubble.content_edit.toPlainText().count("item"), 180)
 
     def test_markdown_render_cache_reuses_same_text(self):
         _MARKDOWN_RENDER_CACHE.clear()
@@ -792,6 +1005,7 @@ class TestSopUiHelpers(unittest.TestCase):
         window.virtualize_session_bubbles("session-1")
 
         self.assertFalse(bubbles[-1].is_virtualized())
+        self.assertFalse(bubbles[0].is_virtualized())
         self.assertTrue(any(bubble.is_virtualized() for bubble in bubbles[:-10]))
 
     def test_edit_user_message_from_branch_creates_new_session_and_resubmits(self):

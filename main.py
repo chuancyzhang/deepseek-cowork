@@ -29,6 +29,7 @@ from core.single_instance import (
     notify_existing_ui,
 )
 from core.chat_storage import ChatStorage
+from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
 from core.conversation_render import build_conversation_render_spans
 from core.html_render import extract_renderable_html_response
 from core.theme import apply_theme, DesignTokens
@@ -201,9 +202,9 @@ QMenu::separator {
 def create_styled_menu(parent=None):
     menu = QMenu(parent)
     menu.setStyleSheet(MENU_STYLESHEET)
-    menu.setAttribute(Qt.WA_TranslucentBackground, True)
-    menu.setWindowFlag(Qt.FramelessWindowHint, True)
-    menu.setWindowFlag(Qt.NoDropShadowWindowHint, True)
+    menu.setAttribute(Qt.WA_TranslucentBackground, False)
+    menu.setWindowFlag(Qt.FramelessWindowHint, False)
+    menu.setWindowFlag(Qt.NoDropShadowWindowHint, False)
     return menu
 
 
@@ -240,6 +241,7 @@ SCROLL_BOTTOM_THRESHOLD_PX = 36
 STREAM_RENDER_INTERVAL_SEC = 0.12
 STREAM_PLAIN_TEXT_THRESHOLD = 2400
 LONG_TEXT_PLAIN_RENDER_THRESHOLD = 6000
+EXTREME_FINAL_PLAIN_TEXT_THRESHOLD = 120000
 LONG_TEXT_PLAIN_LINE_THRESHOLD = 120
 UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
@@ -383,6 +385,23 @@ def render_markdown_or_html_with_cache(text, final=False):
     while len(_MARKDOWN_RENDER_CACHE) > MARKDOWN_RENDER_CACHE_SIZE:
         _MARKDOWN_RENDER_CACHE.popitem(last=False)
     return result
+
+
+def looks_like_markdown_text(text):
+    value = str(text or "")
+    if not value.strip():
+        return False
+    markdown_patterns = (
+        r"(?m)^\s{0,3}#{1,6}\s+\S",
+        r"(?m)^\s*[-*+]\s+\S",
+        r"(?m)^\s*\d+\.\s+\S",
+        r"(?m)^\s{0,3}>\s+\S",
+        r"(?m)^\s*\|.+\|\s*$",
+        r"```",
+        r"\*\*[^*\n][\s\S]*?\*\*",
+        r"`[^`\n]+`",
+    )
+    return any(re.search(pattern, value) for pattern in markdown_patterns)
 
 def set_stylesheet_if_changed(widget, stylesheet):
     if widget.property("_cached_stylesheet") == stylesheet:
@@ -1007,11 +1026,34 @@ def summarize_skill_terms(values, max_items=3, max_chars=72):
     return summary
 
 
+def apple_checkable_list_style(radius=14, bg=None, padding=6):
+    bg = bg or DesignTokens.bg_card
+    checked_bg = rgba_from_hex(DesignTokens.primary, 0.12)
+    checked_border = rgba_from_hex(DesignTokens.primary, 0.26)
+    return (
+        f"QListWidget {{ background: {bg}; border: 1px solid {DesignTokens.border}; "
+        f"border-radius: {radius}px; padding: {padding}px; }}"
+        f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
+        f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        "QListWidget::indicator { width: 18px; height: 18px; }"
+        f"QListWidget::indicator:unchecked {{ background: rgba(255, 255, 255, 0.96); border: 1px solid {DesignTokens.border_strong}; border-radius: 6px; }}"
+        f"QListWidget::indicator:unchecked:hover {{ border-color: {DesignTokens.primary}; background: rgba(255, 255, 255, 1); }}"
+        f"QListWidget::indicator:checked {{ background: {checked_bg}; border: 1px solid {checked_border}; border-radius: 6px; }}"
+        f"QListWidget::indicator:checked:hover {{ background: {rgba_from_hex(DesignTokens.primary, 0.16)}; border-color: {DesignTokens.primary}; }}"
+    )
+
+
 def skill_center_tab_key(skill):
     if not isinstance(skill, dict):
         return "builtin"
+    if str(skill.get("source_format") or "").strip() == SkillManager.MCP_SOURCE_FORMAT:
+        return "mcp"
     is_custom = skill.get("type") == "ai_generated" or skill.get("created_by") == "ai"
     return "custom" if is_custom else "builtin"
+
+
+def skill_center_is_builtin(skill):
+    return skill_center_tab_key(skill) == "builtin"
 
 
 def skill_center_matches_filters(skill, query="", status_filter="all"):
@@ -1605,17 +1647,22 @@ class AppleSwitch(QCheckBox):
         painter.setRenderHint(QPainter.Antialiasing)
         checked = self.isChecked()
         track = QRect(2, 3, 48, 24)
-        track_color = QColor(DesignTokens.success_accent if checked else "#d1d5db")
-        if self.underMouse() and not checked:
+        is_enabled = self.isEnabled()
+        if not is_enabled:
+            track_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.24))
+        else:
+            track_color = QColor(DesignTokens.success_accent if checked else "#d1d5db")
+        if self.underMouse() and not checked and is_enabled:
             track_color = QColor("#c4c9d3")
-        painter.setPen(QPen(QColor(DesignTokens.success_accent if checked else "#c7ccd5"), 1))
+        border_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.42)) if not is_enabled else QColor(DesignTokens.success_accent if checked else "#c7ccd5")
+        painter.setPen(QPen(border_color, 1))
         painter.setBrush(QBrush(track_color))
         painter.drawRoundedRect(track, 12, 12)
 
         knob_x = 27 if checked else 5
         knob = QRect(knob_x, 5, 20, 20)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#ffffff"))
+        painter.setBrush(QColor("#ffffff" if is_enabled else "#f8f9fb"))
         painter.drawEllipse(knob)
 
 
@@ -2827,7 +2874,9 @@ class AgentProfileManager(QWidget):
         skills_label.setStyleSheet(apple_settings_section_title_style())
         editor_layout.addWidget(skills_label)
         self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=4))
+        self.skill_list.setStyleSheet(
+            apple_checkable_list_style(radius=14, bg=DesignTokens.bg_panel_strong, padding=4)
+        )
         self.skill_list.itemChanged.connect(lambda _item: self._sync_current_profile_from_fields())
         editor_layout.addWidget(self.skill_list, 1)
 
@@ -3130,10 +3179,7 @@ class SopTemplateManager(QWidget):
         skills_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
         editor_layout.addWidget(skills_label)
         self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(
-            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px; }}"
-            f"QListWidget::item {{ padding: 8px 10px; color: {DesignTokens.text_primary}; }}"
-        )
+        self.skill_list.setStyleSheet(apple_checkable_list_style(radius=12, bg=DesignTokens.bg_card, padding=4))
         self.skill_list.itemChanged.connect(lambda _item: self._sync_current_template_from_fields())
         editor_layout.addWidget(self.skill_list, 1)
 
@@ -6251,6 +6297,20 @@ class SkillsCenterDialog(QDialog):
         self.layout_standard.addWidget(self.scroll_standard)
         self.tabs.addTab(self.tab_standard, "内置能力")
 
+        self.tab_mcp = QWidget()
+        self.layout_mcp = QVBoxLayout(self.tab_mcp)
+        self.layout_mcp.setContentsMargins(0, 0, 0, 0)
+        self.scroll_mcp = QScrollArea()
+        self._set_scroll_area_chrome(self.scroll_mcp)
+        self.content_mcp = QWidget()
+        self.layout_content_mcp = QVBoxLayout(self.content_mcp)
+        self.layout_content_mcp.setContentsMargins(8, 8, 8, 18)
+        self.layout_content_mcp.setSpacing(10)
+        self.layout_content_mcp.addStretch()
+        self.scroll_mcp.setWidget(self.content_mcp)
+        self.layout_mcp.addWidget(self.scroll_mcp)
+        self.tabs.addTab(self.tab_mcp, "MCP")
+
         self.tab_ai = QWidget()
         self.layout_ai = QVBoxLayout(self.tab_ai)
         self.layout_ai.setContentsMargins(0, 0, 0, 0)
@@ -6267,6 +6327,7 @@ class SkillsCenterDialog(QDialog):
 
         self._tab_layouts = {
             "builtin": self.layout_content_standard,
+            "mcp": self.layout_content_mcp,
             "custom": self.layout_content_ai,
         }
 
@@ -6320,7 +6381,8 @@ class SkillsCenterDialog(QDialog):
             viewport.setStyleSheet("background: transparent;")
 
     def _handle_tab_changed(self, index):
-        self.current_tab_key = "custom" if index == 1 else "builtin"
+        tab_map = {0: "builtin", 1: "mcp", 2: "custom"}
+        self.current_tab_key = tab_map.get(index, "builtin")
         self._refresh_count_label()
 
     def _on_search_text_changed(self, text):
@@ -6407,6 +6469,8 @@ class SkillsCenterDialog(QDialog):
             detail.setText("试试更换关键词，或切换到其他状态筛选。")
         elif tab_key == "custom" and not has_items:
             detail.setText("这里会显示你导入或生成的自定义能力。")
+        elif tab_key == "mcp" and not has_items:
+            detail.setText("这里会显示通过 MCP 接入的外部能力。")
         elif tab_key == "builtin":
             detail.setText("当前没有可展示的内置能力。")
         else:
@@ -6485,8 +6549,13 @@ class SkillsCenterDialog(QDialog):
         toggle = AppleSwitch()
         toggle.setObjectName("SkillEnableSwitch")
         toggle.setChecked(enabled)
-        toggle.setToolTip("关闭" if enabled else "启用")
-        toggle.clicked.connect(lambda checked=False, n=skill["name"]: self.toggle_skill(n, bool(checked)))
+        if skill_center_is_builtin(skill):
+            toggle.setEnabled(False)
+            toggle.setCursor(Qt.ArrowCursor)
+            toggle.setToolTip("内置能力始终启用，不能在这里关闭")
+        else:
+            toggle.setToolTip("关闭" if enabled else "启用")
+            toggle.clicked.connect(lambda checked=False, n=skill["name"]: self.toggle_skill(n, bool(checked)))
         card_layout.addWidget(toggle, 0, Qt.AlignRight | Qt.AlignVCenter)
         return card
 
@@ -6665,12 +6734,7 @@ class SessionSkillPickerDialog(QDialog):
         layout.addWidget(subtitle)
 
         self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(
-            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; "
-            "border-radius: 14px; padding: 6px; }}"
-            f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
-            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
-        )
+        self.skill_list.setStyleSheet(apple_checkable_list_style(radius=14, bg=DesignTokens.bg_card, padding=6))
         selected = set(self._selected_skill_names)
         for skill in self.skills:
             name = str(skill.get("name") or "").strip()
@@ -8539,6 +8603,10 @@ class ChatBubble(QFrame):
             return True
         if extract_renderable_html_response(text):
             return False
+        if final and looks_like_markdown_text(text):
+            return False
+        if final and len(text) < EXTREME_FINAL_PLAIN_TEXT_THRESHOLD:
+            return False
         if len(text) >= LONG_TEXT_PLAIN_RENDER_THRESHOLD:
             return True
         if text.count("\n") >= LONG_TEXT_PLAIN_LINE_THRESHOLD:
@@ -8626,6 +8694,8 @@ class ChatBubble(QFrame):
         self._rendered_main_content_mode = render_mode
         self._last_main_content_render_ts = time.time()
         self.content_edit.scheduleAdjustHeight()
+        QTimer.singleShot(0, self.content_edit.scheduleAdjustHeight)
+        QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
 
     def _render_plain_stream_content(self, text):
         """Avoid full Markdown conversion while a long response is still streaming."""
@@ -9495,6 +9565,7 @@ class SessionState:
         self.selected_skill_names = []
         self.sop_run = None
         self.conversation_branch = None
+        self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
         self.automation_task_id = ""
         self.automation_run_id = ""
@@ -10608,6 +10679,7 @@ class MainWindow(QMainWindow):
         self.project_buttons = {}
         self.project_preview_paths = set()
         self.project_full_expanded_paths = set()
+        self.unassigned_history_full_expanded = False
         self.sidebar_sort_mode = "recent"
         self.current_project_path = ""
         self._session_load_token_counter = 0
@@ -10660,6 +10732,7 @@ class MainWindow(QMainWindow):
         self._background_services_started = False
         self._background_services_scheduled = False
         self._running_automation_history_ids = set()
+        self._chat_save_failure_notified_at = {}
         
         # Animation Throttling
         self.last_message_time = 0
@@ -11543,6 +11616,10 @@ class MainWindow(QMainWindow):
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
         self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
+        self.chat_save_worker = ChatSaveWorker(self.chat_storage.db_path, parent=self)
+        self.chat_save_worker.save_failed.connect(self.handle_chat_save_failed)
+        self.chat_save_worker.save_completed.connect(self.handle_chat_save_completed)
+        self.chat_save_worker.start()
         self.refresh_model_selector()
         
         self.create_new_session()
@@ -12459,6 +12536,7 @@ class MainWindow(QMainWindow):
         state.automation_trigger_source = ""
         state.automation_template_id = ""
         state.conversation_branch = branch_meta
+        state.persisted_conversation_meta = copy.deepcopy(fork_meta or {})
 
     def _create_branch_session(self, parent_record, parent_message_id, forked_messages, action="branch", prefer_parent_title=True):
         parent_record = parent_record if isinstance(parent_record, dict) else {}
@@ -12484,7 +12562,7 @@ class MainWindow(QMainWindow):
         message_id = str(message_id or "").strip()
         if not session_id or not message_id:
             return False
-        self.save_chat_history(session_id=session_id)
+        self.save_chat_history(session_id=session_id, flush=True)
         parent_record = self.chat_storage.get_conversation_record(session_id) or {}
         parent_messages = self.chat_storage.get_messages(session_id)
         forked_messages = self._copy_forked_messages_upto(parent_messages, message_id)
@@ -12520,7 +12598,7 @@ class MainWindow(QMainWindow):
         if not accepted:
             return False
 
-        self.save_chat_history(session_id=session_id)
+        self.save_chat_history(session_id=session_id, flush=True)
         parent_record = self.chat_storage.get_conversation_record(session_id) or {}
         parent_messages = self.chat_storage.get_messages(session_id)
         forked_messages = self._copy_forked_messages_before(parent_messages, message_id)
@@ -12573,7 +12651,7 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return False
 
-        self.save_chat_history(session_id=session_id)
+        self.save_chat_history(session_id=session_id, flush=True)
         parent_record = self.chat_storage.get_conversation_record(session_id) or {}
         parent_messages = self.chat_storage.get_messages(session_id)
         forked_messages = self._copy_forked_messages_before(parent_messages, message_id)
@@ -14113,6 +14191,8 @@ class MainWindow(QMainWindow):
         self.daemon_process = None
 
     def shutdown_workers(self):
+        if not self.flush_pending_chat_saves(timeout_ms=3000):
+            self.append_log("会话保存队列在关闭前未能完全 flush，应用将继续退出。")
         if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
             self.daemon_connect_worker.wait(1000)
         self.daemon_connect_worker = None
@@ -14144,6 +14224,10 @@ class MainWindow(QMainWindow):
             state.code_worker = None
         if self.daemon_timer:
             self.daemon_timer.stop()
+        if getattr(self, "chat_save_worker", None):
+            if not self.chat_save_worker.stop_worker(timeout_ms=3000):
+                self.append_log("会话保存线程未在超时内退出。")
+            self.chat_save_worker = None
 
     def _terminate_process(self, proc):
         if not proc:
@@ -14508,6 +14592,7 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = []
         state.sop_run = None
         state.conversation_branch = None
+        state.persisted_conversation_meta = {}
         state.completed_agent_result_ids = set()
         state.automation_task_id = ""
         state.automation_run_id = ""
@@ -14642,6 +14727,7 @@ class MainWindow(QMainWindow):
             or conversation_meta.get("session_status")
             or "draft"
         )
+        state.persisted_conversation_meta = copy.deepcopy(conversation_meta or {})
         state.run_phase = conversation_meta.get("run_phase") or "Idle"
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
         state.selected_skill_names = normalize_selected_skill_names(
@@ -15347,6 +15433,11 @@ class MainWindow(QMainWindow):
             if refresh:
                 self.refresh_history_list()
 
+    def set_unassigned_history_full_expanded(self, expanded, refresh=True):
+        self.unassigned_history_full_expanded = bool(expanded)
+        if refresh:
+            self.refresh_history_list()
+
     def new_conversation_for_project(self, path):
         if not self.select_project(path):
             return
@@ -15561,6 +15652,9 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
 
         query = self._history_query_text()
+        query_active = bool(query)
+        if query_active:
+            self.unassigned_history_full_expanded = False
         search_ids = None
         if query:
             try:
@@ -15663,10 +15757,22 @@ class MainWindow(QMainWindow):
         unassigned_entries.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
         if unassigned_entries:
             self._add_history_group_label("对话")
-            for entry in unassigned_entries:
+            if query_active or self.unassigned_history_full_expanded or len(unassigned_entries) <= 3:
+                visible_unassigned_entries = unassigned_entries
+            else:
+                visible_unassigned_entries = unassigned_entries[:3]
+            for entry in visible_unassigned_entries:
                 row = self._make_project_session_row(entry, compact=False)
                 self.history_layout.addWidget(row)
                 rendered_any = True
+            if not query_active and len(unassigned_entries) > 3:
+                expand_btn = QPushButton(" 收起全部" if self.unassigned_history_full_expanded else " 展开显示")
+                expand_btn.setCursor(Qt.PointingHandCursor)
+                expand_btn.setStyleSheet(apple_disclosure_button_style())
+                expand_btn.clicked.connect(
+                    lambda checked=False, expanded=not self.unassigned_history_full_expanded: self.set_unassigned_history_full_expanded(expanded)
+                )
+                self.history_layout.addWidget(expand_btn)
 
         if not rendered_any:
             if query:
@@ -15715,6 +15821,7 @@ class MainWindow(QMainWindow):
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def rename_session(self, session_id):
+        self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
         record = self.chat_storage.get_conversation_record(session_id) or {}
         current_title = record.get("title") or "新任务"
         new_title, ok = QInputDialog.getText(self, "重命名任务", "新的任务标题", text=current_title)
@@ -15726,12 +15833,14 @@ class MainWindow(QMainWindow):
         self.chat_storage.upsert_conversation(session_id, title=new_title, status=status, meta=meta)
         state = self.sessions.get(session_id)
         if state:
+            state.persisted_conversation_meta = copy.deepcopy(meta)
             index = self.session_tabs.indexOf(state.session_widget)
             if index >= 0:
                 self.session_tabs.setTabText(index, new_title)
         self.refresh_history_list()
 
     def archive_session(self, session_id):
+        self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
         record = self.chat_storage.get_conversation_record(session_id) or {}
         meta = record.get("meta") or {}
         meta["archived"] = True
@@ -15741,6 +15850,9 @@ class MainWindow(QMainWindow):
             status=record.get("status") or "completed",
             meta=meta,
         )
+        state = self.sessions.get(session_id)
+        if state:
+            state.persisted_conversation_meta = copy.deepcopy(meta)
         self.refresh_history_list()
 
     def on_chat_scroll_value_changed(self, value, session_id):
@@ -15804,15 +15916,25 @@ class MainWindow(QMainWindow):
             id(getattr(state, "last_agent_bubble", None)),
         }
         tail_keep = 10
+        head_keep = 6
         last_tail_index = max(0, len(bubbles) - tail_keep)
 
         any_virtualized = False
         for index, bubble in enumerate(bubbles):
-            if id(bubble) in active_bubbles or index >= last_tail_index:
+            widget_top = bubble.y()
+            widget_height = max(bubble.height(), bubble.sizeHint().height(), 1)
+            widget_bottom = widget_top + widget_height
+            intersects_viewport = widget_bottom >= int(vbar.value()) and widget_top <= int(vbar.value()) + int(viewport.height())
+            layout_unstable = widget_height <= 32 or widget_top == 0
+            if (
+                id(bubble) in active_bubbles
+                or index < head_keep
+                or index >= last_tail_index
+                or intersects_viewport
+                or layout_unstable
+            ):
                 should_virtualize = False
             else:
-                widget_top = bubble.y()
-                widget_bottom = widget_top + max(bubble.height(), bubble.sizeHint().height(), 1)
                 should_virtualize = widget_bottom < top or widget_top > bottom
             if should_virtualize:
                 any_virtualized = True
@@ -15974,6 +16096,7 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.question(self, "确认删除", "确定要删除该会话吗？")
         if confirm != QMessageBox.Yes:
             return
+        self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
         state = self.sessions.get(session_id)
         if state:
             index = self.session_tabs.indexOf(state.session_widget)
@@ -16223,26 +16346,19 @@ class MainWindow(QMainWindow):
         self.create_new_session()
         self.refresh_history_list()
 
-    def save_chat_history(self, session_id=None):
-        state = self.get_session(session_id)
-        if not state:
-            return
-        has_clarify_state = bool(
-            state.clarify_mode_enabled
-            or bool(getattr(state, "pending_clarify_questions", []))
-        )
-        has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        has_sop_state = bool(normalize_sop_run(getattr(state, "sop_run", None)))
-        if not state.messages and not has_clarify_state and not has_selected_skills and not has_sop_state:
-            return
-        title = self._compute_session_title(state.messages) if state.messages else "新任务"
-        meta = {}
-        try:
-            meta = self.chat_storage.get_conversation_meta(state.session_id)
-        except Exception:
-            meta = {}
-        if self.workspace_dir:
-            meta["workspace_dir"] = self.workspace_dir
+    def _session_base_meta(self, state):
+        cached_meta = {}
+        if state:
+            cached_meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
+        if not isinstance(cached_meta, dict):
+            cached_meta = {}
+        return cached_meta
+
+    def _compose_session_meta(self, state):
+        meta = self._session_base_meta(state)
+        workspace_dir = self.workspace_dir or meta.get("workspace_dir") or ""
+        if workspace_dir:
+            meta["workspace_dir"] = workspace_dir
         meta["run_phase"] = getattr(state, "run_phase", "Idle")
         meta["session_status"] = getattr(state, "session_status", "draft")
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
@@ -16250,17 +16366,83 @@ class MainWindow(QMainWindow):
         meta.update(self._session_selected_skills_meta(state))
         meta.update(self._session_sop_meta(state))
         meta.update(self._session_branch_meta(state))
-        try:
-            self.chat_storage.save_conversation(
-                state.session_id,
-                state.messages,
-                title=title,
-                status=getattr(state, "session_status", "draft"),
-                meta=meta,
-            )
-        except Exception:
-            pass
+        return meta
+
+    def _build_chat_save_request(self, state):
+        if not state:
+            return None
+        has_clarify_state = bool(
+            state.clarify_mode_enabled
+            or bool(getattr(state, "pending_clarify_questions", []))
+        )
+        has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
+        has_sop_state = bool(normalize_sop_run(getattr(state, "sop_run", None)))
+        if not state.messages and not has_clarify_state and not has_selected_skills and not has_sop_state:
+            return None
+        title = self._compute_session_title(state.messages) if state.messages else "新任务"
+        meta = self._compose_session_meta(state)
+        state.persisted_conversation_meta = copy.deepcopy(meta)
+        return ChatSaveRequest(
+            session_id=state.session_id,
+            messages=copy.deepcopy(state.messages),
+            title=title,
+            status=getattr(state, "session_status", "draft"),
+            meta=copy.deepcopy(meta),
+            ready_at=time.monotonic(),
+        )
+
+    def flush_pending_chat_saves(self, session_id=None, timeout_ms=3000):
+        worker = getattr(self, "chat_save_worker", None)
+        if not worker:
+            return True
+        return worker.flush(session_id=session_id, timeout_ms=timeout_ms)
+
+    def handle_chat_save_failed(self, session_id, error):
+        session_id = str(session_id or "").strip()
+        self.append_log(f"会话保存失败({session_id or 'unknown'}): {error}")
+        notified = getattr(self, "_chat_save_failure_notified_at", None)
+        if not isinstance(notified, dict):
+            self._chat_save_failure_notified_at = {}
+            notified = self._chat_save_failure_notified_at
+        now = time.monotonic()
+        last_notified_at = float(notified.get(session_id, 0.0))
+        if now - last_notified_at < 5.0:
+            return
+        notified[session_id] = now
+        state = self.get_session(session_id)
+        if state:
+            self.add_system_toast("会话保存失败，稍后自动重试。", "warning", session_id=session_id, auto_close_ms=3500)
+
+    def handle_chat_save_completed(self, session_id):
+        session_id = str(session_id or "").strip()
+        notified = getattr(self, "_chat_save_failure_notified_at", None)
+        if isinstance(notified, dict):
+            notified.pop(session_id, None)
+
+    def save_chat_history(self, session_id=None, flush=False):
+        state = self.get_session(session_id)
+        if state:
+            request = self._build_chat_save_request(state)
+            if request:
+                worker = getattr(self, "chat_save_worker", None)
+                if worker:
+                    worker.enqueue(request)
+                else:
+                    try:
+                        self.chat_storage.save_conversation(
+                            request.session_id,
+                            request.messages,
+                            title=request.title,
+                            status=request.status,
+                            meta=request.meta,
+                        )
+                    except Exception:
+                        pass
         self.update_skill_capture_button_state()
+        if flush:
+            target_session_id = state.session_id if state else session_id
+            return self.flush_pending_chat_saves(session_id=target_session_id, timeout_ms=3000)
+        return True
 
     def start_memory_update(self):
         if self.memory_update_worker and self.memory_update_worker.isRunning():
@@ -16274,7 +16456,7 @@ class MainWindow(QMainWindow):
             self.memory_update_dialog.raise_()
             self.memory_update_dialog.activateWindow()
             return
-        self.save_chat_history(session_id=self.current_session_id)
+        self.save_chat_history(session_id=self.current_session_id, flush=True)
         self._last_memory_update_cutoff_at = None
         self._last_memory_update_transcripts = []
         if hasattr(self, "sidebar_memory_btn"):
@@ -16915,12 +17097,7 @@ class MainWindow(QMainWindow):
             return
         self.save_chat_history(session_id=state.session_id)
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
-        try:
-            meta = self.chat_storage.get_conversation_meta(state.session_id)
-        except Exception:
-            meta = {}
-        if self.workspace_dir:
-            meta["workspace_dir"] = self.workspace_dir
+        meta = self._compose_session_meta(state)
         toast_text = "正在根据修改意见重新生成 SOP 草稿" if revision_feedback else "正在根据当前会话生成 SOP 草稿"
         self.add_system_toast(toast_text, "info", session_id=state.session_id, auto_close_ms=3500)
         self.conversation_sop_worker = ConversationSopDraftWorker(
@@ -17028,12 +17205,7 @@ class MainWindow(QMainWindow):
             return
 
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
-        try:
-            meta = self.chat_storage.get_conversation_meta(state.session_id)
-        except Exception:
-            meta = {}
-        if self.workspace_dir:
-            meta["workspace_dir"] = self.workspace_dir
+        meta = self._compose_session_meta(state)
 
         self.add_system_toast("正在根据当前会话生成 Skill 草稿", "info", auto_close_ms=3500)
         self.conversation_skill_worker = ConversationSkillDraftWorker(

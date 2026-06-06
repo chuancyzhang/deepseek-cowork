@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.5**.
+Current app version: **4.8.6**.
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
@@ -38,6 +38,7 @@ Current app version: **4.8.5**.
 *   **Streamed Reply Coalescing**: Token deltas update the UI on short timers instead of forcing a rich-text relayout for every fragment.
 *   **Markdown Render Cache**: Repeated Markdown/HTML rendering reuses cached output for stable history bubbles and final responses.
 *   **Virtualized Chat Bubbles**: Long conversations collapse far-offscreen bubbles into fixed-height placeholders and restore them near the viewport.
+*   **Asynchronous Chat Saves**: High-frequency conversation saves are debounced and written from a background queue, while branch, rename, archive, delete, memory-update, and app-exit paths still flush pending writes before they read or close.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs, with both cron-expression scheduling and guided quick configuration.
 *   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; the prompt box auto-resizes with content and re-wraps cleanly in narrower layouts, and active automation and selected-skill chips can be removed with one click.
 *   **Conversation Branching**: Finished user and assistant bubbles expose a lightweight `分支` action that creates a new conversation from that point forward, preserving the workspace and selected skills while recording the parent conversation/message in session metadata. User bubbles also support `编辑后重新生成` and `删除并继续`, both of which create a new branch instead of rewriting the original history.
@@ -48,8 +49,8 @@ Current app version: **4.8.5**.
 *   **Smoother Settings Saves**: The settings dialog batches model, MCP, agent, workspace, and IM configuration updates into a single disk write to reduce UI stalls during save.
 *   **Smoother Launch & Run Actions**: Daemon connection now bootstraps in the background, so starting a task or running code no longer waits on repeated UI-thread connection retries.
 *   **Long Conversation Fast Path**: Opening or searching the sidebar now stays on the SQLite history index by default instead of scanning every legacy `chat_history_*.json` file on each refresh; older JSON sessions can be migrated manually from the sidebar menu.
-*   **Lightweight Long-Reply Rendering**: Very long assistant responses stay fully visible, but switch from Markdown HTML to a plain-text view once they become large enough to hurt scrolling or chat-open performance.
-*   **Hidden Windows Console Launches**: Python, Bash, updater fallback, app launch, and system-tool subprocesses share a no-window launch path on Windows to avoid flashing CMD windows during normal use.
+*   **Lightweight Long-Reply Rendering**: Very long assistant responses stay fully visible; streaming output may use a temporary plain-text path, while final Markdown/HTML replies keep rich rendering unless the text is extremely large and plain.
+*   **Hidden Windows Console Launches**: Python, Bash, updater fallback, updater relaunch, app launch, and system-tool subprocesses share a no-window launch path on Windows to avoid flashing CMD windows during normal use.
 *   **On-Demand Runtime Diagnostics**: High-frequency sub-agent lifecycle diagnostics are off by default; set `COWORK_RUNTIME_DEBUG_LOG=1` to write `sub_agent_runtime.log` under the app data directory, or `user_data/` in portable mode.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 

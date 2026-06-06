@@ -344,6 +344,7 @@ def get_tech_stylesheet(theme="light"):
         border: 1px solid {c_border};
         padding: 4px 8px;
         border-radius: {DesignTokens.radius_sm}px;
+        opacity: 240;
     }}
     """
     return css

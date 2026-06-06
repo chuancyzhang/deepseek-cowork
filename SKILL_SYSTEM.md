@@ -273,7 +273,7 @@ Skill Center multi-select export writes a collection ZIP whose root contains one
 
 Export excludes cache and build-style directories such as `__pycache__`, `.venv`, `node_modules`, `dist`, and `build`.
 
-Skill Center editing and deletion are intentionally scoped to user skills under `ai_skills`. Built-in skills are read-only in the workbench and cannot be deleted from Skill Center. The workbench can validate skill files, hot-reload after saving, call registered tools, run declared script entries through `run_skill_script`, and debug MCP tools for synthetic MCP skills.
+Skill Center editing and deletion are intentionally scoped to user skills under `ai_skills`. The UI is split into `Built-in`, `MCP`, and `Custom` tabs: built-in skills are read-only, stay enabled, and cannot be deleted from Skill Center; MCP skills stay in their own tab and can still be toggled and debugged; custom skills remain editable, exportable, and deletable. The workbench can validate skill files, hot-reload after saving, call registered tools, run declared script entries through `run_skill_script`, and debug MCP tools for synthetic MCP skills.
 
 Import accepts:
 

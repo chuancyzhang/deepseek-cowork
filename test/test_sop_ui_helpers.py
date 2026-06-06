@@ -22,6 +22,7 @@ from main import (
     AppleSwitch,
     AutoResizingInputEdit,
     AutoResizingPlainTextEdit,
+    AutoResizingTextEdit,
     AutomationTaskDialog,
     ChatBubble,
     MainWindow,
@@ -932,12 +933,35 @@ class TestSopUiHelpers(unittest.TestCase):
         bubble.show()
         app.processEvents()
 
-        self.assertIsInstance(bubble.user_content_edit, AutoResizingPlainTextEdit)
+        self.assertIsInstance(bubble.user_content_edit, AutoResizingTextEdit)
+        self.assertEqual(bubble.user_content_edit.toPlainText(), "macro-policy-analysis-demo-token")
         self.assertEqual(
             bubble.user_content_edit.wordWrapMode(),
             QTextOption.WrapAtWordBoundaryOrAnywhere,
         )
         self.assertLessEqual(bubble.user_content_edit.width(), 190)
+        self.assertGreater(bubble.user_content_edit.height(), 24)
+
+    def test_chat_bubble_user_wraps_full_chinese_question(self):
+        app = QApplication.instance() or QApplication([])
+        prompt = (
+            "用户提问突然就消失了，应该是要自适应换行，并且展示用户提问的所有文字。"
+            "请确认这段较长的问题在蓝色气泡里完整显示，不要被裁剪。"
+            "macro-policy-analysis-demo-token"
+        )
+        bubble = ChatBubble("User", prompt, source_message_id="u1")
+
+        bubble.apply_dynamic_widths(760, 260)
+        bubble.show()
+        app.processEvents()
+
+        self.assertIsInstance(bubble.user_content_edit, AutoResizingTextEdit)
+        self.assertEqual(bubble.user_content_edit.toPlainText(), prompt)
+        self.assertEqual(
+            bubble.user_content_edit.wordWrapMode(),
+            QTextOption.WrapAtWordBoundaryOrAnywhere,
+        )
+        self.assertLessEqual(bubble.user_content_edit.width(), 230)
         self.assertGreater(bubble.user_content_edit.height(), 24)
 
     def test_chat_bubble_agent_preserves_markdown_for_long_final_content(self):

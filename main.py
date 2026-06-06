@@ -6938,6 +6938,7 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameStyle(QFrame.NoFrame)
+        self.setLineWrapMode(QTextEdit.WidgetWidth)
         self.setFixedHeight(24)
         self._height_adjust_pending = False
         self.textChanged.connect(self.scheduleAdjustHeight)
@@ -6945,6 +6946,9 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         
         # Set word wrap mode to break anywhere if needed (for long strings)
         self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        text_option = self.document().defaultTextOption()
+        text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(text_option)
 
     def scheduleAdjustHeight(self):
         if self._height_adjust_pending:
@@ -6958,9 +6962,14 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         添加最大高度限制防止初始渲染时高度异常
         """
         self._height_adjust_pending = False
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            viewport_width = self.width() - (self.frameWidth() * 2)
+        self.document().setTextWidth(max(0.0, float(viewport_width)))
         doc_height = self.document().size().height()
         margins = self.contentsMargins()
-        height = int(doc_height + margins.top() + margins.bottom())
+        frame = self.frameWidth() * 2
+        height = int(doc_height + margins.top() + margins.bottom() + frame + 4)
         # 确保最小高度避免不可见，同时限制最大高度防止初始异常
         height = max(height, 24)
         height = min(height, 20000)
@@ -7018,6 +7027,9 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         self.setFrameStyle(QFrame.NoFrame)
         self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        text_option = self.document().defaultTextOption()
+        text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(text_option)
         self.setFixedHeight(24)
         self._height_adjust_pending = False
         self.textChanged.connect(self.scheduleAdjustHeight)
@@ -7031,10 +7043,25 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
 
     def adjustHeight(self):
         self._height_adjust_pending = False
-        doc_height = self.document().documentLayout().documentSize().height()
+        text_option = self.document().defaultTextOption()
+        if text_option.wrapMode() != QTextOption.WrapAtWordBoundaryOrAnywhere:
+            text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+            self.document().setDefaultTextOption(text_option)
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            viewport_width = self.width() - (self.frameWidth() * 2)
+        self.document().setTextWidth(max(0.0, float(viewport_width)))
+        line_count = 0
+        block = self.document().begin()
+        while block.isValid():
+            layout = block.layout()
+            line_count += max(1, layout.lineCount() if layout is not None else 1)
+            block = block.next()
+        doc_height = line_count * self.fontMetrics().lineSpacing()
         margins = self.contentsMargins()
+        doc_margin = int(self.document().documentMargin() * 2)
         frame = self.frameWidth() * 2
-        height = int(doc_height + margins.top() + margins.bottom() + frame + 4)
+        height = int(doc_height + doc_margin + margins.top() + margins.bottom() + frame + 4)
         height = max(height, 24)
         height = min(height, 20000)
         if self.height() != height:
@@ -7960,9 +7987,10 @@ class ChatBubble(QFrame):
             if text:
                 bubble_frame = QFrame()
                 self.user_bubble_frame = bubble_frame
+                bubble_frame.setObjectName("UserBubbleFrame")
                 bubble_frame.setMaximumWidth(DesignTokens.user_bubble_max_width)
                 bubble_frame.setStyleSheet(f"""
-                    QFrame {{
+                    QFrame#UserBubbleFrame {{
                         background: {DesignTokens.bg_user_bubble};
                         border-radius: 19px;
                         border-bottom-right-radius: 9px;
@@ -7971,7 +7999,7 @@ class ChatBubble(QFrame):
                 bubble_layout = QVBoxLayout(bubble_frame)
                 bubble_layout.setContentsMargins(15, 10, 15, 10)
 
-                content_edit = AutoResizingPlainTextEdit()
+                content_edit = AutoResizingTextEdit()
                 self.user_content_edit = content_edit
                 content_edit.setPlainText(text)
                 content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)

@@ -6,7 +6,9 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.6**.
+Current app version: **4.8.7**.
+
+Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)

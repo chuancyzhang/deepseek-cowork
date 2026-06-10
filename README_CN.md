@@ -6,7 +6,9 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.6**。
+当前应用版本：**4.8.7**。
+
+供团队与 AI 共同查看的项目状态文件见 [ROADMAP.md](ROADMAP.md)。
 
 ![应用截图1](images/首页.png)
 ![应用截图2](images/使用界面.png)

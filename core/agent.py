@@ -447,6 +447,7 @@ class LLMWorker(QThread):
         messages,
         config_manager,
         workspace_dir=None,
+        automation_runner=None,
         parent_agent_id=None,
         session_id=None,
         conversation_id=None,
@@ -459,6 +460,7 @@ class LLMWorker(QThread):
         self.config_manager = config_manager
         self.api_key = config_manager.get("api_key")
         self.workspace_dir = workspace_dir
+        self.automation_runner = automation_runner
         self.parent_agent_id = parent_agent_id
         self.session_id = session_id or ""
         self.conversation_id = conversation_id or self.session_id
@@ -1383,6 +1385,7 @@ class LLMWorker(QThread):
                                 "session_id": self.session_id,
                                 "conversation_id": self.conversation_id,
                                 "workspace_dir": self.workspace_dir,
+                                "automation_runner": self.automation_runner,
                                 "step_signal": self.step_signal,
                                 "config_manager": self.config_manager,
                                 "skill_manager": self.skill_manager,

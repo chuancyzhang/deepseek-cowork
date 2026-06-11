@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "name": "automation-tools",
+  "kind": "knowledge",
+  "capability_group": "automation",
+  "description": "Manage SOP templates, scheduled automation tasks, and automation run history through AI-callable tools.",
+  "description_cn": "让 AI 可以管理 SOP 模板、定时自动化任务和执行历史。",
+  "tags": ["automation", "sop", "schedule", "task", "cron"],
+  "triggers": ["automation", "scheduled task", "SOP template", "自动化", "定时任务", "任务模板"],
+  "anti_triggers": [],
+  "tool_refs": [
+    "list_automation_templates",
+    "upsert_automation_template",
+    "list_automation_tasks",
+    "upsert_automation_task",
+    "set_automation_task_enabled",
+    "delete_automation_task",
+    "run_automation_task_now",
+    "list_automation_run_history"
+  ],
+  "references": [],
+  "script_refs": [],
+  "script_entries": [],
+  "asset_refs": [],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "List templates or tasks first when the current automation state is unclear.",
+    "Create or update templates before binding a scheduled task to them.",
+    "Ask for approval before deleting or running a task."
+  ]
+}

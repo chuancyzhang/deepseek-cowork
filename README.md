@@ -134,6 +134,7 @@ Open **自动化** from the sidebar:
 *   **Run History** presents a calmer detail view for completed, failed, interrupted, missed, or awaiting-confirmation runs, and can still reopen the related task session.
 *   **Task Templates** continue to hide manual template IDs by default; templates and steps can be set to manual confirmation or auto-advance, and each step can run through the agent, an uploaded Python file, or a Bash command.
 *   **Conversation Automation Entry Points** are more consistent: binding an automation to the current session, previewing a generated SOP draft, and inspecting the right-side automation drawer all use the same Apple-style surfaces and step summaries.
+*   **AI-callable Automation Tools** let the agent inspect templates, create or update templates and scheduled tasks, pause or enable tasks, and review run history through normal `tool_search` discovery. Deleting or immediately running a task still requires explicit user approval, and newly created scheduled tasks default to paused unless the user clearly asks to enable them.
 
 ### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:

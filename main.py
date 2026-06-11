@@ -18307,6 +18307,7 @@ class MainWindow(QMainWindow):
             state.messages,
             self.config_manager,
             self.workspace_dir,
+            automation_runner=self.run_automation_task_now,
             session_id=state.session_id,
             run_context=run_context,
         )

@@ -35,8 +35,8 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 *   **Observability Prompt Preview**: The system-prompt pane prioritizes appended system messages and hides the front of very long base prompts by default, while a `复制全量` action still copies the complete prompt for debugging.
 *   **Vision Attachments**: Prompt-bar image attachments keep structured metadata and are sent as multimodal input only when the selected model enables `支持图片理解`.
 *   **Plain-Text Prompt Pasting**: Pasting into the main prompt box strips rich-text styling from sources like browsers, WeChat, and Office while preserving plain text and line breaks.
-*   **Staged Background Startup**: The main window shows first, then tray setup, daemon prewarm, daemon monitoring, and automation scheduling are deferred into short background phases to keep launch interaction smooth.
-*   **Singleton Background Services**: Repeated clicks on start/run no longer fan out extra daemon or IM gateway processes; startup requests are coalesced in the UI, and child processes enforce a single live instance with file locks.
+*   **Staged Background Startup**: The main window shell shows first, then default workspace hydration, sidebar history rendering, tray setup, daemon prewarm, daemon monitoring, and automation scheduling are deferred into short background phases to keep launch interaction smooth even on slower machines.
+*   **Singleton Background Services**: Repeated clicks on the exe or start/run no longer fan out extra windows, daemon, or IM gateway processes; the UI process now keeps a runtime lock and retries local activation while the first window is still booting, and child processes still enforce a single live instance with file locks.
 *   **Streamed Reply Coalescing**: Token deltas update the UI on short timers instead of forcing a rich-text relayout for every fragment.
 *   **Markdown Render Cache**: Repeated Markdown/HTML rendering reuses cached output for stable history bubbles and final responses.
 *   **Virtualized Chat Bubbles**: Long conversations collapse far-offscreen bubbles into fixed-height placeholders and restore them near the viewport.

@@ -27,6 +27,7 @@ from core.single_instance import (
     UiSingleInstanceServer,
     build_ui_server_name,
     notify_existing_ui,
+    notify_existing_ui_with_retries,
 )
 from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
@@ -254,6 +255,8 @@ BACKGROUND_DAEMON_PREWARM_DELAY_MS = 480
 BACKGROUND_DAEMON_MONITOR_DELAY_MS = 1800
 BACKGROUND_AUTOMATION_START_DELAY_MS = 2400
 GATEWAY_START_SETTLE_DELAY_MS = 1200
+STARTUP_LOG_FILENAME = "startup.log"
+STARTUP_STAGE_CLOCK = time.monotonic()
 
 
 def build_daemon_launch_command(port):
@@ -295,6 +298,16 @@ def append_background_process_log(filename, message):
             handle.write(f"[{timestamp}] {message}\n")
     except Exception:
         pass
+
+
+def log_startup_stage(stage, **fields):
+    if not runtime_debug_logging_enabled():
+        return
+    elapsed_ms = int((time.monotonic() - STARTUP_STAGE_CLOCK) * 1000)
+    parts = [f"stage={stage}", f"elapsed_ms={elapsed_ms}"]
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+    append_background_process_log(STARTUP_LOG_FILENAME, " ".join(parts))
 
 
 _MARKDOWN_RENDER_CACHE = OrderedDict()
@@ -7479,8 +7492,14 @@ class DaemonConnectWorker(QThread):
             time.sleep(0.2)
             connected = False
         if not connected and self.allow_start:
+            launch_lock = acquire_process_singleton(
+                build_process_singleton_lock_path(get_app_data_dir(), f"daemon-launch-{self.port}")
+            )
             try:
-                payload["process"] = launch_daemon_subprocess(self.port)
+                if launch_lock:
+                    payload["process"] = launch_daemon_subprocess(self.port)
+                else:
+                    payload["launch_skipped"] = "busy"
             except Exception as exc:
                 payload["error"] = str(exc)
             for _ in range(self.retries):
@@ -10759,6 +10778,8 @@ class MainWindow(QMainWindow):
         self.single_instance_server = None
         self._background_services_started = False
         self._background_services_scheduled = False
+        self._startup_hydration_scheduled = False
+        self._startup_hydration_completed = False
         self._running_automation_history_ids = set()
         self._chat_save_failure_notified_at = {}
         
@@ -11649,11 +11670,8 @@ class MainWindow(QMainWindow):
         self.chat_save_worker.save_completed.connect(self.handle_chat_save_completed)
         self.chat_save_worker.start()
         self.refresh_model_selector()
-        
         self.create_new_session()
-        self.refresh_history_list()
         self.update_skill_capture_button_state()
-        self.load_default_workspace()
 
         # Initialize Drag Overlay
         self.drag_overlay = DragOverlay(self)
@@ -11663,6 +11681,7 @@ class MainWindow(QMainWindow):
         self.update_ui_state_for_workspace()
         QApplication.instance().installEventFilter(self)
         self.sync_context_drawer_layout()
+        log_startup_stage("main_window_init_complete")
 
     def process_ui_events(self, force=False):
         import time
@@ -11764,9 +11783,22 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not self._startup_hydration_scheduled:
+            self._startup_hydration_scheduled = True
+            QTimer.singleShot(0, self._run_startup_hydration)
         if not self._background_services_scheduled:
             self._background_services_scheduled = True
             QTimer.singleShot(0, self.start_background_services)
+
+    def _run_startup_hydration(self):
+        if self._startup_hydration_completed:
+            return
+        self._startup_hydration_completed = True
+        log_startup_stage("startup_hydration_begin")
+        self.load_default_workspace(refresh_sidebar=False)
+        log_startup_stage("startup_workspace_ready", has_workspace=bool(self.workspace_dir))
+        self.refresh_history_list()
+        log_startup_stage("startup_history_ready")
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and getattr(self, "right_drawer_open", False):
@@ -16603,10 +16635,10 @@ class MainWindow(QMainWindow):
                 self.memory_update_dialog.show_error(f"保存长期记忆失败：{exc}")
             self.add_system_toast(f"保存长期记忆失败：{exc}", "error", auto_close_ms=8000)
 
-    def load_default_workspace(self):
+    def load_default_workspace(self, refresh_sidebar=True):
         default_dir = self.config_manager.get("default_workspace", "")
         if default_dir and os.path.isdir(default_dir):
-            self.load_workspace(default_dir)
+            self.load_workspace(default_dir, refresh_sidebar=refresh_sidebar)
 
     def select_workspace(self):
         directory = QFileDialog.getExistingDirectory(self, "选择工作区")
@@ -19245,6 +19277,7 @@ class MainWindow(QMainWindow):
         self.code_worker.provide_input(response)
 
 if __name__ == "__main__":
+    log_startup_stage("entry")
     if "--daemon" in sys.argv:
         port = DEFAULT_PORT
         for arg in sys.argv:
@@ -19274,6 +19307,13 @@ if __name__ == "__main__":
     ui_server_name = build_ui_server_name()
     if notify_existing_ui(ui_server_name):
         sys.exit(0)
+    ui_runtime_lock = acquire_process_singleton(
+        build_process_singleton_lock_path(get_app_data_dir(), "ui-main")
+    )
+    if not ui_runtime_lock:
+        if notify_existing_ui_with_retries(ui_server_name):
+            sys.exit(0)
+        sys.exit(0)
     if platform.system() == 'Windows':
         try:
             import ctypes
@@ -19284,6 +19324,8 @@ if __name__ == "__main__":
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = SafeApplication(sys.argv)
+    app.ui_runtime_lock = ui_runtime_lock
+    log_startup_stage("app_created")
     icon_path = resolve_app_icon_path()
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
@@ -19302,14 +19344,16 @@ if __name__ == "__main__":
 
     single_instance_server = UiSingleInstanceServer(ui_server_name, activate_main_window, app)
     single_instance_server_started = single_instance_server.start()
-    if not single_instance_server_started and notify_existing_ui(ui_server_name):
+    if not single_instance_server_started and notify_existing_ui_with_retries(ui_server_name):
         sys.exit(0)
 
     window = MainWindow()
     app.main_window = window
     if single_instance_server_started:
         window.attach_single_instance_server(single_instance_server)
+    log_startup_stage("window_created", single_instance_server_started=single_instance_server_started)
     window.showMaximized()
+    log_startup_stage("window_show_requested")
     if pending_activation["requested"]:
         window.activate_existing_window()
     sys.exit(app.exec())

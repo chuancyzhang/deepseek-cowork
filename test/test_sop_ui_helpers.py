@@ -25,6 +25,7 @@ from main import (
     AutoResizingTextEdit,
     AutomationTaskDialog,
     ChatBubble,
+    DaemonConnectWorker,
     MainWindow,
     SessionState,
     SkillsCenterDialog,
@@ -42,8 +43,8 @@ from main import (
     summarize_skill_terms,
 )
 from PySide6.QtCore import QEvent, Qt, QMimeData
-from PySide6.QtGui import QTextOption
-from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import QTextOption, QShowEvent
+from PySide6.QtWidgets import QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 
 class _State:
@@ -1474,6 +1475,57 @@ class TestSopUiHelpers(unittest.TestCase):
                 BACKGROUND_AUTOMATION_START_DELAY_MS,
             ],
         )
+
+    def test_run_startup_hydration_loads_workspace_before_single_history_refresh(self):
+        window = MainWindow.__new__(MainWindow)
+        window._startup_hydration_completed = False
+        window.workspace_dir = ""
+        window.load_default_workspace = MagicMock(side_effect=lambda refresh_sidebar=True: setattr(window, "workspace_dir", "D:\\demo"))
+        window.refresh_history_list = MagicMock()
+
+        window._run_startup_hydration()
+        window._run_startup_hydration()
+
+        window.load_default_workspace.assert_called_once_with(refresh_sidebar=False)
+        window.refresh_history_list.assert_called_once()
+
+    def test_show_event_schedules_startup_hydration_once(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        QMainWindow.__init__(window)
+        window._startup_hydration_scheduled = False
+        window._background_services_scheduled = False
+
+        try:
+            with patch("main.QTimer.singleShot") as single_shot:
+                event = QShowEvent()
+                window.showEvent(event)
+                window.showEvent(event)
+        finally:
+            window.deleteLater()
+            app.processEvents()
+
+        self.assertEqual([call.args[0] for call in single_shot.call_args_list], [0, 0])
+
+    def test_daemon_connect_worker_skips_duplicate_launch_when_lock_busy(self):
+        app = QApplication.instance() or QApplication([])
+        payloads = []
+        worker = DaemonConnectWorker("127.0.0.1", 23333, "sig", allow_start=True, retries=1)
+        worker.finished_signal.connect(lambda payload: payloads.append(payload))
+
+        client = MagicMock()
+        client.ping.side_effect = [None, {"status": "ok", "signature": "sig"}]
+
+        with patch("main.DaemonClient", return_value=client), \
+             patch("main.acquire_process_singleton", return_value=None), \
+             patch("main.launch_daemon_subprocess") as launch_daemon:
+            worker.run()
+            app.processEvents()
+
+        launch_daemon.assert_not_called()
+        self.assertEqual(len(payloads), 1)
+        self.assertTrue(payloads[0]["connected"])
+        self.assertEqual(payloads[0].get("launch_skipped"), "busy")
 
     def test_queue_daemon_connection_coalesces_pending_request_while_worker_running(self):
         window = MainWindow.__new__(MainWindow)

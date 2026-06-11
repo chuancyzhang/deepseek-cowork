@@ -50,6 +50,23 @@ def notify_existing_ui(server_name, command=DEFAULT_UI_COMMAND, timeout_ms=500):
     return bool(ok)
 
 
+def notify_existing_ui_with_retries(
+    server_name,
+    command=DEFAULT_UI_COMMAND,
+    total_timeout_ms=5000,
+    interval_ms=100,
+    per_attempt_timeout_ms=200,
+):
+    """Retry activation while the first UI process is still booting its local server."""
+    deadline = time.monotonic() + max(total_timeout_ms, 0) / 1000
+    while True:
+        if notify_existing_ui(server_name, command=command, timeout_ms=per_attempt_timeout_ms):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(interval_ms, 0) / 1000)
+
+
 class UiSingleInstanceServer(QObject):
     """Local IPC server used by later exe launches to activate the first UI."""
 

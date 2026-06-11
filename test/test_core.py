@@ -28,6 +28,7 @@ from core.single_instance import (
     UiSingleInstanceServer,
     build_ui_server_name,
     notify_existing_ui,
+    notify_existing_ui_with_retries,
 )
 from core.chat_storage import ChatStorage
 from core.im_session_key import build_im_session_key, parse_im_session_key, resolve_date_key
@@ -1099,6 +1100,25 @@ class TestSingleInstance(unittest.TestCase):
         finally:
             server.stop()
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_notify_existing_ui_with_retries_waits_for_booting_server(self):
+        attempts = []
+
+        def fake_notify(*_args, **_kwargs):
+            attempts.append(time.time())
+            return len(attempts) >= 3
+
+        with patch("core.single_instance.notify_existing_ui", side_effect=fake_notify):
+            self.assertTrue(
+                notify_existing_ui_with_retries(
+                    "demo-server",
+                    total_timeout_ms=400,
+                    interval_ms=1,
+                    per_attempt_timeout_ms=1,
+                )
+            )
+
+        self.assertEqual(len(attempts), 3)
 
 
 class TestDaemonInteractionRoundtrip(unittest.TestCase):

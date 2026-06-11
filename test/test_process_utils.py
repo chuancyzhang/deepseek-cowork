@@ -52,6 +52,17 @@ class TestProcessUtils(unittest.TestCase):
             first.release()
             second.release()
 
+    def test_process_singleton_lock_keeps_ui_scope_independent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ui_lock = ProcessSingletonLock(build_process_singleton_lock_path(temp_dir, "ui-main"))
+            daemon_lock = ProcessSingletonLock(build_process_singleton_lock_path(temp_dir, "daemon-launch-23333"))
+
+            self.assertTrue(ui_lock.acquire())
+            self.assertTrue(daemon_lock.acquire())
+
+            ui_lock.release()
+            daemon_lock.release()
+
 
 if __name__ == "__main__":
     unittest.main()

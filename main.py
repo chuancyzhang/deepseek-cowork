@@ -1061,6 +1061,8 @@ def skill_center_tab_key(skill):
         return "builtin"
     if str(skill.get("source_format") or "").strip() == SkillManager.MCP_SOURCE_FORMAT:
         return "mcp"
+    if str(skill.get("source_type") or "").strip() == "bundled_plugin" or skill.get("type") == "bundled_plugin":
+        return "optional"
     is_custom = skill.get("type") == "ai_generated" or skill.get("created_by") == "ai"
     return "custom" if is_custom else "builtin"
 
@@ -1141,15 +1143,15 @@ def summarize_tool_action(tool_name, args):
         if isinstance(value, str) and value.strip():
             path = value.strip()
             break
-    if name in {"read_file", "read_docx", "read_pptx", "read_excel", "read_pdf"}:
+    if name in {"text_file_read", "document_read"}:
         return "查看文件", path or "读取内容"
-    if name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx"}:
+    if name in {"text_file_write", "text_file_update"}:
         return "更新文件", path or "写入结果"
-    if name in {"rename_file"}:
+    if name in {"workspace_rename_path"}:
         return "整理文件", path or "移动或重命名"
-    if name in {"delete_file"}:
+    if name in {"workspace_delete_path"}:
         return "删除文件", path or "删除项目"
-    if name in {"list_files", "search_files", "glob", "grep", "search_codebase"}:
+    if name in {"workspace_list_files", "search_files", "glob", "grep", "search_codebase"}:
         return "扫描工作区", path or "查找相关文件"
     if name in {"bash", "run_command"}:
         cmd = args.get("command") or args.get("cmd") or ""
@@ -1171,7 +1173,7 @@ def extract_related_paths(tool_name, args):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
             paths.append(value.strip())
-    if tool_name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx", "rename_file", "delete_file"}:
+    if tool_name in {"text_file_write", "text_file_update", "workspace_rename_path", "workspace_delete_path"}:
         return paths
     return []
 
@@ -1405,15 +1407,15 @@ def summarize_tool_action(tool_name, args):
         if isinstance(value, str) and value.strip():
             path = value.strip()
             break
-    if name in {"read_file", "read_docx", "read_pptx", "read_excel", "read_pdf"}:
+    if name in {"text_file_read", "document_read"}:
         return "Read File", path or "Read file contents"
-    if name in {"write_file", "update_file", "write_docx", "write_excel", "create_pptx"}:
+    if name in {"text_file_write", "text_file_update"}:
         return "Update File", path or "Write output to disk"
-    if name in {"rename_file"}:
+    if name in {"workspace_rename_path"}:
         return "Rename File", path or "Move or rename item"
-    if name in {"delete_file"}:
+    if name in {"workspace_delete_path"}:
         return "Delete File", path or "Remove item"
-    if name in {"list_files", "search_files", "glob", "grep", "search_codebase"}:
+    if name in {"workspace_list_files", "search_files", "glob", "grep", "search_codebase"}:
         return "Scan Workspace", path or "Search related files"
     if name in {"bash", "run_command"}:
         cmd = args.get("command") or args.get("cmd") or ""
@@ -6310,6 +6312,20 @@ class SkillsCenterDialog(QDialog):
         self.layout_standard.addWidget(self.scroll_standard)
         self.tabs.addTab(self.tab_standard, "内置能力")
 
+        self.tab_optional = QWidget()
+        self.layout_optional = QVBoxLayout(self.tab_optional)
+        self.layout_optional.setContentsMargins(0, 0, 0, 0)
+        self.scroll_optional = QScrollArea()
+        self._set_scroll_area_chrome(self.scroll_optional)
+        self.content_optional = QWidget()
+        self.layout_content_optional = QVBoxLayout(self.content_optional)
+        self.layout_content_optional.setContentsMargins(8, 8, 8, 18)
+        self.layout_content_optional.setSpacing(10)
+        self.layout_content_optional.addStretch()
+        self.scroll_optional.setWidget(self.content_optional)
+        self.layout_optional.addWidget(self.scroll_optional)
+        self.tabs.addTab(self.tab_optional, "可选插件")
+
         self.tab_mcp = QWidget()
         self.layout_mcp = QVBoxLayout(self.tab_mcp)
         self.layout_mcp.setContentsMargins(0, 0, 0, 0)
@@ -6340,6 +6356,7 @@ class SkillsCenterDialog(QDialog):
 
         self._tab_layouts = {
             "builtin": self.layout_content_standard,
+            "optional": self.layout_content_optional,
             "mcp": self.layout_content_mcp,
             "custom": self.layout_content_ai,
         }
@@ -6394,7 +6411,7 @@ class SkillsCenterDialog(QDialog):
             viewport.setStyleSheet("background: transparent;")
 
     def _handle_tab_changed(self, index):
-        tab_map = {0: "builtin", 1: "mcp", 2: "custom"}
+        tab_map = {0: "builtin", 1: "optional", 2: "mcp", 3: "custom"}
         self.current_tab_key = tab_map.get(index, "builtin")
         self._refresh_count_label()
 
@@ -6482,6 +6499,8 @@ class SkillsCenterDialog(QDialog):
             detail.setText("试试更换关键词，或切换到其他状态筛选。")
         elif tab_key == "custom" and not has_items:
             detail.setText("这里会显示你导入或生成的自定义能力。")
+        elif tab_key == "optional" and not has_items:
+            detail.setText("这里会显示随应用分发、默认关闭的可选插件。")
         elif tab_key == "mcp" and not has_items:
             detail.setText("这里会显示通过 MCP 接入的外部能力。")
         elif tab_key == "builtin":
@@ -6702,7 +6721,7 @@ class SkillsCenterDialog(QDialog):
             "删除自定义能力",
             (
                 f"将尝试删除 {selected_count} 个已选能力中的用户自定义能力。\n"
-                "内置能力和 MCP 能力会自动跳过。删除会移除本地能力目录，无法在应用内撤销。是否继续？"
+                "内置能力、可选插件和 MCP 能力会自动跳过。删除会移除本地能力目录，无法在应用内撤销。是否继续？"
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -8835,8 +8854,8 @@ class ToolCallCard(QFrame):
         
         # 1. Icon Area (Timeline Dot)
         tool_icons = {
-            "list_files": "fa5s.folder", "read_file": "fa5s.book-open", "write_file": "fa5s.pen-alt",
-            "update_file": "fa5s.pen", "delete_file": "fa5s.trash-alt", "run_command": "fa5s.terminal",
+            "workspace_list_files": "fa5s.folder", "text_file_read": "fa5s.book-open", "text_file_write": "fa5s.pen-alt",
+            "text_file_update": "fa5s.pen", "workspace_delete_path": "fa5s.trash-alt", "workspace_rename_path": "fa5s.exchange-alt", "document_read": "fa5s.file-alt", "run_command": "fa5s.terminal",
             "bash": "fa5s.terminal",
             "open_preview": "fa5s.compass", "search_codebase": "fa5s.search", "grep": "fa5s.filter",
             "glob": "fa5s.globe", "web_search": "fa5s.globe-americas", "get_diagnostics": "fa5s.stethoscope",

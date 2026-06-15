@@ -17,63 +17,63 @@ class TestToolRegistry(unittest.TestCase):
     def test_mode_filtering_and_deferred_discovery(self):
         registry = ToolRegistry()
 
-        def read_file(path):
+        def text_file_read(path):
             return path
 
-        def write_file(path, content):
+        def text_file_write(path, content):
             return content
 
         registry.register(
-            "read_file",
-            read_file,
+            "text_file_read",
+            text_file_read,
             "Read a workspace file",
             {"type": "object", "properties": {}, "required": []},
         )
         registry.register(
-            "write_file",
-            write_file,
+            "text_file_write",
+            text_file_write,
             "Write a workspace file",
             {"type": "object", "properties": {}, "required": []},
         )
 
         clarifying_names = [item["function"]["name"] for item in registry.definitions(RUN_MODE_CLARIFYING)]
-        self.assertIn("read_file", clarifying_names)
-        self.assertNotIn("write_file", clarifying_names)
+        self.assertIn("text_file_read", clarifying_names)
+        self.assertNotIn("text_file_write", clarifying_names)
 
         execution_initial = [
             item["function"]["name"]
             for item in registry.definitions(RUN_MODE_EXECUTION, discovered_tool_names=set())
         ]
-        self.assertIn("read_file", execution_initial)
-        self.assertNotIn("write_file", execution_initial)
+        self.assertIn("text_file_read", execution_initial)
+        self.assertNotIn("text_file_write", execution_initial)
 
         matches = registry.search("write file", run_mode=RUN_MODE_EXECUTION)
-        self.assertEqual(matches[0]["name"], "write_file")
+        self.assertEqual(matches[0]["name"], "text_file_write")
         execution_after_search = [
             item["function"]["name"]
             for item in registry.definitions(
                 RUN_MODE_EXECUTION,
-                discovered_tool_names={"write_file"},
+                discovered_tool_names={"text_file_write"},
             )
         ]
-        self.assertIn("write_file", execution_after_search)
+        self.assertIn("text_file_write", execution_after_search)
         self.assertEqual(registry.search("write file", run_mode=RUN_MODE_CLARIFYING), [])
 
     def test_alias_resolution(self):
         registry = ToolRegistry()
 
-        def read_file(path):
+        def text_file_read(path):
             return path
 
         registry.register(
-            "read_file",
-            read_file,
+            "text_file_read",
+            text_file_read,
             "Read a workspace file",
             {"type": "object", "properties": {}, "required": []},
             aliases=["open_file"],
         )
 
-        self.assertEqual(registry.resolve_name("open_file"), "read_file")
+        self.assertEqual(registry.resolve_name("open_file"), "text_file_read")
         self.assertTrue(registry.is_allowed("open_file", RUN_MODE_CLARIFYING))
 
 
@@ -832,3 +832,4 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

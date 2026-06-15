@@ -273,7 +273,7 @@ Skill Center multi-select export writes a collection ZIP whose root contains one
 
 Export excludes cache and build-style directories such as `__pycache__`, `.venv`, `node_modules`, `dist`, and `build`.
 
-Skill Center editing and deletion are intentionally scoped to user skills under `ai_skills`. The UI is split into `Built-in`, `MCP`, and `Custom` tabs: built-in skills are read-only, stay enabled, and cannot be deleted from Skill Center; MCP skills stay in their own tab and can still be toggled and debugged; custom skills remain editable, exportable, and deletable. The workbench can validate skill files, hot-reload after saving, call registered tools, run declared script entries through `run_skill_script`, and debug MCP tools for synthetic MCP skills.
+Skill Center editing and deletion are intentionally scoped to user-created skills under the writable AppData `ai_skills` root. The UI is split into `Built-in`, `Optional Plugins`, `MCP`, and `Custom` tabs: built-in skills are read-only and stay enabled; optional bundled plugins are read-only, ship under `ai_skills`, default to disabled, and can be toggled; MCP skills stay in their own tab; custom skills remain editable, exportable, and deletable. The workbench can validate skill files, hot-reload after saving, call registered tools, run declared script entries through `run_skill_script`, and debug MCP tools for synthetic MCP skills.
 
 Import accepts:
 
@@ -330,15 +330,13 @@ This keeps the model simple:
 
 File and information interaction:
 - `file-system`
-- `web-search`
 
 Code and command execution:
 - `command-tools`
-- `system-tools`
 - `python-runner`
 
+`file-system` owns plain-text file reads/writes and workspace path operations only; it must not parse DOCX, PPTX, XLSX/XLS, or PDF.
 `command-tools` owns shell execution, workspace glob/grep search, and declared skill scripts.
-`system-tools` owns environment/app automation such as browser, desktop, and app launch flows.
 `meta-tools` owns `tool_search`, `parallel_tools`, and experience update helpers that help the model find and combine capabilities without widening the execution surface.
 
 AI and human interaction:
@@ -358,6 +356,18 @@ AI and human interaction:
 - `skill-importer`
 
 All of these are still skills in the public sense, but internally they are all experience packages with different roles.
+
+### Optional Bundled Plugins
+
+Default-off plugins ship under `ai_skills` with `source_type: bundled_plugin` and `default_enabled: false`.
+
+- `document-reader`: unified `document_read` for DOCX, PPTX, XLSX/XLS, and PDF reads. It does not use Pandoc and does not provide write tools.
+- `system-tools`: environment, browser, desktop, and app launch automation.
+- `web-search`: web search and article reading.
+- `financial-data-akshare`: AKShare financial data.
+- `browser-automation`, `github-tools`, `yt-dlp-wrapper`: browser, GitHub, and media-download helpers.
+
+Office/PDF writes are intentionally not modeled as fixed tools. The agent should use `run_python_code` with task-appropriate libraries when the user asks to create or modify those formats.
 
 ## System Skills
 

@@ -91,6 +91,8 @@ def _get_file_state(context):
 
 def record_full_read_state(abs_path, context):
     state = _get_file_state(context)
+    if "reads" not in state:
+        return
     state["reads"][_cache_key(abs_path)] = {"full": True, "mtime": _safe_mtime(abs_path)}
 
 

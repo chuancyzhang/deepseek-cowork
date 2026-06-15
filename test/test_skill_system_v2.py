@@ -30,6 +30,27 @@ class TestSkillSystemV2(unittest.TestCase):
         sm.load_skills()
         return sm
 
+    def _build_manager_with_enabled(self, enabled):
+        class ConfigStub:
+            def __init__(self, names):
+                self.names = set(names)
+
+            def is_skill_enabled(self, skill_name, default_enabled=True):
+                if skill_name in self.names:
+                    return True
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get(self, _key, default=None):
+                return default
+
+        sm = SkillManager(workspace_dir=self.temp_dir, config_manager=ConfigStub(enabled))
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills()
+        return sm
+
     def _build_light_manager(self):
         sm = SkillManager.__new__(SkillManager)
         sm.workspace_dir = self.temp_dir
@@ -42,6 +63,13 @@ class TestSkillSystemV2(unittest.TestCase):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         source_dir = os.path.join(repo_root, "skills", skill_name)
         target_dir = os.path.join(self.skills_dir, skill_name)
+        shutil.copytree(source_dir, target_dir)
+        return target_dir
+
+    def _copy_repo_ai_skill(self, skill_name):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        source_dir = os.path.join(repo_root, "ai_skills", skill_name)
+        target_dir = os.path.join(self.ai_skills_dir, skill_name)
         shutil.copytree(source_dir, target_dir)
         return target_dir
 
@@ -698,9 +726,9 @@ class TestSkillSystemV2(unittest.TestCase):
 
     def test_system_tools_skill_only_exposes_environment_automation_tools(self):
         self._copy_repo_skill("command-tools")
-        self._copy_repo_skill("system-tools")
+        self._copy_repo_ai_skill("system-tools")
 
-        sm = self._build_manager()
+        sm = self._build_manager_with_enabled({"system-tools"})
 
         self.assertIn("system-tools", sm.skill_records)
         self.assertCountEqual(

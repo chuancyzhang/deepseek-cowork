@@ -493,7 +493,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('skills', 'skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas + MCP_ANALYSIS_METADATA,
+    datas=[('skills', 'skills'), ('ai_skills', 'ai_skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas + MCP_ANALYSIS_METADATA,
     hiddenimports=pyside6_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
         'docx',
         'pptx',

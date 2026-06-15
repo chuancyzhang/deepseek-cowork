@@ -210,7 +210,7 @@ class TestInteractionSkill(unittest.TestCase):
         self.assertIn("wecom", result["delivery_result"])
         self.assertFalse(result["delivery_result"]["wecom"]["enabled"])
 
-    def test_delete_file_requires_request_user_approval(self):
+    def test_workspace_delete_path_requires_confirmation(self):
         module_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "skills",
@@ -226,17 +226,8 @@ class TestInteractionSkill(unittest.TestCase):
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write("demo")
 
-            with patch.object(
-                module,
-                "request_user_approval",
-                return_value={
-                    "interaction_response": {
-                        "approved": False,
-                        "status": "completed",
-                    }
-                },
-            ) as approval_mock:
-                result = module.delete_file(tmp, "delete-me.txt", _context={"session_id": "session-delete"})
+            with patch.object(module, "ask_user", return_value=False) as approval_mock:
+                result = module.workspace_delete_path(tmp, "delete-me.txt", _context={"session_id": "session-delete"})
 
         self.assertIn("cancelled", result.lower())
         approval_mock.assert_called_once()

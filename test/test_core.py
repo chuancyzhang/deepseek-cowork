@@ -1046,7 +1046,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         worker = LLMWorker.__new__(LLMWorker)
         worker.tools = [
             {"type": "function", "function": {"name": "tool_search"}},
-            {"type": "function", "function": {"name": "read_file"}},
+            {"type": "function", "function": {"name": "text_file_read"}},
         ]
         tools = worker._tools_for_messages(
             [
@@ -1059,7 +1059,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         )
 
         tool_names = [item["function"]["name"] for item in tools]
-        self.assertEqual(tool_names, ["tool_search", "read_file"])
+        self.assertEqual(tool_names, ["tool_search", "text_file_read"])
 
 
 class TestSingleInstance(unittest.TestCase):
@@ -1218,3 +1218,4 @@ class TestImDailySummaryStorage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

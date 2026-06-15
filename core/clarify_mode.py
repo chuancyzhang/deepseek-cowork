@@ -32,14 +32,11 @@ CLARIFY_INTERACTION_TOOLS = (
 )
 
 CLARIFY_READ_TOOLS = (
-    "list_files",
-    "read_file",
+    "workspace_list_files",
+    "text_file_read",
     "glob",
     "grep",
-    "read_docx",
-    "read_pptx",
-    "read_excel",
-    "read_pdf",
+    "document_read",
     "search_files",
     "search_codebase",
     "read_memories",

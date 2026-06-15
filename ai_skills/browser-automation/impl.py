@@ -165,3 +165,29 @@ def visit_and_screenshot(url, workspace_dir=None):
             
     except Exception as e:
         return f"Error using Playwright: {str(e)}"
+
+
+TOOL_EXPORTS = [
+    {
+        "name": "get_active_tab_info",
+        "handler": get_active_tab_info,
+        "description": "Get the active browser tab URL and title on Windows.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+        "read_only": True,
+        "search_hint": "browser active tab url title",
+    },
+    {
+        "name": "visit_and_screenshot",
+        "handler": visit_and_screenshot,
+        "description": "Visit a URL with Playwright and save a screenshot in the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to visit."}
+            },
+            "required": ["url"],
+        },
+        "destructive": True,
+        "search_hint": "browser playwright screenshot web page",
+    },
+]

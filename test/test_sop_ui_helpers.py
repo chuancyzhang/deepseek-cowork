@@ -69,31 +69,35 @@ class SkillCenterHelperTests(unittest.TestCase):
             skill_center_tab_key({"name": "claim-expert", "type": "ai_generated", "created_by": "ai"}),
             "custom",
         )
+        self.assertEqual(
+            skill_center_tab_key({"name": "document-reader", "source_type": "bundled_plugin"}),
+            "optional",
+        )
         self.assertEqual(skill_center_tab_key({"name": "filesystem"}), "builtin")
 
     def test_summarize_skill_terms_truncates_cleanly(self):
         summary = summarize_skill_terms(
-            ["read_file", "write_file", "update_file", "rename_file"],
+            ["text_file_read", "text_file_write", "text_file_update", "workspace_rename_path"],
             max_items=3,
             max_chars=24,
         )
-        self.assertTrue(summary.startswith("read_file"))
+        self.assertTrue(summary.startswith("text_file_read"))
         self.assertTrue(summary.endswith("…"))
-        self.assertNotIn("rename_file", summary)
+        self.assertNotIn("workspace_rename_path", summary)
 
     def test_skill_center_matches_filters_supports_query_and_status(self):
         skill = {
             "name": "file-system",
             "display_name": "文件整理与读写",
             "user_description": "提供工作区内统一的文件发现、读取、写入能力",
-            "tools": ["read_file", "write_file"],
+            "tools": ["text_file_read", "text_file_write"],
             "use_cases": ["整理文件", "读取文档"],
             "enabled": True,
         }
-        self.assertTrue(skill_center_matches_filters(skill, query="read_file", status_filter="all"))
+        self.assertTrue(skill_center_matches_filters(skill, query="text_file_read", status_filter="all"))
         self.assertTrue(skill_center_matches_filters(skill, query="文件整理", status_filter="enabled"))
         self.assertFalse(skill_center_matches_filters(skill, query="浏览器", status_filter="all"))
-        self.assertFalse(skill_center_matches_filters(skill, query="read_file", status_filter="disabled"))
+        self.assertFalse(skill_center_matches_filters(skill, query="text_file_read", status_filter="disabled"))
         self.tool_cards = {}
         self.last_agent_bubble = None
         self.llm_worker = None
@@ -187,7 +191,7 @@ class SkillCenterHelperTests(unittest.TestCase):
         skill_manager.get_all_skills.return_value = []
         dialog = SkillsCenterDialog(skill_manager, MagicMock())
 
-        self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())], ["内置能力", "MCP", "自定义能力"])
+        self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())], ["内置能力", "可选插件", "MCP", "自定义能力"])
 
     def test_skill_center_builtin_switch_is_read_only(self):
         app = QApplication.instance() or QApplication([])
@@ -203,7 +207,7 @@ class SkillCenterHelperTests(unittest.TestCase):
                 "description": "Built-in file access.",
                 "enabled": True,
                 "risk_level": "medium",
-                "tools": ["read_file"],
+                "tools": ["text_file_read"],
             }
         )
 
@@ -1607,8 +1611,8 @@ class TestSopUiHelpers(unittest.TestCase):
         monitor = SubAgentMonitor()
         events = [
             {"agent_id": "agent-1", "agent_name": "worker", "status": "input", "input_text": "task", "content": "task", "ts": 1},
-            {"agent_id": "agent-1", "agent_name": "worker", "status": "tool_use", "tool_name": "read_file", "tool_args": {"path": "a.txt"}, "content": "call", "ts": 2},
-            {"agent_id": "agent-1", "agent_name": "worker", "status": "tool_result", "tool_name": "read_file", "tool_result": "ok", "content": "ok", "ts": 3},
+            {"agent_id": "agent-1", "agent_name": "worker", "status": "tool_use", "tool_name": "text_file_read", "tool_args": {"path": "a.txt"}, "content": "call", "ts": 2},
+            {"agent_id": "agent-1", "agent_name": "worker", "status": "tool_result", "tool_name": "text_file_read", "tool_result": "ok", "content": "ok", "ts": 3},
             {"agent_id": "agent-1", "agent_name": "worker", "status": "completed", "output_text": "done", "content": "done", "ts": 4},
         ]
 
@@ -1733,3 +1737,4 @@ class TestSopUiHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

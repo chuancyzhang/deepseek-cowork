@@ -57,21 +57,21 @@ class TestClarifyModeHelpers(unittest.TestCase):
         available_tool_names = [
             "bash",
             "search_codebase",
-            "list_files",
+            "workspace_list_files",
             "search_codebase",
-            "read_file",
+            "text_file_read",
             "grep",
             "glob",
             "search_files",
             "read_memories",
-            "write_file",
+            "text_file_write",
         ]
 
         self.assertEqual(
             get_clarifying_read_tools(available_tool_names),
             [
-                "list_files",
-                "read_file",
+                "workspace_list_files",
+                "text_file_read",
                 "glob",
                 "grep",
                 "search_files",
@@ -85,7 +85,7 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertTrue(is_tool_allowed_in_clarifying("search_codebase"))
         self.assertTrue(is_tool_allowed_in_clarifying("request_user_input"))
         self.assertFalse(is_tool_allowed_in_clarifying("bash"))
-        self.assertFalse(is_tool_allowed_in_clarifying("write_file"))
+        self.assertFalse(is_tool_allowed_in_clarifying("text_file_write"))
 
     def test_normalize_run_context_preserves_sop_run(self):
         sop_run = create_sop_run(
@@ -689,10 +689,10 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_tool_definitions(self):
                 names = [
                     "bash",
-                    "write_file",
+                    "text_file_write",
                     "search_codebase",
-                    "list_files",
-                    "read_file",
+                    "workspace_list_files",
+                    "text_file_read",
                     "glob",
                     "grep",
                     "request_user_input",
@@ -719,13 +719,13 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             tool_names = {item["function"]["name"] for item in worker.tools}
             self.assertIn("search_codebase", tool_names)
-            self.assertIn("list_files", tool_names)
-            self.assertIn("read_file", tool_names)
+            self.assertIn("workspace_list_files", tool_names)
+            self.assertIn("text_file_read", tool_names)
             self.assertIn("glob", tool_names)
             self.assertIn("grep", tool_names)
             self.assertIn("request_user_input", tool_names)
             self.assertNotIn("bash", tool_names)
-            self.assertNotIn("write_file", tool_names)
+            self.assertNotIn("text_file_write", tool_names)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -762,14 +762,14 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 pass
 
             def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=False):
-                names = ["tool_search", "read_file", "write_file"]
+                names = ["tool_search", "text_file_read", "text_file_write"]
                 return [
                     {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
                     for name in names
                 ]
 
             def is_tool_allowed(self, name, run_mode):
-                return not (run_mode == RUN_MODE_CLARIFYING and name == "write_file")
+                return not (run_mode == RUN_MODE_CLARIFYING and name == "text_file_write")
 
             def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
                 return True
@@ -791,11 +791,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             tool_names = {item["function"]["name"] for item in worker.tools}
             self.assertIn("tool_search", tool_names)
-            self.assertIn("read_file", tool_names)
-            self.assertNotIn("write_file", tool_names)
+            self.assertIn("text_file_read", tool_names)
+            self.assertNotIn("text_file_write", tool_names)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
     unittest.main()
+

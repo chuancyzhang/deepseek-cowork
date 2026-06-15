@@ -3,7 +3,9 @@ name: github-tools
 description: Tools for interacting with GitHub repositories (clone, analyze).
 description_cn: GitHub 仓库操作工具（克隆、分析）。
 license: MIT
-type: standard
+type: bundled_plugin
+source_type: bundled_plugin
+default_enabled: false
 created_by: system
 allowed-tools: clone_repository, analyze_repository
 ---

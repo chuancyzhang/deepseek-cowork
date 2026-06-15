@@ -2,6 +2,9 @@
 name: browser-automation
 description: Deep Browser Integration: Get active tab info (URL/Title) and automate browser tasks using Playwright.
 description_cn: 深度浏览器集成：获取当前标签页信息（URL/标题）并使用 Playwright 自动化浏览器任务。
+type: bundled_plugin
+source_type: bundled_plugin
+default_enabled: false
 metadata:
   author: deepseek-cowork team
   version: "1.0.0"

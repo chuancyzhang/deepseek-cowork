@@ -3,6 +3,9 @@ name: financial-data-akshare
 description: Query free financial market, fund, index, futures, bond, macroeconomic, and company data through AKShare. Use when the user asks for Chinese or global financial data, market quotes, securities fundamentals, fund data, index data, futures data, bond data, macro data, or explicitly mentions AKShare or akfamily.
 description_cn: 通过 AKShare 查询免费的金融市场、股票、基金、指数、期货、债券、宏观和公司数据。
 license: Apache-2.0
+type: bundled_plugin
+source_type: bundled_plugin
+default_enabled: false
 metadata:
   author: deepseek-cowork team
   version: "1.0"

@@ -232,6 +232,7 @@ class ConfigManager:
             "context_budget_ratio": 0.8,
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
+            "enabled_skills": [],
             "agent_profiles": self._default_agent_profiles(),
             "sop_templates": self._default_sop_templates(),
             "automation_tasks": [],
@@ -1199,15 +1200,22 @@ class ConfigManager:
     def set(self, key, value):
         return self._set_config_value(key, value)
 
-    def is_skill_enabled(self, skill_name):
-        return skill_name not in self.config.get("disabled_skills", [])
+    def is_skill_enabled(self, skill_name, default_enabled=True):
+        if skill_name in self.config.get("disabled_skills", []):
+            return False
+        if skill_name in self.config.get("enabled_skills", []):
+            return True
+        return bool(default_enabled)
 
     def set_skill_enabled(self, skill_name, enabled):
         disabled = set(self.config.get("disabled_skills", []))
+        enabled_skills = set(self.config.get("enabled_skills", []))
         if enabled:
-            if skill_name in disabled:
-                disabled.remove(skill_name)
+            disabled.discard(skill_name)
+            enabled_skills.add(skill_name)
         else:
             disabled.add(skill_name)
+            enabled_skills.discard(skill_name)
         self.config["disabled_skills"] = list(disabled)
+        self.config["enabled_skills"] = list(enabled_skills)
         self.save_config()

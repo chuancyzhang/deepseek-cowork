@@ -798,6 +798,7 @@ class LLMWorker(QThread):
             "3. 需要真实 shell 环境、项目命令、构建测试、git/npm/npx/bash 管道或现有 CLI 时，再使用 'bash'。",
             "4. Windows 打包版的 'bash' 优先使用 Git Bash；若 Git Bash 缺失，执行层会退回 cmd.exe，因此可继续执行 cmd 兼容命令。",
             "5. 避免为了运行内联 Python/JavaScript 而套一层 'bash'；除非必须复用命令行入口，否则直接使用对应专用工具。",
+            "文件策略: 'text_file_read'、'text_file_write'、'text_file_update' 只处理普通文本文件；DOCX/PPTX/XLSX/XLS/PDF 读取需先启用可选 document-reader 插件并使用 'document_read'，写入这些格式应使用 'run_python_code' 自行生成。",
             "判定策略: 不要仅依赖系统 PATH 或常见安装目录猜测 Node/Python 可用性，应先在沙盒中直接执行版本命令验证。",
             "",
             "策略 [技能创建]:",

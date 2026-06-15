@@ -1,65 +1,69 @@
-import os
-import sys
-import shutil
 import importlib.util
+import os
+import shutil
+import sys
 
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Load module dynamically because of hyphen in name
-spec = importlib.util.spec_from_file_location("impl", os.path.join(os.path.dirname(__file__), '../skills/file-system/impl.py'))
-impl = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(impl)
+file_spec = importlib.util.spec_from_file_location(
+    "file_impl",
+    os.path.join(os.path.dirname(__file__), "../skills/file-system/impl.py"),
+)
+file_impl = importlib.util.module_from_spec(file_spec)
+file_spec.loader.exec_module(file_impl)
 
-def test_office_skill():
+doc_spec = importlib.util.spec_from_file_location(
+    "document_impl",
+    os.path.join(os.path.dirname(__file__), "../ai_skills/document-reader/impl.py"),
+)
+document_impl = importlib.util.module_from_spec(doc_spec)
+doc_spec.loader.exec_module(document_impl)
+
+
+def test_plain_text_tool_refuses_structured_documents():
     workspace_dir = os.path.abspath("test_workspace")
     if os.path.exists(workspace_dir):
         shutil.rmtree(workspace_dir)
     os.makedirs(workspace_dir)
-    
-    print(f"Testing in {workspace_dir}")
-    
-    # 1. DOCX
-    print("Testing DOCX...")
-    res = impl.write_docx(workspace_dir, "test.docx", "Hello World\nThis is a test.")
-    print(f"Write DOCX: {res}")
-    # Unified read
-    content = impl.read_file(workspace_dir, "test.docx")
-    print(f"Read DOCX (via read_file): {content}")
-    assert "Hello World" in content
-    
-    # 2. PPTX
-    print("\nTesting PPTX...")
-    slides = [{"title": "Title 1", "content": "Content 1"}, {"title": "Title 2", "content": "Content 2"}]
-    res = impl.create_pptx(workspace_dir, "test.pptx", slides)
-    print(f"Create PPTX: {res}")
-    # Unified read
-    content = impl.read_file(workspace_dir, "test.pptx")
-    print(f"Read PPTX (via read_file): {content}")
-    assert "Title 1" in content
-    
-    # 3. Excel
-    print("\nTesting Excel...")
-    data = [["Name", "Age"], ["Alice", 30], ["Bob", 25]]
-    res = impl.write_excel(workspace_dir, "test.xlsx", data)
-    print(f"Write Excel: {res}")
-    # Unified read
-    content = impl.read_file(workspace_dir, "test.xlsx")
-    print(f"Read Excel (via read_file): \n{content}")
-    assert "Alice" in content
+    try:
+        result = file_impl.text_file_read(workspace_dir, "test.docx")
+        assert "structured_document_not_supported" in result
 
-    # 4. Plain Text
-    print("\nTesting Plain Text...")
-    txt_path = os.path.join(workspace_dir, "test.txt")
-    with open(txt_path, 'w') as f:
-        f.write("Just some text")
-    content = impl.read_file(workspace_dir, "test.txt")
-    print(f"Read Text (via read_file): {content}")
-    assert "Just some text" in content
-    
-    # Cleanup
-    # shutil.rmtree(workspace_dir)
-    print("\nTest Complete.")
+        result = file_impl.text_file_write(workspace_dir, "test.pdf", "content")
+        assert "structured_document_not_supported" in result
+    finally:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
 
-if __name__ == "__main__":
-    test_office_skill()
+
+def test_document_read_handles_docx_xlsx_and_plain_text_stays_separate():
+    workspace_dir = os.path.abspath("test_workspace")
+    if os.path.exists(workspace_dir):
+        shutil.rmtree(workspace_dir)
+    os.makedirs(workspace_dir)
+    try:
+        from docx import Document
+        import openpyxl
+
+        doc = Document()
+        doc.add_paragraph("Hello World")
+        doc.save(os.path.join(workspace_dir, "test.docx"))
+
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append(["Name", "Age"])
+        sheet.append(["Alice", 30])
+        workbook.save(os.path.join(workspace_dir, "test.xlsx"))
+
+        with open(os.path.join(workspace_dir, "test.txt"), "w", encoding="utf-8") as handle:
+            handle.write("Just some text")
+
+        docx_content = document_impl.document_read(workspace_dir, "test.docx")
+        assert "Hello World" in docx_content
+
+        xlsx_content = document_impl.document_read(workspace_dir, "test.xlsx")
+        assert "Alice" in xlsx_content
+
+        text_content = file_impl.text_file_read(workspace_dir, "test.txt")
+        assert "Just some text" in text_content
+    finally:
+        shutil.rmtree(workspace_dir, ignore_errors=True)

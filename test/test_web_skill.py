@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 spec = importlib.util.spec_from_file_location(
-    "impl", os.path.join(os.path.dirname(__file__), "../skills/web-search/impl.py")
+    "impl", os.path.join(os.path.dirname(__file__), "../ai_skills/web-search/impl.py")
 )
 impl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(impl)

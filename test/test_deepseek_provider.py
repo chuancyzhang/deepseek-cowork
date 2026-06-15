@@ -139,7 +139,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
                                 SimpleNamespace(
                                     index=0,
                                     id="call_1",
-                                    function=SimpleNamespace(name="read_file", arguments=None),
+                                    function=SimpleNamespace(name="text_file_read", arguments=None),
                                 )
                             ],
                         )
@@ -385,3 +385,4 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

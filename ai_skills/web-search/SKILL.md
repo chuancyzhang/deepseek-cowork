@@ -3,6 +3,9 @@ name: web-search
 description: Provides capabilities to search the web and read online articles.
 description_cn: 提供搜索互联网内容和读取网络文章的能力。
 license: Apache-2.0
+type: bundled_plugin
+source_type: bundled_plugin
+default_enabled: false
 metadata:
   author: deepseek-cowork team
   version: "2.0"

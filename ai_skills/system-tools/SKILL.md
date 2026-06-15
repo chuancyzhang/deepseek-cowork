@@ -3,6 +3,9 @@ name: system-tools
 description: Provides environment and application automation, including app launch/indexing and unified browser/desktop automation.
 description_cn: 提供环境与应用自动化能力，包括应用索引与启动、统一浏览器/桌面自动化。
 license: Apache-2.0
+type: bundled_plugin
+source_type: bundled_plugin
+default_enabled: false
 metadata:
   author: deepseek-cowork team
   version: "1.0"

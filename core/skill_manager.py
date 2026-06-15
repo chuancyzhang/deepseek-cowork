@@ -54,6 +54,7 @@ def _humanize_skill_name(skill_name):
     text = (skill_name or "").replace("_", "-")
     mapping = {
         "agent-manager": "协作代理",
+        "document-reader": "文档读取",
         "file-system": "文件整理与读写",
         "general-experience": "通用经验增强",
         "history-query": "历史记录查询",
@@ -93,6 +94,7 @@ class SkillManager:
     }
 
     SYSTEM_SKILLS = {"skill_builder", "skill-importer"}
+    BUNDLED_PLUGIN_SOURCE_TYPE = "bundled_plugin"
 
     def __init__(self, workspace_dir=None, config_manager=None):
         self.workspace_dir = workspace_dir
@@ -211,6 +213,39 @@ class SkillManager:
         except Exception as e:
             print(f"[SkillManager] Failed to parse skill.json at {skill_json_path}: {e}")
             return {}
+
+    def _skill_identity(self, skill_path):
+        meta, _body = self._parse_skill_md_content(os.path.join(skill_path, "SKILL.md"))
+        spec = self._load_skill_json(skill_path)
+        source_type = (
+            spec.get("source_type")
+            or spec.get("source_format")
+            or meta.get("source_type")
+            or meta.get("source_format")
+            or ""
+        )
+        default_enabled = self._coerce_bool(
+            spec.get("default_enabled", meta.get("default_enabled", True)),
+            default=True,
+        )
+        return {
+            "meta": meta,
+            "spec": spec,
+            "source_type": str(source_type or "").strip(),
+            "default_enabled": default_enabled,
+        }
+
+    def _is_skill_enabled_for_path(self, skill_name, skill_path):
+        identity = self._skill_identity(skill_path)
+        default_enabled = identity.get("default_enabled", True)
+        if self.config_manager and hasattr(self.config_manager, "is_skill_enabled"):
+            try:
+                return self.config_manager.is_skill_enabled(skill_name, default_enabled=default_enabled)
+            except TypeError:
+                if not default_enabled:
+                    return False
+                return self.config_manager.is_skill_enabled(skill_name)
+        return bool(default_enabled)
 
     def _coerce_string_list(self, value):
         if isinstance(value, list):
@@ -1175,7 +1210,7 @@ class SkillManager:
             if not isinstance(server_config, dict):
                 continue
             skill_name = build_mcp_skill_name(server_config.get("id") or server_config.get("name") or f"server-{index + 1}")
-            if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):
+            if self.config_manager and not self.config_manager.is_skill_enabled(skill_name, default_enabled=True):
                 continue
             tool_refs = []
             dependency_status = {"ok": True, "message": "MCP server is available."}
@@ -1314,7 +1349,7 @@ class SkillManager:
         if not skill_path:
             return None, None, f"Skill '{skill_name}' not found."
         root = os.path.abspath(skill_path)
-        if require_writable and os.path.basename(os.path.dirname(root)) != "ai_skills":
+        if require_writable and not self.is_skill_editable(skill_name):
             return root, None, "Only user skills in ai_skills can be edited."
         rel = str(relative_path or "").strip().replace("\\", os.sep).replace("/", os.sep)
         if not rel:
@@ -1334,7 +1369,24 @@ class SkillManager:
 
     def is_skill_editable(self, skill_name):
         skill_path = self._find_skill_path(skill_name)
-        return bool(skill_path and os.path.basename(os.path.dirname(os.path.abspath(skill_path))) == "ai_skills")
+        if not skill_path:
+            return False
+        identity = self._skill_identity(skill_path)
+        if identity.get("source_type") == self.BUNDLED_PLUGIN_SOURCE_TYPE:
+            return False
+        root = os.path.abspath(skill_path)
+        if os.path.basename(os.path.dirname(root)) != "ai_skills":
+            return False
+        for skills_dir in self.skills_dirs:
+            ai_root = os.path.abspath(skills_dir)
+            if os.path.basename(ai_root) != "ai_skills":
+                continue
+            try:
+                if os.path.commonpath([ai_root, root]) == ai_root:
+                    return True
+            except ValueError:
+                continue
+        return False
 
     def _find_user_skill_path(self, skill_name):
         normalized_name = str(skill_name or "").strip()
@@ -1351,6 +1403,8 @@ class SkillManager:
             except ValueError:
                 continue
             if os.path.isdir(candidate):
+                if not self.is_skill_editable(normalized_name):
+                    continue
                 return candidate
         return None
 
@@ -1779,10 +1833,11 @@ class SkillManager:
                 if is_ai_dir:
                     info["type"] = "ai_generated"
                     info["created_by"] = "ai"
-                if self.config_manager:
-                    info["enabled"] = self.config_manager.is_skill_enabled(skill_name)
+                info["enabled"] = self._is_skill_enabled_for_path(skill_name, skill_path)
                 info.update({k: v for k, v in record["meta"].items() if k != "allowed-tools"})
                 info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
+                if info.get("source_type") == self.BUNDLED_PLUGIN_SOURCE_TYPE:
+                    info["type"] = self.BUNDLED_PLUGIN_SOURCE_TYPE
                 all_skills.append(info)
                 seen.add(skill_name)
         for skill_name, record in self.skill_records.items():
@@ -1809,7 +1864,7 @@ class SkillManager:
                 "source_format": record["spec"].get("source_format"),
             }
             if self.config_manager:
-                info["enabled"] = self.config_manager.is_skill_enabled(skill_name)
+                info["enabled"] = self.config_manager.is_skill_enabled(skill_name, default_enabled=True)
             info.update({k: v for k, v in record["meta"].items() if k != "allowed-tools"})
             info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
             all_skills.append(info)
@@ -2023,10 +2078,10 @@ class SkillManager:
             for skill_name in sorted(os.listdir(skills_dir)):
                 if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
                     continue
-                if self.config_manager and not self.config_manager.is_skill_enabled(skill_name):
-                    continue
                 skill_path = os.path.join(skills_dir, skill_name)
                 if not os.path.isdir(skill_path):
+                    continue
+                if not self._is_skill_enabled_for_path(skill_name, skill_path):
                     continue
                 seen.add(skill_name)
                 self.loaded_skill_sources[skill_name] = skill_path

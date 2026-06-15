@@ -23,6 +23,7 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 ### 🔌 Skill System
 *   **Experience-First Skills**: Skills are treated as structured experience packages rather than a second execution protocol.
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
+*   **Optional Bundled Plugins**: Browser, system automation, web search, financial data, media download, and Office/PDF reading ship under `ai_skills/` as default-off plugins instead of core built-ins.
 *   **Portable Skill Packages**: Export a skill as a ZIP package and import it back from either a ZIP file or a source folder.
 *   **Structured Experience Capture**: Runtime lessons can be stored as structured entries and synced back into `SKILL.md`.
 *   **Conversation-to-Skill Loop**: Click `沉淀为 Skill` to turn the current conversation into a reviewed skill draft, then create a new skill or update an existing one.
@@ -140,7 +141,7 @@ Open **自动化** from the sidebar:
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
-*   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center also supports search, enabled-state filters, an icon-free two-column lightweight list, Apple-style switches, selection-mode bulk deletion, user-skill file editing/validation/tool debugging, read-only built-in skills, and MCP tool debugging.
+*   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center separates read-only built-ins, default-off bundled plugins, MCP tools, and custom skills while preserving search, status filters, switches, validation, and tool debugging.
 
 ### 6. Enterprise IM
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
@@ -168,13 +169,14 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 *   **`core/sop_from_conversation.py`**: Conversation-to-SOP draft generation with preview and revision.
 *   **`core/automation_manager.py`**: Scheduled automation task normalization, cron / quick-schedule next-run calculation, execution prompt assembly, and run-history helpers.
 *   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
-*   **`skills/`**: Built-in system skills.
-*   **`ai_skills/`**: AI or user-created skills.
+*   **`skills/`**: Core built-in skills.
+*   **`ai_skills/`**: Default-off bundled plugins plus AI/user-created skills.
 
 ## 🧩 Tool + Experience Model
 - Tools are the only directly callable execution surface for the LLM.
 - Tools are plain Python functions discovered from skill folders (`impl.py`) and converted into JSON-schema function calls.
 - Skills are structured experience packages: guidance, boundaries, lessons learned, recommended workflows, and recommended tools.
+- Core file tools only handle plain text and workspace paths. DOCX, PPTX, XLSX/XLS, and PDF reading lives in the optional `document-reader` plugin through `document_read`; writing those formats is done with `run_python_code` and task-specific libraries.
 - New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
 - `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, and optional `impl.py` assets.
 - Skill packages can be exported individually or as multi-skill collection ZIP archives. ZIP import validates safe paths, supports flat-root, folder-root, and collection packages, keeps the original skill name from metadata, and rejects name conflicts.

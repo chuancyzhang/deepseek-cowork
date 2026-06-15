@@ -541,3 +541,41 @@ def read_web_article(url, max_chars=12000):
 def read_article(url, max_chars=12000):
     return read_web_article(url, max_chars=max_chars)
 
+
+TOOL_EXPORTS = [
+    {
+        "name": "search_web",
+        "handler": search_web,
+        "description": "Search the web with public search providers and return normalized JSON results.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "max_results": {"type": "integer", "description": "Maximum number of results."},
+                "allowed_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional allowed domains."},
+                "blocked_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional blocked domains."},
+                "region": {"type": "string", "description": "Optional search region."},
+                "language": {"type": "string", "description": "Optional search language."},
+            },
+            "required": ["query"],
+        },
+        "read_only": True,
+        "search_hint": "web search internet results",
+    },
+    {
+        "name": "read_web_article",
+        "handler": read_web_article,
+        "description": "Read an online article and return extracted markdown-oriented text.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Article URL."},
+                "max_chars": {"type": "integer", "description": "Maximum characters to return."},
+            },
+            "required": ["url"],
+        },
+        "read_only": True,
+        "search_hint": "read web article url markdown",
+    },
+]
+

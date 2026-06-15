@@ -141,11 +141,11 @@ class _QtWorker:
         def _run():
             self.step_signal.emit("Turn 1: Requesting LLM...")
             self.output_signal.emit("Provider Start: test-provider")
-            self.tool_call_signal.emit({"id": "tool-1", "name": "read_file", "args": {"path": "demo.txt"}})
+            self.tool_call_signal.emit({"id": "tool-1", "name": "text_file_read", "args": {"path": "demo.txt"}})
             self.tool_result_signal.emit(
                 {
                     "id": "tool-1",
-                    "name": "read_file",
+                    "name": "text_file_read",
                     "args": {"path": "demo.txt"},
                     "result": "{\"ok\": true}",
                     "result_obj": {"ok": True},
@@ -504,3 +504,4 @@ class TestAgentManagerTools(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

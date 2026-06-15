@@ -2,7 +2,9 @@
   "version": 2,
   "name": "financial-data-akshare",
   "kind": "knowledge",
-  "capability_group": "file-information-interaction",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
   "description": "Query free financial data through AKShare, including stocks, funds, indices, futures, bonds, macro data, and company data.",
   "tags": [
     "finance",

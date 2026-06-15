@@ -77,6 +77,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - 视觉输入与工具发现：图片/截图输入不会再隐藏 `tool_search`；视觉回合与普通文本回合共用同一套延迟工具发现与 system prompt 能力描述，避免提示词仍要求搜索但 tool schema 实际缺失。
 - 只读并行工具：`parallel_tools` 本身作为 always-allowed 元工具可默认暴露，但每个子调用必须是已发现、当前模式允许、能力范围允许且 `read_only=True` 的工具。
 - 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮不仅更新 provider 的 tool schema，也会重建基础 system prompt 中的“当前可用工具清单”，避免提示词仍停留在旧集合；同一查询也会返回大小写不敏感匹配到的 AI skill 结果，供模型获取经验包上下文。
+- 系统提示词能力分层：基础 system prompt 会明确区分核心内置能力、默认关闭的随包 `ai_skills` 可选插件与当前真实暴露工具，并提示 Office/PDF 读取需通过可选 `document-reader` 的 `document_read`，写入则由 AI 使用代码和任务所需库生成。
 - Imported skill 全文暴露：对 imported / agent skill 继续先注入 brief；一旦 query 或 `tool_search` 命中脚本型 skill，agent loop 会在后续轮次追加完整 skill prompt，并缓存本次 run 已披露的 skill，避免重复展开。
 - Imported skill 执行约束：脚本型 imported skill 会在 skill metadata 和 `tool_search.skills` 中暴露 `preferred_tool = run_skill_script`、候选脚本名和执行提示，模型不再需要通过 `glob` / `bash` 反查 skill 目录。
 - 异常 tool call 恢复：若 provider 流式返回缺少 `function.name` 的畸形 tool call，执行层会忽略该调用并追加恢复提示，而不是把这类半截调用当成正常工具步骤写入历史或 UI。

@@ -1042,6 +1042,48 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_system_prompt_describes_tool_layers_and_document_boundaries(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = LLMWorker.__new__(LLMWorker)
+            worker.workspace_dir = temp_dir
+            worker.run_context = {"mode": RUN_MODE_EXECUTION}
+            worker.tools = [
+                {"type": "function", "function": {"name": "tool_search"}},
+                {"type": "function", "function": {"name": "workspace_list_files"}},
+                {"type": "function", "function": {"name": "text_file_read"}},
+                {"type": "function", "function": {"name": "run_python_code"}},
+            ]
+            worker.parent_agent_id = ""
+            worker.skill_manager = _PromptSkillManagerStub()
+            worker.config_manager = _DaemonConfigStub(temp_dir)
+
+            prompt = worker._build_system_prompt(
+                current_messages=[],
+                runtime_snapshot={"version": "3.test", "python_exe": "python.exe"},
+                sandbox_snapshot={
+                    "python": {"available": True, "version": "3.test", "path": "python.exe"},
+                    "node": {"available": True, "version": "20.test", "path": "node.exe"},
+                    "bash": {"available": False},
+                },
+            )
+
+            self.assertIn("能力分层", prompt)
+            self.assertIn("ai_skills", prompt)
+            self.assertIn("默认关闭的可选插件", prompt)
+            self.assertIn("workspace_list_files", prompt)
+            self.assertIn("只列工作区路径", prompt)
+            self.assertIn("text_file_read", prompt)
+            self.assertIn("只处理普通文本文件", prompt)
+            self.assertIn("document-reader", prompt)
+            self.assertIn("document_read", prompt)
+            self.assertIn("写入这些格式没有固定工具", prompt)
+            self.assertIn("run_python_code", prompt)
+            self.assertIn("file_read", prompt)
+            self.assertIn("当前可用工具清单", prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_image_turn_keeps_tool_search_available(self):
         worker = LLMWorker.__new__(LLMWorker)
         worker.tools = [

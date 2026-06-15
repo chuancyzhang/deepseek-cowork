@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.8**.
+Current app version: **4.8.9**.
 
 Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
@@ -25,6 +25,7 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
 *   **Optional Bundled Plugins**: Browser, system automation, web search, financial data, media download, and Office/PDF reading ship under `ai_skills/` as default-off plugins instead of core built-ins.
 *   **Portable Skill Packages**: Export a skill as a ZIP package and import it back from either a ZIP file or a source folder.
+*   **Standalone Quant Strategy Skill**: `quant-strategy-management` adds controlled Strategy DSL parsing, strategy storage, daily backtests, and report artifacts as a self-contained skill package.
 *   **Structured Experience Capture**: Runtime lessons can be stored as structured entries and synced back into `SKILL.md`.
 *   **Conversation-to-Skill Loop**: Click `沉淀为 Skill` to turn the current conversation into a reviewed skill draft, then create a new skill or update an existing one.
 *   **Explicit Read-Only Parallelism**: `parallel_tools` runs independent read-only tool calls concurrently while preserving ordered results and refusing writes or destructive calls.
@@ -171,6 +172,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 *   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
 *   **`skills/`**: Core built-in skills.
 *   **`ai_skills/`**: Default-off bundled plugins plus AI/user-created skills.
+*   **`ai_skills/quant-strategy-management/`**: Standalone quant strategy skill with its own package, CLI entrypoint, storage, and backtest workflow.
 
 ## 🧩 Tool + Experience Model
 - Tools are the only directly callable execution surface for the LLM.
@@ -182,6 +184,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - Skill packages can be exported individually or as multi-skill collection ZIP archives. ZIP import validates safe paths, supports flat-root, folder-root, and collection packages, keeps the original skill name from metadata, and rejects name conflicts.
 - Imported / agent skills now use progressive disclosure: the agent starts with the brief, then appends the full skill prompt after the query or `tool_search` clearly matches that skill.
 - When a matched imported / agent skill exposes `script_entries`, `tool_search` returns `run_skill_script` as the preferred execution surface, so the agent should use the declared script entry instead of locating the skill directory with `glob` or `bash`.
+- `quant-strategy-management` runs as an independently executable Cowork skill and does not rely on `D:\code\测试策略` as a runtime path dependency.
 - Skills remain hot-reloadable without restarting.
 
 ## 🔄 Agentic Workflow

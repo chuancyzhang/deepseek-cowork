@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.8**。
+当前应用版本：**4.8.9**。
 
 ## 1. 架构理念
 
@@ -48,6 +48,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ### 2.4 技能系统
 *   **core/skill_manager.py**：加载 `skills/` 与 `ai_skills/`，注入工具定义与经验。
+*   **独立 Skill 托管**：`ai_skills/quant-strategy-management` 作为完整能力包接入，内部自带 Strategy DSL、存储、数据拉取、回测、报告和 CLI 入口，不依赖外部工程目录。
 *   **经验回写**：执行结果可回写到 `SKILL.md`，形成自进化闭环。
 *   **能力包迁移与调试**：支持从单个 Skill 目录、Skill 集合目录或 ZIP 导入 Skill，支持将已有 Skill 单独导出或多选导出为集合 ZIP，并跳过缓存/构建目录；能力工作台和批量删除限制在 `ai_skills`，可验证 Skill 文件并调试 tools/scripts。
 *   **显式只读并行**：`parallel_tools` 通过 `SkillManager.call_tool(..., require_read_only=True)` 执行子调用，保留顺序并遵守发现、模式和能力范围限制。
@@ -163,4 +164,5 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/**：推理、配置、守护进程、IM 网关等核心逻辑
 *   **skills/**：内置系统技能
 *   **ai_skills/**：AI 或用户创建技能
+*   **ai_skills/quant-strategy-management/**：独立量化策略 Skill，运行产物写入应用数据目录下的专属空间
 *   **main.py**：桌面 UI 入口

@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.8**。
+当前应用版本：**4.8.9**。
 
 ## 1. 产品概述 (Product Overview)
 
@@ -16,6 +16,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **推理与工具融合**：思考过程中调用工具，降低幻觉与误操作。
 *   **安全可控**：默认工作区沙箱，可按需开启 God Mode。
 *   **技能可扩展**：`skills/` 承载核心内置能力，`ai_skills/` 同时承载默认关闭的随包可选插件和用户/AI 创建的自定义能力，支持热加载。
+*   **量化策略能力**：新增独立 `quant-strategy-management` Skill，支持 Strategy DSL 解析、策略版本管理、日线回测和报告留痕。
 *   **能力可迁移**：自定义 Skill 可从文件夹或 ZIP 导入，也可导出为可迁移 ZIP 包；随包插件只读、可启停、不可删除。
 *   **自进化**：运行经验回写到 `SKILL.md`，持续提升成功率。
 *   **反馈回路闭环**：会话历史可由用户手动沉淀为长期记忆或 Skill，让“执行结果”反过来增强后续上下文与工具使用。
@@ -175,6 +176,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 - 经验写回：通过 `update_skill_experience` 将运行经验追加到 `SKILL.md` 的 `experience`，形成“执行—学习—再执行”的持续闭环。
 - 会话沉淀：`沉淀为 Skill` 提供人工确认通道，把当前会话生成可编辑草稿，再写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`；已有 Skill 可选择追加经验或重写说明。
 - ZIP 迁移与调试：功能中心单独或批量导出自定义 Skill 时会跳过缓存/构建目录；批量导出生成包含多个 Skill 根目录的集合 ZIP。导入 ZIP 时校验路径安全，支持平铺根目录、单 Skill 文件夹根目录或集合包，并以元数据中的 Skill 名称作为最终目录名。自定义 Skill 工作台和批量删除都限制在可写 AppData `ai_skills`；随包插件也位于 `ai_skills`，但标记为 `source_type: bundled_plugin`、默认关闭、只读不可删除。Office/PDF 读取通过可选 `document-reader` 插件的 `document_read`，写入由 AI 使用代码工具按任务生成。
+- 独立量化策略 Skill：`ai_skills/quant-strategy-management` 带有自己的包结构、脚本入口、SQLite 资产库和回测产物目录；Cowork 只负责发现、调用和管理，不依赖外部源项目路径。
 - 当前实现已经打通“系统提示鼓励记录经验 -> LLM 调用 `update_experience` -> `record_experience` 持久化 -> 热加载后续复用”的链路，因此 AI 在合适场景下可以真实调用经验工具，而不是停留在文档设想。
 - 同时，这一能力目前仍属于第一版闭环：系统支持并鼓励 AI 记录经验，但不保证每次都会主动调用，且尚未内建经验验证、效果评估、生命周期治理与检索权重自适应等更强反馈机制。
 

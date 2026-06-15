@@ -103,6 +103,68 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("HTTP API interface notes", prompts)
         self.assertEqual(sm.get_tools_for_skill("http-guide"), ["bash"])
 
+    def test_frozen_internal_ai_skills_are_discovered_as_default_off_plugins(self):
+        exe_dir = os.path.join(self.temp_dir, "dist", "deepseek-cowork")
+        internal_skills = os.path.join(exe_dir, "_internal", "skills")
+        internal_ai_skills = os.path.join(exe_dir, "_internal", "ai_skills")
+        os.makedirs(os.path.join(internal_skills, "builtin-guide"), exist_ok=True)
+        os.makedirs(os.path.join(internal_ai_skills, "document-reader"), exist_ok=True)
+        with open(os.path.join(internal_skills, "builtin-guide", "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: builtin-guide\ndescription: Builtin guide\nkind: knowledge\n---\n"
+                "# Builtin Guide\n"
+            )
+        with open(os.path.join(internal_ai_skills, "document-reader", "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\n"
+                "name: document-reader\n"
+                "description: Document reader\n"
+                "kind: knowledge\n"
+                "source_type: bundled_plugin\n"
+                "default_enabled: false\n"
+                "allowed-tools: [document_read]\n"
+                "---\n"
+                "# Document Reader\n"
+            )
+        with open(os.path.join(internal_ai_skills, "document-reader", "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 1,
+                    "name": "document-reader",
+                    "kind": "knowledge",
+                    "description": "Document reader",
+                    "source_type": "bundled_plugin",
+                    "default_enabled": False,
+                    "tool_refs": ["document_read"],
+                },
+                f,
+            )
+
+        class ConfigStub:
+            def is_skill_enabled(self, _skill_name, default_enabled=True):
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get(self, _key, default=None):
+                return default
+
+        executable = os.path.join(exe_dir, "deepseek-cowork.exe")
+        with patch.object(sys, "frozen", True, create=True), patch.object(sys, "executable", executable):
+            sm = SkillManager(workspace_dir=self.temp_dir, config_manager=ConfigStub())
+
+        self.assertIn(internal_skills, sm.skills_dirs)
+        self.assertIn(internal_ai_skills, sm.skills_dirs)
+        self.assertIn("builtin-guide", sm.skill_records)
+        self.assertNotIn("document-reader", sm.skill_records)
+        self.assertNotIn("document_read", sm.tools)
+
+        skills = {item["name"]: item for item in sm.get_all_skills()}
+        self.assertIn("document-reader", skills)
+        self.assertEqual(skills["document-reader"].get("source_type"), "bundled_plugin")
+        self.assertFalse(skills["document-reader"].get("enabled"))
+
     def test_legacy_impl_functions_are_registered_as_tools(self):
         skill_dir = os.path.join(self.skills_dir, "echo-tools")
         os.makedirs(skill_dir, exist_ok=True)

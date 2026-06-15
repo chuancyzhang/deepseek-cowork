@@ -6,7 +6,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.8**。
+当前应用版本：**4.8.9**。
 
 供团队与 AI 共同查看的项目状态文件见 [ROADMAP.md](ROADMAP.md)。
 
@@ -23,6 +23,7 @@
 *   **经验优先的技能**：技能被视为结构化经验包，而不是第二套执行协议。
 *   **热重载技能**：将新技能放入 `skills/` 或 `ai_skills/`，无需重启即可使用。
 *   **随包可选插件**：浏览器、系统自动化、网页搜索、金融数据、视频下载和 Office/PDF 读取都作为 `ai_skills/` 下默认关闭的随包插件提供，不再混入核心内置工具。
+*   **独立量化策略 Skill**：`quant-strategy-management` 以独立 Skill 形式提供 Strategy DSL 解析、策略资产保存、日线回测和报告产物。
 *   **可迁移能力包**：Skill 支持导出为 ZIP，也支持从 ZIP 文件或源码文件夹回导。
 *   **结构化经验沉淀**：运行中的 lessons learned 可以先写入结构化 entry，再同步回 `SKILL.md` 摘要。
 *   **会话沉淀为 Skill**：点击 `沉淀为 Skill` 可将当前会话提炼为可审阅草稿，用于新建 Skill 或更新已有 Skill。
@@ -167,6 +168,7 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 *   **`core/updater.py`**：GitHub Releases 检查、安装包校验、暂存和 Windows 重启更新器。
 *   **`skills/`**：核心内置技能。
 *   **`ai_skills/`**：默认关闭的随包插件，以及 AI 或用户创建的技能。
+*   **`ai_skills/quant-strategy-management/`**：独立量化策略 Skill，包含私有包、CLI 入口、存储和回测流程。
 
 ## 🧩 Tool + Experience 模型
 - `tool` 是模型唯一直接调用的执行面。
@@ -179,6 +181,7 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 - `tool_search` 现在除了延迟发现工具，也会返回匹配到的 AI skill 结果；对 skill 名、标题、触发词和正文摘要的匹配不区分大小写。
 - 对 imported / agent skill，系统默认采用延迟全文暴露：先注入 brief，命中 query 或被 `tool_search` 命中后，再在后续轮次追加完整 skill 内容。
 - 如果命中的 imported / agent skill 含 `script_entries`，`tool_search` 会返回 `run_skill_script` 作为首选执行入口；模型应直接按脚本入口执行，而不是再用 `glob` / `bash` 去定位 skill 目录。
+- `quant-strategy-management` 运行时不依赖 `D:\code\测试策略` 原始路径，策略资产默认写入应用数据目录，仅用于研究和回测辅助。
 - 新技能仍然支持热加载，无需重启。
 - 当前源码已打通“提示模型记录经验 -> 调用 `update_experience` -> 持久化经验 -> 后续任务再次注入”的链路，因此 AI 在合适场景下可以主动调用经验工具。
 - 但这仍属于可用的第一版经验闭环：系统会鼓励并支持 AI 记录经验，不保证每次都会主动调用，也尚未内建经验验证、效果评估、生命周期治理等强反馈机制。

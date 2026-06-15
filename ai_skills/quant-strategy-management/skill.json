@@ -1,0 +1,82 @@
+{
+  "version": 2,
+  "name": "quant-strategy-management",
+  "kind": "knowledge",
+  "capability_group": "file-information-interaction",
+  "description": "Standalone quantitative strategy asset management with Strategy DSL parsing, persistence, daily backtests, and report artifacts.",
+  "description_cn": "独立量化策略资产管理，支持 Strategy DSL 解析、持久化、日线回测和报告产物。",
+  "default_enabled": true,
+  "tags": [
+    "quant",
+    "strategy",
+    "backtest",
+    "research",
+    "finance",
+    "trading",
+    "量化",
+    "策略",
+    "回测",
+    "投研"
+  ],
+  "triggers": [
+    "quant strategy",
+    "strategy dsl",
+    "backtest",
+    "quant backtest",
+    "量化策略",
+    "策略回测",
+    "策略DSL",
+    "投研回测"
+  ],
+  "anti_triggers": [
+    "auto trading",
+    "broker login",
+    "real order",
+    "自动下单",
+    "券商登录",
+    "真实交易"
+  ],
+  "references": [],
+  "tool_refs": [
+    "parse_quant_strategy",
+    "save_quant_strategy",
+    "list_quant_strategies",
+    "get_quant_strategy",
+    "run_quant_backtest",
+    "run_quant_strategy_from_prompt"
+  ],
+  "experience_policy": {
+    "entry_storage": "experience/entries.jsonl",
+    "summary_sync": "frontmatter_experience"
+  },
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "Parse a strategy idea into a controlled Strategy DSL when the user starts from natural language.",
+    "Save the strategy and versioned DSL when the configuration should become a reusable asset.",
+    "Run a daily backtest to generate summary, trades, equity curve, and HTML report artifacts.",
+    "Keep all results framed as research support rather than guaranteed investment advice."
+  ],
+  "python_dependencies": [
+    "pandas",
+    "akshare",
+    "yfinance"
+  ],
+  "node_dependencies": [],
+  "script_refs": [
+    "scripts/cli.py"
+  ],
+  "script_entries": [
+    {
+      "name": "quant_strategy_cli",
+      "path": "scripts/cli.py",
+      "runtime": "python",
+      "description": "Standalone CLI for parsing, saving, listing, and backtesting quantitative strategies."
+    }
+  ],
+  "asset_refs": [],
+  "source_format": "cowork"
+}

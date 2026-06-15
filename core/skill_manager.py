@@ -63,6 +63,7 @@ def _humanize_skill_name(skill_name):
         "meta-tools": "任务辅助工具",
         "command-tools": "命令与搜索工具",
         "financial-data-akshare": "AKShare 金融数据",
+        "quant-strategy-management": "量化策略管理",
         "python-runner": "Python 执行",
         "skill-importer": "能力导入",
         "skill_builder": "能力创建",
@@ -79,6 +80,7 @@ class SkillManager:
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
         "financial-data-akshare": "file-information-interaction",
+        "quant-strategy-management": "file-information-interaction",
         "web-search": "file-information-interaction",
         "command-tools": "code-command-execution",
         "system-tools": "code-command-execution",
@@ -96,6 +98,16 @@ class SkillManager:
     SYSTEM_SKILLS = {"skill_builder", "skill-importer"}
     BUNDLED_PLUGIN_SOURCE_TYPE = "bundled_plugin"
 
+    def _append_skill_dir(self, path):
+        if path and os.path.isdir(path) and path not in self.skills_dirs:
+            self.skills_dirs.append(path)
+
+    def _append_frozen_skill_dirs(self, base_dir):
+        for folder in ("skills", "ai_skills"):
+            self._append_skill_dir(os.path.join(base_dir, "_internal", folder))
+        for folder in ("skills", "ai_skills"):
+            self._append_skill_dir(os.path.join(base_dir, folder))
+
     def __init__(self, workspace_dir=None, config_manager=None):
         self.workspace_dir = workspace_dir
         self.config_manager = config_manager
@@ -107,14 +119,10 @@ class SkillManager:
 
         if getattr(sys, "frozen", False):
             if hasattr(sys, "_MEIPASS"):
-                self.skills_dirs.append(os.path.join(sys._MEIPASS, "skills"))
+                self._append_skill_dir(os.path.join(sys._MEIPASS, "skills"))
+                self._append_skill_dir(os.path.join(sys._MEIPASS, "ai_skills"))
             else:
-                base_dir = os.path.dirname(sys.executable)
-                internal_path = os.path.join(base_dir, "_internal", "skills")
-                if os.path.exists(internal_path):
-                    self.skills_dirs.append(internal_path)
-                self.skills_dirs.append(os.path.join(base_dir, "skills"))
-                self.skills_dirs.append(os.path.join(base_dir, "ai_skills"))
+                self._append_frozen_skill_dirs(os.path.dirname(sys.executable))
         else:
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             self.skills_dirs.append(os.path.join(repo_root, "skills"))
@@ -140,11 +148,7 @@ class SkillManager:
 
     def _scan_dist_dirs(self):
         if getattr(sys, "frozen", False):
-            base_dir = os.path.dirname(sys.executable)
-            for folder in ("skills", "ai_skills"):
-                candidate = os.path.join(base_dir, folder)
-                if os.path.isdir(candidate) and candidate not in self.skills_dirs:
-                    self.skills_dirs.append(candidate)
+            self._append_frozen_skill_dirs(os.path.dirname(sys.executable))
             return
 
     def _parse_frontmatter_value(self, raw):

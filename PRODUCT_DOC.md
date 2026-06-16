@@ -99,7 +99,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 
 5.  **经验沉淀**
     *   用户点击 `更新长期记忆`，系统扫描新增/变更历史会话，分批更新 `memories.md` 并记录 `memories_update_state.json`。
-    *   用户点击 `沉淀为 Skill`，系统把当前会话提炼为 Skill 草稿，可新建 Skill 或更新已有 Skill，并在保存前预览编辑。
+    *   用户点击 `沉淀为 Skill`，系统先让用户选择当前会话片段，再提炼为 Skill 草稿；可新建 Skill 或更新已有 Skill，并在保存前预览编辑和勾选已运行 Python 代码片段。
     *   用户在功能中心可将自定义 Skill 单独导出为 ZIP，也可多选后导出为集合 ZIP；导入继续支持 ZIP、单 Skill 文件夹或 Skill 集合文件夹。自定义 Skill 可在工作台中编辑文件、验证结构、调试 tools/scripts，并可在选择模式批量删除；内置 Skill 与随包插件只读不可删除，随包插件默认关闭但可启用，MCP 能力可调试连接与 tool 调用。
 
 ---
@@ -174,7 +174,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 - 更新检测：比较 `SKILL.md`/`impl.py` 的修改时间是否晚于上次加载；发现变更即热加载。
 - 热加载：重置工具注册与提示集合，重新解析技能文档，保证新增/修改技能即时可用。
 - 经验写回：通过 `update_skill_experience` 将运行经验追加到 `SKILL.md` 的 `experience`，形成“执行—学习—再执行”的持续闭环。
-- 会话沉淀：`沉淀为 Skill` 提供人工确认通道，把当前会话生成可编辑草稿，再写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`；已有 Skill 可选择追加经验或重写说明。
+- 会话沉淀：`沉淀为 Skill` 提供人工确认通道，把当前会话片段生成可编辑草稿，再写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl`、可选 `impl.py` 与可选 `scripts/` 脚本资产；已有 Skill 可选择追加经验或重写说明。
 - ZIP 迁移与调试：功能中心单独或批量导出自定义 Skill 时会跳过缓存/构建目录；批量导出生成包含多个 Skill 根目录的集合 ZIP。导入 ZIP 时校验路径安全，支持平铺根目录、单 Skill 文件夹根目录或集合包，并以元数据中的 Skill 名称作为最终目录名。自定义 Skill 工作台和批量删除都限制在可写 AppData `ai_skills`；随包插件也位于 `ai_skills`，但标记为 `source_type: bundled_plugin`、默认关闭、只读不可删除。Office/PDF 读取通过可选 `document-reader` 插件的 `document_read`，写入由 AI 使用代码工具按任务生成。
 - 独立量化策略 Skill：`ai_skills/quant-strategy-management` 带有自己的包结构、脚本入口、SQLite 资产库和回测产物目录；Cowork 只负责发现、调用和管理，不依赖外部源项目路径。
 - 当前实现已经打通“系统提示鼓励记录经验 -> LLM 调用 `update_experience` -> `record_experience` 持久化 -> 热加载后续复用”的链路，因此 AI 在合适场景下可以真实调用经验工具，而不是停留在文档设想。

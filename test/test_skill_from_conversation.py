@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.skill_from_conversation import (
     build_skill_json,
+    extract_python_script_assets,
     extract_impl_tool_refs,
     normalize_skill_draft,
     render_session_transcript,
@@ -108,6 +109,37 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("syntax error", error)
 
+        ok, error = validate_impl_py("print('side effect')\n")
+        self.assertFalse(ok)
+        self.assertIn("top-level", error)
+
+    def test_extract_python_script_assets_from_run_python_code(self):
+        assets = extract_python_script_assets(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "run_python_code",
+                                "arguments": json.dumps({"code": "print('ok')\n", "cwd": "D:/work"}),
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "ok\n"},
+            ]
+        )
+
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]["name"], "run_python_001")
+        self.assertEqual(assets[0]["path"], "scripts/run_python_001.py")
+        self.assertEqual(assets[0]["runtime"], "python")
+        self.assertTrue(assets[0]["valid"])
+        self.assertIn("print('ok')", assets[0]["code"])
+        self.assertEqual(assets[0]["source_tool_call_id"], "call-1")
+
     def test_save_new_skill_without_impl_creates_knowledge_package(self):
         result = save_new_skill(
             {
@@ -147,6 +179,33 @@ class TestSkillFromConversation(unittest.TestCase):
             payload = json.load(handle)
         self.assertEqual(payload["tool_refs"], ["normalize_path"])
 
+    def test_save_new_skill_with_script_assets_registers_script_entries(self):
+        result = save_new_skill(
+            {
+                "skill_name": "captured-python",
+                "description": "Captured Python helpers",
+                "usage_guidelines": "Use the captured script when repeating the workflow.",
+                "script_assets": [
+                    {
+                        "name": "run_python_001",
+                        "path": "scripts/run_python_001.py",
+                        "runtime": "python",
+                        "description": "Captured code",
+                        "code": "print('ok')\n",
+                    }
+                ],
+            },
+            target_root=self.ai_skills_dir,
+        )
+
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(os.path.exists(os.path.join(result.path, "scripts", "run_python_001.py")))
+        with open(os.path.join(result.path, "skill.json"), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertEqual(payload["script_refs"], ["scripts/run_python_001.py"])
+        self.assertEqual(payload["script_entries"][0]["name"], "run_python_001")
+        self.assertEqual(payload["script_entries"][0]["runtime"], "python")
+
     def test_save_new_skill_rejects_invalid_impl_without_writing_package(self):
         result = save_new_skill(
             {
@@ -185,6 +244,35 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertIn("existing", payload["tags"])
         self.assertIn("retry", payload["tags"])
         self.assertIn("stderr retry", payload["triggers"])
+
+    def test_update_existing_skill_appends_script_assets(self):
+        self._create_existing_skill()
+        manager = self._manager()
+
+        result = update_existing_skill_from_draft(
+            manager,
+            "ops-guide",
+            {
+                "experience_items": ["Reuse the captured script."],
+                "script_assets": [
+                    {
+                        "name": "run_python_001",
+                        "path": "scripts/run_python_001.py",
+                        "runtime": "python",
+                        "description": "Captured code",
+                        "code": "print('ok')\n",
+                    }
+                ],
+            },
+            strategy="append",
+        )
+
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(os.path.exists(os.path.join(self.ai_skills_dir, "ops-guide", "scripts", "run_python_001.py")))
+        with open(os.path.join(self.ai_skills_dir, "ops-guide", "skill.json"), "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        self.assertIn("scripts/run_python_001.py", payload["script_refs"])
+        self.assertEqual(payload["script_entries"][0]["name"], "run_python_001")
 
     def test_update_existing_skill_rewrite_preserves_structured_entries(self):
         self._create_existing_skill()

@@ -26,7 +26,7 @@
 *   **独立量化策略 Skill**：`quant-strategy-management` 以独立 Skill 形式提供 Strategy DSL 解析、策略资产保存、日线回测和报告产物。
 *   **可迁移能力包**：Skill 支持导出为 ZIP，也支持从 ZIP 文件或源码文件夹回导。
 *   **结构化经验沉淀**：运行中的 lessons learned 可以先写入结构化 entry，再同步回 `SKILL.md` 摘要。
-*   **会话沉淀为 Skill**：点击 `沉淀为 Skill` 可将当前会话提炼为可审阅草稿，用于新建 Skill 或更新已有 Skill。
+*   **会话沉淀为 Skill**：点击 `沉淀为 Skill` 可选择当前会话片段并提炼为可审阅草稿，用于新建 Skill 或更新已有 Skill，也可把已运行的 Python 片段保存为脚本入口。
 *   **显式只读并行工具**：`parallel_tools` 可并发执行彼此独立的只读工具调用，保持结果顺序，并拒绝写入、审批、命令执行等非只读操作。
 
 ### 🖥️ 桌面体验
@@ -137,7 +137,7 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 ### 5. 闭合反馈回路
 在完成有价值的会话后，可以使用侧边栏入口：
 *   **`更新长期记忆`**：扫描新增或变更的历史会话，分批合并写入 `memories.md`；支持进度展示、缩小到后台、结果预览、手动编辑与再次保存。
-*   **`沉淀为 Skill`**：将当前会话生成 Skill 草稿，可新建 Skill，也可对已有 Skill 追加经验或重写说明；保存前可预览和编辑。
+*   **`沉淀为 Skill`**：选择当前会话片段生成 Skill 草稿，可新建 Skill，也可对已有 Skill 追加经验或重写说明；保存前可预览和编辑，并可勾选已运行的 `run_python_code` 片段写入 `scripts/` 和 `script_entries`。
 *   **功能中心导入/导出与调试**：可从单个 Skill 目录、Skill 集合目录或 ZIP 导入自定义能力，也可将现有 Skill 单独导出，或多选后统一导出为可迁移集合 ZIP；能力中心将核心内置能力、默认关闭的随包可选插件、MCP 能力和自定义能力分开管理。内置与随包插件只读不可删除，自定义 Skill 可编辑/验证/调试。
 
 ### 6. 企业消息
@@ -176,7 +176,7 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 - `skill` 是结构化经验包，承载边界、坑点、经验、推荐流程与推荐工具。
 - 核心文件工具只处理普通文本和工作区路径。DOCX、PPTX、XLSX/XLS、PDF 读取由可选 `document-reader` 插件的 `document_read` 统一处理；写入这些格式时由 AI 使用 `run_python_code` 和任务所需库生成。
 - 新经验默认可先写入结构化 entry，再回写到 `SKILL.md` 摘要。
-- `沉淀为 Skill` 是人工确认的沉淀入口，会把会话经验转化为 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`。
+- `沉淀为 Skill` 是人工确认的沉淀入口，会把会话片段经验转化为 `SKILL.md`、`skill.json`、`experience/entries.jsonl`、可选 `impl.py` 与可选 Python 脚本资产。
 - Skill 可以单独导出为 ZIP 包，也可以多选导出为集合 ZIP；ZIP 导入会校验安全路径，支持平铺根目录、单文件夹根目录和包含多个子 Skill 的集合包，优先沿用元数据中的原 Skill 名称，并拒绝同名覆盖。
 - `tool_search` 现在除了延迟发现工具，也会返回匹配到的 AI skill 结果；对 skill 名、标题、触发词和正文摘要的匹配不区分大小写。
 - 对 imported / agent skill，系统默认采用延迟全文暴露：先注入 brief，命中 query 或被 `tool_search` 命中后，再在后续轮次追加完整 skill 内容。

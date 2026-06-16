@@ -62,6 +62,15 @@ def _dict_list(value):
     return [item for item in value if isinstance(item, dict)]
 
 
+def _json_value(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
 def _slugify(text, default="conversation-skill"):
     slug = re.sub(r"[^a-z0-9-]+", "-", str(text or "").lower())
     slug = re.sub(r"-+", "-", slug).strip("-")
@@ -91,11 +100,90 @@ def validate_impl_py(impl_py):
     if not code:
         return True, ""
     try:
-        ast.parse(code)
-        return True, ""
+        tree = ast.parse(code)
     except SyntaxError as exc:
         location = f"line {exc.lineno}, column {exc.offset}" if exc.lineno else "unknown location"
         return False, f"impl.py syntax error at {location}: {exc.msg}"
+    def _literal_only(node):
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return all(_literal_only(item) for item in node.elts)
+        if isinstance(node, ast.Dict):
+            return all(_literal_only(item) for item in [*node.keys, *node.values] if item is not None)
+        return False
+
+    allowed_nodes = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    for node in tree.body:
+        if isinstance(node, allowed_nodes):
+            continue
+        if isinstance(node, ast.Assign) and _literal_only(node.value):
+            continue
+        if isinstance(node, ast.AnnAssign) and (node.value is None or _literal_only(node.value)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        return False, "impl.py must not execute top-level code; keep only imports, constants, functions, and classes."
+    return True, ""
+
+
+def extract_python_script_assets(messages, limit=12):
+    assets = []
+    seen = set()
+    tool_results = {}
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "tool" and message.get("tool_call_id"):
+            tool_results[str(message.get("tool_call_id"))] = str(message.get("content") or "")[:2000]
+
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            if function.get("name") != "run_python_code":
+                continue
+            args = _json_value(function.get("arguments"))
+            if not isinstance(args, dict):
+                continue
+            code = str(args.get("code") or "").strip()
+            if not code:
+                continue
+            key = re.sub(r"\s+", "\n", code).strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            index = len(assets) + 1
+            ok, error = validate_impl_py(code)
+            if not ok:
+                try:
+                    ast.parse(code)
+                    ok, error = True, ""
+                except SyntaxError as exc:
+                    location = f"line {exc.lineno}, column {exc.offset}" if exc.lineno else "unknown location"
+                    error = f"Python syntax error at {location}: {exc.msg}"
+            tool_call_id = str(call.get("id") or "")
+            assets.append(
+                {
+                    "name": f"run_python_{index:03d}",
+                    "path": f"scripts/run_python_{index:03d}.py",
+                    "runtime": "python",
+                    "description": "Python code captured from this conversation.",
+                    "code": code,
+                    "source_tool_call_id": tool_call_id,
+                    "cwd": str(args.get("cwd") or ""),
+                    "result_excerpt": tool_results.get(tool_call_id, ""),
+                    "valid": bool(ok),
+                    "error": error,
+                    "selected": bool(ok),
+                }
+            )
+            if len(assets) >= int(limit or 12):
+                return assets
+    return assets
 
 
 def render_session_transcript(session_id, title, messages, meta=None, char_limit=DEFAULT_TRANSCRIPT_CHAR_LIMIT):
@@ -182,6 +270,7 @@ def normalize_skill_draft(payload, fallback_title="", mode="create"):
         "experience_items": _string_list(payload.get("experience_items")),
         "tool_refs": tool_refs,
         "impl_py": impl_py,
+        "script_assets": _dict_list(payload.get("script_assets")),
     }
     if not draft["usage_guidelines"]:
         draft["usage_guidelines"] = "Use this skill when a future task matches the reusable patterns learned from the source conversation."
@@ -300,6 +389,16 @@ def build_skill_md(draft):
 
 
 def build_skill_json(draft):
+    script_assets = normalize_script_assets(draft.get("script_assets"))
+    script_entries = [
+        {
+            "name": item["name"],
+            "path": item["path"],
+            "runtime": item.get("runtime") or "python",
+            "description": item.get("description") or "",
+        }
+        for item in script_assets
+    ]
     return {
         "version": 2,
         "name": _string(draft.get("skill_name")),
@@ -327,8 +426,8 @@ def build_skill_json(draft):
         },
         "python_dependencies": [],
         "node_dependencies": [],
-        "script_refs": [],
-        "script_entries": [],
+        "script_refs": [item["path"] for item in script_assets],
+        "script_entries": script_entries,
         "asset_refs": [],
         "source_format": "cowork",
     }
@@ -353,6 +452,86 @@ def _atomic_write_json(path, payload):
     _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
+def normalize_script_assets(value):
+    assets = []
+    seen_paths = set()
+    for index, item in enumerate(_dict_list(value), start=1):
+        code = str(item.get("code") or "").strip()
+        if not code:
+            continue
+        try:
+            ast.parse(code)
+        except SyntaxError:
+            continue
+        name = _slugify(item.get("name") or f"run-python-{index:03d}", default=f"run-python-{index:03d}").replace("-", "_")
+        path = str(item.get("path") or f"scripts/{name}.py").replace("\\", "/").strip("/")
+        if not path.startswith("scripts/") or not path.endswith(".py") or ".." in path.split("/"):
+            path = f"scripts/{name}.py"
+        if path.lower() in seen_paths:
+            continue
+        seen_paths.add(path.lower())
+        assets.append(
+            {
+                "name": name,
+                "path": path,
+                "runtime": "python",
+                "description": str(item.get("description") or "Python code captured from a conversation.").strip(),
+                "code": code,
+            }
+        )
+    return assets
+
+
+def write_script_assets(skill_dir, draft):
+    assets = normalize_script_assets(draft.get("script_assets"))
+    for item in assets:
+        _atomic_write_text(os.path.join(skill_dir, item["path"]), item["code"].rstrip() + "\n")
+    return assets
+
+
+def merge_script_assets_metadata(skill_record, draft):
+    if not skill_record:
+        return SaveResult(False, "Target skill not found.")
+    skill_path = skill_record.get("path") or ""
+    json_path = os.path.join(skill_path, "skill.json")
+    assets = write_script_assets(skill_path, draft)
+    if not assets:
+        return SaveResult(True, "No script assets selected.", skill_path)
+    payload = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r", encoding="utf-8-sig") as handle:
+                parsed = json.load(handle)
+            payload = parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            payload = {}
+    script_refs = _string_list(payload.get("script_refs"))
+    script_entries = _dict_list(payload.get("script_entries"))
+    existing_paths = {str(item.get("path") or "").replace("\\", "/").lower() for item in script_entries}
+    for item in assets:
+        if item["path"] not in script_refs:
+            script_refs.append(item["path"])
+        if item["path"].lower() not in existing_paths:
+            script_entries.append(
+                {
+                    "name": item["name"],
+                    "path": item["path"],
+                    "runtime": "python",
+                    "description": item.get("description") or "",
+                }
+            )
+            existing_paths.add(item["path"].lower())
+    payload.setdefault("version", 2)
+    payload.setdefault("name", skill_record.get("name") or os.path.basename(skill_path))
+    payload["script_refs"] = script_refs
+    payload["script_entries"] = script_entries
+    try:
+        _atomic_write_json(json_path, payload)
+        return SaveResult(True, "Skill script assets updated.", skill_path)
+    except Exception as exc:
+        return SaveResult(False, f"Failed to update skill script metadata: {exc}", json_path)
+
+
 def save_new_skill(draft, target_root=None):
     draft = normalize_skill_draft(draft)
     skill_name = draft["skill_name"]
@@ -375,6 +554,7 @@ def save_new_skill(draft, target_root=None):
         _atomic_write_json(os.path.join(target_dir, "skill.json"), build_skill_json(draft))
         if impl_py:
             _atomic_write_text(os.path.join(target_dir, "impl.py"), impl_py.rstrip() + "\n")
+        write_script_assets(target_dir, draft)
         return SaveResult(True, f"Skill '{skill_name}' created.", target_dir)
     except Exception as exc:
         return SaveResult(False, f"Failed to create skill: {exc}", target_dir)
@@ -454,5 +634,8 @@ def update_existing_skill_from_draft(skill_manager, skill_name, draft, strategy=
     metadata_result = merge_skill_json_metadata(record, tags=draft.get("tags"), triggers=draft.get("triggers"))
     if not metadata_result.ok:
         return metadata_result
+    script_result = merge_script_assets_metadata(record, draft)
+    if not script_result.ok:
+        return script_result
     skill_manager.load_skills()
     return SaveResult(True, f"Skill '{skill_name}' updated.", record.get("path") or "")

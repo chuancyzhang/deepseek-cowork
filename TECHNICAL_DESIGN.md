@@ -102,9 +102,10 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 **会话沉淀为 Skill**
 1.  用户点击 `沉淀为 Skill`。
-2.  `ConversationSkillDraftWorker` 将当前会话渲染为转录文本，调用 `core/skill_from_conversation.py` 生成草稿。
-3.  用户选择新建 Skill，或更新已有 Skill 的追加经验/重写说明策略。
-4.  保存时写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl` 与可选 `impl.py`，然后重新加载技能。
+2.  用户选择当前会话中的连续消息片段，避免把无关上下文写入 Skill 草稿。
+3.  `ConversationSkillDraftWorker` 将选中片段渲染为转录文本，调用 `core/skill_from_conversation.py` 生成草稿，并提取片段内已运行的 `run_python_code` 作为可选脚本资产。
+4.  用户选择新建 Skill，或更新已有 Skill 的追加经验/重写说明策略。
+5.  保存时写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl`、可选 `impl.py` 与勾选的 `scripts/`/`script_entries`，然后重新加载技能；热加载失败只提示，不中断已保存结果。
 
 **对话内创建 SOP**
 1.  用户在输入区 `+` 菜单点击 `从对话生成 SOP`。
@@ -137,7 +138,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **更新检测**：对 `SKILL.md`/`impl.py` 的修改时间进行检测，晚于上次加载则触发热加载。
 - **热加载**：重置工具注册与提示集合，重新解析并加载实现。
 - **经验写回**：通过 `update_skill_experience` 追加经验到 `SKILL.md` 的 `experience` 字段，形成“执行—学习—再执行”的闭环。
-- **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill。
+- **人工沉淀**：`沉淀为 Skill` 是显式确认通道，会话片段先生成草稿并由用户预览编辑，再写入新 Skill 或更新已有 Skill；已运行 Python 片段可作为脚本入口沉淀。
 - **对话生成 SOP**：输入区入口将当前会话提炼为可编辑 SOP 草稿，确认后保存为任务模板并绑定当前会话。
 - **SOP 调度执行**：会话与定时自动化都只派发当前步骤；模板默认推进方式可设为人工确认或自动推进，步骤可覆盖模板默认值，完成后由状态机决定暂停、重跑、跳过或继续下一步。非 Agent 步骤通过沙盒 Python 或 Git Bash 直接执行，并把 stdout/stderr/exit code 写回运行态。
 - **迁移复用与调试**：功能中心支持 ZIP 导出/导入，并提供搜索、启用状态筛选、无图标双列轻量列表、Apple 风格滑动开关、选择模式批量导出/删除和能力工作台；能力中心拆分为 `内置能力`、`MCP`、`自定义能力` 三个 tab，自定义 Skill 可编辑/验证/调试/删除，内置 Skill 只读且不可关闭或删除，MCP 能力保留独立展示、连接调试和启停控制。

@@ -27,7 +27,7 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 *   **Portable Skill Packages**: Export a skill as a ZIP package and import it back from either a ZIP file or a source folder.
 *   **Standalone Quant Strategy Skill**: `quant-strategy-management` adds controlled Strategy DSL parsing, strategy storage, daily backtests, and report artifacts as a self-contained skill package.
 *   **Structured Experience Capture**: Runtime lessons can be stored as structured entries and synced back into `SKILL.md`.
-*   **Conversation-to-Skill Loop**: Click `沉淀为 Skill` to turn the current conversation into a reviewed skill draft, then create a new skill or update an existing one.
+*   **Conversation-to-Skill Loop**: Click `沉淀为 Skill` to choose a current conversation segment, turn it into a reviewed skill draft, and optionally preserve executed Python snippets as registered skill scripts.
 *   **Explicit Read-Only Parallelism**: `parallel_tools` runs independent read-only tool calls concurrently while preserving ordered results and refusing writes or destructive calls.
 
 ### 🖥️ Desktop Experience
@@ -141,7 +141,7 @@ Open **自动化** from the sidebar:
 ### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
-*   **`沉淀为 Skill`** turns the current conversation into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, then preview/edit before saving.
+*   **`沉淀为 Skill`** lets you choose a current conversation segment and turn it into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, preview/edit before saving, and optionally store detected `run_python_code` snippets under `scripts/` as `script_entries`.
 *   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center separates read-only built-ins, default-off bundled plugins, MCP tools, and custom skills while preserving search, status filters, switches, validation, and tool debugging.
 
 ### 6. Enterprise IM
@@ -180,7 +180,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 - Skills are structured experience packages: guidance, boundaries, lessons learned, recommended workflows, and recommended tools.
 - Core file tools only handle plain text and workspace paths. DOCX, PPTX, XLSX/XLS, and PDF reading lives in the optional `document-reader` plugin through `document_read`; writing those formats is done with `run_python_code` and task-specific libraries.
 - New experience can be recorded into structured entries first, then promoted back into `SKILL.md` summaries.
-- `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, and optional `impl.py` assets.
+- `沉淀为 Skill` is the manual confirmation path for promoting a useful conversation segment into `SKILL.md`, `skill.json`, `experience/entries.jsonl`, optional `impl.py`, and optional Python script assets registered in `script_entries`.
 - Skill packages can be exported individually or as multi-skill collection ZIP archives. ZIP import validates safe paths, supports flat-root, folder-root, and collection packages, keeps the original skill name from metadata, and rejects name conflicts.
 - Imported / agent skills now use progressive disclosure: the agent starts with the brief, then appends the full skill prompt after the query or `tool_search` clearly matches that skill.
 - When a matched imported / agent skill exposes `script_entries`, `tool_search` returns `run_skill_script` as the preferred execution surface, so the agent should use the declared script entry instead of locating the skill directory with `glob` or `bash`.

@@ -125,8 +125,8 @@ Results are returned in the same order as the input calls. If one subcall fails 
 The system now has a human-confirmed loop for promoting completed work into reusable knowledge:
 
 - `更新长期记忆` updates the long-term memory layer by scanning new or changed conversation history, merging it into `memories.md`, and tracking processed history in `memories_update_state.json`.
-- `沉淀为 Skill` turns the current conversation into an editable skill draft before anything is saved.
-- New skills are written as `SKILL.md`, `skill.json`, optional `impl.py`, and optional structured entries under `experience/entries.jsonl`.
+- `沉淀为 Skill` lets the user choose a current conversation segment and turns it into an editable skill draft before anything is saved.
+- New skills are written as `SKILL.md`, `skill.json`, optional `impl.py`, optional Python scripts under `scripts/`, and optional structured entries under `experience/entries.jsonl`.
 - Existing skills can be updated by appending structured experience entries or rewriting the visible guidance.
 - Skill packages can be exported as ZIP archives and imported back from ZIP files or source folders.
 
@@ -243,7 +243,7 @@ The default update path is:
 1. write a structured entry first
 2. sync high-value lessons back into the summary in `SKILL.md`
 
-For conversation-derived updates, `沉淀为 Skill` uses this storage model after user confirmation. Appending to an existing skill records reusable lessons as structured entries; rewriting a skill updates the human-readable guidance while preserving prior structured experience where possible.
+For conversation-derived updates, `沉淀为 Skill` uses this storage model after user confirmation. Appending to an existing skill records reusable lessons as structured entries; rewriting a skill updates the human-readable guidance while preserving prior structured experience where possible. Detected `run_python_code` snippets can be saved as declared `script_entries` so future agents call `run_skill_script` instead of rediscovering the script path.
 
 ### `references/`
 

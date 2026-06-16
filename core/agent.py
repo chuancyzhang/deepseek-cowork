@@ -498,6 +498,7 @@ class LLMWorker(QThread):
             self.chat_storage = None
         self._bind_agent_manager()
         self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
+        self._stable_system_prompt = None
 
     def _selected_skill_names(self):
         return normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
@@ -685,35 +686,80 @@ class LLMWorker(QThread):
         self.step_signal.emit("System: Stopping...")
         self.abort_signal.emit()
 
-    def _append_skill_prompts_for_names(self, skill_names, current_messages, disclosed_skills, source="skill_prompt"):
-        prompts = []
+    def _skill_context_hash(self, content):
+        return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
+
+    def _existing_skill_context_hashes(self, current_messages, skill_name):
+        hashes = set()
+        for msg in current_messages or []:
+            if not isinstance(msg, dict):
+                continue
+            meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
+            if meta.get("kind") not in ("skill_context", "skill_context_update"):
+                continue
+            if str(meta.get("skill_name") or "") != str(skill_name or ""):
+                continue
+            content_hash = str(meta.get("content_hash") or "")
+            if content_hash:
+                hashes.add(content_hash)
+        return hashes
+
+    def _build_skill_context_message(self, skill_name, content, source):
+        content_hash = self._skill_context_hash(content)
+        return {
+            "role": "system",
+            "content": content,
+            "meta": {
+                "kind": "skill_context",
+                "hidden": True,
+                "skill_name": str(skill_name or ""),
+                "source": source,
+                "content_hash": content_hash,
+            },
+        }
+
+    def _append_skill_prompts_for_names(self, skill_names, current_messages, disclosed_skills, generated_messages=None, source="skill_prompt"):
+        appended = []
         for skill_name in skill_names or []:
-            if not skill_name or skill_name in disclosed_skills:
+            skill_name = str(skill_name or "").strip()
+            if not skill_name:
                 continue
             prompt_getter = getattr(self.skill_manager, "get_full_skill_prompt", None)
             if not callable(prompt_getter):
                 continue
             prompt = prompt_getter(skill_name)
-            if prompt:
-                prompts.append(prompt)
-                disclosed_skills.add(skill_name)
-        if prompts:
-            content = "\n\n".join(prompts)
-            current_messages.append({"role": "system", "content": content})
+            if not prompt:
+                continue
+            content_hash = self._skill_context_hash(prompt)
+            disclosure_key = f"{skill_name}:{content_hash}"
+            if disclosure_key in disclosed_skills:
+                continue
+            disclosed_skills.add(disclosure_key)
+            if content_hash in self._existing_skill_context_hashes(current_messages, skill_name):
+                continue
+            message = self._build_skill_context_message(skill_name, prompt, source)
+            current_messages.append(message)
+            if isinstance(generated_messages, list):
+                generated_messages.append(message.copy())
+            appended.append(message)
+        if appended:
+            content = "\n\n".join(msg.get("content") or "" for msg in appended)
             self.observability_signal.emit({
                 "type": "system_prompt_append",
                 "content": content,
                 "source": source,
+                "kind": "skill_context",
+                "skill_names": [msg.get("meta", {}).get("skill_name") for msg in appended],
                 "timestamp": time.time(),
             })
 
-    def _append_skill_prompts(self, tool_calls, current_messages, disclosed_skills):
+    def _append_skill_prompts(self, tool_calls, current_messages, disclosed_skills, generated_messages=None):
         skill_names = []
         for tool in tool_calls or []:
             skill_name = self.skill_manager.get_skill_of_tool(tool.function.name)
             if skill_name:
                 skill_names.append(skill_name)
-        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt")
+        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, generated_messages, source="skill_prompt")
 
     def _build_skill_query(self, messages):
         parts = []
@@ -724,7 +770,7 @@ class LLMWorker(QThread):
                     parts.append(content.strip())
         return "\n".join(parts)
 
-    def _append_query_matched_skill_prompts(self, current_messages, disclosed_skills):
+    def _append_query_matched_skill_prompts(self, current_messages, disclosed_skills, generated_messages=None):
         selector = getattr(self.skill_manager, "get_full_disclosure_skill_names", None)
         if not callable(selector):
             return
@@ -735,9 +781,9 @@ class LLMWorker(QThread):
             )
         except TypeError:
             skill_names = selector(self._build_skill_query(current_messages))
-        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt_query_match")
+        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, generated_messages, source="skill_prompt_query_match")
 
-    def _append_tool_search_skill_prompts(self, result_obj, current_messages, disclosed_skills):
+    def _append_tool_search_skill_prompts(self, result_obj, current_messages, disclosed_skills, generated_messages=None):
         if not isinstance(result_obj, dict):
             return
         skill_names = []
@@ -749,7 +795,7 @@ class LLMWorker(QThread):
             skill_name = str(item.get("name") or item.get("preferred_skill_name") or "").strip()
             if skill_name:
                 skill_names.append(skill_name)
-        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt_tool_search")
+        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, generated_messages, source="skill_prompt_tool_search")
 
     def _available_tool_names(self):
         names = []
@@ -1017,6 +1063,11 @@ class LLMWorker(QThread):
         runtime_prompt = self._build_runtime_context_prompt(current_messages, runtime_snapshot, sandbox_snapshot)
         return "\n".join([part for part in (stable_prompt, runtime_prompt) if part])
 
+    def _get_stable_system_prompt(self):
+        if self._stable_system_prompt is None:
+            self._stable_system_prompt = self._build_stable_system_prompt()
+        return self._stable_system_prompt
+
     def _build_request_messages(self, current_messages, runtime_context_prompt):
         request_messages = [msg.copy() if isinstance(msg, dict) else msg for msg in current_messages]
         if runtime_context_prompt:
@@ -1024,16 +1075,25 @@ class LLMWorker(QThread):
         return request_messages
 
     def _emit_prompt_observability(self, stable_prompt, runtime_prompt, request_messages):
-        tools_hash = _stable_json_hash(self.tools or [])
-        prefix_hash = _stable_json_hash(request_messages[:-1] if runtime_prompt else request_messages)
+        skill_contexts = []
+        for msg in request_messages or []:
+            if not isinstance(msg, dict):
+                continue
+            meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
+            if meta.get("kind") not in ("skill_context", "skill_context_update"):
+                continue
+            skill_contexts.append({
+                "type": "system_prompt_append",
+                "kind": meta.get("kind"),
+                "source": meta.get("source") or "skill_context",
+                "skill_names": [meta.get("skill_name")] if meta.get("skill_name") else [],
+                "content": msg.get("content") or "",
+            })
         self.observability_signal.emit({
             "type": "system_prompt",
             "content": stable_prompt,
             "runtime_context": runtime_prompt,
-            "stable_prompt_hash": _stable_json_hash(stable_prompt),
-            "runtime_context_hash": _stable_json_hash(runtime_prompt),
-            "tools_hash": tools_hash,
-            "message_prefix_hash": prefix_hash,
+            "skill_contexts": skill_contexts,
             "prompt_cache_key": self.conversation_id or self.session_id,
             "timestamp": time.time(),
             "run_mode": self._current_run_mode(),
@@ -1056,7 +1116,7 @@ class LLMWorker(QThread):
         current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
         runtime_snapshot = get_python_runtime_snapshot()
         sandbox_snapshot = get_runtime_snapshot()
-        stable_system_prompt = self._build_stable_system_prompt()
+        stable_system_prompt = self._get_stable_system_prompt()
         current_messages.insert(0, {"role": "system", "content": stable_system_prompt})
         
         full_reasoning = ""
@@ -1095,14 +1155,14 @@ class LLMWorker(QThread):
                 disclosed_skills.clear()
             # -------------------------
 
-            stable_system_prompt = self._build_stable_system_prompt()
+            stable_system_prompt = self._get_stable_system_prompt()
             current_messages[0]["content"] = stable_system_prompt
             runtime_context_prompt = self._build_runtime_context_prompt(
                 current_messages[1:],
                 runtime_snapshot,
                 sandbox_snapshot,
             )
-            self._append_query_matched_skill_prompts(current_messages, disclosed_skills)
+            self._append_query_matched_skill_prompts(current_messages, disclosed_skills, generated_messages)
             request_messages = self._build_request_messages(current_messages, runtime_context_prompt)
             self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 
@@ -1320,7 +1380,7 @@ class LLMWorker(QThread):
                     ]
 
                     if tool_calls:
-                        self._append_skill_prompts(tool_calls, current_messages, disclosed_skills)
+                        self._append_skill_prompts(tool_calls, current_messages, disclosed_skills, generated_messages)
 
                     if (not tool_calls) and (not (content or "").strip()) and (not provider_error_message):
                         if not force_reply_attempted:
@@ -1560,7 +1620,7 @@ class LLMWorker(QThread):
                             }
                             current_messages.append(tool_msg)
                             if name == "tool_search":
-                                self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills)
+                                self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)
                             generated_messages.append(tool_msg)
                             self.step_signal.emit(f"Tool Result: {result_text}")
                         # Loop continues to let LLM see tool results

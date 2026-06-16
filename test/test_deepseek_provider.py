@@ -220,6 +220,27 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         list(provider.chat_stream([{"role": "user", "content": "hello"}], prompt_cache_key="conv-1"))
         self.assertEqual(captured["prompt_cache_key"], "conv-1")
 
+    def test_stream_usage_retries_without_stream_options_on_generic_bad_request(self):
+        provider, client = self._build_provider(
+            base_url="https://compatible.example/v1",
+            model_name="compatible-model",
+        )
+        calls = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise Exception("400 Bad Request: unknown parameter")
+            return []
+
+        client.chat.completions.create.side_effect = create
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(chunks, [])
+        self.assertIn("stream_options", calls[0])
+        self.assertNotIn("stream_options", calls[1])
+
     def test_prepare_messages_converts_input_image_parts_when_vision_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = os.path.join(temp_dir, "sample.png")

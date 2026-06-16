@@ -302,9 +302,9 @@ Rules:
 - skill matches are case-insensitive
 - pure knowledge skills appear only in `skills`; they are not treated as callable tools
 - if a matched skill owns real tools, those tools still flow through normal deferred-tool discovery
-- imported / agent skills can request `prompt_level = full`, which tells the agent loop to append the full skill prompt on the next model turn
+- imported / agent skills can request `prompt_level = full`, which tells the agent loop to record the full skill prompt as hidden conversation context on the next model turn
 - if a matched skill exposes `script_entries`, `tool_search` should also surface `preferred_tool = run_skill_script` plus the preferred script entry when one is unambiguous
-- after a full skill prompt has been disclosed for the current run, later turns reuse that disclosed guidance instead of re-searching the skill directory
+- after a full skill prompt has been disclosed in the conversation, later turns reuse that hidden context by `skill_name + content_hash` instead of re-injecting the same skill body after each user message
 - once a script-entry skill is matched, the model should not use `glob`, `grep`, or `bash` just to locate the skill folder or script path
 
 ## Experience Ownership

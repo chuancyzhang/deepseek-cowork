@@ -28,6 +28,13 @@ def _normalize_tool_args(arguments):
     return arguments
 
 
+def _is_hidden_context_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return bool(meta.get("hidden")) and meta.get("kind") in {"skill_context", "skill_context_update"}
+
+
 def _new_assistant_group():
     return {
         "messages": [],
@@ -89,6 +96,8 @@ def build_conversation_render_items(messages):
 
     for raw_message in messages or []:
         if not isinstance(raw_message, dict):
+            continue
+        if _is_hidden_context_message(raw_message):
             continue
         role = raw_message.get("role") or ""
         if role == "user":
@@ -155,6 +164,8 @@ def build_conversation_render_spans(messages):
 
     for index, raw_message in enumerate(messages or []):
         if not isinstance(raw_message, dict):
+            continue
+        if _is_hidden_context_message(raw_message):
             continue
         role = raw_message.get("role") or ""
         if role == "user":

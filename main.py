@@ -13731,10 +13731,6 @@ class MainWindow(QMainWindow):
         if isinstance(prompt_meta, dict) and prompt_meta:
             meta_lines = [
                 "# Prompt Cache Observability",
-                f"stable_prompt_hash: {prompt_meta.get('stable_prompt_hash') or ''}",
-                f"runtime_context_hash: {prompt_meta.get('runtime_context_hash') or ''}",
-                f"tools_hash: {prompt_meta.get('tools_hash') or ''}",
-                f"message_prefix_hash: {prompt_meta.get('message_prefix_hash') or ''}",
                 f"prompt_cache_key: {prompt_meta.get('prompt_cache_key') or ''}",
                 "",
             ]
@@ -13786,7 +13782,8 @@ class MainWindow(QMainWindow):
             source = event.get("source") or "system"
             return f"[{stamp}] SYSTEM APPEND {source}\n{event.get('content') or ''}"
         if event_type == "system_prompt":
-            return f"[{stamp}] SYSTEM PROMPT loaded\n{self._observability_pretty_json(event)}"
+            cache_key = event.get("prompt_cache_key") or ""
+            return f"[{stamp}] SYSTEM PROMPT loaded\nprompt_cache_key={cache_key}"
         if event_type == "llm_usage":
             usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
             rate = usage.get("cache_hit_rate")
@@ -13904,12 +13901,12 @@ class MainWindow(QMainWindow):
                 state.system_prompt_text = event.get("content") or ""
                 state.runtime_context_text = event.get("runtime_context") or ""
                 state.prompt_cache_meta = {
-                    "stable_prompt_hash": event.get("stable_prompt_hash") or "",
-                    "runtime_context_hash": event.get("runtime_context_hash") or "",
-                    "tools_hash": event.get("tools_hash") or "",
-                    "message_prefix_hash": event.get("message_prefix_hash") or "",
                     "prompt_cache_key": event.get("prompt_cache_key") or "",
                 }
+                state.system_prompt_appends = [
+                    item for item in (event.get("skill_contexts") or [])
+                    if isinstance(item, dict)
+                ]
             elif event_type == "system_prompt_append":
                 state.system_prompt_appends.append(event)
             state.observability_events.append(event)

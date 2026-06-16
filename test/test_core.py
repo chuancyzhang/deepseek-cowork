@@ -1060,6 +1060,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         temp_dir = tempfile.mkdtemp()
         try:
             worker = self._build_prompt_worker(temp_dir)
+            worker._stable_system_prompt = None
             first = worker._build_stable_system_prompt()
             worker.tools = [{"type": "function", "function": {"name": "bash"}}]
             worker._prompt_context_date = "2026-06-17"
@@ -1068,6 +1069,47 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertNotIn("当前日期", first)
             self.assertNotIn("当前可用工具清单（仅以下工具真正暴露给你，可直接调用）", first)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_stable_system_prompt_is_frozen_per_worker(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            worker._stable_system_prompt = None
+            first = worker._get_stable_system_prompt()
+            memories_path = os.path.join(temp_dir, "memories.md")
+            with open(memories_path, "w", encoding="utf-8") as handle:
+                handle.write("new memory that should wait for the next worker")
+            second = worker._get_stable_system_prompt()
+
+            self.assertEqual(first, second)
+            self.assertNotIn("new memory", second)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_prompt_observability_omits_hash_fields(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            events = []
+            worker.observability_signal = type(
+                "_Signal",
+                (),
+                {"emit": lambda _self, payload: events.append(payload)},
+            )()
+
+            worker._emit_prompt_observability(
+                "stable",
+                "runtime",
+                [{"role": "system", "content": "stable"}, {"role": "system", "content": "runtime"}],
+            )
+
+            self.assertEqual(events[0]["prompt_cache_key"], "conversation-1")
+            self.assertNotIn("stable_prompt_hash", events[0])
+            self.assertNotIn("runtime_context_hash", events[0])
+            self.assertNotIn("tools_hash", events[0])
+            self.assertNotIn("message_prefix_hash", events[0])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

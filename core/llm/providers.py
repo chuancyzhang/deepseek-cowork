@@ -211,11 +211,26 @@ class OpenAIProvider(LLMProvider):
         try:
             return self.client.chat.completions.create(**params)
         except Exception as exc:
-            if "stream_options" not in params or "stream_options" not in str(exc):
+            if "stream_options" not in params or not self._should_retry_without_stream_options(exc):
                 raise
             fallback = dict(params)
             fallback.pop("stream_options", None)
             return self.client.chat.completions.create(**fallback)
+
+    def _should_retry_without_stream_options(self, exc):
+        text = str(exc or "").lower()
+        if "stream_options" in text:
+            return True
+        retry_markers = (
+            "unknown parameter",
+            "unsupported parameter",
+            "invalid parameter",
+            "unrecognized",
+            "not supported",
+            "bad request",
+            "400",
+        )
+        return any(marker in text for marker in retry_markers)
 
     def _usage_payload(self, chunk):
         usage = getattr(chunk, "usage", None)

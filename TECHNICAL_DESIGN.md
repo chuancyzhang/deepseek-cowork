@@ -21,7 +21,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **系统提示条**：`add_system_toast(...)` 在聊天流中渲染紧凑状态条，居中插入、限制最大宽度、允许换行，并跟随当前消息列宽度重算；颜色仅作为轻量状态提示而不是整块警示背景。
 *   **多模态附件建模**：输入区把普通文件记录为 `input_file`，把 PNG/JPEG/WEBP/GIF 记录为 `input_image`；provider 在发送前再决定是否转换成视觉请求。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理；定时计划支持快捷配置和 crontab 表达式双入口。
-*   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。子 Agent 面板按时间线拆分显示任务输入、工具调用、工具结果、流式输出与最终输出；任务观测会显示稳定 prompt、runtime context、工具 schema 与消息前缀指纹，以及 provider 返回的 cached token usage。
+*   **可视化监控**：展示子任务状态、思考过程、工具参数与工具结果。子 Agent 面板按时间线拆分显示任务输入、工具调用、工具结果、流式输出与最终输出；任务观测会区分稳定 prompt、runtime context 与已披露 skill context，并显示 provider 返回的 cached token usage 与命中率。
 *   **后台 daemon 连接**：UI 只发起短任务排队，不在点击开始或自动化分发时同步等待 daemon ping/retry；daemon 请求会在后台合并，避免重复点击堆出多个启动任务；daemon 未就绪时当前请求立即走本地 worker。
 *   **分阶段后台启动**：主窗口先完成显示，再延后补默认工作区、侧边栏历史、托盘、daemon 预热、daemon monitor 和自动化调度，减少首屏阶段的同步负载。
 *   **单窗口与后台进程锁**：UI 主进程在入口处持有运行锁，重复点击 exe 会重试激活首个窗口而不是继续建第二个 UI；daemon 与企业消息网关子进程仍在入口处通过文件锁保证唯一实例，即使多入口同时触发也只保留一个存活进程。
@@ -76,9 +76,9 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - 常驻执行工具：`run_python_code` 在 execution 模式下默认暴露，并进入基础 system prompt 的“当前可用工具清单”，无需先通过 `tool_search` 发现。
 - 视觉输入与工具发现：图片/截图输入不会再隐藏 `tool_search`；视觉回合与普通文本回合共用同一套延迟工具发现与 system prompt 能力描述，避免提示词仍要求搜索但 tool schema 实际缺失。
 - 只读并行工具：`parallel_tools` 本身作为 always-allowed 元工具可默认暴露，但每个子调用必须是已发现、当前模式允许、能力范围允许且 `read_only=True` 的工具。
-- 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮不仅更新 provider 的 tool schema，也会重建基础 system prompt 中的“当前可用工具清单”，避免提示词仍停留在旧集合；同一查询也会返回大小写不敏感匹配到的 AI skill 结果，供模型获取经验包上下文。
-- 系统提示词能力分层：基础 system prompt 会明确区分核心内置能力、默认关闭的随包 `ai_skills` 可选插件与当前真实暴露工具，并提示 Office/PDF 读取需通过可选 `document-reader` 的 `document_read`，写入则由 AI 使用代码和任务所需库生成。
-- Imported skill 全文暴露：对 imported / agent skill 继续先注入 brief；一旦 query 或 `tool_search` 命中脚本型 skill，agent loop 会在后续轮次追加完整 skill prompt，并缓存本次 run 已披露的 skill，避免重复展开。
+- 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮会以追加方式更新 provider 的 tool schema，并在尾部 runtime context 中刷新“当前可用工具清单”；同一查询也会返回大小写不敏感匹配到的 AI skill 结果，供模型获取经验包上下文。
+- 系统提示词能力分层：稳定 system prompt 只放长期策略和工具使用原则；当前真实暴露工具、运行模式、运行时路径和 SOP 状态放在请求尾部 runtime context。Office/PDF 读取需通过可选 `document-reader` 的 `document_read`，写入则由 AI 使用代码和任务所需库生成。
+- Imported skill 全文暴露：对 imported / agent skill 继续先注入 brief；一旦 query 或 `tool_search` 命中脚本型 skill，agent loop 会把完整 skill prompt 记录为隐藏会话上下文，按 `skill_name + content_hash` 去重。第一次披露可能不命中缓存，后续轮次会作为稳定历史前缀复用。
 - Imported skill 执行约束：脚本型 imported skill 会在 skill metadata 和 `tool_search.skills` 中暴露 `preferred_tool = run_skill_script`、候选脚本名和执行提示，模型不再需要通过 `glob` / `bash` 反查 skill 目录。
 - 异常 tool call 恢复：若 provider 流式返回缺少 `function.name` 的畸形 tool call，执行层会忽略该调用并追加恢复提示，而不是把这类半截调用当成正常工具步骤写入历史或 UI。
 
@@ -152,7 +152,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **子 Agent 观测 UI**：状态事件先写入会话事件队列并点亮右侧 `子 Agent` 徽标，不再自动打开抽屉；用户打开抽屉后先清空旧监控视图，再由主线程延迟队列批量渲染轻量摘要行，并限制最近事件窗口，避免事件风暴或 widget 构造影响主任务稳定性。
 - **抽屉点击命中保护**：`eventFilter` 对右侧抽屉和上下文 rail 采用全局坐标命中判断，而不是只依赖 Qt 祖先链；因此滚动区域 viewport、内部子控件和临时弹层不会被误判为抽屉外点击。
 - **抽屉隐藏诊断**：开启 runtime debug 日志后，`hide_context_drawer` 会把关闭原因、来源控件类型、当前 tab 和命中判断写入 `sub_agent_runtime.log`，便于定位“点击后立即收起”类问题。
-- **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览；系统提示词页展示 stable prompt、runtime context、prompt/tools/message-prefix 指纹，并优先预览 append 后的消息。完整 prompt 仍保留在会话状态中且可通过复制按钮导出，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
+- **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览；系统提示词页展示 stable prompt、runtime context 与已披露 skill context，不在首页展示 prompt/tools/message-prefix 指纹。完整 prompt 仍保留在会话状态中且可通过复制按钮导出，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
 - **UI 分段诊断**：开启 runtime debug 日志后，`_handle_agent_state_ui` 会按 session lookup、phase update、tool card、event record、monitor render、bubble PiP、live-agent check、final status 等阶段写入 `ui_agent_state_stage_*` 日志，便于定位 UI 闪退前的最后分支。
 - **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
 - **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。

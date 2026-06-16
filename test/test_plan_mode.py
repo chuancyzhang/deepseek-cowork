@@ -569,6 +569,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
         temp_dir = tempfile.mkdtemp()
         provider_calls = []
+        finished_payloads = []
         try:
             with (
                 patch("core.agent.SkillManager", _SkillManagerStub),
@@ -580,12 +581,23 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     workspace_dir=temp_dir,
                     run_context={"mode": RUN_MODE_EXECUTION},
                 )
+                worker.finished_signal.connect(lambda payload: finished_payloads.append(payload))
                 worker.run()
 
             self.assertEqual(len(provider_calls), 1)
             combined = "\n\n".join(provider_calls[0]["system_messages"])
             self.assertIn("claim-expert", combined)
             self.assertIn("run_skill_script", combined)
+            generated = finished_payloads[0]["generated_messages"]
+            skill_contexts = [
+                msg for msg in generated
+                if isinstance(msg, dict)
+                and isinstance(msg.get("meta"), dict)
+                and msg["meta"].get("kind") == "skill_context"
+            ]
+            self.assertEqual(len(skill_contexts), 1)
+            self.assertTrue(skill_contexts[0]["meta"].get("hidden"))
+            self.assertEqual(skill_contexts[0]["meta"].get("skill_name"), "claim-expert")
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -692,6 +704,53 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("validate_input", "\n\n".join(provider_calls[1]["system_messages"]))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_skill_context_injection_deduplicates_by_content_hash(self):
+        class _SkillManagerStub:
+            def get_full_skill_prompt(self, skill_name, include_references=False, include_entries=False):
+                return f"full prompt for {skill_name}"
+
+        class _Signal:
+            def __init__(self):
+                self.events = []
+
+            def emit(self, payload):
+                self.events.append(payload)
+
+        from core.agent import LLMWorker
+
+        worker = LLMWorker.__new__(LLMWorker)
+        worker.skill_manager = _SkillManagerStub()
+        worker.observability_signal = _Signal()
+        current_messages = [{"role": "user", "content": "hello"}]
+        generated_messages = []
+        disclosed = set()
+
+        worker._append_skill_prompts_for_names(
+            ["claim-expert"],
+            current_messages,
+            disclosed,
+            generated_messages,
+            source="skill_prompt_query_match",
+        )
+        worker._append_skill_prompts_for_names(
+            ["claim-expert"],
+            current_messages,
+            disclosed,
+            generated_messages,
+            source="skill_prompt_query_match",
+        )
+
+        skill_contexts = [
+            msg for msg in current_messages
+            if isinstance(msg, dict)
+            and isinstance(msg.get("meta"), dict)
+            and msg["meta"].get("kind") == "skill_context"
+        ]
+        self.assertEqual(len(skill_contexts), 1)
+        self.assertEqual(len(generated_messages), 1)
+        self.assertEqual(skill_contexts[0]["meta"]["skill_name"], "claim-expert")
+        self.assertTrue(skill_contexts[0]["meta"]["content_hash"])
 
     def test_clarifying_mode_filters_to_allowed_read_and_interaction_tools(self):
         class _SkillManagerStub:

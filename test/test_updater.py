@@ -13,6 +13,7 @@ from core.updater import (
     APP_EXE_NAME,
     INTERNAL_DIR_NAME,
     UpdaterError,
+    cleanup_update_artifacts,
     create_windows_update_script,
     download_asset,
     extract_update_zip,
@@ -128,6 +129,66 @@ class TestUpdater(unittest.TestCase):
         mocked_get.assert_not_called()
         self.assertTrue(any("跳过下载" in message for message, _percent in progress))
 
+    def test_cleanup_update_artifacts_removes_old_update_traces_and_keeps_current_package(self):
+        keep_zip = os.path.join(self.temp_dir, "deepseek-cowork-v4.8.0.zip")
+        old_zip = os.path.join(self.temp_dir, "deepseek-cowork-v4.7.9.zip")
+        temp_download = os.path.join(self.temp_dir, "deepseek-cowork-v4.8.0.zip.download")
+        unrelated = os.path.join(self.temp_dir, "notes.txt")
+        for path in (keep_zip, old_zip, temp_download, unrelated):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        for dirname in ("staged-20260615-120000", "backup-20260615-120000"):
+            os.makedirs(os.path.join(self.temp_dir, dirname), exist_ok=True)
+        for name in ("apply-update-20260615-120000.ps1", "apply-update-20260615-120000.cmd", "update.log", "update-launch.log"):
+            with open(os.path.join(self.temp_dir, name), "w", encoding="utf-8") as handle:
+                handle.write("x")
+
+        removed = cleanup_update_artifacts(target_dir=self.temp_dir, keep_paths=[keep_zip])
+
+        self.assertGreaterEqual(removed, 8)
+        self.assertTrue(os.path.exists(keep_zip))
+        self.assertTrue(os.path.exists(unrelated))
+        self.assertFalse(os.path.exists(old_zip))
+        self.assertFalse(os.path.exists(temp_download))
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "staged-20260615-120000")))
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "backup-20260615-120000")))
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "apply-update-20260615-120000.ps1")))
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "update.log")))
+
+    def test_prepare_update_cleans_artifacts_before_download_and_staging(self):
+        release = {
+            "tag_name": "V4.8.0",
+            "name": "V4.8.0",
+            "html_url": "https://example/release",
+            "body": "Release notes",
+            "assets": [
+                {
+                    "name": "deepseek-cowork-v4.8.0.zip",
+                    "browser_download_url": "https://example/app.zip",
+                    "size": 100,
+                }
+            ],
+        }
+        old_zip = os.path.join(self.temp_dir, "deepseek-cowork-v4.7.9.zip")
+        with open(old_zip, "w", encoding="utf-8") as handle:
+            handle.write("old")
+        os.makedirs(os.path.join(self.temp_dir, "staged-20260615-120000"), exist_ok=True)
+        expected_zip = os.path.join(self.temp_dir, "deepseek-cowork-v4.8.0.zip")
+        staged_dir = os.path.join(self.temp_dir, "staged-current")
+
+        with patch("core.updater.fetch_latest_release", return_value=release), \
+             patch("core.updater.updates_dir", return_value=self.temp_dir), \
+             patch("core.updater.download_asset", return_value=expected_zip) as mocked_download, \
+             patch("core.updater.extract_update_zip", return_value=staged_dir) as mocked_extract:
+            result = prepare_update(current_version="4.7.2", download=True)
+
+        self.assertFalse(os.path.exists(old_zip))
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "staged-20260615-120000")))
+        mocked_download.assert_called_once()
+        mocked_extract.assert_called_once_with(expected_zip, target_dir=self.temp_dir, progress_callback=None)
+        self.assertEqual(result["zip_path"], expected_zip)
+        self.assertEqual(result["staged_app_dir"], staged_dir)
+
     def test_create_windows_update_script_generates_observable_gui_and_fallback(self):
         install_dir = os.path.join(self.temp_dir, "install")
         staged_dir = os.path.join(self.temp_dir, "staged")
@@ -159,6 +220,9 @@ class TestUpdater(unittest.TestCase):
         self.assertIn("System.Windows.Forms", ps_content)
         self.assertIn("DeepSeek Cowork Update", ps_content)
         self.assertIn("ProgressBar", ps_content)
+        self.assertIn("$form.MinimizeBox = $true", ps_content)
+        self.assertIn("$form.TopMost = $false", ps_content)
+        self.assertIn("$form.WindowState = 'Normal'", ps_content)
         self.assertIn("$PidsToWait = @(12345, 23456)", ps_content)
         self.assertIn("[string[]]$RoboArgs", ps_content)
         self.assertIn("robocopy @RoboArgs", ps_content)
@@ -179,6 +243,32 @@ class TestUpdater(unittest.TestCase):
         self.assertIn("call :wait_pid 12345", cmd_content)
         self.assertIn("call :wait_pid 23456", cmd_content)
         self.assertIn("[10%%] Waiting for app to exit", cmd_content)
+
+    def test_create_windows_update_script_can_start_minimized_for_background_install(self):
+        install_dir = os.path.join(self.temp_dir, "install")
+        staged_dir = os.path.join(self.temp_dir, "staged")
+        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        os.makedirs(install_dir, exist_ok=True)
+        with open(os.path.join(staged_dir, APP_EXE_NAME), "w", encoding="utf-8") as handle:
+            handle.write("")
+
+        with patch("core.updater.sys.platform", "win32"):
+            script_path = create_windows_update_script(
+                install_dir=install_dir,
+                staged_app_dir=staged_dir,
+                current_pid=12345,
+                target_dir=self.temp_dir,
+                background_install=True,
+            )
+
+        with open(script_path, "r", encoding="utf-8-sig") as handle:
+            ps_content = handle.read()
+
+        self.assertIn("$RunInBackground = $true", ps_content)
+        self.assertIn("$form.WindowState = 'Minimized'", ps_content)
+        self.assertIn("$form.WindowState = 'Normal'", ps_content)
+        self.assertIn("$form.Activate()", ps_content)
+
 
     def test_create_windows_update_script_rejects_non_windows(self):
         staged_dir = os.path.join(self.temp_dir, "staged")

@@ -69,7 +69,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **内置 Node.js / Git Bash**：Windows 打包版优先从当前应用目录的 `_internal/*_env` 直接解析 bundled runtime；AI 可通过 `run_node_code` 执行 JavaScript，`bash` 在 Git Bash 缺失时会退回 Windows `cmd.exe`。
 *   **Python 动态依赖**：`python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒 Python 中验证模块可导入；第三方包持久化到 AppData `runtime_sandbox` 的 skill 依赖目录，而不是直接写入 `_internal`。沙盒会额外注入 `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS`，让 Windows 原生扩展包能解析 DLL；如果仍然导入失败，会把真实 traceback 返回给用户。
 *   **打包完整性**：内置 Python 运行时除了 `Lib` 外，还必须包含 Windows 平台扩展目录（如 `DLLs`）以及常见 MSVC runtime DLL；否则 `_socket` 等核心模块缺失，内置 `pip` 或原生 wheel 无法加载。
-*   **应用更新**：设置页可检查 GitHub Releases；打包版支持下载、校验、暂存并通过独立更新器重启安装。
+*   **应用更新**：设置页可检查 GitHub Releases；打包版会清理旧更新包、旧暂存目录和旧脚本，仅保留本次目标安装包，并支持下载、校验、暂存后通过独立更新器重启安装；前台进度窗口可最小化，也可选择后台安装。
 *   **MCP 服务器**：设置页以更接近 Apple 偏好设置的轻量分区承载 MCP 配置，默认只保留分区标题；术语保持 `MCP`、`stdio`、`Streamable HTTP`、`Headers`、`JSON` 等英文表达，也支持导入 `mcpServers` / `mcp_servers` JSON；已启用服务器会以延迟发现工具的方式接入 Agent。打包版默认内置 MCP client 运行时，无需额外安装 `mcp`。
 
 ---

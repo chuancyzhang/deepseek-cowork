@@ -123,6 +123,49 @@ def is_cached_asset_valid(asset, zip_path):
     return True
 
 
+def cleanup_update_artifacts(target_dir=None, keep_paths=None, progress_callback=None):
+    target_dir = target_dir or updates_dir()
+    os.makedirs(target_dir, exist_ok=True)
+    keep = {os.path.abspath(path) for path in (keep_paths or []) if path}
+    removed = 0
+    patterns = (
+        re.compile(r"^staged-\d{8}-\d{6}$", re.IGNORECASE),
+        re.compile(r"^backup-\d{8}-\d{6}$", re.IGNORECASE),
+        re.compile(r"^apply-update-\d{8}-\d{6}\.(ps1|cmd)$", re.IGNORECASE),
+        re.compile(r"^deepseek-cowork.*\.zip$", re.IGNORECASE),
+        re.compile(r"^deepseek-cowork.*\.zip\.download$", re.IGNORECASE),
+    )
+    for name in os.listdir(target_dir):
+        path = os.path.join(target_dir, name)
+        abs_path = os.path.abspath(path)
+        if abs_path in keep:
+            continue
+        if not any(pattern.match(name) for pattern in patterns):
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    for log_name in ("update.log", "update-launch.log"):
+        log_path = os.path.join(target_dir, log_name)
+        if os.path.abspath(log_path) in keep:
+            continue
+        try:
+            if os.path.exists(log_path):
+                os.remove(log_path)
+                removed += 1
+        except Exception:
+            continue
+    _emit(progress_callback, f"已清理历史更新痕迹：{removed} 项", None)
+    return removed
+
+
 def download_asset(asset, target_dir=None, progress_callback=None, timeout=30):
     if isinstance(asset, dict):
         asset = ReleaseAsset(
@@ -244,6 +287,9 @@ def prepare_update(current_version=APP_VERSION, download=False, progress_callbac
     if not download:
         return result
     target_dir = updates_dir()
+    expected_zip_path = expected_asset_path(asset, target_dir=target_dir)
+    keep_paths = [expected_zip_path] if is_cached_asset_valid(asset, expected_zip_path) else []
+    cleanup_update_artifacts(target_dir=target_dir, keep_paths=keep_paths, progress_callback=progress_callback)
     zip_path = download_asset(asset, target_dir=target_dir, progress_callback=progress_callback)
     staged_app_dir = extract_update_zip(zip_path, target_dir=target_dir, progress_callback=progress_callback)
     result.update({
@@ -349,8 +395,10 @@ exit /b 1
         handle.write(content)
 
 
-def _write_gui_ps_update_script(script_path, install_dir, staged_app_dir, backup_dir, log_path, wait_pids, exe_name):
+def _write_gui_ps_update_script(script_path, install_dir, staged_app_dir, backup_dir, log_path, wait_pids, exe_name, background_install=False):
     ps_wait_pids = "@(" + ", ".join(str(int(pid)) for pid in wait_pids) + ")"
+    top_most = "$false" if background_install else "$false"
+    window_state = "'Minimized'" if background_install else "'Normal'"
     content = f"""Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -361,13 +409,17 @@ $InstallDir = {_ps_quote(install_dir)}
 $BackupDir = {_ps_quote(backup_dir)}
 $ExeName = {_ps_quote(exe_name)}
 $LogPath = {_ps_quote(log_path)}
+$RunInBackground = {'$true' if background_install else '$false'}
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'DeepSeek Cowork Update'
 $form.Width = 620
 $form.Height = 420
 $form.StartPosition = 'CenterScreen'
-$form.TopMost = $true
+$form.TopMost = {top_most}
+$form.MinimizeBox = $true
+$form.ShowInTaskbar = $true
+$form.WindowState = {window_state}
 
 $title = New-Object System.Windows.Forms.Label
 $title.Text = 'Updating DeepSeek Cowork'
@@ -466,6 +518,9 @@ $timer.Add_Tick({{
         $form.Close()
     }} catch {{
         Add-UpdateLog ("Update failed: " + $_.Exception.Message) 100
+        $form.WindowState = 'Normal'
+        $form.Show()
+        $form.Activate()
         if (Test-Path (Join-Path $BackupDir $ExeName)) {{
             try {{
                 Add-UpdateLog 'Attempting rollback...' 100
@@ -489,7 +544,7 @@ $form.Add_Shown({{ $timer.Start() }})
         handle.write(content)
 
 
-def create_windows_update_script(install_dir, staged_app_dir, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None):
+def create_windows_update_script(install_dir, staged_app_dir, current_pid=None, exe_name=APP_EXE_NAME, target_dir=None, extra_wait_pids=None, background_install=False):
     if sys.platform != "win32":
         raise UpdaterError("自动安装更新仅支持 Windows。")
     install_dir = os.path.abspath(install_dir)
@@ -503,7 +558,16 @@ def create_windows_update_script(install_dir, staged_app_dir, current_pid=None, 
     log_path = os.path.join(target_dir, "update.log")
     ps_script_path, cmd_script_path = _update_script_paths(target_dir, stamp)
     wait_pids = _normalize_wait_pids(current_pid, extra_wait_pids)
-    _write_gui_ps_update_script(ps_script_path, install_dir, staged_app_dir, backup_dir, log_path, wait_pids, exe_name)
+    _write_gui_ps_update_script(
+        ps_script_path,
+        install_dir,
+        staged_app_dir,
+        backup_dir,
+        log_path,
+        wait_pids,
+        exe_name,
+        background_install=background_install,
+    )
     _write_fallback_cmd_script(cmd_script_path, install_dir, staged_app_dir, backup_dir, log_path, wait_pids, exe_name)
     return ps_script_path
 

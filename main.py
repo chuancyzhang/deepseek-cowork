@@ -6015,6 +6015,29 @@ class SettingsDialog(QDialog):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.update_log_edit.append(f"[{timestamp}] {message}")
 
+    def choose_app_update_install_mode(self, latest_version, zip_path):
+        package_line = f"\n安装包位置：{zip_path}" if zip_path else ""
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Question)
+        dialog.setWindowTitle("安装更新")
+        dialog.setText(
+            f"新版本 {latest_version} 已准备好。{package_line}\n"
+            "主程序将关闭，独立更新器会安装更新并自动重启。"
+        )
+        foreground_btn = dialog.addButton("前台安装并重启", QMessageBox.AcceptRole)
+        background_btn = dialog.addButton("后台安装并重启", QMessageBox.AcceptRole)
+        cancel_btn = dialog.addButton("取消", QMessageBox.RejectRole)
+        dialog.setDefaultButton(foreground_btn)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked == foreground_btn:
+            return "foreground"
+        if clicked == background_btn:
+            return "background"
+        if clicked == cancel_btn:
+            return "cancel"
+        return "cancel"
+
     def handle_app_update_finished(self, result):
         self.refresh_current_version_label()
         self.update_btn.setEnabled(True)
@@ -6079,20 +6102,17 @@ class SettingsDialog(QDialog):
         self.append_app_update_log("下载、解压和结构校验完成。")
         if zip_path:
             self.append_app_update_log(f"安装包位置：{zip_path}")
-        package_line = f"\n安装包位置：{zip_path}" if zip_path else ""
-        reply = QMessageBox.question(
-            self,
-            "安装更新",
-            f"新版本 {latest_version} 已准备好。{package_line}\n接下来会打开更新进度窗口，主程序将关闭、安装更新并自动重启。是否继续？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
+        install_mode = self.choose_app_update_install_mode(latest_version, zip_path)
+        if install_mode == "cancel":
             self.update_status_label.setText("更新已下载，尚未安装。再次点击可重新检查。")
-            self.append_app_update_log("用户取消安装，更新包保留在本机更新目录。")
+            self.append_app_update_log("用户取消安装；本次安装包已保留，历史更新痕迹已清理。")
             return
+        background_install = install_mode == "background"
         try:
-            self.append_app_update_log("正在启动独立更新进度窗口。")
+            if background_install:
+                self.append_app_update_log("正在启动独立更新器，安装将在后台进行。")
+            else:
+                self.append_app_update_log("正在启动独立更新进度窗口，可在窗口中最小化。")
             launch_log_path = os.path.join(result.get("updates_dir") or get_app_data_dir(), "update-launch.log")
             self.append_app_update_log(f"更新器启动日志：{launch_log_path}")
             extra_wait_pids = []
@@ -6109,6 +6129,7 @@ class SettingsDialog(QDialog):
                 exe_name=os.path.basename(sys.executable) or "deepseek-cowork.exe",
                 target_dir=result.get("updates_dir"),
                 extra_wait_pids=extra_wait_pids,
+                background_install=background_install,
             )
             launch_windows_update_script(script_path)
             if hasattr(self._main, "quit_app"):

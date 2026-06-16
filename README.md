@@ -148,7 +148,7 @@ Use the sidebar after meaningful work:
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
 
 ### 7. App Updates
-Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds can download, verify, stage, and restart into the new version; source runs only check and link to the release page.
+Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds clean old update packages, staging folders, and scripts before keeping the current target package; then they download, verify, stage, and restart into the new version through the standalone updater. The foreground progress window can be minimized, or installation can run in the background. Source runs only check and link to the release page.
 
 ### 8. MCP Servers
 Open **⚙️ Settings → MCP** to add MCP servers.

@@ -1214,13 +1214,15 @@ class SkillManager:
             if not isinstance(server_config, dict):
                 continue
             skill_name = build_mcp_skill_name(server_config.get("id") or server_config.get("name") or f"server-{index + 1}")
-            if self.config_manager and not self.config_manager.is_skill_enabled(skill_name, default_enabled=True):
+            if not bool(server_config.get("enabled", True)):
+                dependency_status = {"ok": False, "message": "MCP server is disabled in settings."}
+                record = self._build_mcp_skill_record(skill_name, server_config, [], dependency_status)
+                self.skill_records[skill_name] = record
+                self.skill_to_tools.setdefault(skill_name, [])
                 continue
             tool_refs = []
             dependency_status = {"ok": True, "message": "MCP server is available."}
-            if not bool(server_config.get("enabled", True)):
-                dependency_status = {"ok": False, "message": "MCP server is disabled in settings."}
-            elif not package_ready:
+            if not package_ready:
                 dependency_status = {"ok": False, "message": "Python package 'mcp' is not installed."}
             else:
                 result = list_mcp_server_tools(server_config)
@@ -1849,6 +1851,12 @@ class SkillManager:
                 continue
             if record.get("spec", {}).get("source_format") != self.MCP_SOURCE_FORMAT:
                 continue
+            default_enabled = True
+            mcp_servers = self.config_manager.get_mcp_servers() if self.config_manager and hasattr(self.config_manager, "get_mcp_servers") else []
+            for server_config in mcp_servers:
+                if build_mcp_skill_name(server_config.get("id") or server_config.get("name") or "") == skill_name:
+                    default_enabled = bool(server_config.get("enabled", True))
+                    break
             info = {
                 "name": skill_name,
                 "display_name": record["meta"].get("display_name") or _humanize_skill_name(skill_name),
@@ -1868,7 +1876,7 @@ class SkillManager:
                 "source_format": record["spec"].get("source_format"),
             }
             if self.config_manager:
-                info["enabled"] = self.config_manager.is_skill_enabled(skill_name, default_enabled=True)
+                info["enabled"] = default_enabled
             info.update({k: v for k, v in record["meta"].items() if k != "allowed-tools"})
             info.update({k: v for k, v in record["spec"].items() if k not in {"workflow", "tool_refs", "experience_policy", "disclosure_level_defaults"}})
             all_skills.append(info)

@@ -2,7 +2,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.8.9**。
+当前应用版本：**4.9.0**。
 
 ## 1. 产品概述 (Product Overview)
 
@@ -100,7 +100,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 5.  **经验沉淀**
     *   用户点击 `更新长期记忆`，系统扫描新增/变更历史会话，分批更新 `memories.md` 并记录 `memories_update_state.json`。
     *   用户点击 `沉淀为 Skill`，系统先让用户选择当前会话片段，再提炼为 Skill 草稿；可新建 Skill 或更新已有 Skill，并在保存前预览编辑和勾选已运行 Python 代码片段。
-    *   用户在功能中心可将自定义 Skill 单独导出为 ZIP，也可多选后导出为集合 ZIP；导入继续支持 ZIP、单 Skill 文件夹或 Skill 集合文件夹。自定义 Skill 可在工作台中编辑文件、验证结构、调试 tools/scripts，并可在选择模式批量删除；内置 Skill 与随包插件只读不可删除，随包插件默认关闭但可启用，MCP 能力可调试连接与 tool 调用。
+    *   用户在功能中心可将自定义 Skill 单独导出为 ZIP，也可多选后导出为集合 ZIP；导入继续支持 ZIP、单 Skill 文件夹或 Skill 集合文件夹。自定义 Skill 可在工作台中编辑文件、验证结构、调试 tools/scripts，并可在选择模式批量删除；内置 Skill 与随包插件只读不可删除，随包插件默认关闭但可启用，MCP 能力可调试连接与 tool 调用。能力开关会即时重载运行时注册表，MCP 开关同步设置页 server 启用状态。
 
 ---
 

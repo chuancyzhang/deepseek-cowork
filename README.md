@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.8.9**.
+Current app version: **4.9.0**.
 
 Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
@@ -142,7 +142,7 @@ Open **自动化** from the sidebar:
 Use the sidebar after meaningful work:
 *   **`更新长期记忆`** scans new or changed history, merges it into `memories.md` in batches, shows progress, can run in the background, and lets you review/edit before saving.
 *   **`沉淀为 Skill`** lets you choose a current conversation segment and turn it into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, preview/edit before saving, and optionally store detected `run_python_code` snippets under `scripts/` as `script_entries`.
-*   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center separates read-only built-ins, default-off bundled plugins, MCP tools, and custom skills while preserving search, status filters, switches, validation, and tool debugging.
+*   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center separates read-only built-ins, default-off bundled plugins, MCP tools, and custom skills while preserving search, status filters, switches, validation, and tool debugging. Custom skills and bundled plugins reload immediately when toggled; MCP switches stay synchronized with the matching server's enabled state in Settings.
 
 ### 6. Enterprise IM
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.

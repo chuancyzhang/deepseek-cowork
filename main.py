@@ -6614,7 +6614,30 @@ class SkillsCenterDialog(QDialog):
         return card
 
     def toggle_skill(self, name, enabled):
-        self.config_manager.set_skill_enabled(name, enabled)
+        skill = next(
+            (
+                item
+                for item in self._all_skills
+                if str(item.get("name") or "").strip() == str(name or "").strip()
+            ),
+            None,
+        )
+        if skill and str(skill.get("source_format") or "").strip() == SkillManager.MCP_SOURCE_FORMAT:
+            servers = self.config_manager.get_mcp_servers()
+            updated = False
+            for server in servers:
+                skill_name = build_mcp_skill_name(server.get("id") or server.get("name") or "")
+                if skill_name == name:
+                    server["enabled"] = bool(enabled)
+                    updated = True
+                    break
+            if updated:
+                self.config_manager.set_mcp_servers(servers)
+            else:
+                self.config_manager.set_skill_enabled(name, enabled)
+        else:
+            self.config_manager.set_skill_enabled(name, enabled)
+        self.skill_manager.load_skills()
         self.refresh_list()
 
     def toggle_selection_mode(self):

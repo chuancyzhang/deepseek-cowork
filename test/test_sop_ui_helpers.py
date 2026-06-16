@@ -240,6 +240,62 @@ class SkillCenterHelperTests(unittest.TestCase):
         toggle.click()
         config_manager.set_skill_enabled.assert_called_once_with("showdoc-mcp", False)
 
+    def test_skill_center_toggle_reloads_runtime_skills(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = [
+            {
+                "name": "claim-expert",
+                "display_name": "Claim Expert",
+                "description": "Review claim evidence and consistency.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": [],
+                "type": "ai_generated",
+                "created_by": "ai",
+            }
+        ]
+        config_manager = MagicMock()
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+
+        dialog.toggle_skill("claim-expert", False)
+
+        config_manager.set_skill_enabled.assert_called_once_with("claim-expert", False)
+        skill_manager.load_skills.assert_called_once()
+
+    def test_skill_center_mcp_toggle_syncs_server_enabled_state(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = [
+            {
+                "name": "mcp-server-showdoc",
+                "display_name": "MCP / showdoc",
+                "description": "Remote MCP tools.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": ["mcp__showdoc__list_items"],
+                "source_format": "mcp_server",
+            }
+        ]
+        config_manager = MagicMock()
+        config_manager.get_mcp_servers.return_value = [
+            {
+                "id": "showdoc",
+                "name": "showdoc",
+                "enabled": True,
+                "transport": "streamable_http",
+                "url": "https://example.com/mcp",
+            }
+        ]
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+
+        dialog.toggle_skill("mcp-server-showdoc", False)
+
+        updated_servers = config_manager.set_mcp_servers.call_args.args[0]
+        self.assertFalse(updated_servers[0]["enabled"])
+        config_manager.set_skill_enabled.assert_not_called()
+        skill_manager.load_skills.assert_called_once()
+
     def test_skill_center_selection_mode_adds_checkbox(self):
         app = QApplication.instance() or QApplication([])
         skill_manager = MagicMock()

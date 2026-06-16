@@ -216,7 +216,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
 
     def test_skill_manager_registers_mcp_tools_from_config(self):
         config_manager = MagicMock()
-        config_manager.is_skill_enabled.return_value = True
+        config_manager.is_skill_enabled.return_value = False
         config_manager.get_mcp_servers.return_value = [
             {
                 "id": "local-db",
@@ -284,6 +284,36 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             tool_result = sm.call_tool(local_name, {"sql": "select 1"})
             self.assertEqual(tool_result["status"], "ok")
             self.assertEqual(tool_result["text"], "rows")
+
+    def test_skill_manager_keeps_disabled_mcp_visible_without_registering_tools(self):
+        config_manager = MagicMock()
+        config_manager.is_skill_enabled.side_effect = lambda _name, default_enabled=True: default_enabled
+        config_manager.get_mcp_servers.return_value = [
+            {
+                "id": "local-db",
+                "name": "Local DB",
+                "enabled": False,
+                "transport": "stdio",
+                "command": "demo-mcp",
+                "args": ["--workspace", self.temp_dir],
+                "env": {},
+                "headers": {},
+                "timeout_seconds": 30,
+            }
+        ]
+        with patch("core.skill_manager.mcp_package_available", return_value=True), patch(
+            "core.skill_manager.list_mcp_server_tools"
+        ) as list_tools:
+            sm = SkillManager(workspace_dir=self.temp_dir, config_manager=config_manager)
+            sm.skills_dirs = [self.skills_dir]
+            sm.load_skills()
+
+        local_name = "mcp__local_db__query_data"
+        skills = {item["name"]: item for item in sm.get_all_skills()}
+        self.assertIn("mcp-server-local_db", skills)
+        self.assertFalse(skills["mcp-server-local_db"]["enabled"])
+        self.assertNotIn(local_name, sm.tools)
+        list_tools.assert_not_called()
 
     def test_parallel_tools_runs_read_only_calls_and_preserves_order(self):
         self._copy_repo_skill("meta-tools")

@@ -173,6 +173,53 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             if "arguments" in chunk["function"]:
                 self.assertIsNot(chunk["function"]["arguments"], None)
 
+    def test_chat_stream_emits_cached_usage_payload(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+
+        client.chat.completions.create.return_value = [
+            SimpleNamespace(
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                    total_tokens=120,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=75),
+                ),
+                choices=[],
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(chunks[0]["type"], "usage")
+        usage = chunks[0]["usage"]
+        self.assertEqual(usage["input_tokens"], 100)
+        self.assertEqual(usage["cached_input_tokens"], 75)
+        self.assertEqual(usage["uncached_input_tokens"], 25)
+        self.assertAlmostEqual(usage["cache_hit_rate"], 0.75)
+
+    def test_prompt_cache_key_requires_explicit_param(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+        )
+        captured = {}
+
+        def create(**kwargs):
+            captured.update(kwargs)
+            return []
+
+        client.chat.completions.create.side_effect = create
+        list(provider.chat_stream([{"role": "user", "content": "hello"}], prompt_cache_key="conv-1"))
+        self.assertNotIn("prompt_cache_key", captured)
+
+        provider.prompt_cache_key_param = "prompt_cache_key"
+        captured.clear()
+        list(provider.chat_stream([{"role": "user", "content": "hello"}], prompt_cache_key="conv-1"))
+        self.assertEqual(captured["prompt_cache_key"], "conv-1")
+
     def test_prepare_messages_converts_input_image_parts_when_vision_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = os.path.join(temp_dir, "sample.png")

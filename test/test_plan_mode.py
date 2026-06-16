@@ -134,7 +134,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 self.events = events
 
             def chat_stream(self, messages, tools=None):
-                self.events.append(("request", messages[0].get("content", "")))
+                system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
+                self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
 
         from core.agent import LLMWorker
@@ -158,12 +159,14 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             self.assertTrue(events)
             system_prompt = events[0].get("content", "")
-            self.assertIn("策略 [反问模式]", system_prompt)
-            self.assertIn("request_user_input", system_prompt)
-            self.assertNotIn("策略 [计划模式]", system_prompt)
-            self.assertNotIn("<proposed_plan>", system_prompt)
+            runtime_prompt = events[0].get("runtime_context", "")
+            self.assertIn("策略 [反问模式]", runtime_prompt)
+            self.assertIn("request_user_input", runtime_prompt)
+            self.assertNotIn("策略 [计划模式]", runtime_prompt)
+            self.assertNotIn("<proposed_plan>", runtime_prompt)
             self.assertTrue(provider_events)
-            self.assertEqual(system_prompt, provider_events[0][1])
+            self.assertEqual(system_prompt, provider_events[0][1][0])
+            self.assertEqual(runtime_prompt, provider_events[0][1][-1])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -201,7 +204,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 self.events = events
 
             def chat_stream(self, messages, tools=None):
-                self.events.append(("request", messages[0].get("content", "")))
+                system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
+                self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
 
         from core.agent import LLMWorker
@@ -223,11 +227,11 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.observability_signal.connect(lambda data: events.append(data))
                 worker.run()
 
-            system_prompt = events[0].get("content", "")
-            self.assertIn("# 用户指定能力", system_prompt)
-            self.assertIn("`browser-automation`: 浏览器自动化", system_prompt)
-            self.assertIn("Browser automation brief", system_prompt)
-            self.assertIn("General skill prompt", system_prompt)
+            runtime_prompt = events[0].get("runtime_context", "")
+            self.assertIn("# 用户指定能力", runtime_prompt)
+            self.assertIn("`browser-automation`: 浏览器自动化", runtime_prompt)
+            self.assertIn("Browser automation brief", runtime_prompt)
+            self.assertIn("General skill prompt", runtime_prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -255,7 +259,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 self.events = events
 
             def chat_stream(self, messages, tools=None):
-                self.events.append(("request", messages[0].get("content", "")))
+                system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
+                self.events.append(("request", system_messages))
                 yield {"type": "content", "content": "done"}
 
         from core.agent import LLMWorker
@@ -286,10 +291,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.run()
 
             system_prompt = events[0].get("content", "")
-            self.assertIn("# SOP 当前步骤", system_prompt)
-            self.assertIn("当前 SOP: Office", system_prompt)
-            self.assertIn("本轮只允许完成当前步骤", system_prompt)
-            self.assertEqual(system_prompt, provider_events[0][1])
+            runtime_prompt = events[0].get("runtime_context", "")
+            self.assertIn("# SOP 当前步骤", runtime_prompt)
+            self.assertIn("当前 SOP: Office", runtime_prompt)
+            self.assertIn("本轮只允许完成当前步骤", runtime_prompt)
+            self.assertEqual(system_prompt, provider_events[0][1][0])
+            self.assertEqual(runtime_prompt, provider_events[0][1][-1])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -465,8 +472,13 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             def chat_stream(self, messages, tools=None):
                 tool_names = [(item.get("function") or {}).get("name") for item in (tools or [])]
-                system_prompt = messages[0]["content"] if messages and messages[0].get("role") == "system" else ""
-                self.calls.append({"tool_names": tool_names, "system_prompt": system_prompt})
+                system_messages = [
+                    item.get("content", "")
+                    for item in messages
+                    if isinstance(item, dict) and item.get("role") == "system"
+                ]
+                runtime_prompt = system_messages[-1] if system_messages else ""
+                self.calls.append({"tool_names": tool_names, "system_prompt": runtime_prompt})
                 if len(self.calls) == 1:
                     yield {
                         "type": "tool_call",

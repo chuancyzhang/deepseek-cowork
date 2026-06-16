@@ -14,7 +14,7 @@ from .deepseek import (
 
 class LLMProvider(ABC):
     @abstractmethod
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None):
         """
         Yields chunks of response.
         Each chunk should be a dict with:
@@ -91,6 +91,8 @@ class OpenAIProvider(LLMProvider):
         thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
         reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
         supports_vision=False,
+        stream_usage_enabled=True,
+        prompt_cache_key_param="",
     ):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url)
@@ -99,8 +101,10 @@ class OpenAIProvider(LLMProvider):
         self.thinking_enabled = bool(thinking_enabled)
         self.reasoning_effort = normalize_deepseek_reasoning_effort(reasoning_effort)
         self.supports_vision = bool(supports_vision)
+        self.stream_usage_enabled = bool(stream_usage_enabled)
+        self.prompt_cache_key_param = str(prompt_cache_key_param or "").strip()
 
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None):
         try:
             # Clean messages for OpenAI (remove internal keys if any)
             clean_messages = self._prepare_messages(messages)
@@ -116,6 +120,9 @@ class OpenAIProvider(LLMProvider):
             }
             if api_tools:
                 params["tools"] = api_tools
+            if prompt_cache_key:
+                self._apply_prompt_cache_key(params, prompt_cache_key)
+            self._apply_stream_usage_options(params)
             params.update(
                 build_deepseek_request_options(
                     self.model_name,
@@ -125,13 +132,17 @@ class OpenAIProvider(LLMProvider):
                 )
             )
 
-            stream = self.client.chat.completions.create(**params)
+            stream = self._create_chat_completion_stream(params)
 
             for chunk in stream:
-                if not chunk.choices:
+                usage_payload = self._usage_payload(chunk)
+                if usage_payload:
+                    yield {"type": "usage", "usage": usage_payload}
+                choices = getattr(chunk, "choices", None)
+                if not choices:
                     continue
                     
-                delta = chunk.choices[0].delta
+                delta = choices[0].delta
                 
                 # 1. Reasoning (DeepSeek style)
                 if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
@@ -177,6 +188,77 @@ class OpenAIProvider(LLMProvider):
                         
         except Exception as e:
             yield {"type": "error", "content": str(e)}
+
+    def _apply_prompt_cache_key(self, params, prompt_cache_key):
+        key = str(prompt_cache_key or "").strip()
+        if not key or not self.prompt_cache_key_param:
+            return
+        if self.prompt_cache_key_param == "prompt_cache_key":
+            params["prompt_cache_key"] = key
+        elif self.prompt_cache_key_param == "extra_body.prompt_cache_key":
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body["prompt_cache_key"] = key
+            params["extra_body"] = extra_body
+
+    def _apply_stream_usage_options(self, params):
+        if not self.stream_usage_enabled:
+            return
+        stream_options = dict(params.get("stream_options") or {})
+        stream_options["include_usage"] = True
+        params["stream_options"] = stream_options
+
+    def _create_chat_completion_stream(self, params):
+        try:
+            return self.client.chat.completions.create(**params)
+        except Exception as exc:
+            if "stream_options" not in params or "stream_options" not in str(exc):
+                raise
+            fallback = dict(params)
+            fallback.pop("stream_options", None)
+            return self.client.chat.completions.create(**fallback)
+
+    def _usage_payload(self, chunk):
+        usage = getattr(chunk, "usage", None)
+        if usage is None and isinstance(chunk, dict):
+            usage = chunk.get("usage")
+        if usage is None:
+            return None
+
+        def _value(obj, name):
+            if isinstance(obj, dict):
+                return obj.get(name)
+            return getattr(obj, name, None)
+
+        payload = {}
+        for source, target in (
+            ("prompt_tokens", "input_tokens"),
+            ("completion_tokens", "output_tokens"),
+            ("total_tokens", "total_tokens"),
+        ):
+            value = _value(usage, source)
+            if value is not None:
+                payload[target] = value
+
+        cached_tokens = None
+        for details_name in ("prompt_tokens_details", "input_tokens_details"):
+            details = _value(usage, details_name)
+            if details is None:
+                continue
+            cached_tokens = _value(details, "cached_tokens")
+            if cached_tokens is not None:
+                break
+        if cached_tokens is not None:
+            payload["cached_input_tokens"] = cached_tokens
+        input_tokens = payload.get("input_tokens")
+        if input_tokens is not None and cached_tokens is not None:
+            try:
+                input_count = int(input_tokens)
+                cached_count = int(cached_tokens)
+                payload["uncached_input_tokens"] = max(0, input_count - cached_count)
+                payload["cache_hit_rate"] = cached_count / input_count if input_count > 0 else 0
+            except Exception:
+                pass
+        return payload or None
 
     def _prepare_messages(self, messages):
         # Deep copy and clean
@@ -231,6 +313,8 @@ class MoonshotProvider(OpenAIProvider):
         thinking_enabled=DEFAULT_DEEPSEEK_THINKING_ENABLED,
         reasoning_effort=DEFAULT_DEEPSEEK_REASONING_EFFORT,
         supports_vision=False,
+        stream_usage_enabled=True,
+        prompt_cache_key_param="",
     ):
         # Ensure correct Base URL if user selects 'moonshot' but leaves default URL
         if not base_url or "api.openai.com" in base_url:
@@ -242,6 +326,8 @@ class MoonshotProvider(OpenAIProvider):
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
             supports_vision=supports_vision,
+            stream_usage_enabled=stream_usage_enabled,
+            prompt_cache_key_param=prompt_cache_key_param,
         )
 
     def _prepare_messages(self, messages):
@@ -298,7 +384,7 @@ class AnthropicProvider(LLMProvider):
         text = str(base_url or "").strip().lower().rstrip("/")
         return text.endswith("/coding/anthropic") or "/coding/anthropic/" in text
 
-    def chat_stream(self, messages, tools=None):
+    def chat_stream(self, messages, tools=None, prompt_cache_key=None):
         try:
             system_prompt, api_messages = self._prepare_messages(messages)
             

@@ -39,6 +39,16 @@ class LLMFactory:
                 if profile
                 else config_manager.get("supports_vision", False)
             ),
+            "stream_usage_enabled": (
+                profile.get("stream_usage_enabled", True)
+                if profile
+                else config_manager.get("stream_usage_enabled", True)
+            ),
+            "prompt_cache_key_param": (
+                profile.get("prompt_cache_key_param", "")
+                if profile
+                else config_manager.get("prompt_cache_key_param", "")
+            ),
         }
 
         if provider_type == "anthropic":

@@ -9621,6 +9621,8 @@ class SessionState:
         self.sub_agent_render_queued = False
         self.observability_events = []
         self.system_prompt_text = ""
+        self.runtime_context_text = ""
+        self.prompt_cache_meta = {}
         self.system_prompt_appends = []
         self.clarify_mode_enabled = False
         self.clarify_phase = CLARIFY_MODE_DISABLED
@@ -13329,6 +13331,8 @@ class MainWindow(QMainWindow):
         state.pending_tool_results = {}
         state.observability_events = []
         state.system_prompt_text = ""
+        state.runtime_context_text = ""
+        state.prompt_cache_meta = {}
         state.system_prompt_appends = []
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
@@ -13549,13 +13553,33 @@ class MainWindow(QMainWindow):
 
     def _build_observability_prompt_texts(self, state, preview_limit=6000):
         prompt_text = getattr(state, "system_prompt_text", "") or ""
+        runtime_context = getattr(state, "runtime_context_text", "") or ""
+        prompt_meta = getattr(state, "prompt_cache_meta", {}) or {}
+        meta_lines = []
+        if isinstance(prompt_meta, dict) and prompt_meta:
+            meta_lines = [
+                "# Prompt Cache Observability",
+                f"stable_prompt_hash: {prompt_meta.get('stable_prompt_hash') or ''}",
+                f"runtime_context_hash: {prompt_meta.get('runtime_context_hash') or ''}",
+                f"tools_hash: {prompt_meta.get('tools_hash') or ''}",
+                f"message_prefix_hash: {prompt_meta.get('message_prefix_hash') or ''}",
+                f"prompt_cache_key: {prompt_meta.get('prompt_cache_key') or ''}",
+                "",
+            ]
+        prompt_parts = []
+        if meta_lines:
+            prompt_parts.append("\n".join(meta_lines))
+        if prompt_text:
+            prompt_parts.append("# Stable System Prompt\n" + prompt_text)
+        if runtime_context:
+            prompt_parts.append("# Runtime Context Prompt\n" + runtime_context)
         append_parts = []
         for index, item in enumerate(getattr(state, "system_prompt_appends", []) or [], start=1):
             formatted = self._format_observability_prompt_append(item, index)
             if formatted:
                 append_parts.append(formatted)
-        full_text = "".join(([prompt_text] if prompt_text else []) + append_parts)
-        preview_source = "".join(append_parts) if append_parts else prompt_text
+        full_text = "\n\n".join(prompt_parts) + "".join(append_parts)
+        preview_source = "".join(append_parts) if append_parts else full_text
         preview_text = _safe_text_tail_preview(preview_source, preview_limit)
         return full_text, preview_text
 
@@ -13590,7 +13614,23 @@ class MainWindow(QMainWindow):
             source = event.get("source") or "system"
             return f"[{stamp}] SYSTEM APPEND {source}\n{event.get('content') or ''}"
         if event_type == "system_prompt":
-            return f"[{stamp}] SYSTEM PROMPT loaded"
+            return f"[{stamp}] SYSTEM PROMPT loaded\n{self._observability_pretty_json(event)}"
+        if event_type == "llm_usage":
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            rate = usage.get("cache_hit_rate")
+            try:
+                rate_text = f"{float(rate) * 100:.1f}%"
+            except Exception:
+                rate_text = "unknown"
+            return (
+                f"[{stamp}] LLM USAGE cache_hit={rate_text}\n"
+                f"input={usage.get('input_tokens', 'unknown')} "
+                f"cached={usage.get('cached_input_tokens', 'unknown')} "
+                f"uncached={usage.get('uncached_input_tokens', 'unknown')} "
+                f"output={usage.get('output_tokens', 'unknown')} "
+                f"total={usage.get('total_tokens', 'unknown')}\n"
+                f"prompt_cache_key={usage.get('prompt_cache_key') or ''}"
+            )
         return f"[{stamp}] {event_type or 'event'}\n{self._observability_pretty_json(event)}"
 
     def refresh_observability_view(self, session_id=None):
@@ -13690,6 +13730,14 @@ class MainWindow(QMainWindow):
             event_type = event.get("type") or ""
             if event_type == "system_prompt":
                 state.system_prompt_text = event.get("content") or ""
+                state.runtime_context_text = event.get("runtime_context") or ""
+                state.prompt_cache_meta = {
+                    "stable_prompt_hash": event.get("stable_prompt_hash") or "",
+                    "runtime_context_hash": event.get("runtime_context_hash") or "",
+                    "tools_hash": event.get("tools_hash") or "",
+                    "message_prefix_hash": event.get("message_prefix_hash") or "",
+                    "prompt_cache_key": event.get("prompt_cache_key") or "",
+                }
             elif event_type == "system_prompt_append":
                 state.system_prompt_appends.append(event)
             state.observability_events.append(event)
@@ -17910,6 +17958,8 @@ class MainWindow(QMainWindow):
         state.pending_tool_results = {}
         state.observability_events = []
         state.system_prompt_text = ""
+        state.runtime_context_text = ""
+        state.prompt_cache_meta = {}
         state.system_prompt_appends = []
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)

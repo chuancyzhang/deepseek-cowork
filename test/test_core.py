@@ -1017,6 +1017,60 @@ class TestDaemonState(unittest.TestCase):
 
 
 class TestAgentSystemPrompt(unittest.TestCase):
+    def _build_prompt_worker(self, temp_dir):
+        worker = LLMWorker.__new__(LLMWorker)
+        worker.workspace_dir = temp_dir
+        worker.run_context = {"mode": RUN_MODE_EXECUTION}
+        worker.tools = []
+        worker.parent_agent_id = ""
+        worker.session_id = "session-1"
+        worker.conversation_id = "conversation-1"
+        worker.skill_manager = _PromptSkillManagerStub()
+        worker.config_manager = _DaemonConfigStub(temp_dir)
+        worker._prompt_context_date = "2026-06-16"
+        return worker
+
+    def test_request_prompt_keeps_stable_prefix_and_runtime_tail_separate(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            current_messages = [
+                {"role": "system", "content": worker._build_stable_system_prompt()},
+                {"role": "user", "content": "hello"},
+            ]
+            runtime_prompt = worker._build_runtime_context_prompt(
+                current_messages=current_messages[1:],
+                runtime_snapshot={"version": "3.a", "python_exe": "python-a.exe"},
+                sandbox_snapshot={
+                    "python": {"available": True, "version": "3.a", "path": "python-a.exe"},
+                    "node": {"available": False},
+                    "bash": {"available": False},
+                },
+            )
+            request_messages = worker._build_request_messages(current_messages, runtime_prompt)
+
+            self.assertEqual(request_messages[0]["content"], current_messages[0]["content"])
+            self.assertEqual(request_messages[-1]["role"], "system")
+            self.assertIn("# 当前运行状态", request_messages[-1]["content"])
+            self.assertEqual(len(current_messages), 2)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_stable_system_prompt_ignores_runtime_snapshot_changes(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            first = worker._build_stable_system_prompt()
+            worker.tools = [{"type": "function", "function": {"name": "bash"}}]
+            worker._prompt_context_date = "2026-06-17"
+            second = worker._build_stable_system_prompt()
+
+            self.assertEqual(first, second)
+            self.assertNotIn("当前日期", first)
+            self.assertNotIn("当前可用工具清单（仅以下工具真正暴露给你，可直接调用）", first)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_dynamic_status_is_after_stable_policy(self):
         temp_dir = tempfile.mkdtemp()
         try:

@@ -10,6 +10,7 @@ import time
 import shutil
 import uuid
 import threading
+import hashlib
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal, Slot, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
@@ -54,6 +55,14 @@ def _acquire_openai_protocol_lock(worker):
             return waited
         waited = True
     return None
+
+
+def _stable_json_hash(value):
+    try:
+        text = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 def validate_code_safety(code, allowed_dir, god_mode=False):
     """AST 静态分析代码安全性"""
@@ -488,6 +497,7 @@ class LLMWorker(QThread):
         except Exception:
             self.chat_storage = None
         self._bind_agent_manager()
+        self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
 
     def _selected_skill_names(self):
         return normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
@@ -741,47 +751,16 @@ class LLMWorker(QThread):
                 skill_names.append(skill_name)
         self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, source="skill_prompt_tool_search")
 
-    def _build_system_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
-        python_exe = runtime_snapshot.get("python_exe") or get_python_executable()
-        python_info = sandbox_snapshot.get("python") or {}
-        node_info = sandbox_snapshot.get("node") or {}
-        bash_info = sandbox_snapshot.get("bash") or {}
-        available_runtimes = [
-            name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
-            if info.get("available")
-        ]
-        missing_runtimes = [
-            name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
-            if not info.get("available")
-        ]
-        sandbox_env_line = (
-            f"沙盒运行时: 已内置/检测到 {', '.join(available_runtimes)}，可直接调用，无需要求用户安装。"
-            if available_runtimes
-            else "沙盒运行时: 未检测到可用 Python/Node.js/Bash。"
-        )
-        if missing_runtimes:
-            sandbox_env_line += f" 缺失: {', '.join(missing_runtimes)}。"
-        available_packages = runtime_snapshot.get("available_packages", [])
-        missing_packages = runtime_snapshot.get("missing_packages", [])
-        package_line = (
-            f"运行时库检测(可用): {', '.join(available_packages[:10])}"
-            if available_packages
-            else "运行时库检测(可用): 未检测到"
-        )
-        missing_line = (
-            f"运行时库检测(缺失): {', '.join(missing_packages[:10])}"
-            if missing_packages
-            else "运行时库检测(缺失): 无"
-        )
-        run_mode = self._current_run_mode()
-        available_tool_names = []
+    def _available_tool_names(self):
+        names = []
         for item in self.tools or []:
             function = item.get("function") if isinstance(item, dict) else None
             name = function.get("name") if isinstance(function, dict) else ""
             if name:
-                available_tool_names.append(name)
-        available_tool_names = list(dict.fromkeys(available_tool_names))
-        clarifying_read_tools = get_clarifying_read_tools(available_tool_names)
+                names.append(name)
+        return list(dict.fromkeys(names))
+
+    def _build_stable_system_prompt(self):
         enterprise_channels = {"feishu", "dingtalk", "wecom"}
         enterprise_delivery_enabled = (
             (self.run_context.get("im_provider") or "").strip().lower() in enterprise_channels
@@ -858,6 +837,58 @@ class LLMWorker(QThread):
                 "普通桌面会话不要调用 'publish_artifacts'；若生成了本地文件或链接，请直接在最终回复里说明路径或地址。",
             )
 
+        memory_lines = []
+        memories_text = ""
+        if self.config_manager:
+            try:
+                history_dir = self.config_manager.get_chat_history_dir()
+                memories_path = os.path.join(history_dir, "memories.md")
+                if os.path.exists(memories_path):
+                    with open(memories_path, "r", encoding="utf-8") as f:
+                        memories_text = f.read().strip()
+            except Exception:
+                memories_text = ""
+        if memories_text:
+            memory_lines.append("\n# Memories\n" + memories_text)
+
+        return "\n".join(stable_policy_lines + memory_lines)
+
+    def _build_runtime_context_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
+        python_exe = runtime_snapshot.get("python_exe") or get_python_executable()
+        python_info = sandbox_snapshot.get("python") or {}
+        node_info = sandbox_snapshot.get("node") or {}
+        bash_info = sandbox_snapshot.get("bash") or {}
+        available_runtimes = [
+            name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
+            if info.get("available")
+        ]
+        missing_runtimes = [
+            name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
+            if not info.get("available")
+        ]
+        sandbox_env_line = (
+            f"沙盒运行时: 已内置/检测到 {', '.join(available_runtimes)}，可直接调用，无需要求用户安装。"
+            if available_runtimes
+            else "沙盒运行时: 未检测到可用 Python/Node.js/Bash。"
+        )
+        if missing_runtimes:
+            sandbox_env_line += f" 缺失: {', '.join(missing_runtimes)}。"
+        available_packages = runtime_snapshot.get("available_packages", [])
+        missing_packages = runtime_snapshot.get("missing_packages", [])
+        package_line = (
+            f"运行时库检测(可用): {', '.join(available_packages[:10])}"
+            if available_packages
+            else "运行时库检测(可用): 未检测到"
+        )
+        missing_line = (
+            f"运行时库检测(缺失): {', '.join(missing_packages[:10])}"
+            if missing_packages
+            else "运行时库检测(缺失): 无"
+        )
+        run_mode = self._current_run_mode()
+        available_tool_names = self._available_tool_names()
+        clarifying_read_tools = get_clarifying_read_tools(available_tool_names)
+
         capability_lines = []
         if available_tool_names:
             tool_lines = []
@@ -899,26 +930,12 @@ class LLMWorker(QThread):
             capability_lines.append("\n# Skill Capabilities & Guidelines")
             capability_lines.append(system_skills)
 
-        memory_lines = []
-        memories_text = ""
-        if self.config_manager:
-            try:
-                history_dir = self.config_manager.get_chat_history_dir()
-                memories_path = os.path.join(history_dir, "memories.md")
-                if os.path.exists(memories_path):
-                    with open(memories_path, "r", encoding="utf-8") as f:
-                        memories_text = f.read().strip()
-            except Exception:
-                memories_text = ""
-        if memories_text:
-            memory_lines.append("\n# Memories\n" + memories_text)
-
         dynamic_state_lines = [
             "",
             "# 当前运行状态",
             f"当前工作区: {self.workspace_dir}",
             f"当前运行模式: {run_mode}",
-            f"当前日期: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"当前日期: {getattr(self, '_prompt_context_date', '') or datetime.now().strftime('%Y-%m-%d')}",
             f"操作系统: {platform.system()} {platform.release()}",
             f"Python 版本: {sys.version.split()[0]}",
             f"运行时 Python 版本: {runtime_snapshot.get('version') or '未知'}",
@@ -992,8 +1009,45 @@ class LLMWorker(QThread):
         if sop_prompt_fragment:
             dynamic_state_lines.extend(["", sop_prompt_fragment])
 
-        context_lines = stable_policy_lines + capability_lines + memory_lines + dynamic_state_lines
+        context_lines = capability_lines + dynamic_state_lines
         return "\n".join(context_lines)
+
+    def _build_system_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
+        stable_prompt = self._build_stable_system_prompt()
+        runtime_prompt = self._build_runtime_context_prompt(current_messages, runtime_snapshot, sandbox_snapshot)
+        return "\n".join([part for part in (stable_prompt, runtime_prompt) if part])
+
+    def _build_request_messages(self, current_messages, runtime_context_prompt):
+        request_messages = [msg.copy() if isinstance(msg, dict) else msg for msg in current_messages]
+        if runtime_context_prompt:
+            request_messages.append({"role": "system", "content": runtime_context_prompt})
+        return request_messages
+
+    def _emit_prompt_observability(self, stable_prompt, runtime_prompt, request_messages):
+        tools_hash = _stable_json_hash(self.tools or [])
+        prefix_hash = _stable_json_hash(request_messages[:-1] if runtime_prompt else request_messages)
+        self.observability_signal.emit({
+            "type": "system_prompt",
+            "content": stable_prompt,
+            "runtime_context": runtime_prompt,
+            "stable_prompt_hash": _stable_json_hash(stable_prompt),
+            "runtime_context_hash": _stable_json_hash(runtime_prompt),
+            "tools_hash": tools_hash,
+            "message_prefix_hash": prefix_hash,
+            "prompt_cache_key": self.conversation_id or self.session_id,
+            "timestamp": time.time(),
+            "run_mode": self._current_run_mode(),
+        })
+
+    def _provider_chat_stream(self, provider, messages, tools, prompt_cache_key):
+        try:
+            return provider.chat_stream(
+                messages,
+                tools=tools,
+                prompt_cache_key=prompt_cache_key,
+            )
+        except TypeError:
+            return provider.chat_stream(messages, tools=tools)
 
     def run(self):
         # Work on a copy of messages to handle multi-turn locally
@@ -1002,7 +1056,8 @@ class LLMWorker(QThread):
         current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
         runtime_snapshot = get_python_runtime_snapshot()
         sandbox_snapshot = get_runtime_snapshot()
-        current_messages.insert(0, {"role": "system", "content": ""})
+        stable_system_prompt = self._build_stable_system_prompt()
+        current_messages.insert(0, {"role": "system", "content": stable_system_prompt})
         
         full_reasoning = ""
         final_content = ""
@@ -1040,19 +1095,16 @@ class LLMWorker(QThread):
                 disclosed_skills.clear()
             # -------------------------
 
-            system_prompt = self._build_system_prompt(
+            stable_system_prompt = self._build_stable_system_prompt()
+            current_messages[0]["content"] = stable_system_prompt
+            runtime_context_prompt = self._build_runtime_context_prompt(
                 current_messages[1:],
                 runtime_snapshot,
                 sandbox_snapshot,
             )
-            current_messages[0]["content"] = system_prompt
             self._append_query_matched_skill_prompts(current_messages, disclosed_skills)
-            self.observability_signal.emit({
-                "type": "system_prompt",
-                "content": system_prompt,
-                "timestamp": time.time(),
-                "run_mode": self._current_run_mode(),
-            })
+            request_messages = self._build_request_messages(current_messages, runtime_context_prompt)
+            self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 
             # Reset reasoning for the current turn (for UI display)
             current_turn_reasoning = ""
@@ -1075,7 +1127,7 @@ class LLMWorker(QThread):
                         ) and getattr(provider, "thinking_enabled", False)
                     )
                     sanitized_messages, sanitize_meta = sanitize_llm_messages(
-                        current_messages,
+                        request_messages,
                         require_reasoning_replay=require_reasoning_replay,
                         return_metadata=True,
                     )
@@ -1103,9 +1155,11 @@ class LLMWorker(QThread):
                             protocol_locked = True
                             if waited_for_protocol:
                                 self.step_signal.emit("Provider Protocol: waited for OpenAI-compatible stream lock.")
-                        stream = provider.chat_stream(
+                        stream = self._provider_chat_stream(
+                            provider,
                             sanitized_messages,
                             tools=self._tools_for_messages(sanitized_messages),
+                            prompt_cache_key=self.conversation_id or self.session_id,
                         )
 
                         for chunk in stream:
@@ -1176,6 +1230,14 @@ class LLMWorker(QThread):
                                 provider_error_message = chunk.get("content") or "Unknown error"
                                 self.step_signal.emit(f"Provider Error: {provider_error_message}")
                                 self.output_signal.emit(f"Provider Error: {provider_error_message}")
+                            elif type_ == "usage":
+                                usage_payload = dict(chunk.get("usage") or {})
+                                usage_payload.setdefault("prompt_cache_key", self.conversation_id or self.session_id)
+                                self.observability_signal.emit({
+                                    "type": "llm_usage",
+                                    "usage": usage_payload,
+                                    "timestamp": time.time(),
+                                })
                     finally:
                         if protocol_locked:
                             _OPENAI_PROTOCOL_LOCK.release()

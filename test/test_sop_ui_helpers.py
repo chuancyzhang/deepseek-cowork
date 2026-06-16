@@ -316,6 +316,8 @@ class _ObservabilityState:
     def __init__(self, session_id="session-1"):
         self.session_id = session_id
         self.system_prompt_text = ""
+        self.runtime_context_text = ""
+        self.prompt_cache_meta = {}
         self.system_prompt_appends = []
         self.observability_events = []
 
@@ -1280,7 +1282,7 @@ class TestSopUiHelpers(unittest.TestCase):
 
         full_text, preview_text = window._build_observability_prompt_texts(state, preview_limit=200)
 
-        self.assertTrue(full_text.startswith(state.system_prompt_text))
+        self.assertIn("# Stable System Prompt\n" + state.system_prompt_text, full_text)
         self.assertIn("APPEND-CONTENT", full_text)
         self.assertIn("APPEND-CONTENT", preview_text)
         self.assertNotIn("BASE-", preview_text)

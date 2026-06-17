@@ -624,7 +624,7 @@ class TestSopUiHelpers(unittest.TestCase):
         window.save_chat_history.assert_called_once_with(session_id="session-1")
         window.refresh_sop_controls.assert_called_once_with("session-1")
         window.refresh_context_badges.assert_called_once_with("session-1")
-        window.hide_context_drawer.assert_called_once_with(reason="sop_cleared")
+        window.hide_context_drawer.assert_not_called()
 
     def test_clear_session_selected_skills_removes_current_skills(self):
         window = MainWindow.__new__(MainWindow)
@@ -714,7 +714,7 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertEqual(state.sop_run["template_name"], "对话 SOP")
         config_manager.set_sop_templates.assert_called_once()
         window.save_chat_history.assert_called_once_with(session_id="session-1")
-        window.show_context_drawer.assert_called_once_with(MainWindow.RIGHT_TAB_SOP)
+        window.show_context_drawer.assert_not_called()
 
     def test_sop_template_manager_saves_step_executor_fields(self):
         app = QApplication.instance() or QApplication([])

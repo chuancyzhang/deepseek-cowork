@@ -160,7 +160,24 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
 from PySide6.QtWidgets import QProgressBar
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
+
+QWebEngineView = None
+WEBENGINE_AVAILABLE = None
+
+
+def load_qwebengine_view():
+    global QWebEngineView, WEBENGINE_AVAILABLE
+    if WEBENGINE_AVAILABLE is not None:
+        return QWebEngineView
+    try:
+        from PySide6.QtWebEngineWidgets import QWebEngineView as ImportedQWebEngineView
+        QWebEngineView = ImportedQWebEngineView
+        WEBENGINE_AVAILABLE = True
+    except Exception:
+        QWebEngineView = None
+        WEBENGINE_AVAILABLE = False
+    return QWebEngineView
 
 # Try importing OpenAI
 try:
@@ -1000,6 +1017,80 @@ def format_file_size(size):
     if index == 0:
         return f"{int(size)} {units[index]}"
     return f"{size:.1f} {units[index]}"
+
+
+DELIVERABLE_EXTENSIONS = {
+    ".html": ("html", "HTML", "fa5s.file-code"),
+    ".htm": ("html", "HTML", "fa5s.file-code"),
+    ".png": ("image", "图片", "fa5s.file-image"),
+    ".jpg": ("image", "图片", "fa5s.file-image"),
+    ".jpeg": ("image", "图片", "fa5s.file-image"),
+    ".gif": ("image", "图片", "fa5s.file-image"),
+    ".webp": ("image", "图片", "fa5s.file-image"),
+    ".pdf": ("pdf", "PDF", "fa5s.file-pdf"),
+    ".docx": ("docx", "DOCX", "fa5s.file-word"),
+    ".pptx": ("pptx", "PPTX", "fa5s.file-powerpoint"),
+    ".xlsx": ("xlsx", "XLSX", "fa5s.file-excel"),
+}
+
+DELIVERABLE_SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+    "venv",
+    "node_modules",
+    "build",
+    "dist",
+}
+
+
+def scan_workspace_deliverables(workspace_dir, limit=500):
+    root = os.path.abspath(os.path.expanduser(str(workspace_dir or "").strip()))
+    if not root or not os.path.isdir(root):
+        return []
+    items = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if name not in DELIVERABLE_SKIP_DIRS and not name.startswith(".cache")
+            ]
+            for filename in filenames:
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in DELIVERABLE_EXTENSIONS:
+                    continue
+                path = os.path.join(dirpath, filename)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                kind, label, icon = DELIVERABLE_EXTENSIONS[ext]
+                try:
+                    rel_path = os.path.relpath(path, root)
+                except ValueError:
+                    rel_path = path
+                items.append(
+                    {
+                        "path": os.path.normpath(path),
+                        "relative_path": os.path.normpath(rel_path),
+                        "name": filename,
+                        "kind": kind,
+                        "type_label": label,
+                        "icon": icon,
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    }
+                )
+                if len(items) >= int(limit or 500):
+                    break
+            if len(items) >= int(limit or 500):
+                break
+    except OSError:
+        return []
+    items.sort(key=lambda item: (item.get("mtime") or 0, item.get("relative_path") or ""), reverse=True)
+    return items
 
 
 def clarify_phase_label(phase):
@@ -7761,12 +7852,19 @@ class EmptyStateWidget(QWidget):
             ("📁 整理文件", "按类型自动分类", "帮我把当前目录下的文件按类型分类整理"),
             ("🖼️ 处理图片", "批量重命名/压缩", "帮我把所有图片重命名为日期格式"),
             ("🔍 代码搜索", "在项目中查找内容", "搜索当前项目中关于 'TODO' 的代码"),
-            ("📊 生成报告", "分析目录结构", "分析当前目录结构并生成一份报告")
+            (
+                "生成 HTML 交付物",
+                "预览修改，再生成 PPT",
+                "请帮我生成一个 HTML 报告，保存到工作区。完成后我会在右侧交付物里预览并继续修改，最后请根据 HTML 生成 PPTX。",
+                "fa5s.file-code",
+            ),
         ]
         
         self.action_cards = []
-        for text, desc, prompt in self.actions_data:
-            btn = self.create_action_card(text, desc, prompt)
+        for item in self.actions_data:
+            text, desc, prompt = item[:3]
+            icon_name = item[3] if len(item) > 3 else ""
+            btn = self.create_action_card(text, desc, prompt, icon_name=icon_name)
             self.action_cards.append(btn)
             
         layout.addStretch()
@@ -7812,7 +7910,7 @@ class EmptyStateWidget(QWidget):
         for i, btn in enumerate(self.action_cards):
             self.grid_layout.addWidget(btn, i // cols, i % cols)
             
-    def create_action_card(self, title, desc, prompt):
+    def create_action_card(self, title, desc, prompt, icon_name=""):
         btn = QPushButton()
         btn.setCursor(Qt.PointingHandCursor)
         btn.setMinimumHeight(140) # Significantly increase card height
@@ -7834,14 +7932,24 @@ class EmptyStateWidget(QWidget):
         layout = QVBoxLayout(btn)
         layout.setSpacing(10) 
         
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        if icon_name:
+            icon_label = QLabel()
+            icon_label.setPixmap(qta.icon(icon_name, color=DesignTokens.primary).pixmap(20, 20))
+            icon_label.setStyleSheet("background: transparent; border: none;")
+            title_row.addWidget(icon_label, 0, Qt.AlignVCenter)
+
         t_label = QLabel(title)
         t_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary}; background: transparent; border: none;") 
+        title_row.addWidget(t_label, 1)
         
         d_label = QLabel(desc)
         d_label.setStyleSheet(f"font-size: 14px; color: {DesignTokens.text_secondary}; background: transparent; border: none;") 
         d_label.setWordWrap(True) # Ensure text is fully visible
         
-        layout.addWidget(t_label)
+        layout.addLayout(title_row)
         layout.addWidget(d_label)
         layout.addStretch() # Push content to top
         
@@ -7932,6 +8040,110 @@ class SystemToast(QFrame):
         self.updateGeometry()
 
 
+class SopConfirmationBar(QFrame):
+    confirmRequested = Signal()
+    rerunRequested = Signal()
+    skipRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("SopConfirmationBar")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self._applied_max_width = min(DesignTokens.message_max_width - 60, 720)
+        self.setMinimumWidth(DesignTokens.toast_min_width)
+        self.setMaximumWidth(self._applied_max_width)
+        self.setStyleSheet(
+            f"""
+            QFrame#SopConfirmationBar {{
+                background-color: {DesignTokens.toast_bg};
+                border: 1px solid {DesignTokens.warning_border};
+                border-radius: 18px;
+            }}
+            QLabel#SopConfirmationTitle {{
+                color: {DesignTokens.text_primary};
+                font-size: 13px;
+                font-weight: 700;
+                background: transparent;
+            }}
+            QLabel#SopConfirmationText {{
+                color: {DesignTokens.text_secondary};
+                font-size: 12px;
+                font-weight: 500;
+                background: transparent;
+            }}
+            """
+        )
+        add_soft_shadow(self, blur=18, y_offset=6, alpha=DesignTokens.toast_shadow_alpha)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.tasks", color=DesignTokens.warning_icon).pixmap(14, 14))
+        header.addWidget(icon, 0, Qt.AlignTop)
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(3)
+        self.title_label = QLabel("自动化等待确认")
+        self.title_label.setObjectName("SopConfirmationTitle")
+        self.title_label.setWordWrap(True)
+        self.detail_label = QLabel("当前步骤已完成，请确认后继续。")
+        self.detail_label.setObjectName("SopConfirmationText")
+        self.detail_label.setWordWrap(True)
+        title_box.addWidget(self.title_label)
+        title_box.addWidget(self.detail_label)
+        header.addLayout(title_box, 1)
+        layout.addLayout(header)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        actions.addStretch()
+        self.confirm_btn = QPushButton("确认并继续")
+        self.confirm_btn.setCursor(Qt.PointingHandCursor)
+        self.confirm_btn.setFixedHeight(30)
+        self.confirm_btn.setStyleSheet(apple_button_style("primary", radius=15))
+        self.confirm_btn.clicked.connect(self.confirmRequested.emit)
+        self.rerun_btn = QPushButton("重跑本步")
+        self.rerun_btn.setCursor(Qt.PointingHandCursor)
+        self.rerun_btn.setFixedHeight(30)
+        self.rerun_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        self.rerun_btn.clicked.connect(self.rerunRequested.emit)
+        self.skip_btn = QPushButton("标记不适用")
+        self.skip_btn.setCursor(Qt.PointingHandCursor)
+        self.skip_btn.setFixedHeight(30)
+        self.skip_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        self.skip_btn.clicked.connect(self.skipRequested.emit)
+        actions.addWidget(self.confirm_btn)
+        actions.addWidget(self.rerun_btn)
+        actions.addWidget(self.skip_btn)
+        layout.addLayout(actions)
+
+    def update_state(self, sop_run, current_step=None, allow_skip=False, running=False):
+        template_name = (sop_run or {}).get("template_name") or "当前自动化"
+        step_index = int((sop_run or {}).get("current_step_index", 0) or 0) + 1
+        step_count = max(len((sop_run or {}).get("steps") or []), 1)
+        step_title = (current_step or {}).get("title") or f"步骤 {step_index}"
+        self.title_label.setText(f"{template_name} · 第 {min(step_index, step_count)} 步等待确认")
+        self.detail_label.setText(step_title)
+        allow_actions = bool(not running and (sop_run or {}).get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION)
+        self.confirm_btn.setEnabled(allow_actions)
+        self.rerun_btn.setEnabled(allow_actions)
+        self.skip_btn.setEnabled(allow_actions and bool(allow_skip))
+
+    def apply_dynamic_width(self, message_width):
+        target = max(DesignTokens.toast_min_width, min(int(message_width or 0), 720))
+        self._applied_max_width = target
+        self.setMinimumWidth(min(DesignTokens.toast_min_width, target))
+        self.setMaximumWidth(target)
+        self.updateGeometry()
+
+
 def file_chip_icon_name(path):
     ext = os.path.splitext(str(path or ""))[1].lower()
     mapping = {
@@ -7946,6 +8158,8 @@ def file_chip_icon_name(path):
         ".md": "fa5s.file-alt",
         ".csv": "fa5s.file-csv",
         ".json": "fa5s.file-code",
+        ".html": "fa5s.file-code",
+        ".htm": "fa5s.file-code",
         ".py": "fa5s.file-code",
         ".js": "fa5s.file-code",
         ".ts": "fa5s.file-code",
@@ -9687,6 +9901,7 @@ class SessionState:
         self.clarify_answers_context = []
         self.selected_skill_names = []
         self.sop_run = None
+        self.sop_confirmation_bar = None
         self.conversation_branch = None
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
@@ -10804,7 +11019,8 @@ class MainWindow(QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
 
     RIGHT_TAB_FILES = 0
-    RIGHT_TAB_SOP = 1
+    RIGHT_TAB_DELIVERABLES = 1
+    RIGHT_TAB_SOP = RIGHT_TAB_DELIVERABLES
     RIGHT_TAB_OBSERVABILITY = 2
     RIGHT_TAB_SUB_AGENTS = 3
 
@@ -10835,6 +11051,12 @@ class MainWindow(QMainWindow):
         self.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
+        self.current_deliverable_path = ""
+        self.current_deliverable_stale = False
+        self.deliverable_items = []
+        self.deliverable_watcher = QFileSystemWatcher(self)
+        self.deliverable_watcher.directoryChanged.connect(self.handle_deliverable_fs_changed)
+        self.deliverable_watcher.fileChanged.connect(self.handle_deliverable_fs_changed)
         self._agent_state_ui_event_seq = 0
         self.dynamic_conversation_width = DesignTokens.conversation_min_width
         self.dynamic_message_width = DesignTokens.message_min_width
@@ -11269,88 +11491,131 @@ class MainWindow(QMainWindow):
         
         self.right_stack.addWidget(self.workspace_tab)
 
-        # Automation
-        self.sop_tab = QWidget()
-        sop_tab_layout = QVBoxLayout(self.sop_tab)
-        sop_tab_layout.setContentsMargins(14, 12, 14, 14)
-        sop_tab_layout.setSpacing(10)
+        # Deliverables
+        self.deliverables_tab = QWidget()
+        deliverables_layout = QVBoxLayout(self.deliverables_tab)
+        deliverables_layout.setContentsMargins(14, 12, 14, 14)
+        deliverables_layout.setSpacing(10)
 
-        sop_intro_card = QFrame()
-        sop_intro_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
-        sop_intro_layout = QVBoxLayout(sop_intro_card)
-        sop_intro_layout.setContentsMargins(14, 12, 14, 12)
-        sop_intro_layout.setSpacing(6)
-        sop_intro_kicker = QLabel("当前会话自动化")
-        sop_intro_kicker.setStyleSheet(apple_section_kicker_style())
-        sop_intro_layout.addWidget(sop_intro_kicker)
-        self.sop_progress_label = QLabel("尚未绑定自动化")
-        self.sop_progress_label.setStyleSheet(apple_section_title_style(size=15))
-        self.sop_progress_label.setWordWrap(True)
-        sop_intro_layout.addWidget(self.sop_progress_label)
-        self.sop_intro_label = QLabel("当前会话未绑定自动化")
-        self.sop_intro_label.setStyleSheet(apple_caption_style())
-        self.sop_intro_label.setWordWrap(True)
-        sop_intro_layout.addWidget(self.sop_intro_label)
-        self.sop_status_label = QLabel("未启动")
-        self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
-        sop_intro_layout.addWidget(self.sop_status_label, 0, Qt.AlignLeft)
-        sop_tab_layout.addWidget(sop_intro_card)
+        deliverables_header = QFrame()
+        deliverables_header.setStyleSheet(apple_section_surface_style(radius=16))
+        deliverables_header_layout = QHBoxLayout(deliverables_header)
+        deliverables_header_layout.setContentsMargins(12, 10, 10, 10)
+        deliverables_header_layout.setSpacing(8)
+        deliverables_title_box = QVBoxLayout()
+        deliverables_title_box.setContentsMargins(0, 0, 0, 0)
+        deliverables_title_box.setSpacing(2)
+        deliverables_title = QLabel("工作区交付物")
+        deliverables_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 12px;")
+        self.deliverables_meta_label = QLabel("选择 HTML 后可渲染和转换")
+        self.deliverables_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
+        deliverables_title_box.addWidget(deliverables_title)
+        deliverables_title_box.addWidget(self.deliverables_meta_label)
+        deliverables_header_layout.addLayout(deliverables_title_box, 1)
+        self.deliverables_refresh_btn = QToolButton()
+        self.deliverables_refresh_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.text_secondary))
+        self.deliverables_refresh_btn.setToolTip("刷新交付物")
+        self.deliverables_refresh_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverables_refresh_btn.setFixedSize(30, 30)
+        self.deliverables_refresh_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverables_refresh_btn.clicked.connect(self.refresh_deliverables)
+        deliverables_header_layout.addWidget(self.deliverables_refresh_btn)
+        deliverables_layout.addWidget(deliverables_header)
 
-        step_card = QFrame()
-        step_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.74)"))
-        step_layout = QVBoxLayout(step_card)
-        step_layout.setContentsMargins(14, 14, 14, 14)
-        step_layout.setSpacing(8)
-        step_title = QLabel("步骤进度")
-        step_title.setStyleSheet(apple_section_kicker_style())
-        step_layout.addWidget(step_title)
-        self.sop_step_list = QListWidget()
-        self.sop_step_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=14, padding=4))
-        self.sop_step_list.setMinimumHeight(150)
-        step_layout.addWidget(self.sop_step_list)
-        sop_tab_layout.addWidget(step_card)
+        self.deliverables_splitter = SmartSplitter(Qt.Vertical)
+        self.deliverables_splitter.setChildrenCollapsible(False)
+        self.deliverables_list = QListWidget()
+        self.deliverables_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=14, padding=4))
+        self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
+        self.deliverables_splitter.addWidget(self.deliverables_list)
 
-        sop_detail_card = QFrame()
-        sop_detail_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
-        sop_detail_layout = QVBoxLayout(sop_detail_card)
-        sop_detail_layout.setContentsMargins(14, 14, 14, 14)
-        sop_detail_layout.setSpacing(8)
-        sop_detail_kicker = QLabel("当前步骤")
-        sop_detail_kicker.setStyleSheet(apple_section_kicker_style())
-        sop_detail_layout.addWidget(sop_detail_kicker)
-        self.sop_current_step_label = QLabel("当前步骤")
-        self.sop_current_step_label.setStyleSheet(apple_section_title_style(size=15))
-        self.sop_current_step_label.setWordWrap(True)
-        self.sop_instruction_label = QLabel("绑定自动化后，这里会显示当前步骤的执行要求。")
-        self.sop_instruction_label.setWordWrap(True)
-        self.sop_instruction_label.setStyleSheet(apple_caption_style())
-        self.sop_success_label = QLabel("")
-        self.sop_success_label.setWordWrap(True)
-        self.sop_success_label.setStyleSheet(apple_caption_style())
-        sop_detail_layout.addWidget(self.sop_current_step_label)
-        sop_detail_layout.addWidget(self.sop_instruction_label)
-        sop_detail_layout.addWidget(self.sop_success_label)
-        sop_tab_layout.addWidget(sop_detail_card)
+        deliverable_preview = QWidget()
+        deliverable_preview_layout = QVBoxLayout(deliverable_preview)
+        deliverable_preview_layout.setContentsMargins(0, 0, 0, 0)
+        deliverable_preview_layout.setSpacing(8)
 
-        sop_actions = QHBoxLayout()
-        sop_actions.setContentsMargins(0, 0, 0, 0)
-        sop_actions.setSpacing(8)
-        self.sop_confirm_btn = QPushButton("确认并继续")
-        self.sop_confirm_btn.setObjectName("PrimaryBtn")
-        self.sop_confirm_btn.clicked.connect(self.confirm_current_sop_step)
-        self.sop_rerun_btn = QPushButton("重跑本步")
-        self.sop_rerun_btn.setObjectName("SecondaryBtn")
-        self.sop_rerun_btn.clicked.connect(self.rerun_current_sop_step)
-        self.sop_skip_btn = QPushButton("标记不适用")
-        self.sop_skip_btn.setObjectName("SecondaryBtn")
-        self.sop_skip_btn.clicked.connect(self.skip_current_sop_step)
-        sop_actions.addWidget(self.sop_confirm_btn)
-        sop_actions.addWidget(self.sop_rerun_btn)
-        sop_actions.addWidget(self.sop_skip_btn)
-        sop_actions.addStretch()
-        sop_tab_layout.addLayout(sop_actions)
+        deliverable_actions = QHBoxLayout()
+        deliverable_actions.setContentsMargins(0, 0, 0, 0)
+        deliverable_actions.setSpacing(6)
+        self.deliverable_render_btn = QPushButton("渲染")
+        self.deliverable_render_btn.setIcon(qta.icon("fa5s.play", color=DesignTokens.primary))
+        self.deliverable_render_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_render_btn.setFixedHeight(30)
+        self.deliverable_render_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        self.deliverable_render_btn.clicked.connect(self.render_selected_deliverable)
+        self.deliverable_open_btn = QToolButton()
+        self.deliverable_open_btn.setIcon(qta.icon("fa5s.external-link-alt", color=DesignTokens.text_secondary))
+        self.deliverable_open_btn.setToolTip("打开")
+        self.deliverable_open_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_open_btn.setFixedSize(30, 30)
+        self.deliverable_open_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_open_btn.clicked.connect(lambda: self.open_path_in_system(getattr(self, "current_deliverable_path", "")))
+        self.deliverable_reveal_btn = QToolButton()
+        self.deliverable_reveal_btn.setIcon(qta.icon("fa5s.folder-open", color=DesignTokens.text_secondary))
+        self.deliverable_reveal_btn.setToolTip("在资源管理器中显示")
+        self.deliverable_reveal_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_reveal_btn.setFixedSize(30, 30)
+        self.deliverable_reveal_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_reveal_btn.clicked.connect(lambda: self.reveal_in_explorer(getattr(self, "current_deliverable_path", "")))
+        self.deliverable_copy_btn = QToolButton()
+        self.deliverable_copy_btn.setIcon(qta.icon("fa5s.copy", color=DesignTokens.text_secondary))
+        self.deliverable_copy_btn.setToolTip("复制路径")
+        self.deliverable_copy_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_copy_btn.setFixedSize(30, 30)
+        self.deliverable_copy_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_copy_btn.clicked.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_deliverable_path", "")))
+        deliverable_actions.addWidget(self.deliverable_render_btn)
+        deliverable_actions.addWidget(self.deliverable_open_btn)
+        deliverable_actions.addWidget(self.deliverable_reveal_btn)
+        deliverable_actions.addWidget(self.deliverable_copy_btn)
+        deliverable_actions.addStretch()
+        deliverable_preview_layout.addLayout(deliverable_actions)
 
-        self.right_stack.addWidget(self.sop_tab)
+        conversion_row = QHBoxLayout()
+        conversion_row.setContentsMargins(0, 0, 0, 0)
+        conversion_row.setSpacing(6)
+        self.deliverable_convert_buttons = []
+        for fmt in ("PPTX", "DOCX", "PDF"):
+            btn = QPushButton(f"生成 {fmt}")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedHeight(28)
+            btn.setStyleSheet(apple_button_style("secondary", radius=14))
+            btn.clicked.connect(lambda checked=False, target=fmt.lower(): self.start_deliverable_conversion(target))
+            conversion_row.addWidget(btn)
+            self.deliverable_convert_buttons.append(btn)
+        conversion_row.addStretch()
+        deliverable_preview_layout.addLayout(conversion_row)
+
+        self.deliverable_status_label = QLabel("选择交付物查看预览")
+        self.deliverable_status_label.setWordWrap(True)
+        self.deliverable_status_label.setStyleSheet(apple_caption_style())
+        deliverable_preview_layout.addWidget(self.deliverable_status_label)
+
+        self.deliverable_preview_stack = QStackedWidget()
+        self.deliverable_preview_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
+        self.deliverable_text_preview = ReadOnlyTextEdit()
+        self.deliverable_text_preview.setStyleSheet(
+            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
+        )
+        self.deliverable_text_preview.setPlaceholderText("选择 HTML 文件后点击渲染")
+        webengine_view_cls = load_qwebengine_view()
+        if webengine_view_cls is not None:
+            self.deliverable_web_view = webengine_view_cls()
+            self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
+        else:
+            self.deliverable_web_view = None
+        self.deliverable_preview_stack.addWidget(self.deliverable_text_preview)
+        if self.deliverable_web_view is not None:
+            self.deliverable_preview_stack.addWidget(self.deliverable_web_view)
+        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        deliverable_preview_layout.addWidget(self.deliverable_preview_stack, 1)
+
+        self.deliverables_splitter.addWidget(deliverable_preview)
+        self.deliverables_splitter.setStretchFactor(0, 2)
+        self.deliverables_splitter.setStretchFactor(1, 3)
+        self.deliverables_splitter.setSizes([180, 320])
+        deliverables_layout.addWidget(self.deliverables_splitter, 1)
+        self.right_stack.addWidget(self.deliverables_tab)
 
         # Observability
         self.tool_details_tab = QWidget()
@@ -11540,6 +11805,7 @@ class MainWindow(QMainWindow):
 
         # Sub-Agent Monitor (legacy independent window entry)
         self.sub_agent_monitor_window = None
+        self._set_deliverable_controls_enabled("")
         
         right_layout.addWidget(self.right_stack)
         
@@ -11607,7 +11873,7 @@ class MainWindow(QMainWindow):
         context_rail_layout.setSpacing(4)
         context_actions = [
             (self.RIGHT_TAB_FILES, "文件", "fa5s.folder-open"),
-            (self.RIGHT_TAB_SOP, "自动化", "fa5s.tasks"),
+            (self.RIGHT_TAB_DELIVERABLES, "交付物", "fa5s.file-code"),
             (self.RIGHT_TAB_OBSERVABILITY, "观测", "fa5s.chart-line"),
             (self.RIGHT_TAB_SUB_AGENTS, "子 Agent", "fa5s.project-diagram"),
         ]
@@ -11751,7 +12017,7 @@ class MainWindow(QMainWindow):
         self.sop_badge.setCursor(Qt.PointingHandCursor)
         self.sop_badge.setFixedHeight(30)
         self.sop_badge.setVisible(False)
-        self.sop_badge.clicked.connect(lambda: self.show_context_drawer(self.RIGHT_TAB_SOP))
+        self.sop_badge.clicked.connect(lambda: self.add_system_toast("自动化进度会在聊天中提示，等待确认时可直接操作。", "info", auto_close_ms=3200))
         self.sop_badge.closeClicked.connect(self.clear_session_sop)
 
         self.selected_skills_badge = SessionContextChip(" 已选能力", qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
@@ -12154,6 +12420,12 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, SystemToast):
                     yield widget
 
+    def _iter_session_sop_confirmation_bars(self):
+        for state in getattr(self, "sessions", {}).values():
+            bar = getattr(state, "sop_confirmation_bar", None)
+            if bar is not None and _qt_object_alive(bar):
+                yield bar
+
     def sync_conversation_widths(self, drawer_geometry=None):
         metrics = self._compute_conversation_shell_metrics(drawer_geometry)
         conversation_width = int(metrics.get("conversation_width", DesignTokens.conversation_min_width) or DesignTokens.conversation_min_width)
@@ -12182,6 +12454,8 @@ class MainWindow(QMainWindow):
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
         for toast in self._iter_session_system_toasts():
             toast.apply_dynamic_width(message_width)
+        for bar in self._iter_session_sop_confirmation_bars():
+            bar.apply_dynamic_width(message_width)
 
     def sync_context_drawer_layout(self):
         geometry = self._compute_context_drawer_geometry()
@@ -12230,6 +12504,10 @@ class MainWindow(QMainWindow):
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_observability", tab_index=tab_index)
                 self.refresh_observability_view(self.current_session_id)
                 log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_observability", tab_index=tab_index)
+            elif tab_index == self.RIGHT_TAB_DELIVERABLES:
+                log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_deliverables", tab_index=tab_index)
+                self.refresh_deliverables()
+                log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_deliverables", tab_index=tab_index)
             elif tab_index == self.RIGHT_TAB_SUB_AGENTS and hasattr(self, "sub_agent_monitor") and _qt_object_alive(self.sub_agent_monitor):
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="clear_sub_agent_monitor", tab_index=tab_index)
                 self.sub_agent_monitor.reset()
@@ -12277,7 +12555,7 @@ class MainWindow(QMainWindow):
             return
         page_titles = {
             self.RIGHT_TAB_FILES: ("任务文件", "查看工作区文件与内容预览"),
-            self.RIGHT_TAB_SOP: ("自动化流程", "查看当前会话的自动化步骤与确认状态"),
+            self.RIGHT_TAB_DELIVERABLES: ("交付物", "预览 HTML 并生成办公文件"),
             self.RIGHT_TAB_OBSERVABILITY: ("任务观测", "查看系统提示词、工具调用与返回"),
             self.RIGHT_TAB_SUB_AGENTS: ("子 Agent", "查看并行子 Agent 状态与日志"),
         }
@@ -12326,7 +12604,7 @@ class MainWindow(QMainWindow):
             return
         icons = {
             self.RIGHT_TAB_FILES: "fa5s.folder-open",
-            self.RIGHT_TAB_SOP: "fa5s.tasks",
+            self.RIGHT_TAB_DELIVERABLES: "fa5s.file-code",
             self.RIGHT_TAB_OBSERVABILITY: "fa5s.chart-line",
             self.RIGHT_TAB_SUB_AGENTS: "fa5s.project-diagram",
         }
@@ -13077,8 +13355,7 @@ class MainWindow(QMainWindow):
         self.context_available_tabs = set()
         if has_workspace:
             self.context_available_tabs.add(self.RIGHT_TAB_FILES)
-        if has_sop_context:
-            self.context_available_tabs.add(self.RIGHT_TAB_SOP)
+            self.context_available_tabs.add(self.RIGHT_TAB_DELIVERABLES)
         if has_observability_context or has_context:
             self.context_available_tabs.add(self.RIGHT_TAB_OBSERVABILITY)
         if state and (getattr(state, "sub_agent_events", []) or getattr(state, "persisted_agents", [])):
@@ -13167,9 +13444,45 @@ class MainWindow(QMainWindow):
                 names.append(skill_name)
         return names
 
+    def _remove_sop_confirmation_bar(self, state):
+        bar = getattr(state, "sop_confirmation_bar", None) if state else None
+        if bar is not None and _qt_object_alive(bar):
+            bar.deleteLater()
+        if state is not None:
+            state.sop_confirmation_bar = None
+
+    def _sync_sop_confirmation_bar(self, state, sop_run, current_step, running=False):
+        if not state:
+            return
+        awaiting = bool(sop_run and sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION)
+        if not awaiting or state.session_id != self.current_session_id:
+            self._remove_sop_confirmation_bar(state)
+            return
+        bar = getattr(state, "sop_confirmation_bar", None)
+        if bar is None or not _qt_object_alive(bar):
+            bar = SopConfirmationBar()
+            bar.confirmRequested.connect(self.confirm_current_sop_step)
+            bar.rerunRequested.connect(self.rerun_current_sop_step)
+            bar.skipRequested.connect(self.skip_current_sop_step)
+            bar.apply_dynamic_width(self.dynamic_message_width)
+            state.sop_confirmation_bar = bar
+            if getattr(state, "empty_state", None) and state.empty_state.isVisible():
+                state.empty_state.setVisible(False)
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bar, 0, Qt.AlignHCenter)
+        bar.update_state(
+            sop_run,
+            current_step=current_step,
+            allow_skip=bool(current_step and current_step.get("allow_skip")),
+            running=running,
+        )
+        bar.apply_dynamic_width(self.dynamic_message_width)
+
     def refresh_sop_controls(self, session_id=None):
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
+            return
+        if not hasattr(self, "sop_badge"):
+            self._remove_sop_confirmation_bar(state)
             return
         sop_run = normalize_sop_run(getattr(state, "sop_run", None))
         running = bool(
@@ -13179,17 +13492,19 @@ class MainWindow(QMainWindow):
         )
         if not sop_run:
             self.sop_badge.setVisible(False)
-            self.sop_progress_label.setText("尚未绑定自动化")
-            self.sop_intro_label.setText("当前会话未绑定自动化")
-            self.sop_status_label.setText("未启动")
-            self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
-            self.sop_step_list.clear()
-            self.sop_current_step_label.setText("当前步骤")
-            self.sop_instruction_label.setText("绑定自动化后，这里会显示当前步骤的执行要求。")
-            self.sop_success_label.setText("")
-            self.sop_confirm_btn.setEnabled(False)
-            self.sop_rerun_btn.setEnabled(False)
-            self.sop_skip_btn.setEnabled(False)
+            self._remove_sop_confirmation_bar(state)
+            if hasattr(self, "sop_progress_label"):
+                self.sop_progress_label.setText("尚未绑定自动化")
+                self.sop_intro_label.setText("当前会话未绑定自动化")
+                self.sop_status_label.setText("未启动")
+                self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
+                self.sop_step_list.clear()
+                self.sop_current_step_label.setText("当前步骤")
+                self.sop_instruction_label.setText("绑定自动化后，这里会显示当前步骤的执行要求。")
+                self.sop_success_label.setText("")
+                self.sop_confirm_btn.setEnabled(False)
+                self.sop_rerun_btn.setEnabled(False)
+                self.sop_skip_btn.setEnabled(False)
             return
         state.sop_run = sop_run
         current_step = get_current_step(sop_run)
@@ -13202,68 +13517,79 @@ class MainWindow(QMainWindow):
         )
         self.sop_badge.setVisible(True)
         self.sop_badge.setEnabled(not running)
-        self.sop_progress_label.setText(
-            f"{sop_run.get('template_name') or '未命名自动化'} · 第 {min(sop_run.get('current_step_index', 0) + 1, max(len(sop_run.get('steps') or []), 1))} 步"
-        )
-
-        self.sop_step_list.blockSignals(True)
-        self.sop_step_list.clear()
-        for index, step in enumerate(sop_run.get("steps") or []):
-            status = str(step.get("status") or "")
-            icon_name = "fa5s.circle"
-            icon_color = DesignTokens.text_tertiary
-            if status in {"completed", "skipped"}:
-                icon_name = "fa5s.check-circle" if status == "completed" else "fa5s.forward"
-                icon_color = DesignTokens.status_success if status == "completed" else DesignTokens.warning_text
-            elif index == sop_run.get("current_step_index"):
-                icon_name = "fa5s.play-circle"
-                icon_color = DesignTokens.status_running
-            item = QListWidgetItem(
-                qta.icon(icon_name, color=icon_color),
-                f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}\n{status_label_text(status or ('active' if index == sop_run.get('current_step_index') else 'pending'))}",
+        if hasattr(self, "sop_progress_label"):
+            self.sop_progress_label.setText(
+                f"{sop_run.get('template_name') or '未命名自动化'} · 第 {min(sop_run.get('current_step_index', 0) + 1, max(len(sop_run.get('steps') or []), 1))} 步"
             )
-            item.setToolTip(step.get("success_criteria") or "")
-            self.sop_step_list.addItem(item)
-        if self.sop_step_list.count():
-            self.sop_step_list.setCurrentRow(min(sop_run.get("current_step_index", 0), self.sop_step_list.count() - 1))
-        self.sop_step_list.blockSignals(False)
+
+        if hasattr(self, "sop_step_list"):
+            self.sop_step_list.blockSignals(True)
+            self.sop_step_list.clear()
+            for index, step in enumerate(sop_run.get("steps") or []):
+                status = str(step.get("status") or "")
+                icon_name = "fa5s.circle"
+                icon_color = DesignTokens.text_tertiary
+                if status in {"completed", "skipped"}:
+                    icon_name = "fa5s.check-circle" if status == "completed" else "fa5s.forward"
+                    icon_color = DesignTokens.status_success if status == "completed" else DesignTokens.warning_text
+                elif index == sop_run.get("current_step_index"):
+                    icon_name = "fa5s.play-circle"
+                    icon_color = DesignTokens.status_running
+                item = QListWidgetItem(
+                    qta.icon(icon_name, color=icon_color),
+                    f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}\n{status_label_text(status or ('active' if index == sop_run.get('current_step_index') else 'pending'))}",
+                )
+                item.setToolTip(step.get("success_criteria") or "")
+                self.sop_step_list.addItem(item)
+            if self.sop_step_list.count():
+                self.sop_step_list.setCurrentRow(min(sop_run.get("current_step_index", 0), self.sop_step_list.count() - 1))
+            self.sop_step_list.blockSignals(False)
 
         intro = sop_run.get("template_description") or "当前会话正在按自动化模板逐步执行。"
         if sop_run.get("status") == SOP_RUN_STATUS_COMPLETED:
             intro = f"{intro}\n当前自动化已完成。"
-            self.sop_status_label.setText("已完成")
-            self.sop_status_label.setStyleSheet(apple_status_chip_style("completed"))
+            if hasattr(self, "sop_status_label"):
+                self.sop_status_label.setText("已完成")
+                self.sop_status_label.setStyleSheet(apple_status_chip_style("completed"))
         elif sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION:
             intro = f"{intro}\n当前步骤已完成，等待你确认。"
-            self.sop_status_label.setText("等待确认")
-            self.sop_status_label.setStyleSheet(apple_status_chip_style("pending"))
+            if hasattr(self, "sop_status_label"):
+                self.sop_status_label.setText("等待确认")
+                self.sop_status_label.setStyleSheet(apple_status_chip_style("pending"))
         elif running:
-            self.sop_status_label.setText("执行中")
-            self.sop_status_label.setStyleSheet(apple_status_chip_style("running"))
+            if hasattr(self, "sop_status_label"):
+                self.sop_status_label.setText("执行中")
+                self.sop_status_label.setStyleSheet(apple_status_chip_style("running"))
         else:
-            self.sop_status_label.setText("待推进")
-            self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
-        self.sop_intro_label.setText(intro)
+            if hasattr(self, "sop_status_label"):
+                self.sop_status_label.setText("待推进")
+                self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
+        if hasattr(self, "sop_intro_label"):
+            self.sop_intro_label.setText(intro)
 
         if current_step:
             effective_mode = resolve_step_advance_mode(sop_run, current_step)
             mode_text = "自动推进" if effective_mode == SOP_ADVANCE_MODE_AUTO else "人工确认"
-            self.sop_current_step_label.setText(
-                f"当前步骤 {sop_run.get('current_step_index', 0) + 1} / {len(sop_run.get('steps') or [])}: {current_step.get('title') or '未命名步骤'}"
-            )
-            instructions = current_step.get("instructions") or "未填写执行指令。"
-            self.sop_instruction_label.setText(f"{instructions}\n推进方式：{mode_text}")
-            success_text = current_step.get("success_criteria") or "未填写成功标准。"
-            self.sop_success_label.setText(f"成功标准：{success_text}")
+            if hasattr(self, "sop_current_step_label"):
+                self.sop_current_step_label.setText(
+                    f"当前步骤 {sop_run.get('current_step_index', 0) + 1} / {len(sop_run.get('steps') or [])}: {current_step.get('title') or '未命名步骤'}"
+                )
+                instructions = current_step.get("instructions") or "未填写执行指令。"
+                self.sop_instruction_label.setText(f"{instructions}\n推进方式：{mode_text}")
+                success_text = current_step.get("success_criteria") or "未填写成功标准。"
+                self.sop_success_label.setText(f"成功标准：{success_text}")
         else:
-            self.sop_current_step_label.setText("当前步骤")
-            self.sop_instruction_label.setText("当前没有可执行步骤。")
-            self.sop_success_label.setText("")
+            if hasattr(self, "sop_current_step_label"):
+                self.sop_current_step_label.setText("当前步骤")
+                self.sop_instruction_label.setText("当前没有可执行步骤。")
+                self.sop_success_label.setText("")
 
         allow_actions = sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION and not running
-        self.sop_confirm_btn.setEnabled(allow_actions)
-        self.sop_rerun_btn.setEnabled(allow_actions)
-        self.sop_skip_btn.setEnabled(allow_actions and bool(current_step and current_step.get("allow_skip")))
+        if hasattr(self, "sop_confirm_btn"):
+            self.sop_confirm_btn.setEnabled(allow_actions)
+            self.sop_rerun_btn.setEnabled(allow_actions)
+            self.sop_skip_btn.setEnabled(allow_actions and bool(current_step and current_step.get("allow_skip")))
+        self._sync_sop_confirmation_bar(state, sop_run, current_step, running=running)
 
     def _mark_sop_step_done_for_confirmation(self, state, executor="", content="", agent_profile=None):
         sop_run = normalize_sop_run(getattr(state, "sop_run", None))
@@ -14724,7 +15050,7 @@ class MainWindow(QMainWindow):
             self.action_btn.setEnabled(bool(self.workspace_dir))
             self.input_field.setEnabled(bool(self.workspace_dir))
             if awaiting_sop_confirmation:
-                self.input_field.setPlaceholderText("请先在右侧自动化抽屉中确认当前步骤")
+                self.input_field.setPlaceholderText("请先在聊天中的自动化确认条处理当前步骤")
             elif self.workspace_dir:
                 self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             self.pause_btn.setVisible(False)
@@ -14897,6 +15223,7 @@ class MainWindow(QMainWindow):
         state.clarify_answers_context = []
         state.selected_skill_names = []
         state.sop_run = None
+        state.sop_confirmation_bar = None
         state.conversation_branch = None
         state.persisted_conversation_meta = {}
         state.completed_agent_result_ids = set()
@@ -15813,6 +16140,9 @@ class MainWindow(QMainWindow):
             if hasattr(self, "file_model"):
                 self.file_model.setRootPath("")
                 self.file_tree.setRootIndex(self.file_model.index(""))
+            self.current_deliverable_path = ""
+            self.deliverable_items = []
+            self.refresh_deliverables()
             self.update_ui_state_for_workspace()
         self.refresh_history_list()
 
@@ -16908,8 +17238,175 @@ class MainWindow(QMainWindow):
             self.file_model.setRootPath(directory)
             self.file_tree.setRootIndex(self.file_model.index(directory))
             self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
+            self.set_context_tab_hint(self.RIGHT_TAB_DELIVERABLES, True)
+            self.refresh_deliverables()
         if refresh_sidebar:
             self.refresh_history_list()
+
+    def _set_deliverable_controls_enabled(self, path=""):
+        path = path or ""
+        ext = os.path.splitext(path)[1].lower()
+        is_file = bool(path and os.path.isfile(path))
+        is_html = ext in {".html", ".htm"}
+        for name in ("deliverable_open_btn", "deliverable_reveal_btn", "deliverable_copy_btn"):
+            btn = getattr(self, name, None)
+            if btn:
+                btn.setEnabled(is_file)
+        if hasattr(self, "deliverable_render_btn"):
+            self.deliverable_render_btn.setEnabled(is_file and is_html)
+        for btn in getattr(self, "deliverable_convert_buttons", []) or []:
+            btn.setEnabled(is_file and is_html)
+
+    def refresh_deliverables(self):
+        if not hasattr(self, "deliverables_list"):
+            return
+        selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
+        self.deliverables_list.clear()
+        self.deliverable_items = scan_workspace_deliverables(self.workspace_dir)
+        for item in self.deliverable_items:
+            modified = datetime.fromtimestamp(item.get("mtime") or 0).strftime("%Y-%m-%d %H:%M")
+            text = (
+                f"{item.get('name') or os.path.basename(item.get('path') or '')}\n"
+                f"{item.get('type_label') or '文件'} | {format_file_size(item.get('size') or 0)} | {modified}"
+            )
+            list_item = QListWidgetItem(qta.icon(item.get("icon") or "fa5s.file", color=DesignTokens.text_secondary), text)
+            list_item.setData(Qt.UserRole, item.get("path") or "")
+            list_item.setToolTip(item.get("relative_path") or item.get("path") or "")
+            self.deliverables_list.addItem(list_item)
+            if selected_key and os.path.normcase(os.path.normpath(item.get("path") or "")) == selected_key:
+                self.deliverables_list.setCurrentItem(list_item)
+        if hasattr(self, "deliverables_meta_label"):
+            count = len(self.deliverable_items)
+            self.deliverables_meta_label.setText(f"发现 {count} 个可预览交付物" if count else "选择 HTML 后可渲染和转换")
+        self._watch_deliverable_paths()
+        if not self.current_deliverable_path or not os.path.isfile(self.current_deliverable_path):
+            self.current_deliverable_path = ""
+            self.current_deliverable_stale = False
+            self._set_deliverable_controls_enabled("")
+            if hasattr(self, "deliverable_status_label"):
+                self.deliverable_status_label.setText("选择交付物查看预览")
+            if hasattr(self, "deliverable_preview_stack"):
+                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+
+    def _watch_deliverable_paths(self):
+        watcher = getattr(self, "deliverable_watcher", None)
+        if not watcher:
+            return
+        try:
+            files = watcher.files()
+            if files:
+                watcher.removePaths(files)
+            dirs = watcher.directories()
+            if dirs:
+                watcher.removePaths(dirs)
+            watch_dirs = set()
+            if self.workspace_dir and os.path.isdir(self.workspace_dir):
+                watch_dirs.add(os.path.abspath(self.workspace_dir))
+            for item in getattr(self, "deliverable_items", []) or []:
+                item_path = item.get("path") or ""
+                item_dir = os.path.dirname(item_path)
+                if item_dir and os.path.isdir(item_dir):
+                    watch_dirs.add(os.path.abspath(item_dir))
+            current = getattr(self, "current_deliverable_path", "")
+            if current and os.path.isfile(current):
+                current_dir = os.path.dirname(current)
+                if current_dir and os.path.isdir(current_dir):
+                    watch_dirs.add(os.path.abspath(current_dir))
+                watcher.addPath(os.path.abspath(current))
+            if watch_dirs:
+                watcher.addPaths(sorted(watch_dirs)[:200])
+        except Exception:
+            pass
+
+    def handle_deliverable_fs_changed(self, path):
+        current = getattr(self, "current_deliverable_path", "")
+        if current and os.path.normcase(os.path.abspath(path or "")) == os.path.normcase(os.path.abspath(current)):
+            self.current_deliverable_stale = True
+            if hasattr(self, "deliverable_status_label"):
+                self.deliverable_status_label.setText("文件已更新，点击“渲染”查看最新内容。")
+        self.refresh_deliverables()
+
+    def on_deliverable_item_clicked(self, item):
+        path = item.data(Qt.UserRole) if item else ""
+        self.select_deliverable(path)
+
+    def select_deliverable(self, path):
+        path = os.path.normpath(str(path or ""))
+        self.current_deliverable_path = path if os.path.isfile(path) else ""
+        self.current_deliverable_stale = False
+        self._set_deliverable_controls_enabled(self.current_deliverable_path)
+        self._watch_deliverable_paths()
+        if not self.current_deliverable_path:
+            return
+        ext = os.path.splitext(self.current_deliverable_path)[1].lower()
+        if hasattr(self, "deliverable_status_label"):
+            self.deliverable_status_label.setText(self.describe_path_for_preview(self.current_deliverable_path))
+        if ext in {".html", ".htm"}:
+            try:
+                with open(self.current_deliverable_path, "r", encoding="utf-8") as f:
+                    content = f.read(12000)
+                if os.path.getsize(self.current_deliverable_path) > 12000:
+                    content += "\n\n... 文件较大，仅显示开头。点击“渲染”查看完整页面。"
+                self.deliverable_text_preview.setPlainText(content)
+            except UnicodeDecodeError:
+                self.deliverable_text_preview.setPlainText("HTML 文件编码暂时无法直接预览，可点击“打开”。")
+            except Exception as exc:
+                self.deliverable_text_preview.setPlainText(f"无法读取文件：{exc}")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        else:
+            self.deliverable_text_preview.setPlainText("当前格式暂不支持内嵌渲染，可使用打开或在资源管理器中显示。")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+
+    def render_selected_deliverable(self):
+        path = getattr(self, "current_deliverable_path", "")
+        if not path or not os.path.isfile(path):
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in {".html", ".htm"}:
+            self.deliverable_status_label.setText("只有 HTML 文件支持右侧渲染。")
+            return
+        self.current_deliverable_stale = False
+        if self.deliverable_web_view is None:
+            self.deliverable_text_preview.setPlainText("当前运行环境未加载 QtWebEngine，无法在应用内渲染。可点击“打开”使用系统浏览器查看。")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            return
+        self.deliverable_web_view.setUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
+        self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)}")
+
+    def start_deliverable_conversion(self, target_format):
+        path = getattr(self, "current_deliverable_path", "")
+        target_format = str(target_format or "").lower()
+        if target_format not in {"pptx", "docx", "pdf"} or not path or not os.path.isfile(path):
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in {".html", ".htm"}:
+            QMessageBox.information(self, "生成办公文件", "请先选择一个 HTML 文件。")
+            return
+        if not self.workspace_dir:
+            QMessageBox.information(self, "生成办公文件", "请先选择项目工作区。")
+            return
+        output_stem = os.path.splitext(os.path.basename(path))[0]
+        prompt = (
+            f"请读取并分析这个 HTML 文件，并根据它的内容、结构和视觉层级生成 {target_format.upper()} 办公文件。\n"
+            f"- 源 HTML: {path}\n"
+            f"- 输出目录: {os.path.dirname(path)}\n"
+            f"- 默认文件名: {output_stem}.{target_format}\n"
+            "- 如果文件名冲突，请追加时间戳。\n"
+            "- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。"
+        )
+        session_id = self.create_new_session(title=f"生成 {target_format.upper()}", make_current=True)
+        state = self.get_session(session_id)
+        self._set_prompt_files([path], session_id=session_id, refresh=True)
+        submitted = self._submit_session_request(
+            state,
+            prompt,
+            [path],
+            check_duplicates=False,
+            clear_current_input=True,
+        )
+        if submitted:
+            self.add_system_toast(f"已创建普通对话生成 {target_format.upper()}", "info", session_id=session_id, auto_close_ms=3200)
 
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""
@@ -17307,7 +17804,6 @@ class MainWindow(QMainWindow):
             self.save_chat_history(session_id=state.session_id)
             self.refresh_sop_controls(state.session_id)
             self.refresh_context_badges(state.session_id)
-            self.show_context_drawer(self.RIGHT_TAB_SOP)
             self.add_system_toast("已绑定自动化", "success", session_id=state.session_id, auto_close_ms=3200)
 
     def clear_session_sop(self, session_id=None):
@@ -17319,11 +17815,6 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.normalize_session_ui(state)
-        if (
-            getattr(self, "right_drawer_open", False)
-            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_SOP
-        ):
-            self.hide_context_drawer(reason="sop_cleared")
         self.add_system_toast("已移除自动化", "info", session_id=state.session_id, auto_close_ms=2600)
 
     def confirm_current_sop_step(self):
@@ -17475,7 +17966,6 @@ class MainWindow(QMainWindow):
         self.save_chat_history(session_id=state.session_id)
         self.refresh_sop_controls(state.session_id)
         self.refresh_context_badges(state.session_id)
-        self.show_context_drawer(self.RIGHT_TAB_SOP)
         self.add_system_toast("SOP 已生成并绑定到当前会话", "success", session_id=state.session_id, auto_close_ms=4200)
         return True
 
@@ -18102,8 +18592,8 @@ class MainWindow(QMainWindow):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if self._should_block_send_for_sop(state):
             if state.session_id == self.current_session_id:
-                QMessageBox.information(self, "自动化等待确认", "当前步骤已完成，请先在右侧自动化抽屉中确认、重跑或标记不适用。")
-                self.show_context_drawer(self.RIGHT_TAB_SOP)
+                QMessageBox.information(self, "自动化等待确认", "当前步骤已完成，请先在聊天中的自动化确认条里确认、重跑或标记不适用。")
+                self.refresh_sop_controls(state.session_id)
             return False
         if not raw_user_text and not prompt_files:
             return False
@@ -18462,6 +18952,8 @@ class MainWindow(QMainWindow):
             break
         self.refresh_step_list(state.session_id)
         self.refresh_change_list(state.session_id)
+        if state.has_file_changes and state.session_id == self.current_session_id:
+            self.refresh_deliverables()
         if state.session_id == self.current_session_id:
             self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         

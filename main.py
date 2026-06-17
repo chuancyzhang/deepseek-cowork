@@ -5586,6 +5586,7 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(860, 560)
         self.config_manager = config_manager
         self._main = parent
+        self.requires_skill_reload = False
         self.setStyleSheet(
             f"""
             QDialog {{ background: {DesignTokens.bg_app}; }}
@@ -6164,8 +6165,11 @@ class SettingsDialog(QDialog):
         self.config_manager.set("im_gateway", {"enabled_providers": enabled, "providers": providers})
 
     def save_settings(self):
+        self.requires_skill_reload = False
         selected_model_id = self.config_manager.get_selected_model_id()
         model_channels = self.model_channel_manager.get_channels()
+        mcp_servers = normalize_mcp_servers(self.mcp_server_manager.get_servers())
+        current_mcp_servers = self.config_manager.get_mcp_servers()
         all_model_ids = [
             model.get("id")
             for channel in model_channels
@@ -6190,11 +6194,12 @@ class SettingsDialog(QDialog):
         with self.config_manager.batch_save():
             self.config_manager.set_model_channels(model_channels, selected_model_id)
             self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
-            self.config_manager.set_mcp_servers(self.mcp_server_manager.get_servers())
+            self.config_manager.set_mcp_servers(mcp_servers)
             self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
             self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
             self.config_manager.set_god_mode(self.god_mode_check.isChecked())
             self._save_im_gateway_config()
+        self.requires_skill_reload = mcp_servers != current_mcp_servers
         self.accept()
 
 
@@ -17082,7 +17087,7 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dialog = SettingsDialog(self.config_manager, self)
         result = dialog.exec()
-        if result == QDialog.Accepted:
+        if result == QDialog.Accepted and getattr(dialog, "requires_skill_reload", False):
             self.skill_manager.load_skills()
         self.refresh_model_selector()
         self.refresh_context_badges()

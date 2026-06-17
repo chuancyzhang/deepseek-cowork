@@ -44,7 +44,7 @@ from main import (
 )
 from PySide6.QtCore import QEvent, Qt, QMimeData
 from PySide6.QtGui import QTextOption, QShowEvent
-from PySide6.QtWidgets import QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 
 class _State:
@@ -84,6 +84,27 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.assertTrue(summary.startswith("text_file_read"))
         self.assertTrue(summary.endswith("…"))
         self.assertNotIn("workspace_rename_path", summary)
+
+    def test_open_settings_reloads_skills_only_when_required(self):
+        window = MainWindow.__new__(MainWindow)
+        window.config_manager = MagicMock()
+        window.skill_manager = MagicMock()
+        window.refresh_model_selector = MagicMock()
+        window.refresh_context_badges = MagicMock()
+        window.update_ui_state_for_workspace = MagicMock()
+        window.input_field = None
+
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.Accepted
+        dialog.requires_skill_reload = False
+        with patch("main.SettingsDialog", return_value=dialog):
+            MainWindow.open_settings(window)
+        window.skill_manager.load_skills.assert_not_called()
+
+        dialog.requires_skill_reload = True
+        with patch("main.SettingsDialog", return_value=dialog):
+            MainWindow.open_settings(window)
+        window.skill_manager.load_skills.assert_called_once()
 
     def test_skill_center_matches_filters_supports_query_and_status(self):
         skill = {

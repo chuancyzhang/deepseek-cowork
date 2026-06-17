@@ -242,6 +242,33 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("llm_provider"), "openai")
         self.assertEqual(cm.get("model_name"), "glm-test")
 
+    def test_set_model_channels_falls_back_when_selected_model_is_removed(self):
+        cm = self._create_config_manager()
+        channels = [
+            {
+                "channel_id": "anthropic-channel",
+                "display_name": "Anthropic Test",
+                "provider_type": "anthropic",
+                "api_key": "anthropic-key",
+                "base_url": "https://anthropic.example",
+                "models": [
+                    {
+                        "id": "anthropic-new",
+                        "display_name": "Claude New",
+                        "model_name": "claude-new",
+                    }
+                ],
+            }
+        ]
+
+        cm.set_model_channels(channels, "removed-model")
+
+        self.assertEqual(cm.get_selected_model_id(), "anthropic-new")
+        self.assertEqual(cm.get("llm_provider"), "anthropic")
+        self.assertEqual(cm.get("api_key"), "anthropic-key")
+        self.assertEqual(cm.get("base_url"), "https://anthropic.example")
+        self.assertEqual(cm.get("model_name"), "claude-new")
+
     def test_agent_profiles_are_normalized_and_persisted(self):
         cm = self._create_config_manager(
             {

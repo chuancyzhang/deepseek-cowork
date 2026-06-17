@@ -858,9 +858,12 @@ class ConfigManager:
         self.config["model_provider_configs"] = self._provider_configs_from_channels(normalized_channels)
         if selected_model_id is not None:
             self.config["selected_model_id"] = str(selected_model_id or "").strip()
-        if not self.get_model_profile(self.config.get("selected_model_id")):
+        if not self._get_profile_from_configs(normalized_channels, self.config.get("selected_model_id")):
             self.config["selected_model_id"] = self._first_model_id(normalized_channels)
-        self._sync_legacy_model_fields(save=False)
+        self._sync_legacy_model_fields(
+            save=False,
+            profile=self._get_profile_from_configs(normalized_channels, self.config.get("selected_model_id")),
+        )
         self.save_config()
 
     def get_model_provider_configs(self):
@@ -924,8 +927,8 @@ class ConfigManager:
         provider = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
         return f"{provider} / {name}" if provider else name
 
-    def _sync_legacy_model_fields(self, save=True):
-        profile = self.get_model_profile(self.config.get("selected_model_id"))
+    def _sync_legacy_model_fields(self, save=True, profile=None):
+        profile = profile or self.get_model_profile(self.config.get("selected_model_id"))
         if not profile:
             return False
         updates = {

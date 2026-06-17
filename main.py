@@ -7320,13 +7320,14 @@ class AutoResizingInputEdit(QTextEdit):
 class DaemonRequestWorker(QThread):
     finished_signal = Signal(object, str)
 
-    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, parent=None):
+    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, messages=None, parent=None):
         super().__init__(parent)
         self.client = client
         self.session_id = session_id
         self.content = content
         self.workspace_dir = workspace_dir
         self.run_context = run_context or {}
+        self.messages = copy.deepcopy(messages or [])
         self._aborted = False
         self._sock = None
 
@@ -7340,6 +7341,7 @@ class DaemonRequestWorker(QThread):
                 self.content,
                 self.workspace_dir,
                 run_context=self.run_context,
+                messages=self.messages,
             )
         except Exception:
             resp = None
@@ -7366,13 +7368,14 @@ class DaemonStreamWorker(QThread):
     output_signal = Signal(str)
     interaction_signal = Signal(dict)
 
-    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, parent=None):
+    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, messages=None, parent=None):
         super().__init__(parent)
         self.client = client
         self.session_id = session_id
         self.content = content
         self.workspace_dir = workspace_dir
         self.run_context = run_context or {}
+        self.messages = copy.deepcopy(messages or [])
         self._aborted = False
         self._sock = None
 
@@ -7420,6 +7423,8 @@ class DaemonStreamWorker(QThread):
                     "workspace_dir": self.workspace_dir,
                     "run_context": self.run_context,
                 }
+                if self.messages:
+                    payload["messages"] = self.messages
                 sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
                 reader = sock.makefile("r", encoding="utf-8")
                 for line in reader:
@@ -18611,6 +18616,7 @@ class MainWindow(QMainWindow):
             user_text,
             self.workspace_dir,
             run_context=run_context,
+            messages=copy.deepcopy(state.messages),
         )
         state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid), Qt.QueuedConnection)
         state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)

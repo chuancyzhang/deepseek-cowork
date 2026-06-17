@@ -29,6 +29,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **流式合并与渲染缓存**：正文和思考流按短定时器批量刷新；稳定 Markdown / HTML 结果进入 LRU 缓存，历史回放和最终响应不再重复转换。
 *   **聊天气泡虚拟化**：聊天区滚动时按视口 overscan 保留附近气泡，远离视口的历史气泡折叠成固定高度占位，恢复时复用原控件和缓存后的内容。
 *   **异步会话持久化**：`save_chat_history()` 只在 UI 线程里整理快照并入队，后台 `ChatSaveWorker` 按会话合并、500ms debounce 后写入 SQLite；分支、长期记忆更新、会话重命名/归档/删除和应用退出前显式 flush，避免异步保存带来的读取时序问题。
+*   **UI 到 Daemon 的上下文快照**：桌面会话交给 daemon 执行时会随请求传递当前 `state.messages` 快照；daemon 优先用该快照刷新内存会话，再追加本轮用户消息，避免 idle suspend 后从旧 SQLite 或旧缓存恢复导致上下文漂移。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
 

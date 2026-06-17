@@ -945,6 +945,66 @@ class TestDaemonState(unittest.TestCase):
         self.assertTrue(self.state._is_context_overflow_error({"error": "maximum context length exceeded"}))
         self.assertFalse(self.state._is_context_overflow_error({"error": "network timeout"}))
 
+    def test_request_messages_prefers_ui_snapshot_over_sqlite(self):
+        session_id = "desktop-session"
+        self.state.chat_storage.save_conversation(
+            session_id,
+            [{"role": "user", "content": "old sqlite prompt"}],
+            title="old",
+        )
+        snapshot = [
+            {"role": "user", "content": "fresh prompt"},
+            {"role": "assistant", "content": "fresh answer"},
+        ]
+
+        messages = self.state.request_messages(session_id, snapshot)
+
+        self.assertEqual([msg.get("content") for msg in messages], ["fresh prompt", "fresh answer"])
+        self.assertEqual([msg.get("content") for msg in self.state.sessions[session_id]], ["fresh prompt", "fresh answer"])
+
+    def test_run_llm_sync_uses_snapshot_and_dedupes_current_user_message(self):
+        session_id = "desktop-dedupe"
+        snapshot = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "continue"},
+        ]
+        captured = {}
+
+        def run_once(sid, worker_messages, workspace_dir, run_context=None):
+            captured["messages"] = list(worker_messages)
+            return {"generated_messages": [{"role": "assistant", "content": "done"}]}
+
+        self.state._run_worker_once = run_once
+
+        self.state.run_llm_sync(
+            session_id,
+            "continue",
+            workspace_dir=self.temp_dir,
+            run_context={},
+            messages_snapshot=snapshot,
+        )
+
+        self.assertEqual([msg.get("content") for msg in captured["messages"]], ["first", "reply", "continue"])
+        saved_messages = self.state.chat_storage.get_messages(session_id)
+        self.assertEqual([msg.get("content") for msg in saved_messages], ["first", "reply", "continue", "done"])
+
+    def test_snapshot_restores_context_after_idle_suspend(self):
+        session_id = "desktop-after-idle"
+        self.state.sessions[session_id] = [{"role": "user", "content": "stale memory"}]
+        self.state.last_activity = 0
+        self.state.idle_timeout = 1
+        self.state.maybe_suspend()
+        self.assertNotIn(session_id, self.state.sessions)
+        snapshot = [
+            {"role": "user", "content": "fresh after idle"},
+            {"role": "assistant", "content": "still here"},
+        ]
+
+        messages = self.state.request_messages(session_id, snapshot)
+
+        self.assertEqual([msg.get("content") for msg in messages], ["fresh after idle", "still here"])
+
     def test_deepseek_v4_uses_large_context_budget(self):
         state = DaemonState(
             _DaemonConfigStub(

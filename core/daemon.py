@@ -111,17 +111,56 @@ class DaemonState:
             if session_id in self.sessions:
                 messages = self.chat_storage.normalize_messages(self.sessions[session_id])
                 self.sessions[session_id] = messages
+                self._log_context_source(session_id, "daemon_memory", messages)
                 return messages
         if self.chat_storage.has_conversation(session_id):
             messages = self.chat_storage.get_messages(session_id)
+            source = "sqlite"
         else:
             messages = []
+            source = "empty"
         messages = self.chat_storage.normalize_messages(
             self._dedupe_consecutive_user_messages(messages)
         )
         with self.lock:
             self.sessions[session_id] = messages
+        self._log_context_source(session_id, source, messages)
         return messages
+
+    def use_session_messages_snapshot(self, session_id, messages):
+        if not isinstance(messages, list):
+            return None
+        normalized = self.chat_storage.normalize_messages(
+            self._dedupe_consecutive_user_messages(messages)
+        )
+        with self.lock:
+            self.sessions[session_id] = normalized
+        self._log_context_source(session_id, "ui_snapshot", normalized)
+        return normalized
+
+    def request_messages(self, session_id, snapshot=None):
+        messages = self.use_session_messages_snapshot(session_id, snapshot)
+        if messages is not None:
+            return messages
+        return self.get_session_messages(session_id)
+
+    def _log_context_source(self, session_id, source, messages):
+        try:
+            last = messages[-1] if messages else {}
+            _log_daemon(
+                "context_source "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "source": source,
+                        "message_count": len(messages or []),
+                        "last_role": last.get("role") if isinstance(last, dict) else "",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception:
+            pass
 
     def _dedupe_consecutive_user_messages(self, messages):
         if not isinstance(messages, list):
@@ -562,7 +601,7 @@ class DaemonState:
         )
         return retry_messages
 
-    def run_llm_sync(self, session_id, user_text, workspace_dir=None, run_context=None):
+    def run_llm_sync(self, session_id, user_text, workspace_dir=None, run_context=None, messages_snapshot=None):
         self.touch()
         try:
             self.config_manager.load_config()
@@ -570,7 +609,7 @@ class DaemonState:
             _log_daemon(f"run_llm_sync load_config failed session_id={session_id} error={e}")
         idle_minutes = self.config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
-        messages = self.get_session_messages(session_id)
+        messages = self.request_messages(session_id, messages_snapshot)
         normalized_run_context = normalize_run_context(run_context)
         self.append_user_message_if_needed(messages, user_text)
         worker_messages = (
@@ -675,6 +714,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 content,
                 workspace_dir,
                 run_context=run_context,
+                messages_snapshot=data.get("messages"),
             )
             self._send({"status": "ok", "session_id": session_id, "result": result})
             return
@@ -694,7 +734,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 _log_daemon(f"send_message_stream load_config failed session_id={session_id} error={e}")
             idle_minutes = state.config_manager.get("daemon_idle_minutes", 10)
             state.idle_timeout = max(int(idle_minutes), 1) * 60
-            messages = state.get_session_messages(session_id)
+            messages = state.request_messages(session_id, data.get("messages"))
             state.append_user_message_if_needed(messages, content)
             stream_lock = threading.Lock()
             stream_closed = threading.Event()
@@ -887,19 +927,22 @@ class DaemonClient:
         except Exception:
             return None
 
-    def send_message(self, session_id, content, workspace_dir=None, run_context=None):
+    def send_message(self, session_id, content, workspace_dir=None, run_context=None, messages=None):
+        payload = {
+            "action": "send_message",
+            "session_id": session_id,
+            "content": content,
+            "workspace_dir": workspace_dir,
+            "run_context": normalize_run_context(run_context),
+        }
+        if messages:
+            payload["messages"] = messages
         return self._request(
-            {
-                "action": "send_message",
-                "session_id": session_id,
-                "content": content,
-                "workspace_dir": workspace_dir,
-                "run_context": normalize_run_context(run_context),
-            },
+            payload,
             timeout=self.send_timeout
         )
 
-    def send_message_stream(self, session_id, content, workspace_dir=None, run_context=None):
+    def send_message_stream(self, session_id, content, workspace_dir=None, run_context=None, messages=None):
         sock = socket.create_connection((self.host, self.port), timeout=self.send_timeout)
         try:
             payload = {
@@ -909,6 +952,8 @@ class DaemonClient:
                 "workspace_dir": workspace_dir,
                 "run_context": normalize_run_context(run_context),
             }
+            if messages:
+                payload["messages"] = messages
             sock.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
             with sock.makefile("r", encoding="utf-8") as reader:
                 for line in reader:

@@ -26,6 +26,7 @@ from main import (
     AutomationTaskDialog,
     ChatBubble,
     DaemonConnectWorker,
+    DaemonStreamWorker,
     MainWindow,
     SessionState,
     SkillsCenterDialog,
@@ -1626,6 +1627,23 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertTrue(window._pending_daemon_connect_allow_start)
         self.assertEqual(window._pending_daemon_connect_retries, 6)
         self.assertTrue(window.daemon_bootstrapping)
+
+    def test_daemon_stream_worker_keeps_deep_copied_message_snapshot(self):
+        client = MagicMock()
+        messages = [{"role": "user", "content": "remember this"}]
+
+        worker = DaemonStreamWorker(
+            client,
+            "session-1",
+            "continue",
+            "D:\\demo",
+            run_context={"mode": "execution"},
+            messages=messages,
+        )
+        messages[0]["content"] = "mutated later"
+
+        self.assertEqual(worker.messages[0]["content"], "remember this")
+        self.assertIsNot(worker.messages, messages)
 
     def test_handle_daemon_connect_finished_drains_pending_request(self):
         window = MainWindow.__new__(MainWindow)

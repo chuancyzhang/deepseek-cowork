@@ -463,6 +463,7 @@ class LLMWorker(QThread):
         agent_id=None,
         is_subagent=False,
         run_context=None,
+        turn_id=None,
     ):
         super().__init__()
         self.messages = messages
@@ -476,10 +477,14 @@ class LLMWorker(QThread):
         self.agent_id = agent_id or parent_agent_id or ""
         self.is_subagent = bool(is_subagent or parent_agent_id)
         self.run_context = normalize_run_context(run_context)
+        self.turn_id = str(turn_id or "")
         
         # Flags for control
         self.is_paused = False
         self.is_stopped = False
+        self._guidance_lock = threading.Lock()
+        self._pending_guidance = []
+        self._guidance_open = True
         
         # Initialize Skill Manager
         self.skill_manager = SkillManager(workspace_dir, config_manager)
@@ -685,6 +690,55 @@ class LLMWorker(QThread):
         self.is_paused = False # Ensure loop breaks if paused
         self.step_signal.emit("System: Stopping...")
         self.abort_signal.emit()
+
+    def steer(self, message, expected_turn_id=None):
+        """Queue a user message for the next safe model-request boundary."""
+        expected = str(expected_turn_id or "")
+        if expected and expected != self.turn_id:
+            return {
+                "accepted": False,
+                "error": "turn_mismatch",
+                "expected_turn_id": expected,
+                "turn_id": self.turn_id,
+            }
+        if not isinstance(message, dict):
+            return {"accepted": False, "error": "invalid_message", "turn_id": self.turn_id}
+        guidance = json_copy(message, {})
+        guidance["role"] = "user"
+        has_content = bool(str(guidance.get("content") or "").strip())
+        has_parts = bool(guidance.get("content_parts"))
+        if not has_content and not has_parts:
+            return {"accepted": False, "error": "empty_input", "turn_id": self.turn_id}
+        with self._guidance_lock:
+            if not self._guidance_open or self.is_stopped:
+                return {"accepted": False, "error": "turn_not_active", "turn_id": self.turn_id}
+            self._pending_guidance.append(guidance)
+        self.step_signal.emit("System: Guidance queued for the active turn.")
+        return {"accepted": True, "turn_id": self.turn_id}
+
+    def _take_pending_guidance(self, close=False, close_if_empty=False):
+        with self._guidance_lock:
+            if close or (close_if_empty and not self._pending_guidance):
+                self._guidance_open = False
+            pending = self._pending_guidance
+            self._pending_guidance = []
+        return pending
+
+    def _append_pending_guidance(self, current_messages, generated_messages, close=False, close_if_empty=False):
+        pending = self._take_pending_guidance(close=close, close_if_empty=close_if_empty)
+        if not pending:
+            return False
+        for message in pending:
+            current_messages.append(message)
+            generated_messages.append(message)
+            self.observability_signal.emit({
+                "type": "guidance",
+                "content": message.get("content") or "",
+                "message_id": message.get("id") or "",
+                "timestamp": time.time(),
+            })
+        self.step_signal.emit(f"System: Applied {len(pending)} guidance message(s).")
+        return True
 
     def _skill_context_hash(self, content):
         return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
@@ -1141,6 +1195,8 @@ class LLMWorker(QThread):
             if self.is_stopped: 
                 final_content = "⚠️ Operation stopped by user."
                 break
+
+            self._append_pending_guidance(current_messages, generated_messages)
 
             turn_count += 1
             self._refresh_tool_definitions()
@@ -1627,12 +1683,20 @@ class LLMWorker(QThread):
                         continue
                     else:
                         # Final Answer
+                        if self._append_pending_guidance(
+                            current_messages,
+                            generated_messages,
+                            close_if_empty=True,
+                        ):
+                            force_reply_attempted = False
+                            continue
                         final_content = content
                         break
                         
                 except Exception as e:
+                    self._append_pending_guidance(current_messages, generated_messages, close=True)
                     self.output_signal.emit(f"Provider Exception: {e}")
-                    self.finished_signal.emit({"error": str(e)})
+                    self.finished_signal.emit({"error": str(e), "generated_messages": generated_messages})
                     return
             else:
                 # --- Mock Logic / Warning for Missing API Key ---
@@ -1650,6 +1714,7 @@ class LLMWorker(QThread):
                 
                 break
 
+        self._append_pending_guidance(current_messages, generated_messages, close=True)
         self.finished_signal.emit({
             "reasoning": full_reasoning.strip(),
             "content": final_content,

@@ -1904,6 +1904,37 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertEqual(calls[1][0], "tool_result")
         self.assertEqual(calls[1][2], 12000)
 
+    def test_busy_steerable_session_routes_send_to_current_turn(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "_GuidanceState",
+            (),
+            {
+                "session_id": "session-1",
+                "history_loading": False,
+                "history_loaded": True,
+                "turn_steerable": True,
+            },
+        )()
+        window._session_is_busy = MagicMock(return_value=True)
+        window._normalize_prompt_file_paths = lambda paths: list(paths)
+        window._submit_turn_guidance = MagicMock(return_value=True)
+
+        result = window._submit_session_request(
+            state,
+            "focus failing tests",
+            ["C:\\work\\trace.png"],
+            clear_current_input=True,
+        )
+
+        self.assertTrue(result)
+        window._submit_turn_guidance.assert_called_once_with(
+            state,
+            "focus failing tests",
+            ["C:\\work\\trace.png"],
+            clear_current_input=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

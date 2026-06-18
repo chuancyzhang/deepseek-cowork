@@ -4,6 +4,8 @@
 
 当前应用版本：**4.9.1**。
 
+*   **同轮中途引导**：桌面主对话的 `LLMWorker` 维护线程安全的 FIFO guidance 队列，在模型请求前、工具结果返回后及最终收敛边界消费；当前流式响应和正在执行的工具不会被强制打断。daemon 通过 `turn_id`、`turn_started` 与 `steer_message` 协议校验活动轮次，避免迟到输入串入下一轮。引导沿用普通用户消息的 `content` / `content_parts` / 附件元数据，停止或异常时仍保留已接受内容。
+
 ## 1. 架构理念
 
 DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段直接调用工具，实现“思考-执行-再思考”的闭环，降低幻觉并提升任务成功率。

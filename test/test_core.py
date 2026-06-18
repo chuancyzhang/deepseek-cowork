@@ -1346,6 +1346,41 @@ class TestSingleInstance(unittest.TestCase):
         self.assertEqual(len(attempts), 3)
 
 
+class TestLLMWorkerGuidance(unittest.TestCase):
+    def _worker(self, turn_id="turn-1"):
+        worker = LLMWorker.__new__(LLMWorker)
+        QThread = __import__("PySide6.QtCore", fromlist=["QThread"]).QThread
+        QThread.__init__(worker)
+        worker.turn_id = turn_id
+        worker.is_stopped = False
+        worker._guidance_lock = threading.Lock()
+        worker._pending_guidance = []
+        worker._guidance_open = True
+        return worker
+
+    def test_steer_queues_and_applies_messages_in_fifo_order(self):
+        worker = self._worker()
+        first = {"id": "g1", "role": "user", "content": "first"}
+        second = {"id": "g2", "role": "user", "content": "second"}
+
+        self.assertTrue(worker.steer(first, "turn-1")["accepted"])
+        self.assertTrue(worker.steer(second, "turn-1")["accepted"])
+        current_messages = []
+        generated_messages = []
+        self.assertTrue(worker._append_pending_guidance(current_messages, generated_messages))
+
+        self.assertEqual([item["id"] for item in current_messages], ["g1", "g2"])
+        self.assertEqual(current_messages, generated_messages)
+
+    def test_steer_rejects_mismatched_or_closed_turn(self):
+        worker = self._worker()
+        message = {"role": "user", "content": "guide"}
+
+        self.assertEqual(worker.steer(message, "other")["error"], "turn_mismatch")
+        worker._take_pending_guidance(close=True)
+        self.assertEqual(worker.steer(message, "turn-1")["error"], "turn_not_active")
+
+
 class TestDaemonInteractionRoundtrip(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -1393,6 +1428,30 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertTrue(ack["resolved"])
         self.assertTrue(result_holder["result"]["approved"])
         self.assertEqual(result_holder["result"]["status"], "completed")
+
+    def test_steer_message_roundtrip_checks_active_turn(self):
+        class _Worker:
+            turn_id = "turn-7"
+
+            def steer(self, message, expected_turn_id=None):
+                return {
+                    "accepted": expected_turn_id == self.turn_id,
+                    "turn_id": self.turn_id,
+                    "content": message.get("content"),
+                }
+
+        self.state.set_active_worker("session-7", _Worker(), turn_id="turn-7")
+        accepted = self.client.steer_message(
+            "session-7", "turn-7", {"role": "user", "content": "focus tests"}
+        )
+        rejected = self.client.steer_message(
+            "session-7", "stale-turn", {"role": "user", "content": "wrong"}
+        )
+
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["turn_id"], "turn-7")
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(rejected["error"], "turn_mismatch")
 
 class TestImSessionKey(unittest.TestCase):
     def test_build_and_parse_im_session_key(self):

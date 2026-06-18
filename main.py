@@ -252,7 +252,7 @@ def build_form_row_label(text):
     )
     return label
 
-HISTORY_MIGRATION_VERSION = 2
+HISTORY_MIGRATION_VERSION = 3
 CONTENT_FLUSH_INTERVAL_MS = 120
 THINKING_FLUSH_INTERVAL_MS = 140
 SCROLL_FLUSH_INTERVAL_MS = 24
@@ -7461,8 +7461,9 @@ class DaemonStreamWorker(QThread):
     agent_state_signal = Signal(dict)
     output_signal = Signal(str)
     interaction_signal = Signal(dict)
+    turn_started_signal = Signal(str)
 
-    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, messages=None, parent=None):
+    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, messages=None, turn_id=None, parent=None):
         super().__init__(parent)
         self.client = client
         self.session_id = session_id
@@ -7470,6 +7471,7 @@ class DaemonStreamWorker(QThread):
         self.workspace_dir = workspace_dir
         self.run_context = run_context or {}
         self.messages = copy.deepcopy(messages or [])
+        self.turn_id = str(turn_id or "")
         self._aborted = False
         self._sock = None
 
@@ -7516,6 +7518,7 @@ class DaemonStreamWorker(QThread):
                     "content": self.content,
                     "workspace_dir": self.workspace_dir,
                     "run_context": self.run_context,
+                    "turn_id": self.turn_id,
                 }
                 if self.messages:
                     payload["messages"] = self.messages
@@ -7533,6 +7536,8 @@ class DaemonStreamWorker(QThread):
                         continue
                     if msg.get("type") == "thinking":
                         self.thinking_signal.emit(msg.get("delta", ""))
+                    elif msg.get("type") == "turn_started":
+                        self.turn_started_signal.emit(str(msg.get("turn_id") or ""))
                     elif msg.get("type") == "content":
                         self.content_signal.emit(msg.get("delta", ""))
                     elif msg.get("type") == "tool_call":
@@ -7618,6 +7623,27 @@ class DaemonStreamWorker(QThread):
                 aborted=self._aborted,
             )
             self._sock = None
+
+
+class DaemonSteerWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, client, session_id, expected_turn_id, message, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.session_id = session_id
+        self.expected_turn_id = str(expected_turn_id or "")
+        self.message = copy.deepcopy(message or {})
+
+    def run(self):
+        response = self.client.steer_message(
+            self.session_id,
+            self.expected_turn_id,
+            self.message,
+        )
+        if not isinstance(response, dict):
+            response = {"status": "error", "accepted": False, "error": "daemon_unavailable"}
+        self.finished_signal.emit(response)
 
 
 class DaemonConnectWorker(QThread):
@@ -9952,6 +9978,9 @@ class SessionState:
         self.virtualization_active = False
         self.active_turn_id = 0
         self.completed_turn_id = 0
+        self.turn_steerable = False
+        self.pending_guidance_messages = []
+        self.guidance_workers = []
         self.persisted_agents = []
         self.sub_agent_events = []
         self.sub_agent_history_loaded = False
@@ -12126,6 +12155,15 @@ class MainWindow(QMainWindow):
         self.action_btn.setDefault(False)
         self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
         self.action_btn.clicked.connect(self.on_action_clicked)
+
+        self.stop_btn = QPushButton()
+        self.stop_btn.setIcon(qta.icon('fa5s.stop', color='#ff3b30'))
+        self.stop_btn.setToolTip("停止当前任务")
+        self.stop_btn.setCursor(Qt.PointingHandCursor)
+        self.stop_btn.setFixedSize(40, 40)
+        self.stop_btn.setStyleSheet(apple_button_style("secondary", radius=20))
+        self.stop_btn.clicked.connect(self.stop_agent)
+        self.stop_btn.setVisible(False)
         
         self.loop_hint = StatusPill("处理中")
         self.loop_hint.setVisible(False)
@@ -12170,6 +12208,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.loop_hint, 1)
         prompt_toolbar.addStretch()
         prompt_toolbar.addWidget(self.model_select_combo)
+        prompt_toolbar.addWidget(self.stop_btn)
         prompt_toolbar.addWidget(self.action_btn)
         input_card_layout.addLayout(prompt_toolbar)
 
@@ -14905,6 +14944,12 @@ class MainWindow(QMainWindow):
             self.daemon_status_worker.wait(1000)
         self.daemon_status_worker = None
         for session_id, state in list(self.sessions.items()):
+            for guidance_worker in list(getattr(state, "guidance_workers", []) or []):
+                try:
+                    guidance_worker.wait(500)
+                except Exception:
+                    pass
+            state.guidance_workers = []
             self._stop_live_subagents(state, force=True)
             if self.daemon_client and state.daemon_running and state.session_id:
                 try:
@@ -15089,20 +15134,26 @@ class MainWindow(QMainWindow):
     def normalize_session_ui(self, state):
         if not state:
             return
+        history_ready = bool(
+            getattr(state, "history_loaded", True)
+            and not getattr(state, "history_loading", False)
+        )
         running = state.llm_worker and state.llm_worker.isRunning()
         paused = running and state.llm_worker.is_paused
         running_code = state.code_worker and state.code_worker.isRunning()
         running_daemon = getattr(state, "daemon_running", False)
 
         if running or running_code or running_daemon:
-            self.action_btn.setText("停止")
-            self.action_btn.setIcon(qta.icon('fa5s.stop', color='white'))
-            self.action_btn.setStyleSheet(
-                "QPushButton { background: #ff3b30; color: white; border-radius: 20px; font-weight: 700; border: none; } "
-                "QPushButton:hover { background: #d70015; }"
-            )
-            self.action_btn.setEnabled(True)
-            self.input_field.setEnabled(False)
+            steerable = bool(getattr(state, "turn_steerable", False) and not running_code)
+            self.action_btn.setText("引导" if steerable else "运行中")
+            self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
+            self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
+            self.action_btn.setEnabled(steerable)
+            self.input_field.setEnabled(steerable)
+            self.tool_menu_btn.setEnabled(steerable)
+            self.stop_btn.setVisible(True)
+            if steerable:
+                self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
             self.pause_btn.setVisible(bool(running))
             loop_text = getattr(state, "run_phase", "") or ("处理中" if (running_daemon or running_code) else "")
             self.loop_hint.setText(loop_text or "处理中")
@@ -15120,8 +15171,13 @@ class MainWindow(QMainWindow):
             self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
-            self.action_btn.setEnabled(bool(self.workspace_dir))
-            self.input_field.setEnabled(bool(self.workspace_dir))
+            self.action_btn.setEnabled(bool(self.workspace_dir) and history_ready)
+            self.input_field.setEnabled(bool(self.workspace_dir) and history_ready)
+            self.tool_menu_btn.setEnabled(bool(self.workspace_dir) and history_ready)
+            self.stop_btn.setVisible(False)
+            if not history_ready:
+                self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
+                self.action_btn.setText("加载中")
             if awaiting_sop_confirmation:
                 self.input_field.setPlaceholderText("请先在聊天中的自动化确认条处理当前步骤")
             elif self.workspace_dir:
@@ -15407,6 +15463,8 @@ class MainWindow(QMainWindow):
         state.history_load_token = self._session_load_token_counter
         state.history_loading = True
         self._show_session_loading_state(state)
+        if session_id == self.current_session_id:
+            self.normalize_session_ui(state)
         QTimer.singleShot(
             0,
             lambda sid=session_id, token=state.history_load_token: self._load_session_history(sid, token)
@@ -15493,6 +15551,11 @@ class MainWindow(QMainWindow):
 
         state.history_loaded = True
         state.history_loading = False
+        if session_id == self.current_session_id:
+            # Loading replaces the per-session containers. Rebind the window-level
+            # aliases so a later tab sync cannot write the pre-load empty objects
+            # back over the restored conversation.
+            self.set_current_session(session_id)
         self.update_session_tab_title(session_id)
         self.update_history_selection()
         self.refresh_change_list(session_id)
@@ -16984,6 +17047,16 @@ class MainWindow(QMainWindow):
             normalized_messages = repair_tool_call_sequence(source_messages)
         except Exception:
             normalized_messages = source_messages
+        normalized_messages = [
+            msg
+            for msg in normalized_messages
+            if not (
+                isinstance(msg, dict)
+                and isinstance(msg.get("meta"), dict)
+                and msg["meta"].get("kind") in ("skill_context", "skill_context_update")
+                and msg["meta"].get("source") == "skill_prompt_query_match"
+            )
+        ]
         deduped_messages = []
         for msg in normalized_messages:
             if (
@@ -17088,6 +17161,8 @@ class MainWindow(QMainWindow):
 
     def _build_chat_save_request(self, state):
         if not state:
+            return None
+        if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
             return None
         has_clarify_state = bool(
             state.clarify_mode_enabled
@@ -18210,6 +18285,7 @@ class MainWindow(QMainWindow):
             "step_signal",
             "skill_used_signal",
             "input_request_signal",
+            "turn_started_signal",
         ):
             signal = getattr(worker, signal_name, None)
             if signal is None:
@@ -18318,9 +18394,11 @@ class MainWindow(QMainWindow):
         state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id)
         state.daemon_worker = None
         state.daemon_running = False
+        state.turn_steerable = False
         state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
+        self._persist_pending_guidance(state)
         partial_content = (state.current_content_buffer or "").strip()
         partial_thinking = (state.current_thinking_buffer or "").strip()
         if partial_content or partial_thinking:
@@ -18359,7 +18437,8 @@ class MainWindow(QMainWindow):
                      state.daemon_running
         
         if is_running:
-            self.stop_agent()
+            if getattr(state, "turn_steerable", False):
+                self.handle_send()
         else:
             self.handle_send()
 
@@ -18659,6 +18738,137 @@ class MainWindow(QMainWindow):
             return None
         return profile
 
+    def _restore_rejected_guidance(self, state, raw_user_text, prompt_files):
+        if not state:
+            return
+        state.prompt_files = self._normalize_prompt_file_paths(
+            list(getattr(state, "prompt_files", []) or []) + list(prompt_files or [])
+        )
+        if state.session_id == self.current_session_id:
+            current_text = self.input_field.toPlainText().strip()
+            restored_text = str(raw_user_text or "").strip()
+            if restored_text:
+                combined = f"{restored_text}\n\n{current_text}" if current_text else restored_text
+                self.input_field.setPlainText(combined)
+            self.refresh_prompt_file_chips(state.session_id)
+            self.input_field.setFocus()
+            self.add_system_toast("当前任务已结束，引导内容已恢复到输入框。", "warning", session_id=state.session_id)
+
+    def _accept_turn_guidance(self, state, message, display_content, attachments):
+        if not state:
+            return
+        message_id = message.get("id")
+        already_persisted = any(
+            isinstance(item, dict) and item.get("id") == message_id
+            for item in state.messages
+        )
+        if not already_persisted:
+            state.pending_guidance_messages.append(copy.deepcopy(message))
+        if state.session_id == self.current_session_id:
+            self.add_chat_bubble(
+                "User",
+                display_content or "",
+                animate=False,
+                force_scroll=True,
+                attachments=attachments or [],
+                source_message_id=message.get("id"),
+            )
+            self.add_system_toast("已加入当前任务", "info", session_id=state.session_id, auto_close_ms=2200)
+
+    def _handle_daemon_guidance_result(
+        self, response, worker, session_id, expected_turn_id, message,
+        display_content, attachments, raw_user_text, prompt_files,
+    ):
+        state = self.get_session(session_id)
+        if state and worker in state.guidance_workers:
+            state.guidance_workers.remove(worker)
+        accepted = bool(
+            isinstance(response, dict)
+            and response.get("status") == "ok"
+            and response.get("accepted")
+            and str(response.get("turn_id") or "") == str(expected_turn_id)
+            and state
+            and state.active_turn_id == expected_turn_id
+        )
+        if accepted:
+            self._accept_turn_guidance(state, message, display_content, attachments)
+        else:
+            self._restore_rejected_guidance(state, raw_user_text, prompt_files)
+
+    def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False):
+        prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
+        if not state or not getattr(state, "turn_steerable", False):
+            return False
+        payload = self._build_user_message_payload(
+            raw_user_text,
+            prompt_files,
+            supports_vision=self._selected_model_supports_vision(),
+        )
+        if not payload.get("content"):
+            return False
+        expected_turn_id = state.active_turn_id
+        message = {
+            "id": self._new_message_id(),
+            "role": "user",
+            "content": payload.get("content") or "",
+            "meta": {
+                **(payload.get("meta") or {}),
+                "same_turn_guidance": True,
+                "turn_id": str(expected_turn_id),
+            },
+        }
+        if payload.get("content_parts"):
+            message["content_parts"] = payload.get("content_parts")
+
+        if state.llm_worker and state.llm_worker.isRunning():
+            result = state.llm_worker.steer(message, expected_turn_id=expected_turn_id)
+            if not result.get("accepted"):
+                if state.session_id == self.current_session_id:
+                    self.add_system_toast("当前任务已结束，请重新发送。", "warning", session_id=state.session_id)
+                return False
+            if clear_current_input and state.session_id == self.current_session_id:
+                self.input_field.clear()
+                self._clear_prompt_files(state.session_id)
+            self._accept_turn_guidance(
+                state, message, payload.get("display_content") or "", payload.get("attachments") or []
+            )
+            return True
+
+        if state.daemon_running and self.daemon_client:
+            if clear_current_input and state.session_id == self.current_session_id:
+                self.input_field.clear()
+                self._clear_prompt_files(state.session_id)
+            worker = DaemonSteerWorker(
+                self.daemon_client, state.session_id, expected_turn_id, message, parent=self
+            )
+            state.guidance_workers.append(worker)
+            worker.finished_signal.connect(
+                lambda response, w=worker, sid=state.session_id, tid=expected_turn_id,
+                       msg=copy.deepcopy(message), display=payload.get("display_content") or "",
+                       attachments=copy.deepcopy(payload.get("attachments") or []), raw=raw_user_text,
+                       files=list(prompt_files): self._handle_daemon_guidance_result(
+                           response, w, sid, tid, msg, display, attachments, raw, files
+                       ),
+                Qt.QueuedConnection,
+            )
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+            return True
+        return False
+
+    def _persist_pending_guidance(self, state):
+        if not state or not state.pending_guidance_messages:
+            return
+        existing_ids = {
+            item.get("id") for item in state.messages
+            if isinstance(item, dict) and item.get("id")
+        }
+        for message in state.pending_guidance_messages:
+            if message.get("id") not in existing_ids:
+                state.messages.append(copy.deepcopy(message))
+        state.messages = self.chat_storage.normalize_messages(state.messages)
+        state.pending_guidance_messages = []
+
     def _submit_session_request(
         self,
         state,
@@ -18671,7 +18881,28 @@ class MainWindow(QMainWindow):
     ):
         if not state:
             return False
+        if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
+            if state.session_id == self.current_session_id:
+                self.add_system_toast(
+                    "历史会话仍在加载，加载完成后再发送。",
+                    "info",
+                    session_id=state.session_id,
+                    auto_close_ms=3500,
+                )
+                self.normalize_session_ui(state)
+            return False
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
+        if self._session_is_busy(state):
+            if getattr(state, "turn_steerable", False):
+                return self._submit_turn_guidance(
+                    state,
+                    raw_user_text,
+                    prompt_files,
+                    clear_current_input=clear_current_input,
+                )
+            if state.session_id == self.current_session_id:
+                self.add_system_toast("当前运行阶段不支持中途引导。", "warning", session_id=state.session_id)
+            return False
         if self._should_block_send_for_sop(state):
             if state.session_id == self.current_session_id:
                 QMessageBox.information(self, "自动化等待确认", "当前步骤已完成，请先在聊天中的自动化确认条里确认、重跑或标记不适用。")
@@ -19147,6 +19378,11 @@ class MainWindow(QMainWindow):
             automation_runner=self.run_automation_task_now,
             session_id=state.session_id,
             run_context=run_context,
+            turn_id=turn_id,
+        )
+        state.turn_steerable = not bool(
+            normalize_sop_run(getattr(state, "sop_run", None))
+            or getattr(state, "automation_task_id", "")
         )
         if state.session_id == self.current_session_id:
             self.llm_worker = state.llm_worker
@@ -19184,6 +19420,7 @@ class MainWindow(QMainWindow):
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
         state.daemon_running = True
+        state.turn_steerable = False
         state.daemon_worker = DaemonStreamWorker(
             self.daemon_client,
             state.session_id,
@@ -19191,6 +19428,7 @@ class MainWindow(QMainWindow):
             self.workspace_dir,
             run_context=run_context,
             messages=copy.deepcopy(state.messages),
+            turn_id=turn_id,
         )
         state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid), Qt.QueuedConnection)
         state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)
@@ -19200,7 +19438,28 @@ class MainWindow(QMainWindow):
         state.daemon_worker.observability_signal.connect(lambda data, sid=state.session_id: self.handle_observability_event(data, sid), Qt.QueuedConnection)
         state.daemon_worker.agent_state_signal.connect(lambda data, sid=state.session_id: self.handle_agent_state(data, sid), Qt.QueuedConnection)
         state.daemon_worker.interaction_signal.connect(lambda req, sid=state.session_id: self.handle_daemon_interaction_request(req, sid), Qt.QueuedConnection)
+        state.daemon_worker.turn_started_signal.connect(
+            lambda daemon_turn_id, sid=state.session_id, tid=turn_id: self.handle_daemon_turn_started(
+                daemon_turn_id,
+                sid,
+                tid,
+            ),
+            Qt.QueuedConnection,
+        )
         state.daemon_worker.start()
+        if state.session_id == self.current_session_id:
+            self.normalize_session_ui(state)
+
+    def handle_daemon_turn_started(self, daemon_turn_id, session_id=None, turn_id=None):
+        state = self.get_session(session_id)
+        if not state or turn_id != state.active_turn_id:
+            return
+        if str(daemon_turn_id or "") != str(turn_id or ""):
+            return
+        state.turn_steerable = not bool(
+            normalize_sop_run(getattr(state, "sop_run", None))
+            or getattr(state, "automation_task_id", "")
+        )
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
@@ -19210,6 +19469,7 @@ class MainWindow(QMainWindow):
         if turn_id is not None and turn_id != state.active_turn_id:
             return
         state.daemon_running = False
+        state.turn_steerable = False
         state.daemon_worker = None
         if "error" in result and str(result.get("error", "")).lower().find("daemon") >= 0:
             self.daemon_available = False
@@ -19839,6 +20099,7 @@ class MainWindow(QMainWindow):
     def handle_llm_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state: return
+        state.turn_steerable = False
         previous_message_count = len(state.messages)
         if turn_id is not None:
             if turn_id != state.active_turn_id:
@@ -19867,6 +20128,7 @@ class MainWindow(QMainWindow):
             self.temp_thinking_bubble = state.temp_thinking_bubble
 
         if "error" in result:
+            self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
             self.add_system_toast(f"任务执行失败：{result['error']}", "error", session_id=state.session_id)
             bubble.stop_thinking_timers()
@@ -19994,6 +20256,7 @@ class MainWindow(QMainWindow):
                 "content_parts": content_parts
             })
             bubble.set_source_message_id(assistant_source_message_id)
+        state.pending_guidance_messages = []
         state.messages = self.chat_storage.normalize_messages(state.messages)
         self._rebuild_session_render_spans(state)
         if len(state.messages) > previous_message_count:

@@ -202,9 +202,12 @@ class DaemonState:
         title = _compute_session_title(messages)
         self.chat_storage.save_conversation(session_id, messages, title=title)
     
-    def set_active_worker(self, session_id, worker):
+    def set_active_worker(self, session_id, worker, turn_id=None):
         with self.lock:
-            self.active_workers[session_id] = worker
+            self.active_workers[session_id] = {
+                "worker": worker,
+                "turn_id": str(turn_id or getattr(worker, "turn_id", "") or ""),
+            }
     
     def clear_active_worker(self, session_id):
         with self.lock:
@@ -250,7 +253,8 @@ class DaemonState:
     
     def stop_session(self, session_id):
         with self.lock:
-            worker = self.active_workers.get(session_id)
+            active = self.active_workers.get(session_id)
+            worker = active.get("worker") if isinstance(active, dict) else active
             detached = [
                 item.get("worker")
                 for item in self.detached_workers.values()
@@ -269,6 +273,27 @@ class DaemonState:
             except Exception as e:
                 _log_daemon(f"stop_session detached worker.stop failed session_id={session_id} error={e}")
         return bool(worker or detached)
+
+    def steer_session(self, session_id, expected_turn_id, message):
+        with self.lock:
+            active = self.active_workers.get(session_id)
+            if isinstance(active, dict):
+                worker = active.get("worker")
+                active_turn_id = str(active.get("turn_id") or "")
+            else:
+                worker = active
+                active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
+        expected = str(expected_turn_id or "")
+        if not worker:
+            return {"accepted": False, "error": "turn_not_active", "turn_id": active_turn_id}
+        if not expected or expected != active_turn_id:
+            return {
+                "accepted": False,
+                "error": "turn_mismatch",
+                "expected_turn_id": expected,
+                "turn_id": active_turn_id,
+            }
+        return worker.steer(message, expected_turn_id=expected)
 
     def _close_live_subagents(self, session_id, force=False):
         try:
@@ -720,6 +745,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             return
         if action == "send_message_stream":
             session_id = data.get("session_id") or uuid.uuid4().hex
+            turn_id = str(data.get("turn_id") or uuid.uuid4().hex)
             content = data.get("content") or ""
             workspace_dir = data.get("workspace_dir")
             run_context = normalize_run_context(data.get("run_context"))
@@ -797,6 +823,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 workspace_dir,
                 session_id=session_id,
                 run_context=run_context,
+                turn_id=turn_id,
             )
             worker_holder["worker"] = worker
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
@@ -816,8 +843,9 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 send_stream({"type": "interaction_request", "data": request_payload})
 
             interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
-            state.set_active_worker(session_id, worker)
+            state.set_active_worker(session_id, worker, turn_id=turn_id)
             try:
+                send_stream({"type": "turn_started", "turn_id": turn_id})
                 worker.start()
                 done.wait()
                 if not worker.wait(2000):
@@ -855,6 +883,16 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 return
             stopped = self.server.state.stop_session(session_id)
             self._send({"status": "ok", "stopped": stopped})
+            return
+        if action == "steer_message":
+            session_id = data.get("session_id")
+            expected_turn_id = data.get("expected_turn_id")
+            message = data.get("message")
+            if not session_id or expected_turn_id in (None, ""):
+                self._send({"status": "error", "error": "Missing session_id or expected_turn_id"})
+                return
+            result = self.server.state.steer_session(session_id, expected_turn_id, message)
+            self._send({"status": "ok", **result})
             return
         if action == "respond_interaction":
             request_id = data.get("request_id")
@@ -978,6 +1016,19 @@ class DaemonClient:
     def stop_session(self, session_id):
         try:
             return self._request({"action": "stop_session", "session_id": session_id})
+        except Exception:
+            return None
+
+    def steer_message(self, session_id, expected_turn_id, message):
+        try:
+            return self._request(
+                {
+                    "action": "steer_message",
+                    "session_id": session_id,
+                    "expected_turn_id": str(expected_turn_id or ""),
+                    "message": message,
+                }
+            )
         except Exception:
             return None
     

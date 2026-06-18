@@ -8,6 +8,8 @@ Built by **deepseek-cowork team**.
 
 Current app version: **4.9.1**.
 
+While a foreground task is running, you can add text, images, or files in the main composer and choose **Guide** to steer the active turn. Guidance is applied at the next safe model-request boundary without stopping or starting a new task. Local and daemon-backed desktop runs are supported; automations, standalone sub-agents, and enterprise IM are not steerable yet.
+
 Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
 ![intro](images/english_intro.png)

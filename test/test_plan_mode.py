@@ -231,7 +231,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("# 用户指定能力", runtime_prompt)
             self.assertIn("`browser-automation`: 浏览器自动化", runtime_prompt)
             self.assertIn("Browser automation brief", runtime_prompt)
-            self.assertIn("General skill prompt", runtime_prompt)
+            self.assertNotIn("General skill prompt", runtime_prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -516,7 +516,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_injects_full_prompt_for_query_matched_script_skill(self):
+    def test_llm_worker_does_not_inject_full_prompt_from_query_match(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -586,8 +586,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
 
             self.assertEqual(len(provider_calls), 1)
             combined = "\n\n".join(provider_calls[0]["system_messages"])
-            self.assertIn("claim-expert", combined)
-            self.assertIn("run_skill_script", combined)
+            self.assertNotIn("validate_input", combined)
             generated = finished_payloads[0]["generated_messages"]
             skill_contexts = [
                 msg for msg in generated
@@ -595,9 +594,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 and isinstance(msg.get("meta"), dict)
                 and msg["meta"].get("kind") == "skill_context"
             ]
-            self.assertEqual(len(skill_contexts), 1)
-            self.assertTrue(skill_contexts[0]["meta"].get("hidden"))
-            self.assertEqual(skill_contexts[0]["meta"].get("skill_name"), "claim-expert")
+            self.assertEqual(skill_contexts, [])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

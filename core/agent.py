@@ -824,19 +824,6 @@ class LLMWorker(QThread):
                     parts.append(content.strip())
         return "\n".join(parts)
 
-    def _append_query_matched_skill_prompts(self, current_messages, disclosed_skills, generated_messages=None):
-        selector = getattr(self.skill_manager, "get_full_disclosure_skill_names", None)
-        if not callable(selector):
-            return
-        try:
-            skill_names = selector(
-                query_text=self._build_skill_query(current_messages),
-                allowed_skill_names=self._allowed_skill_names(),
-            )
-        except TypeError:
-            skill_names = selector(self._build_skill_query(current_messages))
-        self._append_skill_prompts_for_names(skill_names, current_messages, disclosed_skills, generated_messages, source="skill_prompt_query_match")
-
     def _append_tool_search_skill_prompts(self, result_obj, current_messages, disclosed_skills, generated_messages=None):
         if not isinstance(result_obj, dict):
             return
@@ -1016,20 +1003,6 @@ class LLMWorker(QThread):
             skill_name for skill_name in self._selected_skill_names()
             if self.skill_manager.get_brief_skill_prompt(skill_name)
         ]
-        try:
-            system_skills = self.skill_manager.get_system_prompts(
-                query_text=self._build_skill_query(current_messages),
-                exclude_skill_names=selected_skill_names,
-                allowed_skill_names=self._allowed_skill_names(),
-            )
-        except TypeError:
-            system_skills = self.skill_manager.get_system_prompts(
-                query_text=self._build_skill_query(current_messages),
-            )
-        if system_skills:
-            capability_lines.append("\n# Skill Capabilities & Guidelines")
-            capability_lines.append(system_skills)
-
         dynamic_state_lines = [
             "",
             "# 当前运行状态",
@@ -1218,7 +1191,6 @@ class LLMWorker(QThread):
                 runtime_snapshot,
                 sandbox_snapshot,
             )
-            self._append_query_matched_skill_prompts(current_messages, disclosed_skills, generated_messages)
             request_messages = self._build_request_messages(current_messages, runtime_context_prompt)
             self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 

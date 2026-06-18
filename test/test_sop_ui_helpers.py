@@ -40,6 +40,8 @@ from main import (
     SOP_EXECUTOR_PYTHON_FILE,
     _MARKDOWN_RENDER_CACHE,
     render_markdown_or_html_with_cache,
+    is_auto_query_skill_context_message,
+    session_history_ready,
     skill_center_tab_key,
     skill_center_matches_filters,
     summarize_skill_terms,
@@ -63,6 +65,71 @@ class _AgentUiState:
 
 
 class SkillCenterHelperTests(unittest.TestCase):
+    def test_session_history_ready_requires_completed_load(self):
+        ready = type("State", (), {"history_loaded": True, "history_loading": False})()
+        loading = type("State", (), {"history_loaded": False, "history_loading": True})()
+
+        self.assertTrue(session_history_ready(ready))
+        self.assertFalse(session_history_ready(loading))
+        self.assertFalse(session_history_ready(None))
+
+    def test_auto_query_skill_context_detection_is_source_specific(self):
+        auto = {
+            "role": "system",
+            "meta": {"kind": "skill_context", "source": "skill_prompt_query_match"},
+        }
+        searched = {
+            "role": "system",
+            "meta": {"kind": "skill_context", "source": "skill_prompt_tool_search"},
+        }
+
+        self.assertTrue(is_auto_query_skill_context_message(auto))
+        self.assertFalse(is_auto_query_skill_context_message(searched))
+
+    def test_finish_history_load_rebinds_current_session_aliases(self):
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = "session-1"
+        window.set_current_session = MagicMock()
+        state = type(
+            "State",
+            (),
+            {"session_id": "session-1", "history_loaded": False, "history_loading": True},
+        )()
+
+        window._finish_session_history_load(state)
+
+        self.assertTrue(state.history_loaded)
+        self.assertFalse(state.history_loading)
+        window.set_current_session.assert_called_once_with("session-1")
+
+    def test_history_migration_removes_only_auto_query_skill_context(self):
+        window = MainWindow.__new__(MainWindow)
+        window.workspace_dir = ""
+        window.sessions = {}
+        window.chat_storage = MagicMock()
+        window._compute_session_title = MagicMock(return_value="demo")
+        auto = {
+            "role": "system",
+            "content": "AUTO",
+            "meta": {"kind": "skill_context", "source": "skill_prompt_query_match"},
+        }
+        searched = {
+            "role": "system",
+            "content": "SEARCHED",
+            "meta": {"kind": "skill_context", "source": "skill_prompt_tool_search"},
+        }
+        user = {"role": "user", "content": "hello"}
+
+        migrated = window._normalize_and_persist_session_messages(
+            "session-1",
+            [user, auto, searched],
+            existing_meta={"history_migration_version": 2},
+        )
+
+        self.assertEqual(migrated, [user, searched])
+        saved_messages = window.chat_storage.save_conversation.call_args.args[1]
+        self.assertEqual(saved_messages, [user, searched])
+
     def test_skill_center_tab_key_places_mcp_in_dedicated_tab(self):
         self.assertEqual(
             skill_center_tab_key({"name": "showdoc-mcp", "source_format": "mcp_server"}),

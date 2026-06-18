@@ -32,6 +32,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **聊天气泡虚拟化**：聊天区滚动时按视口 overscan 保留附近气泡，远离视口的历史气泡折叠成固定高度占位，恢复时复用原控件和缓存后的内容。
 *   **异步会话持久化**：`save_chat_history()` 只在 UI 线程里整理快照并入队，后台 `ChatSaveWorker` 按会话合并、500ms debounce 后写入 SQLite；分支、长期记忆更新、会话重命名/归档/删除和应用退出前显式 flush，避免异步保存带来的读取时序问题。
 *   **UI 到 Daemon 的上下文快照**：桌面会话交给 daemon 执行时会随请求传递当前 `state.messages` 快照；daemon 优先用该快照刷新内存会话，再追加本轮用户消息，避免 idle suspend 后从旧 SQLite 或旧缓存恢复导致上下文漂移。
+*   **历史加载一致性屏障**：异步恢复会话期间，输入和保存请求均被拦截；加载完成后通过 `set_current_session()` 重新绑定窗口消息别名。历史迁移版本 3 会移除旧 query 模糊匹配生成的隐藏 Skill 上下文，同时保留 `tool_search` 和真实工具调用产生的上下文。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
 *   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
 
@@ -81,7 +82,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - 只读并行工具：`parallel_tools` 本身作为 always-allowed 元工具可默认暴露，但每个子调用必须是已发现、当前模式允许、能力范围允许且 `read_only=True` 的工具。
 - 延迟发现刷新：`tool_search` 命中延迟工具后，下一轮会以追加方式更新 provider 的 tool schema，并在尾部 runtime context 中刷新“当前可用工具清单”；同一查询也会返回大小写不敏感匹配到的 AI skill 结果，供模型获取经验包上下文。
 - 系统提示词能力分层：稳定 system prompt 只放长期策略和工具使用原则；当前真实暴露工具、运行模式、运行时路径和 SOP 状态放在请求尾部 runtime context。Office/PDF 读取需通过可选 `document-reader` 的 `document_read`，写入则由 AI 使用代码和任务所需库生成。
-- Imported skill 全文暴露：对 imported / agent skill 继续先注入 brief；一旦 query 或 `tool_search` 命中脚本型 skill，agent loop 会把完整 skill prompt 记录为隐藏会话上下文，按 `skill_name + content_hash` 去重。第一次披露可能不命中缓存，后续轮次会作为稳定历史前缀复用。
+- Imported skill 全文暴露：默认只暴露元数据或用户明确选择的 brief；仅在明确选择、`tool_search` 命中或实际调用对应技能工具后，agent loop 才把完整 skill prompt 记录为隐藏会话上下文，并按 `skill_name + content_hash` 去重。普通用户文本不再触发本地 query 模糊匹配。
 - Imported skill 执行约束：脚本型 imported skill 会在 skill metadata 和 `tool_search.skills` 中暴露 `preferred_tool = run_skill_script`、候选脚本名和执行提示，模型不再需要通过 `glob` / `bash` 反查 skill 目录。
 - 异常 tool call 恢复：若 provider 流式返回缺少 `function.name` 的畸形 tool call，执行层会忽略该调用并追加恢复提示，而不是把这类半截调用当成正常工具步骤写入历史或 UI。
 
@@ -125,7 +126,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ## 5. 分层记忆与上下文处理
 - **系统层**：System Prompt 拆成稳定前缀与 runtime context。稳定策略、工具导航、记忆和思考规范保持在请求最前方；工作区、运行模式、日期、runtime 路径、当前工具清单、子 Agent、指定能力和 SOP 当前步骤作为请求尾部临时 system message 注入，不写入持久历史，降低 context cache 前缀失效。
 - **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
-- **技能层**：首次调用技能时注入简版能力提示；按需注入技能完整说明与经验。
+- **技能层**：默认只暴露元数据，用户明确选择时注入简版能力提示；完整说明与经验仅在明确选择、`tool_search` 命中或实际技能工具调用后按需注入。
 - **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与自动化当前步骤，影响工具可见性与 Prompt 约束。
 - **外部工具层**：MCP 配置存储在 `mcp_servers`，兼容 `type = "stdio"` / `type = "streamable_http"` 与 `startup_timeout_ms` 命名，也支持从 `mcpServers` / `mcp_servers` JSON 片段导入；当前只接入 MCP tools，不包含 resources 与 prompts。
 - **历史层**：每轮清理/折叠思考内容以避免重复；DeepSeek thinking 工具调用回合保留 `reasoning_content`，避免多轮工具回放触发协议错误。
@@ -161,7 +162,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
 - **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。
 - **控制**：`pause`、`resume`、`stop`；环路保护（重复思考/工具签名）确保安全收敛。
-- **实现要点**：流式解析四类事件，按需注入技能提示，结果写入历史后继续下一轮直至最终回答。
+- **实现要点**：流式解析四类事件；Skill 全文仅沿明确选择、`tool_search` 或实际工具调用链路注入，结果写入历史后继续下一轮直至最终回答。
 - **会话自动化状态**：Active → Awaiting Confirmation → Active/Completed，用户可在 Awaiting 状态选择确认、重跑或跳过。
 - **定时任务状态**：Enabled/Paused + next_run_at；错过触发时记录为 missed，不自动补跑。cron 语法在应用内解析，不依赖系统 crontab 服务。
 

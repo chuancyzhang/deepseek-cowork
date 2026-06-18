@@ -8202,6 +8202,22 @@ def file_chip_icon_name(path):
     return mapping.get(ext, "fa5s.file")
 
 
+def session_history_ready(state):
+    return bool(
+        state
+        and getattr(state, "history_loaded", True)
+        and not getattr(state, "history_loading", False)
+    )
+
+
+def is_auto_query_skill_context_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return bool(
+        meta.get("kind") in ("skill_context", "skill_context_update")
+        and meta.get("source") == "skill_prompt_query_match"
+    )
 class FileChip(QFrame):
     removeRequested = Signal(str)
 
@@ -15134,10 +15150,7 @@ class MainWindow(QMainWindow):
     def normalize_session_ui(self, state):
         if not state:
             return
-        history_ready = bool(
-            getattr(state, "history_loaded", True)
-            and not getattr(state, "history_loading", False)
-        )
+        history_ready = session_history_ready(state)
         running = state.llm_worker and state.llm_worker.isRunning()
         paused = running and state.llm_worker.is_paused
         running_code = state.code_worker and state.code_worker.isRunning()
@@ -15549,13 +15562,7 @@ class MainWindow(QMainWindow):
         self._rebuild_session_render_spans(state)
         self._render_initial_session_history(state)
 
-        state.history_loaded = True
-        state.history_loading = False
-        if session_id == self.current_session_id:
-            # Loading replaces the per-session containers. Rebind the window-level
-            # aliases so a later tab sync cannot write the pre-load empty objects
-            # back over the restored conversation.
-            self.set_current_session(session_id)
+        self._finish_session_history_load(state)
         self.update_session_tab_title(session_id)
         self.update_history_selection()
         self.refresh_change_list(session_id)
@@ -15565,6 +15572,17 @@ class MainWindow(QMainWindow):
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
+
+    def _finish_session_history_load(self, state):
+        if not state:
+            return
+        state.history_loaded = True
+        state.history_loading = False
+        if state.session_id == self.current_session_id:
+            # Loading replaces the per-session containers. Rebind the window-level
+            # aliases so a later tab sync cannot write the pre-load empty objects
+            # back over the restored conversation.
+            self.set_current_session(state.session_id)
 
     def load_session(self, session_id):
         self.activate_session(session_id)
@@ -17048,14 +17066,8 @@ class MainWindow(QMainWindow):
         except Exception:
             normalized_messages = source_messages
         normalized_messages = [
-            msg
-            for msg in normalized_messages
-            if not (
-                isinstance(msg, dict)
-                and isinstance(msg.get("meta"), dict)
-                and msg["meta"].get("kind") in ("skill_context", "skill_context_update")
-                and msg["meta"].get("source") == "skill_prompt_query_match"
-            )
+            msg for msg in normalized_messages
+            if not is_auto_query_skill_context_message(msg)
         ]
         deduped_messages = []
         for msg in normalized_messages:
@@ -17162,7 +17174,7 @@ class MainWindow(QMainWindow):
     def _build_chat_save_request(self, state):
         if not state:
             return None
-        if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
+        if not session_history_ready(state):
             return None
         has_clarify_state = bool(
             state.clarify_mode_enabled
@@ -18881,7 +18893,7 @@ class MainWindow(QMainWindow):
     ):
         if not state:
             return False
-        if getattr(state, "history_loading", False) or not getattr(state, "history_loaded", True):
+        if not session_history_ready(state):
             if state.session_id == self.current_session_id:
                 self.add_system_toast(
                     "历史会话仍在加载，加载完成后再发送。",

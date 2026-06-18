@@ -17667,12 +17667,11 @@ class MainWindow(QMainWindow):
             "- 如果文件名冲突，请追加时间戳。\n"
             "- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。"
         )
-        session_id = self.create_new_session(
-            title=f"生成 {target_format.upper()}",
-            make_current=True,
-            workspace_dir=self._workspace_dir_for_state(),
-        )
-        state = self.get_session(session_id)
+        state = self.get_current_session()
+        if not state:
+            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
+            return
+        session_id = state.session_id
         self._set_prompt_files([path], session_id=session_id, refresh=True)
         submitted = self._submit_session_request(
             state,
@@ -17682,7 +17681,7 @@ class MainWindow(QMainWindow):
             clear_current_input=True,
         )
         if submitted:
-            self.add_system_toast(f"已创建普通对话生成 {target_format.upper()}", "info", session_id=session_id, auto_close_ms=3200)
+            self.add_system_toast(f"已在当前对话中开始生成 {target_format.upper()}", "info", session_id=session_id, auto_close_ms=3200)
 
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""

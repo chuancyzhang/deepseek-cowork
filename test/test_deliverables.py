@@ -2,10 +2,11 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import MagicMock
 
 from PySide6.QtWidgets import QApplication
 
-from main import EmptyStateWidget, scan_workspace_deliverables
+from main import EmptyStateWidget, MainWindow, scan_workspace_deliverables
 
 
 class TestDeliverableScanning(unittest.TestCase):
@@ -74,6 +75,44 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(main_window.input_field.text, html_card[2])
         finally:
             widget.deleteLater()
+
+    def test_conversion_continues_in_current_conversation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"session_id": "current-session"})()
+            window.current_deliverable_path = html_path
+            window.workspace_dir = tmp
+            window._workspace_dir_for_state = MagicMock(return_value=tmp)
+            window.get_current_session = MagicMock(return_value=state)
+            window.get_session = MagicMock()
+            window.create_new_session = MagicMock()
+            window._set_prompt_files = MagicMock()
+            window._submit_session_request = MagicMock(return_value=True)
+            window.add_system_toast = MagicMock()
+
+            window.start_deliverable_conversion("pptx")
+
+            window.create_new_session.assert_not_called()
+            window.get_session.assert_not_called()
+            window._set_prompt_files.assert_called_once_with(
+                [html_path], session_id="current-session", refresh=True
+            )
+            submit_call = window._submit_session_request.call_args
+            self.assertIs(submit_call.args[0], state)
+            self.assertIn("生成 PPTX 办公文件", submit_call.args[1])
+            self.assertEqual(submit_call.args[2], [html_path])
+            self.assertFalse(submit_call.kwargs["check_duplicates"])
+            self.assertTrue(submit_call.kwargs["clear_current_input"])
+            window.add_system_toast.assert_called_once_with(
+                "已在当前对话中开始生成 PPTX",
+                "info",
+                session_id="current-session",
+                auto_close_ms=3200,
+            )
 
 
 if __name__ == "__main__":

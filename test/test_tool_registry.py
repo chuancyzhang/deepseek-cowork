@@ -176,6 +176,48 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("read_note", clarifying_tools)
         self.assertNotIn("write_note", clarifying_tools)
 
+    def test_chat_only_mode_hides_workspace_tools_from_definitions_and_search(self):
+        skill_dir = os.path.join(self.skills_dir, "mixed-tools")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "impl.py"), "w", encoding="utf-8") as f:
+            f.write(
+                "def local_lookup(workspace_dir, query):\n"
+                "    return query\n\n"
+                "def public_lookup(query):\n"
+                "    return query\n\n"
+                "TOOL_EXPORTS = [\n"
+                "    {'name': 'local_lookup', 'handler': local_lookup, 'description': 'local lookup', "
+                "'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},\n"
+                "    {'name': 'public_lookup', 'handler': public_lookup, 'description': 'public lookup', "
+                "'parameters': {'type': 'object', 'properties': {'query': {'type': 'string'}}, 'required': ['query']}},\n"
+                "]\n"
+            )
+        sm = self._build_manager()
+        discovered = {"local_lookup", "public_lookup"}
+
+        visible = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=discovered,
+                run_context={"mode": RUN_MODE_EXECUTION, "workspace_mode": "chat_only"},
+            )
+        }
+        self.assertNotIn("local_lookup", visible)
+        self.assertIn("public_lookup", visible)
+
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "lookup", "include_loaded": True},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION, "workspace_mode": "chat_only"},
+                "discovered_tool_names": set(),
+            },
+        )
+        names = {item["name"] for item in result.get("tools", [])}
+        self.assertNotIn("local_lookup", names)
+        self.assertIn("public_lookup", names)
+
     def test_parallel_tools_visible_by_default_in_execution_mode(self):
         self._copy_repo_skill("meta-tools")
         sm = self._build_manager()

@@ -670,6 +670,7 @@ class SkillManager:
             kind=tool_kind,
             runtime_binding={"type": "python_function", "skill_name": skill_name},
             skill_refs=[skill_name],
+            metadata={"requires_workspace": "workspace_dir" in sig.parameters},
         )
         if not record:
             return
@@ -747,6 +748,12 @@ class SkillManager:
             metadata={
                 "requires_user_interaction": bool(export.get("requires_user_interaction")),
                 "result_format": str(export.get("result_format") or ""),
+                "requires_workspace": bool(
+                    export.get(
+                        "requires_workspace",
+                        export.get("requiresWorkspace", "workspace_dir" in inspect.signature(func).parameters),
+                    )
+                ),
                 **(dict(export.get("metadata")) if isinstance(export.get("metadata"), dict) else {}),
             },
         )
@@ -900,6 +907,7 @@ class SkillManager:
         )
         results = self._filter_results_by_allowed_skills(results, run_context)
         results = self._filter_enterprise_tool_results(results, run_context)
+        results = self._filter_workspace_tool_results(results, run_context)
         skill_results = self._search_skills(query, limit=limit, run_context=run_context)
         if (
             self._is_enterprise_tool_allowed("publish_artifacts", run_context)
@@ -2191,6 +2199,7 @@ class SkillManager:
         )
         definitions = self._filter_definitions_by_allowed_skills(definitions, run_context)
         definitions = self._filter_enterprise_tool_definitions(definitions, run_context)
+        definitions = self._filter_workspace_tool_definitions(definitions, run_context)
         if self._is_enterprise_tool_allowed("publish_artifacts", run_context):
             publish_definition = self._get_tool_definition("publish_artifacts")
             if publish_definition and not any(
@@ -2200,6 +2209,30 @@ class SkillManager:
             ):
                 definitions.append(publish_definition)
         return definitions
+
+    def _workspace_tools_enabled(self, run_context):
+        ctx = self._normalize_run_context_for_tools(run_context)
+        return (ctx.get("workspace_mode") or "project") == "project"
+
+    def _tool_requires_workspace(self, name):
+        record = self.tool_registry.get(name)
+        return bool(record and record.requires_workspace)
+
+    def _filter_workspace_tool_results(self, results, run_context):
+        if self._workspace_tools_enabled(run_context):
+            return list(results or [])
+        return [item for item in (results or []) if not self._tool_requires_workspace(item.get("name"))]
+
+    def _filter_workspace_tool_definitions(self, definitions, run_context):
+        if self._workspace_tools_enabled(run_context):
+            return list(definitions or [])
+        filtered = []
+        for item in definitions or []:
+            function = item.get("function") if isinstance(item, dict) else None
+            name = function.get("name") if isinstance(function, dict) else ""
+            if not self._tool_requires_workspace(name):
+                filtered.append(item)
+        return filtered
 
     def _get_tool_definition(self, name):
         record = self.tool_registry.get(name)

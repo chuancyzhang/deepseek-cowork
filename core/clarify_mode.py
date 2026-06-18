@@ -157,6 +157,7 @@ def normalize_run_context(run_context):
         "selected_model_id": str(ctx.get("selected_model_id") or "").strip(),
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
         "channel": str(ctx.get("channel") or "").strip().lower(),
+        "workspace_mode": "chat_only" if str(ctx.get("workspace_mode") or "").strip().lower() == "chat_only" else "project",
         "sop_run": normalize_sop_run(ctx.get("sop_run")),
     }
 

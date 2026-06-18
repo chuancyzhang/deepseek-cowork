@@ -359,3 +359,9 @@ def apply_theme(app, theme="auto"):
     base_sheet = qdarktheme.load_stylesheet(mode)
     tech_sheet = get_tech_stylesheet(mode)
     app.setStyleSheet(base_sheet + "\n" + tech_sheet)
+    # Native tooltip windows may still read palette roles on Windows.
+    from PySide6.QtGui import QColor, QPalette
+    palette = app.palette()
+    palette.setColor(QPalette.ToolTipBase, QColor(DesignTokens.bg_main))
+    palette.setColor(QPalette.ToolTipText, QColor(DesignTokens.text_primary))
+    app.setPalette(palette)

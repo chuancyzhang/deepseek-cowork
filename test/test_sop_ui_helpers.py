@@ -719,6 +719,37 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertNotIn("展开显示", self._history_button_texts(window))
         self.assertNotIn("收起全部", self._history_button_texts(window))
 
+    def test_top_new_conversation_creates_unassigned_session(self):
+        window = MainWindow.__new__(MainWindow)
+        window.create_new_session = MagicMock(return_value="chat-only")
+        window.refresh_history_list = MagicMock()
+
+        window.new_conversation()
+
+        window.create_new_session.assert_called_once_with(workspace_dir="")
+        window.refresh_history_list.assert_called_once()
+
+    def test_build_run_context_marks_chat_only_without_workspace(self):
+        window = MainWindow.__new__(MainWindow)
+        window.config_manager = MagicMock()
+        window.config_manager.get_selected_model_id.return_value = "model"
+        window._effective_sop_skill_names = MagicMock(return_value=[])
+        state = type(
+            "_Session",
+            (),
+            {
+                "workspace_dir": "",
+                "persisted_conversation_meta": {},
+                "clarify_mode_state": "exploring",
+                "pending_clarify_questions": [],
+                "sop_run": None,
+            },
+        )()
+
+        context = window._build_run_context(state, "execution")
+
+        self.assertEqual(context["workspace_mode"], "chat_only")
+
     def test_session_activity_indicator_runs_only_for_live_runtime_state(self):
         window = MainWindow.__new__(MainWindow)
         state = _HistoryActionState("session-1")

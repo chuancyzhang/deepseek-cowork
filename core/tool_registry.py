@@ -115,6 +115,10 @@ class ToolRecord:
     skill_refs: list = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
+    @property
+    def requires_workspace(self):
+        return bool(self.metadata.get("requires_workspace", False))
+
     def to_definition(self):
         return {
             "type": "function",

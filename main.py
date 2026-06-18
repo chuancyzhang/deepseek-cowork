@@ -897,6 +897,25 @@ def apple_sidebar_action_button_style(selected=False):
     )
 
 
+def sidebar_plus_icon(color, size=16):
+    """Draw a plus icon without relying on an optional icon-font glyph."""
+    pixel_size = max(12, int(size))
+    pixmap = QPixmap(pixel_size, pixel_size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.8, pixel_size / 7.0))
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    center = pixel_size // 2
+    inset = max(3, pixel_size // 4)
+    painter.drawLine(QPoint(center, inset), QPoint(center, pixel_size - inset))
+    painter.drawLine(QPoint(inset, center), QPoint(pixel_size - inset, center))
+    painter.end()
+    return QIcon(pixmap)
+
+
 def apple_inline_project_chip_style(active=False):
     bg = rgba_from_hex(DesignTokens.primary, 0.10) if active else "rgba(255, 255, 255, 0.72)"
     color = DesignTokens.success_text if active else DesignTokens.text_secondary
@@ -11969,6 +11988,10 @@ class MainWindow(QMainWindow):
         self.ws_label = QLabel("当前文件夹: 未选择")
         self.ws_label.setText("当前项目：未选择")
         self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
+        self.connect_project_btn = QPushButton("连接项目")
+        self.connect_project_btn.setCursor(Qt.PointingHandCursor)
+        self.connect_project_btn.setStyleSheet(apple_button_style("secondary", radius=12))
+        self.connect_project_btn.clicked.connect(self.select_workspace)
         self.security_badge = QLabel("安全范围：仅工作区")
         self.security_badge.setStyleSheet(f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
         self.security_badge.hide()
@@ -11984,7 +12007,9 @@ class MainWindow(QMainWindow):
         self.ws_btn = QPushButton()
         self.ws_btn.hide()
         
+        ws_layout.setSpacing(8)
         ws_layout.addWidget(self.ws_label)
+        ws_layout.addWidget(self.connect_project_btn)
         top_bar.addWidget(ws_container)
 
         self.context_rail = QFrame()
@@ -13418,9 +13443,12 @@ class MainWindow(QMainWindow):
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(True))
         else:
             self.input_field.setEnabled(True)
-            self.input_field.setPlaceholderText("先在左侧选择项目，再开始描述你要处理的任务")
-            self.action_btn.setEnabled(False)
+            self.input_field.setPlaceholderText("直接开始对话；需要处理文件时再连接项目")
+            self.action_btn.setEnabled(True)
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
+            self.ws_label.setText("未连接项目 · 纯对话")
+        if hasattr(self, "connect_project_btn"):
+            self.connect_project_btn.setVisible(not bool(self.workspace_dir))
         self.refresh_context_badges()
 
     def refresh_context_badges(self, session_id=None):
@@ -15197,9 +15225,10 @@ class MainWindow(QMainWindow):
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
             workspace_dir = self._workspace_dir_for_state(state)
-            self.action_btn.setEnabled(bool(workspace_dir) and history_ready)
-            self.input_field.setEnabled(bool(workspace_dir) and history_ready)
+            self.action_btn.setEnabled(history_ready)
+            self.input_field.setEnabled(history_ready)
             self.tool_menu_btn.setEnabled(bool(workspace_dir) and history_ready)
+            self.tool_menu_btn.setToolTip("" if workspace_dir else "连接项目后可添加文件、自动化和本地能力")
             self.stop_btn.setVisible(False)
             if not history_ready:
                 self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
@@ -15208,6 +15237,8 @@ class MainWindow(QMainWindow):
                 self.input_field.setPlaceholderText("请先在聊天中的自动化确认条处理当前步骤")
             elif workspace_dir:
                 self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
+            else:
+                self.input_field.setPlaceholderText("直接开始对话；需要处理文件时再连接项目")
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
@@ -16215,7 +16246,7 @@ class MainWindow(QMainWindow):
         action_icon_size = QSize(12, 12)
 
         new_btn = QToolButton()
-        new_btn.setIcon(qta.icon('fa5s.plus', color=DesignTokens.primary if selected else DesignTokens.text_tertiary))
+        new_btn.setIcon(sidebar_plus_icon(DesignTokens.primary if selected else DesignTokens.text_secondary, 16))
         new_btn.setToolTip("在此项目中新建对话")
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.setFixedSize(26, 26)
@@ -17246,11 +17277,7 @@ class MainWindow(QMainWindow):
         event.acceptProposedAction()
 
     def new_conversation(self):
-        workspace_dir = self._active_workspace_dir()
-        if not workspace_dir:
-            QMessageBox.information(self, "新建对话", "请先在左侧添加或选择一个项目。")
-            return
-        self.create_new_session(workspace_dir=workspace_dir)
+        self.create_new_session(workspace_dir="")
         self.refresh_history_list()
 
     def _session_base_meta(self, state):
@@ -17495,7 +17522,11 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "选择工作区")
         if directory:
             self.config_manager.upsert_project(directory)
-            self.load_workspace(directory)
+            if self.load_workspace(directory, refresh_sidebar=False):
+                state = self.get_current_session()
+                if state and state.messages:
+                    self.save_chat_history(session_id=state.session_id, flush=True)
+                self.refresh_history_list()
 
     def load_workspace(self, directory, refresh_sidebar=True, session_id=None, remember_workspace=True, persist_default=True):
         directory = self._normalize_project_path(directory)
@@ -18605,6 +18636,7 @@ class MainWindow(QMainWindow):
                 ),
                 "selected_skill_names": effective_skill_names,
                 "selected_model_id": self.config_manager.get_selected_model_id(),
+                "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
                 "sop_run": normalize_sop_run(getattr(state, "sop_run", None)),
             }
         )
@@ -18648,6 +18680,7 @@ class MainWindow(QMainWindow):
                 "agent_description": profile.get("description"),
                 "agent_system_prompt": profile.get("system_prompt"),
                 "agent_summon_source": summon_source,
+                "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
                 "sop_run": normalize_sop_run(getattr(state, "sop_run", None)) if state else None,
             }
         )
@@ -19143,9 +19176,6 @@ class MainWindow(QMainWindow):
 
     def handle_send(self):
         state = self.get_current_session()
-        if not self._workspace_dir_for_state(state):
-            QMessageBox.warning(self, "提示", "请先选择一个工作区目录！")
-            return
         self._submit_session_request(
             state,
             self.input_field.toPlainText().strip(),

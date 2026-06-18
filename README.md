@@ -34,7 +34,8 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: A calmer blue-and-white desktop surface with modern chat bubbles, markdown rendering, tool-call cards, and a dynamically sized conversation column that keeps a Codex-like reading width across wide and narrow windows.
-*   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, and keeps each project collapsed by default with only a short preview of conversations. Clicking a project header now only expands or collapses that project's conversation list, while the row `+` button creates a new conversation bound to that project. The top-right `当前项目` chip, file tree, and deliverables drawer always follow the currently visible conversation instead of the last browsed project header, so an in-progress conversation never looks attached to the wrong workspace.
+*   **Project Sidebar**: The top `新建对话` action always starts a workspace-free chat, while each project row `+` creates a project-bound task. The plus icon is drawn by Qt for reliable cross-platform and high-DPI rendering, and sidebar tooltips use a consistent light surface. Project headers only expand or collapse their conversations; workspace context follows the visible conversation.
+*   **Workspace-free Chat**: Users can ask questions before selecting a project. The UI shows `未连接项目 · 纯对话` and withholds local file, command, and automation tools. `连接项目` preserves the current context and binds the conversation to the chosen workspace.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, deliverables, observability, and sub-agent status; the drawer still floats over the main area, but its width now participates in the same three-column layout calculation as the conversation column and reserves a safe reading boundary so child panels do not overlap the chat area. Sub-agent activity lights the panel hint without forcing the drawer open.
 *   **Deliverables Preview**: The drawer can discover workspace HTML, images, PDF, DOCX, PPTX, and XLSX outputs. HTML files can be rendered in place, refreshed after edits, and passed back into the current conversation to generate PPTX, DOCX, or PDF files with the existing toolchain.
 *   **Prompt Cache Observability**: The system-prompt pane separates the stable prefix, per-turn runtime context, and disclosed skill context, while the observability log focuses on cached input tokens and cache hit rate when the provider reports usage.
@@ -125,7 +126,7 @@ The settings window uses a left category list with lightweight borderless prefer
 *   **Extended Permissions**: control whether the assistant may step outside the workspace sandbox for higher-risk actions.
 
 ### 2. Select Project
-Add a local folder in the sidebar **项目** section. A project is the workspace boundary for file access, and each conversation stays bound to its own project. Clicking a project header only reveals that project's conversations; switch projects by opening the target conversation or by using the project row `+` button to start a new bound conversation there.
+Use the top **新建对话** action for a workspace-free chat. For local file work, add a folder under **项目** and use its `+`, or choose **连接项目** from the current chat. A project remains the workspace boundary for file access.
 
 ### 3. Start Automating
 Examples:

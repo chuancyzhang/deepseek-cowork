@@ -622,6 +622,100 @@ class TestSopUiHelpers(unittest.TestCase):
             self._history_session_ids(window),
             ["session-0", "session-1", "session-2", "session-3", "session-4"],
         )
+
+    def test_handle_project_click_only_toggles_project_visibility(self):
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        active_workspace = os.path.join(temp_dir, "active")
+        clicked_workspace = os.path.join(temp_dir, "clicked")
+        os.makedirs(active_workspace)
+        os.makedirs(clicked_workspace)
+
+        window = MainWindow.__new__(MainWindow)
+        window.project_preview_paths = set()
+        window.project_full_expanded_paths = set()
+        window.current_project_path = ""
+        window.current_session_id = "current"
+        window.workspace_dir = active_workspace
+        window.sessions = {
+            "current": type(
+                "_Session",
+                (),
+                {"workspace_dir": active_workspace, "persisted_conversation_meta": {"workspace_dir": active_workspace}},
+            )()
+        }
+        window.config_manager = MagicMock()
+        window.refresh_history_list = MagicMock()
+
+        ok = window.handle_project_click(clicked_workspace)
+
+        self.assertTrue(ok)
+        self.assertEqual(window.current_project_path, os.path.normpath(clicked_workspace))
+        self.assertEqual(window.sessions["current"].workspace_dir, active_workspace)
+        self.assertEqual(window.workspace_dir, active_workspace)
+        self.assertIn(os.path.normpath(clicked_workspace), window.project_preview_paths)
+        window.refresh_history_list.assert_called_once()
+        window.config_manager.upsert_project.assert_called_once_with(os.path.normpath(clicked_workspace))
+
+    def test_compose_session_meta_keeps_session_workspace(self):
+        window = MainWindow.__new__(MainWindow)
+        session_workspace = os.path.normpath("D:/workspace/session")
+        window.workspace_dir = os.path.normpath("D:/workspace/window")
+        state = type(
+            "_Session",
+            (),
+            {
+                "workspace_dir": session_workspace,
+                "persisted_conversation_meta": {"workspace_dir": session_workspace},
+                "run_phase": "Idle",
+                "session_status": "draft",
+                "has_file_changes": False,
+                "clarify_mode_enabled": False,
+                "pending_clarify_questions": [],
+                "selected_skill_names": [],
+                "sop_run": None,
+                "conversation_branch": None,
+            },
+        )()
+
+        meta = window._compose_session_meta(state)
+
+        self.assertEqual(meta["workspace_dir"], session_workspace)
+
+    def test_new_conversation_for_project_binds_new_session_workspace(self):
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        active_workspace = os.path.join(temp_dir, "active")
+        target_workspace = os.path.join(temp_dir, "target")
+        os.makedirs(active_workspace)
+        os.makedirs(target_workspace)
+
+        window = MainWindow.__new__(MainWindow)
+        window.current_project_path = ""
+        window.current_session_id = "current"
+        window.workspace_dir = active_workspace
+        window.sessions = {
+            "current": type(
+                "_Session",
+                (),
+                {"workspace_dir": active_workspace, "persisted_conversation_meta": {"workspace_dir": active_workspace}},
+            )()
+        }
+        window.config_manager = MagicMock()
+        window.refresh_history_list = MagicMock()
+        captured = {}
+
+        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
+            captured["workspace_dir"] = workspace_dir
+            return "new-session"
+
+        window.create_new_session = create_new_session
+
+        window.new_conversation_for_project(target_workspace)
+
+        self.assertEqual(captured["workspace_dir"], os.path.normpath(target_workspace))
+        self.assertEqual(window.sessions["current"].workspace_dir, active_workspace)
+        window.config_manager.upsert_project.assert_called_once_with(os.path.normpath(target_workspace))
         self.assertNotIn("展开显示", self._history_button_texts(window))
         self.assertNotIn("收起全部", self._history_button_texts(window))
 
@@ -1108,7 +1202,7 @@ class TestSopUiHelpers(unittest.TestCase):
 
         created_states = {}
 
-        def create_new_session(session_id=None, title=None, make_current=True):
+        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
             state = type("_ForkState", (), {})()
             state.session_id = session_id
             state.selected_skill_names = []
@@ -1330,7 +1424,7 @@ class TestSopUiHelpers(unittest.TestCase):
         parent_state = _HistoryActionState("parent", parent_messages)
         created_states = {}
 
-        def create_new_session(session_id=None, title=None, make_current=True):
+        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
             state = _HistoryActionState(session_id)
             created_states[session_id] = state
             return session_id
@@ -1394,7 +1488,7 @@ class TestSopUiHelpers(unittest.TestCase):
         parent_state = _HistoryActionState("parent", parent_messages)
         created_states = {}
 
-        def create_new_session(session_id=None, title=None, make_current=True):
+        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
             state = _HistoryActionState(session_id)
             created_states[session_id] = state
             return session_id

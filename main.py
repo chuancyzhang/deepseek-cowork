@@ -274,6 +274,7 @@ BACKGROUND_DAEMON_MONITOR_DELAY_MS = 1800
 BACKGROUND_AUTOMATION_START_DELAY_MS = 2400
 GATEWAY_START_SETTLE_DELAY_MS = 1200
 STARTUP_LOG_FILENAME = "startup.log"
+UI_ERROR_LOG_FILENAME = "ui_error.log"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
 
@@ -326,6 +327,15 @@ def log_startup_stage(stage, **fields):
     for key, value in fields.items():
         parts.append(f"{key}={value}")
     append_background_process_log(STARTUP_LOG_FILENAME, " ".join(parts))
+
+
+def log_ui_exception(receiver, event, exception_text):
+    receiver_name = type(receiver).__name__ if receiver is not None else "None"
+    event_type = event.type() if event is not None else "None"
+    append_background_process_log(
+        UI_ERROR_LOG_FILENAME,
+        f"receiver={receiver_name} event={event_type}\n{str(exception_text or '').rstrip()}",
+    )
 
 
 _MARKDOWN_RENDER_CACHE = OrderedDict()
@@ -1571,10 +1581,12 @@ class SafeApplication(QApplication):
         try:
             return super().notify(receiver, event)
         except Exception:
-            traceback.print_exc()
+            exception_text = traceback.format_exc()
+            print(exception_text, file=sys.stderr, end="")
+            log_ui_exception(receiver, event, exception_text)
             if self.main_window:
                 try:
-                    self.main_window.add_system_toast("程序遇到异常，已继续运行", "error")
+                    self.main_window.add_system_toast("程序遇到异常，详情已写入 ui_error.log", "error")
                 except Exception:
                     pass
             return False
@@ -9889,16 +9901,16 @@ class SessionActivityIndicator(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        size = DesignTokens.activity_indicator_size
-        self.setFixedSize(size, size)
-        self.setToolTip("运行中")
-        self.setAccessibleName("运行中")
-        self.setVisible(False)
         self._angle = 90
         self._running = False
         self._timer = QTimer(self)
         self._timer.setInterval(DesignTokens.activity_indicator_interval_ms)
         self._timer.timeout.connect(self._advance)
+        size = DesignTokens.activity_indicator_size
+        self.setFixedSize(size, size)
+        self.setToolTip("运行中")
+        self.setAccessibleName("运行中")
+        self.setVisible(False)
 
     def setRunning(self, running):
         running = bool(running)

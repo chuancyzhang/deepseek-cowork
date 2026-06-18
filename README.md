@@ -61,6 +61,7 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 *   **Lightweight Long-Reply Rendering**: Very long assistant responses stay fully visible; streaming output may use a temporary plain-text path, while final Markdown/HTML replies keep rich rendering unless the text is extremely large and plain.
 *   **Hidden Windows Console Launches**: Python, Bash, updater fallback, updater relaunch, app launch, and system-tool subprocesses share a no-window launch path on Windows to avoid flashing CMD windows during normal use.
 *   **On-Demand Runtime Diagnostics**: High-frequency sub-agent lifecycle diagnostics are off by default; set `COWORK_RUNTIME_DEBUG_LOG=1` to write `sub_agent_runtime.log` under the app data directory, or `user_data/` in portable mode.
+*   **Persistent UI Exception Diagnostics**: The global UI event guard still prevents one event failure from immediately interrupting the app, while always writing the full traceback to `ui_error.log` under the app data directory or portable `user_data/`; the in-app notice points to that log instead of hiding the root cause behind a generic continuation message.
 *   **Manual Feedback Controls**: Sidebar actions expose `更新长期记忆` and `沉淀为 Skill`, keeping humans in the loop before reusable knowledge is saved.
 
 ### 🛰️ Daemon & IM Gateway

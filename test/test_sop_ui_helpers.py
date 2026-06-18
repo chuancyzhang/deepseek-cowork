@@ -30,6 +30,7 @@ from main import (
     MainWindow,
     SessionActivityIndicator,
     SessionState,
+    UI_ERROR_LOG_FILENAME,
     SkillsCenterDialog,
     SopTemplateManager,
     SystemToast,
@@ -45,6 +46,7 @@ from main import (
     skill_center_tab_key,
     skill_center_matches_filters,
     summarize_skill_terms,
+    log_ui_exception,
 )
 from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData
 from PySide6.QtGui import QTextOption, QShowEvent
@@ -636,6 +638,28 @@ class TestSopUiHelpers(unittest.TestCase):
 
         state.live_activity = True
         self.assertTrue(window._session_has_live_activity(state.session_id))
+
+    def test_session_activity_indicator_is_safe_when_initially_hidden(self):
+        app = QApplication.instance() or QApplication([])
+
+        indicator = SessionActivityIndicator()
+
+        self.assertFalse(indicator.isVisible())
+        self.assertFalse(indicator._timer.isActive())
+
+    def test_ui_exception_log_keeps_full_traceback_context(self):
+        receiver = QWidget()
+        event = QEvent(QEvent.Hide)
+        traceback_text = "Traceback (most recent call last):\nAttributeError: timer missing"
+
+        with patch("main.append_background_process_log") as append_log:
+            log_ui_exception(receiver, event, traceback_text)
+
+        filename, message = append_log.call_args.args
+        self.assertEqual(filename, UI_ERROR_LOG_FILENAME)
+        self.assertIn("receiver=QWidget", message)
+        self.assertIn("event=", message)
+        self.assertIn(traceback_text, message)
 
     def test_set_session_status_updates_sidebar_activity_without_rebuilding_history(self):
         app = QApplication.instance() or QApplication([])

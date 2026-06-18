@@ -9842,6 +9842,68 @@ class SubAgentMonitorWindow(QDialog):
         self.monitor = SubAgentMonitor()
         layout.addWidget(self.monitor)
 
+class SessionActivityIndicator(QWidget):
+    """Small, quiet activity ring used by live conversations in the sidebar."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        size = DesignTokens.activity_indicator_size
+        self.setFixedSize(size, size)
+        self.setToolTip("运行中")
+        self.setAccessibleName("运行中")
+        self.setVisible(False)
+        self._angle = 90
+        self._running = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(DesignTokens.activity_indicator_interval_ms)
+        self._timer.timeout.connect(self._advance)
+
+    def setRunning(self, running):
+        running = bool(running)
+        if self._running == running:
+            return
+        self._running = running
+        self.setVisible(running)
+        if running and self.isVisible():
+            self._timer.start()
+        else:
+            self._timer.stop()
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._running:
+            self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _advance(self):
+        self._angle = (self._angle - 24) % 360
+        self.update()
+
+    def paintEvent(self, event):
+        if not self._running:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(2, 2, -2, -2)
+
+        track = QColor(DesignTokens.border_strong)
+        track.setAlpha(110)
+        track_pen = QPen(track)
+        track_pen.setWidthF(DesignTokens.activity_indicator_stroke)
+        painter.setPen(track_pen)
+        painter.drawEllipse(rect)
+
+        active_pen = QPen(QColor(DesignTokens.primary))
+        active_pen.setWidthF(DesignTokens.activity_indicator_stroke)
+        active_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(active_pen)
+        painter.drawArc(rect, self._angle * 16, 104 * 16)
+
+
 class SessionState:
     def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll):
         self.session_id = session_id
@@ -9878,6 +9940,9 @@ class SessionState:
         self.pending_thinking_delta = ""
         self.run_phase = "待开始"
         self.session_status = "draft"
+        # Runtime-only UI state. Persisted `running` records must not look live
+        # after an application restart.
+        self.live_activity = False
         self.has_file_changes = False
         self.changed_files = []
         self.auto_scroll_enabled = True
@@ -11936,8 +12001,12 @@ class MainWindow(QMainWindow):
         self.session_tabs = QTabWidget()
         self.session_tabs.setObjectName("SessionTabs")
         self.session_tabs.setDocumentMode(True)
-        self.session_tabs.setTabsClosable(True)
-        self.session_tabs.setTabBarAutoHide(True)
+        # The sidebar is the single conversation navigator. QTabWidget remains
+        # an internal stacked container so existing per-session lifecycle code
+        # can continue to switch and dispose pages safely.
+        self.session_tabs.setTabsClosable(False)
+        self.session_tabs.setTabBarAutoHide(False)
+        self.session_tabs.tabBar().hide()
         self.session_tabs.setMinimumWidth(DesignTokens.conversation_min_width)
         self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
         self.session_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
@@ -11947,26 +12016,6 @@ class MainWindow(QMainWindow):
                 border: 1px solid {DesignTokens.border_subtle};
                 border-radius: 28px;
                 background: rgba(255, 255, 255, 0.74);
-                top: -1px;
-            }}
-            QTabBar::tab {{
-                background: rgba(255, 255, 255, 0.64);
-                border: 1px solid transparent;
-                padding: 8px 14px;
-                margin-right: 6px;
-                border-radius: 14px;
-                color: {DesignTokens.text_secondary};
-                font-size: 12px;
-                font-weight: 600;
-            }}
-            QTabBar::tab:hover {{
-                background: rgba(255, 255, 255, 0.9);
-                color: {DesignTokens.text_primary};
-            }}
-            QTabBar::tab:selected {{
-                background: {DesignTokens.primary_soft};
-                border-color: {rgba_from_hex(DesignTokens.primary, 0.16)};
-                color: {DesignTokens.primary};
             }}
             """
         )
@@ -13950,18 +13999,39 @@ class MainWindow(QMainWindow):
                 self.loop_hint.setText(phase or "处理中")
             self.refresh_context_badges(state.session_id)
 
+    def _session_has_live_activity(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return False
+        return bool(getattr(state, "live_activity", False))
+
+    def refresh_session_activity_indicator(self, session_id):
+        indicators = getattr(self, "history_activity_indicators", {})
+        indicator = indicators.get(session_id)
+        if not indicator:
+            return
+        running = self._session_has_live_activity(session_id)
+        indicator.setRunning(running)
+        age_label = getattr(self, "history_age_labels", {}).get(session_id)
+        if age_label:
+            age_label.setVisible(not running and bool(age_label.text()))
+
     def set_session_status(self, status, session_id=None, save=False):
         state = self.get_session(session_id)
         if not state:
             return
         state.session_status = status
+        if status == "running":
+            state.live_activity = True
+        elif status in {"completed", "error", "interrupted", "draft"}:
+            state.live_activity = False
         if status in {"completed", "error", "interrupted"}:
             self._mark_session_automation_completed(state, status)
         if save and state.messages:
             self.save_chat_history(session_id=state.session_id)
+        self.refresh_session_activity_indicator(state.session_id)
         if state.session_id == self.current_session_id:
             self.refresh_context_badges(state.session_id)
-            self.refresh_history_list()
 
     def refresh_change_list(self, session_id=None):
         state = self.get_session(session_id)
@@ -15164,6 +15234,7 @@ class MainWindow(QMainWindow):
 
         tab_title = title or "新对话"
         tab_index = self.session_tabs.addTab(session_widget, tab_title)
+        self.session_tabs.tabBar().hide()
 
         state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
         state.content_flush_timer = QTimer(self)
@@ -15209,6 +15280,7 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
         state.llm_worker = None
+        state.live_activity = False
         state.auto_scroll_enabled = True
         state.pending_scroll_force = False
         state.active_turn_id = 0
@@ -15921,15 +15993,20 @@ class MainWindow(QMainWindow):
         row_layout.addWidget(btn, 1)
 
         age = self._format_project_session_age(entry.get("updated_at"))
-        if age:
-            age_label = QLabel(age)
-            age_label.setStyleSheet(
-                f"color: {DesignTokens.text_tertiary}; font-size: 11px; background: transparent; border: none;"
-            )
-            row_layout.addWidget(age_label)
+        age_label = QLabel(age or "")
+        age_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 11px; background: transparent; border: none;"
+        )
+        row_layout.addWidget(age_label)
+
+        activity_indicator = SessionActivityIndicator(row)
+        row_layout.addWidget(activity_indicator, 0, Qt.AlignVCenter)
 
         self.history_rows[session_id] = row
         self.history_buttons[session_id] = btn
+        self.history_age_labels[session_id] = age_label
+        self.history_activity_indicators[session_id] = activity_indicator
+        self.refresh_session_activity_indicator(session_id)
         return row
 
     def _make_project_row(self, project, sessions, query=""):
@@ -16283,6 +16360,8 @@ class MainWindow(QMainWindow):
         self.history_container.setUpdatesEnabled(False)
         self.history_rows = {}
         self.history_buttons = {}
+        self.history_age_labels = {}
+        self.history_activity_indicators = {}
         self.project_rows = {}
         self.project_buttons = {}
         while self.history_layout.count():

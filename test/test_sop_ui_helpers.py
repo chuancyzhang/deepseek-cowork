@@ -28,6 +28,7 @@ from main import (
     DaemonConnectWorker,
     DaemonStreamWorker,
     MainWindow,
+    SessionActivityIndicator,
     SessionState,
     SkillsCenterDialog,
     SopTemplateManager,
@@ -554,6 +555,48 @@ class TestSopUiHelpers(unittest.TestCase):
         )
         self.assertNotIn("展开显示", self._history_button_texts(window))
         self.assertNotIn("收起全部", self._history_button_texts(window))
+
+    def test_session_activity_indicator_runs_only_for_live_runtime_state(self):
+        window = MainWindow.__new__(MainWindow)
+        state = _HistoryActionState("session-1")
+        state.session_status = "running"
+        state.live_activity = False
+        window.sessions = {state.session_id: state}
+        window.current_session_id = ""
+
+        # A persisted status alone must not create a false spinner after restart.
+        self.assertFalse(window._session_has_live_activity(state.session_id))
+
+        state.live_activity = True
+        self.assertTrue(window._session_has_live_activity(state.session_id))
+
+    def test_set_session_status_updates_sidebar_activity_without_rebuilding_history(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        state = _HistoryActionState("session-1")
+        state.session_status = "draft"
+        state.live_activity = False
+        window.sessions = {state.session_id: state}
+        window.current_session_id = ""
+        indicator = MagicMock(spec=SessionActivityIndicator)
+        age_label = QLabel("1 天")
+        window.history_activity_indicators = {state.session_id: indicator}
+        window.history_age_labels = {state.session_id: age_label}
+        window._mark_session_automation_completed = MagicMock()
+        window.refresh_history_list = MagicMock()
+
+        window.set_session_status("running", state.session_id)
+
+        self.assertTrue(state.live_activity)
+        indicator.setRunning.assert_called_with(True)
+        self.assertFalse(age_label.isVisible())
+        window.refresh_history_list.assert_not_called()
+
+        window.set_session_status("completed", state.session_id)
+
+        self.assertFalse(state.live_activity)
+        indicator.setRunning.assert_called_with(False)
+        window.refresh_history_list.assert_not_called()
 
     def test_save_chat_history_enqueue_path_avoids_direct_db_write(self):
         class _Worker:

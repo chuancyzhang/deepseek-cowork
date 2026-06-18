@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.9.0**.
+Current app version: **4.9.1**.
 
 Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
@@ -32,7 +32,7 @@ Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
 ### 🖥️ Desktop Experience
 *   **PySide6 UI**: A calmer blue-and-white desktop surface with modern chat bubbles, markdown rendering, tool-call cards, and a dynamically sized conversation column that keeps a Codex-like reading width across wide and narrow windows.
-*   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, keeps each project collapsed by default with only a short preview of conversations, and presents the list as a softer Apple-inspired panel with quieter inline action buttons.
+*   **Project Sidebar**: The left sidebar treats local folders as projects, keeps `新建对话` and search pinned at the top, switches the active workspace when a project is selected, and keeps each project collapsed by default with only a short preview of conversations. Conversation navigation now stays exclusively in the sidebar instead of duplicating tabs above the chat; each live conversation shows a quiet activity ring, including when several tasks run in the background.
 *   **Workspace Drawer**: A hidden-by-default right context drawer opens from compact icon buttons for files, deliverables, observability, and sub-agent status; the drawer still floats over the main area, but its width now participates in the same three-column layout calculation as the conversation column and reserves a safe reading boundary so child panels do not overlap the chat area. Sub-agent activity lights the panel hint without forcing the drawer open.
 *   **Deliverables Preview**: The drawer can discover workspace HTML, images, PDF, DOCX, PPTX, and XLSX outputs. HTML files can be rendered in place, refreshed after edits, and used to start a normal AI conversation that generates PPTX, DOCX, or PDF files with the existing toolchain.
 *   **Prompt Cache Observability**: The system-prompt pane separates the stable prefix, per-turn runtime context, and disclosed skill context, while the observability log focuses on cached input tokens and cache hit rate when the provider reports usage.

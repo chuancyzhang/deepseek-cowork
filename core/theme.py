@@ -132,6 +132,10 @@ class DesignTokens:
     status_error = "#ff3b30"
     status_idle = "#8e8e93"
 
+    activity_indicator_size = 14
+    activity_indicator_stroke = 1.6
+    activity_indicator_interval_ms = 70
+
 
 def get_tech_stylesheet(theme="light"):
     is_dark = theme == "dark"

@@ -43,8 +43,9 @@ from main import (
     skill_center_matches_filters,
     summarize_skill_terms,
 )
-from PySide6.QtCore import QEvent, Qt, QMimeData
+from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData
 from PySide6.QtGui import QTextOption, QShowEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 
@@ -206,6 +207,35 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.assertEqual(item.objectName(), "SkillListItem")
         self.assertTrue(item.findChildren(AppleSwitch))
         self.assertFalse([button for button in item.findChildren(QPushButton) if button.text() == "导出"])
+
+    def test_skill_center_switch_track_click_does_not_open_workbench(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        config_manager = MagicMock()
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+        dialog.handle_skill_item_clicked = MagicMock()
+        item = dialog._build_skill_card(
+            {
+                "name": "claim-expert",
+                "display_name": "Claim Expert",
+                "description": "Review claim evidence and consistency.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": [],
+                "type": "ai_generated",
+                "created_by": "ai",
+            }
+        )
+        item.show()
+        app.processEvents()
+        toggle = item.findChildren(AppleSwitch)[0]
+
+        QTest.mouseClick(toggle, Qt.LeftButton, pos=QPoint(toggle.width() - 4, toggle.height() // 2))
+        app.processEvents()
+
+        config_manager.set_skill_enabled.assert_called_once_with("claim-expert", False)
+        dialog.handle_skill_item_clicked.assert_not_called()
 
     def test_skill_center_has_builtin_mcp_and_custom_tabs(self):
         app = QApplication.instance() or QApplication([])

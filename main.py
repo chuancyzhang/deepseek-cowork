@@ -1749,6 +1749,9 @@ class AppleSwitch(QCheckBox):
         self.setText("")
         self.setFocusPolicy(Qt.StrongFocus)
 
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)

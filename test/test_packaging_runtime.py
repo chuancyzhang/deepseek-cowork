@@ -26,11 +26,20 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             spec_text = handle.read()
 
         self.assertIn("PySide6-Addons>=6.0.0", requirements)
-        self.assertIn('"PySide6.QtWebEngineCore"', spec_text)
-        self.assertIn('"PySide6.QtWebEngineWidgets"', spec_text)
+        required_modules = [
+            "PySide6.QtPositioning",
+            "PySide6.QtQml",
+            "PySide6.QtQuick",
+            "PySide6.QtQuickWidgets",
+            "PySide6.QtWebChannel",
+            "PySide6.QtWebEngineCore",
+            "PySide6.QtWebEngineWidgets",
+        ]
         excludes = spec_text.split("excludes=[", 1)[1].split("],", 1)[0]
-        self.assertNotIn("PySide6.QtWebEngineCore", excludes)
-        self.assertNotIn("PySide6.QtWebEngineWidgets", excludes)
+        hidden_imports = spec_text.split("pyside6_hidden = [", 1)[1].split("]", 1)[0]
+        for module_name in required_modules:
+            self.assertIn(f'"{module_name}"', hidden_imports)
+            self.assertNotIn(f"'{module_name}'", excludes)
 
 
 if __name__ == "__main__":

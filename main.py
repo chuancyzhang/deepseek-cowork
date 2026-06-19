@@ -8,6 +8,7 @@ import ast
 import re
 import json
 import html
+import importlib
 import mimetypes
 import platform
 import uuid
@@ -164,20 +165,48 @@ from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoi
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
+WEBENGINE_IMPORT_ERROR = None
+WEBENGINE_IMPORT_TRACEBACK = ""
 
 
 def load_qwebengine_view():
-    global QWebEngineView, WEBENGINE_AVAILABLE
+    global QWebEngineView, WEBENGINE_AVAILABLE, WEBENGINE_IMPORT_ERROR, WEBENGINE_IMPORT_TRACEBACK
     if WEBENGINE_AVAILABLE is not None:
         return QWebEngineView
     try:
-        from PySide6.QtWebEngineWidgets import QWebEngineView as ImportedQWebEngineView
-        QWebEngineView = ImportedQWebEngineView
+        module = importlib.import_module("PySide6.QtWebEngineWidgets")
+        QWebEngineView = module.QWebEngineView
         WEBENGINE_AVAILABLE = True
-    except Exception:
+        WEBENGINE_IMPORT_ERROR = None
+        WEBENGINE_IMPORT_TRACEBACK = ""
+    except Exception as exc:
         QWebEngineView = None
         WEBENGINE_AVAILABLE = False
+        WEBENGINE_IMPORT_ERROR = exc
+        WEBENGINE_IMPORT_TRACEBACK = traceback.format_exc()
+        logger = globals().get("log_sub_agent_runtime")
+        if callable(logger):
+            logger(
+                "qt_webengine_import_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                traceback=WEBENGINE_IMPORT_TRACEBACK,
+            )
     return QWebEngineView
+
+
+def webengine_unavailable_message():
+    error = WEBENGINE_IMPORT_ERROR
+    if isinstance(error, ModuleNotFoundError):
+        missing = str(getattr(error, "name", "") or "QtWebEngine")
+        reason = f"应用内预览组件不完整（缺少 {missing}）"
+    elif isinstance(error, (ImportError, OSError)):
+        reason = "QtWebEngine 组件或其依赖库加载失败"
+    elif error is not None:
+        reason = "QtWebEngine 初始化失败"
+    else:
+        reason = "当前运行环境未提供 QtWebEngine"
+    return f"{reason}，暂时无法在应用内渲染。可点击“打开”使用系统浏览器查看。"
 
 # Try importing OpenAI
 try:
@@ -17867,7 +17896,7 @@ class MainWindow(QMainWindow):
             return
         self.current_deliverable_stale = False
         if self.deliverable_web_view is None:
-            self.deliverable_text_preview.setPlainText("当前运行环境未加载 QtWebEngine，无法在应用内渲染。可点击“打开”使用系统浏览器查看。")
+            self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             return
         url = QUrl.fromLocalFile(os.path.abspath(path))

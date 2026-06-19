@@ -228,6 +228,8 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 
 MCP_RUNTIME_DISTS = ["mcp"]
+SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "pypdf"]
+SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS
 MCP_ANALYSIS_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
 MCP_ANALYSIS_HIDDENIMPORTS = []
@@ -347,7 +349,7 @@ def _collect_minimal_python_env(prefix):
                     _add_data_file(datas, src_path, dest_path)
 
     for site_packages in deduped_site_packages_dirs:
-        datas.extend(_collect_distribution_runtime_entries(site_packages, MCP_RUNTIME_DISTS))
+        datas.extend(_collect_distribution_runtime_entries(site_packages, SANDBOX_RUNTIME_DISTS))
 
     return datas
 
@@ -487,6 +489,8 @@ pyside6_hidden = [
     "PySide6.QtGui",
     "PySide6.QtNetwork",
     "PySide6.QtWidgets",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
 ]
 
 a = Analysis(
@@ -570,9 +574,7 @@ a = Analysis(
         'PySide6.QtTextToSpeech',
         'PySide6.QtUiTools',
         'PySide6.QtWebChannel',
-        'PySide6.QtWebEngineCore',
         'PySide6.QtWebEngineQuick',
-        'PySide6.QtWebEngineWidgets',
         'PySide6.QtWebSockets',
         'PySide6.QtWebView',
         'PySide6.QtXml',

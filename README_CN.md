@@ -38,7 +38,7 @@
 *   **项目式左侧栏**：左侧栏以本地文件夹作为项目；顶部 `新建对话` 始终创建无项目纯对话，项目行 `+` 创建绑定到该项目的任务。`+` 使用 Qt 确定性绘制，在不同系统和 DPI 下保持可见，项目悬浮提示也统一为浅色样式。点击项目标题只负责展开/收起会话，当前项目始终跟随当前可见对话。
 *   **无项目纯对话**：未选择工作区时仍可直接问答，界面显示 `未连接项目 · 纯对话`，并关闭文件、命令和自动化等本地能力；点击 `连接项目` 后保留上下文并将当前对话归入所选项目。
 *   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 状态通过紧凑图标按钮按需展开；抽屉保持隐藏式浮层，但宽度会和主对话列一起按三栏观感统一计算，打开、切换 tab 和进入子界面时主会话区会主动让出安全边界，避免与右侧面板重叠；子 Agent 活动只点亮面板提示，不强制打开抽屉。
-*   **交付物预览**：右侧交付物页会发现工作区里的 HTML、图片、PDF、DOCX、PPTX 和 XLSX 输出；HTML 可在应用内渲染、文件更新后刷新查看，也可将当前 HTML 附加到当前对话中，让 AI 继续调用现有工具生成 PPTX、DOCX 或 PDF。
+*   **HTML 连续创作流**：右侧交付物页将 HTML 作为可持续迭代的创作源；选中后自动渲染，可强制刷新、放大预览、拖动抽屉宽度和上下分区，并在切换会话后恢复当前 HTML。生成 PPTX、DOCX 或 PDF 时会在同一项目中新建普通对话并自动附加当前 HTML。
 *   **Prompt 缓存观测**：系统提示词页会区分稳定前缀、每轮运行态上下文和已披露 skill context；观测日志聚焦 provider 返回的 cached input token、未缓存 input token 与命中率，不再在首页展示 prompt / tools / message-prefix 指纹。
 *   **图片理解附件**：输入区添加的图片会保留结构化附件信息，只有当前模型开启 `支持图片理解` 时才会作为多模态输入发送。
 *   **主输入框纯文本粘贴**：从网页、微信、Office 等来源粘贴到主输入框时会自动去掉富文本样式，只保留纯文本内容与换行。
@@ -106,6 +106,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 
 下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
 Windows 打包版会优先直接从当前应用目录解析内置运行时，包括 `_internal/node_env/node.exe` 与 `_internal/git_bash_env/bin/bash.exe`。AppData 下的 `runtime_sandbox` 继续作为临时、缓存和 skill 依赖目录，不再优先作为可执行运行时来源，因此自动升级后会使用新解压的 `_internal` 文件。如需覆盖探测结果，可设置 `COWORK_NODE_EXE`、`COWORK_NODE_DIR`、`COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
+
+打包版沙盒 Python 默认包含 `openpyxl`、`python-docx`、`python-pptx`、`pypdf` 及其必要依赖，生成 Office/PDF 文件无需用户单独下载；安装包同时包含 `PySide6-Addons` 与 QtWebEngine 运行资源，用于应用内 HTML 预览。
 AI 在 execution 模式下默认可直接调用 `run_python_code`，无需先通过 `tool_search` 发现；JavaScript 仍通过 `run_node_code` 执行，`bash` 工具优先使用 Git Bash，Windows 上缺失 Git Bash 时会退回 `cmd.exe`。
 带截图或其他图片输入的回合也会保留 `tool_search` 发现链路，这样文档读取、浏览器辅助等延迟工具仍可按需被发现，而不会因为视觉输入而消失。
 `python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒运行时里验证导入是否成功。第三方包会持久化到 AppData 的 `runtime_sandbox/.../skills/python-runner/python/site-packages`，重启后仍可用；如果依赖缓存记录还在但沙盒已经无法导入，会自动触发重新安装。

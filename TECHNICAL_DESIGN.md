@@ -16,7 +16,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互，并根据窗口与抽屉状态动态计算主会话区宽度。
 *   **项目式左侧栏**：顶部入口创建无项目纯对话，项目行 `+` 创建项目会话；`+` 由 Qt 绘制以避免图标字体在部分系统或 DPI 下失效，Tooltip 同时通过样式表和 Palette 固定为浅色。项目标题只展开/收起会话预览，当前项目、文件树和交付物面板始终跟随当前可见会话。
 *   **会话级工作区边界**：`SessionState.workspace_dir` 是运行与持久化的工作区来源；激活无项目会话会清除旧项目上下文。`run_context.workspace_mode` 区分 `chat_only` 与 `project`，工具注册根据 handler 是否接收 `workspace_dir` 标记依赖，并在纯对话的工具列表和发现结果中统一过滤。连接项目会保留消息并写入 `meta.workspace_dir`。
-*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；展开时以抽屉左边界作为主阅读区的安全边界，避免遮挡对话。抽屉宽度、主对话列宽度与左右留白现在统一由同一套三栏布局规则计算，并通过 `content_area_layout` 右侧预留空间保证切换文件 / 交付物 / 观测 / 子 Agent tab 或进入其子界面时几何稳定。交付物页扫描工作区 HTML、图片、PDF、DOCX、PPTX 和 XLSX 输出，HTML 通过延迟加载的 QtWebEngine 内嵌渲染，环境不可用时回退为文本预览和系统打开。
+*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；普通宽度继续为主阅读区预留安全边界，交付物专注预览可临时扩大覆盖范围。抽屉左边缘支持拖动，交付物上下分区尺寸与手动宽度写入配置。HTML 通过延迟加载的 QtWebEngine 自动渲染并使用带刷新标识的本地 URL 绕过缓存；环境不可用时回退为文本预览和系统打开。
 *   **动态对话阅读列**：消息列表与输入栏会根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；关闭抽屉时主对话列居中，打开抽屉时主对话列按三栏比例左移，并同步更新消息区、用户气泡、输入卡片和系统提示条宽度，避免输入框、消息卡片和 drawer 子界面出现忽宽忽窄的跳变。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；常规文案偏产品表达，MCP 相关术语保持英文。
@@ -43,7 +43,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/interaction.py**：桥接 UI 与推理流程，统一消息与工具调用格式。
 *   **core/mcp_client.py**：封装 MCP `stdio` 与 Streamable HTTP 会话，负责连接测试、工具枚举与工具调用；对 `mcp` Python client 的新旧 Streamable HTTP API 做版本兼容。
 *   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。OpenAI-compatible provider 会请求并解析 streaming usage 中的 cached token 细节；会话级 prompt cache key 仅在模型配置显式声明参数名时透传。
-*   **core/sandbox_runtime.py**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先直接使用当前应用目录的 `_internal/*_env` 结构，并为沙盒命令注入对应 PATH；AppData `runtime_sandbox` 仅作为临时、缓存和 skill 依赖根目录。若发现 `python_env/python.exe` 只是依赖外部解释器的 venv redirector，会在运行时标记为不可用而不是继续误报；`bash` 执行层在 Windows 缺失 Git Bash 时退回 `cmd.exe`。Skill 级 Python 依赖统一安装到 `runtime_sandbox/.../skills/<skill>/python/site-packages`，由沙盒 `PYTHONPATH` 注入；同时生成 bootstrap `sitecustomize.py`，并通过 `PATH` 与 `COWORK_PYTHON_DLL_DIRS` 暴露 bundled runtime 和 skill 目录中的原生 DLL 搜索路径。
+*   **core/sandbox_runtime.py / 打包 runtime**：解析 bundled Python / Node.js / Git Bash，Windows 打包版优先直接使用当前应用目录的 `_internal/*_env` 结构。`python_env` 随包收集 `openpyxl`、`python-docx`、`python-pptx`、`pypdf` 及传递依赖；QtWebEngine 由 PyInstaller 的 PySide6 hook 收集进安装包。Skill 级动态依赖继续安装到 `runtime_sandbox/.../skills/<skill>/python/site-packages`，并通过 bootstrap、`PATH` 与 `COWORK_PYTHON_DLL_DIRS` 注入。
 *   **core/env_utils.py**：`ensure_package_installed(...)` 不再只依赖主进程 `importlib` 判断是否已安装，而是用沙盒 Python 直接验证目标模块可导入。对于 `python-runner`，若依赖状态缓存显示已安装但沙盒实际无法导入，会强制重装一次以修复失真的缓存记录；若最终失败，则把沙盒 traceback 回传，便于定位 `ImportError` / DLL load failure。
 *   **core/process_utils.py**：集中提供 Windows 无控制台窗口的 subprocess 参数、进程单例锁和 runtime debug 日志开关，供 UI、updater、沙盒和系统技能复用，避免新增执行入口再次闪出 CMD。
 *   **deepseek-cowork.spec**：内置 `python_env` 除 `Lib/` 和最小 `site-packages` 外，还要包含 Windows `DLLs/` 或同类平台扩展目录，以及常见 MSVC runtime DLL；否则 `_socket`、`_ssl` 一类标准扩展缺失，或 native wheel 在 `_internal/python_env` 中无法加载。
@@ -159,7 +159,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **抽屉点击命中保护**：`eventFilter` 对右侧抽屉和上下文 rail 采用全局坐标命中判断，而不是只依赖 Qt 祖先链；因此滚动区域 viewport、内部子控件和临时弹层不会被误判为抽屉外点击。
 - **抽屉隐藏诊断**：开启 runtime debug 日志后，`hide_context_drawer` 会把关闭原因、来源控件类型、当前 tab 和命中判断写入 `sub_agent_runtime.log`，便于定位“点击后立即收起”类问题。
 - **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览；系统提示词页展示 stable prompt、runtime context 与已披露 skill context，不在首页展示 prompt/tools/message-prefix 指纹。完整 prompt 仍保留在会话状态中且可通过复制按钮导出，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
-- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间列出工作区产物；HTML 支持渲染、刷新、打开、显示位置和复制路径。用户选择 HTML 后点击生成 PPTX/DOCX/PDF 时，UI 会将源 HTML 附加到当前对话并继续提交生成任务，由 AI 使用现有工具链生成办公文件，而不是新建对话或在抽屉内写死转换逻辑。
+- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间展示最近产物，并以会话级 `selected_deliverable_path` 保存当前 HTML。选择、刷新、重新打开抽屉或切回会话时会恢复并渲染最新页面；用户可放大或拖动调整预览。生成 PPTX/DOCX/PDF 时创建绑定同一工作区的普通对话，附加源 HTML 后通过现有 Agent 工具链生成，抽屉不内置格式转换器。
 - **UI 分段诊断**：开启 runtime debug 日志后，`_handle_agent_state_ui` 会按 session lookup、phase update、tool card、event record、monitor render、bubble PiP、live-agent check、final status 等阶段写入 `ui_agent_state_stage_*` 日志，便于定位 UI 闪退前的最后分支。
 - **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
 - **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。

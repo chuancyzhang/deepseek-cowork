@@ -10106,6 +10106,46 @@ class SessionState:
         self.automation_run_id = ""
         self.automation_trigger_source = ""
         self.automation_template_id = ""
+        self.selected_deliverable_path = ""
+        self.deliverable_preview_rendered = False
+
+
+class DrawerResizeHandle(QWidget):
+    widthRequested = Signal(int)
+    resizeFinished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._press_x = None
+        self._start_width = 0
+        self.setCursor(Qt.SizeHorCursor)
+        self.setFixedWidth(8)
+        self.setToolTip("拖动调整预览宽度")
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press_x = event.globalPosition().x()
+            self._start_width = self.parentWidget().width() if self.parentWidget() else 0
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._press_x is not None:
+            requested = self._start_width + int(self._press_x - event.globalPosition().x())
+            self.widthRequested.emit(requested)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._press_x is not None:
+            self._press_x = None
+            self.resizeFinished.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -11246,6 +11286,9 @@ class MainWindow(QMainWindow):
         self.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
         self.context_drawer_max_width = DesignTokens.drawer_max_width
         self.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
+        self.context_drawer_user_width = 0
+        self.context_drawer_expanded = False
+        self.context_drawer_width_before_expand = 0
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
         self.current_deliverable_path = ""
@@ -11377,6 +11420,8 @@ class MainWindow(QMainWindow):
         self.conversation_sop_worker = None
         
         self.config_manager = ConfigManager()
+        self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
+        self.deliverables_splitter_sizes = self.config_manager.get("deliverables_splitter_sizes", [180, 320])
         self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
         self.skill_manager = SkillManager(None, self.config_manager)
         self.skill_generator = SkillGenerator(self.config_manager)
@@ -11551,6 +11596,9 @@ class MainWindow(QMainWindow):
         )
         self.right_sidebar.setVisible(False)
         add_soft_shadow(self.right_sidebar, blur=42, y_offset=12, alpha=34)
+        self.right_resize_handle = DrawerResizeHandle(self.right_sidebar)
+        self.right_resize_handle.widthRequested.connect(self.set_context_drawer_width)
+        self.right_resize_handle.resizeFinished.connect(self.persist_context_drawer_width)
         
         right_layout = QVBoxLayout(self.right_sidebar)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -11702,9 +11750,9 @@ class MainWindow(QMainWindow):
         deliverables_title_box = QVBoxLayout()
         deliverables_title_box.setContentsMargins(0, 0, 0, 0)
         deliverables_title_box.setSpacing(2)
-        deliverables_title = QLabel("工作区交付物")
+        deliverables_title = QLabel("创作交付物")
         deliverables_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 12px;")
-        self.deliverables_meta_label = QLabel("选择 HTML 后可渲染和转换")
+        self.deliverables_meta_label = QLabel("从 HTML 预览、迭代，再继续生成")
         self.deliverables_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
         deliverables_title_box.addWidget(deliverables_title)
         deliverables_title_box.addWidget(self.deliverables_meta_label)
@@ -11715,7 +11763,7 @@ class MainWindow(QMainWindow):
         self.deliverables_refresh_btn.setCursor(Qt.PointingHandCursor)
         self.deliverables_refresh_btn.setFixedSize(30, 30)
         self.deliverables_refresh_btn.setStyleSheet(apple_tool_button_style(False))
-        self.deliverables_refresh_btn.clicked.connect(self.refresh_deliverables)
+        self.deliverables_refresh_btn.clicked.connect(lambda: self.refresh_deliverables(render_current=True))
         deliverables_header_layout.addWidget(self.deliverables_refresh_btn)
         deliverables_layout.addWidget(deliverables_header)
 
@@ -11734,12 +11782,19 @@ class MainWindow(QMainWindow):
         deliverable_actions = QHBoxLayout()
         deliverable_actions.setContentsMargins(0, 0, 0, 0)
         deliverable_actions.setSpacing(6)
-        self.deliverable_render_btn = QPushButton("渲染")
+        self.deliverable_render_btn = QPushButton("刷新预览")
         self.deliverable_render_btn.setIcon(qta.icon("fa5s.play", color=DesignTokens.primary))
         self.deliverable_render_btn.setCursor(Qt.PointingHandCursor)
         self.deliverable_render_btn.setFixedHeight(30)
         self.deliverable_render_btn.setStyleSheet(apple_button_style("secondary", radius=15))
         self.deliverable_render_btn.clicked.connect(self.render_selected_deliverable)
+        self.deliverable_expand_btn = QToolButton()
+        self.deliverable_expand_btn.setIcon(qta.icon("fa5s.expand-alt", color=DesignTokens.text_secondary))
+        self.deliverable_expand_btn.setToolTip("放大预览")
+        self.deliverable_expand_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_expand_btn.setFixedSize(30, 30)
+        self.deliverable_expand_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_expand_btn.clicked.connect(self.toggle_deliverable_preview_expanded)
         self.deliverable_open_btn = QToolButton()
         self.deliverable_open_btn.setIcon(qta.icon("fa5s.external-link-alt", color=DesignTokens.text_secondary))
         self.deliverable_open_btn.setToolTip("打开")
@@ -11762,12 +11817,16 @@ class MainWindow(QMainWindow):
         self.deliverable_copy_btn.setStyleSheet(apple_tool_button_style(False))
         self.deliverable_copy_btn.clicked.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_deliverable_path", "")))
         deliverable_actions.addWidget(self.deliverable_render_btn)
+        deliverable_actions.addWidget(self.deliverable_expand_btn)
         deliverable_actions.addWidget(self.deliverable_open_btn)
         deliverable_actions.addWidget(self.deliverable_reveal_btn)
         deliverable_actions.addWidget(self.deliverable_copy_btn)
         deliverable_actions.addStretch()
         deliverable_preview_layout.addLayout(deliverable_actions)
 
+        conversion_title = QLabel("基于当前 HTML 继续创作")
+        conversion_title.setStyleSheet(f"font-weight: 650; color: {DesignTokens.text_primary}; font-size: 11px;")
+        deliverable_preview_layout.addWidget(conversion_title)
         conversion_row = QHBoxLayout()
         conversion_row.setContentsMargins(0, 0, 0, 0)
         conversion_row.setSpacing(6)
@@ -11783,7 +11842,7 @@ class MainWindow(QMainWindow):
         conversion_row.addStretch()
         deliverable_preview_layout.addLayout(conversion_row)
 
-        self.deliverable_status_label = QLabel("选择交付物查看预览")
+        self.deliverable_status_label = QLabel("选择一份 HTML，预览会在这里自动打开")
         self.deliverable_status_label.setWordWrap(True)
         self.deliverable_status_label.setStyleSheet(apple_caption_style())
         deliverable_preview_layout.addWidget(self.deliverable_status_label)
@@ -11794,11 +11853,12 @@ class MainWindow(QMainWindow):
         self.deliverable_text_preview.setStyleSheet(
             apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
         )
-        self.deliverable_text_preview.setPlaceholderText("选择 HTML 文件后点击渲染")
+        self.deliverable_text_preview.setPlaceholderText("先在对话中生成 HTML，再回到这里预览、迭代并派生办公文件")
         webengine_view_cls = load_qwebengine_view()
         if webengine_view_cls is not None:
             self.deliverable_web_view = webengine_view_cls()
             self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
+            self.deliverable_web_view.loadFinished.connect(self.handle_deliverable_render_finished)
         else:
             self.deliverable_web_view = None
         self.deliverable_preview_stack.addWidget(self.deliverable_text_preview)
@@ -11810,7 +11870,11 @@ class MainWindow(QMainWindow):
         self.deliverables_splitter.addWidget(deliverable_preview)
         self.deliverables_splitter.setStretchFactor(0, 2)
         self.deliverables_splitter.setStretchFactor(1, 3)
-        self.deliverables_splitter.setSizes([180, 320])
+        sizes = self.deliverables_splitter_sizes
+        if not isinstance(sizes, list) or len(sizes) != 2:
+            sizes = [180, 320]
+        self.deliverables_splitter.setSizes([max(80, int(sizes[0])), max(160, int(sizes[1]))])
+        self.deliverables_splitter.splitterMoved.connect(self.persist_deliverables_splitter_sizes)
         deliverables_layout.addWidget(self.deliverables_splitter, 1)
         self.right_stack.addWidget(self.deliverables_tab)
 
@@ -12473,6 +12537,59 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def set_context_drawer_width(self, requested_width):
+        parent = getattr(self, "main_container", None)
+        if not parent:
+            return
+        maximum = max(self.context_drawer_min_width, int(parent.width() * 0.72))
+        self.context_drawer_user_width = self._clamp_int(
+            int(requested_width), self.context_drawer_min_width, maximum
+        )
+        self.context_drawer_expanded = self.context_drawer_user_width > self.context_drawer_max_width
+        self._sync_deliverable_expand_button()
+        self.sync_context_drawer_layout()
+
+    def persist_context_drawer_width(self):
+        if getattr(self, "config_manager", None) and self.context_drawer_user_width:
+            self.config_manager.set("context_drawer_width", int(self.context_drawer_user_width))
+
+    def persist_deliverables_splitter_sizes(self, *_args):
+        splitter = getattr(self, "deliverables_splitter", None)
+        if not splitter or not getattr(self, "config_manager", None):
+            return
+        sizes = [int(value) for value in splitter.sizes()]
+        if len(sizes) == 2 and all(value > 0 for value in sizes):
+            self.config_manager.set("deliverables_splitter_sizes", sizes)
+
+    def _sync_deliverable_expand_button(self):
+        btn = getattr(self, "deliverable_expand_btn", None)
+        if not btn:
+            return
+        expanded = bool(getattr(self, "context_drawer_expanded", False))
+        btn.setIcon(qta.icon("fa5s.compress-alt" if expanded else "fa5s.expand-alt", color=DesignTokens.text_secondary))
+        btn.setToolTip("退出放大" if expanded else "放大预览")
+
+    def toggle_deliverable_preview_expanded(self):
+        parent = getattr(self, "main_container", None)
+        if not parent:
+            return
+        if self.context_drawer_expanded:
+            self.context_drawer_expanded = False
+            self.context_drawer_user_width = (
+                self.context_drawer_width_before_expand
+                or min(DesignTokens.drawer_max_width, max(DesignTokens.drawer_preferred_min_width, int(parent.width() * DesignTokens.drawer_width_ratio)))
+            )
+        else:
+            self.context_drawer_width_before_expand = self.right_sidebar.width() if hasattr(self, "right_sidebar") else 0
+            self.context_drawer_expanded = True
+            self.context_drawer_user_width = max(
+                DesignTokens.drawer_max_width + 1,
+                min(int(parent.width() * 0.68), parent.width() - (self.context_drawer_margin * 2)),
+            )
+        self._sync_deliverable_expand_button()
+        self.persist_context_drawer_width()
+        self.sync_context_drawer_layout()
+
     def _compute_context_drawer_geometry(self):
         if not hasattr(self, "right_sidebar"):
             return None
@@ -12481,13 +12598,16 @@ class MainWindow(QMainWindow):
             return None
         margin = self.context_drawer_margin
         content_width = parent.width() - self.main_layout_default_margins[0] - self.main_layout_default_margins[2]
-        width = self._clamp_int(
+        default_width = self._clamp_int(
             int(content_width * DesignTokens.drawer_width_ratio),
             self.context_drawer_preferred_min_width,
             self.context_drawer_max_width,
         )
+        width = int(self.context_drawer_user_width or default_width)
         width_limit = content_width - self.context_drawer_gap - self.context_drawer_min_content_width
-        if width_limit < self.context_drawer_preferred_min_width:
+        if self.context_drawer_expanded:
+            width = min(width, max(self.context_drawer_min_width, int(parent.width() * 0.72)))
+        elif width_limit < self.context_drawer_preferred_min_width:
             width = max(self.context_drawer_min_width, width_limit)
         else:
             width = min(width, width_limit)
@@ -12666,6 +12786,9 @@ class MainWindow(QMainWindow):
             geometry["width"],
             geometry["height"],
         )
+        if hasattr(self, "right_resize_handle"):
+            self.right_resize_handle.setGeometry(0, 18, 8, max(40, geometry["height"] - 36))
+            self.right_resize_handle.raise_()
         if self.right_sidebar.isVisible():
             self.right_sidebar.raise_()
 
@@ -12703,7 +12826,7 @@ class MainWindow(QMainWindow):
                 log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_observability", tab_index=tab_index)
             elif tab_index == self.RIGHT_TAB_DELIVERABLES:
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="refresh_deliverables", tab_index=tab_index)
-                self.refresh_deliverables()
+                self.refresh_deliverables(render_current=True)
                 log_sub_agent_runtime("ui_context_drawer_stage_done", stage="refresh_deliverables", tab_index=tab_index)
             elif tab_index == self.RIGHT_TAB_SUB_AGENTS and hasattr(self, "sub_agent_monitor") and _qt_object_alive(self.sub_agent_monitor):
                 log_sub_agent_runtime("ui_context_drawer_stage_begin", stage="clear_sub_agent_monitor", tab_index=tab_index)
@@ -15197,6 +15320,7 @@ class MainWindow(QMainWindow):
         self.code_worker = state.code_worker
         self.chat_layout = state.chat_layout
         self.active_skills_label = state.active_skills_label
+        self.current_deliverable_path = getattr(state, "selected_deliverable_path", "") or ""
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.refresh_observability_view(session_id)
@@ -15211,6 +15335,11 @@ class MainWindow(QMainWindow):
         ):
             self._queue_render_sub_agent_monitor_for_state(state)
         self._sync_workspace_ui_for_session(session_id, refresh_sidebar=False)
+        if (
+            getattr(self, "right_drawer_open", False)
+            and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_DELIVERABLES
+        ):
+            self.refresh_deliverables(render_current=True)
 
     def normalize_session_ui(self, state):
         if not state: return
@@ -17612,7 +17741,7 @@ class MainWindow(QMainWindow):
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
             btn.setEnabled(is_file and is_html)
 
-    def refresh_deliverables(self):
+    def refresh_deliverables(self, render_current=False):
         if not hasattr(self, "deliverables_list"):
             return
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
@@ -17632,16 +17761,26 @@ class MainWindow(QMainWindow):
                 self.deliverables_list.setCurrentItem(list_item)
         if hasattr(self, "deliverables_meta_label"):
             count = len(self.deliverable_items)
-            self.deliverables_meta_label.setText(f"发现 {count} 个可预览交付物" if count else "选择 HTML 后可渲染和转换")
+            self.deliverables_meta_label.setText(f"最近 {count} 个产物 · 选择 HTML 继续创作" if count else "先在对话中生成 HTML，产物会自动出现在这里")
+        if not self.deliverable_items:
+            empty_item = QListWidgetItem(qta.icon("fa5s.magic", color=DesignTokens.primary), "从一份 HTML 开始\n让 AI 生成页面后，可在这里预览、刷新并继续生成办公文件")
+            empty_item.setFlags(Qt.NoItemFlags)
+            self.deliverables_list.addItem(empty_item)
         self._watch_deliverable_paths()
         if not self.current_deliverable_path or not os.path.isfile(self.current_deliverable_path):
             self.current_deliverable_path = ""
             self.current_deliverable_stale = False
             self._set_deliverable_controls_enabled("")
             if hasattr(self, "deliverable_status_label"):
-                self.deliverable_status_label.setText("选择交付物查看预览")
+                self.deliverable_status_label.setText("还没有可预览的 HTML · 先回到对话中开始创作")
             if hasattr(self, "deliverable_preview_stack"):
                 self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            state = self.get_current_session() if hasattr(self, "get_current_session") else None
+            if state:
+                state.selected_deliverable_path = ""
+                state.deliverable_preview_rendered = False
+        elif render_current:
+            self.select_deliverable(self.current_deliverable_path, render_html=True)
 
     def _watch_deliverable_paths(self):
         watcher = getattr(self, "deliverable_watcher", None)
@@ -17678,17 +17817,21 @@ class MainWindow(QMainWindow):
         if current and os.path.normcase(os.path.abspath(path or "")) == os.path.normcase(os.path.abspath(current)):
             self.current_deliverable_stale = True
             if hasattr(self, "deliverable_status_label"):
-                self.deliverable_status_label.setText("文件已更新，点击“渲染”查看最新内容。")
+                self.deliverable_status_label.setText("文件已更新，点击“刷新预览”查看最新内容。")
         self.refresh_deliverables()
 
     def on_deliverable_item_clicked(self, item):
         path = item.data(Qt.UserRole) if item else ""
         self.select_deliverable(path)
 
-    def select_deliverable(self, path):
+    def select_deliverable(self, path, render_html=True):
         path = os.path.normpath(str(path or ""))
         self.current_deliverable_path = path if os.path.isfile(path) else ""
         self.current_deliverable_stale = False
+        state = self.get_current_session() if hasattr(self, "get_current_session") else None
+        if state:
+            state.selected_deliverable_path = self.current_deliverable_path
+            state.deliverable_preview_rendered = False
         self._set_deliverable_controls_enabled(self.current_deliverable_path)
         self._watch_deliverable_paths()
         if not self.current_deliverable_path:
@@ -17708,6 +17851,8 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self.deliverable_text_preview.setPlainText(f"无法读取文件：{exc}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            if render_html:
+                self.render_selected_deliverable()
         else:
             self.deliverable_text_preview.setPlainText("当前格式暂不支持内嵌渲染，可使用打开或在资源管理器中显示。")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
@@ -17725,9 +17870,23 @@ class MainWindow(QMainWindow):
             self.deliverable_text_preview.setPlainText("当前运行环境未加载 QtWebEngine，无法在应用内渲染。可点击“打开”使用系统浏览器查看。")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             return
-        self.deliverable_web_view.setUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+        url = QUrl.fromLocalFile(os.path.abspath(path))
+        url.setQuery(f"cowork_refresh={time.time_ns()}")
+        self.deliverable_web_view.setUrl(url)
         self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
         self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)}")
+
+    def handle_deliverable_render_finished(self, ok):
+        path = getattr(self, "current_deliverable_path", "")
+        state = self.get_current_session() if hasattr(self, "get_current_session") else None
+        if state:
+            state.deliverable_preview_rendered = bool(ok)
+        if not hasattr(self, "deliverable_status_label"):
+            return
+        if ok and path:
+            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 修改后可刷新继续")
+        elif path:
+            self.deliverable_status_label.setText("页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。")
 
     def start_deliverable_conversion(self, target_format):
         path = getattr(self, "current_deliverable_path", "")
@@ -17750,11 +17909,18 @@ class MainWindow(QMainWindow):
             "- 如果文件名冲突，请追加时间戳。\n"
             "- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。"
         )
-        state = self.get_current_session()
+        workspace_dir = self._workspace_dir_for_state()
+        session_id = self.create_new_session(
+            title=f"基于 HTML 生成 {target_format.upper()}",
+            make_current=True,
+            workspace_dir=workspace_dir,
+        )
+        state = self.get_session(session_id)
         if not state:
-            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
+            self.add_system_toast("创建生成对话失败，请稍后重试。", "warning", auto_close_ms=3200)
             return
-        session_id = state.session_id
+        state.selected_deliverable_path = path
+        self.current_deliverable_path = path
         self._set_prompt_files([path], session_id=session_id, refresh=True)
         submitted = self._submit_session_request(
             state,
@@ -17764,7 +17930,14 @@ class MainWindow(QMainWindow):
             clear_current_input=True,
         )
         if submitted:
-            self.add_system_toast(f"已在当前对话中开始生成 {target_format.upper()}", "info", session_id=session_id, auto_close_ms=3200)
+            self.add_system_toast(f"已创建普通对话，开始生成 {target_format.upper()}", "info", session_id=session_id, auto_close_ms=3200)
+        else:
+            self.add_system_toast(
+                "生成任务未能提交，HTML 已保留在新对话中，可直接重试。",
+                "warning",
+                session_id=session_id,
+                auto_close_ms=4200,
+            )
 
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""

@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest.mock import MagicMock
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
 
 from main import EmptyStateWidget, MainWindow, scan_workspace_deliverables
 
@@ -76,30 +76,34 @@ class TestDeliverableScanning(unittest.TestCase):
         finally:
             widget.deleteLater()
 
-    def test_conversion_continues_in_current_conversation(self):
+    def test_conversion_creates_project_conversation_from_current_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = os.path.join(tmp, "report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write("<html><body>Report</body></html>")
 
             window = MainWindow.__new__(MainWindow)
-            state = type("_Session", (), {"session_id": "current-session"})()
+            state = type("_Session", (), {"session_id": "generated-session"})()
             window.current_deliverable_path = html_path
             window.workspace_dir = tmp
             window._workspace_dir_for_state = MagicMock(return_value=tmp)
-            window.get_current_session = MagicMock(return_value=state)
-            window.get_session = MagicMock()
-            window.create_new_session = MagicMock()
+            window.get_session = MagicMock(return_value=state)
+            window.create_new_session = MagicMock(return_value="generated-session")
             window._set_prompt_files = MagicMock()
             window._submit_session_request = MagicMock(return_value=True)
             window.add_system_toast = MagicMock()
 
             window.start_deliverable_conversion("pptx")
 
-            window.create_new_session.assert_not_called()
-            window.get_session.assert_not_called()
+            window.create_new_session.assert_called_once_with(
+                title="基于 HTML 生成 PPTX",
+                make_current=True,
+                workspace_dir=tmp,
+            )
+            window.get_session.assert_called_once_with("generated-session")
+            self.assertEqual(state.selected_deliverable_path, html_path)
             window._set_prompt_files.assert_called_once_with(
-                [html_path], session_id="current-session", refresh=True
+                [html_path], session_id="generated-session", refresh=True
             )
             submit_call = window._submit_session_request.call_args
             self.assertIs(submit_call.args[0], state)
@@ -108,11 +112,60 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertFalse(submit_call.kwargs["check_duplicates"])
             self.assertTrue(submit_call.kwargs["clear_current_input"])
             window.add_system_toast.assert_called_once_with(
-                "已在当前对话中开始生成 PPTX",
+                "已创建普通对话，开始生成 PPTX",
                 "info",
-                session_id="current-session",
+                session_id="generated-session",
                 auto_close_ms=3200,
             )
+
+    def test_conversion_keeps_new_conversation_when_submission_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"session_id": "generated-session"})()
+            window.current_deliverable_path = html_path
+            window._workspace_dir_for_state = MagicMock(return_value=tmp)
+            window.create_new_session = MagicMock(return_value="generated-session")
+            window.get_session = MagicMock(return_value=state)
+            window._set_prompt_files = MagicMock()
+            window._submit_session_request = MagicMock(return_value=False)
+            window.add_system_toast = MagicMock()
+
+            window.start_deliverable_conversion("pdf")
+
+            self.assertEqual(state.selected_deliverable_path, html_path)
+            self.assertIn("HTML 已保留在新对话中", window.add_system_toast.call_args.args[0])
+            self.assertEqual(window.add_system_toast.call_args.args[1], "warning")
+
+    def test_render_uses_cache_busting_local_url(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = html_path
+            window.current_deliverable_stale = True
+            window.deliverable_web_view = QWidget()
+            window.deliverable_web_view.setUrl = MagicMock()
+            window.deliverable_text_preview = QTextEdit()
+            window.deliverable_preview_stack = QStackedWidget()
+            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
+            window.deliverable_preview_stack.addWidget(window.deliverable_web_view)
+            window.deliverable_status_label = QLabel()
+
+            window.render_selected_deliverable()
+
+            rendered_url = window.deliverable_web_view.setUrl.call_args.args[0]
+            self.assertTrue(rendered_url.isLocalFile())
+            self.assertEqual(os.path.normcase(rendered_url.toLocalFile()), os.path.normcase(html_path))
+            self.assertIn("cowork_refresh=", rendered_url.query())
+            self.assertFalse(window.current_deliverable_stale)
+            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
 
 
 if __name__ == "__main__":

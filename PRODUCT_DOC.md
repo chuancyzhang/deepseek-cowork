@@ -35,8 +35,8 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 1.  **对话式文件操作**：批量整理、重命名、报告生成。
 2.  **技能中心**：双目录技能管理与热加载。
 3.  **项目式左侧栏与纯对话**：顶部新建入口无需项目即可直接问答，项目行 `+` 创建绑定工作区的任务；未连接项目时本地文件、命令和自动化能力保持关闭，连接项目后保留当前上下文。项目操作图标和悬浮提示在不同系统与 DPI 下保持稳定可见。
-4.  **右侧上下文抽屉**：文件树、交付物、任务观测、子 Agent 监控按需展开；交付物页会发现工作区内 HTML、图片、PDF、DOCX、PPTX 和 XLSX 输出，HTML 支持应用内渲染和刷新。
-5.  **HTML 交付物流**：首页示例卡片提示用户先让 AI 生成 HTML，再在右侧交付物页预览迭代；选中 HTML 后可在当前对话中继续，让 AI 基于 HTML 调用现有工具生成 PPTX、DOCX 或 PDF。
+4.  **右侧上下文抽屉**：文件树、交付物、任务观测、子 Agent 监控按需展开；HTML 交付物选中后自动渲染，支持强制刷新、一键放大、拖动抽屉宽度和上下预览比例，并在会话切换后恢复当前创作源。
+5.  **HTML 交付物流**：首页示例卡片提示用户先让 AI 生成 HTML，再在右侧交付物页预览迭代；基于当前 HTML 生成 PPTX、DOCX 或 PDF 时，应用会在同一项目中新建普通对话、附加源 HTML 并自动开始任务。
 6.  **动态对话阅读列**：主聊天区会根据窗口宽度和右侧抽屉状态动态调整阅读列宽度，保持接近 Codex 的舒适比例，并只保留适量右侧留白；输入框、消息卡片和系统提示条会同步按当前阅读列宽度重排。
 7.  **对话分支**：已完成的用户/助手消息支持从当前位置分支出一个新会话，保留截至该消息的上下文，并记录来源会话与来源消息。用户消息还能在新分支里执行“编辑后重新生成”或“删除并继续”，原会话保持不变。
 8.  **用户提问完整展示**：用户蓝色气泡会随当前阅读列宽度自动换行并增高，确保中文长句、文件名和长英文片段都完整可见。
@@ -72,7 +72,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **源码运行**：建议使用虚拟环境 **.venv\Scripts\python**。
 *   **环境适配**：`env_utils` 在 Dev/EXE 模式下自动识别 Python 与 pip。
 *   **内置 Node.js / Git Bash**：Windows 打包版优先从当前应用目录的 `_internal/*_env` 直接解析 bundled runtime；AI 可通过 `run_node_code` 执行 JavaScript，`bash` 在 Git Bash 缺失时会退回 Windows `cmd.exe`。
-*   **Python 动态依赖**：`python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒 Python 中验证模块可导入；第三方包持久化到 AppData `runtime_sandbox` 的 skill 依赖目录，而不是直接写入 `_internal`。沙盒会额外注入 `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS`，让 Windows 原生扩展包能解析 DLL；如果仍然导入失败，会把真实 traceback 返回给用户。
+*   **Python 依赖**：内置沙盒默认提供 `openpyxl`、`python-docx`、`python-pptx`、`pypdf` 及其必要依赖；其他第三方包仍由 `python-runner` 安装并在同一沙盒中验证导入。动态依赖持久化到 AppData `runtime_sandbox`，并通过 `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS` 支持 Windows 原生扩展。
 *   **打包完整性**：内置 Python 运行时除了 `Lib` 外，还必须包含 Windows 平台扩展目录（如 `DLLs`）以及常见 MSVC runtime DLL；否则 `_socket` 等核心模块缺失，内置 `pip` 或原生 wheel 无法加载。
 *   **应用更新**：设置页可检查 GitHub Releases；打包版会清理旧更新包、旧暂存目录和旧脚本，仅保留本次目标安装包，并支持下载、校验、暂存后通过独立更新器重启安装；前台进度窗口可最小化，也可选择后台安装。
 *   **MCP 服务器**：设置页以更接近 Apple 偏好设置的轻量分区承载 MCP 配置，默认只保留分区标题；术语保持 `MCP`、`stdio`、`Streamable HTTP`、`Headers`、`JSON` 等英文表达，也支持导入 `mcpServers` / `mcp_servers` JSON；已启用服务器会以延迟发现工具的方式接入 Agent。打包版默认内置 MCP client 运行时，无需额外安装 `mcp`。

@@ -4,6 +4,7 @@ import time
 import unittest
 from unittest.mock import MagicMock
 
+from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
 
 from main import (
@@ -11,6 +12,7 @@ from main import (
     MainWindow,
     deliverable_preview_bootstrap_script,
     deliverable_preview_settle_script,
+    load_qwebengine_view,
     scan_workspace_deliverables,
 )
 
@@ -206,8 +208,49 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertIn("Math.max(100", bootstrap)
         self.assertIn("animation:none", bootstrap)
         self.assertIn("MutationObserver", bootstrap)
+        self.assertIn("normalizedWheelDelta", bootstrap)
+        self.assertIn("event.shiftKey", bootstrap)
+        self.assertIn("passive: false", bootstrap)
+        self.assertIn("document.scrollingElement", bootstrap)
         self.assertIn("getAnimations", settle)
         self.assertIn("media.pause", settle)
+
+    def test_light_preview_wheel_fallback_scrolls_both_axes(self):
+        webengine_view_cls = load_qwebengine_view()
+        if webengine_view_cls is None:
+            self.skipTest("QtWebEngine is unavailable")
+        app = QApplication.instance() or QApplication([])
+        view = webengine_view_cls()
+        view.resize(320, 240)
+        window = MainWindow.__new__(MainWindow)
+        window.deliverable_web_view = view
+        window._configure_deliverable_web_view()
+
+        loaded = []
+        load_loop = QEventLoop()
+        view.loadFinished.connect(lambda ok: (loaded.append(bool(ok)), load_loop.quit()))
+        view.setHtml(
+            "<!doctype html><html><body style='margin:0;width:1600px;height:1600px'>preview</body></html>"
+        )
+        QTimer.singleShot(5000, load_loop.quit)
+        load_loop.exec()
+        self.assertEqual(loaded, [True])
+
+        def evaluate(script):
+            result = []
+            loop = QEventLoop()
+            view.page().runJavaScript(script, lambda value: (result.append(value), loop.quit()))
+            QTimer.singleShot(5000, loop.quit)
+            loop.exec()
+            self.assertTrue(result, f"JavaScript callback timed out: {script}")
+            return result[0]
+
+        evaluate("document.dispatchEvent(new WheelEvent('wheel',{deltaY:120,bubbles:true,cancelable:true}))")
+        self.assertGreater(evaluate("document.scrollingElement.scrollTop"), 0)
+        evaluate("window.scrollTo(0,0)")
+        evaluate("document.dispatchEvent(new WheelEvent('wheel',{deltaY:120,shiftKey:true,bubbles:true,cancelable:true}))")
+        self.assertGreater(evaluate("document.scrollingElement.scrollLeft"), 0)
+        view.close()
 
 
 if __name__ == "__main__":

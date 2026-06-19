@@ -1,5 +1,7 @@
 # DeepSeek Cowork 架构设计
 
+HTML 交付物预览保留纵向、横向和嵌套区域滚动能力。
+
 项目团队：**deepseek-cowork team**。
 
 当前应用版本：**4.9.1**。

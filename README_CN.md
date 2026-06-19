@@ -1,5 +1,7 @@
 # DeepSeek Cowork
 
+> HTML 交付物内嵌预览支持纵向、横向及嵌套区域的滚轮与触控板滚动。
+
 [中文文档](README_CN.md) | [English](README.md)
 
 **DeepSeek Cowork** 是围绕 **DeepSeek V4 thinking 与工具调用工作流** 构建的 Windows 桌面智能代理框架。它将推理与工具调用融合在一个连续流程中，面向文件、应用与工作流提供稳定可控的自动化能力。（**本项目不是DeepSeek官方开发，纯个人探索和爱好**）

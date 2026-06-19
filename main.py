@@ -1214,6 +1214,48 @@ def deliverable_preview_bootstrap_script():
     }
     quietMedia(document.documentElement);
   }
+  function normalizedWheelDelta(event) {
+    let scale = 1;
+    if (event.deltaMode === 1) scale = 16;
+    else if (event.deltaMode === 2) scale = Math.max(1, window.innerHeight || 1);
+    let x = Number(event.deltaX || 0) * scale;
+    let y = Number(event.deltaY || 0) * scale;
+    if (event.shiftKey && !x) {
+      x = y;
+      y = 0;
+    }
+    return {x: x, y: y};
+  }
+  function canScrollInDirection(node, x, y) {
+    if (!node) return false;
+    const maxX = Math.max(0, node.scrollWidth - node.clientWidth);
+    const maxY = Math.max(0, node.scrollHeight - node.clientHeight);
+    const canX = x && maxX > 1 && ((x < 0 && node.scrollLeft > 0) || (x > 0 && node.scrollLeft < maxX));
+    const canY = y && maxY > 1 && ((y < 0 && node.scrollTop > 0) || (y > 0 && node.scrollTop < maxY));
+    return Boolean(canX || canY);
+  }
+  function findScrollTarget(start, x, y) {
+    const pageScroller = document.scrollingElement || document.documentElement;
+    let node = start && start.nodeType === 1 ? start : null;
+    while (node && node !== document.documentElement) {
+      const style = window.getComputedStyle(node);
+      const scrollableX = /(auto|scroll|overlay)/.test(style.overflowX || '');
+      const scrollableY = /(auto|scroll|overlay)/.test(style.overflowY || '');
+      if (((x && scrollableX) || (y && scrollableY)) && canScrollInDirection(node, x, y)) return node;
+      node = node.parentElement;
+    }
+    return canScrollInDirection(pageScroller, x, y) ? pageScroller : null;
+  }
+  document.addEventListener('wheel', function (event) {
+    if (event.defaultPrevented || event.ctrlKey) return;
+    const delta = normalizedWheelDelta(event);
+    if (!delta.x && !delta.y) return;
+    const target = findScrollTarget(event.target, delta.x, delta.y);
+    if (!target) return;
+    target.scrollLeft += delta.x;
+    target.scrollTop += delta.y;
+    event.preventDefault();
+  }, {capture: true, passive: false});
   applyPolicy();
   document.addEventListener('DOMContentLoaded', applyPolicy, {once: true});
   new MutationObserver(function (mutations) {

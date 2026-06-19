@@ -6,7 +6,13 @@ from unittest.mock import MagicMock
 
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
 
-from main import EmptyStateWidget, MainWindow, scan_workspace_deliverables
+from main import (
+    EmptyStateWidget,
+    MainWindow,
+    deliverable_preview_bootstrap_script,
+    deliverable_preview_settle_script,
+    scan_workspace_deliverables,
+)
 
 
 class TestDeliverableScanning(unittest.TestCase):
@@ -166,6 +172,42 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIn("cowork_refresh=", rendered_url.query())
             self.assertFalse(window.current_deliverable_stale)
             self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
+
+    def test_render_reuses_unchanged_html(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = html_path
+            window.current_deliverable_stale = False
+            window.deliverable_render_path = html_path
+            window.deliverable_render_fingerprint = window._deliverable_fingerprint(html_path)
+            window.deliverable_web_view = QWidget()
+            window.deliverable_web_view.setUrl = MagicMock()
+            window.deliverable_text_preview = QTextEdit()
+            window.deliverable_preview_stack = QStackedWidget()
+            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
+            window.deliverable_preview_stack.addWidget(window.deliverable_web_view)
+            window.deliverable_status_label = QLabel()
+
+            window.render_selected_deliverable()
+
+            window.deliverable_web_view.setUrl.assert_not_called()
+            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
+
+    def test_light_preview_scripts_throttle_continuous_rendering(self):
+        bootstrap = deliverable_preview_bootstrap_script()
+        settle = deliverable_preview_settle_script()
+
+        self.assertIn("requestAnimationFrame", bootstrap)
+        self.assertIn("Math.max(100", bootstrap)
+        self.assertIn("animation:none", bootstrap)
+        self.assertIn("MutationObserver", bootstrap)
+        self.assertIn("getAnimations", settle)
+        self.assertIn("media.pause", settle)
 
 
 if __name__ == "__main__":

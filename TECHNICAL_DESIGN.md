@@ -16,7 +16,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互，并根据窗口与抽屉状态动态计算主会话区宽度。
 *   **项目式左侧栏**：顶部入口创建无项目纯对话，项目行 `+` 创建项目会话；`+` 由 Qt 绘制以避免图标字体在部分系统或 DPI 下失效，Tooltip 同时通过样式表和 Palette 固定为浅色。项目标题只展开/收起会话预览，当前项目、文件树和交付物面板始终跟随当前可见会话。
 *   **会话级工作区边界**：`SessionState.workspace_dir` 是运行与持久化的工作区来源；激活无项目会话会清除旧项目上下文。`run_context.workspace_mode` 区分 `chat_only` 与 `project`，工具注册根据 handler 是否接收 `workspace_dir` 标记依赖，并在纯对话的工具列表和发现结果中统一过滤。连接项目会保留消息并写入 `meta.workspace_dir`。
-*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；普通宽度继续为主阅读区预留安全边界，交付物专注预览可临时扩大覆盖范围。抽屉左边缘支持拖动，交付物上下分区尺寸与手动宽度写入配置。HTML 通过延迟加载的 QtWebEngine 自动渲染并使用带刷新标识的本地 URL 绕过缓存；环境不可用时回退为文本预览和系统打开。
+*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；普通宽度继续为主阅读区预留安全边界，交付物专注预览可临时扩大覆盖范围。抽屉左边缘支持拖动，交付物上下分区尺寸与手动宽度写入配置。HTML 通过延迟加载的 QtWebEngine 自动渲染；文档创建阶段注入轻量预览策略，限制高频动画、定时任务和自动播放，文件指纹未变化时复用现有页面，只有强制刷新或文件更新才使用刷新标识重新导航。交付物目录扫描在后台执行并对文件监听事件防抖；环境不可用时回退为文本预览和系统打开。
 *   **动态对话阅读列**：消息列表与输入栏会根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；关闭抽屉时主对话列居中，打开抽屉时主对话列按三栏比例左移，并同步更新消息区、用户气泡、输入卡片和系统提示条宽度，避免输入框、消息卡片和 drawer 子界面出现忽宽忽窄的跳变。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；常规文案偏产品表达，MCP 相关术语保持英文。
@@ -160,7 +160,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **抽屉点击命中保护**：`eventFilter` 对右侧抽屉和上下文 rail 采用全局坐标命中判断，而不是只依赖 Qt 祖先链；因此滚动区域 viewport、内部子控件和临时弹层不会被误判为抽屉外点击。
 - **抽屉隐藏诊断**：开启 runtime debug 日志后，`hide_context_drawer` 会把关闭原因、来源控件类型、当前 tab 和命中判断写入 `sub_agent_runtime.log`，便于定位“点击后立即收起”类问题。
 - **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览；系统提示词页展示 stable prompt、runtime context 与已披露 skill context，不在首页展示 prompt/tools/message-prefix 指纹。完整 prompt 仍保留在会话状态中且可通过复制按钮导出，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
-- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间展示最近产物，并以会话级 `selected_deliverable_path` 保存当前 HTML。选择、刷新、重新打开抽屉或切回会话时会恢复并渲染最新页面；用户可放大或拖动调整预览。生成 PPTX/DOCX/PDF 时创建绑定同一工作区的普通对话，附加源 HTML 后通过现有 Agent 工具链生成，抽屉不内置格式转换器。
+- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间展示后台扫描得到的最近产物，并以会话级 `selected_deliverable_path` 保存当前 HTML。选择或切回会话时优先复用文件指纹未变化的轻量预览；文件更新会标记过期，用户可强制刷新、放大或拖动调整预览。生成 PPTX/DOCX/PDF 时创建绑定同一工作区的普通对话，附加源 HTML 后通过现有 Agent 工具链生成，抽屉不内置格式转换器。
 - **UI 分段诊断**：开启 runtime debug 日志后，`_handle_agent_state_ui` 会按 session lookup、phase update、tool card、event record、monitor render、bubble PiP、live-agent check、final status 等阶段写入 `ui_agent_state_stage_*` 日志，便于定位 UI 闪退前的最后分支。
 - **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
 - **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。

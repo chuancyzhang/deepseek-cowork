@@ -1151,6 +1151,108 @@ def scan_workspace_deliverables(workspace_dir, limit=500):
     return items
 
 
+def deliverable_preview_bootstrap_script():
+    """Return the idempotent lightweight-preview policy injected before page scripts."""
+    return r"""
+(function () {
+  if (window.__coworkLightPreviewInstalled) return;
+  window.__coworkLightPreviewInstalled = true;
+  const nativeRaf = window.requestAnimationFrame.bind(window);
+  const nativeCancelRaf = window.cancelAnimationFrame.bind(window);
+  const frameCallbacks = new Map();
+  let nextFrameId = 1;
+  let pumpId = 0;
+  let lastFrame = 0;
+  function pump(timestamp) {
+    pumpId = 0;
+    if (timestamp - lastFrame < 64) {
+      pumpId = nativeRaf(pump);
+      return;
+    }
+    lastFrame = timestamp;
+    const callbacks = Array.from(frameCallbacks.values());
+    frameCallbacks.clear();
+    callbacks.forEach(function (callback) { callback(timestamp); });
+    if (frameCallbacks.size) pumpId = nativeRaf(pump);
+  }
+  window.requestAnimationFrame = function (callback) {
+    const id = nextFrameId++;
+    frameCallbacks.set(id, callback);
+    if (!pumpId) pumpId = nativeRaf(pump);
+    return id;
+  };
+  window.cancelAnimationFrame = function (id) {
+    frameCallbacks.delete(id);
+    if (!frameCallbacks.size && pumpId) {
+      nativeCancelRaf(pumpId);
+      pumpId = 0;
+    }
+  };
+  const nativeInterval = window.setInterval.bind(window);
+  window.setInterval = function (callback, delay) {
+    const args = Array.prototype.slice.call(arguments, 2);
+    return nativeInterval.apply(window, [callback, Math.max(100, Number(delay) || 0)].concat(args));
+  };
+  function quietMedia(root) {
+    if (!root || root.nodeType !== 1) return;
+    const mediaItems = [];
+    if (root.matches && root.matches('video,audio')) mediaItems.push(root);
+    if (root.querySelectorAll) mediaItems.push.apply(mediaItems, root.querySelectorAll('video,audio'));
+    mediaItems.forEach(function (media) {
+      media.autoplay = false;
+      try { media.pause(); } catch (_) {}
+    });
+  }
+  function applyPolicy() {
+    if (!document.documentElement) return;
+    let style = document.getElementById('cowork-light-preview-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'cowork-light-preview-style';
+      style.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}';
+      (document.head || document.documentElement).appendChild(style);
+    }
+    quietMedia(document.documentElement);
+  }
+  applyPolicy();
+  document.addEventListener('DOMContentLoaded', applyPolicy, {once: true});
+  new MutationObserver(function (mutations) {
+    mutations.forEach(function (mutation) {
+      mutation.addedNodes.forEach(quietMedia);
+    });
+  }).observe(document.documentElement || document, {childList: true, subtree: true});
+})();
+"""
+
+
+def deliverable_preview_settle_script():
+    return r"""
+(function () {
+  document.querySelectorAll('video,audio').forEach(function (media) {
+    media.autoplay = false;
+    try { media.pause(); } catch (_) {}
+  });
+  if (document.getAnimations) {
+    document.getAnimations().forEach(function (animation) {
+      try { animation.cancel(); } catch (_) {}
+    });
+  }
+})();
+"""
+
+
+class DeliverableScanWorker(QThread):
+    completed = Signal(object, int)
+
+    def __init__(self, workspace_dir, generation, parent=None):
+        super().__init__(parent)
+        self.workspace_dir = workspace_dir
+        self.generation = int(generation)
+
+    def run(self):
+        self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
+
+
 def clarify_phase_label(phase):
     mapping = {
         CLARIFY_MODE_DISABLED: "未启用",
@@ -11323,9 +11425,19 @@ class MainWindow(QMainWindow):
         self.current_deliverable_path = ""
         self.current_deliverable_stale = False
         self.deliverable_items = []
+        self.deliverable_render_fingerprint = None
+        self.deliverable_render_path = ""
+        self.deliverable_render_loading = False
+        self.deliverable_scan_generation = 0
+        self.deliverable_scan_worker = None
+        self.deliverable_scan_pending_render = False
         self.deliverable_watcher = QFileSystemWatcher(self)
         self.deliverable_watcher.directoryChanged.connect(self.handle_deliverable_fs_changed)
         self.deliverable_watcher.fileChanged.connect(self.handle_deliverable_fs_changed)
+        self.deliverable_refresh_timer = QTimer(self)
+        self.deliverable_refresh_timer.setSingleShot(True)
+        self.deliverable_refresh_timer.setInterval(180)
+        self.deliverable_refresh_timer.timeout.connect(self.refresh_deliverables)
         self._agent_state_ui_event_seq = 0
         self.dynamic_conversation_width = DesignTokens.conversation_min_width
         self.dynamic_message_width = DesignTokens.message_min_width
@@ -11816,7 +11928,7 @@ class MainWindow(QMainWindow):
         self.deliverable_render_btn.setCursor(Qt.PointingHandCursor)
         self.deliverable_render_btn.setFixedHeight(30)
         self.deliverable_render_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.deliverable_render_btn.clicked.connect(self.render_selected_deliverable)
+        self.deliverable_render_btn.clicked.connect(lambda: self.render_selected_deliverable(force=True))
         self.deliverable_expand_btn = QToolButton()
         self.deliverable_expand_btn.setIcon(qta.icon("fa5s.expand-alt", color=DesignTokens.text_secondary))
         self.deliverable_expand_btn.setToolTip("放大预览")
@@ -11887,6 +11999,8 @@ class MainWindow(QMainWindow):
         if webengine_view_cls is not None:
             self.deliverable_web_view = webengine_view_cls()
             self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
+            self._configure_deliverable_web_view()
+            self.deliverable_web_view.loadProgress.connect(self.handle_deliverable_render_progress)
             self.deliverable_web_view.loadFinished.connect(self.handle_deliverable_render_finished)
         else:
             self.deliverable_web_view = None
@@ -15196,6 +15310,10 @@ class MainWindow(QMainWindow):
     def shutdown_workers(self):
         if not self.flush_pending_chat_saves(timeout_ms=3000):
             self.append_log("会话保存队列在关闭前未能完全 flush，应用将继续退出。")
+        deliverable_scan_worker = getattr(self, "deliverable_scan_worker", None)
+        if deliverable_scan_worker is not None and deliverable_scan_worker.isRunning():
+            deliverable_scan_worker.wait(3000)
+        self.deliverable_scan_worker = None
         if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
             self.daemon_connect_worker.wait(1000)
         self.daemon_connect_worker = None
@@ -17770,12 +17888,92 @@ class MainWindow(QMainWindow):
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
             btn.setEnabled(is_file and is_html)
 
+    def _configure_deliverable_web_view(self):
+        view = getattr(self, "deliverable_web_view", None)
+        if view is None:
+            return
+        try:
+            module = importlib.import_module("PySide6.QtWebEngineCore")
+            script_class = module.QWebEngineScript
+            script = script_class()
+            script.setName("cowork-light-preview")
+            script.setSourceCode(deliverable_preview_bootstrap_script())
+            injection_enum = getattr(script_class, "InjectionPoint", script_class)
+            world_enum = getattr(script_class, "ScriptWorldId", script_class)
+            script.setInjectionPoint(getattr(injection_enum, "DocumentCreation"))
+            script.setWorldId(getattr(world_enum, "MainWorld"))
+            script.setRunsOnSubFrames(False)
+            view.page().scripts().insert(script)
+        except Exception as exc:
+            log_sub_agent_runtime("deliverable_preview_script_install_failed", error=str(exc))
+
+    def _deliverable_fingerprint(self, path):
+        try:
+            stat = os.stat(path)
+            return (os.path.normcase(os.path.abspath(path)), int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return None
+
+    def _can_reuse_deliverable_render(self, path):
+        fingerprint = self._deliverable_fingerprint(path)
+        return bool(
+            fingerprint
+            and fingerprint == getattr(self, "deliverable_render_fingerprint", None)
+            and os.path.normcase(os.path.abspath(path))
+            == os.path.normcase(os.path.abspath(getattr(self, "deliverable_render_path", "") or ""))
+            and not getattr(self, "current_deliverable_stale", False)
+        )
+
     def refresh_deliverables(self, render_current=False):
         if not hasattr(self, "deliverables_list"):
             return
+        self.deliverable_scan_generation = int(getattr(self, "deliverable_scan_generation", 0)) + 1
+        self.deliverable_scan_pending_render = bool(
+            getattr(self, "deliverable_scan_pending_render", False) or render_current
+        )
+        worker = getattr(self, "deliverable_scan_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        self._start_deliverable_scan(
+            self.deliverable_scan_generation,
+            self.deliverable_scan_pending_render,
+        )
+
+    def _start_deliverable_scan(self, generation, render_current=False):
+        workspace_dir = getattr(self, "workspace_dir", None)
+        self.deliverable_scan_pending_render = False
+        if not workspace_dir or not os.path.isdir(workspace_dir):
+            self._apply_deliverable_items([], render_current=render_current)
+            return
+        worker = DeliverableScanWorker(workspace_dir, generation, self)
+        self.deliverable_scan_worker = worker
+        worker.completed.connect(
+            lambda items, completed_generation: self._handle_deliverable_scan_completed(
+                items, completed_generation, render_current
+            )
+        )
+        worker.finished.connect(lambda: self._finish_deliverable_scan(worker))
+        worker.start()
+
+    def _handle_deliverable_scan_completed(self, items, generation, render_current=False):
+        if int(generation) != int(getattr(self, "deliverable_scan_generation", 0)):
+            return
+        self._apply_deliverable_items(items, render_current=render_current)
+
+    def _finish_deliverable_scan(self, worker):
+        if getattr(self, "deliverable_scan_worker", None) is worker:
+            self.deliverable_scan_worker = None
+        worker.deleteLater()
+        if int(getattr(self, "deliverable_scan_generation", 0)) != int(worker.generation):
+            self._start_deliverable_scan(
+                self.deliverable_scan_generation,
+                self.deliverable_scan_pending_render,
+            )
+
+    def _apply_deliverable_items(self, items, render_current=False):
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
         self.deliverables_list.clear()
-        self.deliverable_items = scan_workspace_deliverables(self.workspace_dir)
+        self.deliverable_items = list(items or [])
         for item in self.deliverable_items:
             modified = datetime.fromtimestamp(item.get("mtime") or 0).strftime("%Y-%m-%d %H:%M")
             text = (
@@ -17847,7 +18045,11 @@ class MainWindow(QMainWindow):
             self.current_deliverable_stale = True
             if hasattr(self, "deliverable_status_label"):
                 self.deliverable_status_label.setText("文件已更新，点击“刷新预览”查看最新内容。")
-        self.refresh_deliverables()
+        timer = getattr(self, "deliverable_refresh_timer", None)
+        if timer is not None:
+            timer.start()
+        else:
+            self.refresh_deliverables()
 
     def on_deliverable_item_clicked(self, item):
         path = item.data(Qt.UserRole) if item else ""
@@ -17855,8 +18057,11 @@ class MainWindow(QMainWindow):
 
     def select_deliverable(self, path, render_html=True):
         path = os.path.normpath(str(path or ""))
+        previous_path = getattr(self, "current_deliverable_path", "") or ""
+        can_reuse_render = bool(path and self._can_reuse_deliverable_render(path))
         self.current_deliverable_path = path if os.path.isfile(path) else ""
-        self.current_deliverable_stale = False
+        if previous_path and os.path.normcase(os.path.abspath(previous_path)) != os.path.normcase(os.path.abspath(path)):
+            self.current_deliverable_stale = False
         state = self.get_current_session() if hasattr(self, "get_current_session") else None
         if state:
             state.selected_deliverable_path = self.current_deliverable_path
@@ -17869,6 +18074,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(self.describe_path_for_preview(self.current_deliverable_path))
         if ext in {".html", ".htm"}:
+            if render_html and can_reuse_render and self.deliverable_web_view is not None:
+                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
+                self.deliverable_status_label.setText(
+                    f"正在预览 {os.path.basename(self.current_deliverable_path)} · 轻量模式"
+                )
+                if state:
+                    state.deliverable_preview_rendered = True
+                return
             try:
                 with open(self.current_deliverable_path, "r", encoding="utf-8") as f:
                     content = f.read(12000)
@@ -17881,12 +18094,12 @@ class MainWindow(QMainWindow):
                 self.deliverable_text_preview.setPlainText(f"无法读取文件：{exc}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             if render_html:
-                self.render_selected_deliverable()
+                self.render_selected_deliverable(force=False)
         else:
             self.deliverable_text_preview.setPlainText("当前格式暂不支持内嵌渲染，可使用打开或在资源管理器中显示。")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
 
-    def render_selected_deliverable(self):
+    def render_selected_deliverable(self, force=False):
         path = getattr(self, "current_deliverable_path", "")
         if not path or not os.path.isfile(path):
             return
@@ -17894,27 +18107,65 @@ class MainWindow(QMainWindow):
         if ext not in {".html", ".htm"}:
             self.deliverable_status_label.setText("只有 HTML 文件支持右侧渲染。")
             return
-        self.current_deliverable_stale = False
         if self.deliverable_web_view is None:
             self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             return
+        if not force and self._can_reuse_deliverable_render(path):
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
+            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 轻量模式")
+            return
+        fingerprint = self._deliverable_fingerprint(path)
+        previous_fingerprint = getattr(self, "deliverable_render_fingerprint", None)
+        needs_cache_bust = bool(
+            force
+            or getattr(self, "current_deliverable_stale", False)
+            or (previous_fingerprint and previous_fingerprint != fingerprint)
+        )
         url = QUrl.fromLocalFile(os.path.abspath(path))
-        url.setQuery(f"cowork_refresh={time.time_ns()}")
+        if needs_cache_bust:
+            url.setQuery(f"cowork_refresh={time.time_ns()}")
+        self.deliverable_render_fingerprint = fingerprint
+        self.deliverable_render_path = path
+        self.deliverable_render_loading = True
+        self.current_deliverable_stale = False
         self.deliverable_web_view.setUrl(url)
         self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
-        self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)}")
+        self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · 轻量模式")
+
+    def handle_deliverable_render_progress(self, progress):
+        if not getattr(self, "deliverable_render_loading", False):
+            return
+        path = getattr(self, "current_deliverable_path", "")
+        if path and hasattr(self, "deliverable_status_label"):
+            self.deliverable_status_label.setText(
+                f"正在渲染 {max(0, min(100, int(progress)))}% · {os.path.basename(path)}"
+            )
 
     def handle_deliverable_render_finished(self, ok):
         path = getattr(self, "current_deliverable_path", "")
+        view = getattr(self, "deliverable_web_view", None)
+        try:
+            loaded_path = os.path.normcase(os.path.abspath(view.url().toLocalFile())) if view is not None else ""
+        except Exception:
+            loaded_path = os.path.normcase(os.path.abspath(path)) if path else ""
+        if path and loaded_path and loaded_path != os.path.normcase(os.path.abspath(path)):
+            return
+        self.deliverable_render_loading = False
+        if view is not None:
+            try:
+                view.page().runJavaScript(deliverable_preview_settle_script())
+            except Exception:
+                pass
         state = self.get_current_session() if hasattr(self, "get_current_session") else None
         if state:
             state.deliverable_preview_rendered = bool(ok)
         if not hasattr(self, "deliverable_status_label"):
             return
         if ok and path:
-            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 修改后可刷新继续")
+            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 轻量模式")
         elif path:
+            self.deliverable_render_fingerprint = None
             self.deliverable_status_label.setText("页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。")
 
     def start_deliverable_conversion(self, target_format):

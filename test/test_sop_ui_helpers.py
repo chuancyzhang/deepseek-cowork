@@ -45,6 +45,7 @@ from main import (
     session_history_ready,
     skill_center_tab_key,
     skill_center_matches_filters,
+    skill_runtime_reload_pending,
     summarize_skill_terms,
     log_ui_exception,
 )
@@ -103,6 +104,21 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.assertTrue(state.history_loaded)
         self.assertFalse(state.history_loading)
         window.set_current_session.assert_called_once_with("session-1")
+
+    def test_available_session_skills_flushes_pending_runtime_reload(self):
+        window = MainWindow.__new__(MainWindow)
+        window.skill_manager = MagicMock()
+        window.skill_manager.get_all_skills.return_value = [
+            {"name": "claim-expert", "enabled": True},
+            {"name": "disabled-skill", "enabled": False},
+        ]
+        setattr(window.skill_manager, "_skill_runtime_reload_pending", True)
+
+        skills = window._available_session_skills()
+
+        window.skill_manager.load_skills.assert_called_once()
+        self.assertEqual([skill["name"] for skill in skills], ["claim-expert"])
+        self.assertFalse(skill_runtime_reload_pending(window.skill_manager))
 
     def test_history_migration_removes_only_auto_query_skill_context(self):
         window = MainWindow.__new__(MainWindow)
@@ -362,7 +378,7 @@ class SkillCenterHelperTests(unittest.TestCase):
         toggle.click()
         config_manager.set_skill_enabled.assert_called_once_with("showdoc-mcp", False)
 
-    def test_skill_center_toggle_reloads_runtime_skills(self):
+    def test_skill_center_toggle_defers_runtime_reload_until_next_use(self):
         app = QApplication.instance() or QApplication([])
         skill_manager = MagicMock()
         skill_manager.get_all_skills.return_value = [
@@ -383,7 +399,9 @@ class SkillCenterHelperTests(unittest.TestCase):
         dialog.toggle_skill("claim-expert", False)
 
         config_manager.set_skill_enabled.assert_called_once_with("claim-expert", False)
-        skill_manager.load_skills.assert_called_once()
+        skill_manager.load_skills.assert_not_called()
+        self.assertTrue(skill_runtime_reload_pending(skill_manager))
+        self.assertFalse(dialog._all_skills[0]["enabled"])
 
     def test_skill_center_mcp_toggle_syncs_server_enabled_state(self):
         app = QApplication.instance() or QApplication([])
@@ -416,7 +434,103 @@ class SkillCenterHelperTests(unittest.TestCase):
         updated_servers = config_manager.set_mcp_servers.call_args.args[0]
         self.assertFalse(updated_servers[0]["enabled"])
         config_manager.set_skill_enabled.assert_not_called()
+        skill_manager.load_skills.assert_not_called()
+        self.assertTrue(skill_runtime_reload_pending(skill_manager))
+
+    def test_skill_center_toggle_updates_filtered_current_tab_without_full_reload(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = [
+            {
+                "name": "claim-expert",
+                "display_name": "Claim Expert",
+                "description": "Review claim evidence and consistency.",
+                "enabled": True,
+                "risk_level": "medium",
+                "tools": [],
+                "type": "ai_generated",
+                "created_by": "ai",
+            }
+        ]
+        config_manager = MagicMock()
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+        dialog.tabs.setCurrentIndex(3)
+        dialog.set_status_filter("enabled")
+
+        dialog.toggle_skill("claim-expert", False)
+
+        self.assertIn("显示 0 / 1 个能力", dialog.count_label.text())
+        self.assertIn("下次使用时刷新", dialog.count_label.text())
+
+    def test_skill_center_workbench_flushes_pending_reload_once(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.side_effect = [
+            [
+                {
+                    "name": "claim-expert",
+                    "display_name": "Claim Expert",
+                    "description": "Review claim evidence and consistency.",
+                    "enabled": True,
+                    "risk_level": "medium",
+                    "tools": [],
+                    "type": "ai_generated",
+                    "created_by": "ai",
+                }
+            ],
+            [
+                {
+                    "name": "claim-expert",
+                    "display_name": "Claim Expert",
+                    "description": "Review claim evidence and consistency.",
+                    "enabled": False,
+                    "risk_level": "medium",
+                    "tools": [],
+                    "type": "ai_generated",
+                    "created_by": "ai",
+                }
+            ],
+            [
+                {
+                    "name": "claim-expert",
+                    "display_name": "Claim Expert",
+                    "description": "Review claim evidence and consistency.",
+                    "enabled": False,
+                    "risk_level": "medium",
+                    "tools": [],
+                    "type": "ai_generated",
+                    "created_by": "ai",
+                }
+            ],
+        ]
+        config_manager = MagicMock()
+        dialog = SkillsCenterDialog(skill_manager, config_manager)
+        dialog.tabs.setCurrentIndex(3)
+        dialog.toggle_skill("claim-expert", False)
+        fake_workbench = MagicMock()
+        fake_workbench.exec.return_value = None
+
+        with patch("main.CapabilityWorkbenchDialog", return_value=fake_workbench) as workbench_cls:
+            dialog.handle_skill_item_clicked({"name": "claim-expert", "enabled": True})
+
         skill_manager.load_skills.assert_called_once()
+        self.assertFalse(skill_runtime_reload_pending(skill_manager))
+        opened_skill = workbench_cls.call_args.args[0]
+        self.assertFalse(opened_skill["enabled"])
+
+    def test_skill_center_manual_refresh_clears_pending_reload_flag(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = []
+        dialog = SkillsCenterDialog(skill_manager, MagicMock())
+        dialog.toggle_skill("missing-skill", False)
+        self.assertTrue(skill_runtime_reload_pending(skill_manager))
+
+        with patch("main.QMessageBox.information"):
+            dialog.manual_refresh()
+
+        skill_manager.load_skills.assert_called_once()
+        self.assertFalse(skill_runtime_reload_pending(skill_manager))
 
     def test_skill_center_selection_mode_adds_checkbox(self):
         app = QApplication.instance() or QApplication([])

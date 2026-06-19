@@ -1216,6 +1216,29 @@ def skill_center_matches_filters(skill, query="", status_filter="all"):
     return normalized_query in haystack
 
 
+SKILL_RUNTIME_RELOAD_PENDING_ATTR = "_skill_runtime_reload_pending"
+
+
+def mark_skill_runtime_reload_pending(skill_manager, pending=True):
+    if skill_manager is None:
+        return
+    setattr(skill_manager, SKILL_RUNTIME_RELOAD_PENDING_ATTR, bool(pending))
+
+
+def skill_runtime_reload_pending(skill_manager):
+    if skill_manager is None:
+        return False
+    return bool(getattr(skill_manager, "__dict__", {}).get(SKILL_RUNTIME_RELOAD_PENDING_ATTR, False))
+
+
+def flush_pending_skill_runtime_reload(skill_manager):
+    if not skill_runtime_reload_pending(skill_manager):
+        return False
+    skill_manager.load_skills()
+    mark_skill_runtime_reload_pending(skill_manager, False)
+    return True
+
+
 def normalize_conversation_branch_meta(value):
     if not isinstance(value, dict):
         return None
@@ -6526,6 +6549,7 @@ class SkillsCenterDialog(QDialog):
 
     def manual_refresh(self):
         self.skill_manager.load_skills()
+        mark_skill_runtime_reload_pending(self.skill_manager, False)
         self.refresh_list()
         QMessageBox.information(self, "能力中心", "已重新扫描并加载全部能力。")
 
@@ -6565,6 +6589,9 @@ class SkillsCenterDialog(QDialog):
     def _handle_tab_changed(self, index):
         tab_map = {0: "builtin", 1: "optional", 2: "mcp", 3: "custom"}
         self.current_tab_key = tab_map.get(index, "builtin")
+        if not hasattr(self, "_tab_layouts"):
+            return
+        self._render_tab(self.current_tab_key)
         self._refresh_count_label()
 
     def _on_search_text_changed(self, text):
@@ -6596,19 +6623,26 @@ class SkillsCenterDialog(QDialog):
 
     def _render_skill_groups(self):
         for tab_key, layout in self._tab_layouts.items():
-            self._clear_layout(layout)
-            tab_skills, filtered_skills = self._filtered_skills(tab_key)
-            if filtered_skills:
-                layout.insertWidget(layout.count() - 1, self._build_skill_grid(filtered_skills))
-            else:
-                layout.insertWidget(layout.count() - 1, self._build_empty_state(tab_key, bool(tab_skills)))
+            self._render_tab(tab_key)
         self._refresh_count_label()
+
+    def _render_tab(self, tab_key):
+        layout = self._tab_layouts.get(tab_key)
+        if layout is None:
+            return
+        self._clear_layout(layout)
+        tab_skills, filtered_skills = self._filtered_skills(tab_key)
+        if filtered_skills:
+            layout.insertWidget(layout.count() - 1, self._build_skill_grid(filtered_skills))
+        else:
+            layout.insertWidget(layout.count() - 1, self._build_empty_state(tab_key, bool(tab_skills)))
 
     def _refresh_count_label(self):
         total, visible = self._filtered_skills(self.current_tab_key)
         selected_count = len(self.selected_skill_names)
         selected_text = f"，已选 {selected_count}" if self.selection_mode else ""
-        self.count_label.setText(f"显示 {len(visible)} / {len(total)} 个能力{selected_text}")
+        pending_text = "，运行时将在下次使用时刷新" if skill_runtime_reload_pending(self.skill_manager) else ""
+        self.count_label.setText(f"显示 {len(visible)} / {len(total)} 个能力{selected_text}{pending_text}")
 
     def _current_column_count(self):
         return 2
@@ -6744,11 +6778,13 @@ class SkillsCenterDialog(QDialog):
         return card
 
     def toggle_skill(self, name, enabled):
+        name = str(name or "").strip()
+        enabled = bool(enabled)
         skill = next(
             (
                 item
                 for item in self._all_skills
-                if str(item.get("name") or "").strip() == str(name or "").strip()
+                if str(item.get("name") or "").strip() == name
             ),
             None,
         )
@@ -6767,8 +6803,12 @@ class SkillsCenterDialog(QDialog):
                 self.config_manager.set_skill_enabled(name, enabled)
         else:
             self.config_manager.set_skill_enabled(name, enabled)
-        self.skill_manager.load_skills()
-        self.refresh_list()
+        if skill:
+            skill["enabled"] = enabled
+        mark_skill_runtime_reload_pending(self.skill_manager, True)
+        tab_key = skill_center_tab_key(skill) if skill else self.current_tab_key
+        self._render_tab(tab_key)
+        self._refresh_count_label()
 
     def toggle_selection_mode(self):
         self.selection_mode = not self.selection_mode
@@ -6808,6 +6848,18 @@ class SkillsCenterDialog(QDialog):
             self.set_skill_selected(skill_name, skill_name not in self.selected_skill_names)
             self._render_skill_groups()
             return
+        if flush_pending_skill_runtime_reload(self.skill_manager):
+            self.refresh_list()
+            refreshed_skill = next(
+                (
+                    item
+                    for item in self._all_skills
+                    if str(item.get("name") or "").strip() == skill_name
+                ),
+                None,
+            )
+            if refreshed_skill:
+                skill = refreshed_skill
         dialog = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
         dialog.exec()
         self.refresh_list()
@@ -17910,7 +17962,11 @@ class MainWindow(QMainWindow):
     def open_skills_center(self):
         SkillsCenterDialog(self.skill_manager, self.config_manager, self).exec()
 
+    def _flush_pending_skill_runtime_reload(self):
+        return flush_pending_skill_runtime_reload(self.skill_manager)
+
     def _available_session_skills(self):
+        self._flush_pending_skill_runtime_reload()
         skills = []
         for skill in self.skill_manager.get_all_skills():
             if skill.get("enabled") is False:

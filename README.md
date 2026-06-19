@@ -12,6 +12,8 @@ While a foreground task is running, you can add text, images, or files in the ma
 
 Project status for the team and AI agents lives in [ROADMAP.md](ROADMAP.md).
 
+For installation, model setup, project conversations, and editable PPTX generation, see the illustrated [Chinese user guide](USER_GUIDE.md).
+
 ![intro](images/english_intro.png)
 ![App Screenshot 1](images/首页.png)
 ![App Screenshot 2](images/使用界面.png)

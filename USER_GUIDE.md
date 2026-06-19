@@ -1,0 +1,146 @@
+# DeepSeek Cowork 使用指南
+
+本指南介绍 DeepSeek Cowork 的安装、模型配置、基础使用方式，以及如何通过 HTML 交付物生成可编辑的 PPTX 文件。
+
+> 当前界面截图基于 4.9.1 版本。后续版本的按钮位置或文案可能略有调整，请以实际界面为准。
+
+## 目录
+
+- [安装](#安装)
+- [首次使用前的配置](#首次使用前的配置)
+  - [配置大模型 API](#配置大模型-api)
+  - [切换对话模型](#切换对话模型)
+  - [更新应用](#更新应用)
+- [开始使用](#开始使用)
+  - [直接对话](#直接对话)
+  - [基于文件夹对话](#基于文件夹对话)
+- [应用场景：生成可编辑的 PPTX](#应用场景生成可编辑的-pptx)
+
+## 安装
+
+1. 打开项目的 [Releases 页面](https://github.com/chuancyzhang/deepseek-cowork/releases)。
+2. 进入带有 **Latest** 标签的最新版本，下载 ZIP 压缩包。
+
+   ![在 Releases 页面下载最新版本](images/user-guide/01-download-release.png)
+
+3. 将压缩包保存到合适的位置并解压，得到 `deepseek-cowork` 文件夹。
+
+   ![解压下载的压缩包](images/user-guide/02-extract-package.png)
+
+4. 打开文件夹，双击 `deepseek-cowork` 启动应用。
+
+   ![启动 DeepSeek Cowork](images/user-guide/03-launch-application.png)
+
+## 首次使用前的配置
+
+启动后会进入 DeepSeek Cowork 主界面。
+
+![DeepSeek Cowork 主界面](images/user-guide/04-home-screen.png)
+
+### 配置大模型 API
+
+DeepSeek Cowork 需要配置可用的大模型 API 后才能正常执行任务。
+
+1. 点击左下角的 **设置**。
+
+   ![打开设置](images/user-guide/05-open-settings.png)
+
+2. 进入 **模型与服务**，填写 API 服务地址与访问密钥。DeepSeek API 的访问密钥可前往 [DeepSeek 开放平台](https://platform.deepseek.com/) 获取。
+
+   ![配置 API 服务](images/user-guide/06-model-service-settings.png)
+
+3. 点击 **新增模型**。
+
+   ![新增模型入口](images/user-guide/07-add-model.png)
+
+4. 填写模型配置并确认。示例中：
+
+   - `deepseek-v4-flash` 对应快速模型；
+   - `deepseek-v4-pro` 对应专家模式。
+
+   ![填写模型配置](images/user-guide/08-model-configuration.png)
+
+5. 配置完成后，点击 **保存**。
+
+> 模型名称与可用能力可能随服务商调整。请以服务商当前提供的模型和项目内实际配置项为准。
+
+### 切换对话模型
+
+在主界面的对话输入区下方，可以选择并切换已经配置好的模型。
+
+![切换对话模型](images/user-guide/09-switch-model.png)
+
+### 更新应用
+
+进入 **设置 → 更新**，可以检查并安装 DeepSeek Cowork 的最新版本。
+
+![在设置中更新应用](images/user-guide/10-update-settings.png)
+
+## 开始使用
+
+DeepSeek Cowork 支持两种主要使用方式：
+
+1. **直接对话**：不连接项目，仅进行问答与内容讨论。
+2. **基于文件夹对话**：连接本地文件夹作为项目，让 AI 在授权的工作区内读取和处理文件。
+
+### 直接对话
+
+未选择文件夹（项目）时，当前会话为直接对话。此时 AI 不会直接操作电脑上的项目文件。
+
+![直接对话界面](images/user-guide/11-direct-chat.png)
+
+### 基于文件夹对话
+
+可以通过以下任一方式连接项目：
+
+- 点击左侧项目区域的 **+**，选择一个本地文件夹；
+
+  ![通过加号添加项目](images/user-guide/12-add-project.png)
+
+- 点击主界面的 **连接项目**，选择一个本地文件夹。
+
+  ![通过连接项目选择文件夹](images/user-guide/13-connect-project.png)
+
+连接后，AI 会将该文件夹作为当前工作区，并在授权范围内读取、创建或修改文件。请在执行重要或批量操作前确认任务要求与目标路径。
+
+## 应用场景：生成可编辑的 PPTX
+
+下面以“先生成 HTML 交付物，再转换为 PPTX”为例，展示一个完整工作流。
+
+1. 选择一个文件夹作为当前项目。
+
+   ![连接用于生成交付物的项目](images/user-guide/14-project-workspace.png)
+
+2. 点击 **生成 HTML 交付物**，对话输入区会出现一段示例要求。可以直接使用，也可以按照实际需求修改。
+
+   ![生成 HTML 交付物示例](images/user-guide/15-generate-html-example.png)
+
+3. 让 AI 在工作区中生成一个或多个 HTML 文件，然后点击右侧的 **交付物** 按钮查看结果。
+
+   ![打开交付物面板](images/user-guide/16-open-deliverables.png)
+
+   ![查看已生成的交付物](images/user-guide/17-deliverables-panel.png)
+
+4. 选择生成的 `.html` 文件进行预览。需要在独立浏览器中查看时，点击文件条目右侧的外部打开图标。
+
+   ![打开 HTML 交付物预览](images/user-guide/18-open-html-preview.png)
+
+   ![在浏览器中检查 HTML 效果](images/user-guide/19-html-preview.png)
+
+5. 根据预览效果继续向 AI 提出修改要求，直到页面内容和视觉样式符合预期。
+
+   > 如果最终目标是演示文稿，可以在提示中明确要求“生成 PPTX 风格的 HTML”，并说明页面比例、主题、页数和内容结构。
+
+6. 确认 HTML 无误后，选中目标文件并点击 **生成 PPTX**。AI 会基于该 HTML 生成可编辑的 PowerPoint 文件。
+
+   ![从 HTML 生成 PPTX](images/user-guide/20-generate-pptx.png)
+
+7. 在项目文件夹中找到生成的 `.pptx` 文件。
+
+   ![在项目文件夹中查看 PPTX](images/user-guide/21-output-folder.png)
+
+8. 使用 PowerPoint 或其他兼容软件打开文件，即可继续编辑文字、图表和页面布局。
+
+   ![编辑生成的 PPTX](images/user-guide/22-editable-pptx.png)
+
+完成以上步骤后，就可以继续探索文件处理、内容生成、自动化任务和其他工作流。

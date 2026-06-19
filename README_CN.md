@@ -12,6 +12,8 @@
 
 供团队与 AI 共同查看的项目状态文件见 [ROADMAP.md](ROADMAP.md)。
 
+安装、模型配置、项目对话与可编辑 PPTX 生成的完整步骤，请参阅图文版 [使用指南](USER_GUIDE.md)。
+
 ![应用截图1](images/首页.png)
 ![应用截图2](images/使用界面.png)
 

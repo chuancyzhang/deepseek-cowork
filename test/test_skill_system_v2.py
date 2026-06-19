@@ -786,19 +786,18 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("list_agents", tool_names)
         self.assertNotIn("dispatch_agents", tool_names)
 
-    def test_system_tools_skill_only_exposes_environment_automation_tools(self):
-        self._copy_repo_skill("command-tools")
-        self._copy_repo_ai_skill("system-tools")
+    def test_browser_automation_exposes_unified_browser_surface(self):
+        self._copy_repo_ai_skill("browser-automation")
 
-        sm = self._build_manager_with_enabled({"system-tools"})
+        sm = self._build_manager_with_enabled({"browser-automation"})
 
-        self.assertIn("system-tools", sm.skill_records)
+        self.assertIn("browser-automation", sm.skill_records)
         self.assertCountEqual(
-            sm.get_tools_for_skill("system-tools"),
-            ["system_automate", "build_app_index", "find_app", "launch_app", "open_with"],
+            sm.get_tools_for_skill("browser-automation"),
+            ["browser_automate", "get_active_tab_info", "visit_and_screenshot"],
         )
-        record = sm.skill_records["system-tools"]
-        self.assertEqual(record["tool_refs"], ["system_automate", "build_app_index", "find_app", "launch_app", "open_with"])
+        record = sm.skill_records["browser-automation"]
+        self.assertEqual(record["tool_refs"], ["browser_automate", "get_active_tab_info", "visit_and_screenshot"])
 
     def test_run_skill_script_uses_skill_dependency_flow_and_sandbox_runner(self):
         skill_dir = os.path.join(self.skills_dir, "scripted-skill")

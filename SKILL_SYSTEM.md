@@ -362,10 +362,10 @@ All of these are still skills in the public sense, but internally they are all e
 Default-off plugins ship under `ai_skills` with `source_type: bundled_plugin` and `default_enabled: false`.
 
 - `document-reader`: unified `document_read` for DOCX, PPTX, XLSX/XLS, and PDF reads. It does not use Pandoc and does not provide write tools.
-- `system-tools`: environment, browser, desktop, and app launch automation.
 - `web-search`: web search and article reading.
 - `financial-data-akshare`: AKShare financial data.
-- `browser-automation`, `github-tools`, `yt-dlp-wrapper`: browser, GitHub, and media-download helpers.
+- `browser-automation`: serial browser observation and interaction through dedicated persistent, temporary isolated, or explicitly authorized Chrome 144+ existing sessions. It does not provide desktop or application-launch automation.
+- `github-tools`, `yt-dlp-wrapper`: GitHub and media-download helpers.
 
 Office/PDF writes are intentionally not modeled as fixed tools. The agent should use `run_python_code` with task-appropriate libraries when the user asks to create or modify those formats.
 

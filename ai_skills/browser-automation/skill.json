@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "name": "browser-automation",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
+  "description": "Automate and inspect persistent, isolated, or explicitly authorized existing Chrome-compatible browser sessions.",
+  "description_cn": "自动化并检查专用持久、临时隔离或用户明确授权的当前 Chrome 兼容浏览器会话。",
+  "tags": ["browser", "automation", "playwright", "chrome", "cdp"],
+  "triggers": ["browser automation", "Chrome", "Playwright", "browser session", "浏览器自动化", "网页操作", "浏览器会话"],
+  "anti_triggers": ["web search", "网页搜索", "download video", "下载视频"],
+  "tool_refs": ["browser_automate", "get_active_tab_info", "visit_and_screenshot"],
+  "python_dependencies": ["playwright", "uiautomation"],
+  "node_dependencies": [],
+  "workflow": [
+    "Observe the page before acting when state is unknown.",
+    "Use stable element refs and execute interactions serially.",
+    "Verify state after actions and request confirmation before consequential external changes."
+  ]
+}

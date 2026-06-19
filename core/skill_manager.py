@@ -67,7 +67,7 @@ def _humanize_skill_name(skill_name):
         "python-runner": "Python 执行",
         "skill-importer": "能力导入",
         "skill_builder": "能力创建",
-        "system-tools": "环境与应用自动化",
+        "browser-automation": "浏览器自动化",
         "web-search": "网页搜索",
     }
     return mapping.get(text, text.replace("-", " ").title())
@@ -83,7 +83,7 @@ class SkillManager:
         "quant-strategy-management": "file-information-interaction",
         "web-search": "file-information-interaction",
         "command-tools": "code-command-execution",
-        "system-tools": "code-command-execution",
+        "browser-automation": "file-information-interaction",
         "python-runner": "code-command-execution",
         "interaction": "ai-human-interaction",
         "history-query": "memory-meta",

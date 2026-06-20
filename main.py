@@ -160,7 +160,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
-from PySide6.QtWidgets import QProgressBar
+from PySide6.QtWidgets import QProgressBar, QScrollBar
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
 
 QWebEngineView = None
@@ -1209,22 +1209,10 @@ def deliverable_preview_bootstrap_script():
     if (!style) {
       style = document.createElement('style');
       style.id = 'cowork-light-preview-style';
-      style.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}';
+      style.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}html{scrollbar-width:none!important}html::-webkit-scrollbar{display:none!important}';
       (document.head || document.documentElement).appendChild(style);
     }
     quietMedia(document.documentElement);
-  }
-  function normalizedWheelDelta(event) {
-    let scale = 1;
-    if (event.deltaMode === 1) scale = 16;
-    else if (event.deltaMode === 2) scale = Math.max(1, window.innerHeight || 1);
-    let x = Number(event.deltaX || 0) * scale;
-    let y = Number(event.deltaY || 0) * scale;
-    if (event.shiftKey && !x) {
-      x = y;
-      y = 0;
-    }
-    return {x: x, y: y};
   }
   function canScrollInDirection(node, x, y) {
     if (!node) return false;
@@ -1246,16 +1234,27 @@ def deliverable_preview_bootstrap_script():
     }
     return canScrollInDirection(pageScroller, x, y) ? pageScroller : null;
   }
-  document.addEventListener('wheel', function (event) {
-    if (event.defaultPrevented || event.ctrlKey) return;
-    const delta = normalizedWheelDelta(event);
-    if (!delta.x && !delta.y) return;
-    const target = findScrollTarget(event.target, delta.x, delta.y);
-    if (!target) return;
-    target.scrollLeft += delta.x;
-    target.scrollTop += delta.y;
-    event.preventDefault();
-  }, {capture: true, passive: false});
+  window.__coworkScrollWheelAt = function (clientX, clientY, x, y) {
+    const start = document.elementFromPoint(Number(clientX) || 0, Number(clientY) || 0);
+    const target = findScrollTarget(start, Number(x) || 0, Number(y) || 0);
+    if (!target) return '';
+    const pageScroller = document.scrollingElement || document.documentElement;
+    if (target === pageScroller) return 'page';
+    target.scrollLeft += Number(x) || 0;
+    target.scrollTop += Number(y) || 0;
+    return 'nested';
+  };
+  window.__coworkPreviewMetrics = function () {
+    const scroller = document.scrollingElement || document.documentElement;
+    return {
+      left: scroller.scrollLeft || 0,
+      top: scroller.scrollTop || 0,
+      width: scroller.scrollWidth || 0,
+      height: scroller.scrollHeight || 0,
+      clientWidth: scroller.clientWidth || 0,
+      clientHeight: scroller.clientHeight || 0
+    };
+  };
   applyPolicy();
   document.addEventListener('DOMContentLoaded', applyPolicy, {once: true});
   new MutationObserver(function (mutations) {
@@ -10320,6 +10319,174 @@ class DrawerResizeHandle(QWidget):
             return
         super().mouseReleaseEvent(event)
 
+
+class DeliverableWebPreview(QWidget):
+    """Qt-owned scrolling shell for the embedded HTML deliverable preview."""
+
+    def __init__(self, web_view, parent=None):
+        super().__init__(parent)
+        self.web_view = web_view
+        self._syncing_scrollbars = False
+        self._sync_pending = False
+        self._pending_page_delta_x = 0.0
+        self._pending_page_delta_y = 0.0
+        self._page_wheel_flush_pending = False
+
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(3)
+        layout.setVerticalSpacing(3)
+        layout.addWidget(web_view, 0, 0)
+
+        self.vertical_scrollbar = QScrollBar(Qt.Vertical)
+        self.horizontal_scrollbar = QScrollBar(Qt.Horizontal)
+        self.vertical_scrollbar.setObjectName("DeliverableVerticalScrollBar")
+        self.horizontal_scrollbar.setObjectName("DeliverableHorizontalScrollBar")
+        self.vertical_scrollbar.setVisible(False)
+        self.horizontal_scrollbar.setVisible(False)
+        layout.addWidget(self.vertical_scrollbar, 0, 1)
+        layout.addWidget(self.horizontal_scrollbar, 1, 0)
+
+        scrollbar_style = f"""
+            QScrollBar {{ background: transparent; border: none; margin: 0px; }}
+            QScrollBar:vertical {{ width: 10px; }}
+            QScrollBar:horizontal {{ height: 10px; }}
+            QScrollBar::handle {{ background: {DesignTokens.border_strong}; border-radius: 5px; min-width: 30px; min-height: 30px; }}
+            QScrollBar::handle:hover {{ background: {DesignTokens.text_tertiary}; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ width: 0px; height: 0px; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+        """
+        self.vertical_scrollbar.setStyleSheet(scrollbar_style)
+        self.horizontal_scrollbar.setStyleSheet(scrollbar_style)
+        self.vertical_scrollbar.valueChanged.connect(self._apply_scrollbar_values)
+        self.horizontal_scrollbar.valueChanged.connect(self._apply_scrollbar_values)
+        web_view.loadFinished.connect(self._handle_load_finished)
+        app = QApplication.instance()
+        if app is None:
+            raise RuntimeError("HTML 预览滚轮控制需要已初始化的 QApplication")
+        app.installEventFilter(self)
+
+    def _handle_load_finished(self, ok):
+        if not ok:
+            return
+        self.schedule_scrollbar_sync()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.schedule_scrollbar_sync()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Wheel and not (event.modifiers() & Qt.ControlModifier):
+            if not self.isVisible() or not self.web_view.isVisible():
+                return super().eventFilter(obj, event)
+            try:
+                global_position = event.globalPosition().toPoint()
+                position = self.web_view.mapFromGlobal(global_position)
+            except Exception:
+                return super().eventFilter(obj, event)
+            if not self.web_view.rect().contains(position):
+                return super().eventFilter(obj, event)
+            pixel_delta = event.pixelDelta()
+            angle_delta = event.angleDelta()
+            delta_x = -pixel_delta.x() if not pixel_delta.isNull() else -angle_delta.x() / 2
+            delta_y = -pixel_delta.y() if not pixel_delta.isNull() else -angle_delta.y() / 2
+            if event.modifiers() & Qt.ShiftModifier and not delta_x:
+                delta_x = delta_y
+                delta_y = 0
+            script = (
+                "window.__coworkScrollWheelAt && "
+                f"window.__coworkScrollWheelAt({position.x()},{position.y()},"
+                f"{delta_x:.2f},{delta_y:.2f})"
+            )
+            self.web_view.page().runJavaScript(
+                script,
+                lambda result, x=delta_x, y=delta_y: self._handle_wheel_result(result, x, y),
+            )
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _handle_wheel_result(self, result, delta_x, delta_y):
+        if result == "page":
+            self._pending_page_delta_x += delta_x
+            self._pending_page_delta_y += delta_y
+            if not self._page_wheel_flush_pending:
+                self._page_wheel_flush_pending = True
+                QTimer.singleShot(0, self._flush_page_wheel_delta)
+            return
+        if result == "nested":
+            self.web_view.update()
+        self.schedule_scrollbar_sync()
+
+    def _flush_page_wheel_delta(self):
+        self._page_wheel_flush_pending = False
+        delta_x = self._pending_page_delta_x
+        delta_y = self._pending_page_delta_y
+        self._pending_page_delta_x = 0.0
+        self._pending_page_delta_y = 0.0
+        if delta_x:
+            self.horizontal_scrollbar.setValue(
+                self.horizontal_scrollbar.value() + int(round(delta_x))
+            )
+        if delta_y:
+            self.vertical_scrollbar.setValue(
+                self.vertical_scrollbar.value() + int(round(delta_y))
+            )
+
+    def schedule_scrollbar_sync(self):
+        if self._sync_pending:
+            return
+        self._sync_pending = True
+        QTimer.singleShot(0, self._sync_scrollbars)
+
+    def _sync_scrollbars(self):
+        self._sync_pending = False
+        self.web_view.page().runJavaScript(
+            "window.__coworkPreviewMetrics ? JSON.stringify(window.__coworkPreviewMetrics()) : ''",
+            self._apply_page_metrics,
+        )
+
+    def _apply_page_metrics(self, metrics):
+        if isinstance(metrics, str):
+            try:
+                metrics = json.loads(metrics)
+            except json.JSONDecodeError:
+                metrics = None
+        if not isinstance(metrics, dict):
+            return
+        self._syncing_scrollbars = True
+        try:
+            width = max(0, int(metrics.get("width") or 0))
+            height = max(0, int(metrics.get("height") or 0))
+            client_width = max(0, int(metrics.get("clientWidth") or 0))
+            client_height = max(0, int(metrics.get("clientHeight") or 0))
+            max_x = max(0, width - client_width)
+            max_y = max(0, height - client_height)
+            self.horizontal_scrollbar.setRange(0, max_x)
+            self.horizontal_scrollbar.setPageStep(client_width)
+            self.horizontal_scrollbar.setValue(max(0, int(metrics.get("left") or 0)))
+            self.horizontal_scrollbar.setVisible(max_x > 1)
+            self.vertical_scrollbar.setRange(0, max_y)
+            self.vertical_scrollbar.setPageStep(client_height)
+            self.vertical_scrollbar.setValue(max(0, int(metrics.get("top") or 0)))
+            self.vertical_scrollbar.setVisible(max_y > 1)
+        finally:
+            self._syncing_scrollbars = False
+
+    def _apply_scrollbar_values(self, _value):
+        if self._syncing_scrollbars:
+            return
+        x = self.horizontal_scrollbar.value()
+        y = self.vertical_scrollbar.value()
+        self.web_view.page().runJavaScript(
+            f"window.scrollTo({x},{y})",
+            lambda _result: self._handle_page_scroll_applied(),
+        )
+
+    def _handle_page_scroll_applied(self):
+        self.web_view.update()
+        self.schedule_scrollbar_sync()
+
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
         super().__init__(orientation, parent)
@@ -12041,14 +12208,17 @@ class MainWindow(QMainWindow):
         if webengine_view_cls is not None:
             self.deliverable_web_view = webengine_view_cls()
             self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
-            self._configure_deliverable_web_view()
+            self.deliverable_web_configuration_error = self._configure_deliverable_web_view()
+            self.deliverable_web_preview = DeliverableWebPreview(self.deliverable_web_view)
             self.deliverable_web_view.loadProgress.connect(self.handle_deliverable_render_progress)
             self.deliverable_web_view.loadFinished.connect(self.handle_deliverable_render_finished)
         else:
             self.deliverable_web_view = None
+            self.deliverable_web_preview = None
+            self.deliverable_web_configuration_error = ""
         self.deliverable_preview_stack.addWidget(self.deliverable_text_preview)
-        if self.deliverable_web_view is not None:
-            self.deliverable_preview_stack.addWidget(self.deliverable_web_view)
+        if self.deliverable_web_preview is not None:
+            self.deliverable_preview_stack.addWidget(self.deliverable_web_preview)
         self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
         deliverable_preview_layout.addWidget(self.deliverable_preview_stack, 1)
 
@@ -17946,8 +18116,16 @@ class MainWindow(QMainWindow):
             script.setWorldId(getattr(world_enum, "MainWorld"))
             script.setRunsOnSubFrames(False)
             view.page().scripts().insert(script)
+            return ""
         except Exception as exc:
             log_sub_agent_runtime("deliverable_preview_script_install_failed", error=str(exc))
+            return f"HTML 预览滚动控制初始化失败：{exc}"
+
+    def _show_deliverable_web_preview(self):
+        preview = getattr(self, "deliverable_web_preview", None) or self.deliverable_web_view
+        self.deliverable_preview_stack.setCurrentWidget(preview)
+        if hasattr(preview, "schedule_scrollbar_sync"):
+            preview.schedule_scrollbar_sync()
 
     def _deliverable_fingerprint(self, path):
         try:
@@ -18117,7 +18295,7 @@ class MainWindow(QMainWindow):
             self.deliverable_status_label.setText(self.describe_path_for_preview(self.current_deliverable_path))
         if ext in {".html", ".htm"}:
             if render_html and can_reuse_render and self.deliverable_web_view is not None:
-                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
+                self._show_deliverable_web_preview()
                 self.deliverable_status_label.setText(
                     f"正在预览 {os.path.basename(self.current_deliverable_path)} · 轻量模式"
                 )
@@ -18153,8 +18331,14 @@ class MainWindow(QMainWindow):
             self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             return
+        configuration_error = getattr(self, "deliverable_web_configuration_error", "")
+        if configuration_error:
+            self.deliverable_text_preview.setPlainText(configuration_error)
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText(configuration_error)
+            return
         if not force and self._can_reuse_deliverable_render(path):
-            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
+            self._show_deliverable_web_preview()
             self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 轻量模式")
             return
         fingerprint = self._deliverable_fingerprint(path)
@@ -18172,7 +18356,7 @@ class MainWindow(QMainWindow):
         self.deliverable_render_loading = True
         self.current_deliverable_stale = False
         self.deliverable_web_view.setUrl(url)
-        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_web_view)
+        self._show_deliverable_web_preview()
         self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · 轻量模式")
 
     def handle_deliverable_render_progress(self, progress):
@@ -18199,6 +18383,9 @@ class MainWindow(QMainWindow):
                 view.page().runJavaScript(deliverable_preview_settle_script())
             except Exception:
                 pass
+        preview = getattr(self, "deliverable_web_preview", None)
+        if preview is not None:
+            preview.schedule_scrollbar_sync()
         state = self.get_current_session() if hasattr(self, "get_current_session") else None
         if state:
             state.deliverable_preview_rendered = bool(ok)

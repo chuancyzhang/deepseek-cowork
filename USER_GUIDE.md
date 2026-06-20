@@ -121,7 +121,7 @@ DeepSeek Cowork 支持两种主要使用方式：
 
    ![查看已生成的交付物](images/user-guide/17-deliverables-panel.png)
 
-4. 选择生成的 `.html` 文件进行预览。需要在独立浏览器中查看时，点击文件条目右侧的外部打开图标。
+4. 选择生成的 `.html` 文件进行预览。预览区支持滚轮、触控板和可拖动的横纵滚动条；响应式页面仅在内容确实超出当前宽度时显示横向滚动条。需要在独立浏览器中查看时，点击文件条目右侧的外部打开图标。
 
    ![打开 HTML 交付物预览](images/user-guide/18-open-html-preview.png)
 

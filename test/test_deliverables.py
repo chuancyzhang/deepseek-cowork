@@ -1,14 +1,17 @@
+import hashlib
 import os
 import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock
 
-from PySide6.QtCore import QEventLoop, QTimer
+from PySide6.QtCore import QByteArray, QBuffer, QEventLoop, QIODevice, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
 
 from main import (
     EmptyStateWidget,
+    DeliverableWebPreview,
     MainWindow,
     deliverable_preview_bootstrap_script,
     deliverable_preview_settle_script,
@@ -208,14 +211,14 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertIn("Math.max(100", bootstrap)
         self.assertIn("animation:none", bootstrap)
         self.assertIn("MutationObserver", bootstrap)
-        self.assertIn("normalizedWheelDelta", bootstrap)
-        self.assertIn("event.shiftKey", bootstrap)
-        self.assertIn("passive: false", bootstrap)
+        self.assertIn("__coworkScrollWheelAt", bootstrap)
+        self.assertIn("__coworkPreviewMetrics", bootstrap)
+        self.assertNotIn("addEventListener('wheel'", bootstrap)
         self.assertIn("document.scrollingElement", bootstrap)
         self.assertIn("getAnimations", settle)
         self.assertIn("media.pause", settle)
 
-    def test_light_preview_wheel_fallback_scrolls_both_axes(self):
+    def test_light_preview_qt_input_and_scrollbars_scroll_both_axes(self):
         webengine_view_cls = load_qwebengine_view()
         if webengine_view_cls is None:
             self.skipTest("QtWebEngine is unavailable")
@@ -225,12 +228,17 @@ class TestDeliverableScanning(unittest.TestCase):
         window = MainWindow.__new__(MainWindow)
         window.deliverable_web_view = view
         window._configure_deliverable_web_view()
+        preview = DeliverableWebPreview(view)
+        preview.resize(320, 240)
+        preview.show()
 
         loaded = []
         load_loop = QEventLoop()
         view.loadFinished.connect(lambda ok: (loaded.append(bool(ok)), load_loop.quit()))
         view.setHtml(
-            "<!doctype html><html><body style='margin:0;width:1600px;height:1600px'>preview</body></html>"
+            "<!doctype html><html><body style='margin:0;width:1600px;height:1600px'>"
+            "<div id='nested' style='position:absolute;left:0;top:0;width:100px;height:100px;overflow:auto'>"
+            "<div style='width:400px;height:500px'>nested</div></div>preview</body></html>"
         )
         QTimer.singleShot(5000, load_loop.quit)
         load_loop.exec()
@@ -245,12 +253,117 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertTrue(result, f"JavaScript callback timed out: {script}")
             return result[0]
 
-        evaluate("document.dispatchEvent(new WheelEvent('wheel',{deltaY:120,bubbles:true,cancelable:true}))")
+        def render_digest():
+            payload = QByteArray()
+            buffer = QBuffer(payload)
+            buffer.open(QIODevice.WriteOnly)
+            self.assertTrue(view.grab().save(buffer, "PNG"))
+            return hashlib.sha256(bytes(payload)).hexdigest()
+
+        routing_target = QWidget()
+        routing_target.setObjectName("UnrelatedWheelTarget")
+        outside_wheel = QWheelEvent(
+            QPointF(10, 10),
+            QPointF(view.mapToGlobal(QPoint(-20, -20))),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(routing_target, outside_wheel)
+        QApplication.processEvents()
+        self.assertEqual(evaluate("document.scrollingElement.scrollTop"), 0)
+        control_wheel = QWheelEvent(
+            QPointF(120, 100),
+            QPointF(view.mapToGlobal(QPoint(120, 100))),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.ControlModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(routing_target, control_wheel)
+        QApplication.processEvents()
+        self.assertEqual(evaluate("document.scrollingElement.scrollTop"), 0)
+        before_wheel_digest = render_digest()
+        wheel = QWheelEvent(
+            QPointF(120, 100),
+            QPointF(view.mapToGlobal(QPoint(120, 100))),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(routing_target, wheel)
+        QApplication.processEvents()
+        wheel_loop = QEventLoop()
+        QTimer.singleShot(100, wheel_loop.quit)
+        wheel_loop.exec()
         self.assertGreater(evaluate("document.scrollingElement.scrollTop"), 0)
+        paint_loop = QEventLoop()
+        QTimer.singleShot(200, paint_loop.quit)
+        paint_loop.exec()
+        self.assertNotEqual(render_digest(), before_wheel_digest)
         evaluate("window.scrollTo(0,0)")
-        evaluate("document.dispatchEvent(new WheelEvent('wheel',{deltaY:120,shiftKey:true,bubbles:true,cancelable:true}))")
+        horizontal_wheel = QWheelEvent(
+            QPointF(120, 100),
+            QPointF(view.mapToGlobal(QPoint(120, 100))),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.ShiftModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(routing_target, horizontal_wheel)
+        QApplication.processEvents()
+        horizontal_loop = QEventLoop()
+        QTimer.singleShot(100, horizontal_loop.quit)
+        horizontal_loop.exec()
         self.assertGreater(evaluate("document.scrollingElement.scrollLeft"), 0)
-        view.close()
+        evaluate("window.scrollTo(0,0)")
+        nested_wheel = QWheelEvent(
+            QPointF(50, 50),
+            QPointF(view.mapToGlobal(QPoint(50, 50))),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(routing_target, nested_wheel)
+        QApplication.processEvents()
+        self.assertGreater(evaluate("document.getElementById('nested').scrollTop"), 0)
+        preview.schedule_scrollbar_sync()
+        QApplication.processEvents()
+        evaluate("0")
+        expected_vertical_max = int(evaluate(
+            "document.scrollingElement.scrollHeight-document.scrollingElement.clientHeight"
+        ))
+        expected_horizontal_max = int(evaluate(
+            "document.scrollingElement.scrollWidth-document.scrollingElement.clientWidth"
+        ))
+        self.assertEqual(preview.vertical_scrollbar.maximum(), expected_vertical_max)
+        self.assertEqual(preview.horizontal_scrollbar.maximum(), expected_horizontal_max)
+        preview.vertical_scrollbar.setValue(preview.vertical_scrollbar.maximum())
+        preview.horizontal_scrollbar.setValue(preview.horizontal_scrollbar.maximum())
+        QApplication.processEvents()
+        self.assertEqual(
+            evaluate("document.scrollingElement.scrollTop"),
+            preview.vertical_scrollbar.maximum(),
+        )
+        self.assertEqual(
+            evaluate("document.scrollingElement.scrollLeft"),
+            preview.horizontal_scrollbar.maximum(),
+        )
+        QApplication.instance().removeEventFilter(preview)
+        preview.close()
 
 
 if __name__ == "__main__":

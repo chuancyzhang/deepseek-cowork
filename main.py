@@ -69,11 +69,14 @@ from core.llm.factory import LLMFactory
 from core.memory_update import (
     DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
     filter_transcripts_for_memory_update,
+    generate_memory_update,
     generate_memory_update_incremental,
     load_memory_update_state,
     read_memory_file,
     save_memory_file_with_backup,
+    save_memory_update_state,
 )
+from core.memory_store import MemoryStore
 from core.mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
     TRANSPORT_STDIO,
@@ -11038,17 +11041,15 @@ class MemoryUpdateWorker(QThread):
                 f"发现 {len(transcripts)} 个需要更新的历史会话；已跳过 {max(0, all_transcript_count - len(transcripts))} 个旧会话"
             )
             self.progress_signal.emit("正在读取当前长期记忆")
-            current_memory = read_memory_file(self.history_dir)
+            current_memory = MemoryStore(self.history_dir).read_summary("global")
             self.progress_signal.emit("正在连接当前模型")
             provider = LLMFactory.create_provider(self.config_manager)
-            result = generate_memory_update_incremental(
+            result = generate_memory_update(
                 provider,
                 current_memory,
                 transcripts,
-                self.history_dir,
                 max_batch_tokens=DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
                 progress_callback=self.progress_signal.emit,
-                preview_callback=self.batch_preview_signal.emit,
             )
             result.update({
                 "ok": True,
@@ -11066,13 +11067,280 @@ class MemoryUpdateWorker(QThread):
             })
 
 
+class MemoryCenterDialog(QDialog):
+    def __init__(self, history_dir, workspace_dir="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("记忆")
+        self.resize(980, 700)
+        self.setMinimumSize(820, 560)
+        self.store = MemoryStore(history_dir)
+        self.workspace_dir = workspace_dir or ""
+        self.current_module_id = ""
+        self.loading = False
+        self.module_dirty = False
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+        title = QLabel("记忆")
+        title.setStyleSheet(apple_section_title_style(22))
+        subtitle = QLabel("管理长期摘要、可检索的记忆模块，以及所有智能体共享的性格底色。")
+        subtitle.setStyleSheet(apple_caption_style())
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        layout.addWidget(self.tabs, 1)
+
+        summary_page = QWidget()
+        summary_layout = QVBoxLayout(summary_page)
+        summary_layout.setContentsMargins(12, 16, 12, 12)
+        summary_bar = QHBoxLayout()
+        self.summary_scope = QComboBox()
+        self.summary_scope.addItem("全局摘要", "global")
+        if self.workspace_dir:
+            self.summary_scope.addItem("当前工作区摘要", "workspace")
+        self.summary_scope.currentIndexChanged.connect(self.load_summary)
+        summary_bar.addWidget(self.summary_scope)
+        summary_bar.addStretch()
+        generate_btn = QPushButton("从历史生成")
+        generate_btn.setObjectName("SecondaryBtn")
+        generate_btn.clicked.connect(self.start_generation)
+        summary_bar.addWidget(generate_btn)
+        summary_layout.addLayout(summary_bar)
+        self.summary_edit = QTextEdit()
+        self.summary_edit.setPlaceholderText("记录需要始终提供给 AI 的精简、稳定信息。")
+        self.summary_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=12))
+        summary_layout.addWidget(self.summary_edit, 1)
+        summary_save = QPushButton("保存摘要")
+        summary_save.setObjectName("PrimaryBtn")
+        summary_save.clicked.connect(self.save_summary)
+        summary_layout.addWidget(summary_save, 0, Qt.AlignRight)
+        self.tabs.addTab(summary_page, "长期摘要")
+
+        modules_page = QWidget()
+        modules_layout = QHBoxLayout(modules_page)
+        modules_layout.setContentsMargins(12, 16, 12, 12)
+        modules_layout.setSpacing(16)
+        left = QVBoxLayout()
+        module_actions = QHBoxLayout()
+        new_btn = QPushButton("新建")
+        new_btn.setObjectName("SecondaryBtn")
+        new_btn.clicked.connect(self.new_module)
+        archive_btn = QPushButton("归档")
+        archive_btn.setObjectName("SecondaryBtn")
+        archive_btn.clicked.connect(self.archive_module)
+        restore_btn = QPushButton("恢复上一版")
+        restore_btn.setObjectName("SecondaryBtn")
+        restore_btn.clicked.connect(self.restore_module)
+        module_actions.addWidget(new_btn)
+        module_actions.addWidget(archive_btn)
+        module_actions.addWidget(restore_btn)
+        left.addLayout(module_actions)
+        self.module_list = QListWidget()
+        self.module_list.setMinimumWidth(250)
+        self.module_list.setStyleSheet(apple_list_style(border=False))
+        self.module_list.currentItemChanged.connect(self.load_selected_module)
+        left.addWidget(self.module_list, 1)
+        modules_layout.addLayout(left)
+
+        editor = QVBoxLayout()
+        self.module_title = QLineEdit()
+        self.module_title.setPlaceholderText("模块标题")
+        editor.addWidget(self.module_title)
+        meta_row = QHBoxLayout()
+        self.module_tags = QLineEdit()
+        self.module_tags.setPlaceholderText("标签，用逗号分隔")
+        self.module_scope = QComboBox()
+        self.module_scope.addItem("全局", "global")
+        if self.workspace_dir:
+            self.module_scope.addItem("当前工作区", "workspace")
+        self.module_enabled = QCheckBox("启用")
+        meta_row.addWidget(self.module_tags, 1)
+        meta_row.addWidget(self.module_scope)
+        meta_row.addWidget(self.module_enabled)
+        editor.addLayout(meta_row)
+        self.module_edit = QTextEdit()
+        self.module_edit.setPlaceholderText("这里的内容会在相关任务中由 AI 按需检索。")
+        self.module_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=12))
+        editor.addWidget(self.module_edit, 1)
+        self.module_title.textEdited.connect(self.mark_module_dirty)
+        self.module_tags.textEdited.connect(self.mark_module_dirty)
+        self.module_edit.textChanged.connect(self.mark_module_dirty)
+        self.module_scope.currentIndexChanged.connect(self.mark_module_dirty)
+        self.module_enabled.toggled.connect(self.mark_module_dirty)
+        module_save = QPushButton("保存模块")
+        module_save.setObjectName("PrimaryBtn")
+        module_save.setShortcut("Ctrl+S")
+        module_save.clicked.connect(self.save_module)
+        editor.addWidget(module_save, 0, Qt.AlignRight)
+        modules_layout.addLayout(editor, 1)
+        self.tabs.addTab(modules_page, "记忆模块")
+
+        soul_page = QWidget()
+        soul_layout = QVBoxLayout(soul_page)
+        soul_layout.setContentsMargins(12, 16, 12, 12)
+        soul_hint = QLabel("描述 AI 是怎样的性格、如何与你相处以及表达偏好。具体智能体角色会叠加在这层性格之上。")
+        soul_hint.setWordWrap(True)
+        soul_hint.setStyleSheet(apple_caption_style())
+        soul_layout.addWidget(soul_hint)
+        self.soul_edit = QTextEdit()
+        self.soul_edit.setPlaceholderText("例如：你温和、好奇、坦率，喜欢先理解问题，再给出清晰而有主见的建议。")
+        self.soul_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=12))
+        soul_layout.addWidget(self.soul_edit, 1)
+        soul_save = QPushButton("保存灵魂提示词")
+        soul_save.setObjectName("PrimaryBtn")
+        soul_save.clicked.connect(self.save_soul)
+        soul_layout.addWidget(soul_save, 0, Qt.AlignRight)
+        self.tabs.addTab(soul_page, "灵魂提示词")
+
+        close_btn = QPushButton("完成")
+        close_btn.setObjectName("SecondaryBtn")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn, 0, Qt.AlignRight)
+        self.load_summary()
+        self.soul_edit.setPlainText(self.store.read_soul())
+        self.refresh_modules()
+
+    def _scope(self):
+        return self.summary_scope.currentData() or "global"
+
+    def load_summary(self):
+        scope = self._scope()
+        self.summary_edit.setPlainText(self.store.read_summary(scope, self.workspace_dir))
+
+    def save_summary(self):
+        try:
+            self.store.save_summary(self.summary_edit.toPlainText(), self._scope(), self.workspace_dir)
+            QMessageBox.information(self, "记忆", "长期摘要已保存，将从下一轮对话开始生效。")
+        except Exception as exc:
+            QMessageBox.critical(self, "保存失败", str(exc))
+
+    def save_soul(self):
+        try:
+            self.store.save_soul(self.soul_edit.toPlainText())
+            QMessageBox.information(self, "记忆", "灵魂提示词已保存，将从下一轮对话开始生效。")
+        except Exception as exc:
+            QMessageBox.critical(self, "保存失败", str(exc))
+
+    def refresh_modules(self, select_id=""):
+        self.module_list.clear()
+        for module in self.store.list_modules(self.workspace_dir):
+            item = QListWidgetItem(module.get("title") or "未命名模块")
+            item.setData(Qt.UserRole, module.get("id"))
+            if not module.get("enabled", True):
+                item.setForeground(QColor(DesignTokens.text_muted))
+            self.module_list.addItem(item)
+            if module.get("id") == select_id:
+                self.module_list.setCurrentItem(item)
+
+    def new_module(self):
+        if self.module_dirty and QMessageBox.question(self, "未保存的修改", "放弃当前模块尚未保存的修改吗？") != QMessageBox.Yes:
+            return
+        self.loading = True
+        self.current_module_id = ""
+        self.module_list.clearSelection()
+        self.module_title.clear()
+        self.module_tags.clear()
+        self.module_scope.setCurrentIndex(0)
+        self.module_enabled.setChecked(True)
+        self.module_edit.clear()
+        self.module_dirty = False
+        self.loading = False
+        self.module_title.setFocus()
+
+    def mark_module_dirty(self, *_args):
+        if not self.loading:
+            self.module_dirty = True
+
+    def load_selected_module(self, current, previous=None):
+        if not current:
+            return
+        if self.module_dirty:
+            reply = QMessageBox.question(self, "未保存的修改", "放弃当前模块尚未保存的修改吗？")
+            if reply != QMessageBox.Yes:
+                self.module_list.blockSignals(True)
+                self.module_list.setCurrentItem(previous)
+                self.module_list.blockSignals(False)
+                return
+        try:
+            module = self.store.get_module(current.data(Qt.UserRole))
+        except Exception as exc:
+            QMessageBox.critical(self, "读取失败", str(exc))
+            return
+        self.loading = True
+        self.current_module_id = module["id"]
+        self.module_title.setText(module.get("title") or "")
+        self.module_tags.setText(", ".join(module.get("tags") or []))
+        self.module_scope.setCurrentIndex(max(0, self.module_scope.findData(module.get("scope") or "global")))
+        self.module_enabled.setChecked(module.get("enabled", True))
+        self.module_edit.setPlainText(module.get("content") or "")
+        self.module_dirty = False
+        self.loading = False
+
+    def save_module(self):
+        try:
+            module = self.store.save_module(
+                self.module_title.text(), self.module_edit.toPlainText(), self.current_module_id,
+                [item.strip() for item in self.module_tags.text().split(",")],
+                self.module_scope.currentData() or "global", self.workspace_dir,
+                self.module_enabled.isChecked(),
+            )
+            self.current_module_id = module["id"]
+            self.module_dirty = False
+            self.refresh_modules(module["id"])
+            QMessageBox.information(self, "记忆", "记忆模块已保存。")
+        except Exception as exc:
+            QMessageBox.critical(self, "保存失败", str(exc))
+
+    def archive_module(self):
+        if not self.current_module_id:
+            return
+        if QMessageBox.question(self, "归档模块", "归档后 AI 将不再检索这个模块。确定继续吗？") != QMessageBox.Yes:
+            return
+        try:
+            self.store.archive_module(self.current_module_id)
+            self.new_module()
+            self.refresh_modules()
+        except Exception as exc:
+            QMessageBox.critical(self, "归档失败", str(exc))
+
+    def restore_module(self):
+        if not self.current_module_id:
+            return
+        if QMessageBox.question(self, "恢复上一版", "当前内容会先保存为版本，然后恢复上一版。确定继续吗？") != QMessageBox.Yes:
+            return
+        try:
+            content = self.store.restore_latest_module_version(self.current_module_id)
+            self.loading = True
+            self.module_edit.setPlainText(content)
+            self.module_dirty = False
+            self.loading = False
+            QMessageBox.information(self, "记忆", "已恢复上一版；恢复前的内容仍可再次恢复。")
+        except Exception as exc:
+            QMessageBox.warning(self, "无法恢复", str(exc))
+
+    def start_generation(self):
+        self.hide()
+        if self.parent() and hasattr(self.parent(), "start_memory_update"):
+            self.parent().start_memory_update()
+
+    def closeEvent(self, event):
+        if self.module_dirty and QMessageBox.question(self, "未保存的修改", "关闭后会丢失当前模块尚未保存的修改，确定关闭吗？") != QMessageBox.Yes:
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+
 class MemoryUpdateDialog(QDialog):
     save_requested = Signal(str)
     background_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("更新长期记忆")
+        self.setWindowTitle("生成长期记忆")
         self.resize(760, 620)
         self.running = True
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
@@ -11110,7 +11378,7 @@ class MemoryUpdateDialog(QDialog):
 
         self.editor = QTextEdit()
         self.editor.setReadOnly(True)
-        self.editor.setPlaceholderText("生成完成后会在这里显示新的 memories.md 内容。")
+        self.editor.setPlaceholderText("生成完成后会在这里显示待确认的长期记忆草稿。")
         self.editor.setStyleSheet(
             f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
             f"background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; "
@@ -11127,7 +11395,7 @@ class MemoryUpdateDialog(QDialog):
         self.close_btn.setCursor(Qt.PointingHandCursor)
         self.close_btn.setEnabled(False)
         self.close_btn.clicked.connect(self.reject)
-        self.save_btn = QPushButton("保存到 memories.md")
+        self.save_btn = QPushButton("确认并生成模块")
         self.save_btn.setCursor(Qt.PointingHandCursor)
         self.save_btn.setEnabled(False)
         self.save_btn.setIcon(qta.icon('fa5s.save', color='#ffffff'))
@@ -12289,11 +12557,11 @@ class MainWindow(QMainWindow):
         sidebar_automation_btn.clicked.connect(self.open_automation_center)
         sidebar_layout.addWidget(sidebar_automation_btn)
 
-        self.sidebar_memory_btn = QPushButton(" 更新长期记忆")
+        self.sidebar_memory_btn = QPushButton(" 记忆")
         self.sidebar_memory_btn.setIcon(qta.icon('fa5s.brain', color='#4b5563'))
         self.sidebar_memory_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_memory_btn.setStyleSheet(sidebar_btn_style)
-        self.sidebar_memory_btn.clicked.connect(self.start_memory_update)
+        self.sidebar_memory_btn.clicked.connect(self.open_memory_center)
         sidebar_layout.addWidget(self.sidebar_memory_btn)
 
         self.sidebar_skill_capture_btn = QPushButton(" 沉淀为 Skill")
@@ -18110,6 +18378,13 @@ class MainWindow(QMainWindow):
             return self.flush_pending_chat_saves(session_id=target_session_id, timeout_ms=3000)
         return True
 
+    def open_memory_center(self):
+        try:
+            dialog = MemoryCenterDialog(self.chat_history_dir, self.workspace_dir or "", self)
+            dialog.exec()
+        except Exception as exc:
+            QMessageBox.critical(self, "记忆不可用", str(exc))
+
     def start_memory_update(self):
         if self.memory_update_worker and self.memory_update_worker.isRunning():
             if self.memory_update_dialog:
@@ -18127,7 +18402,7 @@ class MainWindow(QMainWindow):
         self._last_memory_update_transcripts = []
         if hasattr(self, "sidebar_memory_btn"):
             self.sidebar_memory_btn.setEnabled(True)
-            self.sidebar_memory_btn.setText(" 正在更新记忆")
+            self.sidebar_memory_btn.setText(" 记忆 · 正在生成")
         self.memory_update_dialog = MemoryUpdateDialog(self)
         self.memory_update_dialog.save_requested.connect(self.save_memory_update_from_dialog)
         self.memory_update_dialog.background_requested.connect(self.handle_memory_update_backgrounded)
@@ -18156,7 +18431,7 @@ class MainWindow(QMainWindow):
         if not self.memory_update_dialog:
             return
         stats = (
-            f"批次 {data.get('batch_index', 0)}/{data.get('batch_count', 0)} 已写入 memories.md，"
+            f"批次 {data.get('batch_index', 0)}/{data.get('batch_count', 0)} 已生成预览，"
             f"累计处理 {data.get('processed_count', 0)}/{data.get('transcript_count', 0)} 个历史会话。"
         )
         self.memory_update_dialog.show_batch_result(data.get("content") or "", stats)
@@ -18169,12 +18444,12 @@ class MainWindow(QMainWindow):
             return
         self.memory_update_dialog = None
         if hasattr(self, "sidebar_memory_btn"):
-            self.sidebar_memory_btn.setText(" 更新长期记忆")
+            self.sidebar_memory_btn.setText(" 记忆")
 
     def handle_memory_update_finished(self, result):
         if hasattr(self, "sidebar_memory_btn"):
             self.sidebar_memory_btn.setEnabled(True)
-            self.sidebar_memory_btn.setText(" 更新长期记忆")
+            self.sidebar_memory_btn.setText(" 记忆")
         worker = self.memory_update_worker
         self.memory_update_worker = None
         if worker:
@@ -18192,7 +18467,7 @@ class MainWindow(QMainWindow):
                     self.memory_update_dialog.raise_()
                     self.memory_update_dialog.activateWindow()
                 if hasattr(self, "sidebar_memory_btn"):
-                    self.sidebar_memory_btn.setText(" 查看更新状态")
+                    self.sidebar_memory_btn.setText(" 记忆 · 查看状态")
                 self.add_system_toast(message, "info", auto_close_ms=5000)
             else:
                 if self.memory_update_dialog:
@@ -18201,7 +18476,7 @@ class MainWindow(QMainWindow):
                     self.memory_update_dialog.raise_()
                     self.memory_update_dialog.activateWindow()
                 if hasattr(self, "sidebar_memory_btn"):
-                    self.sidebar_memory_btn.setText(" 查看更新状态")
+                    self.sidebar_memory_btn.setText(" 记忆 · 查看状态")
                 self.add_system_toast(f"长期记忆更新失败：{message}", "error", auto_close_ms=8000)
             return
 
@@ -18213,7 +18488,7 @@ class MainWindow(QMainWindow):
             f"本次跳过旧会话 {max(0, result.get('all_transcript_count', 0) - result.get('transcript_count', 0))} 个，"
             f"分批 {result.get('batch_count', 0)} 批，"
             f"估算输入 {result.get('estimated_tokens', 0)} tokens。"
-            "每个批次已自动写入 memories.md；你仍可编辑下方内容并再次保存。"
+            "生成结果尚未写入；请检查并确认保存。"
         )
         if self.memory_update_dialog:
             self.memory_update_dialog.show_result(memory_text, stats)
@@ -18221,7 +18496,7 @@ class MainWindow(QMainWindow):
             self.memory_update_dialog.raise_()
             self.memory_update_dialog.activateWindow()
         if hasattr(self, "sidebar_memory_btn"):
-            self.sidebar_memory_btn.setText(" 查看记忆结果")
+            self.sidebar_memory_btn.setText(" 记忆 · 查看结果")
 
     def save_memory_update_from_dialog(self, memory_text):
         final_text = (memory_text or "").strip()
@@ -18229,13 +18504,36 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法保存", "长期记忆内容为空，已取消保存。")
             return
         try:
-            save_result = save_memory_file_with_backup(self.chat_history_dir, final_text + "\n")
-            backup_path = save_result.get("backup_path")
+            store = MemoryStore(self.chat_history_dir)
+            backup_path = store.save_summary(final_text, "global")
+            sections = []
+            current_title = ""
+            current_lines = []
+            for line in final_text.splitlines():
+                if line.startswith("## "):
+                    if current_title and "\n".join(current_lines).strip():
+                        sections.append((current_title, "\n".join(current_lines).strip()))
+                    current_title = line[3:].strip()
+                    current_lines = []
+                elif current_title:
+                    current_lines.append(line)
+            if current_title and "\n".join(current_lines).strip():
+                sections.append((current_title, "\n".join(current_lines).strip()))
+            if not sections:
+                sections = [(f"历史记忆 {datetime.now().strftime('%Y-%m-%d')}", final_text)]
+            for title, content in sections:
+                store.save_module(title, content, tags=["历史生成"], scope="global")
+            if self._last_memory_update_cutoff_at:
+                save_memory_update_state(
+                    self.chat_history_dir,
+                    self._last_memory_update_cutoff_at,
+                    self._last_memory_update_transcripts,
+                )
             suffix = f" 已备份旧文件：{backup_path}" if backup_path else ""
-            suffix = f"{suffix} 本次处理状态已在批次写入时记录。"
+            suffix = f"{suffix} 已生成 {len(sections)} 个可编辑记忆模块。"
             if self.memory_update_dialog:
-                self.memory_update_dialog.mark_saved(f"长期记忆已保存到 memories.md。{suffix}")
-            self.add_system_toast(f"长期记忆已保存到 memories.md{suffix}", "success", auto_close_ms=8000)
+                self.memory_update_dialog.mark_saved(f"长期记忆摘要与模块已保存。{suffix}")
+            self.add_system_toast(f"长期记忆摘要与模块已保存。{suffix}", "success", auto_close_ms=8000)
         except Exception as exc:
             if self.memory_update_dialog:
                 self.memory_update_dialog.show_error(f"保存长期记忆失败：{exc}")

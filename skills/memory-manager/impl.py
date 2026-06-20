@@ -1,5 +1,7 @@
 import os
 
+from core.memory_store import MemoryStore
+
 
 def _get_memories_path(_context):
     if not _context:
@@ -15,27 +17,44 @@ def read_memories(_context=None):
     path = _get_memories_path(_context)
     if not path:
         return "Error: Config manager not available."
-    if not os.path.exists(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    store = MemoryStore(os.path.dirname(path))
+    workspace_dir = (_context or {}).get("workspace_dir") or ""
+    parts = [store.read_summary("global")]
+    if workspace_dir:
+        parts.append(store.read_summary("workspace", workspace_dir))
+    return "\n\n".join(item.strip() for item in parts if item.strip())
 
 
 def write_memories(content, mode="append", _context=None):
     path = _get_memories_path(_context)
     if not path:
         return "Error: Config manager not available."
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if mode == "replace":
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content or "")
-        return "OK"
-    existing = ""
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            existing = f.read()
-    if existing and not existing.endswith("\n"):
-        existing += "\n"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(existing + (content or ""))
+    store = MemoryStore(os.path.dirname(path))
+    existing = store.read_summary("global")
+    updated = content or "" if mode == "replace" else (existing.rstrip() + "\n" + (content or "")).strip()
+    store.save_summary(updated)
     return "OK"
+
+
+def list_memory_modules(_context=None):
+    path = _get_memories_path(_context)
+    if not path:
+        return {"error": "Config manager not available."}
+    store = MemoryStore(os.path.dirname(path))
+    return {"modules": store.list_modules((_context or {}).get("workspace_dir") or "")}
+
+
+def search_memory_modules(query, limit=8, _context=None):
+    path = _get_memories_path(_context)
+    if not path:
+        return {"error": "Config manager not available."}
+    store = MemoryStore(os.path.dirname(path))
+    return {"modules": store.search_modules(query, (_context or {}).get("workspace_dir") or "", limit)}
+
+
+def read_memory_module(module_id, _context=None):
+    path = _get_memories_path(_context)
+    if not path:
+        return {"error": "Config manager not available."}
+    store = MemoryStore(os.path.dirname(path))
+    return store.get_module(module_id)

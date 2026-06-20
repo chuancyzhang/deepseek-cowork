@@ -29,6 +29,7 @@ from core.clarify_mode import (
     normalize_run_context,
 )
 from core.sop_manager import build_sop_prompt_fragment
+from core.memory_store import MemoryStore
 from core.llm.deepseek import is_deepseek_request
 
 try:
@@ -882,9 +883,9 @@ class LLMWorker(QThread):
             "3. 这些经验将在未来类似场景中自动注入，帮助你变得更聪明。",
             "",
             "策略 [记忆]:",
-            "1. 你拥有 'read_memories' 与 'write_memories' 工具，用于读取/更新 memories.md（可能不存在或为空）。",
-            "2. 在每次对话结束后，若出现长期稳定偏好、重要背景、持续项目约定、用户身份/环境信息，才更新 memories.md；否则不要更新。",
-            "3. 避免写入敏感信息或临时细节；默认追加，只有在需要整体整理时才使用替换模式。",
+            "1. 长期摘要会常驻上下文；详细记忆请使用 'search_memory_modules' 与 'read_memory_module' 按需检索。",
+            "2. 只有用户明确要求记住时才使用 'write_memories'；自行推断的信息不要静默写入。",
+            "3. 避免写入敏感信息、临时细节或完整聊天记录。",
             "",
             "策略 [历史检索]: 当用户需要回忆之前讨论内容时，优先使用 'query_history' 工具进行检索。",
             "",
@@ -925,18 +926,18 @@ class LLMWorker(QThread):
             )
 
         memory_lines = []
-        memories_text = ""
         if self.config_manager:
-            try:
-                history_dir = self.config_manager.get_chat_history_dir()
-                memories_path = os.path.join(history_dir, "memories.md")
-                if os.path.exists(memories_path):
-                    with open(memories_path, "r", encoding="utf-8") as f:
-                        memories_text = f.read().strip()
-            except Exception:
-                memories_text = ""
-        if memories_text:
-            memory_lines.append("\n# Memories\n" + memories_text)
+            history_dir = self.config_manager.get_chat_history_dir()
+            store = MemoryStore(history_dir)
+            soul = store.read_soul().strip()
+            global_summary = store.read_summary("global").strip()
+            workspace_summary = store.read_summary("workspace", self.workspace_dir).strip() if self.workspace_dir else ""
+            if soul:
+                memory_lines.append("\n# 灵魂提示词\n" + soul)
+            if global_summary:
+                memory_lines.append("\n# 全局长期记忆\n" + global_summary)
+            if workspace_summary:
+                memory_lines.append("\n# 当前工作区记忆\n" + workspace_summary)
 
         return "\n".join(stable_policy_lines + memory_lines)
 

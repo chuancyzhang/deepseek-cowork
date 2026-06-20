@@ -39,7 +39,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **历史加载一致性屏障**：异步恢复会话期间，输入和保存请求均被拦截；加载完成后通过 `set_current_session()` 重新绑定窗口消息别名。历史迁移版本 3 会移除旧 query 模糊匹配生成的隐藏 Skill 上下文，同时保留 `tool_search` 和真实工具调用产生的上下文。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
 *   **UI 异常持久化**：`SafeApplication.notify(...)` 保留全局事件保护，但捕获异常时会将接收控件类型、事件类型和完整 traceback 始终追加到应用数据目录（便携模式为 `user_data/`）下的 `ui_error.log`；系统提示仅指向日志，不再把通用“继续运行”文案当作错误详情。
-*   **反馈回路按钮**：侧边栏 `更新长期记忆` 与 `沉淀为 Skill` 触发后台 worker，并在 UI 中提供进度、预览、编辑与保存确认。
+*   **反馈回路按钮**：侧边栏 `记忆` 打开可编辑的分层记忆中心并可触发生成草稿；`沉淀为 Skill` 保持会话知识沉淀入口。
 
 ### 2.2 Agent Core
 *   **core/agent.py**：推理循环与工具调度，负责将用户输入转化为可执行任务。
@@ -70,7 +70,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/automation_manager.py**：规范化定时任务、计算 cron / 快捷计划的 next run、生成完整执行提示词并维护运行历史记录结构。
 *   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、`mcp_servers`、项目列表、工作区、自动化任务与运行历史。
 *   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组，并以 `meta.pinned` / `meta.archived` 管理单条对话；局部元数据更新保留最近活动时间。SQLite 连接启用 WAL / busy timeout，并在普通追加路径下只写入新增消息，编辑、删除和迁移仍回退全量重写。旧版 `conversation_branch` 元数据可继续读取但不驱动 UI，旧版 `chat_history_*.json` 通过手动迁移写回 SQLite。
-*   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
+*   **core/memory_update.py / core/memory_store.py**：前者扫描历史并生成草稿，后者管理灵魂、摘要、全局/工作区模块、索引与版本备份；确认保存后才推进处理状态。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，下载前清理旧 ZIP、暂存目录、备份目录和更新脚本，校验解压结构并生成 Windows 更新脚本；PowerShell GUI 更新脚本允许前台窗口最小化，也支持默认最小化的后台安装，应用重启路径继续显式隐藏控制台窗口。
 
 ### 2.6 企业 IM
@@ -106,10 +106,10 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 ### 4.1 手动反馈回路数据流
 
 **长期记忆更新**
-1.  用户点击 `更新长期记忆`。
+1.  用户从侧边栏打开 `记忆` 中心，可直接维护灵魂提示词、全局/工作区摘要和记忆模块，也可发起历史生成。
 2.  `MemoryUpdateWorker` 从 `core/chat_storage.py` 读取新增或变更的历史会话，并跳过 `memories_update_state.json` 中已处理的内容。
-3.  `core/memory_update.py` 按批构造提示，将当前 `memories.md` 与历史批次交给模型合并；当模型返回为空或失败时执行有限重试。
-4.  每个批次写入 `memories.md` 并生成备份，同时向对话框回传进度和批次预览；最终结果仍允许用户编辑并再次保存。
+3.  `core/memory_update.py` 按批生成长期记忆草稿；生成期间不修改正式记忆或处理游标。
+4.  用户确认后，`core/memory_store.py` 保存摘要、按 Markdown 小节生成可编辑模块并创建版本备份，随后才推进处理游标。灵魂与摘要常驻提示词，详细模块通过记忆工具按需检索。
 
 **会话沉淀为 Skill**
 1.  用户点击 `沉淀为 Skill`。
@@ -132,7 +132,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ## 5. 分层记忆与上下文处理
 - **系统层**：System Prompt 拆成稳定前缀与 runtime context。稳定策略、工具导航、记忆和思考规范保持在请求最前方；工作区、运行模式、日期、runtime 路径、当前工具清单、子 Agent、指定能力和 SOP 当前步骤作为请求尾部临时 system message 注入，不写入持久历史，降低 context cache 前缀失效。
-- **记忆层**：`memories.md`（可选）承载稳定偏好与长期信息，自动注入 System Prompt；`更新长期记忆` 通过 `memories_update_state.json` 记录处理进度，后续运行聚焦新增或变更会话。
+- **记忆层**：`memory/` 保存全局灵魂、全局/工作区摘要、模块索引与版本备份；旧 `memories.md` 首次使用时非破坏性导入。灵魂与适用摘要自动注入稳定 System Prompt，详细模块由 `search_memory_modules` / `read_memory_module` 按需读取；生成草稿确认保存后才更新 `memories_update_state.json`。
 - **技能层**：默认只暴露元数据，用户明确选择时注入简版能力提示；完整说明与经验仅在明确选择、`tool_search` 命中或实际技能工具调用后按需注入。
 - **会话层**：`run_context` 携带反问模式、指定能力、智能体配置与自动化当前步骤，影响工具可见性与 Prompt 约束。
 - **外部工具层**：MCP 配置存储在 `mcp_servers`，兼容 `type = "stdio"` / `type = "streamable_http"` 与 `startup_timeout_ms` 命名，也支持从 `mcpServers` / `mcp_servers` JSON 片段导入；当前只接入 MCP tools，不包含 resources 与 prompts。

@@ -1043,6 +1043,49 @@ def apple_settings_value_style():
     return f"color: {DesignTokens.text_primary}; font-size: 18px; font-weight: 700;"
 
 
+def apply_settings_combo_style(combo):
+    """Keep settings combo popup items legible across active and inactive states."""
+    view = combo.view()
+    view.setStyleSheet(
+        f"""
+        QAbstractItemView {{
+            background: {DesignTokens.bg_panel_strong};
+            color: {DesignTokens.text_primary};
+            border: 1px solid {DesignTokens.border_subtle};
+            outline: none;
+            padding: 4px;
+            selection-background-color: {DesignTokens.primary_soft};
+            selection-color: {DesignTokens.text_primary};
+        }}
+        QAbstractItemView::item {{
+            color: {DesignTokens.text_primary};
+            min-height: 28px;
+            padding: 4px 8px;
+            border: none;
+            border-radius: 8px;
+        }}
+        QAbstractItemView::item:hover {{
+            background: {DesignTokens.bg_hover};
+            color: {DesignTokens.text_primary};
+        }}
+        QAbstractItemView::item:selected,
+        QAbstractItemView::item:selected:active,
+        QAbstractItemView::item:selected:!active,
+        QAbstractItemView::item:selected:!focus {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.text_primary};
+        }}
+        """
+    )
+    palette = view.palette()
+    palette.setColor(QPalette.Base, QColor(DesignTokens.bg_panel_strong))
+    palette.setColor(QPalette.Text, QColor(DesignTokens.text_primary))
+    palette.setColor(QPalette.Highlight, QColor(DesignTokens.primary_soft))
+    palette.setColor(QPalette.HighlightedText, QColor(DesignTokens.text_primary))
+    view.setPalette(palette)
+    return combo
+
+
 def settings_status_chip(text, tone="neutral"):
     colors = {
         "neutral": (DesignTokens.muted_chip_bg, DesignTokens.muted_chip_text, DesignTokens.border_subtle),
@@ -2752,6 +2795,7 @@ class ModelEditDialog(QDialog):
             form.addRow(build_form_row_label("Thinking"), self.thinking_check)
 
             self.reasoning_combo = QComboBox()
+            apply_settings_combo_style(self.reasoning_combo)
             for effort in SUPPORTED_DEEPSEEK_REASONING_EFFORTS:
                 self.reasoning_combo.addItem(effort, effort)
             effort = normalize_deepseek_reasoning_effort(
@@ -2892,6 +2936,7 @@ class ModelChannelEditor(QFrame):
         form.addRow(build_form_row_label("服务名称"), self.display_name_input)
 
         self.provider_combo = QComboBox()
+        apply_settings_combo_style(self.provider_combo)
         self.provider_combo.addItem("OpenAI 兼容", "openai")
         self.provider_combo.addItem("Anthropic", "anthropic")
         provider_type = str(self.channel_config.get("provider_type") or "openai").lower()
@@ -5460,6 +5505,7 @@ class McpServerEditDialog(QDialog):
         form.addRow(build_form_row_label("名称"), self.name_input)
 
         self.transport_combo = QComboBox()
+        apply_settings_combo_style(self.transport_combo)
         self.transport_combo.addItem("stdio", TRANSPORT_STDIO)
         self.transport_combo.addItem("Streamable HTTP", TRANSPORT_STREAMABLE_HTTP)
         transport = str(self.server.get("transport") or self.server.get("type") or TRANSPORT_STDIO)
@@ -6164,6 +6210,7 @@ class SettingsDialog(QDialog):
 
         def build_source_editor(kind, presets):
             combo = QComboBox()
+            apply_settings_combo_style(combo)
             for source_id, item in presets.items():
                 combo.addItem(item["name"], source_id)
             selected_id = self.download_sources[kind]["selected"]

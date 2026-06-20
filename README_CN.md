@@ -28,7 +28,7 @@
 ### 🔌 技能系统
 *   **经验优先的技能**：技能被视为结构化经验包，而不是第二套执行协议。
 *   **热重载技能**：将新技能放入 `skills/` 或 `ai_skills/`，无需重启即可使用。
-*   **随包可选插件**：浏览器自动化、网页搜索、金融数据、视频下载和 Office/PDF 读取都作为 `ai_skills/` 下默认关闭的随包插件提供，不再混入核心内置工具。
+*   **随包可选插件**：浏览器自动化、网页搜索、金融数据和 Office/PDF 读取作为 `ai_skills/` 下的随包插件提供；所需第三方库可在“设置 → 组件与依赖”提前安装。
 *   **浏览器会话**：`browser-automation` 采用串行“观察—操作—验证”流程，支持专用持久 profile、临时隔离 profile，以及遵循 Chrome 授权流程的 Chrome 144+ 当前会话连接。
 *   **独立量化策略 Skill**：`quant-strategy-management` 以独立 Skill 形式提供 Strategy DSL 解析、策略资产保存、日线回测和报告产物。
 *   **可迁移能力包**：Skill 支持导出为 ZIP，也支持从 ZIP 文件或源码文件夹回导。
@@ -101,7 +101,7 @@
     ```
 
 ### 打包前运行时准备（Windows）
-在执行 `pyinstaller deepseek-cowork.spec` 之前，先拉取固定版本的运行时包（Node.js + Git Bash），并进行 SHA256 校验：
+在执行 `pyinstaller deepseek-cowork.spec` 之前，先拉取固定版本的 Git Bash 运行时并进行 SHA256 校验。Node.js 已改为应用内可选组件：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
@@ -110,7 +110,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
 Windows 打包版会优先直接从当前应用目录解析内置运行时，包括 `_internal/node_env/node.exe` 与 `_internal/git_bash_env/bin/bash.exe`。AppData 下的 `runtime_sandbox` 继续作为临时、缓存和 skill 依赖目录，不再优先作为可执行运行时来源，因此自动升级后会使用新解压的 `_internal` 文件。如需覆盖探测结果，可设置 `COWORK_NODE_EXE`、`COWORK_NODE_DIR`、`COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
 
-打包版沙盒 Python 默认包含 `openpyxl`、`python-docx`、`python-pptx`、`pypdf` 及其必要依赖，生成 Office/PDF 文件无需用户单独下载；安装包同时包含 `PySide6-Addons` 与 QtWebEngine 运行资源，用于应用内 HTML 预览。
+打包版保留完整沙箱 Python 基础环境。文档、数据分析、金融分析、浏览器自动化和网页研究第三方库可在“设置 → 组件与依赖”按需安装，并支持 PyPI、清华、阿里云及自定义 HTTPS 源；Node.js 可从官方源或 npmmirror 安装。安装包继续包含 `PySide6-Addons` 与 QtWebEngine 运行资源。
 AI 在 execution 模式下默认可直接调用 `run_python_code`，无需先通过 `tool_search` 发现；JavaScript 仍通过 `run_node_code` 执行，`bash` 工具优先使用 Git Bash，Windows 上缺失 Git Bash 时会退回 `cmd.exe`。
 带截图或其他图片输入的回合也会保留 `tool_search` 发现链路，这样文档读取、浏览器辅助等延迟工具仍可按需被发现，而不会因为视觉输入而消失。
 `python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒运行时里验证导入是否成功。第三方包会持久化到 AppData 的 `runtime_sandbox/.../skills/python-runner/python/site-packages`，重启后仍可用；如果依赖缓存记录还在但沙盒已经无法导入，会自动触发重新安装。
@@ -136,7 +136,7 @@ Windows 打包时还必须把 `DLLs/` 这类平台扩展目录以及常见 MSVC 
 示例：
 *   *“扫描这个项目中未使用的 import 并移除。”*
 *   *“汇总文件夹里的所有 PDF 并生成报告。”*
-*   *“创建一个使用 yt-dlp 的视频下载技能。”*
+*   *“创建一个读取公开数据并生成分析图表的技能。”*
 *   输入区 `+` 菜单中的 **从对话生成 SOP** 会从当前会话一次性提炼完整 SOP 草稿；确认后保存为任务模板并绑定到当前会话，也可以输入修改意见重新生成草稿。
 
 ### 4. 管理自动化

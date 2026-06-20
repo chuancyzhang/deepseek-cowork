@@ -50,6 +50,21 @@ from core.updater import (
     launch_windows_update_script,
     prepare_update,
 )
+from core.runtime_components import (
+    NODE_SOURCES,
+    PYTHON_SOURCES,
+    TOOLKITS,
+    install_node_runtime,
+    install_toolkit,
+    node_runtime_status,
+    normalize_download_sources,
+    selected_source,
+    source_options,
+    test_source,
+    toolkit_status,
+    uninstall_node_runtime,
+    uninstall_toolkit,
+)
 from core.llm.factory import LLMFactory
 from core.memory_update import (
     DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
@@ -5872,6 +5887,44 @@ class McpServerManager(QWidget):
         return json.loads(json.dumps(self.servers, ensure_ascii=False))
 
 
+class RuntimeComponentWorker(QThread):
+    progress_signal = Signal(str, int)
+    finished_signal = Signal(dict)
+
+    def __init__(self, action, component_id, source=None, parent=None):
+        super().__init__(parent)
+        self.action = action
+        self.component_id = component_id
+        self.source = source or {}
+
+    def run(self):
+        try:
+            progress = lambda message, percent: self.progress_signal.emit(str(message), int(percent))
+            if self.component_id == "node":
+                result = install_node_runtime(self.source, progress) if self.action in {"install", "repair"} else uninstall_node_runtime()
+            else:
+                result = install_toolkit(self.component_id, self.source, progress, force=self.action == "repair") if self.action in {"install", "repair"} else uninstall_toolkit(self.component_id)
+            self.finished_signal.emit({"ok": True, "component_id": self.component_id, "result": result})
+        except Exception as exc:
+            self.finished_signal.emit({"ok": False, "component_id": self.component_id, "error": str(exc)})
+
+
+class SourceTestWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, kind, source, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.source = source
+
+    def run(self):
+        try:
+            test_source(self.kind, self.source)
+            self.finished_signal.emit({"ok": True, "kind": self.kind})
+        except Exception as exc:
+            self.finished_signal.emit({"ok": False, "kind": self.kind, "error": str(exc)})
+
+
 class AppUpdateWorker(QThread):
     progress_signal = Signal(str, int)
     finished_signal = Signal(dict)
@@ -6090,6 +6143,133 @@ class SettingsDialog(QDialog):
         permission_panel_layout.addWidget(self.god_mode_check)
         permission_group_layout.addWidget(permission_panel)
 
+        components_page, components_layout = make_scroll_page(
+            "组件与依赖",
+            "按需安装运行环境与常用工具包；其他 Skill 依赖仍会在首次使用时自动准备。",
+        )
+        self.component_worker = None
+        self.source_test_worker = None
+        self.component_rows = {}
+        self.download_sources = normalize_download_sources(self.config_manager.get("download_sources", {}))
+
+        source_group, source_group_layout = build_settings_surface(
+            "下载源",
+            "下载失败时不会自动切换镜像，便于确认实际来源与错误。",
+            radius=20,
+            show_subtitle=False,
+        )
+        source_form = QFormLayout()
+        source_form.setSpacing(10)
+        configure_responsive_form_layout(source_form)
+
+        def build_source_editor(kind, presets):
+            combo = QComboBox()
+            for source_id, item in presets.items():
+                combo.addItem(item["name"], source_id)
+            selected_id = self.download_sources[kind]["selected"]
+            custom_items = self.download_sources[kind]["custom"]
+            custom_by_id = {item["id"]: item for item in custom_items}
+            custom_selected = next((item for item in custom_items if item["id"] == selected_id), None)
+            for item in custom_items:
+                combo.addItem(item["name"], item["id"])
+            combo.addItem("添加自定义 HTTPS 源…", "custom")
+            combo.setCurrentIndex(max(0, combo.findData(selected_id)))
+            url_input = QLineEdit()
+            url_input.setPlaceholderText("https://example.com/simple/" if kind == "python" else "https://example.com/node/")
+            url_input.setText((custom_selected or {}).get("url", ""))
+            url_input.setVisible(bool(custom_selected))
+            test_btn = QPushButton("测试")
+            test_btn.setObjectName("SecondaryBtn")
+            test_btn.setFixedWidth(72)
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            row_layout.addWidget(combo)
+            row_layout.addWidget(url_input, 1)
+            row_layout.addWidget(test_btn)
+            def sync_custom_source_field():
+                source_id = combo.currentData()
+                is_custom = source_id == "custom" or source_id not in presets
+                url_input.setVisible(is_custom)
+                if source_id in custom_by_id:
+                    url_input.setText(custom_by_id[source_id]["url"])
+                elif source_id == "custom":
+                    url_input.clear()
+            combo.currentIndexChanged.connect(lambda _index: sync_custom_source_field())
+            test_btn.clicked.connect(lambda _checked=False, source_kind=kind: self.test_component_source(source_kind))
+            return row, combo, url_input, test_btn
+
+        python_source_row, self.python_source_combo, self.python_source_url, self.python_source_test_btn = build_source_editor("python", PYTHON_SOURCES)
+        node_source_row, self.node_source_combo, self.node_source_url, self.node_source_test_btn = build_source_editor("node", NODE_SOURCES)
+        source_form.addRow(build_form_row_label("Python 包"), python_source_row)
+        source_form.addRow(build_form_row_label("Node.js"), node_source_row)
+        source_group_layout.addLayout(source_form)
+        components_layout.addWidget(source_group)
+
+        runtime_group, runtime_group_layout = build_settings_surface("运行环境", "Node.js 不再占用基础分发包体积。", radius=20, show_subtitle=False)
+        toolkit_group, toolkit_group_layout = build_settings_surface("工具包", "工具包安装到沙箱 Python，可被代码执行和相关 Skill 共同使用。", radius=20, show_subtitle=False)
+
+        def add_component_row(container, component_id, title_text, detail_text, status):
+            panel = QFrame()
+            panel.setStyleSheet("QFrame { background: transparent; border: none; }")
+            row = QHBoxLayout(panel)
+            row.setContentsMargins(0, 7, 0, 7)
+            row.setSpacing(12)
+            text_box = QVBoxLayout()
+            text_box.setSpacing(3)
+            title_label = QLabel(title_text)
+            title_label.setStyleSheet(apple_settings_section_title_style())
+            detail_label = QLabel(detail_text)
+            detail_label.setWordWrap(True)
+            detail_label.setStyleSheet(apple_settings_inline_note_style())
+            status_label = QLabel()
+            status_label.setStyleSheet(apple_settings_inline_note_style())
+            text_box.addWidget(title_label)
+            text_box.addWidget(detail_label)
+            text_box.addWidget(status_label)
+            action_btn = QPushButton()
+            action_btn.setObjectName("SecondaryBtn")
+            repair_btn = QPushButton("修复")
+            repair_btn.setObjectName("SecondaryBtn")
+            row.addLayout(text_box, 1)
+            row.addWidget(repair_btn)
+            row.addWidget(action_btn)
+            self.component_rows[component_id] = {"status": status_label, "action": action_btn, "repair": repair_btn}
+            action_btn.clicked.connect(lambda _checked=False, cid=component_id: self.toggle_component(cid))
+            repair_btn.clicked.connect(lambda _checked=False, cid=component_id: self.start_component_action("repair", cid))
+            container.addWidget(panel)
+            self.update_component_row(component_id, status)
+
+        add_component_row(runtime_group_layout, "node", "Node.js", "JavaScript 执行、npm / npx 与 Node Skill", node_runtime_status())
+        for toolkit_id, spec in TOOLKITS.items():
+            packages = "、".join(spec["packages"])
+            skills = "、".join(spec["skills"]) or "通用 Python 任务"
+            add_component_row(toolkit_group_layout, toolkit_id, spec["name"], f"{spec['description']}\n关联：{skills} · 包：{packages}", toolkit_status(toolkit_id))
+        runtime_group_layout.addStretch()
+        toolkit_group_layout.addStretch()
+        components_layout.addWidget(runtime_group)
+        components_layout.addWidget(toolkit_group)
+
+        dependency_group, dependency_group_layout = build_settings_surface("其他 Skill 依赖", "未被工具包覆盖的依赖继续按现有机制静默安装并自动修复。", radius=20, show_subtitle=False)
+        skill_manager = getattr(self._main, "skill_manager", None)
+        records = getattr(skill_manager, "skill_records", {}) if skill_manager else {}
+        covered = {package.lower() for spec in TOOLKITS.values() for package in spec["packages"]}
+        dependency_lines = []
+        for skill_name, record in sorted(records.items()):
+            spec = record.get("spec") or {}
+            python_deps = list(spec.get("python_dependencies") or [])
+            node_deps = list(spec.get("node_dependencies") or [])
+            remaining = [item for item in python_deps if item.lower() not in covered] + node_deps
+            if remaining:
+                dependency_lines.append(f"{skill_name}：{', '.join(remaining)}")
+        dependency_label = QLabel("\n".join(dependency_lines) if dependency_lines else "当前没有额外的 Skill 依赖。")
+        dependency_label.setWordWrap(True)
+        dependency_label.setStyleSheet(apple_settings_inline_note_style())
+        dependency_group_layout.addWidget(dependency_label)
+        components_layout.addWidget(dependency_group)
+        components_layout.addStretch()
+
         update_page, update_layout = make_scroll_page(
             "应用更新",
             "检查 GitHub Releases，确认当前版本和可安装更新之间的状态变化。",
@@ -6281,6 +6461,7 @@ class SettingsDialog(QDialog):
         add_settings_page("MCP", "fa5s.plug", mcp_page)
         add_settings_page("企业消息", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
+        add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
         add_settings_page("更新", "fa5s.download", update_page)
         self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
         self.nav_list.setCurrentRow(0)
@@ -6296,6 +6477,111 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
+
+    def _source_config_from_editors(self):
+        config = normalize_download_sources(self.download_sources)
+        for kind, combo, url_input in (
+            ("python", self.python_source_combo, self.python_source_url),
+            ("node", self.node_source_combo, self.node_source_url),
+        ):
+            selected = combo.currentData()
+            if selected == "custom" or str(selected).startswith("custom-"):
+                url = url_input.text().strip()
+                if not url.lower().startswith("https://"):
+                    raise ValueError("自定义下载源必须使用 HTTPS。")
+                custom_id = "custom-" + uuid.uuid5(uuid.NAMESPACE_URL, url).hex[:12]
+                custom_name = url.split("/", 3)[2] if "/" in url else "自定义源"
+                custom_item = {"id": custom_id, "name": custom_name, "url": url}
+                retained = [item for item in config[kind]["custom"] if item.get("id") not in {selected, custom_id}]
+                config[kind]["custom"] = retained + [custom_item]
+                config[kind]["selected"] = custom_id
+            else:
+                config[kind]["selected"] = str(selected)
+        return normalize_download_sources(config)
+
+    def _current_component_source(self, kind):
+        config = self._source_config_from_editors()
+        return selected_source(kind, config)
+
+    def test_component_source(self, kind):
+        if self.source_test_worker and self.source_test_worker.isRunning():
+            return
+        try:
+            source = self._current_component_source(kind)
+        except Exception as exc:
+            QMessageBox.warning(self, "下载源", str(exc))
+            return
+        button = self.python_source_test_btn if kind == "python" else self.node_source_test_btn
+        button.setEnabled(False)
+        button.setText("测试中…")
+        self.source_test_worker = SourceTestWorker(kind, source, self)
+        self.source_test_worker.finished_signal.connect(self.handle_source_test_finished)
+        self.source_test_worker.start()
+
+    def handle_source_test_finished(self, result):
+        kind = result.get("kind")
+        button = self.python_source_test_btn if kind == "python" else self.node_source_test_btn
+        button.setEnabled(True)
+        button.setText("测试")
+        if result.get("ok"):
+            QMessageBox.information(self, "下载源", "连接测试成功。")
+        else:
+            QMessageBox.warning(self, "下载源测试失败", result.get("error") or "无法连接下载源。")
+        self.source_test_worker = None
+
+    def update_component_row(self, component_id, status):
+        row = self.component_rows.get(component_id)
+        if not row:
+            return
+        installed = bool(status.get("installed"))
+        size = int(status.get("size") or 0)
+        suffix = f" · {format_file_size(size)}" if size else ""
+        source = status.get("source") or ""
+        source_suffix = f" · {source}" if source else ""
+        row["status"].setText(("已安装" if installed else "未安装") + suffix + source_suffix)
+        row["action"].setText("卸载" if installed else "安装")
+        row["repair"].setVisible(installed)
+
+    def toggle_component(self, component_id):
+        status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
+        action = "uninstall" if status.get("installed") else "install"
+        if action == "uninstall":
+            reply = QMessageBox.question(self, "卸载组件", "确定卸载该组件？相关能力下次使用时可能重新安装依赖。", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        self.start_component_action(action, component_id)
+
+    def start_component_action(self, action, component_id):
+        if self.component_worker and self.component_worker.isRunning():
+            QMessageBox.information(self, "组件管理", "另一个组件操作正在进行，请稍候。")
+            return
+        try:
+            source = self._current_component_source("node" if component_id == "node" else "python") if action in {"install", "repair"} else {}
+        except Exception as exc:
+            QMessageBox.warning(self, "组件管理", str(exc))
+            return
+        for item in self.component_rows.values():
+            item["action"].setEnabled(False)
+            item["repair"].setEnabled(False)
+        row = self.component_rows[component_id]
+        row["status"].setText("正在处理…")
+        self.component_worker = RuntimeComponentWorker(action, component_id, source, self)
+        self.component_worker.progress_signal.connect(lambda message, _percent, cid=component_id: self.component_rows[cid]["status"].setText(message))
+        self.component_worker.finished_signal.connect(self.handle_component_finished)
+        self.component_worker.start()
+
+    def handle_component_finished(self, result):
+        component_id = result.get("component_id")
+        for item in self.component_rows.values():
+            item["action"].setEnabled(True)
+            item["repair"].setEnabled(True)
+        status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
+        self.update_component_row(component_id, status)
+        if result.get("ok"):
+            QMessageBox.information(self, "组件管理", "组件操作已完成。")
+        else:
+            QMessageBox.warning(self, "组件操作失败", result.get("error") or "组件操作失败。")
+        self.component_worker = None
 
     def refresh_current_version_label(self):
         self.update_current_label.setText(f"当前版本：{APP_VERSION}")
@@ -6518,6 +6804,12 @@ class SettingsDialog(QDialog):
             self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
             self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
             self.config_manager.set_god_mode(self.god_mode_check.isChecked())
+            try:
+                self.download_sources = self._source_config_from_editors()
+                self.config_manager.set("download_sources", self.download_sources)
+            except ValueError as exc:
+                QMessageBox.warning(self, "下载源", str(exc))
+                return
             self._save_im_gateway_config()
         self.requires_skill_reload = mcp_servers != current_mcp_servers
         self.accept()

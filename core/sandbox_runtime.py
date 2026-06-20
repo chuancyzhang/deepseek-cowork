@@ -13,6 +13,11 @@ SANDBOX_VERSION = "v1"
 _RUNTIME_CACHE = None
 
 
+def reset_runtime_cache():
+    global _RUNTIME_CACHE
+    _RUNTIME_CACHE = None
+
+
 def _norm(path):
     return os.path.abspath(path) if path else ""
 
@@ -448,6 +453,14 @@ def _skill_node_root(skill_id):
     return os.path.join(_skill_root(skill_id), "node")
 
 
+def _toolkit_python_paths():
+    try:
+        from core.runtime_components import installed_toolkit_paths
+        return installed_toolkit_paths()
+    except Exception:
+        return []
+
+
 def _sandbox_python_bootstrap_dir(root):
     path = os.path.join(root, "python_bootstrap")
     os.makedirs(path, exist_ok=True)
@@ -501,6 +514,7 @@ def _python_dll_dirs(runtime, skill_id=None):
         os.path.join(runtime_root, "DLLs") if runtime_root else "",
         runtime_site_packages,
         skill_site_packages,
+        *_toolkit_python_paths(),
     )
 
 
@@ -537,6 +551,8 @@ def build_sandbox_env(workspace_dir=None, skill_id=None):
         pythonpath_entries.append(python_path)
         env["NODE_PATH"] = node_modules
         env["npm_config_prefix"] = node_root
+
+    pythonpath_entries.extend(_toolkit_python_paths())
 
     existing_pythonpath = env.get("PYTHONPATH", "")
     if existing_pythonpath:
@@ -740,7 +756,8 @@ def install_skill_dependencies(skill_id, python_dependencies=None, node_dependen
                 raise RuntimeError("Sandbox Python runtime is missing.")
             target = _skill_python_path(skill_id)
             os.makedirs(target, exist_ok=True)
-            cmd = [python_exe, "-m", "pip", "install", "--upgrade", "--target", target] + python_dependencies
+            from core.runtime_components import selected_python_index_url
+            cmd = [python_exe, "-m", "pip", "install", "--index-url", selected_python_index_url(), "--upgrade", "--target", target] + python_dependencies
             out = subprocess.check_output(cmd, env=env, text=True, encoding="utf-8", errors="replace", stderr=subprocess.STDOUT, **_no_window_kwargs())
             logs.append(out.strip())
         if node_dependencies:

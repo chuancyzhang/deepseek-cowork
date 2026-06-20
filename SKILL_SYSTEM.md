@@ -365,7 +365,7 @@ Default-off plugins ship under `ai_skills` with `source_type: bundled_plugin` an
 - `web-search`: web search and article reading.
 - `financial-data-akshare`: AKShare financial data.
 - `browser-automation`: serial browser observation and interaction through dedicated persistent, temporary isolated, or explicitly authorized Chrome 144+ existing sessions. It does not provide desktop or application-launch automation.
-- `github-tools`, `yt-dlp-wrapper`: GitHub and media-download helpers.
+- Optional bundled skills declare Python and Node dependencies that are shown under Settings → Components & Dependencies; common dependencies can be prepared as reusable toolkits.
 
 Office/PDF writes are intentionally not modeled as fixed tools. The agent should use `run_python_code` with task-appropriate libraries when the user asks to create or modify those formats.
 

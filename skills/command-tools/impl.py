@@ -9,6 +9,8 @@ import tempfile
 from PySide6.QtCore import QObject, Qt
 
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox, run_skill_script_in_sandbox
+from core.interaction import ask_user
+from core.runtime_components import install_node_runtime, load_saved_download_sources, selected_source
 
 DEFAULT_EXCLUDE_DIRS = {".git", ".idea", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 
@@ -160,7 +162,22 @@ def run_node_code(workspace_dir, code, _context=None):
 
     node_exe = get_runtime_executable("node")
     if not node_exe:
-        return "Error: Bundled Node.js runtime is missing. This package may be corrupted. Please reinstall the application."
+        approved = ask_user(
+            "此操作需要可选的 Node.js 运行环境。是否现在从设置中选择的下载源安装？",
+            _context=_context,
+            title="安装 Node.js",
+            timeout_seconds=180,
+        )
+        if not approved:
+            return "Error: Node.js runtime is not installed and the user declined installation."
+        try:
+            source = selected_source("node", load_saved_download_sources())
+            install_node_runtime(source)
+            node_exe = get_runtime_executable("node")
+        except Exception as exc:
+            return f"Error installing Node.js runtime: {exc}"
+        if not node_exe:
+            return "Error: Node.js installation completed but the runtime could not be resolved."
 
     temp_path = ""
     try:

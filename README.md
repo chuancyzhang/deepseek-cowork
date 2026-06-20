@@ -27,7 +27,7 @@ For installation, model setup, project conversations, and editable PPTX generati
 ### 🔌 Skill System
 *   **Experience-First Skills**: Skills are treated as structured experience packages rather than a second execution protocol.
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
-*   **Optional Bundled Plugins**: Browser automation, web search, financial data, media download, and Office/PDF reading ship under `ai_skills/` as default-off plugins instead of core built-ins.
+*   **Optional Bundled Plugins**: Browser automation, web search, financial data, and Office/PDF reading ship under `ai_skills/`; their dependencies can be prepared from Settings → Components & Dependencies.
 *   **Browser Sessions**: `browser-automation` provides serial observe/act/verify workflows with a dedicated persistent profile, temporary isolated profiles, and an explicit Chrome 144+ connection mode that honors Chrome's remote-debugging approval flow.
 *   **Portable Skill Packages**: Export a skill as a ZIP package and import it back from either a ZIP file or a source folder.
 *   **Standalone Quant Strategy Skill**: `quant-strategy-management` adds controlled Strategy DSL parsing, strategy storage, daily backtests, and report artifacts as a self-contained skill package.
@@ -101,7 +101,7 @@ For installation, model setup, project conversations, and editable PPTX generati
     ```
 
 ### Build Runtime Bootstrap (Windows Packaging)
-Before running `pyinstaller deepseek-cowork.spec`, fetch pinned runtime bundles (Node.js + Git Bash) with SHA256 verification:
+Before running `pyinstaller deepseek-cowork.spec`, fetch the pinned Git Bash runtime with SHA256 verification. Node.js is now an in-app optional component:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
@@ -112,7 +112,7 @@ Packaged Windows builds resolve bundled runtimes directly from the current app d
 Agents get `run_python_code` in the default execution tool list so Python can be used without a prior `tool_search`; JavaScript execution still uses `run_node_code`, and the `bash` tool prefers Git Bash before falling back to `cmd.exe` on Windows.
 Vision turns keep the same `tool_search` discovery path as text turns, so screenshot or image tasks can still discover deferred tools such as document readers or browser helpers when needed.
 The packaged Python sandbox should be built from the base interpreter rather than a virtualenv redirector, otherwise `run_python_code` may fail on machines that do not have the builder's Python installation path.
-Packaged builds include `openpyxl`, `python-docx`, `python-pptx`, and `pypdf` (plus their required dependencies) directly in the sandbox Python runtime, so document generation does not require a separate download. `PySide6-Addons` and QtWebEngine runtime resources are also included for in-app HTML preview.
+Packaged builds retain the complete sandbox Python base environment. Document, data-analysis, finance, browser-automation, and web-research dependencies can be installed on demand from Settings → Components & Dependencies, using PyPI, Tsinghua, Aliyun, or a custom HTTPS index. Node.js can use the official source or npmmirror. `PySide6-Addons` and QtWebEngine resources remain bundled for HTML preview.
 `install_package` for `python-runner` verifies imports inside the same sandbox runtime used by `run_python_code`. Third-party packages are persisted under AppData `runtime_sandbox/.../skills/python-runner/python/site-packages` so they survive restarts, and stale dependency cache entries are reinstalled automatically if the sandbox can no longer import them.
 The sandbox now injects a Python bootstrap `sitecustomize.py`, `PATH`, and `COWORK_PYTHON_DLL_DIRS` so Windows packages with native extensions can resolve DLLs from the bundled runtime plus skill-scoped `site-packages`.
 When a package still fails to import after installation, `install_package` returns the sandbox traceback instead of only reporting a generic "still cannot import" message.

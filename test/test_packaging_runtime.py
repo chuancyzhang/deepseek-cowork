@@ -6,18 +6,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestPackagedRuntimeContract(unittest.TestCase):
-    def test_document_libraries_are_bundled_into_sandbox_runtime(self):
+    def test_document_libraries_and_node_are_optional_components(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
             spec_text = handle.read()
 
-        self.assertIn(
-            'SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "pypdf"]',
-            spec_text,
-        )
-        self.assertIn(
-            "_collect_distribution_runtime_entries(site_packages, SANDBOX_RUNTIME_DISTS)",
-            spec_text,
-        )
+        self.assertIn('SANDBOX_DOCUMENT_DISTS = []', spec_text)
+        self.assertIn('SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS', spec_text)
+        self.assertIn('node_env = []', spec_text)
+        excludes = spec_text.split("excludes=[", 1)[1].split("],", 1)[0]
+        for module_name in ("docx", "pptx", "openpyxl", "pypdf"):
+            self.assertIn(f"'{module_name}'", excludes)
 
     def test_webengine_is_a_required_packaging_dependency(self):
         with open(os.path.join(ROOT, "requirements.txt"), "r", encoding="utf-8") as handle:

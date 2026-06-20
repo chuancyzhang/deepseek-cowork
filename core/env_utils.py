@@ -291,8 +291,9 @@ def ensure_package_installed(package_name, import_name=None, skill_id=None):
                     raise RuntimeError(msg)
                 _inject_skill_python_path(skill_id)
         else:
+            from core.runtime_components import selected_python_index_url
             subprocess.check_call(
-                [python_exe, "-m", "pip", "install", package_name],
+                [python_exe, "-m", "pip", "install", "--index-url", selected_python_index_url(), package_name],
                 env=build_sandbox_env(),
                 **subprocess_kwargs_no_window(),
             )

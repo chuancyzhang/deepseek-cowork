@@ -71,8 +71,9 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 *   **可执行文件**：直接运行，无需安装 Python。
 *   **源码运行**：建议使用虚拟环境 **.venv\Scripts\python**。
 *   **环境适配**：`env_utils` 在 Dev/EXE 模式下自动识别 Python 与 pip。
-*   **内置 Node.js / Git Bash**：Windows 打包版优先从当前应用目录的 `_internal/*_env` 直接解析 bundled runtime；AI 可通过 `run_node_code` 执行 JavaScript，`bash` 在 Git Bash 缺失时会退回 Windows `cmd.exe`。
-*   **Python 依赖**：内置沙盒默认提供 `openpyxl`、`python-docx`、`python-pptx`、`pypdf` 及其必要依赖；其他第三方包仍由 `python-runner` 安装并在同一沙盒中验证导入。动态依赖持久化到 AppData `runtime_sandbox`，并通过 `sitecustomize.py`、`PATH` 与 `COWORK_PYTHON_DLL_DIRS` 支持 Windows 原生扩展。
+*   **运行环境组件**：Git Bash 与沙箱 Python 基础环境继续随包；Node.js 改为设置中的可选组件，也可在首次调用 `run_node_code` 时确认安装。
+*   **Python 工具包**：设置提供文档、数据分析、金融分析、浏览器自动化和网页研究工具包。工具包写入 AppData 沙箱并注入所有 Python 执行入口；其他 Skill 依赖继续静默安装并验证导入。
+*   **下载源**：Python 包支持 PyPI、清华、阿里云和自定义 HTTPS index；Node.js 支持官方源、npmmirror 和自定义 HTTPS 源。失败时明确显示实际来源，不自动切换镜像。
 *   **打包完整性**：内置 Python 运行时除了 `Lib` 外，还必须包含 Windows 平台扩展目录（如 `DLLs`）以及常见 MSVC runtime DLL；否则 `_socket` 等核心模块缺失，内置 `pip` 或原生 wheel 无法加载。
 *   **应用更新**：设置页可检查 GitHub Releases；打包版会清理旧更新包、旧暂存目录和旧脚本，仅保留本次目标安装包，并支持下载、校验、暂存后通过独立更新器重启安装；前台进度窗口可最小化，也可选择后台安装。
 *   **MCP 服务器**：设置页以更接近 Apple 偏好设置的轻量分区承载 MCP 配置，默认只保留分区标题；术语保持 `MCP`、`stdio`、`Streamable HTTP`、`Headers`、`JSON` 等英文表达，也支持导入 `mcpServers` / `mcp_servers` JSON；已启用服务器会以延迟发现工具的方式接入 Agent。打包版默认内置 MCP client 运行时，无需额外安装 `mcp`。

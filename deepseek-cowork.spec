@@ -228,8 +228,8 @@ def _collect_distribution_runtime_entries(site_packages, root_names):
 
 
 MCP_RUNTIME_DISTS = ["mcp"]
-SANDBOX_DOCUMENT_DISTS = ["openpyxl", "python-docx", "python-pptx", "pypdf"]
-SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS + SANDBOX_DOCUMENT_DISTS
+SANDBOX_DOCUMENT_DISTS = []
+SANDBOX_RUNTIME_DISTS = MCP_RUNTIME_DISTS
 MCP_ANALYSIS_DISTS = ["mcp"]
 MCP_ANALYSIS_METADATA = []
 MCP_ANALYSIS_HIDDENIMPORTS = []
@@ -428,14 +428,7 @@ GIT_BASH_SLIM_EXCLUDES = [
 ]
 
 
-node_env = _collect_required_runtime_env(
-    "COWORK_NODE_DIR",
-    "node_env",
-    "node_env",
-    "Node.js",
-    required_files=["node.exe"],
-    exclude_globs=NODE_SLIM_EXCLUDES if RUNTIME_SLIM else [],
-)
+node_env = []
 git_bash_env = _collect_required_runtime_env(
     "COWORK_GIT_BASH_DIR",
     "git_bash_env",
@@ -504,10 +497,6 @@ a = Analysis(
     binaries=[],
     datas=[('skills', 'skills'), ('ai_skills', 'ai_skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas + MCP_ANALYSIS_METADATA,
     hiddenimports=pyside6_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
-        'docx',
-        'pptx',
-        'openpyxl',
-        'pypdf',
         'bs4',
         'requests',
         'markdown',
@@ -527,6 +516,10 @@ a = Analysis(
         'matplotlib',
         'scipy',
         'lxml',
+        'docx',
+        'pptx',
+        'openpyxl',
+        'pypdf',
         'PySide6.Qt3DAnimation',
         'PySide6.Qt3DCore',
         'PySide6.Qt3DExtras',

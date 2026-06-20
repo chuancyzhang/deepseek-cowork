@@ -21,6 +21,7 @@ from .automation_manager import (
 )
 from .mcp_client import DEFAULT_MCP_TIMEOUT_SECONDS, TRANSPORT_STDIO, normalize_mcp_transport
 from .sop_manager import default_sop_templates, normalize_sop_templates
+from .runtime_components import default_download_sources, normalize_download_sources
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
@@ -240,6 +241,7 @@ class ConfigManager:
             "mcp_servers": [],
             "projects": [],
             "god_mode": False,
+            "download_sources": default_download_sources(),
             "default_workspace": "",
             "im_gateway": {
                 "enabled_providers": [],
@@ -252,6 +254,7 @@ class ConfigManager:
         }
         self.load_config()
         self._apply_migrations()
+        self.config["download_sources"] = normalize_download_sources(self.config.get("download_sources"))
 
     def get_god_mode(self):
         return self.config.get("god_mode", False)

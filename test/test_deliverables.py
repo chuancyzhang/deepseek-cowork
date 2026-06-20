@@ -87,69 +87,91 @@ class TestDeliverableScanning(unittest.TestCase):
         finally:
             widget.deleteLater()
 
-    def test_conversion_creates_project_conversation_from_current_html(self):
+    def test_conversion_continues_in_current_conversation_for_all_formats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+
+            for target_format in ("pptx", "docx", "pdf"):
+                with self.subTest(target_format=target_format):
+                    window = MainWindow.__new__(MainWindow)
+                    state = type("_Session", (), {"session_id": "current-session"})()
+                    window.current_deliverable_path = html_path
+                    window.workspace_dir = tmp
+                    window._workspace_dir_for_state = MagicMock(return_value=tmp)
+                    window.get_current_session = MagicMock(return_value=state)
+                    window.create_new_session = MagicMock()
+                    window._set_prompt_files = MagicMock()
+                    window._submit_session_request = MagicMock(return_value=True)
+                    window.add_system_toast = MagicMock()
+
+                    window.start_deliverable_conversion(target_format)
+
+                    window.create_new_session.assert_not_called()
+                    self.assertEqual(state.selected_deliverable_path, html_path)
+                    window._set_prompt_files.assert_called_once_with(
+                        [html_path], session_id="current-session", refresh=True
+                    )
+                    submit_call = window._submit_session_request.call_args
+                    self.assertIs(submit_call.args[0], state)
+                    self.assertIn(f"生成 {target_format.upper()} 办公文件", submit_call.args[1])
+                    self.assertEqual(submit_call.args[2], [html_path])
+                    self.assertFalse(submit_call.kwargs["check_duplicates"])
+                    self.assertTrue(submit_call.kwargs["clear_current_input"])
+                    window.add_system_toast.assert_called_once_with(
+                        f"已在当前对话中开始生成 {target_format.upper()}",
+                        "info",
+                        session_id="current-session",
+                        auto_close_ms=3200,
+                    )
+
+    def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = os.path.join(tmp, "report.html")
             with open(html_path, "w", encoding="utf-8") as f:
                 f.write("<html><body>Report</body></html>")
 
             window = MainWindow.__new__(MainWindow)
-            state = type("_Session", (), {"session_id": "generated-session"})()
-            window.current_deliverable_path = html_path
-            window.workspace_dir = tmp
-            window._workspace_dir_for_state = MagicMock(return_value=tmp)
-            window.get_session = MagicMock(return_value=state)
-            window.create_new_session = MagicMock(return_value="generated-session")
-            window._set_prompt_files = MagicMock()
-            window._submit_session_request = MagicMock(return_value=True)
-            window.add_system_toast = MagicMock()
-
-            window.start_deliverable_conversion("pptx")
-
-            window.create_new_session.assert_called_once_with(
-                title="基于 HTML 生成 PPTX",
-                make_current=True,
-                workspace_dir=tmp,
-            )
-            window.get_session.assert_called_once_with("generated-session")
-            self.assertEqual(state.selected_deliverable_path, html_path)
-            window._set_prompt_files.assert_called_once_with(
-                [html_path], session_id="generated-session", refresh=True
-            )
-            submit_call = window._submit_session_request.call_args
-            self.assertIs(submit_call.args[0], state)
-            self.assertIn("生成 PPTX 办公文件", submit_call.args[1])
-            self.assertEqual(submit_call.args[2], [html_path])
-            self.assertFalse(submit_call.kwargs["check_duplicates"])
-            self.assertTrue(submit_call.kwargs["clear_current_input"])
-            window.add_system_toast.assert_called_once_with(
-                "已创建普通对话，开始生成 PPTX",
-                "info",
-                session_id="generated-session",
-                auto_close_ms=3200,
-            )
-
-    def test_conversion_keeps_new_conversation_when_submission_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            html_path = os.path.join(tmp, "report.html")
-            with open(html_path, "w", encoding="utf-8") as f:
-                f.write("<html><body>Report</body></html>")
-
-            window = MainWindow.__new__(MainWindow)
-            state = type("_Session", (), {"session_id": "generated-session"})()
+            state = type("_Session", (), {"session_id": "current-session"})()
             window.current_deliverable_path = html_path
             window._workspace_dir_for_state = MagicMock(return_value=tmp)
-            window.create_new_session = MagicMock(return_value="generated-session")
-            window.get_session = MagicMock(return_value=state)
+            window.get_current_session = MagicMock(return_value=state)
+            window.create_new_session = MagicMock()
             window._set_prompt_files = MagicMock()
             window._submit_session_request = MagicMock(return_value=False)
             window.add_system_toast = MagicMock()
 
             window.start_deliverable_conversion("pdf")
 
+            window.create_new_session.assert_not_called()
             self.assertEqual(state.selected_deliverable_path, html_path)
-            self.assertIn("HTML 已保留在新对话中", window.add_system_toast.call_args.args[0])
+            self.assertIn("HTML 已保留在当前对话中", window.add_system_toast.call_args.args[0])
             self.assertEqual(window.add_system_toast.call_args.args[1], "warning")
+
+    def test_conversion_reports_when_current_conversation_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = html_path
+            window._workspace_dir_for_state = MagicMock(return_value=tmp)
+            window.get_current_session = MagicMock(return_value=None)
+            window._set_prompt_files = MagicMock()
+            window._submit_session_request = MagicMock()
+            window.add_system_toast = MagicMock()
+
+            window.start_deliverable_conversion("docx")
+
+            window._set_prompt_files.assert_not_called()
+            window._submit_session_request.assert_not_called()
+            window.add_system_toast.assert_called_once_with(
+                "当前没有可继续的对话，请先新建对话。",
+                "warning",
+                auto_close_ms=3200,
+            )
 
     def test_render_uses_cache_busting_local_url(self):
         app = QApplication.instance() or QApplication([])

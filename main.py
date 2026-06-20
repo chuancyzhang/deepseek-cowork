@@ -13103,7 +13103,6 @@ class MainWindow(QMainWindow):
         
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
-        QApplication.instance().installEventFilter(self)
         self.sync_context_drawer_layout()
         log_startup_stage("main_window_init_complete")
 
@@ -13113,97 +13112,6 @@ class MainWindow(QMainWindow):
         if force or (now - self.last_ui_update_time > 0.05):
             QApplication.processEvents()
             self.last_ui_update_time = now
-
-    def _event_global_pos(self, event):
-        if event is None:
-            return None
-        try:
-            if hasattr(event, "globalPosition"):
-                position = event.globalPosition()
-                if position is not None:
-                    return position.toPoint()
-        except Exception:
-            pass
-        try:
-            if hasattr(event, "globalPos"):
-                position = event.globalPos()
-                if position is not None:
-                    return QPoint(position)
-        except Exception:
-            pass
-        return None
-
-    def _widget_matches_or_contains(self, root, obj):
-        if root is None or obj is None:
-            return False
-        try:
-            return obj is root or root.isAncestorOf(obj)
-        except Exception:
-            return False
-
-    def _widget_contains_global_pos(self, widget, global_pos):
-        if widget is None or global_pos is None:
-            return False
-        try:
-            if not _qt_object_alive(widget):
-                return False
-            local_pos = widget.mapFromGlobal(global_pos)
-            return widget.rect().contains(local_pos)
-        except Exception:
-            return False
-
-    def _is_transient_popup_widget(self, widget):
-        if widget is None:
-            return False
-        try:
-            if isinstance(widget, QMenu):
-                return True
-            return widget.windowType() in {Qt.Popup, Qt.ToolTip}
-        except Exception:
-            return False
-
-    def _classify_context_drawer_click(self, obj, event):
-        global_pos = self._event_global_pos(event)
-        right_sidebar = getattr(self, "right_sidebar", None)
-        context_rail = getattr(self, "context_rail", None)
-        in_drawer = self._widget_matches_or_contains(right_sidebar, obj)
-        in_rail = self._widget_matches_or_contains(context_rail, obj)
-        if not in_drawer:
-            in_drawer = self._widget_contains_global_pos(right_sidebar, global_pos)
-        if not in_rail:
-            in_rail = self._widget_contains_global_pos(context_rail, global_pos)
-        popup_widget = obj.window() if isinstance(obj, QWidget) else None
-        is_popup = self._is_transient_popup_widget(obj) or self._is_transient_popup_widget(popup_widget)
-        return {
-            "global_pos": global_pos,
-            "in_drawer": bool(in_drawer),
-            "in_rail": bool(in_rail),
-            "is_popup": bool(is_popup),
-        }
-
-    def _should_hide_context_drawer_for_click(self, obj, event):
-        if not getattr(self, "right_drawer_open", False):
-            return False, None
-        if event is None or event.type() != QEvent.MouseButtonPress or not isinstance(obj, QWidget):
-            return False, None
-        hit_test = self._classify_context_drawer_click(obj, event)
-        should_hide = not hit_test["in_drawer"] and not hit_test["in_rail"] and not hit_test["is_popup"]
-        return should_hide, hit_test
-
-    def eventFilter(self, obj, event):
-        should_hide, hit_test = self._should_hide_context_drawer_for_click(obj, event)
-        if should_hide:
-            source_window = obj.window() if isinstance(obj, QWidget) else None
-            if source_window is self or source_window is None:
-                self.hide_context_drawer(
-                    reason="outside_mouse_press",
-                    source_obj=obj,
-                    source_window=source_window,
-                    in_drawer=hit_test["in_drawer"],
-                    in_rail=hit_test["in_rail"],
-                    is_popup=hit_test["is_popup"],
-                )
-        return super().eventFilter(obj, event)
 
     def showEvent(self, event):
         super().showEvent(event)

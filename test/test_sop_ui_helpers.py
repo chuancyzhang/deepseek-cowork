@@ -614,17 +614,6 @@ class _ObservabilityState:
         self.observability_events = []
 
 
-class _MousePressEventStub:
-    def __init__(self, global_pos):
-        self._global_pos = global_pos
-
-    def type(self):
-        return QEvent.MouseButtonPress
-
-    def globalPos(self):
-        return self._global_pos
-
-
 class _HistoryActionState:
     def __init__(self, session_id="session-1", messages=None):
         self.session_id = session_id
@@ -2143,77 +2132,36 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertTrue(callable(detail_tile.event))
         self.assertEqual(summary_row.focusPolicy(), Qt.NoFocus)
 
-    def test_context_drawer_click_helper_keeps_drawer_open_for_sub_agent_child_widget(self):
-        app = QApplication.instance() or QApplication([])
+    def test_context_drawer_has_no_outside_click_auto_hide_handler(self):
+        self.assertNotIn("eventFilter", MainWindow.__dict__)
+        self.assertFalse(hasattr(MainWindow, "_should_hide_context_drawer_for_click"))
+
+    def test_context_drawer_still_closes_explicitly(self):
         window = MainWindow.__new__(MainWindow)
         window.right_drawer_open = True
-        window.right_drawer_tab = window.RIGHT_TAB_SUB_AGENTS
-        host = QWidget()
-        host.setGeometry(0, 0, 480, 360)
-        window.right_sidebar = QWidget(host)
-        window.right_sidebar.setGeometry(220, 20, 220, 300)
-        window.context_rail = QWidget(host)
-        window.context_rail.setGeometry(12, 20, 44, 300)
-        inside = QWidget(window.right_sidebar)
-        inside.setGeometry(16, 16, 80, 24)
-        host.show()
-        app.processEvents()
+        window.right_drawer_tab = window.RIGHT_TAB_DELIVERABLES
+        window.right_sidebar = MagicMock()
+        window.sync_context_drawer_layout = MagicMock()
+        window.update_context_rail_badges = MagicMock()
 
-        event = _MousePressEventStub(inside.mapToGlobal(inside.rect().center()))
-        should_hide, hit_test = window._should_hide_context_drawer_for_click(inside, event)
+        window.hide_context_drawer(reason="manual")
 
-        self.assertFalse(should_hide)
-        self.assertTrue(hit_test["in_drawer"])
-        host.close()
+        self.assertFalse(window.right_drawer_open)
+        window.right_sidebar.setVisible.assert_called_once_with(False)
+        window.sync_context_drawer_layout.assert_called_once_with()
+        window.update_context_rail_badges.assert_called_once_with()
 
-    def test_context_drawer_click_helper_keeps_drawer_open_for_scroll_viewport(self):
-        app = QApplication.instance() or QApplication([])
+    def test_escape_still_closes_context_drawer(self):
         window = MainWindow.__new__(MainWindow)
         window.right_drawer_open = True
-        window.right_drawer_tab = window.RIGHT_TAB_SUB_AGENTS
-        host = QWidget()
-        host.setGeometry(0, 0, 480, 360)
-        window.right_sidebar = QWidget(host)
-        window.right_sidebar.setGeometry(220, 20, 220, 300)
-        window.context_rail = QWidget(host)
-        window.context_rail.setGeometry(12, 20, 44, 300)
-        scroll = QScrollArea(window.right_sidebar)
-        scroll.setGeometry(10, 10, 180, 160)
-        scroll.setWidget(QWidget())
-        host.show()
-        app.processEvents()
+        window.hide_context_drawer = MagicMock()
+        event = MagicMock()
+        event.key.return_value = Qt.Key_Escape
 
-        viewport = scroll.viewport()
-        event = _MousePressEventStub(viewport.mapToGlobal(viewport.rect().center()))
-        should_hide, hit_test = window._should_hide_context_drawer_for_click(viewport, event)
+        window.keyPressEvent(event)
 
-        self.assertFalse(should_hide)
-        self.assertTrue(hit_test["in_drawer"])
-        host.close()
-
-    def test_context_drawer_click_helper_hides_drawer_for_click_outside_context_zone(self):
-        app = QApplication.instance() or QApplication([])
-        window = MainWindow.__new__(MainWindow)
-        window.right_drawer_open = True
-        window.right_drawer_tab = window.RIGHT_TAB_SUB_AGENTS
-        host = QWidget()
-        host.setGeometry(0, 0, 480, 360)
-        window.right_sidebar = QWidget(host)
-        window.right_sidebar.setGeometry(220, 20, 220, 300)
-        window.context_rail = QWidget(host)
-        window.context_rail.setGeometry(12, 20, 44, 300)
-        outside = QWidget(host)
-        outside.setGeometry(80, 60, 80, 40)
-        host.show()
-        app.processEvents()
-
-        event = _MousePressEventStub(outside.mapToGlobal(outside.rect().center()))
-        should_hide, hit_test = window._should_hide_context_drawer_for_click(outside, event)
-
-        self.assertTrue(should_hide, msg=str(hit_test))
-        self.assertFalse(hit_test["in_drawer"])
-        self.assertFalse(hit_test["in_rail"])
-        host.close()
+        window.hide_context_drawer.assert_called_once_with()
+        event.accept.assert_called_once_with()
 
     def test_show_tool_details_uses_safe_preview_setter(self):
         window = MainWindow.__new__(MainWindow)

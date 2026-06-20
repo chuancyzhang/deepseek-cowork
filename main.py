@@ -12159,7 +12159,8 @@ class MainWindow(QMainWindow):
         # --- Sidebar ---
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setMinimumWidth(228)
+        sidebar.setMinimumWidth(DesignTokens.sidebar_min_width)
+        sidebar.setMaximumWidth(DesignTokens.sidebar_max_width)
         sidebar.setStyleSheet(
             f"background-color: {DesignTokens.bg_sidebar}; "
             f"border-right: 1px solid {DesignTokens.separator};"

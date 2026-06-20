@@ -1847,7 +1847,7 @@ class TestSopUiHelpers(unittest.TestCase):
 
         metrics = window._compute_conversation_shell_metrics()
 
-        self.assertEqual(metrics["conversation_width"], 1105)
+        self.assertEqual(metrics["conversation_width"], 1167)
         self.assertLessEqual(abs(metrics["left_spacer_width"] - metrics["right_spacer_width"]), 1)
 
     def test_conversation_shell_metrics_shift_left_with_drawer(self):
@@ -1858,11 +1858,11 @@ class TestSopUiHelpers(unittest.TestCase):
         window.main_layout_default_margins = (32, 28, 32, 28)
         window.context_drawer_gap = 16
 
-        metrics = window._compute_conversation_shell_metrics({"x": 1216, "width": 368})
+        metrics = window._compute_conversation_shell_metrics({"x": 1154, "width": 430})
 
-        self.assertEqual(metrics["conversation_width"], 911)
+        self.assertEqual(metrics["conversation_width"], 951)
         self.assertLess(metrics["left_spacer_width"], metrics["right_spacer_width"])
-        self.assertEqual(metrics["drawer_width"], 368)
+        self.assertEqual(metrics["drawer_width"], 430)
 
     def test_compute_context_drawer_geometry_uses_stable_ratio(self):
         window = MainWindow.__new__(MainWindow)
@@ -1881,9 +1881,61 @@ class TestSopUiHelpers(unittest.TestCase):
 
         geometry = window._compute_context_drawer_geometry()
 
-        self.assertEqual(geometry["width"], 368)
-        self.assertEqual(geometry["x"], 1216)
+        self.assertEqual(geometry["width"], 430)
+        self.assertEqual(geometry["x"], 1154)
         self.assertEqual(geometry["height"], 948)
+
+    def test_context_drawer_geometry_preserves_manual_width(self):
+        window = MainWindow.__new__(MainWindow)
+        parent = MagicMock()
+        parent.width.return_value = 1600
+        parent.height.return_value = 980
+        window.right_sidebar = MagicMock()
+        window.right_sidebar.parentWidget.return_value = parent
+        window.main_layout_default_margins = (32, 28, 32, 28)
+        window.context_drawer_margin = 16
+        window.context_drawer_gap = 16
+        window.context_drawer_min_width = DesignTokens.drawer_min_width
+        window.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
+        window.context_drawer_max_width = DesignTokens.drawer_max_width
+        window.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
+        window.context_drawer_user_width = 470
+        window.context_drawer_expanded = False
+
+        geometry = window._compute_context_drawer_geometry()
+
+        self.assertEqual(geometry["width"], 470)
+        self.assertEqual(geometry["x"], 1114)
+
+    def test_three_column_layout_compacts_without_overlap_on_narrow_window(self):
+        window = MainWindow.__new__(MainWindow)
+        parent = MagicMock()
+        parent.width.return_value = 1000
+        parent.height.return_value = 760
+        window.right_sidebar = MagicMock()
+        window.right_sidebar.parentWidget.return_value = parent
+        window.main_container = parent
+        window.main_layout_default_margins = (32, 28, 32, 28)
+        window.context_drawer_margin = 16
+        window.context_drawer_gap = 16
+        window.context_drawer_min_width = DesignTokens.drawer_min_width
+        window.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
+        window.context_drawer_max_width = DesignTokens.drawer_max_width
+        window.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
+        window.context_drawer_user_width = 0
+        window.context_drawer_expanded = False
+        window.right_drawer_open = True
+
+        geometry = window._compute_context_drawer_geometry()
+        metrics = window._compute_conversation_shell_metrics(geometry)
+
+        self.assertEqual(geometry["width"], 260)
+        self.assertEqual(geometry["x"], 724)
+        self.assertEqual(metrics["conversation_width"], 581)
+        self.assertLessEqual(
+            metrics["conversation_width"] + metrics["left_spacer_width"] + metrics["right_spacer_width"],
+            metrics["shell_width"],
+        )
 
     def test_set_observability_section_resyncs_context_layout(self):
         window = MainWindow.__new__(MainWindow)

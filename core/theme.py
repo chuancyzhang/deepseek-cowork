@@ -345,12 +345,9 @@ def get_tech_stylesheet(theme="light"):
     }}
 
     QToolTip {{
-        background-color: {c_bg_card};
+        background-color: {c_bg_main};
         color: {c_text_primary};
         border: 1px solid {c_border};
-        padding: 4px 8px;
-        border-radius: {DesignTokens.radius_sm}px;
-        opacity: 240;
     }}
     """
     return css
@@ -361,7 +358,9 @@ def apply_theme(app, theme="auto"):
     base_sheet = qdarktheme.load_stylesheet(mode)
     tech_sheet = get_tech_stylesheet(mode)
     app.setStyleSheet(base_sheet + "\n" + tech_sheet)
-    # Native tooltip windows may still read palette roles on Windows.
+    # Native tooltip windows still read palette roles on Windows. Keep these
+    # colors identical to the deliberately minimal QToolTip stylesheet above;
+    # translucent or rounded tooltip rules can render as black native windows.
     from PySide6.QtGui import QColor, QPalette
     palette = app.palette()
     palette.setColor(QPalette.ToolTipBase, QColor(DesignTokens.bg_main))

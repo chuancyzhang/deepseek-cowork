@@ -587,6 +587,24 @@ class ChatStorage:
             "meta": meta,
         }
 
+    def update_conversation_meta(self, conversation_id, meta_patch):
+        if not isinstance(meta_patch, dict):
+            raise TypeError("meta_patch must be a dict")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT meta FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"conversation not found: {conversation_id}")
+            meta = self._parse_json_dict(row["meta"])
+            meta.update(meta_patch)
+            conn.execute(
+                "UPDATE conversations SET meta = ? WHERE id = ?",
+                (json.dumps(meta, ensure_ascii=False), conversation_id),
+            )
+        return self.get_conversation_record(conversation_id)
+
     def upsert_agent(
         self,
         agent_id,

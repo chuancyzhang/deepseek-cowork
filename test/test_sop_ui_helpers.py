@@ -25,6 +25,7 @@ from main import (
     AutoResizingTextEdit,
     AutomationTaskDialog,
     ChatBubble,
+    ConversationHistoryRow,
     DaemonConnectWorker,
     DaemonStreamWorker,
     MainWindow,
@@ -777,7 +778,6 @@ class TestSopUiHelpers(unittest.TestCase):
                 "pending_clarify_questions": [],
                 "selected_skill_names": [],
                 "sop_run": None,
-                "conversation_branch": None,
             },
         )()
 
@@ -940,7 +940,6 @@ class TestSopUiHelpers(unittest.TestCase):
                 "run_phase": "Idle",
                 "session_status": "draft",
                 "has_file_changes": False,
-                "conversation_branch": None,
             },
         )()
         window.workspace_dir = "D:/workspace"
@@ -951,7 +950,6 @@ class TestSopUiHelpers(unittest.TestCase):
         window._session_clarify_meta = MagicMock(return_value={})
         window._session_selected_skills_meta = MagicMock(return_value={})
         window._session_sop_meta = MagicMock(return_value={})
-        window._session_branch_meta = MagicMock(return_value={})
         window.update_skill_capture_button_state = MagicMock()
 
         result = window.save_chat_history(session_id="session-1")
@@ -1301,106 +1299,41 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertEqual(payload["content_parts"][1]["path"], os.path.normpath(os.path.abspath(image_path)))
         self.assertEqual(payload["meta"]["workspace_referenced_images"], [os.path.normpath(os.path.abspath(image_path))])
 
-    def test_fork_conversation_at_message_creates_clean_branch_session(self):
-        temp_dir = tempfile.mkdtemp()
-        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
-        db_path = os.path.join(temp_dir, "chat_history.sqlite")
-        storage = ChatStorage(db_path)
-        workspace_dir = os.path.join(temp_dir, "workspace")
-        os.makedirs(workspace_dir)
-        parent_messages = [
-            {"id": "u1", "role": "user", "content": "first"},
-            {"id": "a1", "role": "assistant", "content": "reply"},
-            {"id": "u2", "role": "user", "content": "second"},
-        ]
-        storage.save_conversation(
-            "parent",
-            parent_messages,
-            title="Parent task",
-            status="running",
-            meta={
-                "workspace_dir": workspace_dir,
-                "selected_skill_names": ["python-runner"],
-                "sop_run": {"template_id": "demo"},
-            },
-        )
-
-        window = MainWindow.__new__(MainWindow)
-        window.chat_storage = storage
-        window.workspace_dir = workspace_dir
-        window.save_chat_history = MagicMock()
-        window.refresh_history_list = MagicMock()
-        window.activate_session = MagicMock()
-        window.add_system_toast = MagicMock()
-        window.sessions = {}
-
-        created_states = {}
-
-        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
-            state = type("_ForkState", (), {})()
-            state.session_id = session_id
-            state.selected_skill_names = []
-            state.run_phase = ""
-            state.session_status = ""
-            state.has_file_changes = True
-            state.changed_files = ["demo.py"]
-            state.clarify_mode_enabled = True
-            state.clarify_phase = "awaiting"
-            state.clarify_mode_state = "awaiting"
-            state.pending_clarify_questions = [{"id": "q1"}]
-            state.clarify_source_user_text = "source"
-            state.clarify_answers_context = ["answer"]
-            state.sop_run = {"template_id": "demo"}
-            state.completed_agent_result_ids = {"a"}
-            state.automation_task_id = "task"
-            state.automation_run_id = "run"
-            state.automation_trigger_source = "manual"
-            state.automation_template_id = "tpl"
-            state.conversation_branch = None
-            created_states[session_id] = state
-            return session_id
-
-        window.create_new_session = create_new_session
-        window.get_session = lambda session_id: created_states.get(session_id)
-
-        ok = window.fork_conversation_at_message("parent", "a1")
-
-        self.assertTrue(ok)
-        window.save_chat_history.assert_called_once_with(session_id="parent")
-        window.refresh_history_list.assert_called_once()
-        window.activate_session.assert_called_once()
-
-        new_session_id = window.activate_session.call_args.args[0]
-        new_record = storage.get_conversation_record(new_session_id)
-        new_messages = storage.get_messages(new_session_id)
-        new_state = created_states[new_session_id]
-
-        self.assertEqual([msg["role"] for msg in new_messages], ["user", "assistant"])
-        self.assertEqual([msg["content"] for msg in new_messages], ["first", "reply"])
-        self.assertNotEqual([msg["id"] for msg in new_messages], ["u1", "a1"])
-        self.assertEqual(new_record["status"], "draft")
-        self.assertEqual(new_record["title"], "Parent task - 分支")
-        self.assertEqual(new_record["meta"]["workspace_dir"], workspace_dir)
-        self.assertEqual(new_record["meta"]["selected_skill_names"], ["python-runner"])
-        self.assertEqual(new_record["meta"]["conversation_branch"]["parent_session_id"], "parent")
-        self.assertEqual(new_record["meta"]["conversation_branch"]["parent_message_id"], "a1")
-        self.assertEqual(new_state.selected_skill_names, ["python-runner"])
-        self.assertFalse(new_state.clarify_mode_enabled)
-        self.assertIsNone(new_state.sop_run)
-        self.assertEqual(new_state.conversation_branch["parent_session_id"], "parent")
-        self.assertEqual(new_record["meta"]["conversation_branch"]["action"], "branch")
-
-    def test_chat_bubble_user_shows_edit_delete_and_branch_actions(self):
+    def test_chat_bubble_user_shows_edit_and_delete_actions(self):
         app = QApplication.instance() or QApplication([])
         bubble = ChatBubble("User", "hello", source_message_id="u1")
 
         self.assertIsNotNone(app)
         self.assertIsNotNone(bubble.edit_btn)
         self.assertIsNotNone(bubble.delete_btn)
-        self.assertIsNotNone(bubble.branch_btn)
         self.assertFalse(bubble.edit_btn.isHidden())
         self.assertFalse(bubble.delete_btn.isHidden())
-        self.assertFalse(bubble.branch_btn.isHidden())
+
+    def test_chat_bubble_inline_edit_can_cancel_or_submit(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("User", "hello", source_message_id="u1")
+        submitted = []
+        bubble.editSubmitRequested.connect(lambda message_id, text: submitted.append((message_id, text)))
+
+        bubble.begin_inline_edit()
+        self.assertFalse(bubble.user_content_edit.isReadOnly())
+        bubble.user_content_edit.setPlainText("changed")
+        bubble.submit_inline_edit()
+        self.assertEqual(submitted, [("u1", "changed")])
+
+        bubble.cancel_inline_edit()
+        self.assertTrue(bubble.user_content_edit.isReadOnly())
+        self.assertEqual(bubble.user_content_edit.toPlainText(), "hello")
+
+    def test_conversation_history_row_reveals_reserved_hover_actions(self):
+        app = QApplication.instance() or QApplication([])
+        row = ConversationHistoryRow()
+        action = QPushButton(row)
+        row.set_hover_actions([action])
+
+        self.assertTrue(action.isHidden())
+        row._set_actions_visible(True)
+        self.assertFalse(action.isHidden())
 
     def test_chat_bubble_user_wraps_long_hyphenated_text_without_truncation(self):
         app = QApplication.instance() or QApplication([])
@@ -1509,7 +1442,7 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertFalse(bubbles[0].is_virtualized())
         self.assertTrue(any(bubble.is_virtualized() for bubble in bubbles[:-10]))
 
-    def test_edit_user_message_from_branch_creates_new_session_and_resubmits(self):
+    def test_edit_user_message_inline_truncates_current_session_and_resubmits(self):
         temp_dir = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         db_path = os.path.join(temp_dir, "chat_history.sqlite")
@@ -1550,44 +1483,30 @@ class TestSopUiHelpers(unittest.TestCase):
         window.workspace_dir = workspace_dir
         window.save_chat_history = MagicMock()
         window.refresh_history_list = MagicMock()
-        window.activate_session = MagicMock()
         window.add_system_toast = MagicMock()
         window._submit_session_request = MagicMock(return_value=True)
+        window._render_rewritten_session = MagicMock()
         window.sessions = {}
 
         parent_state = _HistoryActionState("parent", parent_messages)
-        created_states = {}
+        window.get_session = lambda session_id=None: parent_state if session_id == "parent" else None
 
-        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
-            state = _HistoryActionState(session_id)
-            created_states[session_id] = state
-            return session_id
-
-        window.create_new_session = create_new_session
-        window.get_session = lambda session_id=None: created_states.get(session_id) or (parent_state if session_id == "parent" else None)
-
-        with patch("main.QInputDialog.getMultiLineText", return_value=("rewritten second", True)):
-            ok = window.edit_user_message_from_branch("parent", "u2")
+        ok = window.edit_user_message_inline("parent", "u2", "rewritten second")
 
         self.assertTrue(ok)
-        window.save_chat_history.assert_called_once_with(session_id="parent")
+        self.assertEqual(window.save_chat_history.call_count, 2)
+        window.save_chat_history.assert_any_call(session_id="parent", flush=True)
         window.refresh_history_list.assert_called_once()
-        window.activate_session.assert_called_once()
         window._submit_session_request.assert_called_once()
-
-        new_session_id = window.activate_session.call_args.args[0]
-        new_record = storage.get_conversation_record(new_session_id)
-        new_messages = storage.get_messages(new_session_id)
+        window._render_rewritten_session.assert_called_once_with(parent_state, parent_messages[:2])
         submit_args = window._submit_session_request.call_args
 
-        self.assertEqual([msg["content"] for msg in new_messages], ["first", "reply"])
-        self.assertEqual(new_record["meta"]["conversation_branch"]["action"], "edit_user_message")
-        self.assertEqual(submit_args.args[0].session_id, new_session_id)
+        self.assertEqual(submit_args.args[0].session_id, "parent")
         self.assertEqual(submit_args.args[1], "rewritten second")
         self.assertEqual(submit_args.args[2], [attachment_path])
         self.assertFalse(submit_args.kwargs["check_duplicates"])
 
-    def test_delete_user_message_from_branch_creates_new_session_without_resubmit(self):
+    def test_delete_user_message_in_place_preserves_following_messages(self):
         temp_dir = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
         db_path = os.path.join(temp_dir, "chat_history.sqlite")
@@ -1613,39 +1532,26 @@ class TestSopUiHelpers(unittest.TestCase):
         window.workspace_dir = workspace_dir
         window.save_chat_history = MagicMock()
         window.refresh_history_list = MagicMock()
-        window.activate_session = MagicMock()
         window.add_system_toast = MagicMock()
         window._submit_session_request = MagicMock()
+        window._render_rewritten_session = MagicMock()
         window.input_field = MagicMock()
         window.sessions = {}
 
         parent_state = _HistoryActionState("parent", parent_messages)
-        created_states = {}
-
-        def create_new_session(session_id=None, title=None, make_current=True, workspace_dir=None):
-            state = _HistoryActionState(session_id)
-            created_states[session_id] = state
-            return session_id
-
-        window.create_new_session = create_new_session
-        window.get_session = lambda session_id=None: created_states.get(session_id) or (parent_state if session_id == "parent" else None)
+        window.get_session = lambda session_id=None: parent_state if session_id == "parent" else None
 
         with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
-            ok = window.delete_user_message_from_branch("parent", "u2")
+            ok = window.delete_user_message_in_place("parent", "u2")
 
         self.assertTrue(ok)
-        window.save_chat_history.assert_called_once_with(session_id="parent")
+        self.assertEqual(window.save_chat_history.call_count, 2)
+        window.save_chat_history.assert_any_call(session_id="parent", flush=True)
         window.refresh_history_list.assert_called_once()
-        window.activate_session.assert_called_once()
         window._submit_session_request.assert_not_called()
         window.input_field.setFocus.assert_called_once()
-
-        new_session_id = window.activate_session.call_args.args[0]
-        new_record = storage.get_conversation_record(new_session_id)
-        new_messages = storage.get_messages(new_session_id)
-
-        self.assertEqual([msg["content"] for msg in new_messages], ["first", "reply"])
-        self.assertEqual(new_record["meta"]["conversation_branch"]["action"], "delete_user_message")
+        remaining = window._render_rewritten_session.call_args.args[1]
+        self.assertEqual([msg["content"] for msg in remaining], ["first", "reply", "after second"])
 
     def test_select_files_for_prompt_forwards_dialog_selection(self):
         window = MainWindow.__new__(MainWindow)

@@ -1469,32 +1469,6 @@ def flush_pending_skill_runtime_reload(skill_manager):
     return True
 
 
-def normalize_conversation_branch_meta(value):
-    if not isinstance(value, dict):
-        return None
-    parent_session_id = str(value.get("parent_session_id") or "").strip()
-    parent_message_id = str(value.get("parent_message_id") or "").strip()
-    if not parent_session_id or not parent_message_id:
-        return None
-    created_at = value.get("created_at")
-    try:
-        created_at = int(created_at) if created_at is not None else None
-    except Exception:
-        created_at = None
-    action = str(value.get("action") or "").strip()
-    if action not in {"branch", "edit_user_message", "delete_user_message"}:
-        action = ""
-    branch_meta = {
-        "parent_session_id": parent_session_id,
-        "parent_message_id": parent_message_id,
-        "parent_title": str(value.get("parent_title") or "").strip(),
-        "created_at": created_at,
-    }
-    if action:
-        branch_meta["action"] = action
-    return branch_meta
-
-
 def session_status_text(status, im_provider=None):
     if im_provider == "feishu":
         return ("来自飞书", DesignTokens.info_text, DesignTokens.info_bg)
@@ -8385,6 +8359,28 @@ class HistoryTitleButton(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class ConversationHistoryRow(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover_actions = []
+
+    def set_hover_actions(self, widgets):
+        self._hover_actions = list(widgets or [])
+        self._set_actions_visible(False)
+
+    def _set_actions_visible(self, visible):
+        for widget in self._hover_actions:
+            widget.setVisible(bool(visible))
+
+    def enterEvent(self, event):
+        self._set_actions_visible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_actions_visible(False)
+        super().leaveEvent(event)
+
+
 class ElidedToolLabel(QLabel):
     def __init__(self, text="", parent=None):
         super().__init__(parent)
@@ -8855,8 +8851,7 @@ class FileChip(QFrame):
         self.setToolTip(self.path)
 
 class ChatBubble(QFrame):
-    branchRequested = Signal(str)
-    editRequested = Signal(str)
+    editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
@@ -8882,13 +8877,15 @@ class ChatBubble(QFrame):
         self._virtualized_height = 0
         self._virtualized_visible_state = {}
         self.source_message_id = str(source_message_id or "").strip()
-        self.branch_btn = None
         self.edit_btn = None
         self.delete_btn = None
-        self.branch_row_layout = None
+        self.message_action_buttons = []
+        self.edit_controls = None
+        self.edit_original_text = ""
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         attachments = list(attachments or [])
+        self.user_attachments = attachments
         
         # Main Horizontal Layout (Avatar | Content)
         main_layout = QHBoxLayout(self)
@@ -8930,7 +8927,7 @@ class ChatBubble(QFrame):
                 cw_layout.addWidget(attachment_group, 0, Qt.AlignRight)
 
             # Bubble Frame
-            if text:
+            if text or attachments:
                 bubble_frame = QFrame()
                 self.user_bubble_frame = bubble_frame
                 bubble_frame.setObjectName("UserBubbleFrame")
@@ -8944,6 +8941,7 @@ class ChatBubble(QFrame):
                 """)
                 bubble_layout = QVBoxLayout(bubble_frame)
                 bubble_layout.setContentsMargins(15, 10, 15, 10)
+                self.user_bubble_layout = bubble_layout
 
                 content_edit = AutoResizingTextEdit()
                 self.user_content_edit = content_edit
@@ -8956,6 +8954,25 @@ class ChatBubble(QFrame):
                 apply_selection_palette(content_edit, "#ffffff", "#0b57d0")
 
                 bubble_layout.addWidget(content_edit)
+
+                edit_controls = QWidget()
+                edit_controls.setVisible(False)
+                edit_controls_layout = QHBoxLayout(edit_controls)
+                edit_controls_layout.setContentsMargins(0, 8, 0, 0)
+                edit_controls_layout.setSpacing(8)
+                edit_controls_layout.addStretch()
+                cancel_btn = QPushButton("取消")
+                cancel_btn.setCursor(Qt.PointingHandCursor)
+                cancel_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+                cancel_btn.clicked.connect(self.cancel_inline_edit)
+                submit_btn = QPushButton("发送")
+                submit_btn.setCursor(Qt.PointingHandCursor)
+                submit_btn.setStyleSheet(apple_button_style("primary", radius=14))
+                submit_btn.clicked.connect(self.submit_inline_edit)
+                edit_controls_layout.addWidget(cancel_btn)
+                edit_controls_layout.addWidget(submit_btn)
+                bubble_layout.addWidget(edit_controls)
+                self.edit_controls = edit_controls
                 cw_layout.addWidget(bubble_frame, 0, Qt.AlignRight)
 
             if self.source_message_id:
@@ -8965,8 +8982,6 @@ class ChatBubble(QFrame):
                 action_row.addStretch()
                 action_row.addWidget(self._create_edit_button())
                 action_row.addWidget(self._create_delete_button())
-                action_row.addWidget(self._create_branch_button())
-                self.branch_row_layout = action_row
                 cw_layout.addLayout(action_row)
             
             # Add to main
@@ -9103,9 +9118,6 @@ class ChatBubble(QFrame):
             copy_row = QHBoxLayout()
             copy_row.setContentsMargins(0, 0, 0, 0)
             copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
-            if self.source_message_id:
-                copy_row.addWidget(self._create_branch_button(), 0, Qt.AlignLeft)
-            self.branch_row_layout = copy_row
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
             
@@ -9178,24 +9190,17 @@ class ChatBubble(QFrame):
     def is_virtualized(self):
         return bool(self._virtualized)
 
-    def _create_branch_button(self):
-        if self.branch_btn is not None:
-            return self.branch_btn
-        btn = self._create_message_action_button("fa5s.code-branch", "从这里分支", self._emit_branch_request)
-        self.branch_btn = btn
-        return btn
-
     def _create_edit_button(self):
         if self.edit_btn is not None:
             return self.edit_btn
-        btn = self._create_message_action_button("fa5s.pen", "编辑后重新生成", self._emit_edit_request)
+        btn = self._create_message_action_button("fa5s.pen", "编辑并重新生成", self.begin_inline_edit)
         self.edit_btn = btn
         return btn
 
     def _create_delete_button(self):
         if self.delete_btn is not None:
             return self.delete_btn
-        btn = self._create_message_action_button("fa5s.trash-alt", "删除并从这里继续", self._emit_delete_request)
+        btn = self._create_message_action_button("fa5s.trash-alt", "删除这条消息", self._emit_delete_request)
         self.delete_btn = btn
         return btn
 
@@ -9209,15 +9214,66 @@ class ChatBubble(QFrame):
         btn.setFixedSize(26, 26)
         btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
         btn.clicked.connect(slot)
+        self.message_action_buttons.append(btn)
         return btn
 
-    def _emit_branch_request(self):
-        if self.source_message_id:
-            self.branchRequested.emit(self.source_message_id)
+    def begin_inline_edit(self):
+        if not self.source_message_id or self.role != "User" or self.user_content_edit is None:
+            return
+        self.edit_original_text = self.user_content_edit.toPlainText()
+        self.user_content_edit.setReadOnly(False)
+        self.user_content_edit.setFocus()
+        self.user_content_edit.selectAll()
+        if self.user_bubble_frame is not None:
+            self.user_bubble_frame.setStyleSheet(f"""
+                QFrame#UserBubbleFrame {{
+                    background: {DesignTokens.bg_secondary};
+                    border: 1px solid {DesignTokens.border_subtle};
+                    border-radius: 19px;
+                }}
+            """)
+        self.user_content_edit.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; "
+            "border: none; background: transparent;"
+        )
+        if self.edit_controls is not None:
+            self.edit_controls.setVisible(True)
+        for button in self.message_action_buttons:
+            button.setVisible(False)
 
-    def _emit_edit_request(self):
-        if self.source_message_id:
-            self.editRequested.emit(self.source_message_id)
+    def cancel_inline_edit(self):
+        if self.user_content_edit is None:
+            return
+        self.user_content_edit.setPlainText(self.edit_original_text)
+        self._finish_inline_edit()
+
+    def submit_inline_edit(self):
+        if not self.source_message_id or self.user_content_edit is None:
+            return
+        text = self.user_content_edit.toPlainText().strip()
+        if not text and not self.user_attachments:
+            return
+        self.editSubmitRequested.emit(self.source_message_id, text)
+
+    def _finish_inline_edit(self):
+        if self.user_content_edit is not None:
+            self.user_content_edit.setReadOnly(True)
+            self.user_content_edit.setStyleSheet(
+                "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
+                "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
+            )
+        if self.user_bubble_frame is not None:
+            self.user_bubble_frame.setStyleSheet(f"""
+                QFrame#UserBubbleFrame {{
+                    background: {DesignTokens.bg_user_bubble};
+                    border-radius: 19px;
+                    border-bottom-right-radius: 9px;
+                }}
+            """)
+        if self.edit_controls is not None:
+            self.edit_controls.setVisible(False)
+        for button in self.message_action_buttons:
+            button.setVisible(True)
 
     def _emit_delete_request(self):
         if self.source_message_id:
@@ -9226,30 +9282,15 @@ class ChatBubble(QFrame):
     def set_source_message_id(self, source_message_id):
         self.source_message_id = str(source_message_id or "").strip()
         if not self.source_message_id:
-            if self.branch_btn is not None:
-                self.branch_btn.setVisible(False)
             if self.edit_btn is not None:
                 self.edit_btn.setVisible(False)
             if self.delete_btn is not None:
                 self.delete_btn.setVisible(False)
             return
-        if self.branch_btn is None and self.branch_row_layout is not None:
-            if self.role == "User":
-                self.edit_btn = self._create_edit_button()
-                self.branch_row_layout.insertWidget(1, self.edit_btn)
-                self.delete_btn = self._create_delete_button()
-                self.branch_row_layout.insertWidget(2, self.delete_btn)
-                self.branch_btn = self._create_branch_button()
-                self.branch_row_layout.insertWidget(3, self.branch_btn)
-            else:
-                self.branch_btn = self._create_branch_button()
-                self.branch_row_layout.insertWidget(1, self.branch_btn, 0, Qt.AlignLeft)
         if self.edit_btn is not None:
             self.edit_btn.setVisible(self.role == "User")
         if self.delete_btn is not None:
             self.delete_btn.setVisible(self.role == "User")
-        if self.branch_btn is not None:
-            self.branch_btn.setVisible(True)
 
     def apply_dynamic_widths(self, message_width, user_bubble_width):
         if self.content_wrapper is not None:
@@ -10610,7 +10651,6 @@ class SessionState:
         self.selected_skill_names = []
         self.sop_run = None
         self.sop_confirmation_bar = None
-        self.conversation_branch = None
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
         self.automation_task_id = ""
@@ -13853,12 +13893,6 @@ class MainWindow(QMainWindow):
     def _new_message_id(self):
         return uuid.uuid4().hex
 
-    def _session_branch_meta(self, state):
-        branch_meta = normalize_conversation_branch_meta(getattr(state, "conversation_branch", None))
-        if not branch_meta:
-            return {}
-        return {"conversation_branch": branch_meta}
-
     def _session_is_busy(self, state):
         return bool(
             state
@@ -13906,138 +13940,24 @@ class MainWindow(QMainWindow):
                 return message_id
         return ""
 
-    def _copy_forked_messages_upto(self, messages, message_id):
-        target_id = str(message_id or "").strip()
-        if not target_id:
-            return []
-        copied = []
-        for msg in messages or []:
-            if not isinstance(msg, dict):
-                continue
-            original_id = str(msg.get("id") or "").strip()
-            msg_copy = copy.deepcopy(msg)
-            msg_copy["id"] = self._new_message_id()
-            copied.append(msg_copy)
-            if original_id == target_id:
-                return copied
-        return []
-
-    def _copy_forked_messages_before(self, messages, message_id):
-        target_id = str(message_id or "").strip()
-        if not target_id:
-            return []
-        copied = []
-        for msg in messages or []:
-            if not isinstance(msg, dict):
-                continue
-            if str(msg.get("id") or "").strip() == target_id:
-                return copied
-            msg_copy = copy.deepcopy(msg)
-            msg_copy["id"] = self._new_message_id()
-            copied.append(msg_copy)
-        return []
-
-    def _build_fork_title(self, parent_record, messages, prefer_parent_title=True):
-        parent_record = parent_record if isinstance(parent_record, dict) else {}
-        title_base = ""
-        if prefer_parent_title:
-            title_base = str(parent_record.get("title") or "").strip()
-        if not title_base:
-            title_base = str(self._compute_session_title(messages or []) or "").strip()
-        if not title_base:
-            title_base = "新对话"
-        return f"{title_base} - 分支"
-
-    def _build_forked_session_meta(self, parent_record, parent_message_id, action="branch"):
-        parent_record = parent_record if isinstance(parent_record, dict) else {}
-        parent_meta = parent_record.get("meta") if isinstance(parent_record.get("meta"), dict) else {}
-        branch_meta = {
-            "parent_session_id": str(parent_record.get("id") or "").strip(),
-            "parent_message_id": str(parent_message_id or "").strip(),
-            "parent_title": str(parent_record.get("title") or "").strip(),
-            "created_at": int(time.time()),
-        }
-        if action in {"branch", "edit_user_message", "delete_user_message"}:
-            branch_meta["action"] = action
-        copied_meta = {
-            "workspace_dir": parent_meta.get("workspace_dir") or self._active_workspace_dir() or "",
-            "selected_skill_names": normalize_selected_skill_names(parent_meta.get("selected_skill_names")),
-            "conversation_branch": branch_meta,
-        }
-        return {key: value for key, value in copied_meta.items() if value not in (None, "", [], {})}
-
-    def _prepare_branch_session_state(self, state, messages, fork_meta):
+    def _render_rewritten_session(self, state, messages):
         if not state:
             return
-        selected_skill_names = normalize_selected_skill_names(fork_meta.get("selected_skill_names"))
-        branch_meta = normalize_conversation_branch_meta(fork_meta.get("conversation_branch"))
-        if getattr(state, "chat_layout", None) is not None:
-            self._reset_session_history_state(state)
-            state.history_loading = False
-            state.history_loaded = True
-            state.messages = self.chat_storage.normalize_messages(copy.deepcopy(messages or []))
-            self._rebuild_session_render_spans(state)
-            state.displayed_render_count = len(state.render_items)
-            if state.messages:
-                self.render_message_batch(state.messages, state.session_id, animate=False)
-            else:
-                self._render_initial_session_history(state)
-        state.selected_skill_names = selected_skill_names
-        state.run_phase = "待开始"
-        state.session_status = "draft"
-        state.has_file_changes = False
-        state.changed_files = []
-        state.clarify_mode_enabled = False
-        state.clarify_phase = CLARIFY_MODE_DISABLED
-        state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-        state.pending_clarify_questions = []
-        state.clarify_source_user_text = ""
-        state.clarify_answers_context = []
-        state.sop_run = None
-        state.completed_agent_result_ids = set()
-        state.automation_task_id = ""
-        state.automation_run_id = ""
-        state.automation_trigger_source = ""
-        state.automation_template_id = ""
-        state.conversation_branch = branch_meta
-        state.persisted_conversation_meta = copy.deepcopy(fork_meta or {})
+        self.clear_chat_layout(state.chat_layout)
+        state.empty_state = None
+        state.messages = self.chat_storage.normalize_messages(copy.deepcopy(messages or []))
+        state.tool_cards = {}
+        state.pending_tool_results = {}
+        state.last_agent_bubble = None
+        state.temp_thinking_bubble = None
+        self._rebuild_session_render_spans(state)
+        state.displayed_render_count = len(state.render_items)
+        if state.messages:
+            self.render_message_batch(state.messages, state.session_id, animate=False)
+        else:
+            self._render_initial_session_history(state)
 
-    def _create_branch_session(self, parent_record, parent_message_id, forked_messages, action="branch", prefer_parent_title=True):
-        parent_record = parent_record if isinstance(parent_record, dict) else {}
-        fork_title = self._build_fork_title(parent_record, forked_messages, prefer_parent_title=prefer_parent_title)
-        new_session_id = self._new_message_id()
-        fork_meta = self._build_forked_session_meta(parent_record, parent_message_id, action=action)
-        self.chat_storage.save_conversation(
-            new_session_id,
-            forked_messages,
-            title=fork_title,
-            status="draft",
-            meta=fork_meta,
-        )
-
-        self.create_new_session(session_id=new_session_id, title=fork_title, make_current=False)
-        self._prepare_branch_session_state(self.get_session(new_session_id), forked_messages, fork_meta)
-        self.refresh_history_list()
-        self.activate_session(new_session_id, ensure_loaded=False)
-        return new_session_id
-
-    def fork_conversation_at_message(self, session_id, message_id):
-        session_id = str(session_id or "").strip()
-        message_id = str(message_id or "").strip()
-        if not session_id or not message_id:
-            return False
-        self.save_chat_history(session_id=session_id, flush=True)
-        parent_record = self.chat_storage.get_conversation_record(session_id) or {}
-        parent_messages = self.chat_storage.get_messages(session_id)
-        forked_messages = self._copy_forked_messages_upto(parent_messages, message_id)
-        if not forked_messages:
-            self.add_system_toast("找不到可分支的消息位置", "warning", session_id=session_id, auto_close_ms=3200)
-            return False
-        new_session_id = self._create_branch_session(parent_record, message_id, forked_messages, action="branch")
-        self.add_system_toast("已创建分支会话", "success", session_id=new_session_id, auto_close_ms=3200)
-        return True
-
-    def edit_user_message_from_branch(self, session_id, message_id):
+    def edit_user_message_inline(self, session_id, message_id, edited_text):
         session_id = str(session_id or "").strip()
         message_id = str(message_id or "").strip()
         if not session_id or not message_id:
@@ -14052,47 +13972,39 @@ class MainWindow(QMainWindow):
             self.add_system_toast("只能编辑用户消息。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
 
-        original_text = self._message_display_content(source_message)
-        edited_text, accepted = QInputDialog.getMultiLineText(
-            self,
-            "编辑消息",
-            "修改内容后会基于这里创建新分支，并重新生成后续回答。",
-            original_text,
-        )
-        if not accepted:
+        edited_text = str(edited_text or "").strip()
+        prompt_files = self._message_attachment_paths(source_message)
+        if not edited_text and not prompt_files:
+            self.add_system_toast("消息内容不能为空。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
 
         self.save_chat_history(session_id=session_id, flush=True)
-        parent_record = self.chat_storage.get_conversation_record(session_id) or {}
-        parent_messages = self.chat_storage.get_messages(session_id)
-        forked_messages = self._copy_forked_messages_before(parent_messages, message_id)
-        source_message = self._find_message_by_id(parent_messages, message_id)
-        if source_message is None:
+        messages = list(getattr(state, "messages", []) or [])
+        target_index = next(
+            (index for index, item in enumerate(messages) if str(item.get("id") or "").strip() == message_id),
+            -1,
+        )
+        if target_index < 0:
             self.add_system_toast("找不到要编辑的消息。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
-        prompt_files = self._message_attachment_paths(source_message)
-        new_session_id = self._create_branch_session(
-            parent_record,
-            message_id,
-            forked_messages,
-            action="edit_user_message",
-            prefer_parent_title=False,
-        )
-        fork_state = self.get_session(new_session_id)
+        self._render_rewritten_session(state, messages[:target_index])
         submitted = self._submit_session_request(
-            fork_state,
+            state,
             edited_text,
             prompt_files,
             check_duplicates=False,
             clear_current_input=False,
         )
         if not submitted:
-            self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=new_session_id, auto_close_ms=3200)
+            self._render_rewritten_session(state, messages)
+            self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
-        self.add_system_toast("已创建编辑分支并重新生成", "success", session_id=new_session_id, auto_close_ms=3200)
+        self.save_chat_history(session_id=session_id)
+        self.refresh_history_list()
+        self.add_system_toast("已更新消息并重新生成", "success", session_id=session_id, auto_close_ms=3200)
         return True
 
-    def delete_user_message_from_branch(self, session_id, message_id):
+    def delete_user_message_in_place(self, session_id, message_id):
         session_id = str(session_id or "").strip()
         message_id = str(message_id or "").strip()
         if not session_id or not message_id:
@@ -14110,26 +14022,24 @@ class MainWindow(QMainWindow):
         confirm = QMessageBox.question(
             self,
             "确认删除消息",
-            "这会创建一个新分支，并删除这条用户消息及其后续内容。是否继续？",
+            "仅删除这条用户消息，后续内容会保留。是否继续？",
         )
         if confirm != QMessageBox.Yes:
             return False
 
         self.save_chat_history(session_id=session_id, flush=True)
-        parent_record = self.chat_storage.get_conversation_record(session_id) or {}
-        parent_messages = self.chat_storage.get_messages(session_id)
-        forked_messages = self._copy_forked_messages_before(parent_messages, message_id)
-        if source_message is None or self._find_message_by_id(parent_messages, message_id) is None:
+        messages = list(getattr(state, "messages", []) or [])
+        remaining_messages = [
+            item for item in messages
+            if str(item.get("id") or "").strip() != message_id
+        ]
+        if len(remaining_messages) == len(messages):
             self.add_system_toast("找不到要删除的消息。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
-        new_session_id = self._create_branch_session(
-            parent_record,
-            message_id,
-            forked_messages,
-            action="delete_user_message",
-            prefer_parent_title=False,
-        )
-        self.add_system_toast("已创建删除分支，请从这里继续输入。", "success", session_id=new_session_id, auto_close_ms=3200)
+        self._render_rewritten_session(state, remaining_messages)
+        self.save_chat_history(session_id=session_id, flush=True)
+        self.refresh_history_list()
+        self.add_system_toast("已删除消息，后续内容保持不变。", "success", session_id=session_id, auto_close_ms=3200)
         if hasattr(self, "input_field") and self.input_field:
             self.input_field.setFocus()
         return True
@@ -16201,7 +16111,6 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = []
         state.sop_run = None
         state.sop_confirmation_bar = None
-        state.conversation_branch = None
         state.persisted_conversation_meta = {}
         state.completed_agent_result_ids = set()
         state.automation_task_id = ""
@@ -16343,9 +16252,6 @@ class MainWindow(QMainWindow):
             conversation_meta.get("selected_skill_names")
         )
         state.sop_run = normalize_sop_run(conversation_meta.get("sop_run"))
-        state.conversation_branch = normalize_conversation_branch_meta(
-            conversation_meta.get("conversation_branch")
-        )
         state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
         state.clarify_mode_state = normalize_clarify_phase(
             conversation_meta.get("clarify_mode_state"),
@@ -16920,7 +16826,7 @@ class MainWindow(QMainWindow):
         title = entry.get("title") or "新任务"
         selected = session_id == self.current_session_id
 
-        row = QFrame()
+        row = ConversationHistoryRow()
         row.setObjectName("HistoryRow")
         set_stylesheet_if_changed(row, apple_history_row_style(selected))
         row_layout = QHBoxLayout(row)
@@ -16970,7 +16876,7 @@ class MainWindow(QMainWindow):
     def _make_project_session_row(self, entry, compact=True):
         session_id = entry["id"]
         selected = session_id == self.current_session_id
-        row = QFrame()
+        row = ConversationHistoryRow()
         row.setObjectName("HistoryRow")
         set_stylesheet_if_changed(row, apple_history_row_style(selected))
         row_layout = QHBoxLayout(row)
@@ -16993,6 +16899,33 @@ class MainWindow(QMainWindow):
 
         activity_indicator = SessionActivityIndicator(row)
         row_layout.addWidget(activity_indicator, 0, Qt.AlignVCenter)
+
+        actions = QWidget(row)
+        actions.setFixedWidth(54)
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(2)
+        pinned = bool(entry.get("pinned"))
+        pin_btn = QToolButton(actions)
+        pin_btn.setIcon(qta.icon('fa5s.thumbtack', color=DesignTokens.primary if pinned else DesignTokens.text_tertiary))
+        pin_btn.setToolTip("取消置顶对话" if pinned else "置顶对话")
+        pin_btn.setCursor(Qt.PointingHandCursor)
+        pin_btn.setFixedSize(26, 26)
+        pin_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
+        pin_btn.clicked.connect(
+            lambda checked=False, sid=session_id, value=not pinned: self.set_conversation_pinned(sid, value)
+        )
+        archive_btn = QToolButton(actions)
+        archive_btn.setIcon(qta.icon('fa5s.archive', color=DesignTokens.text_tertiary))
+        archive_btn.setToolTip("归档对话")
+        archive_btn.setCursor(Qt.PointingHandCursor)
+        archive_btn.setFixedSize(26, 26)
+        archive_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
+        archive_btn.clicked.connect(lambda checked=False, sid=session_id: self.archive_session(sid))
+        actions_layout.addWidget(pin_btn)
+        actions_layout.addWidget(archive_btn)
+        row_layout.addWidget(actions, 0, Qt.AlignVCenter)
+        row.set_hover_actions([pin_btn, archive_btn])
 
         self.history_rows[session_id] = row
         self.history_buttons[session_id] = btn
@@ -17421,6 +17354,7 @@ class MainWindow(QMainWindow):
                 "updated_at": updated_at,
                 "status": conv.get("status") or "draft",
                 "workspace_dir": workspace_path,
+                "pinned": bool(meta.get("pinned")),
             }
             if workspace_path:
                 grouped.setdefault(project_key, {"path": workspace_path, "sessions": []})["sessions"].append(entry)
@@ -17450,7 +17384,10 @@ class MainWindow(QMainWindow):
         for key, payload in grouped.items():
             path = payload.get("path") or ""
             meta = project_meta_by_key.get(key, {})
-            sessions = sorted(payload.get("sessions") or [], key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+            sessions = sorted(
+                payload.get("sessions") or [],
+                key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0)),
+            )
             latest = latest_by_project.get(key) or max([int(item.get("updated_at") or 0) for item in sessions] or [int(meta.get("updated_at") or 0)])
             project_entries.append({
                 "path": path,
@@ -17471,7 +17408,9 @@ class MainWindow(QMainWindow):
             self.history_layout.addWidget(row)
             rendered_any = True
 
-        unassigned_entries.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+        unassigned_entries.sort(
+            key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0))
+        )
         if unassigned_entries:
             self._add_history_group_label("对话")
             if query_active or self.unassigned_history_full_expanded or len(unassigned_entries) <= 3:
@@ -17558,18 +17497,19 @@ class MainWindow(QMainWindow):
 
     def archive_session(self, session_id):
         self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
-        record = self.chat_storage.get_conversation_record(session_id) or {}
+        record = self.chat_storage.update_conversation_meta(session_id, {"archived": True})
         meta = record.get("meta") or {}
-        meta["archived"] = True
-        self.chat_storage.upsert_conversation(
-            session_id,
-            title=record.get("title") or "新任务",
-            status=record.get("status") or "completed",
-            meta=meta,
-        )
         state = self.sessions.get(session_id)
         if state:
             state.persisted_conversation_meta = copy.deepcopy(meta)
+        self.refresh_history_list()
+
+    def set_conversation_pinned(self, session_id, pinned):
+        self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
+        record = self.chat_storage.update_conversation_meta(session_id, {"pinned": bool(pinned)})
+        state = self.sessions.get(session_id)
+        if state:
+            state.persisted_conversation_meta = copy.deepcopy(record.get("meta") or {})
         self.refresh_history_list()
 
     def on_chat_scroll_value_changed(self, value, session_id):
@@ -18021,7 +17961,6 @@ class MainWindow(QMainWindow):
                 merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
                 merged_meta.update(self._session_selected_skills_meta(self.sessions.get(session_id)))
                 merged_meta.update(self._session_sop_meta(self.sessions.get(session_id)))
-                merged_meta.update(self._session_branch_meta(self.sessions.get(session_id)))
             try:
                 self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
@@ -18089,7 +18028,6 @@ class MainWindow(QMainWindow):
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         meta.update(self._session_sop_meta(state))
-        meta.update(self._session_branch_meta(state))
         return meta
 
     def _build_chat_save_request(self, state):
@@ -20448,14 +20386,11 @@ class MainWindow(QMainWindow):
             attachments=attachments,
             source_message_id=source_message_id,
         )
-        bubble.branchRequested.connect(
-            lambda msg_id, sid=state.session_id: self.fork_conversation_at_message(sid, msg_id)
-        )
-        bubble.editRequested.connect(
-            lambda msg_id, sid=state.session_id: self.edit_user_message_from_branch(sid, msg_id)
+        bubble.editSubmitRequested.connect(
+            lambda msg_id, text, sid=state.session_id: self.edit_user_message_inline(sid, msg_id, text)
         )
         bubble.deleteRequested.connect(
-            lambda msg_id, sid=state.session_id: self.delete_user_message_from_branch(sid, msg_id)
+            lambda msg_id, sid=state.session_id: self.delete_user_message_in_place(sid, msg_id)
         )
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         

@@ -22,7 +22,8 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **动态对话阅读列**：消息列表与输入栏会根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；默认采用紧凑项目栏、宽中央聊天列和稳定右侧工作区的 Codex 式三栏比例。关闭抽屉时主对话列居中，打开抽屉时主对话列收紧两侧空白并左移，同时更新消息区、用户气泡、输入卡片和系统提示条宽度，避免输入框、消息卡片和 drawer 子界面出现忽宽忽窄的跳变。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；下拉框弹层统一使用高对比度的悬停与选中状态，并兼容 Windows 失焦选中态；常规文案偏产品表达，MCP 相关术语保持英文。
-*   **对话分支按钮**：已完成的用户/助手气泡会暴露 `分支` 图标按钮，点击后创建一个新的线性会话快照；用户消息额外提供“编辑后重新生成”和“删除并继续”，两者都通过新分支承载，不在同一会话内改写历史。
+*   **消息原地编辑**：已完成的用户气泡可切换到内嵌编辑态；提交时在当前会话截断目标消息及其后续内容并重新生成，删除仅移除目标用户消息。运行中或历史尚未加载时明确阻止改写。
+*   **对话置顶与归档**：项目内及无项目对话共用悬停操作区；`meta.pinned` 控制组内优先排序，`meta.archived` 控制侧边栏过滤，元数据局部更新不会改写 `updated_at`。
 *   **系统提示条**：`add_system_toast(...)` 在聊天流中渲染紧凑状态条，居中插入、限制最大宽度、允许换行，并跟随当前消息列宽度重算；颜色仅作为轻量状态提示而不是整块警示背景。会话自动化等待人工确认时也在聊天流中插入操作条，承载确认、重跑和标记不适用。
 *   **多模态附件建模**：输入区把普通文件记录为 `input_file`，把 PNG/JPEG/WEBP/GIF 记录为 `input_image`；provider 在发送前再决定是否转换成视觉请求。
 *   **自动化中心**：侧边栏独立入口，承载已配置任务、执行历史与任务模板管理；定时计划支持快捷配置和 crontab 表达式双入口。
@@ -33,7 +34,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **长对话轻量渲染**：长会话打开时不再先构造整段 render items；历史按跨度分页渲染，长回复流式阶段可临时走纯文本快路径，最终回复优先保留 Markdown / HTML 富文本渲染，仅极端巨大的普通文本才降级。
 *   **流式合并与渲染缓存**：正文和思考流按短定时器批量刷新；稳定 Markdown / HTML 结果进入 LRU 缓存，历史回放和最终响应不再重复转换。
 *   **聊天气泡虚拟化**：聊天区滚动时按视口 overscan 保留附近气泡，远离视口的历史气泡折叠成固定高度占位，恢复时复用原控件和缓存后的内容。
-*   **异步会话持久化**：`save_chat_history()` 只在 UI 线程里整理快照并入队，后台 `ChatSaveWorker` 按会话合并、500ms debounce 后写入 SQLite；分支、长期记忆更新、会话重命名/归档/删除和应用退出前显式 flush，避免异步保存带来的读取时序问题。
+*   **异步会话持久化**：`save_chat_history()` 只在 UI 线程里整理快照并入队，后台 `ChatSaveWorker` 按会话合并、500ms debounce 后写入 SQLite；消息改写、长期记忆更新、会话重命名/归档/删除和应用退出前显式 flush，避免异步保存带来的读取时序问题。
 *   **UI 到 Daemon 的上下文快照**：桌面会话交给 daemon 执行时会随请求传递当前 `state.messages` 快照；daemon 优先用该快照刷新内存会话，再追加本轮用户消息，避免 idle suspend 后从旧 SQLite 或旧缓存恢复导致上下文漂移。
 *   **历史加载一致性屏障**：异步恢复会话期间，输入和保存请求均被拦截；加载完成后通过 `set_current_session()` 重新绑定窗口消息别名。历史迁移版本 3 会移除旧 query 模糊匹配生成的隐藏 Skill 上下文，同时保留 `tool_search` 和真实工具调用产生的上下文。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
@@ -68,7 +69,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/sop_manager.py**：规范化自动化模板和会话运行态，维护 step/run 状态、步骤执行器元数据，并生成当前步骤 Prompt 片段。
 *   **core/automation_manager.py**：规范化定时任务、计算 cron / 快捷计划的 next run、生成完整执行提示词并维护运行历史记录结构。
 *   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、`mcp_servers`、项目列表、工作区、自动化任务与运行历史。
-*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组、无项目对话查询和项目会话归档；会话可通过 `meta.conversation_branch` 记录来源会话、来源消息和分支动作类型。SQLite 连接启用 WAL / busy timeout，并在普通追加路径下只写入新增消息，编辑、删除和迁移仍回退全量重写。旧版 `chat_history_*.json` 默认不再参与侧边栏刷新，而是通过手动迁移写回 SQLite。
+*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组，并以 `meta.pinned` / `meta.archived` 管理单条对话；局部元数据更新保留最近活动时间。SQLite 连接启用 WAL / busy timeout，并在普通追加路径下只写入新增消息，编辑、删除和迁移仍回退全量重写。旧版 `conversation_branch` 元数据可继续读取但不驱动 UI，旧版 `chat_history_*.json` 通过手动迁移写回 SQLite。
 *   **core/memory_update.py**：扫描历史会话，分批更新 `memories.md`，写入备份与 `memories_update_state.json`。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，下载前清理旧 ZIP、暂存目录、备份目录和更新脚本，校验解压结构并生成 Windows 更新脚本；PowerShell GUI 更新脚本允许前台窗口最小化，也支持默认最小化的后台安装，应用重启路径继续显式隐藏控制台窗口。
 

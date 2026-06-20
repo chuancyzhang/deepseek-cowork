@@ -98,6 +98,27 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual(messages[0]["content"], "hello edited")
         self.assertEqual([msg["id"] for msg in messages], ["m1", "m2"])
 
+    def test_update_conversation_meta_preserves_activity_time(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation(
+            "conv-pin",
+            [{"id": "u1", "role": "user", "content": "hello"}],
+            title="demo",
+            meta={
+                "workspace_dir": "D:/demo",
+                "conversation_branch": {"parent_session_id": "legacy"},
+            },
+        )
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE conversations SET updated_at = 123 WHERE id = ?", ("conv-pin",))
+
+        record = storage.update_conversation_meta("conv-pin", {"pinned": True})
+
+        self.assertEqual(record["updated_at"], 123)
+        self.assertTrue(record["meta"]["pinned"])
+        self.assertEqual(record["meta"]["workspace_dir"], "D:/demo")
+        self.assertEqual(record["meta"]["conversation_branch"]["parent_session_id"], "legacy")
+
     def test_migrate_legacy_json_histories_imports_missing_sessions(self):
         storage = ChatStorage(self.db_path)
         legacy_path = os.path.join(self.temp_dir, "chat_history_legacy-session.json")

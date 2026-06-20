@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -26,6 +27,34 @@ class TestRuntimeComponents(unittest.TestCase):
         )
         self.assertIn("scikit-learn", runtime_components.TOOLKITS["data-analysis"]["packages"])
         self.assertIn("quantstats", runtime_components.TOOLKITS["finance"]["packages"])
+        self.assertIn("reportlab", runtime_components.TOOLKITS["documents"]["packages"])
+        self.assertIn("reportlab", runtime_components.TOOLKITS["documents"]["imports"])
+
+    def test_toolkit_status_marks_stale_package_catalog_for_update(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(runtime_components, "toolkits_root", return_value=temp_dir):
+            target = runtime_components.toolkit_path("documents")
+            os.makedirs(target)
+            marker = os.path.join(os.path.dirname(target), "toolkit.json")
+            old_packages = [
+                package
+                for package in runtime_components.TOOLKITS["documents"]["packages"]
+                if package != "reportlab"
+            ]
+            with open(marker, "w", encoding="utf-8") as handle:
+                json.dump({"packages": old_packages}, handle)
+
+            status = runtime_components.toolkit_status("documents")
+
+            self.assertTrue(status["installed"])
+            self.assertTrue(status["needs_update"])
+            self.assertEqual(status["missing_packages"], ["reportlab"])
+
+            with open(marker, "w", encoding="utf-8") as handle:
+                json.dump({"packages": runtime_components.TOOLKITS["documents"]["packages"]}, handle)
+
+            current_status = runtime_components.toolkit_status("documents")
+            self.assertFalse(current_status["needs_update"])
+            self.assertEqual(current_status["missing_packages"], [])
 
     def test_installed_toolkit_paths_require_marker(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(runtime_components, "toolkits_root", return_value=temp_dir):

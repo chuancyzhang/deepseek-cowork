@@ -32,8 +32,8 @@ TOOLKITS = {
     "documents": {
         "name": "文档工具包",
         "description": "读取与生成 XLSX、DOCX、PPTX 和 PDF",
-        "packages": ["openpyxl", "python-docx", "python-pptx", "pypdf"],
-        "imports": ["openpyxl", "docx", "pptx", "pypdf"],
+        "packages": ["openpyxl", "python-docx", "python-pptx", "pypdf", "reportlab"],
+        "imports": ["openpyxl", "docx", "pptx", "pypdf", "reportlab"],
         "skills": ["document-reader"],
     },
     "data-analysis": {
@@ -199,10 +199,20 @@ def toolkit_status(toolkit_id):
                 marker = json.load(handle)
         except Exception:
             marker = {}
+    installed_packages = {
+        str(package).strip().lower()
+        for package in (marker.get("packages") or [])
+        if str(package).strip()
+    }
+    required_packages = {package.lower() for package in spec["packages"]}
+    missing_packages = sorted(required_packages - installed_packages)
+    installed = bool(marker and os.path.isdir(toolkit_path(toolkit_id)))
     return {
         "id": toolkit_id,
         **spec,
-        "installed": bool(marker and os.path.isdir(toolkit_path(toolkit_id))),
+        "installed": installed,
+        "needs_update": installed and bool(missing_packages),
+        "missing_packages": missing_packages if installed else [],
         "source": marker.get("source") or "",
         "size": _directory_size(root),
     }

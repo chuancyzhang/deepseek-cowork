@@ -27,7 +27,7 @@ For installation, model setup, project conversations, and editable PPTX generati
 ### 🔌 Skill System
 *   **Experience-First Skills**: Skills are treated as structured experience packages rather than a second execution protocol.
 *   **Hot-Reloadable Skills**: Drop new skills into `skills/` or `ai_skills/` and use them immediately.
-*   **Optional Bundled Plugins**: Browser automation, web search, financial data, and Office/PDF reading ship under `ai_skills/`; their dependencies can be prepared from Settings → Components & Dependencies.
+*   **Optional Bundled Plugins**: Browser automation, web search, financial data, and Office/PDF reading ship under `ai_skills/`; their dependencies can be prepared from Settings → Components & Dependencies, and the document toolkit includes ReportLab for PDF generation.
 *   **Browser Sessions**: `browser-automation` provides serial observe/act/verify workflows with a dedicated persistent profile, temporary isolated profiles, and an explicit Chrome 144+ connection mode that honors Chrome's remote-debugging approval flow.
 *   **Portable Skill Packages**: Export a skill as a ZIP package and import it back from either a ZIP file or a source folder.
 *   **Standalone Quant Strategy Skill**: `quant-strategy-management` adds controlled Strategy DSL parsing, strategy storage, daily backtests, and report artifacts as a self-contained skill package.

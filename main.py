@@ -6555,17 +6555,19 @@ class SettingsDialog(QDialog):
         if not row:
             return
         installed = bool(status.get("installed"))
+        needs_update = bool(status.get("needs_update"))
         size = int(status.get("size") or 0)
         suffix = f" · {format_file_size(size)}" if size else ""
         source = status.get("source") or ""
         source_suffix = f" · {source}" if source else ""
-        row["status"].setText(("已安装" if installed else "未安装") + suffix + source_suffix)
-        row["action"].setText("卸载" if installed else "安装")
+        state_text = "需要更新" if needs_update else ("已安装" if installed else "未安装")
+        row["status"].setText(state_text + suffix + source_suffix)
+        row["action"].setText("更新" if needs_update else ("卸载" if installed else "安装"))
         row["repair"].setVisible(installed)
 
     def toggle_component(self, component_id):
         status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
-        action = "uninstall" if status.get("installed") else "install"
+        action = "repair" if status.get("needs_update") else ("uninstall" if status.get("installed") else "install")
         if action == "uninstall":
             reply = QMessageBox.question(self, "卸载组件", "确定卸载该组件？相关能力下次使用时可能重新安装依赖。", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:

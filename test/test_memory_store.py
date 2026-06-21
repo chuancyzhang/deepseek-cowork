@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -25,28 +26,36 @@ class TestMemoryStore(unittest.TestCase):
         finally:
             other.cleanup()
 
-    def test_global_and_workspace_modules_are_isolated(self):
-        self.store.save_module("Global", "global content")
-        self.store.save_module("Project A", "a content", scope="workspace", workspace_dir="C:/A")
-        self.store.save_module("Project B", "b content", scope="workspace", workspace_dir="C:/B")
-        titles = [item["title"] for item in self.store.list_modules("C:/A")]
-        self.assertEqual(set(titles), {"Global", "Project A"})
+    def test_global_and_workspace_summaries_are_isolated(self):
+        self.store.save_summary("global", "global")
+        self.store.save_summary("project a", "workspace", "C:/A")
+        self.store.save_summary("project b", "workspace", "C:/B")
+        self.assertEqual(self.store.read_summary("global").strip(), "global")
+        self.assertEqual(self.store.read_summary("workspace", "C:/A").strip(), "project a")
+        self.assertEqual(self.store.read_summary("workspace", "C:/B").strip(), "project b")
         self.assertNotEqual(workspace_key("C:/A"), workspace_key("C:/B"))
 
-    def test_edit_creates_restorable_version(self):
-        module = self.store.save_module("Preference", "first")
-        self.store.save_module("Preference", "second", module_id=module["id"])
-        self.assertTrue(self.store.list_module_versions(module["id"]))
-        restored = self.store.restore_latest_module_version(module["id"])
-        self.assertEqual(restored.strip(), "first")
-        self.assertEqual(self.store.get_module(module["id"])["content"].strip(), "first")
+    def test_initialization_removes_obsolete_module_data_and_backups(self):
+        root = os.path.join(self.temp_dir.name, "memory")
+        module_dir = os.path.join(root, "global", "modules")
+        backup_dir = os.path.join(root, "backups")
+        os.makedirs(module_dir, exist_ok=True)
+        os.makedirs(backup_dir, exist_ok=True)
+        with open(os.path.join(root, "index.json"), "w", encoding="utf-8") as handle:
+            json.dump({"modules": []}, handle)
+        with open(os.path.join(module_dir, "old.md"), "w", encoding="utf-8") as handle:
+            handle.write("old module")
+        with open(os.path.join(backup_dir, "old.md.1.bak"), "w", encoding="utf-8") as handle:
+            handle.write("old module")
+        with open(os.path.join(backup_dir, "summary.md.1.bak"), "w", encoding="utf-8") as handle:
+            handle.write("summary")
 
-    def test_search_ignores_disabled_and_other_workspace_modules(self):
-        self.store.save_module("Python style", "prefer pathlib", tags=["python"])
-        self.store.save_module("Disabled", "prefer pathlib", enabled=False)
-        self.store.save_module("Other", "prefer pathlib", scope="workspace", workspace_dir="C:/Other")
-        results = self.store.search_modules("pathlib", "C:/Current")
-        self.assertEqual([item["title"] for item in results], ["Python style"])
+        MemoryStore(self.temp_dir.name)
+
+        self.assertFalse(os.path.exists(os.path.join(root, "index.json")))
+        self.assertFalse(os.path.exists(module_dir))
+        self.assertFalse(os.path.exists(os.path.join(backup_dir, "old.md.1.bak")))
+        self.assertTrue(os.path.exists(os.path.join(backup_dir, "summary.md.1.bak")))
 
 
 if __name__ == "__main__":

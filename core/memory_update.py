@@ -4,6 +4,8 @@ import os
 import tempfile
 import time
 
+from core.memory_store import normalize_workspace_dir, workspace_key
+
 
 DEFAULT_MEMORY_BATCH_TOKEN_LIMIT = 200_000
 MEMORY_UPDATE_STATE_FILENAME = "memories_update_state.json"
@@ -342,9 +344,26 @@ def load_memory_update_state(history_dir):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {"schema_version": 2, "global": {}, "workspaces": {}}
+        if data.get("schema_version") == 2:
+            data.setdefault("global", {})
+            data.setdefault("workspaces", {})
+            return data
+        # The former flat cursor represented the all-history/global flow.
+        return {"schema_version": 2, "global": data, "workspaces": {}}
     except Exception:
-        return {}
+        return {"schema_version": 2, "global": {}, "workspaces": {}}
+
+
+def memory_update_scope_state(history_dir, scope="global", workspace_dir=""):
+    state = load_memory_update_state(history_dir)
+    if scope == "global":
+        return dict(state.get("global") or {})
+    key = workspace_key(workspace_dir)
+    if not key:
+        raise ValueError("工作区记忆更新必须指定工作区路径。")
+    return dict((state.get("workspaces") or {}).get(key) or {})
 
 
 def transcript_updated_at(transcript):
@@ -387,6 +406,19 @@ def filter_transcripts_for_memory_update(transcripts, last_processed_at=0, cutof
     return sorted(filtered, key=lambda item: (transcript_updated_at(item), item.get("id") or ""))
 
 
+def filter_transcripts_for_workspace(transcripts, workspace_dir):
+    target = normalize_workspace_dir(workspace_dir)
+    if not target:
+        raise ValueError("当前没有可用于生成摘要的工作区。")
+    result = []
+    for transcript in transcripts or []:
+        meta = transcript.get("meta") if isinstance(transcript.get("meta"), dict) else {}
+        candidate = normalize_workspace_dir(meta.get("workspace_dir"))
+        if candidate and candidate == target:
+            result.append(transcript)
+    return result
+
+
 def processed_conversation_records(transcripts):
     records = []
     for transcript in transcripts or []:
@@ -403,7 +435,7 @@ def processed_conversation_records(transcripts):
     return records
 
 
-def save_memory_update_state(history_dir, cutoff_at, transcripts):
+def save_memory_update_state(history_dir, cutoff_at, transcripts, scope="global", workspace_dir=""):
     os.makedirs(history_dir, exist_ok=True)
     try:
         cutoff_at = int(cutoff_at or time.time())
@@ -415,11 +447,21 @@ def save_memory_update_state(history_dir, cutoff_at, transcripts):
         "updated_at": int(time.time()),
         "processed_conversations": processed_conversation_records(transcripts),
     }
+    state = load_memory_update_state(history_dir)
+    state["schema_version"] = 2
+    if scope == "global":
+        state["global"] = payload
+    else:
+        key = workspace_key(workspace_dir)
+        if not key:
+            raise ValueError("工作区记忆更新必须指定工作区路径。")
+        payload["workspace_dir"] = normalize_workspace_dir(workspace_dir)
+        state.setdefault("workspaces", {})[key] = payload
     path = memory_update_state_path(history_dir)
     fd, tmp_path = tempfile.mkstemp(prefix="memories_update_state.", suffix=".tmp", dir=history_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+            json.dump(state, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, path)
     finally:
         if os.path.exists(tmp_path):

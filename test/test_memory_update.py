@@ -10,9 +10,11 @@ from core.memory_update import (
     collect_llm_content,
     estimate_tokens,
     filter_transcripts_for_memory_update,
+    filter_transcripts_for_workspace,
     generate_memory_update,
     generate_memory_update_incremental,
     load_memory_update_state,
+    memory_update_scope_state,
     save_memory_file_with_backup,
     save_memory_update_state,
 )
@@ -137,8 +139,32 @@ class TestMemoryUpdate(unittest.TestCase):
         self.assertEqual(state["last_processed_at"], 456)
         self.assertEqual(state["processed_conversations"][0]["id"], "a")
         loaded = load_memory_update_state(self.temp_dir)
-        self.assertEqual(loaded["last_processed_at"], 456)
-        self.assertEqual(loaded["processed_conversations"][0]["updated_at"], 123)
+        self.assertEqual(loaded["global"]["last_processed_at"], 456)
+        self.assertEqual(loaded["global"]["processed_conversations"][0]["updated_at"], 123)
+
+    def test_workspace_transcript_filter_matches_only_assigned_workspace(self):
+        transcripts = [
+            {"id": "a", "meta": {"workspace_dir": "C:/Work/A"}},
+            {"id": "b", "meta": {"workspace_dir": "C:/Work/B"}},
+            {"id": "legacy", "meta": {}},
+        ]
+        filtered = filter_transcripts_for_workspace(transcripts, "C:/Work/A")
+        self.assertEqual([item["id"] for item in filtered], ["a"])
+
+    def test_global_and_workspace_update_cursors_are_independent(self):
+        global_items = [{"id": "global", "updated_at": 100, "messages": []}]
+        workspace_items = [{"id": "workspace", "updated_at": 200, "messages": []}]
+        save_memory_update_state(self.temp_dir, 111, global_items)
+        save_memory_update_state(self.temp_dir, 222, workspace_items, "workspace", "C:/Work/A")
+        self.assertEqual(memory_update_scope_state(self.temp_dir)["last_processed_at"], 111)
+        self.assertEqual(memory_update_scope_state(self.temp_dir, "workspace", "C:/Work/A")["last_processed_at"], 222)
+        self.assertEqual(memory_update_scope_state(self.temp_dir, "workspace", "C:/Work/B"), {})
+
+    def test_legacy_flat_cursor_migrates_to_global_scope(self):
+        with open(os.path.join(self.temp_dir, "memories_update_state.json"), "w", encoding="utf-8") as handle:
+            json.dump({"last_processed_at": 321, "processed_conversations": []}, handle)
+        self.assertEqual(memory_update_scope_state(self.temp_dir)["last_processed_at"], 321)
+        self.assertEqual(memory_update_scope_state(self.temp_dir, "workspace", "C:/Work/A"), {})
 
     def test_generate_memory_update_incremental_saves_each_batch_and_advances_state(self):
         provider = IncrementalFakeProvider()
@@ -161,8 +187,8 @@ class TestMemoryUpdate(unittest.TestCase):
         with open(memory_path, "r", encoding="utf-8") as f:
             self.assertEqual(f.read(), "# Memory\n- batch 2\n")
         state = load_memory_update_state(self.temp_dir)
-        self.assertEqual(state["last_processed_at"], 200)
-        self.assertEqual([item["id"] for item in state["processed_conversations"]], ["a", "b"])
+        self.assertEqual(state["global"]["last_processed_at"], 200)
+        self.assertEqual([item["id"] for item in state["global"]["processed_conversations"]], ["a", "b"])
 
     def test_collect_llm_content_retries_empty_responses_five_times(self):
         provider = EmptyThenSuccessProvider(empty_count=4)

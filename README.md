@@ -67,7 +67,7 @@ For installation, model setup, project conversations, and editable PPTX generati
 *   **Hidden Windows Console Launches**: Python, Bash, updater fallback, updater relaunch, app launch, and system-tool subprocesses share a no-window launch path on Windows to avoid flashing CMD windows during normal use.
 *   **On-Demand Runtime Diagnostics**: High-frequency sub-agent lifecycle diagnostics are off by default; set `COWORK_RUNTIME_DEBUG_LOG=1` to write `sub_agent_runtime.log` under the app data directory, or `user_data/` in portable mode.
 *   **Persistent UI Exception Diagnostics**: The global UI event guard still prevents one event failure from immediately interrupting the app, while always writing the full traceback to `ui_error.log` under the app data directory or portable `user_data/`; the in-app notice points to that log instead of hiding the root cause behind a generic continuation message.
-*   **Manual Feedback Controls**: Sidebar actions expose `记忆` and `沉淀为 Skill`; generated knowledge is saved only after review, and memory modules remain editable afterward.
+*   **Manual Feedback Controls**: Sidebar actions expose `记忆` and `沉淀为 Skill`; generated long-term summaries are saved only after review.
 
 ### 🛰️ Daemon & IM Gateway
 *   **Headless Daemon**: Background inference keeps UI responsive.
@@ -152,7 +152,7 @@ Open **自动化** from the sidebar:
 
 ### 5. Close the Feedback Loop
 Use the sidebar after meaningful work:
-*   **`记忆` / Memory** opens the layered Memory Center for editing global/workspace summaries, searchable modules, and the global soul prompt. History-derived memory remains a draft until confirmation, then becomes editable modules with enable, archive, and restore controls.
+*   **`记忆` / Memory** opens the Memory Center for editing global/workspace summaries and the global soul prompt. Global generation reads all history, while current-workspace generation reads only conversations assigned to that workspace; both remain drafts until confirmation.
 *   **`沉淀为 Skill`** lets you choose a current conversation segment and turn it into a skill draft. You can create a new skill or update an existing one by appending experience or rewriting guidance, preview/edit before saving, and optionally store detected `run_python_code` snippets under `scripts/` as `script_entries`.
 *   **Skill Center import/export/debug** imports custom abilities from a single skill folder, a skill collection folder, or ZIP packages, and exports existing skills individually or as a selected multi-skill collection ZIP. The Skill Center separates read-only built-ins, default-off bundled plugins, MCP tools, and custom skills while preserving search, status filters, switches, validation, and tool debugging. Switches update the list immediately, while runtime skill registration refreshes on the next use or a manual refresh; MCP switches stay synchronized with the matching server's enabled state in Settings. The full switch track is clickable without opening the capability workbench.
 
@@ -215,7 +215,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 ## 🧠 Layered Memory & Context
 - System prompt layout: stable policies and tool strategy come first, while volatile status such as run mode, date, runtime paths, selected skills, and SOP state is placed later to improve DeepSeek context-cache stability.
 - Memories: the soul prompt and applicable summaries are injected automatically; detailed editable modules are searched only when relevant.
-- The Memory Center keeps a soul prompt and compact global/current-workspace summaries in the stable prompt, while detailed enabled modules are searched on demand. History generation is review-first and advances `memories_update_state.json` only after the user saves it.
+- The Memory Center keeps a soul prompt and compact global/current-workspace summaries in the stable prompt. Generation is review-first and advances an independent global or workspace cursor only after the user saves it.
 - Skill prompts: minimal experience briefs first, then fuller guidance only when needed.
 - Session-level selected skills and agent profiles narrow the allowed capability scope for the current task.
 - Context budgeting: DeepSeek V4 Pro/Flash default to a 1,000,000-token window and only proactively compress near the configured budget threshold; non-V4 models use a smaller conservative window.

@@ -18,9 +18,6 @@ CORE_ALWAYS_LOAD_TOOLS = {
     "request_user_input",
     "request_user_approval",
     "read_memories",
-    "list_memory_modules",
-    "search_memory_modules",
-    "read_memory_module",
     "update_experience",
 }
 
@@ -35,9 +32,6 @@ READ_ONLY_TOOL_NAMES = {
     "query_history",
     "query_history_vector",
     "read_memories",
-    "list_memory_modules",
-    "search_memory_modules",
-    "read_memory_module",
     "search_web",
     "read_web_article",
     "analyze_skill_source_folder",

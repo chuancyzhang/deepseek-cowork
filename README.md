@@ -124,7 +124,7 @@ The bundled Python runtime must also include platform extension modules from loc
 ### 1. Configuration
 Open **⚙️ Settings**:
 The settings window uses a left category list with lightweight borderless preference sections on the right.
-*   **Models & Services**: split providers or use-cases into separate model service cards, each with its own access key, base URL, and model list.
+*   **Models & Services**: split providers or use-cases into separate model service cards, each with its own access key, base URL, and model list. A channel can test its currently selected model with the unsaved form values. OpenAI-compatible models may explicitly declare supported reasoning-effort levels.
 *   **Agents**: save reusable working personas with their own prompt and skill scope.
 *   **Workspace**: set the default workspace and chat storage location so the app opens into a stable working context.
 *   **MCP**: configure `stdio` or Streamable HTTP MCP servers. MCP terms stay in English so they match official examples and JSON snippets.
@@ -134,6 +134,7 @@ The settings window uses a left category list with lightweight borderless prefer
 Use the top **新建对话** action for a workspace-free chat. For local file work, add a folder under **项目** and use its `+`, or choose **连接项目** from the current chat. A project remains the workspace boundary for file access.
 
 ### 3. Start Automating
+The compact model menu in the prompt bar shows each model as `channel / model`. Models with configured reasoning-effort support also expose their allowed levels in the same menu and remember the last level selected for that model; models without that capability show no reasoning control.
 Examples:
 *   *"Scan this project for unused imports and remove them."*
 *   *"Summarize all PDFs in this folder into a single report."*

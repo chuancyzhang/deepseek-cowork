@@ -9,7 +9,7 @@ from .deepseek import (
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
     build_deepseek_request_options,
     is_deepseek_request,
-    normalize_deepseek_reasoning_effort,
+    normalize_reasoning_effort,
 )
 
 class LLMProvider(ABC):
@@ -23,6 +23,9 @@ class LLMProvider(ABC):
         - tool_call: dict (for tool_call, partial or complete)
         """
         pass
+
+    def test_connection(self, timeout=20):
+        raise NotImplementedError("当前模型服务未实现连接测试。")
 
 
 SUPPORTED_VISION_MIME_TYPES = {
@@ -99,7 +102,7 @@ class OpenAIProvider(LLMProvider):
         self.base_url = base_url
         self.model_name = model_name
         self.thinking_enabled = bool(thinking_enabled)
-        self.reasoning_effort = normalize_deepseek_reasoning_effort(reasoning_effort)
+        self.reasoning_effort = normalize_reasoning_effort(reasoning_effort)
         self.supports_vision = bool(supports_vision)
         self.stream_usage_enabled = bool(stream_usage_enabled)
         self.prompt_cache_key_param = str(prompt_cache_key_param or "").strip()
@@ -123,14 +126,15 @@ class OpenAIProvider(LLMProvider):
             if prompt_cache_key:
                 self._apply_prompt_cache_key(params, prompt_cache_key)
             self._apply_stream_usage_options(params)
-            params.update(
-                build_deepseek_request_options(
+            if is_deepseek_request(self.model_name, self.base_url):
+                params.update(build_deepseek_request_options(
                     self.model_name,
                     self.base_url,
                     thinking_enabled=self.thinking_enabled,
                     reasoning_effort=self.reasoning_effort,
-                )
-            )
+                ))
+            elif self.reasoning_effort:
+                params["reasoning_effort"] = self.reasoning_effort
 
             stream = self._create_chat_completion_stream(params)
 
@@ -188,6 +192,30 @@ class OpenAIProvider(LLMProvider):
                         
         except Exception as e:
             yield {"type": "error", "content": str(e)}
+
+    def test_connection(self, timeout=20):
+        params = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "stream": False,
+            "max_tokens": 8,
+            "timeout": timeout,
+        }
+        if is_deepseek_request(self.model_name, self.base_url):
+            params.update(build_deepseek_request_options(
+                self.model_name,
+                self.base_url,
+                thinking_enabled=self.thinking_enabled,
+                reasoning_effort=self.reasoning_effort,
+            ))
+        elif self.reasoning_effort:
+            params["reasoning_effort"] = self.reasoning_effort
+        response = self.client.chat.completions.create(**params)
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            raise RuntimeError("服务未返回任何响应内容。")
+        message = getattr(choices[0], "message", None)
+        return str(getattr(message, "content", "") or "").strip()
 
     def _apply_prompt_cache_key(self, params, prompt_cache_key):
         key = str(prompt_cache_key or "").strip()
@@ -446,6 +474,19 @@ class AnthropicProvider(LLMProvider):
 
         except Exception as e:
             yield {"type": "error", "content": str(e)}
+
+    def test_connection(self, timeout=20):
+        response = self.client.messages.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": "Reply with OK."}],
+            max_tokens=8,
+            timeout=timeout,
+        )
+        blocks = getattr(response, "content", None) or []
+        text = "".join(str(getattr(block, "text", "") or "") for block in blocks).strip()
+        if not text:
+            raise RuntimeError("服务未返回任何响应内容。")
+        return text
 
     def _prepare_messages(self, messages):
         """

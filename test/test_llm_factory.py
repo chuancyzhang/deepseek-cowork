@@ -101,6 +101,36 @@ class TestLLMFactory(unittest.TestCase):
         self.assertEqual(provider.reasoning_effort, "max")
         self.assertFalse(provider.supports_vision)
 
+    def test_create_provider_accepts_runtime_reasoning_override(self):
+        self.mock_config.get_model_profile.return_value = {
+            "provider_type": "openai",
+            "api_key": "profile_key",
+            "base_url": "https://profile.url",
+            "model_name": "profile-model",
+            "reasoning_effort": "medium",
+        }
+
+        provider = LLMFactory.create_provider(
+            self.mock_config,
+            "openai-profile",
+            reasoning_effort="xhigh",
+        )
+
+        self.assertEqual(provider.reasoning_effort, "xhigh")
+
+    def test_create_provider_from_unsaved_profile(self):
+        provider = LLMFactory.create_provider_from_profile({
+            "provider_type": "openai",
+            "api_key": "draft-key",
+            "base_url": "https://draft.url",
+            "model_name": "draft-model",
+            "reasoning_effort": "low",
+        })
+
+        self.assertIsInstance(provider, OpenAIProvider)
+        self.assertEqual(provider.model_name, "draft-model")
+        self.assertEqual(provider.reasoning_effort, "low")
+
     def test_create_provider_uses_anthropic_profile(self):
         self.mock_config.get_model_profile.return_value = {
             "provider_type": "anthropic",

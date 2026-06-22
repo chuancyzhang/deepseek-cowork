@@ -155,6 +155,7 @@ def normalize_run_context(run_context):
         "agent_system_prompt": str(ctx.get("agent_system_prompt") or "").strip(),
         "agent_summon_source": str(ctx.get("agent_summon_source") or "").strip(),
         "selected_model_id": str(ctx.get("selected_model_id") or "").strip(),
+        "reasoning_effort": str(ctx.get("reasoning_effort") or "").strip().lower(),
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
         "channel": str(ctx.get("channel") or "").strip().lower(),
         "workspace_mode": "chat_only" if str(ctx.get("workspace_mode") or "").strip().lower() == "chat_only" else "project",

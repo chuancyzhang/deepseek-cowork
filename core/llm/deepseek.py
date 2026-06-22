@@ -4,6 +4,7 @@ LEGACY_DEEPSEEK_MODEL = "deepseek-reasoner"
 DEFAULT_DEEPSEEK_THINKING_ENABLED = True
 DEFAULT_DEEPSEEK_REASONING_EFFORT = "high"
 SUPPORTED_DEEPSEEK_REASONING_EFFORTS = ("high", "max")
+SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
 DEEPSEEK_V4_MODEL_PREFIXES = ("deepseek-v4-pro", "deepseek-v4-flash")
 
@@ -18,6 +19,21 @@ def normalize_deepseek_reasoning_effort(value):
     if text in SUPPORTED_DEEPSEEK_REASONING_EFFORTS:
         return text
     return DEFAULT_DEEPSEEK_REASONING_EFFORT
+
+
+def normalize_reasoning_effort(value, allowed=None):
+    text = str(value or "").strip().lower()
+    supported = tuple(SUPPORTED_REASONING_EFFORTS if allowed is None else allowed)
+    return text if text in supported else ""
+
+
+def normalize_reasoning_efforts(values):
+    normalized = []
+    for value in values or []:
+        effort = normalize_reasoning_effort(value)
+        if effort and effort not in normalized:
+            normalized.append(effort)
+    return normalized
 
 
 def is_deepseek_request(model_name, base_url=None):
@@ -39,11 +55,13 @@ def build_deepseek_request_options(
 ):
     if not is_deepseek_request(model_name, base_url):
         return {}
-    return {
-        "reasoning_effort": normalize_deepseek_reasoning_effort(reasoning_effort),
+    options = {
         "extra_body": {
             "thinking": {
                 "type": "enabled" if bool(thinking_enabled) else "disabled"
             }
         },
     }
+    if str(reasoning_effort or "").strip():
+        options["reasoning_effort"] = normalize_deepseek_reasoning_effort(reasoning_effort)
+    return options

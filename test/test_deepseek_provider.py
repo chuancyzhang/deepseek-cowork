@@ -50,7 +50,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(captured["reasoning_effort"], "max")
         self.assertEqual(captured["extra_body"]["thinking"]["type"], "enabled")
 
-    def test_non_deepseek_requests_skip_deepseek_only_options(self):
+    def test_non_deepseek_requests_send_configured_reasoning_effort_without_deepseek_body(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1",
             model_name="gpt-4.1-mini",
@@ -66,8 +66,36 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         client.chat.completions.create.side_effect = create
         list(provider.chat_stream([{"role": "user", "content": "hello"}]))
 
+        self.assertEqual(captured["reasoning_effort"], "max")
+        self.assertNotIn("extra_body", captured)
+
+    def test_non_deepseek_requests_omit_unconfigured_reasoning_effort(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+        captured = {}
+        client.chat.completions.create.side_effect = lambda **kwargs: captured.update(kwargs) or []
+
+        list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
         self.assertNotIn("reasoning_effort", captured)
         self.assertNotIn("extra_body", captured)
+
+    def test_connection_uses_timeout_and_current_reasoning_effort(self):
+        provider, client = self._build_provider(reasoning_effort="max")
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))]
+        )
+
+        result = provider.test_connection(timeout=20)
+
+        self.assertEqual(result, "OK")
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["timeout"], 20)
+        self.assertEqual(kwargs["reasoning_effort"], "max")
 
     def test_non_deepseek_prepare_messages_drops_reasoning_content(self):
         provider, _client = self._build_provider(

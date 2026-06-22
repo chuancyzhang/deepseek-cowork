@@ -21,7 +21,8 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；交付物支持列表与专注布局。最终助手回复由工作区约束的路径识别器生成 `cowork-file` 内部链接，点击后再次验证路径并直达交付物。HTML 与 Markdown 通过延迟加载的 QtWebEngine 渲染，PDF 使用延迟加载的 QtPdf；DOC/DOCX、PPT/PPTX、XLS/XLSX 由隔离子进程调用本机 Office 只读导出到应用缓存目录，缓存键包含路径、修改时间和大小。Office 缺失、文件损坏、加密或超时均显示明确错误，不静默降级。文件监听、轻量 HTML 策略、预览指纹复用及抽屉持久化继续保留。
 *   **动态对话阅读列**：消息列表与输入栏保持原有视觉样式，并根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；项目栏默认宽度为 232px，主区水平边距为 12px，抽屉外边距与中右栏间距为 8px，对话列目标占可用 shell 的 96%，窄窗口仍由 compact minimum 与 drawer width limit 防止重叠。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
-*   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；下拉框弹层统一使用高对比度的悬停与选中状态，并兼容 Windows 失焦选中态；常规文案偏产品表达，MCP 相关术语保持英文。
+*   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；模型渠道可在后台线程中用未保存的地址、密钥、当前模型和 20 秒请求超时执行真实连接测试。常规文案偏产品表达，MCP 相关术语保持英文。
+*   **模型与推理选择**：对话栏模型菜单使用 `channel / model` 标签区分同名模型。OpenAI-compatible 模型通过 profile 的 `reasoning_efforts` 声明允许档位，`reasoning_effort` 保存该模型上次选择；运行上下文把本轮档位显式传给 `LLMFactory`。没有能力声明时 UI 不显示推理项且 provider 不发送 `reasoning_effort`。
 *   **消息原地编辑**：已完成的用户气泡可切换到内嵌编辑态；提交时在当前会话截断目标消息及其后续内容并重新生成，删除仅移除目标用户消息。运行中或历史尚未加载时明确阻止改写。
 *   **对话置顶与归档**：项目内及无项目对话共用悬停操作区；`meta.pinned` 控制组内优先排序，`meta.archived` 控制侧边栏过滤，元数据局部更新不会改写 `updated_at`。启动入口只调用 Tooltip 专用主题初始化，使 `QToolTip` 样式与 `QPalette` 共用不透明浅色配色且不使用透明度或圆角窗口规则，避免 Windows 原生 tooltip 合成为黑块，同时不改变主界面控件样式。
 *   **系统提示条**：`add_system_toast(...)` 在聊天流中渲染紧凑状态条，居中插入、限制最大宽度、允许换行，并跟随当前消息列宽度重算；颜色仅作为轻量状态提示而不是整块警示背景。会话自动化等待人工确认时也在聊天流中插入操作条，承载确认、重跑和标记不适用。
@@ -45,7 +46,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/agent.py**：推理循环与工具调度，负责将用户输入转化为可执行任务。
 *   **core/interaction.py**：桥接 UI 与推理流程，统一消息与工具调用格式。
 *   **core/mcp_client.py**：封装 MCP `stdio` 与 Streamable HTTP 会话，负责连接测试、工具枚举与工具调用；对 `mcp` Python client 的新旧 Streamable HTTP API 做版本兼容。
-*   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。OpenAI-compatible provider 会请求并解析 streaming usage 中的 cached token 细节；会话级 prompt cache key 仅在模型配置显式声明参数名时透传。
+*   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。OpenAI-compatible provider 只在模型显式声明推理档位时发送通用 `reasoning_effort`，DeepSeek 请求继续附带 Thinking 参数；provider 还提供设置页使用的最小真实连接测试。OpenAI-compatible provider 会请求并解析 streaming usage 中的 cached token 细节；会话级 prompt cache key 仅在模型配置显式声明参数名时透传。
 *   **core/sandbox_runtime.py / 打包 runtime**：随包保留 Python 基础环境与 Git Bash，Node.js 改为 AppData 可选运行时。文档等第三方库不再预装；五类工具包由 `core/runtime_components.py` 安装并注入所有沙箱 Python 入口，文档工具包包含用于生成 PDF 的 ReportLab，并会根据安装标记提示旧工具包更新依赖。Skill 私有依赖和自动修复保持兼容。QtWebEngine 及其传递模块继续随包。
 *   **组件下载源**：Python 组件统一使用配置的 pip index，Node.js 使用配置的归档源并验证固定 SHA-256；自定义源仅接受无内嵌凭据的 HTTPS 地址，下载失败不静默换源。
 *   **core/env_utils.py**：`ensure_package_installed(...)` 不再只依赖主进程 `importlib` 判断是否已安装，而是用沙盒 Python 直接验证目标模块可导入。对于 `python-runner`，若依赖状态缓存显示已安装但沙盒实际无法导入，会强制重装一次以修复失真的缓存记录；若最终失败，则把沙盒 traceback 回传，便于定位 `ImportError` / DLL load failure。

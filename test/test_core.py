@@ -242,6 +242,44 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("llm_provider"), "openai")
         self.assertEqual(cm.get("model_name"), "glm-test")
 
+    def test_model_reasoning_efforts_are_normalized_and_remembered(self):
+        cm = self._create_config_manager()
+        channels = [{
+            "channel_id": "gpt-channel",
+            "display_name": "GPT 渠道",
+            "provider_type": "openai",
+            "api_key": "test-key",
+            "base_url": "https://example.com/v1",
+            "models": [{
+                "id": "gpt-model",
+                "display_name": "GPT-5.5",
+                "model_name": "gpt-5.5",
+                "reasoning_efforts": ["low", "medium", "high", "invalid", "high"],
+                "reasoning_effort": "medium",
+            }],
+        }]
+
+        cm.set_model_channels(channels, "gpt-model")
+        self.assertEqual(cm.get_model_profile()["reasoning_efforts"], ["low", "medium", "high"])
+        self.assertTrue(cm.set_model_reasoning_effort("gpt-model", "high"))
+        self.assertEqual(cm.get_model_profile()["reasoning_effort"], "high")
+        self.assertFalse(cm.set_model_reasoning_effort("gpt-model", "xhigh"))
+
+    def test_non_reasoning_model_does_not_inherit_legacy_effort(self):
+        cm = self._create_config_manager()
+        cm.set_model_channels([{
+            "channel_id": "plain-channel",
+            "display_name": "普通渠道",
+            "provider_type": "openai",
+            "api_key": "test-key",
+            "base_url": "https://example.com/v1",
+            "models": [{"id": "plain-model", "model_name": "plain-model"}],
+        }], "plain-model")
+
+        profile = cm.get_model_profile()
+        self.assertEqual(profile["reasoning_efforts"], [])
+        self.assertEqual(profile["reasoning_effort"], "")
+
     def test_set_model_channels_falls_back_when_selected_model_is_removed(self):
         cm = self._create_config_manager()
         channels = [

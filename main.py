@@ -139,8 +139,9 @@ from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
-    SUPPORTED_DEEPSEEK_REASONING_EFFORTS,
-    normalize_deepseek_reasoning_effort,
+    SUPPORTED_REASONING_EFFORTS,
+    normalize_reasoning_effort,
+    normalize_reasoning_efforts,
 )
 from core.clarify_mode import (
     CLARIFY_MODE_DISABLED,
@@ -2816,7 +2817,7 @@ class ModelEditDialog(QDialog):
         model = dict(model or {})
         self._editing_existing = bool(model)
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
-        self.resize(480, 340)
+        self.resize(500, 430)
         self.setStyleSheet(
             f"""
             QDialog {{ background: {DesignTokens.bg_app}; }}
@@ -2860,24 +2861,61 @@ class ModelEditDialog(QDialog):
 
         self.thinking_check = None
         self.reasoning_combo = None
+        self.reasoning_checks = {}
         if provider_id == "openai":
-            self.thinking_check = QCheckBox("启用 Thinking 模式")
-            self.thinking_check.setChecked(
-                bool(model.get("deepseek_thinking_enabled", DEFAULT_DEEPSEEK_THINKING_ENABLED))
-            )
-            form.addRow(build_form_row_label("Thinking"), self.thinking_check)
+            configured_efforts = normalize_reasoning_efforts(model.get("reasoning_efforts"))
+            self.thinking_check = QCheckBox("支持推理强度")
+            self.thinking_check.setChecked(bool(configured_efforts))
+            form.addRow(build_form_row_label("推理"), self.thinking_check)
+
+            effort_labels = {
+                "low": "低",
+                "medium": "中",
+                "high": "高",
+                "xhigh": "超高",
+                "max": "极限",
+            }
+            effort_widget = QWidget()
+            effort_layout = QHBoxLayout(effort_widget)
+            effort_layout.setContentsMargins(0, 0, 0, 0)
+            effort_layout.setSpacing(10)
+            for effort in SUPPORTED_REASONING_EFFORTS:
+                check = QCheckBox(effort_labels[effort])
+                check.setChecked(effort in configured_efforts)
+                self.reasoning_checks[effort] = check
+                effort_layout.addWidget(check)
+            effort_layout.addStretch()
+            form.addRow(build_form_row_label("支持档位"), effort_widget)
 
             self.reasoning_combo = QComboBox()
             apply_settings_combo_style(self.reasoning_combo)
-            for effort in SUPPORTED_DEEPSEEK_REASONING_EFFORTS:
-                self.reasoning_combo.addItem(effort, effort)
-            effort = normalize_deepseek_reasoning_effort(
-                model.get("deepseek_reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT)
+            for effort in SUPPORTED_REASONING_EFFORTS:
+                self.reasoning_combo.addItem(effort_labels[effort], effort)
+            effort = normalize_reasoning_effort(
+                model.get("reasoning_effort", model.get("deepseek_reasoning_effort")),
+                configured_efforts,
             )
             effort_index = self.reasoning_combo.findData(effort)
             if effort_index >= 0:
                 self.reasoning_combo.setCurrentIndex(effort_index)
-            form.addRow(build_form_row_label("推理强度"), self.reasoning_combo)
+            form.addRow(build_form_row_label("初始档位"), self.reasoning_combo)
+
+            def sync_reasoning_controls():
+                enabled = self.thinking_check.isChecked()
+                for check in self.reasoning_checks.values():
+                    check.setEnabled(enabled)
+                allowed = [key for key, check in self.reasoning_checks.items() if check.isChecked()]
+                self.reasoning_combo.setEnabled(enabled and bool(allowed))
+                for index in range(self.reasoning_combo.count()):
+                    item_enabled = self.reasoning_combo.itemData(index) in allowed
+                    self.reasoning_combo.model().item(index).setEnabled(item_enabled)
+                if allowed and self.reasoning_combo.currentData() not in allowed:
+                    self.reasoning_combo.setCurrentIndex(self.reasoning_combo.findData(allowed[0]))
+
+            self.thinking_check.toggled.connect(lambda _checked: sync_reasoning_controls())
+            for check in self.reasoning_checks.values():
+                check.toggled.connect(lambda _checked: sync_reasoning_controls())
+            sync_reasoning_controls()
 
         card_layout.addLayout(form)
         hint = QLabel("建议让显示名称包含服务来源或用途，例如“OpenRouter / Claude Sonnet”或“本地图像理解”。")
@@ -2908,19 +2946,52 @@ class ModelEditDialog(QDialog):
             "supports_vision": bool(self.vision_check and self.vision_check.isChecked()),
         }
         if self.provider_id == "openai":
-            item["deepseek_thinking_enabled"] = bool(self.thinking_check and self.thinking_check.isChecked())
-            item["deepseek_reasoning_effort"] = (
-                self.reasoning_combo.currentData()
-                if self.reasoning_combo
-                else DEFAULT_DEEPSEEK_REASONING_EFFORT
-            )
+            enabled = bool(self.thinking_check and self.thinking_check.isChecked())
+            efforts = [
+                effort for effort, check in self.reasoning_checks.items()
+                if enabled and check.isChecked()
+            ]
+            selected_effort = self.reasoning_combo.currentData() if efforts and self.reasoning_combo else ""
+            item["deepseek_thinking_enabled"] = enabled
+            item["deepseek_reasoning_effort"] = selected_effort or DEFAULT_DEEPSEEK_REASONING_EFFORT
+            item["reasoning_efforts"] = efforts
+            item["reasoning_effort"] = selected_effort
         return item
 
     def accept(self):
         if not self.model_name_input.text().strip():
             QMessageBox.warning(self, "模型配置", "请填写模型名称。")
             return
+        if self.thinking_check and self.thinking_check.isChecked():
+            if not any(check.isChecked() for check in self.reasoning_checks.values()):
+                QMessageBox.warning(self, "模型配置", "请至少选择一个推理强度档位。")
+                return
         super().accept()
+
+
+class ModelConnectionTestWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, profile, parent=None):
+        super().__init__(parent)
+        self.profile = dict(profile or {})
+
+    def run(self):
+        started_at = time.monotonic()
+        try:
+            provider = LLMFactory.create_provider_from_profile(self.profile)
+            preview = provider.test_connection(timeout=20)
+            self.finished_signal.emit({
+                "ok": True,
+                "elapsed": time.monotonic() - started_at,
+                "preview": str(preview or "").strip(),
+            })
+        except Exception as exc:
+            self.finished_signal.emit({
+                "ok": False,
+                "elapsed": time.monotonic() - started_at,
+                "error": str(exc),
+            })
 
 
 class ModelChannelEditor(QFrame):
@@ -2930,6 +3001,8 @@ class ModelChannelEditor(QFrame):
         self.expanded = bool(expanded)
         self.on_expand = on_expand
         self.on_delete = on_delete
+        self.test_worker = None
+        self._tested_signature = ""
         self.setObjectName("ModelChannelEditor")
         self.setStyleSheet(
             f"""
@@ -3037,6 +3110,7 @@ class ModelChannelEditor(QFrame):
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(104)
         self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
+        self.model_list.currentRowChanged.connect(self.clear_test_result)
         body_layout.addWidget(self.model_list)
 
         button_row = QHBoxLayout()
@@ -3052,17 +3126,32 @@ class ModelChannelEditor(QFrame):
         add_btn.clicked.connect(self.add_model)
         edit_btn.clicked.connect(self.edit_model)
         delete_btn.clicked.connect(self.delete_model)
+        self.test_btn = QPushButton("测试")
+        self.test_btn.setObjectName("SecondaryBtn")
+        self.test_btn.setIcon(qta.icon("fa5s.plug", color=DesignTokens.text_secondary))
+        self.test_btn.clicked.connect(self.test_current_model)
         button_row.addWidget(add_btn)
         button_row.addWidget(edit_btn)
         button_row.addWidget(delete_btn)
         button_row.addStretch()
+        button_row.addWidget(self.test_btn)
         body_layout.addLayout(button_row)
+
+        self.test_status_label = QLabel("选择一个模型后，可验证地址、密钥与真实调用。")
+        self.test_status_label.setWordWrap(True)
+        self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+        body_layout.addWidget(self.test_status_label)
 
         layout.addWidget(self.body)
         self.refresh_model_list()
         self.set_expanded(self.expanded)
         self.refresh_provider_placeholders()
         self.refresh_header()
+
+        self.display_name_input.textChanged.connect(self.clear_test_result)
+        self.api_key_input.textChanged.connect(self.clear_test_result)
+        self.base_url_input.textChanged.connect(self.clear_test_result)
+        self.provider_combo.currentIndexChanged.connect(self.clear_test_result)
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
@@ -3128,6 +3217,13 @@ class ModelChannelEditor(QFrame):
             self.model_list.setCurrentRow(0)
         self.refresh_header()
 
+    def clear_test_result(self, *_args):
+        if self.test_worker and self.test_worker.isRunning():
+            return
+        if hasattr(self, "test_status_label"):
+            self.test_status_label.setText("选择一个模型后，可验证地址、密钥与真实调用。")
+            self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+
     def add_model(self):
         dialog = ModelEditDialog(self._provider_type(), parent=self)
         if dialog.exec() == QDialog.Accepted:
@@ -3135,6 +3231,7 @@ class ModelChannelEditor(QFrame):
             model["id"] = f"{self.channel_config.get('channel_id') or self._provider_type()}-{uuid.uuid4().hex[:8]}"
             self._models().append(model)
             self.refresh_model_list()
+            self.clear_test_result()
 
     def _current_model_index(self):
         row = self.model_list.currentRow()
@@ -3152,6 +3249,7 @@ class ModelChannelEditor(QFrame):
             self._models()[index] = dialog.get_model(existing_id=current.get("id"))
             self.refresh_model_list()
             self.model_list.setCurrentRow(index)
+            self.clear_test_result()
 
     def delete_model(self):
         index = self._current_model_index()
@@ -3161,6 +3259,65 @@ class ModelChannelEditor(QFrame):
         self.refresh_model_list()
         if self.model_list.count():
             self.model_list.setCurrentRow(min(index, self.model_list.count() - 1))
+        self.clear_test_result()
+
+    def test_current_model(self):
+        if self.test_worker and self.test_worker.isRunning():
+            return
+        index = self._current_model_index()
+        if index < 0:
+            QMessageBox.warning(self, "模型测试", "请先选择一个模型。")
+            return
+        api_key = self.api_key_input.text().strip()
+        base_url = self.base_url_input.text().strip()
+        model = dict(self._models()[index])
+        if not api_key:
+            QMessageBox.warning(self, "模型测试", "请填写访问密钥。")
+            return
+        if not base_url:
+            QMessageBox.warning(self, "模型测试", "请填写服务地址。")
+            return
+        if not str(model.get("model_name") or "").strip():
+            QMessageBox.warning(self, "模型测试", "当前模型缺少模型标识。")
+            return
+        model.update({
+            "provider_type": self._provider_type(),
+            "api_key": api_key,
+            "base_url": base_url,
+        })
+        self._tested_signature = json.dumps(model, ensure_ascii=False, sort_keys=True)
+        self.test_btn.setEnabled(False)
+        self.test_btn.setText("测试中…")
+        self.test_status_label.setText(f"正在测试 {model.get('display_name') or model.get('model_name')}…")
+        self.test_worker = ModelConnectionTestWorker(model, self)
+        self.test_worker.finished_signal.connect(self.handle_test_result)
+        self.test_worker.start()
+
+    def handle_test_result(self, result):
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("测试")
+        index = self._current_model_index()
+        current_model = dict(self._models()[index]) if index >= 0 else {}
+        current_model.update({
+            "provider_type": self._provider_type(),
+            "api_key": self.api_key_input.text().strip(),
+            "base_url": self.base_url_input.text().strip(),
+        })
+        if json.dumps(current_model, ensure_ascii=False, sort_keys=True) != self._tested_signature:
+            self.test_status_label.setText("配置已变化，请重新测试。")
+            self.test_status_label.setStyleSheet(apple_settings_inline_note_style())
+            self.test_worker = None
+            return
+        elapsed = float(result.get("elapsed") or 0)
+        if result.get("ok"):
+            self.test_status_label.setText(f"测试通过 · {elapsed:.1f} 秒")
+            self.test_status_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-size: 12px;")
+        else:
+            message = result.get("error") or "未知错误"
+            self.test_status_label.setText(f"测试失败 · {message}")
+            self.test_status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
+            QMessageBox.warning(self, "模型测试失败", message)
+        self.test_worker = None
 
     def get_channel_config(self):
         return {
@@ -13282,16 +13439,18 @@ class MainWindow(QMainWindow):
         )
         self.clarify_mode_badge.clicked.connect(self.on_clarify_mode_toggled)
 
-        self.model_select_combo = QComboBox()
-        self.model_select_combo.setCursor(Qt.PointingHandCursor)
-        self.model_select_combo.setMinimumWidth(150)
-        self.model_select_combo.setMaximumWidth(260)
-        self.model_select_combo.setStyleSheet(
-            f"QComboBox {{ border: 1px solid transparent; background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_secondary}; "
-            "font-size: 12px; padding: 5px 22px 5px 10px; border-radius: 14px; }}"
-            f"QComboBox:hover {{ color: {DesignTokens.text_primary}; background: rgba(255, 255, 255, 0.88); border-color: {DesignTokens.border_subtle}; }}"
+        self.model_select_btn = QToolButton()
+        self.model_select_btn.setCursor(Qt.PointingHandCursor)
+        self.model_select_btn.setMinimumWidth(170)
+        self.model_select_btn.setMaximumWidth(300)
+        self.model_select_btn.setPopupMode(QToolButton.InstantPopup)
+        self.model_select_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.model_select_btn.setStyleSheet(
+            f"QToolButton {{ border: 1px solid transparent; background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_secondary}; "
+            "font-size: 12px; padding: 5px 10px; border-radius: 14px; }}"
+            f"QToolButton:hover {{ color: {DesignTokens.text_primary}; background: rgba(255, 255, 255, 0.88); border-color: {DesignTokens.border_subtle}; }}"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
-        self.model_select_combo.currentIndexChanged.connect(self.on_model_selection_changed)
 
         self.pause_btn = QPushButton()
         self.pause_btn.setIcon(qta.icon('fa5s.pause', color='#4b5563'))
@@ -13361,7 +13520,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.pause_btn)
         prompt_toolbar.addWidget(self.loop_hint, 1)
         prompt_toolbar.addStretch()
-        prompt_toolbar.addWidget(self.model_select_combo)
+        prompt_toolbar.addWidget(self.model_select_btn)
         prompt_toolbar.addWidget(self.stop_btn)
         prompt_toolbar.addWidget(self.action_btn)
         input_card_layout.addLayout(prompt_toolbar)
@@ -14349,43 +14508,76 @@ class MainWindow(QMainWindow):
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
     def refresh_model_selector(self):
-        if not hasattr(self, "model_select_combo"):
+        if not hasattr(self, "model_select_btn"):
             return
         selected_id = self.config_manager.get_selected_model_id()
-        blocked = self.model_select_combo.blockSignals(True)
-        self.model_select_combo.clear()
-        for profile in self.config_manager.iter_model_profiles():
-            display_name = profile.get("display_name") or profile.get("model_name") or "模型"
-            provider_name = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
-            effort = ""
-            if profile.get("provider") == "openai":
-                effort = str(profile.get("deepseek_reasoning_effort") or "").strip()
-            label = f"{display_name} · {effort}" if effort else display_name
-            tooltip_parts = [
-                part
-                for part in (
-                    provider_name,
-                    profile.get("model_name", ""),
-                    profile.get("base_url", ""),
+        profiles = self.config_manager.iter_model_profiles()
+        selected = next((item for item in profiles if item.get("id") == selected_id), None)
+        if selected is None and profiles:
+            selected = profiles[0]
+            selected_id = selected.get("id")
+        menu = QMenu(self.model_select_btn)
+        effort_labels = {
+            "low": "低",
+            "medium": "中",
+            "high": "高",
+            "xhigh": "超高",
+            "max": "极限",
+        }
+        efforts = normalize_reasoning_efforts((selected or {}).get("reasoning_efforts"))
+        current_effort = normalize_reasoning_effort((selected or {}).get("reasoning_effort"), efforts)
+        if efforts:
+            menu.addSection("推理")
+            for effort in efforts:
+                action = menu.addAction(effort_labels.get(effort, effort))
+                action.setCheckable(True)
+                action.setChecked(effort == current_effort)
+                action.triggered.connect(
+                    lambda _checked=False, value=effort: self.on_reasoning_effort_selected(value)
                 )
-                if part
-            ]
-            tooltip = " / ".join(tooltip_parts)
-            self.model_select_combo.addItem(label, profile.get("id"))
-            self.model_select_combo.setItemData(self.model_select_combo.count() - 1, tooltip, Qt.ToolTipRole)
-        index = self.model_select_combo.findData(selected_id)
-        if index < 0 and self.model_select_combo.count():
-            index = 0
-        if index >= 0:
-            self.model_select_combo.setCurrentIndex(index)
-        self.model_select_combo.blockSignals(blocked)
+            menu.addSeparator()
+        model_menu = menu.addMenu("模型") if efforts else menu
+        if not efforts:
+            model_menu.addSection("模型")
+        for profile in profiles:
+            display_name = profile.get("display_name") or profile.get("model_name") or "模型"
+            channel_name = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
+            label = f"{channel_name} / {display_name}" if channel_name else display_name
+            action = model_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(profile.get("id") == selected_id)
+            action.setToolTip(" / ".join(filter(None, (profile.get("model_name", ""), profile.get("base_url", "")))))
+            action.triggered.connect(
+                lambda _checked=False, model_id=profile.get("id"): self.on_model_selection_changed(model_id)
+            )
+        self.model_select_btn.setMenu(menu)
+        if selected:
+            display_name = selected.get("display_name") or selected.get("model_name") or "模型"
+            channel_name = selected.get("channel_display_name") or selected.get("provider_display_name") or selected.get("provider") or ""
+            label = f"{channel_name} / {display_name}" if channel_name else display_name
+            if current_effort:
+                label += f" · {effort_labels.get(current_effort, current_effort)}"
+            self.model_select_btn.setText(label)
+            self.model_select_btn.setToolTip(" / ".join(filter(None, (selected.get("model_name", ""), selected.get("base_url", "")))))
+        else:
+            self.model_select_btn.setText("未配置模型")
 
-    def on_model_selection_changed(self, index):
-        if index < 0:
-            return
-        model_id = self.model_select_combo.itemData(index)
+    def on_model_selection_changed(self, model_id):
         if model_id and self.config_manager.set_selected_model_id(model_id):
+            self.refresh_model_selector()
             self.refresh_context_badges()
+
+    def on_reasoning_effort_selected(self, effort):
+        model_id = self.config_manager.get_selected_model_id()
+        if self.config_manager.set_model_reasoning_effort(model_id, effort):
+            self.refresh_model_selector()
+
+    def _selected_reasoning_effort(self):
+        profile = self.config_manager.get_model_profile(self.config_manager.get_selected_model_id())
+        if not isinstance(profile, dict):
+            return ""
+        efforts = normalize_reasoning_efforts(profile.get("reasoning_efforts"))
+        return normalize_reasoning_effort(profile.get("reasoning_effort"), efforts)
 
     def update_ui_state_for_workspace(self):
         if self.workspace_dir:
@@ -20026,6 +20218,7 @@ class MainWindow(QMainWindow):
                 ),
                 "selected_skill_names": effective_skill_names,
                 "selected_model_id": self.config_manager.get_selected_model_id(),
+                "reasoning_effort": self._selected_reasoning_effort(),
                 "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
                 "sop_run": normalize_sop_run(getattr(state, "sop_run", None)),
             }
@@ -20063,6 +20256,7 @@ class MainWindow(QMainWindow):
             {
                 "mode": RUN_MODE_EXECUTION,
                 "selected_model_id": self.config_manager.get_selected_model_id(),
+                "reasoning_effort": self._selected_reasoning_effort(),
                 "selected_skill_names": skill_names,
                 "allowed_skill_names": skill_names,
                 "agent_profile_id": profile.get("id"),

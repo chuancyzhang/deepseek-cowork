@@ -1206,6 +1206,7 @@ class LLMWorker(QThread):
                     provider = LLMFactory.create_provider(
                         self.config_manager,
                         self.run_context.get("selected_model_id"),
+                        reasoning_effort=self.run_context.get("reasoning_effort") or None,
                     )
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     self.step_signal.emit(f"Provider Start: {provider_name}")

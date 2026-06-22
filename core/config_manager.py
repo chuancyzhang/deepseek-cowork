@@ -12,6 +12,8 @@ from .llm.deepseek import (
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    normalize_reasoning_effort,
+    normalize_reasoning_efforts,
     should_migrate_legacy_model,
 )
 from .automation_manager import (
@@ -571,19 +573,36 @@ class ConfigManager:
             "supports_vision": bool(source.get("supports_vision", False)),
         }
         if provider_id == "openai":
-            entry["deepseek_thinking_enabled"] = bool(
+            thinking_enabled = bool(
                 source.get(
                     "deepseek_thinking_enabled",
                     source.get("thinking_enabled", DEFAULT_DEEPSEEK_THINKING_ENABLED),
                 )
             )
-            entry["deepseek_reasoning_effort"] = str(
+            legacy_effort = str(
                 source.get(
                     "deepseek_reasoning_effort",
                     source.get("reasoning_effort", DEFAULT_DEEPSEEK_REASONING_EFFORT),
                 )
                 or DEFAULT_DEEPSEEK_REASONING_EFFORT
             )
+            raw_efforts = source.get("reasoning_efforts")
+            if isinstance(raw_efforts, list):
+                reasoning_efforts = normalize_reasoning_efforts(raw_efforts)
+            elif "deepseek" in model_name.lower() and thinking_enabled:
+                reasoning_efforts = ["high", "max"]
+            else:
+                reasoning_efforts = []
+            reasoning_effort = normalize_reasoning_effort(
+                source.get("reasoning_effort", legacy_effort),
+                reasoning_efforts,
+            )
+            if reasoning_efforts and not reasoning_effort:
+                reasoning_effort = "medium" if "medium" in reasoning_efforts else reasoning_efforts[0]
+            entry["deepseek_thinking_enabled"] = thinking_enabled
+            entry["deepseek_reasoning_effort"] = reasoning_effort or legacy_effort
+            entry["reasoning_efforts"] = reasoning_efforts
+            entry["reasoning_effort"] = reasoning_effort
         return entry
 
     def _normalize_channel_config(self, channel, index=0, used_channel_ids=None, used_model_ids=None):
@@ -919,6 +938,23 @@ class ConfigManager:
         self._sync_legacy_model_fields(save=False)
         self.save_config()
         return True
+
+    def set_model_reasoning_effort(self, model_id, reasoning_effort):
+        selected_id = str(model_id or "").strip()
+        channels = self.get_model_channels()
+        for channel in channels:
+            for model in channel.get("models") or []:
+                if model.get("id") != selected_id:
+                    continue
+                efforts = normalize_reasoning_efforts(model.get("reasoning_efforts"))
+                effort = normalize_reasoning_effort(reasoning_effort, efforts)
+                if not effort:
+                    return False
+                model["reasoning_effort"] = effort
+                model["deepseek_reasoning_effort"] = effort
+                self.set_model_channels(channels, self.config.get("selected_model_id"))
+                return True
+        return False
 
     def get_model_label(self, model_id=None, include_provider=True):
         profile = self.get_model_profile(model_id)

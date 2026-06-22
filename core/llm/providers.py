@@ -493,14 +493,39 @@ class AnthropicProvider(LLMProvider):
         Convert OpenAI-style messages to Anthropic format.
         - Extract system message.
         - Convert 'image_url' content to Anthropic image block.
+        - Merge consecutive tool results into the single user message required
+          immediately after an assistant tool-use turn.
         """
         system_prompt = ""
         api_messages = []
+        pending_tool_results = []
+
+        def flush_tool_results():
+            if not pending_tool_results:
+                return
+            api_messages.append({
+                "role": "user",
+                "content": list(pending_tool_results),
+            })
+            pending_tool_results.clear()
         
         for msg in messages:
             role = msg.get("role")
             content = msg.get("content")
             content_parts = msg.get("content_parts")
+
+            if role == "tool":
+                tool_call_id = str(msg.get("tool_call_id") or "").strip()
+                if not tool_call_id:
+                    raise ValueError("Anthropic tool result is missing tool_call_id.")
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": content if content is not None else "",
+                })
+                continue
+
+            flush_tool_results()
             
             if role == "system":
                 system_prompt += content + "\n"
@@ -542,23 +567,6 @@ class AnthropicProvider(LLMProvider):
                             # If it's a remote URL, we might need to fetch it (not implemented yet)
                             new_content.append({"type": "text", "text": f"[Image: {url}] (Remote images not fully supported in Anthropic adapter yet)"})
             
-            # Tool results
-            if role == "tool":
-                tool_call_id = msg.get("tool_call_id")
-                if not tool_call_id:
-                    continue
-                # OpenAI: role="tool", tool_call_id="..."
-                # Anthropic: role="user", content=[{"type": "tool_result", "tool_use_id": ..., "content": ...}]
-                api_messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_call_id,
-                        "content": content if content is not None else ""
-                    }]
-                })
-                continue
-            
             # Assistant messages with tool calls
             if role == "assistant" and "tool_calls" in msg:
                 # Anthropic expects tool_use blocks in content
@@ -596,7 +604,8 @@ class AnthropicProvider(LLMProvider):
                 "role": role,
                 "content": new_content
             })
-            
+
+        flush_tool_results()
         return system_prompt.strip(), api_messages
 
     def _convert_tools(self, tools):

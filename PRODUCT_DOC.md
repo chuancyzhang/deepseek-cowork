@@ -113,7 +113,7 @@ DeepSeek V4 强化了长上下文、thinking 与工具调用回放能力。DeepS
 ## 4. 技术架构 (Technical Architecture)
 
 *   **GUI**：PySide6
-*   **LLM**：DeepSeek V4（OpenAI 兼容）与 Anthropic
+*   **LLM**：DeepSeek V4（OpenAI 兼容）与 Anthropic；Anthropic 多工具轮次会把同轮全部 `tool_result` 合并到紧随 `tool_use` 的一条用户消息中，保证协议顺序有效。
 *   **Pattern**：Interleaved Chain-of-Thought
 *   **Core**：
     *   `Agent`：推理与工具调度

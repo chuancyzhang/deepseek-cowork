@@ -203,6 +203,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 ## 🔄 Agentic Workflow
 - Interleaved CoT: think → tool-call → observe → continue thinking → final answer.
 - Streaming events: reasoning/content/tool_call/tool_result, plus structured sub-agent state events for input, tool activity, results, and completion.
+- Anthropic tool rounds group every result from one multi-tool response into the immediately following user message, matching the protocol's `tool_use` / `tool_result` ordering requirements.
 - Sub-agent lifecycles keep result handling separate from Qt thread cleanup, preventing overlapping restarts while a worker is still winding down.
 - Sub-agent monitor events are collected first and rendered as lightweight summary rows after the user opens the drawer, avoiding widget churn during active streaming.
 - The context drawer no longer listens for outside clicks; files, deliverables, observability, and sub-agent pages stay open until the user clicks close or presses `Esc`.

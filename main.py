@@ -21027,8 +21027,10 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state: return
         
-        # Hide Empty State if this is the first message
-        if state.empty_state and state.empty_state.isVisible():
+        # A newly rebuilt session page can still report the empty state as not
+        # visible while one of its ancestors is hidden. Hide it explicitly so
+        # it cannot reappear when the page is shown after the first bubble.
+        if state.empty_state is not None:
             state.empty_state.setVisible(False)
             
         # Throttling Animation

@@ -1457,6 +1457,39 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertFalse(bubbles[0].is_virtualized())
         self.assertTrue(any(bubble.is_virtualized() for bubble in bubbles[:-10]))
 
+    def test_add_chat_bubble_hides_empty_state_before_hidden_session_page_is_shown(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        empty_state = QLabel("empty")
+        layout.addWidget(empty_state)
+        empty_state.show()
+        app.processEvents()
+
+        state = SessionState("session-1", layout, QLabel(), host, QScrollArea())
+        state.empty_state = empty_state
+        window.get_current_session = lambda: state
+        window._workspace_dir_for_state = lambda _state=None: ""
+        window.dynamic_message_width = 720
+        window.dynamic_user_bubble_width = 520
+        window.last_message_time = 0
+        window.process_ui_events = MagicMock()
+        window.request_session_scroll_to_bottom = MagicMock()
+        window.queue_session_bubble_virtualization = MagicMock()
+
+        self.assertFalse(empty_state.isVisible())
+        self.assertFalse(empty_state.isHidden())
+
+        bubble = window.add_chat_bubble("User", "rewritten first message", source_message_id="u1")
+        host.show()
+        app.processEvents()
+
+        self.assertTrue(empty_state.isHidden())
+        self.assertFalse(empty_state.isVisible())
+        self.assertTrue(bubble.isVisible())
+        host.deleteLater()
+
     def test_edit_user_message_inline_truncates_current_session_and_resubmits(self):
         temp_dir = tempfile.mkdtemp()
         self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))

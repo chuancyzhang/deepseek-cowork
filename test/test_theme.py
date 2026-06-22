@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
-from core.theme import DesignTokens, apply_theme, get_tech_stylesheet
+from core.theme import DesignTokens, apply_theme, apply_tooltip_theme, get_tech_stylesheet
 
 
 class ThemeTests(unittest.TestCase):
@@ -26,6 +26,17 @@ class ThemeTests(unittest.TestCase):
     def test_apply_theme_aligns_native_tooltip_palette(self):
         apply_theme(self.app, "light")
 
+        palette = self.app.palette()
+        self.assertEqual(palette.color(QPalette.ToolTipBase).name(), DesignTokens.bg_main)
+        self.assertEqual(palette.color(QPalette.ToolTipText).name(), DesignTokens.text_primary)
+
+    def test_tooltip_only_theme_does_not_load_global_widget_styles(self):
+        apply_tooltip_theme(self.app)
+
+        stylesheet = self.app.styleSheet()
+        self.assertIn("QToolTip {", stylesheet)
+        self.assertNotIn("QPushButton", stylesheet)
+        self.assertNotIn("QLineEdit", stylesheet)
         palette = self.app.palette()
         self.assertEqual(palette.color(QPalette.ToolTipBase).name(), DesignTokens.bg_main)
         self.assertEqual(palette.color(QPalette.ToolTipText).name(), DesignTokens.text_primary)

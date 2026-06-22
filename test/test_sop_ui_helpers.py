@@ -49,6 +49,7 @@ from main import (
     skill_runtime_reload_pending,
     summarize_skill_terms,
     log_ui_exception,
+    initialize_desktop_theme,
 )
 from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData
 from PySide6.QtGui import QTextOption, QShowEvent
@@ -69,6 +70,20 @@ class _AgentUiState:
 
 
 class SkillCenterHelperTests(unittest.TestCase):
+    @patch("main.apply_tooltip_theme")
+    def test_desktop_theme_initialization_applies_tooltip_only_theme(self, apply_tooltip_theme_mock):
+        app = MagicMock()
+        font = MagicMock()
+        app.font.return_value = font
+
+        initialize_desktop_theme(app)
+
+        app.setStyle.assert_called_once_with("Fusion")
+        font.setFamily.assert_called_once_with("Segoe UI")
+        font.setPointSize.assert_called_once_with(10)
+        app.setFont.assert_called_once_with(font)
+        apply_tooltip_theme_mock.assert_called_once_with(app)
+
     def test_session_history_ready_requires_completed_load(self):
         ready = type("State", (), {"history_loaded": True, "history_loading": False})()
         loading = type("State", (), {"history_loaded": False, "history_loading": True})()
@@ -1749,11 +1764,11 @@ class TestSopUiHelpers(unittest.TestCase):
         window.right_drawer_open = False
         window.main_container = MagicMock()
         window.main_container.width.return_value = 1600
-        window.main_layout_default_margins = (32, 28, 32, 28)
+        window.main_layout_default_margins = (12, 20, 12, 20)
 
         metrics = window._compute_conversation_shell_metrics()
 
-        self.assertEqual(metrics["conversation_width"], 1167)
+        self.assertEqual(metrics["conversation_width"], 1512)
         self.assertLessEqual(abs(metrics["left_spacer_width"] - metrics["right_spacer_width"]), 1)
 
     def test_conversation_shell_metrics_shift_left_with_drawer(self):
@@ -1761,14 +1776,14 @@ class TestSopUiHelpers(unittest.TestCase):
         window.right_drawer_open = True
         window.main_container = MagicMock()
         window.main_container.width.return_value = 1600
-        window.main_layout_default_margins = (32, 28, 32, 28)
-        window.context_drawer_gap = 16
+        window.main_layout_default_margins = (12, 20, 12, 20)
+        window.context_drawer_gap = 8
 
-        metrics = window._compute_conversation_shell_metrics({"x": 1154, "width": 430})
+        metrics = window._compute_conversation_shell_metrics({"x": 1151, "width": 441})
 
-        self.assertEqual(metrics["conversation_width"], 951)
+        self.assertEqual(metrics["conversation_width"], 1085)
         self.assertLess(metrics["left_spacer_width"], metrics["right_spacer_width"])
-        self.assertEqual(metrics["drawer_width"], 430)
+        self.assertEqual(metrics["drawer_width"], 441)
 
     def test_compute_context_drawer_geometry_uses_stable_ratio(self):
         window = MainWindow.__new__(MainWindow)
@@ -1777,9 +1792,9 @@ class TestSopUiHelpers(unittest.TestCase):
         parent.height.return_value = 980
         window.right_sidebar = MagicMock()
         window.right_sidebar.parentWidget.return_value = parent
-        window.main_layout_default_margins = (32, 28, 32, 28)
-        window.context_drawer_margin = 16
-        window.context_drawer_gap = 16
+        window.main_layout_default_margins = (12, 20, 12, 20)
+        window.context_drawer_margin = 8
+        window.context_drawer_gap = 8
         window.context_drawer_min_width = DesignTokens.drawer_min_width
         window.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
         window.context_drawer_max_width = DesignTokens.drawer_max_width
@@ -1787,9 +1802,9 @@ class TestSopUiHelpers(unittest.TestCase):
 
         geometry = window._compute_context_drawer_geometry()
 
-        self.assertEqual(geometry["width"], 430)
-        self.assertEqual(geometry["x"], 1154)
-        self.assertEqual(geometry["height"], 948)
+        self.assertEqual(geometry["width"], 441)
+        self.assertEqual(geometry["x"], 1151)
+        self.assertEqual(geometry["height"], 964)
 
     def test_context_drawer_geometry_preserves_manual_width(self):
         window = MainWindow.__new__(MainWindow)
@@ -1798,9 +1813,9 @@ class TestSopUiHelpers(unittest.TestCase):
         parent.height.return_value = 980
         window.right_sidebar = MagicMock()
         window.right_sidebar.parentWidget.return_value = parent
-        window.main_layout_default_margins = (32, 28, 32, 28)
-        window.context_drawer_margin = 16
-        window.context_drawer_gap = 16
+        window.main_layout_default_margins = (12, 20, 12, 20)
+        window.context_drawer_margin = 8
+        window.context_drawer_gap = 8
         window.context_drawer_min_width = DesignTokens.drawer_min_width
         window.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
         window.context_drawer_max_width = DesignTokens.drawer_max_width
@@ -1811,7 +1826,7 @@ class TestSopUiHelpers(unittest.TestCase):
         geometry = window._compute_context_drawer_geometry()
 
         self.assertEqual(geometry["width"], 470)
-        self.assertEqual(geometry["x"], 1114)
+        self.assertEqual(geometry["x"], 1122)
 
     def test_three_column_layout_compacts_without_overlap_on_narrow_window(self):
         window = MainWindow.__new__(MainWindow)
@@ -1821,9 +1836,9 @@ class TestSopUiHelpers(unittest.TestCase):
         window.right_sidebar = MagicMock()
         window.right_sidebar.parentWidget.return_value = parent
         window.main_container = parent
-        window.main_layout_default_margins = (32, 28, 32, 28)
-        window.context_drawer_margin = 16
-        window.context_drawer_gap = 16
+        window.main_layout_default_margins = (12, 20, 12, 20)
+        window.context_drawer_margin = 8
+        window.context_drawer_gap = 8
         window.context_drawer_min_width = DesignTokens.drawer_min_width
         window.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
         window.context_drawer_max_width = DesignTokens.drawer_max_width
@@ -1836,8 +1851,8 @@ class TestSopUiHelpers(unittest.TestCase):
         metrics = window._compute_conversation_shell_metrics(geometry)
 
         self.assertEqual(geometry["width"], 260)
-        self.assertEqual(geometry["x"], 724)
-        self.assertEqual(metrics["conversation_width"], 581)
+        self.assertEqual(geometry["x"], 732)
+        self.assertEqual(metrics["conversation_width"], 683)
         self.assertLessEqual(
             metrics["conversation_width"] + metrics["left_spacer_width"] + metrics["right_spacer_width"],
             metrics["shell_width"],

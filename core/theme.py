@@ -63,8 +63,8 @@ class DesignTokens:
     shadow_soft = "0 6px 16px rgba(15, 23, 42, 0.06)"
 
     sidebar_min_width = 216
-    sidebar_width = 248
-    sidebar_max_width = 300
+    sidebar_width = 232
+    sidebar_max_width = 280
     drawer_min_width = 260
     drawer_preferred_min_width = 360
     drawer_max_width = 500
@@ -72,14 +72,14 @@ class DesignTokens:
 
     conversation_min_width = 840
     conversation_compact_min_width = 560
-    conversation_max_width = 1240
+    conversation_max_width = 1560
     conversation_closed_min_width = 900
-    conversation_closed_max_width = 1240
-    conversation_closed_target_ratio = 0.76
+    conversation_closed_max_width = 1560
+    conversation_closed_target_ratio = 0.96
     conversation_open_min_width = 840
     conversation_open_compact_min_width = 560
-    conversation_open_max_width = 1180
-    conversation_open_target_ratio = 0.86
+    conversation_open_max_width = 1440
+    conversation_open_target_ratio = 0.96
     conversation_open_left_spacer_ratio = 0.40
 
     message_min_width = 720
@@ -361,6 +361,19 @@ def apply_theme(app, theme="auto"):
     # Native tooltip windows still read palette roles on Windows. Keep these
     # colors identical to the deliberately minimal QToolTip stylesheet above;
     # translucent or rounded tooltip rules can render as black native windows.
+    from PySide6.QtGui import QColor, QPalette
+    palette = app.palette()
+    palette.setColor(QPalette.ToolTipBase, QColor(DesignTokens.bg_main))
+    palette.setColor(QPalette.ToolTipText, QColor(DesignTokens.text_primary))
+    app.setPalette(palette)
+
+
+def apply_tooltip_theme(app):
+    """Apply only the Windows-safe tooltip surface without restyling the UI."""
+    app.setStyleSheet(
+        f"QToolTip {{ background-color: {DesignTokens.bg_main}; "
+        f"color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border}; }}"
+    )
     from PySide6.QtGui import QColor, QPalette
     palette = app.palette()
     palette.setColor(QPalette.ToolTipBase, QColor(DesignTokens.bg_main))

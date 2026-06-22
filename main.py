@@ -34,7 +34,7 @@ from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
 from core.conversation_render import build_conversation_render_spans
 from core.html_render import extract_renderable_html_response
-from core.theme import apply_theme, DesignTokens
+from core.theme import apply_tooltip_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.app_version import APP_VERSION
@@ -959,6 +959,16 @@ def sidebar_plus_icon(color, size=16):
     painter.drawLine(QPoint(inset, center), QPoint(pixel_size - inset, center))
     painter.end()
     return QIcon(pixmap)
+
+
+def initialize_desktop_theme(app):
+    """Apply the production font and Windows-safe tooltip surface."""
+    app.setStyle("Fusion")
+    font = app.font()
+    font.setFamily("Segoe UI")
+    font.setPointSize(10)
+    app.setFont(font)
+    apply_tooltip_theme(app)
 
 
 def apple_inline_project_chip_style(active=False):
@@ -12109,10 +12119,10 @@ class MainWindow(QMainWindow):
         self.workspace_dir = None
         self.right_drawer_open = False
         self.right_drawer_tab = self.RIGHT_TAB_FILES
-        self.main_layout_default_margins = (32, 28, 32, 28)
+        self.main_layout_default_margins = (12, 20, 12, 20)
         self.main_content_default_margins = (0, 0, 0, 0)
-        self.context_drawer_margin = 16
-        self.context_drawer_gap = 16
+        self.context_drawer_margin = 8
+        self.context_drawer_gap = 8
         self.context_drawer_min_width = DesignTokens.drawer_min_width
         self.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
         self.context_drawer_max_width = DesignTokens.drawer_max_width
@@ -12321,7 +12331,7 @@ class MainWindow(QMainWindow):
         )
 
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(16, 20, 16, 18)
+        sidebar_layout.setContentsMargins(12, 20, 12, 18)
         sidebar_layout.setSpacing(12)
 
         new_chat_btn = QPushButton(" 新建对话")
@@ -17069,9 +17079,8 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(6, 3, 4, 3)
         header_layout.setSpacing(6)
 
-        icon_name = 'fa5s.folder-open' if selected else 'fa5s.folder'
         project_btn = QPushButton(f" {name}")
-        project_btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
+        project_btn.setIcon(qta.icon('fa5s.folder-open' if selected else 'fa5s.folder', color=DesignTokens.text_secondary))
         project_btn.setCursor(Qt.PointingHandCursor)
         project_btn.setToolTip(path)
         project_btn.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
@@ -21643,11 +21652,7 @@ if __name__ == "__main__":
     icon_path = resolve_app_icon_path()
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
-    app.setStyle("Fusion")
-    font = app.font()
-    font.setFamily("Segoe UI")
-    font.setPointSize(10)
-    app.setFont(font)
+    initialize_desktop_theme(app)
     pending_activation = {"requested": False}
 
     def activate_main_window():

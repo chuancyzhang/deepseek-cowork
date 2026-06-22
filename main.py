@@ -16,6 +16,7 @@ import glob
 import markdown
 import socket
 import threading
+from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
@@ -33,6 +34,16 @@ from core.single_instance import (
 from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
 from core.conversation_render import build_conversation_render_spans
+from core.deliverable_preview import (
+    DELIVERABLE_TYPES,
+    OFFICE_EXTENSIONS,
+    iter_workspace_file_paths,
+    linkify_workspace_paths_in_html,
+    normalize_workspace_file,
+    office_export_command,
+    office_preview_cache_path,
+    run_office_export_cli,
+)
 from core.html_render import extract_renderable_html_response
 from core.theme import apply_tooltip_theme, DesignTokens
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
@@ -183,6 +194,10 @@ QWebEngineView = None
 WEBENGINE_AVAILABLE = None
 WEBENGINE_IMPORT_ERROR = None
 WEBENGINE_IMPORT_TRACEBACK = ""
+QPdfDocument = None
+QPdfView = None
+QPDF_AVAILABLE = None
+QPDF_IMPORT_ERROR = None
 
 
 def load_qwebengine_view():
@@ -223,6 +238,25 @@ def webengine_unavailable_message():
     else:
         reason = "当前运行环境未提供 QtWebEngine"
     return f"{reason}，暂时无法在应用内渲染。可点击“打开”使用系统浏览器查看。"
+
+
+def load_qpdf_classes():
+    global QPdfDocument, QPdfView, QPDF_AVAILABLE, QPDF_IMPORT_ERROR
+    if QPDF_AVAILABLE is not None:
+        return QPdfDocument, QPdfView
+    try:
+        pdf_module = importlib.import_module("PySide6.QtPdf")
+        widgets_module = importlib.import_module("PySide6.QtPdfWidgets")
+        QPdfDocument = pdf_module.QPdfDocument
+        QPdfView = widgets_module.QPdfView
+        QPDF_AVAILABLE = True
+        QPDF_IMPORT_ERROR = None
+    except Exception as exc:
+        QPdfDocument = None
+        QPdfView = None
+        QPDF_AVAILABLE = False
+        QPDF_IMPORT_ERROR = exc
+    return QPdfDocument, QPdfView
 
 # Try importing OpenAI
 try:
@@ -453,20 +487,27 @@ def markdown_render_style():
     """
 
 
-def render_markdown_or_html_with_cache(text, final=False):
+def render_markdown_or_html_with_cache(text, final=False, workspace_dir=""):
     text = text or ""
     raw_html = extract_renderable_html_response(text) if final else ""
     cache_kind = "raw_html" if raw_html else "markdown"
-    cache_key = (cache_kind, text)
+    workspace_key = os.path.normcase(os.path.abspath(workspace_dir)) if workspace_dir else ""
+    cache_key = (cache_kind, text, workspace_key)
     cached = _MARKDOWN_RENDER_CACHE.get(cache_key)
     if cached is not None:
         _MARKDOWN_RENDER_CACHE.move_to_end(cache_key)
         return cached
     if raw_html:
-        result = ("raw_html", markdown_render_style() + raw_html)
+        html_output = markdown_render_style() + raw_html
+        if final and workspace_dir:
+            html_output = linkify_workspace_paths_in_html(html_output, workspace_dir)
+        result = ("raw_html", html_output)
     else:
         html_content = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br', 'sane_lists'])
-        result = ("html", markdown_render_style() + html_content)
+        html_output = markdown_render_style() + html_content
+        if final and workspace_dir:
+            html_output = linkify_workspace_paths_in_html(html_output, workspace_dir)
+        result = ("html", html_output)
     _MARKDOWN_RENDER_CACHE[cache_key] = result
     while len(_MARKDOWN_RENDER_CACHE) > MARKDOWN_RENDER_CACHE_SIZE:
         _MARKDOWN_RENDER_CACHE.popitem(last=False)
@@ -1146,19 +1187,7 @@ def format_file_size(size):
     return f"{size:.1f} {units[index]}"
 
 
-DELIVERABLE_EXTENSIONS = {
-    ".html": ("html", "HTML", "fa5s.file-code"),
-    ".htm": ("html", "HTML", "fa5s.file-code"),
-    ".png": ("image", "图片", "fa5s.file-image"),
-    ".jpg": ("image", "图片", "fa5s.file-image"),
-    ".jpeg": ("image", "图片", "fa5s.file-image"),
-    ".gif": ("image", "图片", "fa5s.file-image"),
-    ".webp": ("image", "图片", "fa5s.file-image"),
-    ".pdf": ("pdf", "PDF", "fa5s.file-pdf"),
-    ".docx": ("docx", "DOCX", "fa5s.file-word"),
-    ".pptx": ("pptx", "PPTX", "fa5s.file-powerpoint"),
-    ".xlsx": ("xlsx", "XLSX", "fa5s.file-excel"),
-}
+DELIVERABLE_EXTENSIONS = DELIVERABLE_TYPES
 
 DELIVERABLE_SKIP_DIRS = {
     ".git",
@@ -1361,6 +1390,65 @@ class DeliverableScanWorker(QThread):
 
     def run(self):
         self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
+
+
+class OfficePreviewWorker(QThread):
+    completed = Signal(str, str, str)
+
+    def __init__(self, source_path, output_path, parent=None, timeout_seconds=90):
+        super().__init__(parent)
+        self.source_path = source_path
+        self.output_path = output_path
+        self.timeout_seconds = max(10, int(timeout_seconds))
+        self.process = None
+
+    def cancel(self):
+        process = self.process
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        command = office_export_command(self.source_path, self.output_path, main_script=__file__)
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={**os.environ, "PYTHONUTF8": "1"},
+                **subprocess_kwargs_no_window(),
+            )
+            stdout, stderr = self.process.communicate(timeout=self.timeout_seconds)
+        except subprocess.TimeoutExpired:
+            self.cancel()
+            if self.process is not None:
+                try:
+                    self.process.wait(3)
+                except Exception:
+                    self.process.kill()
+            self.completed.emit(self.source_path, "", "Office 生成预览超时，请关闭可能存在的 Office 弹窗后重试。")
+            return
+        except Exception as exc:
+            self.completed.emit(self.source_path, "", f"无法启动 Office 预览进程：{exc}")
+            return
+        payload = None
+        for line in reversed((stdout or "").splitlines()):
+            try:
+                payload = json.loads(line)
+                break
+            except Exception:
+                continue
+        if self.process.returncode == 0 and os.path.isfile(self.output_path):
+            self.completed.emit(self.source_path, self.output_path, "")
+            return
+        error = (payload or {}).get("error") if isinstance(payload, dict) else ""
+        detail = error or (stderr or "").strip() or "Microsoft Office 未能生成预览。"
+        self.completed.emit(self.source_path, "", detail)
 
 
 def clarify_phase_label(phase):
@@ -7689,6 +7777,8 @@ class ReadOnlyTextEdit(QTextEdit):
         menu.exec(event.globalPos())
 
 class AutoResizingTextEdit(ReadOnlyTextEdit):
+    linkActivated = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # self.setReadOnly(True) # Inherited
@@ -7706,6 +7796,12 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         text_option = self.document().defaultTextOption()
         text_option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.document().setDefaultTextOption(text_option)
+
+    def mouseReleaseEvent(self, event):
+        anchor = self.anchorAt(event.position().toPoint()) if event.button() == Qt.LeftButton else ""
+        super().mouseReleaseEvent(event)
+        if anchor and not self.textCursor().hasSelection():
+            self.linkActivated.emit(anchor)
 
     def scheduleAdjustHeight(self):
         if self._height_adjust_pending:
@@ -8866,6 +8962,7 @@ class FileChip(QFrame):
 class ChatBubble(QFrame):
     editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
+    deliverablePathActivated = Signal(str)
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(
@@ -8877,6 +8974,7 @@ class ChatBubble(QFrame):
         attachments=None,
         attachment_hint="用户添加的文件",
         source_message_id="",
+        workspace_dir="",
     ):
         super().__init__()
         self.role = role
@@ -8890,6 +8988,7 @@ class ChatBubble(QFrame):
         self._virtualized_height = 0
         self._virtualized_visible_state = {}
         self.source_message_id = str(source_message_id or "").strip()
+        self.workspace_dir = str(workspace_dir or "").strip()
         self.edit_btn = None
         self.delete_btn = None
         self.message_action_buttons = []
@@ -9088,6 +9187,7 @@ class ChatBubble(QFrame):
             
             # 2. Main Content
             self.content_rich_edit = AutoResizingTextEdit()
+            self.content_rich_edit.linkActivated.connect(self._handle_content_link)
             self.content_plain_edit = AutoResizingPlainTextEdit()
             self.content_rich_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
             self.content_plain_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
@@ -9631,6 +9731,8 @@ class ChatBubble(QFrame):
             return True
         if extract_renderable_html_response(text):
             return False
+        if final and self.workspace_dir and iter_workspace_file_paths(text, self.workspace_dir):
+            return False
         if final and looks_like_markdown_text(text):
             return False
         if final and len(text) < EXTREME_FINAL_PLAIN_TEXT_THRESHOLD:
@@ -9707,7 +9809,11 @@ class ChatBubble(QFrame):
                 self._render_plain_stream_content(text)
                 render_mode = "plain"
             else:
-                render_mode, html_content = render_markdown_or_html_with_cache(text, final=final)
+                render_mode, html_content = render_markdown_or_html_with_cache(
+                    text,
+                    final=final,
+                    workspace_dir=self.workspace_dir,
+                )
                 content_widget.setHtml(html_content)
         except Exception:
             plain_widget = self._set_main_content_view_mode("plain")
@@ -9724,6 +9830,12 @@ class ChatBubble(QFrame):
         self.content_edit.scheduleAdjustHeight()
         QTimer.singleShot(0, self.content_edit.scheduleAdjustHeight)
         QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
+
+    def _handle_content_link(self, href):
+        value = str(href or "")
+        if not value.startswith("cowork-file:"):
+            return
+        self.deliverablePathActivated.emit(unquote(value[len("cowork-file:"):]))
 
     def _render_plain_stream_content(self, text):
         """Avoid full Markdown conversion while a long response is still streaming."""
@@ -12138,6 +12250,11 @@ class MainWindow(QMainWindow):
         self.deliverable_render_fingerprint = None
         self.deliverable_render_path = ""
         self.deliverable_render_loading = False
+        self.deliverable_pdf_document = None
+        self.deliverable_pdf_view = None
+        self.office_preview_worker = None
+        self.office_preview_source_path = ""
+        self.deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
         self.deliverable_scan_generation = 0
         self.deliverable_scan_worker = None
         self.deliverable_scan_pending_render = False
@@ -12611,6 +12728,13 @@ class MainWindow(QMainWindow):
         deliverables_title_box.addWidget(deliverables_title)
         deliverables_title_box.addWidget(self.deliverables_meta_label)
         deliverables_header_layout.addLayout(deliverables_title_box, 1)
+        self.deliverable_layout_btn = QToolButton()
+        self.deliverable_layout_btn.setToolTip("切换列表与专注预览")
+        self.deliverable_layout_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_layout_btn.setFixedSize(30, 30)
+        self.deliverable_layout_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_layout_btn.clicked.connect(self.toggle_deliverable_layout_mode)
+        deliverables_header_layout.addWidget(self.deliverable_layout_btn)
         self.deliverables_refresh_btn = QToolButton()
         self.deliverables_refresh_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.text_secondary))
         self.deliverables_refresh_btn.setToolTip("刷新交付物")
@@ -12735,6 +12859,7 @@ class MainWindow(QMainWindow):
         self.deliverables_splitter.setSizes([max(80, int(sizes[0])), max(160, int(sizes[1]))])
         self.deliverables_splitter.splitterMoved.connect(self.persist_deliverables_splitter_sizes)
         deliverables_layout.addWidget(self.deliverables_splitter, 1)
+        self._apply_deliverable_layout_mode(self.deliverable_layout_mode, persist=False)
         self.right_stack.addWidget(self.deliverables_tab)
 
         # Observability
@@ -13327,6 +13452,36 @@ class MainWindow(QMainWindow):
         sizes = [int(value) for value in splitter.sizes()]
         if len(sizes) == 2 and all(value > 0 for value in sizes):
             self.config_manager.set("deliverables_splitter_sizes", sizes)
+
+    def _apply_deliverable_layout_mode(self, mode, persist=True):
+        mode = "focus" if mode == "focus" else "list"
+        self.deliverable_layout_mode = mode
+        list_widget = getattr(self, "deliverables_list", None)
+        if list_widget is not None:
+            list_widget.setVisible(mode == "list")
+        btn = getattr(self, "deliverable_layout_btn", None)
+        if btn is not None:
+            if mode == "focus":
+                btn.setIcon(qta.icon("fa5s.list", color=DesignTokens.text_secondary))
+                btn.setToolTip("显示交付物列表")
+            else:
+                btn.setIcon(qta.icon("fa5s.file-alt", color=DesignTokens.text_secondary))
+                btn.setToolTip("专注预览")
+        if persist:
+            self.config_manager.set("deliverable_layout_mode", mode)
+        meta = getattr(self, "deliverables_meta_label", None)
+        if meta is not None:
+            if mode == "focus" and getattr(self, "current_deliverable_path", ""):
+                try:
+                    meta.setText(os.path.relpath(self.current_deliverable_path, self.workspace_dir))
+                except ValueError:
+                    meta.setText(self.current_deliverable_path)
+            elif mode == "list":
+                meta.setText(f"最近 {len(getattr(self, 'deliverable_items', []) or [])} 个产物 · 选择文件预览")
+
+    def toggle_deliverable_layout_mode(self):
+        target = "list" if getattr(self, "deliverable_layout_mode", "list") == "focus" else "focus"
+        self._apply_deliverable_layout_mode(target)
 
     def _sync_deliverable_expand_button(self):
         btn = getattr(self, "deliverable_expand_btn", None)
@@ -15808,6 +15963,11 @@ class MainWindow(QMainWindow):
         if deliverable_scan_worker is not None and deliverable_scan_worker.isRunning():
             deliverable_scan_worker.wait(3000)
         self.deliverable_scan_worker = None
+        office_preview_worker = getattr(self, "office_preview_worker", None)
+        if office_preview_worker is not None and office_preview_worker.isRunning():
+            office_preview_worker.cancel()
+            office_preview_worker.wait(3000)
+        self.office_preview_worker = None
         if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
             self.daemon_connect_worker.wait(1000)
         self.daemon_connect_worker = None
@@ -18434,7 +18594,7 @@ class MainWindow(QMainWindow):
             if btn:
                 btn.setEnabled(is_file)
         if hasattr(self, "deliverable_render_btn"):
-            self.deliverable_render_btn.setEnabled(is_file and is_html)
+            self.deliverable_render_btn.setEnabled(is_file and ext in DELIVERABLE_EXTENSIONS)
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
             btn.setEnabled(is_file and is_html)
 
@@ -18546,7 +18706,14 @@ class MainWindow(QMainWindow):
                 self.deliverables_list.setCurrentItem(list_item)
         if hasattr(self, "deliverables_meta_label"):
             count = len(self.deliverable_items)
-            self.deliverables_meta_label.setText(f"最近 {count} 个产物 · 选择 HTML 继续创作" if count else "先在对话中生成 HTML，产物会自动出现在这里")
+            if self.current_deliverable_path and getattr(self, "deliverable_layout_mode", "list") == "focus":
+                try:
+                    relative = os.path.relpath(self.current_deliverable_path, self.workspace_dir)
+                except ValueError:
+                    relative = self.current_deliverable_path
+                self.deliverables_meta_label.setText(relative)
+            else:
+                self.deliverables_meta_label.setText(f"最近 {count} 个产物 · 选择文件预览" if count else "项目文件会自动出现在这里")
         if not self.deliverable_items:
             empty_item = QListWidgetItem(qta.icon("fa5s.magic", color=DesignTokens.primary), "从一份 HTML 开始\n让 AI 生成页面后，可在这里预览、刷新并继续生成办公文件")
             empty_item.setFlags(Qt.NoItemFlags)
@@ -18613,6 +18780,25 @@ class MainWindow(QMainWindow):
         path = item.data(Qt.UserRole) if item else ""
         self.select_deliverable(path)
 
+    def open_deliverable_from_chat(self, path, session_id=None):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        workspace_dir = self._workspace_dir_for_state(state)
+        normalized = normalize_workspace_file(path, workspace_dir)
+        if not normalized:
+            self.add_system_toast(
+                "文件不存在、格式不受支持，或已不在当前项目内。",
+                "warning",
+                session_id=session_id,
+                auto_close_ms=3600,
+            )
+            return
+        if state:
+            state.selected_deliverable_path = normalized
+        self.current_deliverable_path = normalized
+        self._apply_deliverable_layout_mode("focus")
+        self.show_context_drawer(self.RIGHT_TAB_DELIVERABLES)
+        self.select_deliverable(normalized, render_html=True)
+
     def select_deliverable(self, path, render_html=True):
         path = os.path.normpath(str(path or ""))
         previous_path = getattr(self, "current_deliverable_path", "") or ""
@@ -18625,6 +18811,12 @@ class MainWindow(QMainWindow):
             state.selected_deliverable_path = self.current_deliverable_path
             state.deliverable_preview_rendered = False
         self._set_deliverable_controls_enabled(self.current_deliverable_path)
+        if self.current_deliverable_path and hasattr(self, "deliverables_meta_label"):
+            try:
+                relative = os.path.relpath(self.current_deliverable_path, self.workspace_dir)
+            except ValueError:
+                relative = self.current_deliverable_path
+            self.deliverables_meta_label.setText(relative)
         self._watch_deliverable_paths()
         if not self.current_deliverable_path:
             return
@@ -18653,6 +18845,9 @@ class MainWindow(QMainWindow):
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             if render_html:
                 self.render_selected_deliverable(force=False)
+        elif ext in DELIVERABLE_EXTENSIONS:
+            if render_html:
+                self.render_selected_deliverable(force=False)
         else:
             self.deliverable_text_preview.setPlainText("当前格式暂不支持内嵌渲染，可使用打开或在资源管理器中显示。")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
@@ -18662,8 +18857,18 @@ class MainWindow(QMainWindow):
         if not path or not os.path.isfile(path):
             return
         ext = os.path.splitext(path)[1].lower()
-        if ext not in {".html", ".htm"}:
-            self.deliverable_status_label.setText("只有 HTML 文件支持右侧渲染。")
+        kind = (DELIVERABLE_EXTENSIONS.get(ext) or ("", "", ""))[0]
+        if kind == "markdown":
+            self._render_markdown_deliverable(path, force=force)
+            return
+        if kind == "pdf":
+            self._show_pdf_deliverable(path)
+            return
+        if ext in OFFICE_EXTENSIONS:
+            self._render_office_deliverable(path, force=force)
+            return
+        if kind != "html":
+            self.deliverable_status_label.setText("当前格式暂不支持内嵌渲染，可使用系统应用打开。")
             return
         if self.deliverable_web_view is None:
             self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
@@ -18697,6 +18902,113 @@ class MainWindow(QMainWindow):
         self._show_deliverable_web_preview()
         self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · 轻量模式")
 
+    def _render_markdown_deliverable(self, path, force=False):
+        if self.deliverable_web_view is None:
+            self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            return
+        fingerprint = self._deliverable_fingerprint(path)
+        if not force and self._can_reuse_deliverable_render(path):
+            self._show_deliverable_web_preview()
+            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · Markdown")
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                source = handle.read()
+        except Exception as exc:
+            self.deliverable_text_preview.setPlainText(f"无法读取 Markdown 文件：{exc}")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("Markdown 预览失败。")
+            return
+        body = markdown.markdown(source, extensions=["fenced_code", "tables", "nl2br", "sane_lists"])
+        document = markdown_render_style() + f"<main>{body}</main>"
+        self.deliverable_render_fingerprint = fingerprint
+        self.deliverable_render_path = path
+        self.deliverable_render_loading = True
+        self.current_deliverable_stale = False
+        base_url = QUrl.fromLocalFile(os.path.abspath(os.path.dirname(path)) + os.sep)
+        self.deliverable_web_view.setHtml(document, base_url)
+        self._show_deliverable_web_preview()
+        self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · Markdown")
+
+    def _ensure_deliverable_pdf_view(self):
+        if getattr(self, "deliverable_pdf_view", None) is not None:
+            return self.deliverable_pdf_view
+        document_cls, view_cls = load_qpdf_classes()
+        if document_cls is None or view_cls is None:
+            return None
+        self.deliverable_pdf_document = document_cls(self)
+        self.deliverable_pdf_view = view_cls()
+        page_mode_enum = getattr(view_cls, "PageMode", view_cls)
+        zoom_mode_enum = getattr(view_cls, "ZoomMode", view_cls)
+        if hasattr(self.deliverable_pdf_view, "setPageMode"):
+            self.deliverable_pdf_view.setPageMode(getattr(page_mode_enum, "MultiPage"))
+        if hasattr(self.deliverable_pdf_view, "setZoomMode"):
+            self.deliverable_pdf_view.setZoomMode(getattr(zoom_mode_enum, "FitToWidth"))
+        self.deliverable_pdf_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border: none;")
+        self.deliverable_preview_stack.addWidget(self.deliverable_pdf_view)
+        return self.deliverable_pdf_view
+
+    def _show_pdf_deliverable(self, pdf_path, source_path=None):
+        view = self._ensure_deliverable_pdf_view()
+        if view is None:
+            detail = str(QPDF_IMPORT_ERROR or "QtPdf 组件不可用")
+            self.deliverable_text_preview.setPlainText(f"无法加载 PDF 预览组件：{detail}")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("PDF 预览组件不可用。")
+            return
+        error = self.deliverable_pdf_document.load(os.path.abspath(pdf_path))
+        no_error = getattr(type(error), "None_", None)
+        if no_error is not None and error != no_error:
+            self.deliverable_text_preview.setPlainText(f"PDF 加载失败：{error}")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("PDF 预览失败。")
+            return
+        self.deliverable_preview_stack.setCurrentWidget(view)
+        display_path = source_path or pdf_path
+        self.current_deliverable_stale = False
+        self.deliverable_status_label.setText(f"正在预览 {os.path.basename(display_path)} · PDF")
+
+    def _render_office_deliverable(self, path, force=False):
+        cache_path = office_preview_cache_path(path, get_app_data_dir())
+        if os.path.isfile(cache_path) and not force:
+            self._show_pdf_deliverable(cache_path, source_path=path)
+            return
+        running = getattr(self, "office_preview_worker", None)
+        if running is not None and running.isRunning():
+            self.deliverable_status_label.setText("正在生成另一份 Office 预览，完成后会继续打开当前文件。")
+            return
+        self.office_preview_source_path = path
+        self.deliverable_text_preview.setPlainText(
+            "正在调用本机 Microsoft Office 生成只读 PDF 预览。\n\n"
+            "首次打开或文件较大时可能需要一些时间，请不要操作可能出现的 Office 安全提示窗口。"
+        )
+        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        self.deliverable_status_label.setText(f"正在生成预览：{os.path.basename(path)}")
+        worker = OfficePreviewWorker(path, cache_path, self)
+        self.office_preview_worker = worker
+        worker.completed.connect(self._handle_office_preview_completed)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _handle_office_preview_completed(self, source_path, pdf_path, error):
+        self.office_preview_worker = None
+        current = getattr(self, "current_deliverable_path", "") or ""
+        same_source = bool(current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(source_path)))
+        if same_source and pdf_path:
+            self._show_pdf_deliverable(pdf_path, source_path=source_path)
+            return
+        if same_source:
+            self.deliverable_text_preview.setPlainText(
+                f"无法使用本机 Microsoft Office 生成预览。\n\n{error}\n\n"
+                "请确认已安装对应的 Word、PowerPoint 或 Excel 桌面应用，并关闭文件占用或安全提示后重试。"
+            )
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("Office 预览失败，可重试或使用系统应用打开。")
+            return
+        if current and os.path.isfile(current):
+            self.render_selected_deliverable(force=False)
+
     def handle_deliverable_render_progress(self, progress):
         if not getattr(self, "deliverable_render_loading", False):
             return
@@ -18709,11 +19021,12 @@ class MainWindow(QMainWindow):
     def handle_deliverable_render_finished(self, ok):
         path = getattr(self, "current_deliverable_path", "")
         view = getattr(self, "deliverable_web_view", None)
+        current_ext = os.path.splitext(path)[1].lower() if path else ""
         try:
             loaded_path = os.path.normcase(os.path.abspath(view.url().toLocalFile())) if view is not None else ""
         except Exception:
             loaded_path = os.path.normcase(os.path.abspath(path)) if path else ""
-        if path and loaded_path and loaded_path != os.path.normcase(os.path.abspath(path)):
+        if current_ext not in {".md", ".markdown"} and path and loaded_path and loaded_path != os.path.normcase(os.path.abspath(path)):
             return
         self.deliverable_render_loading = False
         if view is not None:
@@ -18730,7 +19043,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "deliverable_status_label"):
             return
         if ok and path:
-            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 轻量模式")
+            mode_label = "Markdown" if current_ext in {".md", ".markdown"} else "轻量模式"
+            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · {mode_label}")
         elif path:
             self.deliverable_render_fingerprint = None
             self.deliverable_status_label.setText("页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。")
@@ -20537,12 +20851,16 @@ class MainWindow(QMainWindow):
             duration,
             attachments=attachments,
             source_message_id=source_message_id,
+            workspace_dir=self._workspace_dir_for_state(state),
         )
         bubble.editSubmitRequested.connect(
             lambda msg_id, text, sid=state.session_id: self.edit_user_message_inline(sid, msg_id, text)
         )
         bubble.deleteRequested.connect(
             lambda msg_id, sid=state.session_id: self.delete_user_message_in_place(sid, msg_id)
+        )
+        bubble.deliverablePathActivated.connect(
+            lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
         )
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         
@@ -21601,6 +21919,14 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     log_startup_stage("entry")
+    if "--office-preview-export" in sys.argv:
+        flag_index = sys.argv.index("--office-preview-export")
+        values = sys.argv[flag_index + 1:flag_index + 3]
+        if len(values) != 2:
+            print(json.dumps({"ok": False, "error": "Office 预览导出参数不完整。"}, ensure_ascii=False))
+            sys.exit(2)
+        office_helper_app = QApplication(sys.argv)
+        sys.exit(run_office_export_cli(values[0], values[1]))
     if "--daemon" in sys.argv:
         port = DEFAULT_PORT
         for arg in sys.argv:

@@ -2,7 +2,7 @@
 
 本指南介绍 DeepSeek Cowork 的安装、模型配置、基础使用方式，以及如何通过 HTML 交付物生成可编辑的 PPTX 文件。
 
-> 当前界面截图基于 4.9.2 版本。后续版本的按钮位置或文案可能略有调整，请以实际界面为准。
+> 当前界面截图基于 4.9.3 版本。后续版本的按钮位置或文案可能略有调整，请以实际界面为准。
 
 ## 目录
 
@@ -116,6 +116,8 @@ DeepSeek Cowork 支持两种主要使用方式：
    ![生成 HTML 交付物示例](images/user-guide/15-generate-html-example.png)
 
 3. 让 AI 在工作区中生成一个或多个 HTML 文件，然后点击右侧的 **交付物** 按钮查看结果。
+
+   如果 AI 在最终回复中给出当前项目内的完整文件路径，也可以直接点击路径。应用会自动打开交付物抽屉并进入专注预览。交付物支持 HTML、Markdown、PDF、DOC/DOCX、PPT/PPTX 和 XLS/XLSX；Office 文件需要本机安装对应的 Microsoft Office 桌面应用，应用会在后台生成只读 PDF 预览，不修改源文件。
 
    ![打开交付物面板](images/user-guide/16-open-deliverables.png)
 

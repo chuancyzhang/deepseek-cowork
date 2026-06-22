@@ -1,10 +1,10 @@
 # DeepSeek Cowork 架构设计
 
-HTML 交付物预览由 Qt 输入层接管真实滚轮与触控板事件，并用 Qt 滚动条同步页面位置，保留纵向、横向和嵌套区域滚动能力。
+交付物预览按格式分发：HTML/Markdown 使用 WebEngine，PDF 使用 QtPdf，新旧 Office 文件由本机 Microsoft Office 隔离进程导出为缓存 PDF。
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.9.2**。
+当前应用版本：**4.9.3**。
 
 *   **同轮中途引导**：桌面主对话的 `LLMWorker` 维护线程安全的 FIFO guidance 队列，在模型请求前、工具结果返回后及最终收敛边界消费；当前流式响应和正在执行的工具不会被强制打断。daemon 通过 `turn_id`、`turn_started` 与 `steer_message` 协议校验活动轮次，避免迟到输入串入下一轮。引导沿用普通用户消息的 `content` / `content_parts` / 附件元数据，停止或异常时仍保留已接受内容。
 
@@ -18,7 +18,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互，并根据窗口与抽屉状态动态计算主会话区宽度。
 *   **项目式左侧栏**：顶部入口创建无项目纯对话，项目行 `+` 创建项目会话；`+` 由 Qt 绘制以避免图标字体在部分系统或 DPI 下失效。正式启动通过 `initialize_desktop_theme(...)` 只应用 Tooltip 专用样式与 Palette，不加载会覆盖既有控件外观的全局主题。项目标题只展开/收起会话预览，当前项目、文件树和交付物面板始终跟随当前可见会话。
 *   **会话级工作区边界**：`SessionState.workspace_dir` 是运行与持久化的工作区来源；激活无项目会话会清除旧项目上下文。`run_context.workspace_mode` 区分 `chat_only` 与 `project`，工具注册根据 handler 是否接收 `workspace_dir` 标记依赖，并在纯对话的工具列表和发现结果中统一过滤。连接项目会保留消息并写入 `meta.workspace_dir`。
-*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；打开后不响应抽屉外点击自动关闭，只通过关闭按钮或 `Esc` 收起，便于在聊天区持续修改 HTML 或对照上下文。普通宽度继续为主阅读区预留安全边界，交付物专注预览可临时扩大覆盖范围。抽屉左边缘支持拖动，交付物上下分区尺寸与手动宽度写入配置。HTML 通过延迟加载的 QtWebEngine 自动渲染；文档创建阶段注入轻量预览策略，限制高频动画、定时任务和自动播放。真实滚轮事件在 HTML 预览自身的应用级 Qt 事件过滤器中命中当前可见预览，因此不依赖 Chromium 动态创建的内部控件；页面级滚轮累计后调整外置 Qt 滚动条，与拖动操作共用 `window.scrollTo` 和重绘回调，嵌套滚动区域仍在页面内处理。文件指纹未变化时复用现有页面，只有强制刷新或文件更新才使用刷新标识重新导航。交付物目录扫描在后台执行并对文件监听事件防抖；环境不可用时显示明确错误并提供系统打开入口。
+*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；交付物支持列表与专注布局。最终助手回复由工作区约束的路径识别器生成 `cowork-file` 内部链接，点击后再次验证路径并直达交付物。HTML 与 Markdown 通过延迟加载的 QtWebEngine 渲染，PDF 使用延迟加载的 QtPdf；DOC/DOCX、PPT/PPTX、XLS/XLSX 由隔离子进程调用本机 Office 只读导出到应用缓存目录，缓存键包含路径、修改时间和大小。Office 缺失、文件损坏、加密或超时均显示明确错误，不静默降级。文件监听、轻量 HTML 策略、预览指纹复用及抽屉持久化继续保留。
 *   **动态对话阅读列**：消息列表与输入栏保持原有视觉样式，并根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；项目栏默认宽度为 232px，主区水平边距为 12px，抽屉外边距与中右栏间距为 8px，对话列目标占可用 shell 的 96%，窄窗口仍由 compact minimum 与 drawer width limit 防止重叠。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；下拉框弹层统一使用高对比度的悬停与选中状态，并兼容 Windows 失焦选中态；常规文案偏产品表达，MCP 相关术语保持英文。
@@ -164,7 +164,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **抽屉持续展开策略**：主窗口不再安装用于外部点击关闭的全局 `eventFilter`；文件、交付物、任务观测和子 Agent 共用显式关闭策略。
 - **抽屉隐藏诊断**：开启 runtime debug 日志后，`hide_context_drawer` 会记录显式关闭原因和当前 tab；四个上下文页不再因外部点击自动收起。
 - **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览；系统提示词页展示 stable prompt、runtime context 与已披露 skill context，不在首页展示 prompt/tools/message-prefix 指纹。完整 prompt 仍保留在会话状态中且可通过复制按钮导出，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
-- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间展示后台扫描得到的最近产物，并以会话级 `selected_deliverable_path` 保存当前 HTML。选择或切回会话时优先复用文件指纹未变化的轻量预览；文件更新会标记过期，用户可强制刷新、放大或拖动调整预览。生成 PPTX/DOCX/PDF 时将源 HTML 附加到当前对话并通过现有 Agent 工具链继续生成，抽屉不新建对话，也不内置格式转换器。
+- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间展示最近产物，并以会话级 `selected_deliverable_path` 保存当前文件。选择或切回会话时优先复用文件指纹未变化的 HTML、Markdown、PDF 或 Office 缓存预览；文件更新会标记过期。Office 转 PDF 仅用于只读预览，不修改源文件也不作为新交付物展示。基于 HTML 生成 PPTX/DOCX/PDF 仍由现有 Agent 工具链在当前对话中完成。
 - **UI 分段诊断**：开启 runtime debug 日志后，`_handle_agent_state_ui` 会按 session lookup、phase update、tool card、event record、monitor render、bubble PiP、live-agent check、final status 等阶段写入 `ui_agent_state_stage_*` 日志，便于定位 UI 闪退前的最后分支。
 - **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
 - **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。

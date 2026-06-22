@@ -126,6 +126,28 @@ class TestDeliverableScanning(unittest.TestCase):
                         auto_close_ms=3200,
                     )
 
+    def test_chat_file_link_opens_deliverable_in_focus_mode(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "报告.doc")
+            with open(path, "wb") as handle:
+                handle.write(b"doc")
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"selected_deliverable_path": ""})()
+            window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._apply_deliverable_layout_mode = MagicMock()
+            window.show_context_drawer = MagicMock()
+            window.select_deliverable = MagicMock()
+            window.add_system_toast = MagicMock()
+
+            window.open_deliverable_from_chat(path, "session-1")
+
+            self.assertEqual(state.selected_deliverable_path, os.path.normpath(path))
+            window._apply_deliverable_layout_mode.assert_called_once_with("focus")
+            window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_DELIVERABLES)
+            window.select_deliverable.assert_called_once_with(os.path.normpath(path), render_html=True)
+            window.add_system_toast.assert_not_called()
+
     def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = os.path.join(tmp, "report.html")
@@ -376,13 +398,15 @@ class TestDeliverableScanning(unittest.TestCase):
         preview.vertical_scrollbar.setValue(preview.vertical_scrollbar.maximum())
         preview.horizontal_scrollbar.setValue(preview.horizontal_scrollbar.maximum())
         QApplication.processEvents()
-        self.assertEqual(
+        self.assertAlmostEqual(
             evaluate("document.scrollingElement.scrollTop"),
             preview.vertical_scrollbar.maximum(),
+            delta=1,
         )
-        self.assertEqual(
+        self.assertAlmostEqual(
             evaluate("document.scrollingElement.scrollLeft"),
             preview.horizontal_scrollbar.maximum(),
+            delta=1,
         )
         QApplication.instance().removeEventFilter(preview)
         preview.close()

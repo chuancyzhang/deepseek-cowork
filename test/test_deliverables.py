@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import os
 import tempfile
 import time
@@ -21,6 +22,16 @@ from main import (
 
 
 class TestDeliverableScanning(unittest.TestCase):
+    def test_main_window_loads_deliverable_preferences_after_config_initialization(self):
+        source = inspect.getsource(MainWindow.__init__)
+
+        config_init = source.index("self.config_manager = ConfigManager()")
+        layout_preference = source.index(
+            'self.deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")'
+        )
+
+        self.assertLess(config_init, layout_preference)
+
     def test_scans_supported_deliverables_sorted_by_modified_time(self):
         with tempfile.TemporaryDirectory() as tmp:
             old_html = os.path.join(tmp, "report.html")

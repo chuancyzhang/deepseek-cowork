@@ -38,6 +38,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **异步会话持久化**：`save_chat_history()` 只在 UI 线程里整理快照并入队，后台 `ChatSaveWorker` 按会话合并、500ms debounce 后写入 SQLite；消息改写、长期记忆更新、会话重命名/归档/删除和应用退出前显式 flush，避免异步保存带来的读取时序问题。
 *   **UI 到 Daemon 的上下文快照**：桌面会话交给 daemon 执行时会随请求传递当前 `state.messages` 快照；daemon 优先用该快照刷新内存会话，再追加本轮用户消息，避免 idle suspend 后从旧 SQLite 或旧缓存恢复导致上下文漂移。
 *   **历史加载一致性屏障**：异步恢复会话期间，输入和保存请求均被拦截；加载完成后通过 `set_current_session()` 重新绑定窗口消息别名。历史迁移版本 3 会移除旧 query 模糊匹配生成的隐藏 Skill 上下文，同时保留 `tool_search` 和真实工具调用产生的上下文。
+*   **主窗口偏好初始化**：`MainWindow` 在读取交付物布局、抽屉宽度和侧边栏排序等持久化偏好前先创建唯一的 `ConfigManager`，避免启动阶段访问尚未初始化的配置对象。
 *   **运行时诊断日志开关**：高频子 Agent/UI runtime 日志默认关闭，仅当 `COWORK_RUNTIME_DEBUG_LOG=1` 时写入 `sub_agent_runtime.log`，避免状态流和磁盘 IO 绑定。
 *   **UI 异常持久化**：`SafeApplication.notify(...)` 保留全局事件保护，但捕获异常时会将接收控件类型、事件类型和完整 traceback 始终追加到应用数据目录（便携模式为 `user_data/`）下的 `ui_error.log`；系统提示仅指向日志，不再把通用“继续运行”文案当作错误详情。
 *   **反馈回路按钮**：侧边栏 `记忆` 打开可编辑的分层记忆中心并可触发生成草稿；`沉淀为 Skill` 保持会话知识沉淀入口。

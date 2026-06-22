@@ -12411,7 +12411,6 @@ class MainWindow(QMainWindow):
         self.deliverable_pdf_view = None
         self.office_preview_worker = None
         self.office_preview_source_path = ""
-        self.deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
         self.deliverable_scan_generation = 0
         self.deliverable_scan_worker = None
         self.deliverable_scan_pending_render = False
@@ -12548,6 +12547,7 @@ class MainWindow(QMainWindow):
         
         self.config_manager = ConfigManager()
         self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
+        self.deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
         self.deliverables_splitter_sizes = self.config_manager.get("deliverables_splitter_sizes", [180, 320])
         self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
         self.skill_manager = SkillManager(None, self.config_manager)

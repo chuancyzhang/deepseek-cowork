@@ -291,6 +291,44 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
             self.assertIn("内置预览", window.deliverable_status_label.text())
 
+    def test_pdf_view_is_bound_to_document_before_preview(self):
+        app = QApplication.instance() or QApplication([])
+
+        class FakePdfDocument:
+            def __init__(self, parent=None):
+                self.parent = parent
+
+        class FakePdfView(QWidget):
+            class PageMode:
+                MultiPage = object()
+
+            class ZoomMode:
+                FitToWidth = object()
+
+            def __init__(self):
+                super().__init__()
+                self.bound_document = None
+
+            def setDocument(self, document):
+                self.bound_document = document
+
+            def setPageMode(self, mode):
+                self.page_mode = mode
+
+            def setZoomMode(self, mode):
+                self.zoom_mode = mode
+
+        window = MainWindow.__new__(MainWindow)
+        window.deliverable_pdf_view = None
+        window.deliverable_pdf_document = None
+        window.deliverable_preview_stack = QStackedWidget()
+
+        with patch("main.load_qpdf_classes", return_value=(FakePdfDocument, FakePdfView)):
+            view = window._ensure_deliverable_pdf_view()
+
+        self.assertIs(view.bound_document, window.deliverable_pdf_document)
+        self.assertEqual(window.deliverable_preview_stack.indexOf(view), 0)
+
     def test_light_preview_scripts_throttle_continuous_rendering(self):
         bootstrap = deliverable_preview_bootstrap_script()
         settle = deliverable_preview_settle_script()

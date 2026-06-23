@@ -19104,6 +19104,8 @@ class MainWindow(QMainWindow):
             return None
         self.deliverable_pdf_document = document_cls(self)
         self.deliverable_pdf_view = view_cls()
+        if hasattr(self.deliverable_pdf_view, "setDocument"):
+            self.deliverable_pdf_view.setDocument(self.deliverable_pdf_document)
         page_mode_enum = getattr(view_cls, "PageMode", view_cls)
         zoom_mode_enum = getattr(view_cls, "ZoomMode", view_cls)
         if hasattr(self.deliverable_pdf_view, "setPageMode"):

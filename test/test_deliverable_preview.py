@@ -20,6 +20,7 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
             self.assertIn(extension, OFFICE_EXTENSIONS)
         self.assertIn(".md", DELIVERABLE_TYPES)
         self.assertIn(".markdown", DELIVERABLE_TYPES)
+        self.assertIn(".bmp", DELIVERABLE_TYPES)
 
     def test_only_accepts_existing_workspace_files(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
@@ -51,7 +52,7 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
 
     def test_finds_multiple_supported_paths(self):
         with tempfile.TemporaryDirectory() as workspace:
-            paths = [os.path.join(workspace, "report.md"), os.path.join(workspace, "slides.ppt")]
+            paths = [os.path.join(workspace, "report.md"), os.path.join(workspace, "slides.ppt"), os.path.join(workspace, "chart.bmp")]
             for path in paths:
                 with open(path, "wb") as handle:
                     handle.write(b"x")

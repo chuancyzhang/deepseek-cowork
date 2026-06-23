@@ -19029,6 +19029,9 @@ class MainWindow(QMainWindow):
         if kind == "pdf":
             self._show_pdf_deliverable(path)
             return
+        if kind == "image":
+            self._show_image_deliverable(path)
+            return
         if ext in OFFICE_EXTENSIONS:
             self._render_office_deliverable(path, force=force)
             return
@@ -19066,6 +19069,43 @@ class MainWindow(QMainWindow):
         self.deliverable_web_view.setUrl(url)
         self._show_deliverable_web_preview()
         self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · 轻量模式")
+
+    def _show_image_deliverable(self, path):
+        max_preview_bytes = 25 * 1024 * 1024
+        try:
+            size = os.path.getsize(path)
+        except OSError as exc:
+            self.deliverable_text_preview.setPlainText(f"无法读取图片文件：{exc}")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("图片预览失败。")
+            return
+        if size > max_preview_bytes:
+            self.deliverable_text_preview.setPlainText(
+                f"图片文件过大，暂不在应用内预览。\n\n文件大小：{format_file_size(size)}"
+            )
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("图片过大，可使用系统应用打开。")
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self.deliverable_text_preview.setPlainText("无法解码图片文件，可使用系统应用打开。")
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText("图片预览失败。")
+            return
+        self.preview_pixmap = pixmap
+        target_size = self.deliverable_preview_stack.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            target_size = QSize(720, 480)
+        scaled = pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.preview_image.setPixmap(scaled)
+        self.deliverable_preview_stack.setCurrentWidget(self.preview_image)
+        self.deliverable_render_fingerprint = self._deliverable_fingerprint(path)
+        self.deliverable_render_path = path
+        self.deliverable_render_loading = False
+        self.current_deliverable_stale = False
+        self.deliverable_status_label.setText(
+            f"正在预览 {os.path.basename(path)} · 图片 · {pixmap.width()}×{pixmap.height()}"
+        )
 
     def _render_markdown_deliverable(self, path, force=False):
         if self.deliverable_web_view is None:

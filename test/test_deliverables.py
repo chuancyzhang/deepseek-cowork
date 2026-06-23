@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from PySide6.QtCore import QByteArray, QBuffer, QEventLoop, QIODevice, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QColor, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
 
 from main import (
@@ -290,6 +290,57 @@ class TestDeliverableScanning(unittest.TestCase):
             window.deliverable_web_view.setHtml.assert_called_once()
             self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
             self.assertIn("内置预览", window.deliverable_status_label.text())
+
+    def test_image_deliverable_renders_in_preview_label(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = os.path.join(tmp, "chart.png")
+            pixmap = QPixmap(24, 16)
+            pixmap.fill(QColor("#007aff"))
+            self.assertTrue(pixmap.save(image_path, "PNG"))
+
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = image_path
+            window.current_deliverable_stale = True
+            window.deliverable_render_fingerprint = None
+            window.deliverable_render_path = ""
+            window.preview_image = QLabel()
+            window.preview_pixmap = None
+            window.deliverable_text_preview = QTextEdit()
+            window.deliverable_preview_stack = QStackedWidget()
+            window.deliverable_preview_stack.resize(320, 240)
+            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
+            window.deliverable_preview_stack.addWidget(window.preview_image)
+            window.deliverable_status_label = QLabel()
+
+            window.render_selected_deliverable()
+
+            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.preview_image)
+            self.assertFalse(window.preview_image.pixmap().isNull())
+            self.assertFalse(window.current_deliverable_stale)
+            self.assertIn("图片", window.deliverable_status_label.text())
+
+    def test_invalid_image_deliverable_reports_decode_failure(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = os.path.join(tmp, "broken.png")
+            with open(image_path, "wb") as handle:
+                handle.write(b"not an image")
+
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = image_path
+            window.preview_image = QLabel()
+            window.deliverable_text_preview = QTextEdit()
+            window.deliverable_preview_stack = QStackedWidget()
+            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
+            window.deliverable_preview_stack.addWidget(window.preview_image)
+            window.deliverable_status_label = QLabel()
+
+            window.render_selected_deliverable()
+
+            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_text_preview)
+            self.assertIn("无法解码图片文件", window.deliverable_text_preview.toPlainText())
+            self.assertEqual("图片预览失败。", window.deliverable_status_label.text())
 
     def test_pdf_view_is_bound_to_document_before_preview(self):
         app = QApplication.instance() or QApplication([])

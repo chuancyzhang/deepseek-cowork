@@ -14,6 +14,7 @@ DELIVERABLE_TYPES = {
     ".jpeg": ("image", "图片", "fa5s.file-image"),
     ".gif": ("image", "图片", "fa5s.file-image"),
     ".webp": ("image", "图片", "fa5s.file-image"),
+    ".bmp": ("image", "图片", "fa5s.file-image"),
     ".pdf": ("pdf", "PDF", "fa5s.file-pdf"),
     ".doc": ("doc", "DOC", "fa5s.file-word"),
     ".docx": ("docx", "DOCX", "fa5s.file-word"),
@@ -33,7 +34,7 @@ OFFICE_EXTENSIONS = {
 }
 _PATH_PATTERN = re.compile(
     r"(?P<path>(?:[A-Za-z]:[\\/]|\\\\)[^\r\n<>\"|?*]*?"
-    r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.md))"
+    r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.bmp|\.md))"
     r"(?=$|[\s\]\[(){}，。；：、,;:!?！？'\"])",
     re.IGNORECASE,
 )

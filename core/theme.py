@@ -74,8 +74,8 @@ class DesignTokens:
     conversation_compact_min_width = 560
     conversation_max_width = 1560
     conversation_closed_min_width = 900
-    conversation_closed_max_width = 1560
-    conversation_closed_target_ratio = 0.96
+    conversation_closed_max_width = 1340
+    conversation_closed_target_ratio = 0.76
     conversation_open_min_width = 840
     conversation_open_compact_min_width = 560
     conversation_open_max_width = 1440

@@ -1811,7 +1811,7 @@ class TestSopUiHelpers(unittest.TestCase):
 
         metrics = window._compute_conversation_shell_metrics()
 
-        self.assertEqual(metrics["conversation_width"], 1512)
+        self.assertEqual(metrics["conversation_width"], 1197)
         self.assertLessEqual(abs(metrics["left_spacer_width"] - metrics["right_spacer_width"]), 1)
 
     def test_conversation_shell_metrics_shift_left_with_drawer(self):

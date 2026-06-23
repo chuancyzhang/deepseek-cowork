@@ -16,9 +16,9 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 
 ### 2.1 UI 层 (PySide6)
 *   **main.py**：桌面入口，负责窗口、聊天气泡、工具调用卡片、右侧上下文抽屉等 UI 交互，并根据窗口与抽屉状态动态计算主会话区宽度。
-*   **项目式左侧栏**：顶部入口创建无项目纯对话，项目行 `+` 创建项目会话；项目区的 `+`、文件夹和更多操作符号由 Qt 绘制以避免图标字体在部分系统或 DPI 下失效。正式启动通过 `initialize_desktop_theme(...)` 只应用 Tooltip 专用样式与 Palette，不加载会覆盖既有控件外观的全局主题，并避免项目行长路径 Tooltip 在部分 Windows 主机合成为黑块。项目标题只展开/收起会话预览，当前项目、文件树和交付物面板始终跟随当前可见会话。
+*   **项目式左侧栏**：顶部入口创建无项目纯对话，项目行 `+` 创建项目会话；项目区的 `+`、文件夹和更多操作符号由 Qt 绘制以避免图标字体在部分系统或 DPI 下失效。正式启动通过 `initialize_desktop_theme(...)` 只应用 Tooltip 专用样式与 Palette，不加载会覆盖既有控件外观的全局主题，并避免项目行长路径 Tooltip 在部分 Windows 主机合成为黑块。项目标题只展开/收起会话预览，当前项目与文件页始终跟随当前可见会话。
 *   **会话级工作区边界**：`SessionState.workspace_dir` 是运行与持久化的工作区来源；激活无项目会话会清除旧项目上下文。`run_context.workspace_mode` 区分 `chat_only` 与 `project`，工具注册根据 handler 是否接收 `workspace_dir` 标记依赖，并在纯对话的工具列表和发现结果中统一过滤。连接项目会保留消息并写入 `meta.workspace_dir`。
-*   **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 监控以隐藏抽屉承载；交付物支持列表与专注布局。最终助手回复由工作区约束的路径识别器生成 `cowork-file` 内部链接，点击后再次验证路径并直达交付物。HTML 与 Markdown 通过延迟加载的 QtWebEngine 渲染，PDF 使用延迟加载的 QtPdf，组件不可用时使用 pypdf 显示文本预览；DOCX/PPTX/XLSX 由 python-docx、python-pptx、openpyxl 生成结构化 HTML 预览，旧版 DOC/PPT/XLS 二进制格式显示明确不支持提示。文件损坏、加密或依赖缺失均显示明确错误，不静默降级。文件监听、轻量 HTML 策略、预览指纹复用及抽屉持久化继续保留。
+*   **右侧上下文抽屉**：文件、任务观测、子 Agent 监控以隐藏抽屉承载；文件页内用“全部文件 / 交付物”分段承载工作区文件树和最近交付物列表，并共用同一套预览栈。最终助手回复由工作区约束的路径识别器生成 `cowork-file` 内部链接，点击后再次验证路径并直达交付物视图。HTML 与 Markdown 通过延迟加载的 QtWebEngine 渲染，PDF 使用延迟加载的 QtPdf，组件不可用时使用 pypdf 显示文本预览；DOCX/PPTX/XLSX 由 python-docx、python-pptx、openpyxl 生成结构化 HTML 预览，旧版 DOC/PPT/XLS 二进制格式显示明确不支持提示。文件损坏、加密或依赖缺失均显示明确错误，不静默降级。文件监听、轻量 HTML 策略、预览指纹复用及抽屉持久化继续保留。
 *   **动态对话阅读列**：消息列表与输入栏保持原有视觉样式，并根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；项目栏默认宽度为 232px，主区水平边距为 12px，抽屉外边距与中右栏间距为 8px，对话列目标占可用 shell 的 96%，窄窗口仍由 compact minimum 与 drawer width limit 防止重叠。
 *   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
 *   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；模型渠道可在后台线程中用未保存的地址、密钥、当前模型和 20 秒请求超时执行真实连接测试。常规文案偏产品表达，MCP 相关术语保持英文。
@@ -163,10 +163,10 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 - **子 Agent 生命周期**：模型任务完成时先写入结果与状态，`QThread.finished` 后再释放 worker 引用；若存在排队输入，旧线程完全退出后才启动下一轮，避免线程销毁或重启重叠导致崩溃。
 - **子 Agent 诊断日志**：设置 `COWORK_RUNTIME_DEBUG_LOG=1` 后，UI 召唤入口、manager 生命周期、worker signal、pending input、清理与异常会写入 `sub_agent_runtime.log`，位置为 `DeepSeekCowork` 应用数据目录或便携模式的 `user_data/`；日常运行默认关闭高频日志。
 - **子 Agent 观测 UI**：状态事件先写入会话事件队列并点亮右侧 `子 Agent` 徽标，不再自动打开抽屉；用户打开抽屉后先清空旧监控视图，再由主线程延迟队列批量渲染轻量摘要行，并限制最近事件窗口，避免事件风暴或 widget 构造影响主任务稳定性。
-- **抽屉持续展开策略**：主窗口不再安装用于外部点击关闭的全局 `eventFilter`；文件、交付物、任务观测和子 Agent 共用显式关闭策略。
-- **抽屉隐藏诊断**：开启 runtime debug 日志后，`hide_context_drawer` 会记录显式关闭原因和当前 tab；四个上下文页不再因外部点击自动收起。
+- **抽屉持续展开策略**：主窗口不再安装用于外部点击关闭的全局 `eventFilter`；文件页、任务观测和子 Agent 共用显式关闭策略。
+- **抽屉隐藏诊断**：开启 runtime debug 日志后，`hide_context_drawer` 会记录显式关闭原因和当前 tab；上下文页不再因外部点击自动收起。
 - **任务观测安全预览**：右侧 `任务观测` 抽屉只向 Qt 文本控件写入截断后的系统提示词、观测日志和工具详情预览；系统提示词页展示 stable prompt、runtime context 与已披露 skill context，不在首页展示 prompt/tools/message-prefix 指纹。完整 prompt 仍保留在会话状态中且可通过复制按钮导出，避免超长 prompt/JSON 在页面变为可见时触发 native UI 崩溃。
-- **交付物预览与转换**：右侧 `交付物` 抽屉按修改时间展示最近产物，并以会话级 `selected_deliverable_path` 保存当前文件。选择或切回会话时优先复用文件指纹未变化的 HTML、Markdown、PDF 或结构化文档预览；文件更新会标记过期。DOCX/PPTX/XLSX 预览只读取源文件并生成应用内 HTML，不修改源文件也不作为新交付物展示。基于 HTML 生成 PPTX/DOCX/PDF 仍由现有 Agent 工具链在当前对话中完成。
+- **交付物预览与转换**：右侧文件页的交付物视图按修改时间展示最近产物，并以会话级 `selected_deliverable_path` 保存当前文件。选择或切回会话时优先复用文件指纹未变化的 HTML、Markdown、PDF 或结构化文档预览；文件更新会标记过期。DOCX/PPTX/XLSX 预览只读取源文件并生成应用内 HTML，不修改源文件也不作为新交付物展示。基于 HTML 生成 PPTX/DOCX/PDF 仍由现有 Agent 工具链在当前对话中完成。
 - **UI 分段诊断**：开启 runtime debug 日志后，`_handle_agent_state_ui` 会按 session lookup、phase update、tool card、event record、monitor render、bubble PiP、live-agent check、final status 等阶段写入 `ui_agent_state_stage_*` 日志，便于定位 UI 闪退前的最后分支。
 - **OpenAI 兼容协议串行化**：父 worker 与子 worker 各自创建独立 provider/client，但进入 OpenAI-compatible `chat_stream` 前会竞争同一协议锁，避免父子 Agent 同时流式请求导致兼容协议或 socket 流混写。
 - **Daemon 断流回收**：daemon 流式连接写入失败时会取消交互请求、强制关闭当前会话的 live 子 Agent，并停止主 worker；若 worker 尚未真正退出，daemon 暂存线程句柄到 `detached_workers`，等待 `QThread.finished` 后再清理，避免断流后悬挂或析构运行中的线程。

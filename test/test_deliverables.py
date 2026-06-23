@@ -91,7 +91,7 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertNotIn("生成报告", titles)
             html_card = next(item for item in widget.actions_data if item[0] == "生成 HTML 交付物")
             self.assertEqual(html_card[1], "预览修改，再生成 PPT")
-            self.assertIn("右侧交付物", html_card[2])
+            self.assertIn("右侧文件页的交付物视图", html_card[2])
             self.assertIn("生成 PPTX", html_card[2])
             self.assertEqual(html_card[3], "fa5s.file-code")
             widget.action_cards[titles.index("生成 HTML 交付物")].click()

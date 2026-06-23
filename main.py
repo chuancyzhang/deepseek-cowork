@@ -40,9 +40,8 @@ from core.deliverable_preview import (
     iter_workspace_file_paths,
     linkify_workspace_paths_in_html,
     normalize_workspace_file,
-    office_export_command,
-    office_preview_cache_path,
-    run_office_export_cli,
+    render_pdf_text_preview,
+    render_structured_document_preview,
 )
 from core.html_render import extract_renderable_html_response
 from core.theme import apply_tooltip_theme, DesignTokens
@@ -984,23 +983,60 @@ def apple_sidebar_action_button_style(selected=False):
     )
 
 
-def sidebar_plus_icon(color, size=16):
-    """Draw a plus icon without relying on an optional icon-font glyph."""
+def sidebar_symbol_icon(kind, color, size=16):
+    """Draw sidebar symbols without relying on optional icon-font glyphs."""
     pixel_size = max(12, int(size))
     pixmap = QPixmap(pixel_size, pixel_size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
     pen = QPen(QColor(color))
-    pen.setWidthF(max(1.8, pixel_size / 7.0))
+    pen.setWidthF(max(1.6, pixel_size / 8.0))
     pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
     painter.setPen(pen)
-    center = pixel_size // 2
-    inset = max(3, pixel_size // 4)
-    painter.drawLine(QPoint(center, inset), QPoint(center, pixel_size - inset))
-    painter.drawLine(QPoint(inset, center), QPoint(pixel_size - inset, center))
+    color_obj = QColor(color)
+    if kind == "ellipsis":
+        painter.setBrush(QBrush(color_obj))
+        radius = max(1.4, pixel_size / 13.0)
+        y = pixel_size / 2.0
+        for x in (pixel_size * 0.32, pixel_size * 0.50, pixel_size * 0.68):
+            painter.drawEllipse(QPoint(int(x), int(y)), int(radius), int(radius))
+    elif kind in {"folder", "folder-open", "folder-plus"}:
+        fill = QColor(color_obj)
+        fill.setAlpha(36)
+        painter.setBrush(QBrush(fill))
+        path = QPainterPath()
+        path.moveTo(pixel_size * 0.16, pixel_size * 0.34)
+        path.lineTo(pixel_size * 0.40, pixel_size * 0.34)
+        path.lineTo(pixel_size * 0.48, pixel_size * 0.44)
+        path.lineTo(pixel_size * 0.84, pixel_size * 0.44)
+        path.lineTo(pixel_size * 0.84, pixel_size * 0.74)
+        path.quadTo(pixel_size * 0.84, pixel_size * 0.82, pixel_size * 0.76, pixel_size * 0.82)
+        path.lineTo(pixel_size * 0.20, pixel_size * 0.82)
+        path.quadTo(pixel_size * 0.12, pixel_size * 0.82, pixel_size * 0.12, pixel_size * 0.74)
+        path.lineTo(pixel_size * 0.12, pixel_size * 0.42)
+        path.quadTo(pixel_size * 0.12, pixel_size * 0.34, pixel_size * 0.16, pixel_size * 0.34)
+        painter.drawPath(path)
+        if kind == "folder-plus":
+            painter.setBrush(Qt.NoBrush)
+            center = pixel_size * 0.64
+            span = pixel_size * 0.12
+            painter.drawLine(QPoint(int(center), int(center - span)), QPoint(int(center), int(center + span)))
+            painter.drawLine(QPoint(int(center - span), int(center)), QPoint(int(center + span), int(center)))
+        elif kind == "folder-open":
+            painter.drawLine(QPoint(int(pixel_size * 0.24), int(pixel_size * 0.66)), QPoint(int(pixel_size * 0.78), int(pixel_size * 0.66)))
+    else:
+        center = pixel_size // 2
+        inset = max(3, pixel_size // 4)
+        painter.drawLine(QPoint(center, inset), QPoint(center, pixel_size - inset))
+        painter.drawLine(QPoint(inset, center), QPoint(pixel_size - inset, center))
     painter.end()
     return QIcon(pixmap)
+
+
+def sidebar_plus_icon(color, size=16):
+    return sidebar_symbol_icon("plus", color, size)
 
 
 def initialize_desktop_theme(app):
@@ -1391,65 +1427,6 @@ class DeliverableScanWorker(QThread):
 
     def run(self):
         self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
-
-
-class OfficePreviewWorker(QThread):
-    completed = Signal(str, str, str)
-
-    def __init__(self, source_path, output_path, parent=None, timeout_seconds=90):
-        super().__init__(parent)
-        self.source_path = source_path
-        self.output_path = output_path
-        self.timeout_seconds = max(10, int(timeout_seconds))
-        self.process = None
-
-    def cancel(self):
-        process = self.process
-        if process is not None and process.poll() is None:
-            try:
-                process.terminate()
-            except Exception:
-                pass
-
-    def run(self):
-        command = office_export_command(self.source_path, self.output_path, main_script=__file__)
-        try:
-            self.process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env={**os.environ, "PYTHONUTF8": "1"},
-                **subprocess_kwargs_no_window(),
-            )
-            stdout, stderr = self.process.communicate(timeout=self.timeout_seconds)
-        except subprocess.TimeoutExpired:
-            self.cancel()
-            if self.process is not None:
-                try:
-                    self.process.wait(3)
-                except Exception:
-                    self.process.kill()
-            self.completed.emit(self.source_path, "", "Office 生成预览超时，请关闭可能存在的 Office 弹窗后重试。")
-            return
-        except Exception as exc:
-            self.completed.emit(self.source_path, "", f"无法启动 Office 预览进程：{exc}")
-            return
-        payload = None
-        for line in reversed((stdout or "").splitlines()):
-            try:
-                payload = json.loads(line)
-                break
-            except Exception:
-                continue
-        if self.process.returncode == 0 and os.path.isfile(self.output_path):
-            self.completed.emit(self.source_path, self.output_path, "")
-            return
-        error = (payload or {}).get("error") if isinstance(payload, dict) else ""
-        detail = error or (stderr or "").strip() or "Microsoft Office 未能生成预览。"
-        self.completed.emit(self.source_path, "", detail)
 
 
 def clarify_phase_label(phase):
@@ -12409,8 +12386,6 @@ class MainWindow(QMainWindow):
         self.deliverable_render_loading = False
         self.deliverable_pdf_document = None
         self.deliverable_pdf_view = None
-        self.office_preview_worker = None
-        self.office_preview_source_path = ""
         self.deliverable_scan_generation = 0
         self.deliverable_scan_worker = None
         self.deliverable_scan_pending_render = False
@@ -12637,14 +12612,14 @@ class MainWindow(QMainWindow):
         project_header_layout.addWidget(project_label)
         project_header_layout.addStretch()
         self.sidebar_projects_menu_btn = QToolButton()
-        self.sidebar_projects_menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        self.sidebar_projects_menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_secondary, 16))
         self.sidebar_projects_menu_btn.setToolTip("项目与侧边栏选项")
         self.sidebar_projects_menu_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_projects_menu_btn.setFixedSize(28, 28)
         self.sidebar_projects_menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
         self.sidebar_projects_menu_btn.clicked.connect(self.show_sidebar_projects_menu)
         self.sidebar_add_project_btn = QToolButton()
-        self.sidebar_add_project_btn.setIcon(qta.icon('fa5s.folder-plus', color=DesignTokens.text_secondary))
+        self.sidebar_add_project_btn.setIcon(sidebar_symbol_icon("folder-plus", DesignTokens.text_secondary, 16))
         self.sidebar_add_project_btn.setToolTip("添加项目")
         self.sidebar_add_project_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_add_project_btn.setFixedSize(28, 28)
@@ -13393,7 +13368,7 @@ class MainWindow(QMainWindow):
         self.clarify_mode_action.triggered.connect(self.on_clarify_mode_toggled)
 
         self.tool_menu_btn = QPushButton()
-        self.tool_menu_btn.setIcon(qta.icon('fa5s.plus', color='#6b7280'))
+        self.tool_menu_btn.setIcon(sidebar_plus_icon("#6b7280", 16))
         self.tool_menu_btn.setToolTip("工具")
         self.tool_menu_btn.setCursor(Qt.PointingHandCursor)
         self.tool_menu_btn.setFixedSize(36, 36)
@@ -13654,7 +13629,7 @@ class MainWindow(QMainWindow):
         parent = getattr(self, "main_container", None)
         if not parent:
             return
-        if self.context_drawer_expanded:
+        if getattr(self, "context_drawer_expanded", False):
             self.context_drawer_expanded = False
             self.context_drawer_user_width = (
                 self.context_drawer_width_before_expand
@@ -13684,9 +13659,9 @@ class MainWindow(QMainWindow):
             self.context_drawer_preferred_min_width,
             self.context_drawer_max_width,
         )
-        width = int(self.context_drawer_user_width or default_width)
+        width = int(getattr(self, "context_drawer_user_width", 0) or default_width)
         width_limit = content_width - self.context_drawer_gap - self.context_drawer_min_content_width
-        if self.context_drawer_expanded:
+        if getattr(self, "context_drawer_expanded", False):
             width = min(width, max(self.context_drawer_min_width, int(parent.width() * 0.72)))
         elif width_limit < self.context_drawer_preferred_min_width:
             width = max(self.context_drawer_min_width, width_limit)
@@ -16155,11 +16130,6 @@ class MainWindow(QMainWindow):
         if deliverable_scan_worker is not None and deliverable_scan_worker.isRunning():
             deliverable_scan_worker.wait(3000)
         self.deliverable_scan_worker = None
-        office_preview_worker = getattr(self, "office_preview_worker", None)
-        if office_preview_worker is not None and office_preview_worker.isRunning():
-            office_preview_worker.cancel()
-            office_preview_worker.wait(3000)
-        self.office_preview_worker = None
         if self.daemon_connect_worker and self.daemon_connect_worker.isRunning():
             self.daemon_connect_worker.wait(1000)
         self.daemon_connect_worker = None
@@ -17332,7 +17302,7 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(meta_label)
 
         menu_btn = QToolButton()
-        menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_tertiary))
+        menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_tertiary, 16))
         menu_btn.setToolTip("更多操作")
         menu_btn.setCursor(Qt.PointingHandCursor)
         menu_btn.setAutoRaise(True)
@@ -17432,9 +17402,8 @@ class MainWindow(QMainWindow):
         header_layout.setSpacing(6)
 
         project_btn = QPushButton(f" {name}")
-        project_btn.setIcon(qta.icon('fa5s.folder-open' if selected else 'fa5s.folder', color=DesignTokens.text_secondary))
+        project_btn.setIcon(sidebar_symbol_icon("folder-open" if selected else "folder", DesignTokens.text_secondary, 16))
         project_btn.setCursor(Qt.PointingHandCursor)
-        project_btn.setToolTip(path)
         project_btn.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
         project_btn.clicked.connect(lambda checked=False, p=path, q=query_active: self.handle_project_click(p, query_active=q))
         header_layout.addWidget(project_btn, 1)
@@ -17452,7 +17421,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(new_btn)
 
         menu_btn = QToolButton()
-        menu_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.primary if selected else DesignTokens.text_tertiary))
+        menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.primary if selected else DesignTokens.text_tertiary, 16))
         menu_btn.setToolTip("项目操作")
         menu_btn.setCursor(Qt.PointingHandCursor)
         menu_btn.setFixedSize(26, 26)
@@ -17932,7 +17901,7 @@ class MainWindow(QMainWindow):
                 button.setStyleSheet(apple_history_title_style(is_current))
         current_key = self._project_key(self._workspace_dir_for_state())
         for path, button in self.project_buttons.items():
-            button.setIcon(qta.icon('fa5s.folder-open' if self._project_key(path) == current_key else 'fa5s.folder', color=DesignTokens.text_secondary))
+            button.setIcon(sidebar_symbol_icon("folder-open" if self._project_key(path) == current_key else "folder", DesignTokens.text_secondary, 16))
 
     def show_session_menu(self, session_id, anchor):
         menu = create_styled_menu(self)
@@ -19144,10 +19113,20 @@ class MainWindow(QMainWindow):
     def _show_pdf_deliverable(self, pdf_path, source_path=None):
         view = self._ensure_deliverable_pdf_view()
         if view is None:
-            detail = str(QPDF_IMPORT_ERROR or "QtPdf 组件不可用")
-            self.deliverable_text_preview.setPlainText(f"无法加载 PDF 预览组件：{detail}")
+            try:
+                text = render_pdf_text_preview(pdf_path)
+            except Exception as exc:
+                detail = str(QPDF_IMPORT_ERROR or "QtPdf 组件不可用")
+                self.deliverable_text_preview.setPlainText(
+                    f"无法加载 PDF 版式预览组件：{detail}\n\nPDF 文本预览也无法生成：{exc}"
+                )
+                self.deliverable_status_label.setText("PDF 预览失败。")
+                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+                return
+            self.deliverable_text_preview.setPlainText(text)
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("PDF 预览组件不可用。")
+            self.current_deliverable_stale = False
+            self.deliverable_status_label.setText("QtPdf 不可用，正在显示 PDF 文本预览。")
             return
         error = self.deliverable_pdf_document.load(os.path.abspath(pdf_path))
         no_error = getattr(type(error), "None_", None)
@@ -19162,44 +19141,35 @@ class MainWindow(QMainWindow):
         self.deliverable_status_label.setText(f"正在预览 {os.path.basename(display_path)} · PDF")
 
     def _render_office_deliverable(self, path, force=False):
-        cache_path = office_preview_cache_path(path, get_app_data_dir())
-        if os.path.isfile(cache_path) and not force:
-            self._show_pdf_deliverable(cache_path, source_path=path)
-            return
-        running = getattr(self, "office_preview_worker", None)
-        if running is not None and running.isRunning():
-            self.deliverable_status_label.setText("正在生成另一份 Office 预览，完成后会继续打开当前文件。")
-            return
-        self.office_preview_source_path = path
-        self.deliverable_text_preview.setPlainText(
-            "正在调用本机 Microsoft Office 生成只读 PDF 预览。\n\n"
-            "首次打开或文件较大时可能需要一些时间，请不要操作可能出现的 Office 安全提示窗口。"
-        )
-        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-        self.deliverable_status_label.setText(f"正在生成预览：{os.path.basename(path)}")
-        worker = OfficePreviewWorker(path, cache_path, self)
-        self.office_preview_worker = worker
-        worker.completed.connect(self._handle_office_preview_completed)
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
-
-    def _handle_office_preview_completed(self, source_path, pdf_path, error):
-        self.office_preview_worker = None
-        current = getattr(self, "current_deliverable_path", "") or ""
-        same_source = bool(current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(source_path)))
-        if same_source and pdf_path:
-            self._show_pdf_deliverable(pdf_path, source_path=source_path)
-            return
-        if same_source:
-            self.deliverable_text_preview.setPlainText(
-                f"无法使用本机 Microsoft Office 生成预览。\n\n{error}\n\n"
-                "请确认已安装对应的 Word、PowerPoint 或 Excel 桌面应用，并关闭文件占用或安全提示后重试。"
-            )
+        try:
+            preview = render_structured_document_preview(path)
+        except Exception as exc:
+            self.deliverable_text_preview.setPlainText(f"无法生成内置文档预览：{exc}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("Office 预览失败，可重试或使用系统应用打开。")
+            self.deliverable_status_label.setText("内置文档预览失败。")
             return
-        if current and os.path.isfile(current):
-            self.render_selected_deliverable(force=False)
+        fingerprint = self._deliverable_fingerprint(path)
+        self.deliverable_render_fingerprint = fingerprint
+        self.deliverable_render_path = path
+        self.deliverable_render_loading = False
+        self.current_deliverable_stale = False
+        configuration_error = getattr(self, "deliverable_web_configuration_error", "")
+        if self.deliverable_web_view is None or configuration_error:
+            note = "应用内网页预览组件不可用，正在显示纯文本结构化预览。"
+            if configuration_error:
+                note = configuration_error + "\n\n" + note
+            self.deliverable_text_preview.setPlainText(note + "\n\n" + preview.get("text", ""))
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText(
+                f"正在预览 {os.path.basename(path)} · {preview.get('format') or '文档'} 文本"
+            )
+            return
+        base_url = QUrl.fromLocalFile(os.path.abspath(os.path.dirname(path)) + os.sep)
+        self.deliverable_web_view.setHtml(preview.get("html", ""), base_url)
+        self._show_deliverable_web_preview()
+        self.deliverable_status_label.setText(
+            f"正在预览 {os.path.basename(path)} · {preview.get('format') or '文档'} 内置预览"
+        )
 
     def handle_deliverable_render_progress(self, progress):
         if not getattr(self, "deliverable_render_loading", False):
@@ -22115,14 +22085,6 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     log_startup_stage("entry")
-    if "--office-preview-export" in sys.argv:
-        flag_index = sys.argv.index("--office-preview-export")
-        values = sys.argv[flag_index + 1:flag_index + 3]
-        if len(values) != 2:
-            print(json.dumps({"ok": False, "error": "Office 预览导出参数不完整。"}, ensure_ascii=False))
-            sys.exit(2)
-        office_helper_app = QApplication(sys.argv)
-        sys.exit(run_office_export_cli(values[0], values[1]))
     if "--daemon" in sys.argv:
         port = DEFAULT_PORT
         for arg in sys.argv:

@@ -31,6 +31,7 @@ from main import (
     MainWindow,
     SessionActivityIndicator,
     SessionState,
+    sidebar_symbol_icon,
     UI_ERROR_LOG_FILENAME,
     SkillsCenterDialog,
     SopTemplateManager,
@@ -83,6 +84,15 @@ class SkillCenterHelperTests(unittest.TestCase):
         font.setPointSize.assert_called_once_with(10)
         app.setFont.assert_called_once_with(font)
         apply_tooltip_theme_mock.assert_called_once_with(app)
+
+    def test_sidebar_symbols_are_qt_drawn_icons(self):
+        app = QApplication.instance() or QApplication([])
+
+        for kind in ("plus", "ellipsis", "folder", "folder-open", "folder-plus"):
+            with self.subTest(kind=kind):
+                icon = sidebar_symbol_icon(kind, DesignTokens.text_secondary, 16)
+                self.assertFalse(icon.isNull())
+                self.assertFalse(icon.pixmap(16, 16).isNull())
 
     def test_session_history_ready_requires_completed_load(self):
         ready = type("State", (), {"history_loaded": True, "history_loading": False})()

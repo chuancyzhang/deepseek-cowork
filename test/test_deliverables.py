@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 from PySide6.QtCore import QByteArray, QBuffer, QEventLoop, QIODevice, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QWheelEvent
@@ -257,6 +258,38 @@ class TestDeliverableScanning(unittest.TestCase):
 
             window.deliverable_web_view.setUrl.assert_not_called()
             self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
+
+    def test_office_deliverable_uses_builtin_structured_preview(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            docx_path = os.path.join(tmp, "report.docx")
+            with open(docx_path, "wb") as handle:
+                handle.write(b"docx")
+
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = docx_path
+            window.current_deliverable_stale = True
+            window.deliverable_render_fingerprint = None
+            window.deliverable_render_path = ""
+            window.deliverable_web_view = QWidget()
+            window.deliverable_web_view.setHtml = MagicMock()
+            window.deliverable_web_preview = window.deliverable_web_view
+            window.deliverable_text_preview = QTextEdit()
+            window.deliverable_preview_stack = QStackedWidget()
+            window.deliverable_preview_stack.addWidget(window.deliverable_text_preview)
+            window.deliverable_preview_stack.addWidget(window.deliverable_web_view)
+            window.deliverable_status_label = QLabel()
+
+            with patch(
+                "main.render_structured_document_preview",
+                return_value={"format": "DOCX", "html": "<html>preview</html>", "text": "preview"},
+            ) as preview_mock:
+                window.render_selected_deliverable()
+
+            preview_mock.assert_called_once_with(docx_path)
+            window.deliverable_web_view.setHtml.assert_called_once()
+            self.assertIs(window.deliverable_preview_stack.currentWidget(), window.deliverable_web_view)
+            self.assertIn("内置预览", window.deliverable_status_label.text())
 
     def test_light_preview_scripts_throttle_continuous_rendering(self):
         bootstrap = deliverable_preview_bootstrap_script()

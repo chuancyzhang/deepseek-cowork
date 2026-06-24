@@ -94,6 +94,86 @@ class SkillCenterHelperTests(unittest.TestCase):
                 self.assertFalse(icon.isNull())
                 self.assertFalse(icon.pixmap(16, 16).isNull())
 
+    def test_project_selector_only_allows_empty_ready_idle_session(self):
+        window = MainWindow.__new__(MainWindow)
+        ready = type(
+            "State",
+            (),
+            {
+                "history_loaded": True,
+                "history_loading": False,
+                "messages": [],
+                "llm_worker": None,
+                "daemon_running": False,
+                "code_worker": None,
+            },
+        )()
+        with_messages = type(
+            "State",
+            (),
+            {
+                "history_loaded": True,
+                "history_loading": False,
+                "messages": [{"role": "user", "content": "hello"}],
+                "llm_worker": None,
+                "daemon_running": False,
+                "code_worker": None,
+            },
+        )()
+        loading = type(
+            "State",
+            (),
+            {
+                "history_loaded": False,
+                "history_loading": True,
+                "messages": [],
+                "llm_worker": None,
+                "daemon_running": False,
+                "code_worker": None,
+            },
+        )()
+
+        self.assertTrue(window._project_selector_switch_allowed(ready))
+        self.assertFalse(window._project_selector_switch_allowed(with_messages))
+        self.assertFalse(window._project_selector_switch_allowed(loading))
+
+    def test_select_project_for_current_conversation_rebinds_empty_session(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "State",
+            (),
+            {
+                "session_id": "session-1",
+                "workspace_dir": "",
+                "persisted_conversation_meta": {},
+                "history_loaded": True,
+                "history_loading": False,
+                "messages": [],
+                "llm_worker": None,
+                "daemon_running": False,
+                "code_worker": None,
+            },
+        )()
+        window.get_current_session = lambda: state
+        window.config_manager = MagicMock()
+        window._apply_workspace_to_ui = MagicMock()
+        window.normalize_session_ui = MagicMock()
+        window.refresh_project_selector = MagicMock()
+        with tempfile.TemporaryDirectory() as project:
+            selected = window.select_project_for_current_conversation(project)
+
+        normalized = os.path.normpath(os.path.abspath(project))
+        self.assertTrue(selected)
+        self.assertEqual(state.workspace_dir, normalized)
+        self.assertEqual(state.persisted_conversation_meta["workspace_dir"], normalized)
+        window.config_manager.upsert_project.assert_called_once_with(normalized)
+        window._apply_workspace_to_ui.assert_called_once_with(
+            normalized,
+            refresh_sidebar=True,
+            remember_workspace=True,
+            persist_default=True,
+        )
+
     def test_session_history_ready_requires_completed_load(self):
         ready = type("State", (), {"history_loaded": True, "history_loading": False})()
         loading = type("State", (), {"history_loaded": False, "history_loading": True})()

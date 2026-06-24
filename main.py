@@ -187,7 +187,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
-from PySide6.QtWidgets import QProgressBar, QScrollBar
+from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
 
 QWebEngineView = None
@@ -12615,14 +12615,14 @@ class MainWindow(QMainWindow):
         project_header_layout.addStretch()
         self.sidebar_projects_menu_btn = QToolButton()
         self.sidebar_projects_menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_secondary, 16))
-        self.sidebar_projects_menu_btn.setToolTip("项目与侧边栏选项")
+        self.sidebar_projects_menu_btn.setAccessibleName("项目与侧边栏选项")
         self.sidebar_projects_menu_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_projects_menu_btn.setFixedSize(28, 28)
         self.sidebar_projects_menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
         self.sidebar_projects_menu_btn.clicked.connect(self.show_sidebar_projects_menu)
         self.sidebar_add_project_btn = QToolButton()
         self.sidebar_add_project_btn.setIcon(sidebar_symbol_icon("folder-plus", DesignTokens.text_secondary, 16))
-        self.sidebar_add_project_btn.setToolTip("添加项目")
+        self.sidebar_add_project_btn.setAccessibleName("添加项目")
         self.sidebar_add_project_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_add_project_btn.setFixedSize(28, 28)
         self.sidebar_add_project_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
@@ -13181,10 +13181,6 @@ class MainWindow(QMainWindow):
         self.ws_label = QLabel("当前文件夹: 未选择")
         self.ws_label.setText("当前项目：未选择")
         self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
-        self.connect_project_btn = QPushButton("连接项目")
-        self.connect_project_btn.setCursor(Qt.PointingHandCursor)
-        self.connect_project_btn.setStyleSheet(apple_button_style("secondary", radius=12))
-        self.connect_project_btn.clicked.connect(self.select_workspace)
         self.security_badge = QLabel("安全范围：仅工作区")
         self.security_badge.setStyleSheet(f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
         self.security_badge.hide()
@@ -13202,7 +13198,6 @@ class MainWindow(QMainWindow):
         
         ws_layout.setSpacing(8)
         ws_layout.addWidget(self.ws_label)
-        ws_layout.addWidget(self.connect_project_btn)
         top_bar.addWidget(ws_container)
 
         self.context_rail = QFrame()
@@ -13459,6 +13454,27 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.stop_btn)
         prompt_toolbar.addWidget(self.action_btn)
         input_card_layout.addLayout(prompt_toolbar)
+
+        self.project_selector_btn = QToolButton()
+        self.project_selector_btn.setCursor(Qt.PointingHandCursor)
+        self.project_selector_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.project_selector_btn.setIcon(sidebar_symbol_icon("folder", DesignTokens.text_secondary, 16))
+        self.project_selector_btn.setIconSize(QSize(16, 16))
+        self.project_selector_btn.setFixedHeight(32)
+        self.project_selector_btn.setMaximumWidth(280)
+        self.project_selector_btn.setStyleSheet(
+            f"QToolButton {{ background: transparent; color: {DesignTokens.text_secondary}; border: none; "
+            "border-radius: 12px; padding: 4px 10px; font-size: 12px; text-align: left; }}"
+            f"QToolButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}"
+            f"QToolButton:disabled {{ color: {DesignTokens.text_tertiary}; background: transparent; }}"
+        )
+        self.project_selector_btn.clicked.connect(self.show_project_selector_menu)
+        project_selector_row = QHBoxLayout()
+        project_selector_row.setContentsMargins(0, 0, 0, 0)
+        project_selector_row.setSpacing(0)
+        project_selector_row.addWidget(self.project_selector_btn)
+        project_selector_row.addStretch()
+        input_card_layout.addLayout(project_selector_row)
 
         self.input_row = QWidget()
         self.input_row_layout = QHBoxLayout(self.input_row)
@@ -14573,8 +14589,7 @@ class MainWindow(QMainWindow):
             self.action_btn.setEnabled(True)
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
             self.ws_label.setText("未连接项目 · 纯对话")
-        if hasattr(self, "connect_project_btn"):
-            self.connect_project_btn.setVisible(not bool(self.workspace_dir))
+        self.refresh_project_selector()
         self.refresh_context_badges()
 
     def refresh_context_badges(self, session_id=None):
@@ -16378,6 +16393,7 @@ class MainWindow(QMainWindow):
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
+        self.refresh_project_selector(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.refresh_observability_view(state.session_id)
         self.update_skill_capture_button_state()
@@ -17396,31 +17412,39 @@ class MainWindow(QMainWindow):
         project_btn = QPushButton(f" {name}")
         project_btn.setIcon(sidebar_symbol_icon("folder-open" if selected else "folder", DesignTokens.text_secondary, 16))
         project_btn.setCursor(Qt.PointingHandCursor)
+        project_btn.setMinimumWidth(0)
+        project_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         project_btn.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
         project_btn.clicked.connect(lambda checked=False, p=path, q=query_active: self.handle_project_click(p, query_active=q))
         header_layout.addWidget(project_btn, 1)
 
         action_icon_size = QSize(12, 12)
+        actions = QWidget()
+        actions.setFixedWidth(56)
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(4)
 
         new_btn = QToolButton()
         new_btn.setIcon(sidebar_plus_icon(DesignTokens.primary if selected else DesignTokens.text_secondary, 16))
-        new_btn.setToolTip("在此项目中新建对话")
+        new_btn.setAccessibleName("在此项目中新建对话")
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.setFixedSize(26, 26)
         new_btn.setIconSize(action_icon_size)
         new_btn.setStyleSheet(apple_sidebar_action_button_style(selected))
         new_btn.clicked.connect(lambda checked=False, p=path: self.new_conversation_for_project(p))
-        header_layout.addWidget(new_btn)
+        actions_layout.addWidget(new_btn)
 
         menu_btn = QToolButton()
         menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.primary if selected else DesignTokens.text_tertiary, 16))
-        menu_btn.setToolTip("项目操作")
+        menu_btn.setAccessibleName("项目操作")
         menu_btn.setCursor(Qt.PointingHandCursor)
         menu_btn.setFixedSize(26, 26)
         menu_btn.setIconSize(action_icon_size)
         menu_btn.setStyleSheet(apple_sidebar_action_button_style(selected))
         menu_btn.clicked.connect(lambda checked=False, p=path, btn_ref=menu_btn: self.show_project_menu(p, btn_ref))
-        header_layout.addWidget(menu_btn)
+        actions_layout.addWidget(menu_btn)
+        header_layout.addWidget(actions, 0, Qt.AlignVCenter)
         outer.addWidget(header)
 
         if fully_expanded:
@@ -17524,6 +17548,128 @@ class MainWindow(QMainWindow):
         self.config_manager.upsert_project(normalized)
         self.create_new_session(workspace_dir=normalized)
         self.refresh_history_list()
+
+    def _project_selector_switch_allowed(self, state=None):
+        state = state or self.get_current_session()
+        if not state:
+            return False
+        if not session_history_ready(state):
+            return False
+        if getattr(state, "messages", None):
+            return False
+        return not bool(
+            (state.llm_worker and state.llm_worker.isRunning())
+            or getattr(state, "daemon_running", False)
+            or (state.code_worker and state.code_worker.isRunning())
+        )
+
+    def refresh_project_selector(self, session_id=None):
+        button = getattr(self, "project_selector_btn", None)
+        if not button:
+            return
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        workspace_dir = self._workspace_dir_for_state(state)
+        project_meta = None
+        for item in self.config_manager.get_projects(include_hidden=False):
+            if self._project_key(item.get("path")) == self._project_key(workspace_dir):
+                project_meta = item
+                break
+        label = self._project_display_name(workspace_dir, project_meta) if workspace_dir else "不使用项目"
+        metrics = QFontMetrics(button.font())
+        button.setText(metrics.elidedText(label, Qt.ElideRight, 210))
+        button.setIcon(sidebar_symbol_icon("folder-open" if workspace_dir else "folder", DesignTokens.text_secondary, 16))
+        allowed = self._project_selector_switch_allowed(state)
+        button.setEnabled(allowed)
+        if allowed:
+            button.setToolTip("选择已加入的项目")
+        elif state and getattr(state, "messages", None):
+            button.setToolTip("已有内容的对话不能切换项目")
+        else:
+            button.setToolTip("当前任务运行中或会话尚未加载，暂时不能切换项目")
+
+    def select_project_for_current_conversation(self, path):
+        state = self.get_current_session()
+        if not self._project_selector_switch_allowed(state):
+            self.refresh_project_selector()
+            return False
+        normalized = self._normalize_project_path(path)
+        if normalized and not os.path.isdir(normalized):
+            QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
+            return False
+        if normalized:
+            self.config_manager.upsert_project(normalized)
+        self._set_session_workspace(state, normalized)
+        self._apply_workspace_to_ui(
+            normalized,
+            refresh_sidebar=True,
+            remember_workspace=bool(normalized),
+            persist_default=bool(normalized),
+        )
+        self.normalize_session_ui(state)
+        self.refresh_project_selector(state.session_id)
+        return True
+
+    def add_project_from_selector(self):
+        if not self._project_selector_switch_allowed():
+            self.refresh_project_selector()
+            return
+        directory = QFileDialog.getExistingDirectory(self, "添加并选择项目")
+        if directory:
+            self.select_project_for_current_conversation(directory)
+
+    def show_project_selector_menu(self):
+        if not self._project_selector_switch_allowed():
+            self.refresh_project_selector()
+            return
+        menu = create_styled_menu(self)
+        search = QLineEdit(menu)
+        search.setPlaceholderText("搜索项目")
+        search.setClearButtonEnabled(True)
+        search.setFixedHeight(32)
+        search.setMinimumWidth(260)
+        search.setStyleSheet(apple_search_field_style())
+        search_action = QWidgetAction(menu)
+        search_action.setDefaultWidget(search)
+        menu.addAction(search_action)
+        menu.addSeparator()
+
+        current_workspace = self._workspace_dir_for_state()
+        project_actions = []
+        for project in self.config_manager.get_projects(include_hidden=False):
+            path = self._normalize_project_path(project.get("path"))
+            if not path:
+                continue
+            action = QAction(self._project_display_name(path, project), menu)
+            action.setCheckable(True)
+            action.setChecked(self._project_key(path) == self._project_key(current_workspace))
+            action.setData(path)
+            action.triggered.connect(lambda checked=False, p=path: self.select_project_for_current_conversation(p))
+            menu.addAction(action)
+            project_actions.append(action)
+
+        if not project_actions:
+            empty_action = QAction("尚未加入项目", menu)
+            empty_action.setEnabled(False)
+            menu.addAction(empty_action)
+
+        menu.addSeparator()
+        add_action = QAction("添加新项目", menu)
+        add_action.triggered.connect(self.add_project_from_selector)
+        menu.addAction(add_action)
+        none_action = QAction("不使用项目", menu)
+        none_action.setCheckable(True)
+        none_action.setChecked(not bool(current_workspace))
+        none_action.triggered.connect(lambda: self.select_project_for_current_conversation(""))
+        menu.addAction(none_action)
+
+        def filter_projects(text):
+            query = str(text or "").strip().lower()
+            for action in project_actions:
+                action.setVisible(not query or query in action.text().lower())
+
+        search.textChanged.connect(filter_projects)
+        menu.aboutToShow.connect(search.setFocus)
+        menu.exec(self.project_selector_btn.mapToGlobal(self.project_selector_btn.rect().bottomLeft()))
 
     def show_project_menu(self, path, anchor):
         normalized = self._normalize_project_path(path)

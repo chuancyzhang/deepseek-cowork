@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 import zipfile
 from urllib.parse import urlparse
 
@@ -27,13 +28,14 @@ NODE_SOURCES = {
 NODE_VERSION = "v24.14.1"
 NODE_ARCHIVE = "node-v24.14.1-win-x64.zip"
 NODE_SHA256 = "6E50CE5498C0CEBC20FD39AB3FF5DF836ED2F8A31AA093CECAD8497CFF126D70"
+TOOLKIT_MARKER_SCHEMA = 2
 
 TOOLKITS = {
     "documents": {
         "name": "文档工具包",
         "description": "读取与生成 XLSX、DOCX、PPTX 和 PDF",
-        "packages": ["openpyxl", "python-docx", "python-pptx", "pypdf", "reportlab"],
-        "imports": ["openpyxl", "docx", "pptx", "pypdf", "reportlab"],
+        "packages": ["openpyxl", "python-docx", "python-pptx", "Pillow", "pypdf", "reportlab"],
+        "imports": ["openpyxl", "docx", "pptx", "PIL.Image", "pypdf", "reportlab"],
         "skills": ["document-reader"],
     },
     "data-analysis": {
@@ -166,12 +168,52 @@ def toolkit_path(toolkit_id):
     return os.path.join(toolkits_root(), toolkit_id, "site-packages")
 
 
+def _toolkit_definition_hash(toolkit_id):
+    spec = TOOLKITS[toolkit_id]
+    payload = {
+        "packages": spec["packages"],
+        "imports": spec["imports"],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _read_toolkit_marker(toolkit_id):
+    marker_path = os.path.join(os.path.dirname(toolkit_path(toolkit_id)), "toolkit.json")
+    try:
+        with open(marker_path, "r", encoding="utf-8") as handle:
+            marker = json.load(handle)
+        return marker if isinstance(marker, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _toolkit_marker_health(toolkit_id, marker):
+    from core.sandbox_runtime import get_runtime_executable
+
+    if not marker:
+        return False, "缺少工具包健康标记。"
+    if marker.get("schema") != TOOLKIT_MARKER_SCHEMA:
+        return False, "工具包由旧版本安装，需要更新后重新验收。"
+    if marker.get("definition_hash") != _toolkit_definition_hash(toolkit_id):
+        return False, "工具包依赖定义已变化，需要更新。"
+    current_python = os.path.normcase(os.path.abspath(get_runtime_executable("python") or ""))
+    marker_python = os.path.normcase(os.path.abspath(marker.get("python_executable") or ""))
+    if not current_python or marker_python != current_python:
+        return False, "沙箱 Python 运行时已变化，需要重新安装工具包。"
+    if not marker.get("verified"):
+        return False, marker.get("verification_error") or "工具包尚未通过完整性验证。"
+    return True, ""
+
+
 def installed_toolkit_paths():
     paths = []
     for toolkit_id in TOOLKITS:
         path = toolkit_path(toolkit_id)
-        marker = os.path.join(os.path.dirname(path), "toolkit.json")
-        if os.path.isdir(path) and os.path.isfile(marker):
+        marker = _read_toolkit_marker(toolkit_id)
+        healthy, _error = _toolkit_marker_health(toolkit_id, marker)
+        if os.path.isdir(path) and healthy:
             paths.append(path)
     return paths
 
@@ -191,14 +233,7 @@ def _directory_size(path):
 def toolkit_status(toolkit_id):
     spec = TOOLKITS[toolkit_id]
     root = os.path.dirname(toolkit_path(toolkit_id))
-    marker_path = os.path.join(root, "toolkit.json")
-    marker = {}
-    if os.path.isfile(marker_path):
-        try:
-            with open(marker_path, "r", encoding="utf-8") as handle:
-                marker = json.load(handle)
-        except Exception:
-            marker = {}
+    marker = _read_toolkit_marker(toolkit_id)
     installed_packages = {
         str(package).strip().lower()
         for package in (marker.get("packages") or [])
@@ -207,15 +242,155 @@ def toolkit_status(toolkit_id):
     required_packages = {package.lower() for package in spec["packages"]}
     missing_packages = sorted(required_packages - installed_packages)
     installed = bool(marker and os.path.isdir(toolkit_path(toolkit_id)))
+    healthy, health_error = _toolkit_marker_health(toolkit_id, marker) if installed else (False, "")
+    needs_update = installed and (
+        marker.get("schema") != TOOLKIT_MARKER_SCHEMA
+        or marker.get("definition_hash") != _toolkit_definition_hash(toolkit_id)
+        or bool(missing_packages)
+    )
+    needs_repair = installed and not needs_update and not healthy
     return {
         "id": toolkit_id,
         **spec,
         "installed": installed,
-        "needs_update": installed and bool(missing_packages),
+        "healthy": healthy,
+        "needs_update": needs_update,
+        "needs_repair": needs_repair,
+        "health_error": health_error,
         "missing_packages": missing_packages if installed else [],
         "source": marker.get("source") or "",
         "size": _directory_size(root),
     }
+
+
+def _verify_toolkit_candidate(python_exe, toolkit_id, candidate_path):
+    from core.sandbox_runtime import build_sandbox_env
+
+    imports = TOOLKITS[toolkit_id]["imports"]
+    code = (
+        "import importlib,json,traceback\n"
+        f"checks={json.dumps(imports, ensure_ascii=False)}\n"
+        "result={'ok': True, 'checked': [], 'error': ''}\n"
+        "try:\n"
+        "    for name in checks:\n"
+        "        importlib.import_module(name)\n"
+        "        result['checked'].append(name)\n"
+        "except Exception:\n"
+        "    result['ok'] = False\n"
+        "    result['error'] = traceback.format_exc()\n"
+        "print(json.dumps(result, ensure_ascii=False))\n"
+        "raise SystemExit(0 if result['ok'] else 1)\n"
+    )
+    env = build_sandbox_env()
+    bootstrap_entries = [
+        item
+        for item in (env.get("PYTHONPATH") or "").split(os.pathsep)
+        if item and os.path.basename(item) == "python_bootstrap"
+    ]
+    env["PYTHONPATH"] = os.pathsep.join(bootstrap_entries + [candidate_path])
+    completed = subprocess.run(
+        [python_exe, "-X", "utf8", "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **subprocess_kwargs_no_window(),
+    )
+    output = (completed.stdout or "").strip()
+    payload = {}
+    if output:
+        try:
+            payload = json.loads(output.splitlines()[-1])
+        except (ValueError, TypeError):
+            payload = {}
+    if completed.returncode != 0 or not payload.get("ok"):
+        detail = payload.get("error") or completed.stderr or output or "未知导入错误"
+        raise RuntimeError(f"{TOOLKITS[toolkit_id]['name']}完整性验证失败：\n{detail.strip()}")
+    return payload.get("checked") or []
+
+
+def _repair_python_runner_import_conflicts(python_exe, toolkit_id, candidate_path):
+    from core.sandbox_runtime import build_sandbox_env
+
+    skill_path = os.path.join(
+        get_app_data_dir(),
+        "runtime_sandbox",
+        "v1",
+        "skills",
+        "python-runner",
+        "python",
+        "site-packages",
+    )
+    if not os.path.isdir(skill_path):
+        return []
+    base_env = build_sandbox_env(skill_id="python-runner")
+    bootstrap_entries = [
+        item
+        for item in (base_env.get("PYTHONPATH") or "").split(os.pathsep)
+        if item and os.path.basename(item) == "python_bootstrap"
+    ]
+    repaired = []
+    for import_name in TOOLKITS[toolkit_id]["imports"]:
+        env = dict(base_env)
+        env["PYTHONPATH"] = os.pathsep.join(bootstrap_entries + [skill_path, candidate_path])
+        probe = subprocess.run(
+            [python_exe, "-X", "utf8", "-c", f"import importlib; importlib.import_module({import_name!r})"],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_kwargs_no_window(),
+        )
+        if probe.returncode == 0:
+            continue
+        top_level = import_name.split(".", 1)[0]
+        candidates = [
+            os.path.join(skill_path, top_level),
+            os.path.join(skill_path, top_level + ".py"),
+        ]
+        conflict_paths = [path for path in candidates if os.path.exists(path)]
+        if not conflict_paths:
+            continue
+        for path in conflict_paths:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        retry = subprocess.run(
+            [python_exe, "-X", "utf8", "-c", f"import importlib; importlib.import_module({import_name!r})"],
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_kwargs_no_window(),
+        )
+        if retry.returncode != 0:
+            raise RuntimeError(
+                f"清理 python-runner 中冲突的 {top_level} 后仍无法导入 {import_name}：\n"
+                f"{(retry.stderr or retry.stdout or '未知导入错误').strip()}"
+            )
+        repaired.append(top_level)
+    return sorted(set(repaired))
+
+
+def _replace_toolkit_root(staged_root, target_root):
+    backup_root = target_root + ".previous"
+    if os.path.isdir(backup_root):
+        shutil.rmtree(backup_root)
+    had_existing = os.path.isdir(target_root)
+    if had_existing:
+        os.replace(target_root, backup_root)
+    try:
+        os.replace(staged_root, target_root)
+    except Exception:
+        if had_existing and os.path.isdir(backup_root) and not os.path.exists(target_root):
+            os.replace(backup_root, target_root)
+        raise
+    if os.path.isdir(backup_root):
+        shutil.rmtree(backup_root)
 
 
 def install_toolkit(toolkit_id, python_source, progress_callback=None, force=False):
@@ -230,35 +405,60 @@ def install_toolkit(toolkit_id, python_source, progress_callback=None, force=Fal
     if not valid_https_source(source_url):
         raise ValueError("Python 下载源必须是有效的 HTTPS 地址。")
     spec = TOOLKITS[toolkit_id]
-    target = toolkit_path(toolkit_id)
-    os.makedirs(target, exist_ok=True)
-    if progress_callback:
-        progress_callback(f"正在从 {python_source.get('name') or source_url} 安装 {spec['name']}…", 10)
-    command = [python_exe, "-m", "pip", "install", "--index-url", source_url, "--upgrade", "--target", target]
-    if force:
-        command.append("--force-reinstall")
-    command.extend(spec["packages"])
-    completed = subprocess.run(
-        command,
-        env=build_sandbox_env(),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **subprocess_kwargs_no_window(),
-    )
-    if completed.returncode != 0:
-        raise RuntimeError((completed.stderr or completed.stdout or "pip 安装失败").strip())
-    marker = {
-        "id": toolkit_id,
-        "packages": spec["packages"],
-        "source": python_source.get("name") or source_url,
-        "source_url": source_url,
-    }
-    with open(os.path.join(os.path.dirname(target), "toolkit.json"), "w", encoding="utf-8") as handle:
-        json.dump(marker, handle, ensure_ascii=False, indent=2)
-    if progress_callback:
-        progress_callback(f"{spec['name']}安装完成。", 100)
+    target_root = os.path.dirname(toolkit_path(toolkit_id))
+    staged_root = tempfile.mkdtemp(prefix=f".{toolkit_id}-", dir=toolkits_root())
+    staged_target = os.path.join(staged_root, "site-packages")
+    os.makedirs(staged_target)
+    try:
+        if progress_callback:
+            progress_callback(f"正在从 {python_source.get('name') or source_url} 下载并安装 {spec['name']}…", 20)
+        command = [python_exe, "-m", "pip", "install", "--index-url", source_url, "--upgrade", "--target", staged_target]
+        if force:
+            command.append("--force-reinstall")
+        command.extend(spec["packages"])
+        completed = subprocess.run(
+            command,
+            env=build_sandbox_env(),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_kwargs_no_window(),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError((completed.stderr or completed.stdout or "pip 安装失败").strip())
+        if progress_callback:
+            progress_callback(f"正在验证 {spec['name']} 的全部依赖…", 75)
+        checked_imports = _verify_toolkit_candidate(python_exe, toolkit_id, staged_target)
+        repaired_conflicts = _repair_python_runner_import_conflicts(
+            python_exe,
+            toolkit_id,
+            staged_target,
+        )
+        marker = {
+            "schema": TOOLKIT_MARKER_SCHEMA,
+            "id": toolkit_id,
+            "packages": spec["packages"],
+            "imports": checked_imports,
+            "definition_hash": _toolkit_definition_hash(toolkit_id),
+            "python_executable": os.path.abspath(python_exe),
+            "verified": True,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "repaired_python_runner_conflicts": repaired_conflicts,
+            "source": python_source.get("name") or source_url,
+            "source_url": source_url,
+        }
+        with open(os.path.join(staged_root, "toolkit.json"), "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, ensure_ascii=False, indent=2)
+        if progress_callback:
+            progress_callback(f"正在启用 {spec['name']}…", 92)
+        _replace_toolkit_root(staged_root, target_root)
+        staged_root = ""
+        if progress_callback:
+            progress_callback(f"{spec['name']}安装并验证完成。", 100)
+    finally:
+        if staged_root and os.path.isdir(staged_root):
+            shutil.rmtree(staged_root, ignore_errors=True)
     return toolkit_status(toolkit_id)
 
 

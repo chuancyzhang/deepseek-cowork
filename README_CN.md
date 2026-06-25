@@ -111,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 下载文件会放在 `.runtime_downloads/`，解压后目录为 `node_env/` 与 `git_bash_env/`。
 Windows 打包版会优先直接从当前应用目录解析内置运行时，包括 `_internal/node_env/node.exe` 与 `_internal/git_bash_env/bin/bash.exe`。AppData 下的 `runtime_sandbox` 继续作为临时、缓存和 skill 依赖目录，不再优先作为可执行运行时来源，因此自动升级后会使用新解压的 `_internal` 文件。如需覆盖探测结果，可设置 `COWORK_NODE_EXE`、`COWORK_NODE_DIR`、`COWORK_BASH_EXE`、`COWORK_GIT_BASH_DIR` 或 `COWORK_BASH_DIR`。
 
-打包版保留完整沙箱 Python 基础环境。文档、数据分析、金融分析、浏览器自动化和网页研究第三方库可在“设置 → 组件与依赖”按需安装，并支持 PyPI、清华、阿里云及自定义 HTTPS 源；Node.js 可从官方源或 npmmirror 安装。安装包继续包含 `PySide6-Addons` 与 QtWebEngine 运行资源。
+打包版保留完整沙箱 Python 基础环境。文档、数据分析、金融分析、浏览器自动化和网页研究第三方库可在“设置 → 组件与依赖”按需安装，并支持 PyPI、清华、阿里云及自定义 HTTPS 源；Node.js 可从官方源或 npmmirror 安装。用户可以连续加入多个组件任务，应用会按顺序逐个安装；设置页关闭后任务继续运行，并可在重新打开时查看进度与日志。Python 工具包先安装到临时目录并逐项验证声明模块，全部通过后才原子启用，避免残缺依赖被误报为“已安装”。安装包继续包含 `PySide6-Addons` 与 QtWebEngine 运行资源。
 AI 在 execution 模式下默认可直接调用 `run_python_code`，无需先通过 `tool_search` 发现；JavaScript 仍通过 `run_node_code` 执行，`bash` 工具优先使用 Git Bash，Windows 上缺失 Git Bash 时会退回 `cmd.exe`。
 带截图或其他图片输入的回合也会保留 `tool_search` 发现链路，这样文档读取、浏览器辅助等延迟工具仍可按需被发现，而不会因为视觉输入而消失。
 `python-runner` 的 `install_package` 会在与 `run_python_code` 相同的沙盒运行时里验证导入是否成功。第三方包会持久化到 AppData 的 `runtime_sandbox/.../skills/python-runner/python/site-packages`，重启后仍可用；如果依赖缓存记录还在但沙盒已经无法导入，会自动触发重新安装。

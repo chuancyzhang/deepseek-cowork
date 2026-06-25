@@ -48,8 +48,9 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/interaction.py**：桥接 UI 与推理流程，统一消息与工具调用格式。
 *   **core/mcp_client.py**：封装 MCP `stdio` 与 Streamable HTTP 会话，负责连接测试、工具枚举与工具调用；对 `mcp` Python client 的新旧 Streamable HTTP API 做版本兼容。
 *   **core/llm/providers.py**：在 OpenAI-compatible / Anthropic provider 边界把 `input_image` 转换成 base64 data URL 视觉块；未开启 `supports_vision` 时仅保留文本提示，因此 OCR 走模型能力而不额外引入本地 OCR 引擎。Anthropic 适配器将连续工具结果合并为紧随 assistant `tool_use` 的单条 user `tool_result` 消息，满足单轮多工具调用的协议约束。OpenAI-compatible provider 只在模型显式声明推理档位时发送通用 `reasoning_effort`，DeepSeek 请求继续附带 Thinking 参数；provider 还提供设置页使用的最小真实连接测试。OpenAI-compatible provider 会请求并解析 streaming usage 中的 cached token 细节；会话级 prompt cache key 仅在模型配置显式声明参数名时透传。
-*   **core/sandbox_runtime.py / 打包 runtime**：随包保留 Python 基础环境与 Git Bash，Node.js 改为 AppData 可选运行时。文档等第三方库不再预装；五类工具包由 `core/runtime_components.py` 安装并注入所有沙箱 Python 入口，文档工具包包含用于生成 PDF 的 ReportLab，并会根据安装标记提示旧工具包更新依赖。Skill 私有依赖和自动修复保持兼容。QtWebEngine 及其传递模块继续随包。
+*   **core/sandbox_runtime.py / 打包 runtime**：随包保留 Python 基础环境与 Git Bash，Node.js 改为 AppData 可选运行时。文档等第三方库不再预装；五类工具包由 `core/runtime_components.py` 事务安装到临时目录，在隔离 `PYTHONPATH` 中验证全部声明模块后原子替换正式目录，只有带当前 schema、定义哈希和 Python 运行时标记的健康工具包才会注入沙箱。文档工具包显式包含 Pillow 与 ReportLab；若 `python-runner` 中的残缺同名模块遮蔽健康工具包，只清理发生冲突的顶层模块。Skill 私有依赖和自动修复保持兼容。QtWebEngine 及其传递模块继续随包。
 *   **组件下载源**：Python 组件统一使用配置的 pip index，Node.js 使用配置的归档源并验证固定 SHA-256；自定义源仅接受无内嵌凭据的 HTTPS 地址，下载失败不静默换源。
+*   **组件后台队列**：主窗口持有应用级组件任务管理器，安装、更新、修复和卸载严格单任务串行执行；设置窗口只订阅任务快照，因此关闭后任务仍继续，重开可恢复队列、进度和会话日志，完成或失败由托盘通知反馈。
 *   **core/env_utils.py**：`ensure_package_installed(...)` 不再只依赖主进程 `importlib` 判断是否已安装，而是用沙盒 Python 直接验证目标模块可导入。对于 `python-runner`，若依赖状态缓存显示已安装但沙盒实际无法导入，会强制重装一次以修复失真的缓存记录；若最终失败，则把沙盒 traceback 回传，便于定位 `ImportError` / DLL load failure。
 *   **core/process_utils.py**：集中提供 Windows 无控制台窗口的 subprocess 参数、进程单例锁和 runtime debug 日志开关，供 UI、updater、沙盒和系统技能复用，避免新增执行入口再次闪出 CMD。
 *   **deepseek-cowork.spec**：内置 `python_env` 除 `Lib/` 和最小 `site-packages` 外，还要包含 Windows `DLLs/` 或同类平台扩展目录，以及常见 MSVC runtime DLL；否则 `_socket`、`_ssl` 一类标准扩展缺失，或 native wheel 在 `_internal/python_env` 中无法加载。

@@ -188,7 +188,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -6162,6 +6162,146 @@ class RuntimeComponentWorker(QThread):
             self.finished_signal.emit({"ok": False, "component_id": self.component_id, "error": str(exc)})
 
 
+class ComponentTaskManager(QObject):
+    state_changed = Signal(dict)
+    log_changed = Signal(str)
+    notification_requested = Signal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._queue = []
+        self._current = None
+        self._worker = None
+        self._pending_result = None
+        self._tasks = {}
+        self._logs = []
+
+    def enqueue(self, action, component_id, source=None):
+        if component_id in self._tasks:
+            return False
+        task = {
+            "action": action,
+            "component_id": component_id,
+            "source": dict(source or {}),
+            "state": "queued",
+            "message": "等待安装队列",
+            "progress": 0,
+            "error": "",
+        }
+        self._tasks[component_id] = task
+        self._queue.append(task)
+        self._append_log(component_id, f"已加入队列：{self._action_label(action)}")
+        self._emit_snapshot()
+        self._start_next()
+        return True
+
+    def has_task(self, component_id):
+        return component_id in self._tasks
+
+    def snapshot(self):
+        queue_ids = [task["component_id"] for task in self._queue]
+        tasks = {}
+        for component_id, task in self._tasks.items():
+            item = {key: value for key, value in task.items() if key != "source"}
+            if item["state"] == "queued":
+                item["queue_position"] = queue_ids.index(component_id) + 1 if component_id in queue_ids else 0
+            tasks[component_id] = item
+        return {
+            "current": self._current["component_id"] if self._current else "",
+            "tasks": tasks,
+            "logs": list(self._logs),
+        }
+
+    def _action_label(self, action):
+        return {
+            "install": "安装",
+            "repair": "修复",
+            "uninstall": "卸载",
+        }.get(action, action)
+
+    def _component_name(self, component_id):
+        if component_id == "node":
+            return "Node.js"
+        return (TOOLKITS.get(component_id) or {}).get("name") or component_id
+
+    def _append_log(self, component_id, message):
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {self._component_name(component_id)} · {message}"
+        self._logs.append(line)
+        if len(self._logs) > 500:
+            self._logs = self._logs[-500:]
+        self.log_changed.emit(line)
+
+    def _emit_snapshot(self):
+        self.state_changed.emit(self.snapshot())
+
+    def _start_next(self):
+        if self._worker is not None or not self._queue:
+            return
+        task = self._queue.pop(0)
+        self._current = task
+        task["state"] = "running"
+        task["message"] = "正在准备环境…"
+        task["progress"] = 1
+        self._append_log(task["component_id"], f"开始{self._action_label(task['action'])}")
+        worker = RuntimeComponentWorker(
+            task["action"],
+            task["component_id"],
+            task["source"],
+            self,
+        )
+        self._worker = worker
+        worker.progress_signal.connect(self._handle_progress)
+        worker.finished_signal.connect(self._capture_result)
+        worker.finished.connect(self._worker_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._emit_snapshot()
+        worker.start()
+
+    def _handle_progress(self, message, percent):
+        if not self._current:
+            return
+        self._current["message"] = str(message or "")
+        self._current["progress"] = max(0, min(100, int(percent)))
+        self._append_log(self._current["component_id"], self._current["message"])
+        self._emit_snapshot()
+
+    def _capture_result(self, result):
+        self._pending_result = dict(result or {})
+
+    def _worker_finished(self):
+        result = self._pending_result or {"ok": False, "error": "组件任务未返回结果。"}
+        self._pending_result = None
+        task = self._current
+        self._worker = None
+        self._current = None
+        if not task:
+            self._start_next()
+            return
+        component_id = task["component_id"]
+        ok = bool(result.get("ok"))
+        if ok:
+            task["state"] = "completed"
+            task["message"] = "操作已完成"
+            task["progress"] = 100
+            self._append_log(component_id, "操作完成")
+            self.notification_requested.emit(
+                "组件操作完成",
+                f"{self._component_name(component_id)}已完成{self._action_label(task['action'])}。",
+            )
+        else:
+            task["state"] = "failed"
+            task["error"] = result.get("error") or "组件操作失败。"
+            task["message"] = "操作失败"
+            self._append_log(component_id, f"失败：{task['error']}")
+            self.notification_requested.emit(
+                "组件操作失败",
+                f"{self._component_name(component_id)}：{task['error']}",
+            )
+        self._tasks.pop(component_id, None)
+        self._emit_snapshot()
+        self._start_next()
+
+
 class SourceTestWorker(QThread):
     finished_signal = Signal(dict)
 
@@ -6400,7 +6540,7 @@ class SettingsDialog(QDialog):
             "组件与依赖",
             "按需安装运行环境与常用工具包；其他 Skill 依赖仍会在首次使用时自动准备。",
         )
-        self.component_worker = None
+        self.component_task_manager = getattr(self._main, "component_task_manager", None)
         self.source_test_worker = None
         self.component_rows = {}
         self.download_sources = normalize_download_sources(self.config_manager.get("download_sources", {}))
@@ -6479,9 +6619,15 @@ class SettingsDialog(QDialog):
             detail_label.setStyleSheet(apple_settings_inline_note_style())
             status_label = QLabel()
             status_label.setStyleSheet(apple_settings_inline_note_style())
+            progress_bar = QProgressBar()
+            progress_bar.setRange(0, 100)
+            progress_bar.setTextVisible(False)
+            progress_bar.setFixedHeight(4)
+            progress_bar.setVisible(False)
             text_box.addWidget(title_label)
             text_box.addWidget(detail_label)
             text_box.addWidget(status_label)
+            text_box.addWidget(progress_bar)
             action_btn = QPushButton()
             action_btn.setObjectName("SecondaryBtn")
             repair_btn = QPushButton("修复")
@@ -6489,7 +6635,12 @@ class SettingsDialog(QDialog):
             row.addLayout(text_box, 1)
             row.addWidget(repair_btn)
             row.addWidget(action_btn)
-            self.component_rows[component_id] = {"status": status_label, "action": action_btn, "repair": repair_btn}
+            self.component_rows[component_id] = {
+                "status": status_label,
+                "action": action_btn,
+                "repair": repair_btn,
+                "progress": progress_bar,
+            }
             action_btn.clicked.connect(lambda _checked=False, cid=component_id: self.toggle_component(cid))
             repair_btn.clicked.connect(lambda _checked=False, cid=component_id: self.start_component_action("repair", cid))
             container.addWidget(panel)
@@ -6504,6 +6655,23 @@ class SettingsDialog(QDialog):
         toolkit_group_layout.addStretch()
         components_layout.addWidget(runtime_group)
         components_layout.addWidget(toolkit_group)
+
+        task_group, task_group_layout = build_settings_surface(
+            "后台任务",
+            "组件会按加入顺序逐个处理；关闭设置后仍会继续。",
+            radius=20,
+            show_subtitle=False,
+        )
+        self.component_queue_label = QLabel("当前没有组件任务。")
+        self.component_queue_label.setWordWrap(True)
+        self.component_queue_label.setStyleSheet(apple_settings_inline_note_style())
+        self.component_log_edit = QPlainTextEdit()
+        self.component_log_edit.setReadOnly(True)
+        self.component_log_edit.setMaximumHeight(150)
+        self.component_log_edit.setPlaceholderText("安装、验证与错误日志会显示在这里。")
+        task_group_layout.addWidget(self.component_queue_label)
+        task_group_layout.addWidget(self.component_log_edit)
+        components_layout.addWidget(task_group)
 
         dependency_group, dependency_group_layout = build_settings_surface("其他 Skill 依赖", "未被工具包覆盖的依赖继续按现有机制静默安装并自动修复。", radius=20, show_subtitle=False)
         skill_manager = getattr(self._main, "skill_manager", None)
@@ -6523,6 +6691,9 @@ class SettingsDialog(QDialog):
         dependency_group_layout.addWidget(dependency_label)
         components_layout.addWidget(dependency_group)
         components_layout.addStretch()
+        if self.component_task_manager:
+            self.component_task_manager.state_changed.connect(self.handle_component_task_state)
+            self.handle_component_task_state(self.component_task_manager.snapshot())
 
         update_page, update_layout = make_scroll_page(
             "应用更新",
@@ -6789,18 +6960,22 @@ class SettingsDialog(QDialog):
             return
         installed = bool(status.get("installed"))
         needs_update = bool(status.get("needs_update"))
+        needs_repair = bool(status.get("needs_repair"))
         size = int(status.get("size") or 0)
         suffix = f" · {format_file_size(size)}" if size else ""
         source = status.get("source") or ""
         source_suffix = f" · {source}" if source else ""
-        state_text = "需要更新" if needs_update else ("已安装" if installed else "未安装")
+        state_text = "需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装"))
+        if needs_repair and status.get("health_error"):
+            state_text += f"：{status['health_error']}"
         row["status"].setText(state_text + suffix + source_suffix)
         row["action"].setText("更新" if needs_update else ("卸载" if installed else "安装"))
         row["repair"].setVisible(installed)
+        row["progress"].setVisible(False)
 
     def toggle_component(self, component_id):
         status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
-        action = "repair" if status.get("needs_update") else ("uninstall" if status.get("installed") else "install")
+        action = "repair" if status.get("needs_update") or status.get("needs_repair") else ("uninstall" if status.get("installed") else "install")
         if action == "uninstall":
             reply = QMessageBox.question(self, "卸载组件", "确定卸载该组件？相关能力下次使用时可能重新安装依赖。", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:
@@ -6808,36 +6983,50 @@ class SettingsDialog(QDialog):
         self.start_component_action(action, component_id)
 
     def start_component_action(self, action, component_id):
-        if self.component_worker and self.component_worker.isRunning():
-            QMessageBox.information(self, "组件管理", "另一个组件操作正在进行，请稍候。")
+        if not self.component_task_manager:
+            QMessageBox.warning(self, "组件管理", "后台组件任务管理器不可用。")
+            return
+        if self.component_task_manager.has_task(component_id):
             return
         try:
             source = self._current_component_source("node" if component_id == "node" else "python") if action in {"install", "repair"} else {}
         except Exception as exc:
             QMessageBox.warning(self, "组件管理", str(exc))
             return
-        for item in self.component_rows.values():
-            item["action"].setEnabled(False)
-            item["repair"].setEnabled(False)
-        row = self.component_rows[component_id]
-        row["status"].setText("正在处理…")
-        self.component_worker = RuntimeComponentWorker(action, component_id, source, self)
-        self.component_worker.progress_signal.connect(lambda message, _percent, cid=component_id: self.component_rows[cid]["status"].setText(message))
-        self.component_worker.finished_signal.connect(self.handle_component_finished)
-        self.component_worker.start()
+        self.component_task_manager.enqueue(action, component_id, source)
 
-    def handle_component_finished(self, result):
-        component_id = result.get("component_id")
-        for item in self.component_rows.values():
-            item["action"].setEnabled(True)
-            item["repair"].setEnabled(True)
-        status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
-        self.update_component_row(component_id, status)
-        if result.get("ok"):
-            QMessageBox.information(self, "组件管理", "组件操作已完成。")
-        else:
-            QMessageBox.warning(self, "组件操作失败", result.get("error") or "组件操作失败。")
-        self.component_worker = None
+    def handle_component_task_state(self, snapshot):
+        tasks = (snapshot or {}).get("tasks") or {}
+        queue_lines = []
+        for component_id, row in self.component_rows.items():
+            task = tasks.get(component_id)
+            if not task:
+                status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
+                self.update_component_row(component_id, status)
+                row["action"].setEnabled(True)
+                row["repair"].setEnabled(True)
+                continue
+            row["action"].setEnabled(False)
+            row["repair"].setEnabled(False)
+            state = task.get("state")
+            if state == "queued":
+                position = int(task.get("queue_position") or 0)
+                text = f"排队中 · 第 {position} 项"
+                queue_lines.append(f"{position}. {component_id}")
+                row["progress"].setRange(0, 0)
+            else:
+                text = task.get("message") or "正在处理…"
+                progress = int(task.get("progress") or 0)
+                row["progress"].setRange(0, 100)
+                row["progress"].setValue(progress)
+                queue_lines.insert(0, f"正在处理：{component_id}")
+            row["status"].setText(text)
+            row["progress"].setVisible(True)
+        self.component_queue_label.setText("\n".join(queue_lines) if queue_lines else "当前没有组件任务。")
+        logs = (snapshot or {}).get("logs") or []
+        self.component_log_edit.setPlainText("\n".join(logs))
+        scrollbar = self.component_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def refresh_current_version_label(self):
         self.update_current_label.setText(f"当前版本：{APP_VERSION}")
@@ -12416,6 +12605,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DeepSeek Cowork")
         self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
+        self.component_task_manager = ComponentTaskManager(self)
+        self.component_task_manager.notification_requested.connect(self.notify_component_task)
         
         # Set Window Icon
         icon_path = resolve_app_icon_path()
@@ -19743,6 +19934,12 @@ class MainWindow(QMainWindow):
         self.update_ui_state_for_workspace()
         if result == QDialog.Accepted and hasattr(self, "input_field") and self.input_field and self.input_field.isEnabled():
             self.input_field.setFocus()
+
+    def notify_component_task(self, title, message):
+        if getattr(self, "tray_icon", None):
+            self.tray_icon.showMessage(title, message, QSystemTrayIcon.Information, 5000)
+        else:
+            self.add_system_toast(message, "info")
 
     def open_automation_center(self):
         AutomationDialog(self.config_manager, self).exec()

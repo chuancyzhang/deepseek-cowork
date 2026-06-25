@@ -38,6 +38,12 @@ _PATH_PATTERN = re.compile(
     r"(?=$|[\s\]\[(){}，。；：、,;:!?！？'\"])",
     re.IGNORECASE,
 )
+_MARKDOWN_CODE_PATTERN = re.compile(r"```.*?```|~~~.*?~~~|`[^`\r\n]*`", re.DOTALL)
+
+
+def _mask_markdown_code(text):
+    value = str(text or "")
+    return _MARKDOWN_CODE_PATTERN.sub(lambda match: " " * len(match.group(0)), value)
 
 
 def normalize_workspace_file(path, workspace_dir):
@@ -58,7 +64,7 @@ def normalize_workspace_file(path, workspace_dir):
 def iter_workspace_file_paths(text, workspace_dir):
     results = []
     seen = set()
-    for match in _PATH_PATTERN.finditer(str(text or "")):
+    for match in _PATH_PATTERN.finditer(_mask_markdown_code(text)):
         path = normalize_workspace_file(match.group("path"), workspace_dir)
         key = os.path.normcase(path)
         if path and key not in seen:

@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
 
 from main import (
+    ChatBubble,
     EmptyStateWidget,
     DeliverableWebPreview,
     MainWindow,
@@ -23,6 +24,42 @@ from main import (
 
 
 class TestDeliverableScanning(unittest.TestCase):
+    def test_agent_bubble_builds_clickable_cards_for_workspace_deliverables(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            report = os.path.join(workspace, "季度报告.html")
+            deck = os.path.join(workspace, "汇报.pptx")
+            for path in (report, deck):
+                with open(path, "wb") as handle:
+                    handle.write(b"x")
+
+            bubble = ChatBubble("Agent", "", workspace_dir=workspace)
+            activated = []
+            bubble.deliverablePathActivated.connect(activated.append)
+            bubble.set_main_content(f"完成：{report}\n另一个版本：{deck}\n重复：{report}", final=True)
+            app.processEvents()
+
+            self.assertFalse(bubble.deliverable_cards.isHidden())
+            self.assertEqual(bubble.deliverable_cards_layout.count(), 2)
+            first_button = bubble.deliverable_cards_layout.itemAt(0).widget()
+            self.assertEqual(first_button.text(), "季度报告.html")
+            first_button.click()
+            self.assertEqual(activated, [os.path.normpath(report)])
+
+    def test_agent_bubble_ignores_non_workspace_deliverable_cards(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
+            external = os.path.join(outside, "external.pdf")
+            with open(external, "wb") as handle:
+                handle.write(b"x")
+
+            bubble = ChatBubble("Agent", "", workspace_dir=workspace)
+            bubble.set_main_content(f"文件：{external}", final=True)
+            app.processEvents()
+
+            self.assertFalse(bubble.deliverable_cards.isVisible())
+            self.assertEqual(bubble.deliverable_cards_layout.count(), 0)
+
     def test_main_window_loads_deliverable_preferences_after_config_initialization(self):
         source = inspect.getsource(MainWindow.__init__)
 
@@ -159,6 +196,47 @@ class TestDeliverableScanning(unittest.TestCase):
             window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_DELIVERABLES)
             window.select_deliverable.assert_called_once_with(os.path.normpath(path), render_html=True)
             window.add_system_toast.assert_not_called()
+
+    def test_open_deliverables_view_follows_latest_new_chat_path(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            first = os.path.join(workspace, "first.html")
+            latest = os.path.join(workspace, "latest.pdf")
+            for path in (first, latest):
+                with open(path, "wb") as handle:
+                    handle.write(b"x")
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"selected_deliverable_path": first})()
+            window.current_session_id = "session-1"
+            window.right_drawer_open = True
+            window.right_drawer_tab = window.RIGHT_TAB_FILES
+            window.file_workspace_section = window.FILE_SECTION_DELIVERABLES
+            window.current_deliverable_path = first
+            window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._apply_deliverable_layout_mode = MagicMock()
+            window.select_deliverable = MagicMock()
+
+            window.handle_chat_deliverable_paths_changed([first, latest], "session-1")
+
+            self.assertEqual(state.selected_deliverable_path, os.path.normpath(latest))
+            window._apply_deliverable_layout_mode.assert_called_once_with("focus")
+            window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
+
+    def test_chat_path_does_not_follow_when_deliverables_view_is_closed(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            latest = os.path.join(workspace, "latest.html")
+            with open(latest, "wb") as handle:
+                handle.write(b"x")
+            window = MainWindow.__new__(MainWindow)
+            window.current_session_id = "session-1"
+            window.right_drawer_open = False
+            window.get_session = MagicMock()
+            window.select_deliverable = MagicMock()
+
+            window.handle_chat_deliverable_paths_changed([latest], "session-1")
+
+            window.get_session.assert_not_called()
+            window.select_deliverable.assert_not_called()
 
     def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9097,6 +9097,7 @@ class ChatBubble(QFrame):
     editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
     deliverablePathActivated = Signal(str)
+    deliverablePathsChanged = Signal(object)
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(
@@ -9367,6 +9368,15 @@ class ChatBubble(QFrame):
             copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
+
+            self.deliverable_cards = QWidget()
+            self.deliverable_cards.setVisible(False)
+            self.deliverable_cards_layout = QHBoxLayout(self.deliverable_cards)
+            self.deliverable_cards_layout.setContentsMargins(0, 2, 0, 0)
+            self.deliverable_cards_layout.setSpacing(8)
+            self.deliverable_cards_layout.setAlignment(Qt.AlignLeft)
+            col_layout.addWidget(self.deliverable_cards)
+            self._deliverable_paths = []
             
             # 3. Sub-Agent Indicators
             self.sub_agent_indicators = QWidget()
@@ -9961,6 +9971,7 @@ class ChatBubble(QFrame):
         self._rendered_main_content_final = bool(final)
         self._rendered_main_content_mode = render_mode
         self._last_main_content_render_ts = time.time()
+        self._sync_deliverable_cards(text)
         self.content_edit.scheduleAdjustHeight()
         QTimer.singleShot(0, self.content_edit.scheduleAdjustHeight)
         QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
@@ -9970,6 +9981,57 @@ class ChatBubble(QFrame):
         if not value.startswith("cowork-file:"):
             return
         self.deliverablePathActivated.emit(unquote(value[len("cowork-file:"):]))
+
+    def _sync_deliverable_cards(self, text):
+        if not hasattr(self, "deliverable_cards_layout"):
+            return
+        paths = [path for _start, _end, path in iter_workspace_file_paths(text, self.workspace_dir)]
+        if paths == self._deliverable_paths:
+            return
+        while self.deliverable_cards_layout.count():
+            item = self.deliverable_cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for path in paths:
+            ext = os.path.splitext(path)[1].lower()
+            kind, type_label, icon_name = DELIVERABLE_EXTENSIONS.get(
+                ext, ("file", ext.lstrip(".").upper() or "文件", "fa5s.file")
+            )
+            button = QPushButton(os.path.basename(path))
+            button.setCursor(Qt.PointingHandCursor)
+            button.setIcon(qta.icon(icon_name, color=DesignTokens.primary))
+            button.setToolTip(path)
+            button.setAccessibleName(f"预览交付物 {os.path.basename(path)}")
+            button.setMinimumWidth(110)
+            button.setMaximumWidth(220)
+            button.setStyleSheet(f"""
+                QPushButton {{
+                    background: rgba(255, 255, 255, 0.82);
+                    color: {DesignTokens.text_primary};
+                    border: 1px solid {DesignTokens.border_subtle};
+                    border-radius: 14px;
+                    padding: 8px 12px;
+                    font-size: 12px;
+                    font-weight: 600;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background: {DesignTokens.primary_soft};
+                    border-color: {rgba_from_hex(DesignTokens.primary, 0.28)};
+                    color: {DesignTokens.primary};
+                }}
+                QPushButton:pressed {{
+                    background: {rgba_from_hex(DesignTokens.primary, 0.14)};
+                }}
+            """)
+            button.setProperty("deliverableType", kind)
+            button.setStatusTip(type_label)
+            button.clicked.connect(lambda checked=False, value=path: self.deliverablePathActivated.emit(value))
+            self.deliverable_cards_layout.addWidget(button)
+        self._deliverable_paths = paths
+        self.deliverable_cards.setVisible(bool(paths))
+        self.deliverablePathsChanged.emit(list(paths))
 
     def _render_plain_stream_content(self, text):
         """Avoid full Markdown conversion while a long response is still streaming."""
@@ -19110,6 +19172,34 @@ class MainWindow(QMainWindow):
         self.show_context_drawer(self.RIGHT_TAB_FILES)
         self.select_deliverable(normalized, render_html=True)
 
+    def handle_chat_deliverable_paths_changed(self, paths, session_id=None):
+        if session_id != getattr(self, "current_session_id", None):
+            return
+        if not getattr(self, "right_drawer_open", False):
+            return
+        if getattr(self, "right_drawer_tab", None) != self.RIGHT_TAB_FILES:
+            return
+        if getattr(self, "file_workspace_section", "") != self.FILE_SECTION_DELIVERABLES:
+            return
+        state = self.get_session(session_id)
+        workspace_dir = self._workspace_dir_for_state(state)
+        valid_paths = [
+            normalized
+            for path in (paths or [])
+            if (normalized := normalize_workspace_file(path, workspace_dir))
+        ]
+        if not valid_paths:
+            return
+        latest = valid_paths[-1]
+        current = getattr(self, "current_deliverable_path", "") or ""
+        if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(latest)):
+            return
+        if state:
+            state.selected_deliverable_path = latest
+        self.current_deliverable_path = latest
+        self._apply_deliverable_layout_mode("focus")
+        self.select_deliverable(latest, render_html=True)
+
     def select_deliverable(self, path, render_html=True):
         path = os.path.normpath(str(path or ""))
         previous_path = getattr(self, "current_deliverable_path", "") or ""
@@ -21222,15 +21312,7 @@ class MainWindow(QMainWindow):
             source_message_id=source_message_id,
             workspace_dir=self._workspace_dir_for_state(state),
         )
-        bubble.editSubmitRequested.connect(
-            lambda msg_id, text, sid=state.session_id: self.edit_user_message_inline(sid, msg_id, text)
-        )
-        bubble.deleteRequested.connect(
-            lambda msg_id, sid=state.session_id: self.delete_user_message_in_place(sid, msg_id)
-        )
-        bubble.deliverablePathActivated.connect(
-            lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
-        )
+        self._connect_chat_bubble_actions(bubble, state)
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         
         if index is not None:
@@ -21245,6 +21327,23 @@ class MainWindow(QMainWindow):
         self.queue_session_bubble_virtualization(state.session_id)
             
         return bubble
+
+    def _connect_chat_bubble_actions(self, bubble, state):
+        if bubble is None or state is None or getattr(bubble, "_main_window_actions_connected", False):
+            return
+        bubble._main_window_actions_connected = True
+        bubble.editSubmitRequested.connect(
+            lambda msg_id, text, sid=state.session_id: self.edit_user_message_inline(sid, msg_id, text)
+        )
+        bubble.deleteRequested.connect(
+            lambda msg_id, sid=state.session_id: self.delete_user_message_in_place(sid, msg_id)
+        )
+        bubble.deliverablePathActivated.connect(
+            lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
+        )
+        bubble.deliverablePathsChanged.connect(
+            lambda paths, sid=state.session_id: self.handle_chat_deliverable_paths_changed(paths, sid)
+        )
 
     def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None):
         state = self.get_session(session_id)
@@ -21274,6 +21373,8 @@ class MainWindow(QMainWindow):
         
         # Insert "Thinking" bubble
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
+        state.temp_thinking_bubble.workspace_dir = self._workspace_dir_for_state(state)
+        self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -21323,6 +21424,8 @@ class MainWindow(QMainWindow):
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
+        state.temp_thinking_bubble.workspace_dir = self._workspace_dir_for_state(state)
+        self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -22027,6 +22130,8 @@ class MainWindow(QMainWindow):
             state.temp_thinking_bubble = None
         else:
             bubble = ChatBubble("agent", "", thinking=result.get("reasoning"))
+            bubble.workspace_dir = self._workspace_dir_for_state(state)
+            self._connect_chat_bubble_actions(bubble, state)
             bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         

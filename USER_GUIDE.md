@@ -118,7 +118,7 @@ DeepSeek Cowork 支持两种主要使用方式：
 
 3. 让 AI 在工作区中生成一个或多个 HTML 文件，然后点击右侧的 **文件** 按钮，并切换到 **交付物** 视图查看结果。
 
-   如果 AI 在最终回复中给出当前项目内的完整文件路径，也可以直接点击路径。应用会自动打开文件抽屉中的交付物视图并进入专注预览。交付物支持 HTML、Markdown、图片、PDF、DOCX、PPTX 和 XLSX；DOCX/PPTX/XLSX 使用应用内结构化预览，不需要本机安装 Microsoft Office。旧版 DOC/PPT/XLS 暂不支持内置预览，可转换为新版格式后查看。
+   如果 AI 在回复中给出当前项目内的完整文件路径，可以直接点击路径或消息末尾的文件卡片。应用会打开文件抽屉中的交付物视图并进入专注预览；保持该视图打开时，后续新生成的文件会自动切换预览，同一个文件被修改后则会提示手动刷新。交付物支持 HTML、Markdown、图片、PDF、DOCX、PPTX 和 XLSX；DOCX/PPTX/XLSX 使用应用内结构化预览，不需要本机安装 Microsoft Office。旧版 DOC/PPT/XLS 暂不支持内置预览，可转换为新版格式后查看。
 
    ![打开交付物面板](images/user-guide/16-open-deliverables.png)
 

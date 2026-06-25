@@ -59,6 +59,16 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
             matches = iter_workspace_file_paths("文件：" + "；".join(paths), workspace)
             self.assertEqual([item[2] for item in matches], [os.path.normpath(path) for path in paths])
 
+    def test_ignores_paths_inside_markdown_code(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "report.html")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+
+            text = f"行内：`{path}`\n\n```\n{path}\n```"
+
+            self.assertEqual(iter_workspace_file_paths(text, workspace), [])
+
     def test_renders_docx_preview_without_microsoft_office(self):
         from docx import Document
 

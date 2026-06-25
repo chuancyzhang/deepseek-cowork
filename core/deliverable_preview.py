@@ -35,10 +35,10 @@ OFFICE_EXTENSIONS = {
 _PATH_PATTERN = re.compile(
     r"(?P<path>(?:[A-Za-z]:[\\/]|\\\\)[^\r\n<>\"|?*]*?"
     r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.bmp|\.md))"
-    r"(?=$|[\s\]\[(){}，。；：、,;:!?！？'\"])",
+    r"(?=$|[\s\]\[(){}，。；：、,;:!?！？'\"`])",
     re.IGNORECASE,
 )
-_MARKDOWN_CODE_PATTERN = re.compile(r"```.*?```|~~~.*?~~~|`[^`\r\n]*`", re.DOTALL)
+_MARKDOWN_CODE_PATTERN = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
 
 
 def _mask_markdown_code(text):
@@ -81,7 +81,7 @@ def linkify_workspace_paths_in_html(html_text, workspace_dir):
     for node in list(soup.find_all(string=True)):
         if not isinstance(node, NavigableString):
             continue
-        if node.parent and node.parent.name in {"a", "code", "pre", "script", "style"}:
+        if node.parent and node.parent.name in {"a", "pre", "script", "style"}:
             continue
         matches = iter_workspace_file_paths(str(node), workspace_dir)
         if not matches:

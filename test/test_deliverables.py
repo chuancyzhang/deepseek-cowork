@@ -46,6 +46,24 @@ class TestDeliverableScanning(unittest.TestCase):
             first_button.click()
             self.assertEqual(activated, [os.path.normpath(report)])
 
+    def test_agent_bubble_builds_card_for_inline_code_delivery_path(self):
+        app = QApplication.instance() or QApplication([])
+        workspace = r"D:\code\数据分析测试"
+        path = os.path.join(workspace, "html_test_output_20260625_225209.pptx")
+        if not os.path.isfile(path):
+            self.skipTest("Screenshot regression fixture is unavailable")
+
+        bubble = ChatBubble("Agent", "", workspace_dir=workspace)
+        bubble.set_main_content(f"主文件路径： `{path}` (35,331 字节)", final=True)
+        app.processEvents()
+
+        self.assertEqual(bubble.deliverable_cards_layout.count(), 1)
+        self.assertEqual(
+            bubble.deliverable_cards_layout.itemAt(0).widget().text(),
+            "html_test_output_20260625_225209.pptx",
+        )
+        self.assertIn("cowork-file:", bubble.content_rich_edit.toHtml())
+
     def test_agent_bubble_ignores_non_workspace_deliverable_cards(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:

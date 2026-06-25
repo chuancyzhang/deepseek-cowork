@@ -35,7 +35,7 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
             self.assertEqual(normalize_workspace_file(outside_path, workspace), "")
             self.assertEqual(normalize_workspace_file(os.path.join(workspace, "missing.pdf"), workspace), "")
 
-    def test_linkifies_paths_but_not_code_or_outside_files(self):
+    def test_linkifies_plain_and_inline_code_paths_but_not_outside_files(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
             report = os.path.join(workspace, "交付 报告.docx")
             external = os.path.join(outside, "external.docx")
@@ -46,8 +46,8 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
 
             rendered = linkify_workspace_paths_in_html(source, workspace)
 
-            self.assertEqual(rendered.count("cowork-file:"), 1)
-            self.assertIn(f"<code>{report}</code>", rendered)
+            self.assertEqual(rendered.count("cowork-file:"), 2)
+            self.assertIn("<code><a ", rendered)
             self.assertIn(external, rendered)
 
     def test_finds_multiple_supported_paths(self):
@@ -59,15 +59,27 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
             matches = iter_workspace_file_paths("文件：" + "；".join(paths), workspace)
             self.assertEqual([item[2] for item in matches], [os.path.normpath(path) for path in paths])
 
-    def test_ignores_paths_inside_markdown_code(self):
+    def test_accepts_inline_code_path_but_ignores_fenced_code_path(self):
         with tempfile.TemporaryDirectory() as workspace:
             path = os.path.join(workspace, "report.html")
             with open(path, "wb") as handle:
                 handle.write(b"x")
 
             text = f"行内：`{path}`\n\n```\n{path}\n```"
+            matches = iter_workspace_file_paths(text, workspace)
 
-            self.assertEqual(iter_workspace_file_paths(text, workspace), [])
+            self.assertEqual([item[2] for item in matches], [os.path.normpath(path)])
+
+    def test_linkifies_complete_path_inside_inline_code(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "html_test_output_20260625_225209.pptx")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+
+            rendered = linkify_workspace_paths_in_html(f"<p>主文件路径：<code>{path}</code></p>", workspace)
+
+            self.assertIn("cowork-file:", rendered)
+            self.assertIn('data-cowork-path=', rendered)
 
     def test_renders_docx_preview_without_microsoft_office(self):
         from docx import Document

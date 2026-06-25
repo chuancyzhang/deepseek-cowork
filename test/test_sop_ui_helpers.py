@@ -29,6 +29,7 @@ from main import (
     DaemonConnectWorker,
     DaemonStreamWorker,
     MainWindow,
+    SidebarHoverTipController,
     SessionActivityIndicator,
     SessionState,
     sidebar_symbol_icon,
@@ -55,7 +56,7 @@ from main import (
 from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData
 from PySide6.QtGui import QTextOption, QShowEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
 
 
 class _State:
@@ -1439,6 +1440,40 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertTrue(action.isHidden())
         row._set_actions_visible(True)
         self.assertFalse(action.isHidden())
+
+    def test_sidebar_hover_tip_uses_in_window_bubble(self):
+        app = QApplication.instance() or QApplication([])
+        host = QWidget()
+        host.resize(240, 120)
+        button = QToolButton(host)
+        button.setGeometry(190, 40, 26, 26)
+        controller = SidebarHoverTipController(host)
+
+        controller.register(button, "项目操作")
+        host.show()
+        button.show()
+        app.processEvents()
+        controller._pending_widget = button
+        with patch.object(button, "underMouse", return_value=True):
+            controller._show_pending()
+
+        self.assertEqual(button.toolTip(), "")
+        self.assertEqual(button.accessibleName(), "项目操作")
+        self.assertEqual(controller.bubble.parent(), host)
+        self.assertEqual(controller.bubble.text(), "项目操作")
+        self.assertFalse(controller.bubble.isHidden())
+        self.assertLessEqual(controller.bubble.geometry().right(), host.width())
+
+        controller.hide()
+        self.assertTrue(controller.bubble.isHidden())
+
+    def test_sidebar_hover_tip_rejects_empty_text(self):
+        app = QApplication.instance() or QApplication([])
+        host = QWidget()
+        controller = SidebarHoverTipController(host)
+
+        with self.assertRaisesRegex(ValueError, "不能为空"):
+            controller.register(QToolButton(host), "")
 
     def test_chat_bubble_user_wraps_long_hyphenated_text_without_truncation(self):
         app = QApplication.instance() or QApplication([])

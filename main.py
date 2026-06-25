@@ -8791,6 +8791,85 @@ class HistoryTitleButton(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class SidebarHoverTipController(QObject):
+    SHOW_DELAY_MS = 350
+    MARGIN = 8
+    GAP = 6
+
+    def __init__(self, host):
+        super().__init__(host)
+        self.host = host
+        self._texts = {}
+        self._pending_widget = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(self.SHOW_DELAY_MS)
+        self._timer.timeout.connect(self._show_pending)
+
+        self.bubble = QLabel(host)
+        self.bubble.setObjectName("SidebarHoverTip")
+        self.bubble.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.bubble.setAlignment(Qt.AlignCenter)
+        self.bubble.setStyleSheet(
+            f"QLabel#SidebarHoverTip {{"
+            f"background: {DesignTokens.bg_card};"
+            f"color: {DesignTokens.text_primary};"
+            f"border: 1px solid {DesignTokens.border_subtle};"
+            "border-radius: 7px;"
+            "padding: 5px 8px;"
+            "font-size: 12px;"
+            "font-weight: 500;"
+            "}"
+        )
+        add_soft_shadow(self.bubble, blur=16, y_offset=4, alpha=38)
+        self.bubble.hide()
+
+    def register(self, widget, text):
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("侧边栏按钮提示文案不能为空。")
+        self._texts[widget] = text
+        widget.setToolTip("")
+        widget.setAccessibleName(text)
+        widget.installEventFilter(self)
+        return widget
+
+    def eventFilter(self, obj, event):
+        if obj not in self._texts:
+            return super().eventFilter(obj, event)
+        if event.type() == QEvent.Enter:
+            self._pending_widget = obj
+            self._timer.start()
+        elif event.type() in (QEvent.Leave, QEvent.MouseButtonPress, QEvent.Hide, QEvent.Destroy):
+            self.hide()
+        return super().eventFilter(obj, event)
+
+    def hide(self):
+        self._timer.stop()
+        self._pending_widget = None
+        self.bubble.hide()
+
+    def _show_pending(self):
+        widget = self._pending_widget
+        if widget is None or not widget.isVisible() or not widget.underMouse():
+            self.hide()
+            return
+        self.bubble.setText(self._texts[widget])
+        self.bubble.adjustSize()
+
+        anchor = widget.mapTo(self.host, QPoint(widget.width(), widget.height() // 2))
+        x = anchor.x() + self.GAP
+        y = anchor.y() - self.bubble.height() // 2
+        if x + self.bubble.width() + self.MARGIN > self.host.width():
+            left_anchor = widget.mapTo(self.host, QPoint(0, widget.height() // 2))
+            x = left_anchor.x() - self.bubble.width() - self.GAP
+        x = max(self.MARGIN, min(x, self.host.width() - self.bubble.width() - self.MARGIN))
+        y = max(self.MARGIN, min(y, self.host.height() - self.bubble.height() - self.MARGIN))
+        self.bubble.move(x, y)
+        self.bubble.raise_()
+        self.bubble.show()
+
+
 class ConversationHistoryRow(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -12607,6 +12686,7 @@ class MainWindow(QMainWindow):
         self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
         self.component_task_manager = ComponentTaskManager(self)
         self.component_task_manager.notification_requested.connect(self.notify_component_task)
+        self.sidebar_hover_tips = SidebarHoverTipController(self)
         
         # Set Window Icon
         icon_path = resolve_app_icon_path()
@@ -12868,14 +12948,14 @@ class MainWindow(QMainWindow):
         project_header_layout.addStretch()
         self.sidebar_projects_menu_btn = QToolButton()
         self.sidebar_projects_menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_secondary, 16))
-        self.sidebar_projects_menu_btn.setAccessibleName("项目与侧边栏选项")
+        self.sidebar_hover_tips.register(self.sidebar_projects_menu_btn, "项目与侧边栏选项")
         self.sidebar_projects_menu_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_projects_menu_btn.setFixedSize(28, 28)
         self.sidebar_projects_menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
         self.sidebar_projects_menu_btn.clicked.connect(self.show_sidebar_projects_menu)
         self.sidebar_add_project_btn = QToolButton()
         self.sidebar_add_project_btn.setIcon(sidebar_symbol_icon("folder-plus", DesignTokens.text_secondary, 16))
-        self.sidebar_add_project_btn.setAccessibleName("添加项目")
+        self.sidebar_hover_tips.register(self.sidebar_add_project_btn, "添加项目")
         self.sidebar_add_project_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_add_project_btn.setFixedSize(28, 28)
         self.sidebar_add_project_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
@@ -17615,7 +17695,7 @@ class MainWindow(QMainWindow):
         pinned = bool(entry.get("pinned"))
         pin_btn = QToolButton(actions)
         pin_btn.setIcon(qta.icon('fa5s.thumbtack', color=DesignTokens.primary if pinned else DesignTokens.text_tertiary))
-        pin_btn.setToolTip("取消置顶对话" if pinned else "置顶对话")
+        self.sidebar_hover_tips.register(pin_btn, "取消置顶对话" if pinned else "置顶对话")
         pin_btn.setCursor(Qt.PointingHandCursor)
         pin_btn.setFixedSize(26, 26)
         pin_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
@@ -17624,7 +17704,7 @@ class MainWindow(QMainWindow):
         )
         archive_btn = QToolButton(actions)
         archive_btn.setIcon(qta.icon('fa5s.archive', color=DesignTokens.text_tertiary))
-        archive_btn.setToolTip("归档对话")
+        self.sidebar_hover_tips.register(archive_btn, "归档对话")
         archive_btn.setCursor(Qt.PointingHandCursor)
         archive_btn.setFixedSize(26, 26)
         archive_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
@@ -17680,7 +17760,7 @@ class MainWindow(QMainWindow):
 
         new_btn = QToolButton()
         new_btn.setIcon(sidebar_plus_icon(DesignTokens.primary if selected else DesignTokens.text_secondary, 16))
-        new_btn.setAccessibleName("在此项目中新建对话")
+        self.sidebar_hover_tips.register(new_btn, "在此项目中新建对话")
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.setFixedSize(26, 26)
         new_btn.setIconSize(action_icon_size)
@@ -17690,7 +17770,7 @@ class MainWindow(QMainWindow):
 
         menu_btn = QToolButton()
         menu_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.primary if selected else DesignTokens.text_tertiary, 16))
-        menu_btn.setAccessibleName("项目操作")
+        self.sidebar_hover_tips.register(menu_btn, "项目操作")
         menu_btn.setCursor(Qt.PointingHandCursor)
         menu_btn.setFixedSize(26, 26)
         menu_btn.setIconSize(action_icon_size)

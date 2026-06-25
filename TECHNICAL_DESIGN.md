@@ -72,7 +72,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **core/sop_manager.py**：规范化自动化模板和会话运行态，维护 step/run 状态、步骤执行器元数据，并生成当前步骤 Prompt 片段。
 *   **core/automation_manager.py**：规范化定时任务、计算 cron / 快捷计划的 next run、生成完整执行提示词并维护运行历史记录结构。
 *   **core/config_manager.py**：统一配置入口，管理 API Key、Provider、`mcp_servers`、项目列表、工作区、自动化任务与运行历史。
-*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组，并以 `meta.pinned` / `meta.archived` 管理单条对话；局部元数据更新保留最近活动时间。SQLite 连接启用 WAL / busy timeout，并在普通追加路径下只写入新增消息，编辑、删除和迁移仍回退全量重写。旧版 `conversation_branch` 元数据可继续读取但不驱动 UI，旧版 `chat_history_*.json` 通过手动迁移写回 SQLite。
+*   **core/chat_storage.py**：历史对话持久化，按 `meta.workspace_dir` 支持项目分组，并以 `meta.pinned` / `meta.archived` 管理单条对话；局部元数据更新保留最近活动时间。SQLite 连接启用 WAL / busy timeout，并在普通追加路径下只写入新增消息，编辑、删除和迁移仍回退全量重写。旧版 `conversation_branch` 元数据可继续读取但不驱动 UI，底层仍保留旧版 `chat_history_*.json` 到 SQLite 的迁移能力。
 *   **core/memory_update.py / core/memory_store.py**：前者按全局或当前工作区扫描历史并生成草稿，后者管理灵魂提示词、全局/工作区摘要与版本备份；确认保存后才推进对应作用域的处理状态。
 *   **core/updater.py**：检查 GitHub Releases，选择正式 ZIP 资产，下载前清理旧 ZIP、暂存目录、备份目录和更新脚本，校验解压结构并生成 Windows 更新脚本；PowerShell GUI 更新脚本允许前台窗口最小化，也支持默认最小化的后台安装，应用重启路径继续显式隐藏控制台窗口。
 

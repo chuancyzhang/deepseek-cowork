@@ -18023,11 +18023,6 @@ class MainWindow(QMainWindow):
         reveal_action.triggered.connect(lambda checked=False, p=normalized: self.reveal_in_explorer(p))
         menu.addAction(reveal_action)
 
-        worktree_action = QAction("创建永久工作树", self)
-        worktree_action.setEnabled(os.path.exists(os.path.join(normalized, ".git")))
-        worktree_action.triggered.connect(lambda checked=False, p=normalized: self.create_git_worktree_for_project(p))
-        menu.addAction(worktree_action)
-
         rename_action = QAction("重命名项目", self)
         rename_action.triggered.connect(lambda checked=False, p=normalized: self.rename_project(p))
         menu.addAction(rename_action)
@@ -18115,9 +18110,6 @@ class MainWindow(QMainWindow):
         organize_action = QAction("整理侧边栏", self)
         organize_action.triggered.connect(self.organize_sidebar_projects)
         menu.addAction(organize_action)
-        migrate_action = QAction("迁移旧版 JSON 历史", self)
-        migrate_action.triggered.connect(self.migrate_legacy_json_histories)
-        menu.addAction(migrate_action)
         menu.addSeparator()
         recent_action = QAction("按最近活动排序", self)
         recent_action.setCheckable(True)
@@ -18347,12 +18339,7 @@ class MainWindow(QMainWindow):
             if query:
                 empty_text = "没有匹配的项目或对话"
             else:
-                legacy_hint = bool(self._legacy_history_file_paths())
-                empty_text = (
-                    "检测到旧版 JSON 历史，可从项目菜单里执行“迁移旧版 JSON 历史”。"
-                    if legacy_hint
-                    else "还没有项目，点击项目标题栏的文件夹按钮添加"
-                )
+                empty_text = "还没有项目，点击项目标题栏的文件夹按钮添加"
             self._add_history_empty_state(empty_text)
 
         self.history_layout.addStretch()

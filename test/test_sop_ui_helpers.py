@@ -791,6 +791,21 @@ class TestSopUiHelpers(unittest.TestCase):
                 texts.append(widget.text().strip())
         return texts
 
+    def test_empty_history_does_not_advertise_legacy_json_migration(self):
+        QApplication.instance() or QApplication([])
+        window = self._build_history_sidebar_window([])
+        window._legacy_history_file_paths = lambda: ["chat_history_legacy.json"]
+
+        window.refresh_history_list()
+
+        labels = [
+            window.history_layout.itemAt(index).widget().text()
+            for index in range(window.history_layout.count())
+            if isinstance(window.history_layout.itemAt(index).widget(), QLabel)
+        ]
+        self.assertIn("还没有项目，点击项目标题栏的文件夹按钮添加", labels)
+        self.assertFalse(any("迁移旧版 JSON 历史" in text for text in labels))
+
     def test_unassigned_conversations_default_to_preview_with_expand_button(self):
         conversations = [
             {"id": f"session-{idx}", "title": f"Task {idx}", "updated_at": 100 - idx, "status": "draft"}

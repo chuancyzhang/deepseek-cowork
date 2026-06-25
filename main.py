@@ -187,8 +187,8 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
-from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
+from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -9087,13 +9087,13 @@ class EmptyStateWidget(QWidget):
         return btn
 
 class SystemToast(QFrame):
-    """System Notification in Chat Stream"""
-    def __init__(self, text, type="info"):
-        super().__init__()
+    """Compact floating system notification."""
+    def __init__(self, text, type="info", parent=None):
+        super().__init__(parent)
         self.setObjectName("SystemToast")
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self._applied_max_width = min(DesignTokens.message_max_width - 60, 720)
+        self._applied_max_width = min(DesignTokens.message_max_width - 60, DesignTokens.toast_max_width)
         self._applied_min_width = DesignTokens.toast_min_width
         self.setMinimumWidth(self._applied_min_width)
         self.setMaximumWidth(self._applied_max_width)
@@ -9114,7 +9114,14 @@ class SystemToast(QFrame):
             icon_color = DesignTokens.warning_icon
             tint_color = DesignTokens.toast_tint_warning
 
-        layout = QHBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(7, 3, 7, 9)
+        outer_layout.setSpacing(0)
+        surface = QFrame(self)
+        surface.setObjectName("SystemToastSurface")
+        outer_layout.addWidget(surface)
+
+        layout = QHBoxLayout(surface)
         layout.setContentsMargins(10, 8, 12, 8)
         layout.setSpacing(8)
 
@@ -9137,6 +9144,10 @@ class SystemToast(QFrame):
         self.setStyleSheet(
             f"""
             QFrame#SystemToast {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#SystemToastSurface {{
                 background-color: {DesignTokens.toast_bg};
                 border: 1px solid {DesignTokens.toast_border};
                 border-radius: 16px;
@@ -9154,14 +9165,15 @@ class SystemToast(QFrame):
             }}
             """
         )
-        add_soft_shadow(self, blur=18, y_offset=6, alpha=DesignTokens.toast_shadow_alpha)
+        add_soft_shadow(surface, blur=18, y_offset=6, alpha=DesignTokens.toast_shadow_alpha)
 
+        self.surface = surface
         self.message_label = msg_label
         self.icon_badge = icon_badge
         self.icon_label = icon_badge
 
     def apply_dynamic_width(self, message_width):
-        target = max(DesignTokens.toast_min_width, min(int(message_width or 0), 720))
+        target = max(1, min(int(message_width or 0), DesignTokens.toast_max_width))
         min_width = min(DesignTokens.toast_min_width, target)
         self._applied_max_width = target
         self._applied_min_width = min_width
@@ -12736,6 +12748,14 @@ class MainWindow(QMainWindow):
         self.dynamic_message_width = DesignTokens.message_min_width
         self.dynamic_user_bubble_width = DesignTokens.user_bubble_min_width
         self.dynamic_layout_metrics = {}
+        self._system_toast_queue = []
+        self._active_system_toast = None
+        self._system_toast_animation = None
+        self._system_toast_position_animation = None
+        self._system_toast_animation_phase = None
+        self._system_toast_timer = QTimer(self)
+        self._system_toast_timer.setSingleShot(True)
+        self._system_toast_timer.timeout.connect(self._dismiss_active_system_toast)
         
         # Apply Clean Light Theme manually for optimized components
         self.setStyleSheet(f"""
@@ -13672,7 +13692,7 @@ class MainWindow(QMainWindow):
         self.sop_badge.setCursor(Qt.PointingHandCursor)
         self.sop_badge.setFixedHeight(30)
         self.sop_badge.setVisible(False)
-        self.sop_badge.clicked.connect(lambda: self.add_system_toast("自动化进度会在聊天中提示，等待确认时可直接操作。", "info", auto_close_ms=3200))
+        self.sop_badge.clicked.connect(lambda: self.add_system_toast("自动化进度会在顶部提示，等待确认时可直接操作。", "info", auto_close_ms=3200))
         self.sop_badge.closeClicked.connect(self.clear_session_sop)
 
         self.selected_skills_badge = SessionContextChip(" 已选能力", qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
@@ -14125,17 +14145,6 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, ChatBubble):
                     yield widget
 
-    def _iter_session_system_toasts(self):
-        for state in getattr(self, "sessions", {}).values():
-            chat_layout = getattr(state, "chat_layout", None)
-            if chat_layout is None:
-                continue
-            for index in range(chat_layout.count()):
-                item = chat_layout.itemAt(index)
-                widget = item.widget() if item is not None else None
-                if isinstance(widget, SystemToast):
-                    yield widget
-
     def _iter_session_sop_confirmation_bars(self):
         for state in getattr(self, "sessions", {}).values():
             bar = getattr(state, "sop_confirmation_bar", None)
@@ -14168,10 +14177,9 @@ class MainWindow(QMainWindow):
 
         for bubble in self._iter_session_chat_bubbles():
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
-        for toast in self._iter_session_system_toasts():
-            toast.apply_dynamic_width(message_width)
         for bar in self._iter_session_sop_confirmation_bars():
             bar.apply_dynamic_width(message_width)
+        self._position_active_system_toast()
 
     def sync_context_drawer_layout(self):
         geometry = self._compute_context_drawer_geometry()
@@ -16546,6 +16554,7 @@ class MainWindow(QMainWindow):
             self.drag_overlay.resize(self.size())
         if hasattr(self, "right_sidebar"):
             self.position_context_drawer()
+        self._position_active_system_toast()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -21611,15 +21620,153 @@ class MainWindow(QMainWindow):
             lambda paths, sid=state.session_id: self.handle_chat_deliverable_paths_changed(paths, sid)
         )
 
+    def _system_toast_duration(self, type="info", auto_close_ms=None):
+        if auto_close_ms is not None and int(auto_close_ms) > 0:
+            return int(auto_close_ms)
+        if type == "error":
+            return DesignTokens.toast_error_duration_ms
+        return DesignTokens.toast_default_duration_ms
+
+    def _system_toast_target_position(self, toast):
+        parent = getattr(self, "main_container", None)
+        if parent is None:
+            raise RuntimeError("SystemToast requires an initialized main container.")
+        anchor = getattr(self, "conversation_column", None)
+        if anchor is not None and _qt_object_alive(anchor):
+            anchor_top_left = anchor.mapTo(parent, QPoint(0, 0))
+            anchor_x = anchor_top_left.x()
+            anchor_width = anchor.width()
+        else:
+            anchor_x = 0
+            anchor_width = parent.width()
+        available_width = max(1, min(anchor_width - 32, DesignTokens.toast_max_width))
+        toast.apply_dynamic_width(available_width)
+        toast.adjustSize()
+        toast_width = min(toast.width(), available_width)
+        toast.resize(toast_width, toast.sizeHint().height())
+        x = anchor_x + max(0, (anchor_width - toast.width()) // 2)
+        return QPoint(x, DesignTokens.toast_top_margin)
+
+    def _position_active_system_toast(self):
+        toast = getattr(self, "_active_system_toast", None)
+        if toast is None or not _qt_object_alive(toast):
+            return
+        target = self._system_toast_target_position(toast)
+        position_animation = getattr(self, "_system_toast_position_animation", None)
+        if position_animation is not None and position_animation.state() == QAbstractAnimation.Running:
+            if getattr(self, "_system_toast_animation_phase", None) == "exit":
+                target -= QPoint(0, DesignTokens.toast_slide_distance)
+            position_animation.setEndValue(target)
+            return
+        toast.move(target)
+        toast.raise_()
+
+    def _show_next_system_toast(self):
+        active = getattr(self, "_active_system_toast", None)
+        if active is not None and _qt_object_alive(active):
+            return
+        if not self._system_toast_queue:
+            return
+        payload = self._system_toast_queue.pop(0)
+        toast = SystemToast(payload["text"], payload["type"], self.main_container)
+        toast._display_duration_ms = payload["duration_ms"]
+        opacity_effect = QGraphicsOpacityEffect(toast)
+        opacity_effect.setOpacity(0.0)
+        toast.setGraphicsEffect(opacity_effect)
+        toast._opacity_effect = opacity_effect
+        self._active_system_toast = toast
+
+        target = self._system_toast_target_position(toast)
+        start = target - QPoint(0, DesignTokens.toast_slide_distance)
+        toast.move(start)
+        toast.show()
+        toast.raise_()
+
+        position_animation = QPropertyAnimation(toast, b"pos", toast)
+        position_animation.setDuration(DesignTokens.toast_enter_duration_ms)
+        position_animation.setStartValue(start)
+        position_animation.setEndValue(target)
+        position_animation.setEasingCurve(QEasingCurve.OutCubic)
+        opacity_animation = QPropertyAnimation(opacity_effect, b"opacity", toast)
+        opacity_animation.setDuration(DesignTokens.toast_enter_duration_ms)
+        opacity_animation.setStartValue(0.0)
+        opacity_animation.setEndValue(1.0)
+        opacity_animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation = QParallelAnimationGroup(toast)
+        animation.addAnimation(position_animation)
+        animation.addAnimation(opacity_animation)
+        animation.finished.connect(lambda current=toast: self._complete_system_toast_entry(current))
+        self._system_toast_position_animation = position_animation
+        self._system_toast_animation = animation
+        self._system_toast_animation_phase = "enter"
+        animation.start()
+
+    def _complete_system_toast_entry(self, toast):
+        if toast is not getattr(self, "_active_system_toast", None) or not _qt_object_alive(toast):
+            return
+        self._system_toast_animation = None
+        self._system_toast_position_animation = None
+        self._system_toast_animation_phase = None
+        toast.move(self._system_toast_target_position(toast))
+        self._system_toast_timer.start(toast._display_duration_ms)
+
+    def _dismiss_active_system_toast(self):
+        toast = getattr(self, "_active_system_toast", None)
+        if toast is None or not _qt_object_alive(toast):
+            return
+        self._system_toast_timer.stop()
+        running_animation = getattr(self, "_system_toast_animation", None)
+        if running_animation is not None:
+            running_animation.stop()
+
+        start = toast.pos()
+        target = start - QPoint(0, DesignTokens.toast_slide_distance)
+        opacity_effect = toast._opacity_effect
+        position_animation = QPropertyAnimation(toast, b"pos", toast)
+        position_animation.setDuration(DesignTokens.toast_exit_duration_ms)
+        position_animation.setStartValue(start)
+        position_animation.setEndValue(target)
+        position_animation.setEasingCurve(QEasingCurve.InCubic)
+        opacity_animation = QPropertyAnimation(opacity_effect, b"opacity", toast)
+        opacity_animation.setDuration(DesignTokens.toast_exit_duration_ms)
+        opacity_animation.setStartValue(opacity_effect.opacity())
+        opacity_animation.setEndValue(0.0)
+        opacity_animation.setEasingCurve(QEasingCurve.InCubic)
+        animation = QParallelAnimationGroup(toast)
+        animation.addAnimation(position_animation)
+        animation.addAnimation(opacity_animation)
+        animation.finished.connect(lambda current=toast: self._complete_system_toast_exit(current))
+        self._system_toast_position_animation = position_animation
+        self._system_toast_animation = animation
+        self._system_toast_animation_phase = "exit"
+        animation.start()
+
+    def _complete_system_toast_exit(self, toast):
+        if toast is not getattr(self, "_active_system_toast", None):
+            return
+        animation = getattr(self, "_system_toast_animation", None)
+        if animation is not None:
+            animation.stop()
+        self._system_toast_animation = None
+        self._system_toast_position_animation = None
+        self._system_toast_animation_phase = None
+        self._active_system_toast = None
+        toast.hide()
+        toast.deleteLater()
+        self._show_next_system_toast()
+
     def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None):
         state = self.get_session(session_id)
-        if not state: return
-        toast = SystemToast(text, type)
-        toast.apply_dynamic_width(self.dynamic_message_width)
-        state.chat_layout.insertWidget(state.chat_layout.count() - 1, toast, 0, Qt.AlignHCenter)
-        self.request_session_scroll_to_bottom(state.session_id, force=False)
-        self.process_ui_events(force=True)
-        if auto_close_ms: QTimer.singleShot(auto_close_ms, toast.deleteLater)
+        if not state:
+            return
+        self._system_toast_queue.append(
+            {
+                "text": str(text),
+                "type": type,
+                "duration_ms": self._system_toast_duration(type, auto_close_ms),
+            }
+        )
+        self._show_next_system_toast()
 
     def append_log(self, text):
         print(f"[Log] {text}")

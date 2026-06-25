@@ -91,6 +91,13 @@ class DesignTokens:
     user_bubble_max_width = 840
     user_bubble_ratio = 0.88
     toast_min_width = 260
+    toast_max_width = 720
+    toast_top_margin = 16
+    toast_slide_distance = 8
+    toast_enter_duration_ms = 180
+    toast_exit_duration_ms = 140
+    toast_default_duration_ms = 4000
+    toast_error_duration_ms = 8000
 
     success_bg = "#f0fdf4"
     success_text = "#166534"

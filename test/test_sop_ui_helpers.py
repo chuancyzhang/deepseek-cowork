@@ -53,7 +53,7 @@ from main import (
     log_ui_exception,
     initialize_desktop_theme,
 )
-from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData
+from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData, QTimer
 from PySide6.QtGui import QTextOption, QShowEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
@@ -1172,10 +1172,117 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertLessEqual(toast.maximumWidth(), 720)
         self.assertIs(toast.icon_label, toast.icon_badge)
         self.assertTrue(toast.message_label.wordWrap())
+        self.assertIsNotNone(toast.surface.graphicsEffect())
 
         text_label = toast.findChild(QLabel, "SystemToastText")
         self.assertIsNotNone(text_label)
         self.assertEqual("已绑定自动化，正在等待下一步执行说明", text_label.text())
+
+    def _make_floating_toast_window(self):
+        QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        QMainWindow.__init__(window)
+        window.main_container = QWidget(window)
+        window.main_container.resize(1000, 700)
+        window.conversation_column = QWidget(window.main_container)
+        window.conversation_column.setGeometry(140, 80, 720, 560)
+        current_state = type(
+            "_ToastState",
+            (),
+            {"session_id": "current", "chat_layout": MagicMock()},
+        )()
+        background_state = type(
+            "_ToastState",
+            (),
+            {"session_id": "background", "chat_layout": MagicMock()},
+        )()
+        window.sessions = {
+            current_state.session_id: current_state,
+            background_state.session_id: background_state,
+        }
+        window.current_session_id = current_state.session_id
+        window._system_toast_queue = []
+        window._active_system_toast = None
+        window._system_toast_animation = None
+        window._system_toast_position_animation = None
+        window._system_toast_animation_phase = None
+        window._system_toast_timer = QTimer(window)
+        window._system_toast_timer.setSingleShot(True)
+        window._system_toast_timer.timeout.connect(window._dismiss_active_system_toast)
+        window.request_session_scroll_to_bottom = MagicMock()
+
+        def cleanup():
+            animation = getattr(window, "_system_toast_animation", None)
+            if animation is not None:
+                animation.stop()
+            window._system_toast_timer.stop()
+
+        self.addCleanup(cleanup)
+        return window, current_state, background_state
+
+    def test_system_toast_uses_type_defaults_and_preserves_explicit_duration(self):
+        window, _current_state, _background_state = self._make_floating_toast_window()
+
+        self.assertEqual(DesignTokens.toast_default_duration_ms, window._system_toast_duration("info"))
+        self.assertEqual(DesignTokens.toast_default_duration_ms, window._system_toast_duration("warning"))
+        self.assertEqual(DesignTokens.toast_error_duration_ms, window._system_toast_duration("error"))
+        self.assertEqual(2350, window._system_toast_duration("error", 2350))
+
+    def test_system_toast_floats_above_main_content_without_touching_chat_layout(self):
+        window, _current_state, background_state = self._make_floating_toast_window()
+
+        window.add_system_toast(
+            "后台任务已完成",
+            "success",
+            session_id=background_state.session_id,
+            auto_close_ms=2400,
+        )
+
+        toast = window._active_system_toast
+        self.assertIsNotNone(toast)
+        self.assertIs(toast.parentWidget(), window.main_container)
+        self.assertEqual("后台任务已完成", toast.message_label.text())
+        self.assertEqual(2400, toast._display_duration_ms)
+        self.assertEqual(DesignTokens.toast_top_margin - DesignTokens.toast_slide_distance, toast.y())
+        background_state.chat_layout.insertWidget.assert_not_called()
+        window.request_session_scroll_to_bottom.assert_not_called()
+
+    def test_system_toast_queues_one_at_a_time_and_advances_fifo(self):
+        window, current_state, background_state = self._make_floating_toast_window()
+
+        window.add_system_toast("第一条", "info", session_id=current_state.session_id)
+        first_toast = window._active_system_toast
+        window.add_system_toast("第二条", "error", session_id=background_state.session_id)
+
+        self.assertEqual("第一条", first_toast.message_label.text())
+        self.assertEqual(1, len(window._system_toast_queue))
+        self.assertEqual("第二条", window._system_toast_queue[0]["text"])
+
+        window._complete_system_toast_exit(first_toast)
+
+        self.assertIsNot(first_toast, window._active_system_toast)
+        self.assertEqual("第二条", window._active_system_toast.message_label.text())
+        self.assertEqual([], window._system_toast_queue)
+
+    def test_system_toast_entry_animation_is_subtle_and_repositions_with_column(self):
+        window, current_state, _background_state = self._make_floating_toast_window()
+
+        window.add_system_toast("位置测试", "info", session_id=current_state.session_id)
+
+        animation = window._system_toast_animation
+        position_animation = window._system_toast_position_animation
+        self.assertEqual(2, animation.animationCount())
+        self.assertEqual(DesignTokens.toast_enter_duration_ms, position_animation.duration())
+        self.assertEqual(
+            DesignTokens.toast_slide_distance,
+            position_animation.endValue().y() - position_animation.startValue().y(),
+        )
+
+        previous_end_x = position_animation.endValue().x()
+        window.conversation_column.setGeometry(220, 80, 700, 560)
+        window._position_active_system_toast()
+
+        self.assertGreater(position_animation.endValue().x(), previous_end_x)
 
     def test_save_conversation_sop_draft_saves_template_and_binds_run(self):
         window = MainWindow.__new__(MainWindow)

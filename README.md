@@ -160,7 +160,7 @@ Use the sidebar after meaningful work:
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
 
 ### 7. App Updates
-Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds clean old update packages, staging folders, and scripts before keeping the current target package; then they download, verify, stage, and restart into the new version through the standalone updater. The foreground progress window can be minimized, or installation can run in the background. Source runs only check and link to the release page.
+Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds still download and verify the complete Release ZIP, then compare it with the current installation locally using SHA-256. The standalone updater backs up, writes, or deletes only changed application files; unchanged files are not copied again and `user_data` is always preserved. Foreground and background installation, differential rollback, and automatic restart remain available. Source runs only check and link to the release page.
 
 ### 8. MCP Servers
 Open **⚙️ Settings → MCP** to add MCP servers.
@@ -181,7 +181,7 @@ Open **⚙️ Settings → MCP** to add MCP servers.
 *   **`core/sop_manager.py`**: Session-level automation templates, per-step executor metadata, per-step state, advance mode (`manual` / `auto`), confirmation, rerun, and skip flow.
 *   **`core/sop_from_conversation.py`**: Conversation-to-SOP draft generation with preview and revision.
 *   **`core/automation_manager.py`**: Scheduled automation task normalization, cron / quick-schedule next-run calculation, execution prompt assembly, and run-history helpers.
-*   **`core/updater.py`**: GitHub Releases update checks, package validation, staging, and Windows restart installer.
+*   **`core/updater.py`**: GitHub Releases checks, full-package validation, local file-difference plans, and the Windows differential updater.
 *   **`skills/`**: Core built-in skills.
 *   **`ai_skills/`**: Default-off bundled plugins plus AI/user-created skills.
 *   **`ai_skills/quant-strategy-management/`**: Standalone quant strategy skill with its own package, CLI entrypoint, storage, and backtest workflow.

@@ -13,6 +13,7 @@ from core.updater import (
     APP_EXE_NAME,
     INTERNAL_DIR_NAME,
     UpdaterError,
+    build_update_plan,
     cleanup_update_artifacts,
     create_windows_update_script,
     download_asset,
@@ -21,6 +22,7 @@ from core.updater import (
     launch_windows_update_script,
     prepare_update,
     select_release_asset,
+    write_update_plan,
 )
 
 
@@ -189,6 +191,42 @@ class TestUpdater(unittest.TestCase):
         self.assertEqual(result["zip_path"], expected_zip)
         self.assertEqual(result["staged_app_dir"], staged_dir)
 
+    def test_build_update_plan_detects_added_modified_deleted_and_unchanged_files(self):
+        install_dir = os.path.join(self.temp_dir, "install")
+        staged_dir = os.path.join(self.temp_dir, "staged")
+        os.makedirs(os.path.join(install_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        os.makedirs(os.path.join(staged_dir, INTERNAL_DIR_NAME), exist_ok=True)
+        for root in (install_dir, staged_dir):
+            with open(os.path.join(root, APP_EXE_NAME), "w", encoding="utf-8") as handle:
+                handle.write("same exe")
+        with open(os.path.join(install_dir, INTERNAL_DIR_NAME, "same.txt"), "w", encoding="utf-8") as handle:
+            handle.write("same")
+        with open(os.path.join(staged_dir, INTERNAL_DIR_NAME, "same.txt"), "w", encoding="utf-8") as handle:
+            handle.write("same")
+        with open(os.path.join(install_dir, INTERNAL_DIR_NAME, "changed.txt"), "w", encoding="utf-8") as handle:
+            handle.write("old")
+        with open(os.path.join(staged_dir, INTERNAL_DIR_NAME, "changed.txt"), "w", encoding="utf-8") as handle:
+            handle.write("new")
+        with open(os.path.join(install_dir, INTERNAL_DIR_NAME, "removed.txt"), "w", encoding="utf-8") as handle:
+            handle.write("removed")
+        with open(os.path.join(staged_dir, INTERNAL_DIR_NAME, "added.txt"), "w", encoding="utf-8") as handle:
+            handle.write("added")
+        os.makedirs(os.path.join(install_dir, "user_data"), exist_ok=True)
+        with open(os.path.join(install_dir, "user_data", "keep.json"), "w", encoding="utf-8") as handle:
+            handle.write("private")
+
+        plan = build_update_plan(install_dir, staged_dir)
+
+        self.assertEqual([item["path"] for item in plan["added"]], ["_internal/added.txt"])
+        self.assertEqual([item["path"] for item in plan["modified"]], ["_internal/changed.txt"])
+        self.assertEqual([item["path"] for item in plan["deleted"]], ["_internal/removed.txt"])
+        self.assertEqual(plan["summary"]["unchanged"], 2)
+        self.assertFalse(any("user_data" in item["path"] for key in ("added", "modified", "deleted") for item in plan[key]))
+
+    def _create_change_plan(self, install_dir, staged_dir):
+        plan = build_update_plan(install_dir, staged_dir)
+        return write_update_plan(plan, target_dir=self.temp_dir)
+
     def test_create_windows_update_script_generates_observable_gui_and_fallback(self):
         install_dir = os.path.join(self.temp_dir, "install")
         staged_dir = os.path.join(self.temp_dir, "staged")
@@ -198,9 +236,11 @@ class TestUpdater(unittest.TestCase):
             handle.write("")
 
         with patch("core.updater.sys.platform", "win32"):
+            plan_path = self._create_change_plan(install_dir, staged_dir)
             script_path = create_windows_update_script(
                 install_dir=install_dir,
                 staged_app_dir=staged_dir,
+                change_plan_path=plan_path,
                 current_pid=12345,
                 extra_wait_pids=[23456],
                 target_dir=self.temp_dir,
@@ -224,25 +264,24 @@ class TestUpdater(unittest.TestCase):
         self.assertIn("$form.TopMost = $false", ps_content)
         self.assertIn("$form.WindowState = 'Normal'", ps_content)
         self.assertIn("$PidsToWait = @(12345, 23456)", ps_content)
-        self.assertIn("[string[]]$RoboArgs", ps_content)
-        self.assertIn("robocopy @RoboArgs", ps_content)
-        self.assertNotIn("robocopy @Args", ps_content)
-        self.assertIn("Invoke-Robocopy -RoboArgs @($InstallDir, $BackupDir", ps_content)
-        self.assertIn("Invoke-Robocopy -RoboArgs @($SourceDir, $InstallDir", ps_content)
-        self.assertIn("Invoke-Robocopy -RoboArgs @($BackupDir, $InstallDir", ps_content)
-        self.assertNotIn("Invoke-Robocopy -Args", ps_content)
+        self.assertIn("ConvertFrom-Json", ps_content)
+        self.assertIn("Get-FileHash", ps_content)
+        self.assertIn("Attempting differential rollback", ps_content)
+        self.assertNotIn("robocopy", ps_content.lower())
+        self.assertNotIn("/MIR", ps_content)
         self.assertIn("10", ps_content)
         self.assertIn("25", ps_content)
         self.assertIn("55", ps_content)
-        self.assertIn("75", ps_content)
+        self.assertIn("70", ps_content)
+        self.assertIn("82", ps_content)
+        self.assertIn("86", ps_content)
         self.assertIn("90", ps_content)
         self.assertIn("100", ps_content)
         self.assertIn("user_data", ps_content)
         self.assertIn("update.log", ps_content)
         self.assertIn("-WindowStyle Hidden", ps_content)
-        self.assertIn("call :wait_pid 12345", cmd_content)
-        self.assertIn("call :wait_pid 23456", cmd_content)
-        self.assertIn("[10%%] Waiting for app to exit", cmd_content)
+        self.assertIn("powershell.exe", cmd_content)
+        self.assertIn(os.path.basename(script_path), cmd_content)
 
     def test_create_windows_update_script_can_start_minimized_for_background_install(self):
         install_dir = os.path.join(self.temp_dir, "install")
@@ -253,9 +292,11 @@ class TestUpdater(unittest.TestCase):
             handle.write("")
 
         with patch("core.updater.sys.platform", "win32"):
+            plan_path = self._create_change_plan(install_dir, staged_dir)
             script_path = create_windows_update_script(
                 install_dir=install_dir,
                 staged_app_dir=staged_dir,
+                change_plan_path=plan_path,
                 current_pid=12345,
                 target_dir=self.temp_dir,
                 background_install=True,
@@ -281,6 +322,7 @@ class TestUpdater(unittest.TestCase):
                 create_windows_update_script(
                     install_dir=os.path.join(self.temp_dir, "install"),
                     staged_app_dir=staged_dir,
+                    change_plan_path=os.path.join(self.temp_dir, "missing.json"),
                     target_dir=self.temp_dir,
                 )
 
@@ -317,9 +359,11 @@ class TestUpdater(unittest.TestCase):
             handle.write("")
 
         with patch("core.updater.sys.platform", "win32"):
+            plan_path = self._create_change_plan(install_dir, staged_dir)
             script_path = create_windows_update_script(
                 install_dir=install_dir,
                 staged_app_dir=staged_dir,
+                change_plan_path=plan_path,
                 current_pid=12345,
                 target_dir=self.temp_dir,
             )

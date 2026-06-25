@@ -6335,6 +6335,7 @@ class AppUpdateWorker(QThread):
                 current_version=APP_VERSION,
                 download=self.install_enabled,
                 progress_callback=emit_progress,
+                install_dir=get_base_dir() if self.install_enabled else None,
             )
             result["install_enabled"] = self.install_enabled
             self.finished_signal.emit(result)
@@ -7150,8 +7151,25 @@ class SettingsDialog(QDialog):
 
         self.update_progress.setValue(100)
         zip_path = result.get("zip_path") or ""
-        self.update_status_label.setText(f"新版本 {latest_version} 已下载并校验完成。")
-        self.append_app_update_log("下载、解压和结构校验完成。")
+        change_summary = result.get("change_summary") or {}
+        change_count = (
+            int(change_summary.get("added") or 0)
+            + int(change_summary.get("modified") or 0)
+            + int(change_summary.get("deleted") or 0)
+        )
+        write_mb = int(change_summary.get("write_bytes") or 0) / (1024 * 1024)
+        self.update_status_label.setText(
+            f"新版本 {latest_version} 已准备完成，将差异更新 {change_count} 个文件。"
+        )
+        self.append_app_update_log("完整安装包下载、解压和结构校验完成。")
+        self.append_app_update_log(
+            "本地文件比较："
+            f"新增 {int(change_summary.get('added') or 0)}，"
+            f"修改 {int(change_summary.get('modified') or 0)}，"
+            f"删除 {int(change_summary.get('deleted') or 0)}，"
+            f"未变化 {int(change_summary.get('unchanged') or 0)}；"
+            f"实际写入约 {write_mb:.1f} MB。"
+        )
         if zip_path:
             self.append_app_update_log(f"安装包位置：{zip_path}")
         install_mode = self.choose_app_update_install_mode(latest_version, zip_path)
@@ -7177,6 +7195,7 @@ class SettingsDialog(QDialog):
             script_path = create_windows_update_script(
                 install_dir=get_base_dir(),
                 staged_app_dir=staged_app_dir,
+                change_plan_path=result.get("change_plan_path"),
                 current_pid=os.getpid(),
                 exe_name=os.path.basename(sys.executable) or "deepseek-cowork.exe",
                 target_dir=result.get("updates_dir"),

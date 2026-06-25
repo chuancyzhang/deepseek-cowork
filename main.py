@@ -6322,9 +6322,10 @@ class AppUpdateWorker(QThread):
     progress_signal = Signal(str, int)
     finished_signal = Signal(dict)
 
-    def __init__(self, install_enabled=False, parent=None):
+    def __init__(self, install_enabled=False, check_only=False, parent=None):
         super().__init__(parent)
         self.install_enabled = install_enabled
+        self.check_only = check_only
 
     def run(self):
         try:
@@ -6333,14 +6334,19 @@ class AppUpdateWorker(QThread):
 
             result = prepare_update(
                 current_version=APP_VERSION,
-                download=self.install_enabled,
+                download=self.install_enabled and not self.check_only,
                 progress_callback=emit_progress,
-                install_dir=get_base_dir() if self.install_enabled else None,
+                install_dir=get_base_dir() if self.install_enabled and not self.check_only else None,
             )
             result["install_enabled"] = self.install_enabled
+            result["check_only"] = self.check_only
             self.finished_signal.emit(result)
         except Exception as exc:
-            self.finished_signal.emit({"error": str(exc), "install_enabled": self.install_enabled})
+            self.finished_signal.emit({
+                "error": str(exc),
+                "install_enabled": self.install_enabled,
+                "check_only": self.check_only,
+            })
 
 
 class SettingsDialog(QDialog):
@@ -6410,6 +6416,7 @@ class SettingsDialog(QDialog):
             item = QListWidgetItem(qta.icon(icon_name, color=DesignTokens.text_secondary), label)
             self.nav_list.addItem(item)
             self.content_stack.addWidget(page)
+            return item
 
         model_page, model_layout = make_scroll_page(
             "模型与服务",
@@ -6711,6 +6718,21 @@ class SettingsDialog(QDialog):
         self.update_current_label = QLabel()
         self.refresh_current_version_label()
         self.update_current_label.setStyleSheet(apple_settings_section_title_style())
+        self.update_available_banner = QLabel()
+        self.update_available_banner.setWordWrap(True)
+        self.update_available_banner.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {DesignTokens.primary};
+                background: {DesignTokens.primary_soft};
+                border: 1px solid {DesignTokens.border_settings_summary};
+                border-radius: 12px;
+                padding: 10px 12px;
+                font-weight: 600;
+            }}
+            """
+        )
+        self.update_available_banner.setVisible(False)
         self.update_latest_label = QLabel("最新版本：尚未检查")
         self.update_latest_label.setStyleSheet(apple_settings_inline_note_style())
         self.update_status_label = QLabel("点击按钮后会检查 GitHub Releases。打包版可自动下载并重启更新，源码运行时只检查版本。")
@@ -6736,6 +6758,7 @@ class SettingsDialog(QDialog):
         update_button_bar = QHBoxLayout()
         update_button_bar.addWidget(self.update_btn)
         update_button_bar.addStretch()
+        update_group_layout.addWidget(self.update_available_banner)
         update_group_layout.addWidget(self.update_current_label)
         update_group_layout.addWidget(self.update_latest_label)
         update_group_layout.addWidget(self.update_status_label)
@@ -6746,6 +6769,7 @@ class SettingsDialog(QDialog):
         update_layout.addWidget(update_group)
         update_layout.addStretch()
         self.app_update_worker = None
+        self._automatic_update_check_started = False
 
         model_layout.addWidget(self.model_channel_manager)
         model_layout.addStretch()
@@ -6888,7 +6912,7 @@ class SettingsDialog(QDialog):
         add_settings_page("企业消息", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
-        add_settings_page("更新", "fa5s.download", update_page)
+        self.update_nav_item = add_settings_page("更新", "fa5s.download", update_page)
         self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
         self.nav_list.setCurrentRow(0)
 
@@ -7035,20 +7059,29 @@ class SettingsDialog(QDialog):
     def showEvent(self, event):
         self.refresh_current_version_label()
         super().showEvent(event)
+        if not self._automatic_update_check_started:
+            self._automatic_update_check_started = True
+            self.start_app_update(check_only=True)
 
-    def start_app_update(self):
+    def start_app_update(self, checked=False, check_only=False):
         if self.app_update_worker and self.app_update_worker.isRunning():
             return
         self.refresh_current_version_label()
         install_enabled = bool(getattr(sys, "frozen", False) and platform.system() == "Windows")
-        self.update_btn.setEnabled(False)
-        self.update_btn.setText("正在检查...")
+        self.update_btn.setEnabled(not check_only)
+        if not check_only:
+            self.update_btn.setText("正在检查...")
         self.update_status_label.setText("正在连接 GitHub Releases...")
-        self.update_log_edit.clear()
-        self.append_app_update_log("开始检查更新。")
+        if not check_only:
+            self.update_log_edit.clear()
+            self.append_app_update_log("开始检查更新。")
         self.update_progress.setValue(0)
-        self.update_progress.setVisible(install_enabled)
-        self.app_update_worker = AppUpdateWorker(install_enabled=install_enabled, parent=self)
+        self.update_progress.setVisible(install_enabled and not check_only)
+        self.app_update_worker = AppUpdateWorker(
+            install_enabled=install_enabled,
+            check_only=check_only,
+            parent=self,
+        )
         self.app_update_worker.progress_signal.connect(self.handle_app_update_progress)
         self.app_update_worker.finished_signal.connect(self.handle_app_update_finished)
         self.app_update_worker.finished.connect(self.app_update_worker.deleteLater)
@@ -7096,6 +7129,7 @@ class SettingsDialog(QDialog):
         self.update_btn.setEnabled(True)
         self.update_btn.setText("检查并更新")
         self.app_update_worker = None
+        check_only = bool(isinstance(result, dict) and result.get("check_only"))
         if not isinstance(result, dict):
             self.update_status_label.setText("检查更新失败：返回结果无效。")
             self.append_app_update_log("检查更新失败：返回结果无效。")
@@ -7103,8 +7137,9 @@ class SettingsDialog(QDialog):
         if result.get("error"):
             message = result.get("error") or "未知错误"
             self.update_status_label.setText(f"检查更新失败：{message}")
-            self.append_app_update_log(f"检查更新失败：{message}")
-            QMessageBox.warning(self, "应用更新", message)
+            if not check_only:
+                self.append_app_update_log(f"检查更新失败：{message}")
+                QMessageBox.warning(self, "应用更新", message)
             return
 
         release = result.get("release") or {}
@@ -7120,13 +7155,29 @@ class SettingsDialog(QDialog):
             self.update_notes_label.setText("更新日志：该 Release 未填写说明。")
 
         if not result.get("update_available"):
+            self.update_available_banner.setVisible(False)
+            self.update_nav_item.setText("更新")
             self.update_progress.setVisible(False)
             self.update_status_label.setText("当前已是最新版本。")
-            self.append_app_update_log("当前已是最新版本。")
-            QMessageBox.information(self, "应用更新", "当前已是最新版本。")
+            if not check_only:
+                self.append_app_update_log("当前已是最新版本。")
+                QMessageBox.information(self, "应用更新", "当前已是最新版本。")
             return
 
         html_url = release.get("html_url") or GITHUB_RELEASES_URL
+        self.update_available_banner.setText(
+            f"发现新版本 {latest_version}，可以更新。点击下方“立即更新”开始下载。"
+        )
+        self.update_available_banner.setVisible(True)
+        self.update_nav_item.setText("更新  •")
+        self.update_btn.setText("立即更新")
+        if check_only:
+            self.update_progress.setVisible(False)
+            self.update_status_label.setText(
+                f"新版本 {latest_version} 已发布，当前版本为 {APP_VERSION}。"
+            )
+            return
+
         if not result.get("install_enabled"):
             self.update_progress.setVisible(False)
             self.update_status_label.setText("发现新版本。源码运行模式不会自动替换目录，可打开 Releases 页面手动下载。")

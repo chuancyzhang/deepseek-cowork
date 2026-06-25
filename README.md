@@ -160,7 +160,7 @@ Use the sidebar after meaningful work:
 Open **⚙️ Settings → Enterprise Messaging**, fill in credentials for Feishu, DingTalk, or WeCom smart bot, enable the channel, then start the gateway.
 
 ### 7. App Updates
-Open **⚙️ Settings → Updates** to check GitHub Releases. Packaged builds still download and verify the complete Release ZIP, then compare it with the current installation locally using SHA-256. The standalone updater backs up, writes, or deletes only changed application files; unchanged files are not copied again and `user_data` is always preserved. Foreground and background installation, differential rollback, and automatic restart remain available. Source runs only check and link to the release page.
+Opening Settings performs a lightweight background check against GitHub Releases. When a new version is available, the Updates navigation item and the top of the Updates page show a reminder without downloading anything. After the user clicks **Update Now**, packaged builds download and verify the complete Release ZIP, then compare it with the current installation locally using SHA-256. The standalone updater backs up, writes, or deletes only changed application files; unchanged files are not copied again and `user_data` is always preserved. Foreground and background installation, differential rollback, and automatic restart remain available. Source runs only check and link to the release page.
 
 ### 8. MCP Servers
 Open **⚙️ Settings → MCP** to add MCP servers.

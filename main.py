@@ -14370,8 +14370,6 @@ class MainWindow(QMainWindow):
         return [
             ("add_files", "添加文件"),
             ("add_agent", "添加智能体"),
-            ("add_sop", "添加自动化"),
-            ("create_sop", "从对话生成 SOP"),
             ("select_skills", "指定能力"),
             ("clarify_mode", "反问模式"),
         ]
@@ -14808,15 +14806,6 @@ class MainWindow(QMainWindow):
         menu.addAction(add_files)
         add_agent_menu = menu.addMenu(qta.icon('fa5s.user-astronaut', color='#4b5563'), "添加智能体")
         self._populate_agent_menu(add_agent_menu)
-        add_sop_action = QAction(qta.icon('fa5s.tasks', color='#4b5563'), "添加自动化", self)
-        add_sop_action.triggered.connect(self.open_session_sop_picker)
-        menu.addAction(add_sop_action)
-        create_sop_action = QAction(qta.icon('fa5s.magic', color='#4b5563'), "从对话生成 SOP", self)
-        create_sop_action.triggered.connect(self.start_conversation_sop_flow)
-        state = self.get_current_session()
-        sop_worker_running = bool(self.conversation_sop_worker and self.conversation_sop_worker.isRunning())
-        create_sop_action.setEnabled(bool(state and getattr(state, "messages", [])) and not sop_worker_running)
-        menu.addAction(create_sop_action)
         select_skills_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "指定能力", self)
         select_skills_action.triggered.connect(self.open_session_skill_picker)
         menu.addAction(select_skills_action)

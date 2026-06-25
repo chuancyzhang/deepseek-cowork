@@ -1069,8 +1069,10 @@ class TestSopUiHelpers(unittest.TestCase):
         entries = window._prompt_tool_menu_entries()
         self.assertEqual(
             [label for _key, label in entries],
-            ["添加文件", "添加智能体", "添加自动化", "从对话生成 SOP", "指定能力", "反问模式"],
+            ["添加文件", "添加智能体", "指定能力", "反问模式"],
         )
+        self.assertNotIn("添加自动化", [label for _key, label in entries])
+        self.assertNotIn("从对话生成 SOP", [label for _key, label in entries])
         self.assertNotIn("能力中心", [label for _key, label in entries])
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):

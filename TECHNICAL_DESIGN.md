@@ -4,7 +4,7 @@
 
 项目团队：**deepseek-cowork team**。
 
-当前应用版本：**4.9.3**。
+当前应用版本：**4.9.4**。
 
 *   **同轮中途引导**：桌面主对话的 `LLMWorker` 维护线程安全的 FIFO guidance 队列，在模型请求前、工具结果返回后及最终收敛边界消费；当前流式响应和正在执行的工具不会被强制打断。daemon 通过 `turn_id`、`turn_started` 与 `steer_message` 协议校验活动轮次，避免迟到输入串入下一轮。引导沿用普通用户消息的 `content` / `content_parts` / 附件元数据，停止或异常时仍保留已接受内容。
 
@@ -20,7 +20,7 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 *   **会话级工作区边界**：`SessionState.workspace_dir` 是运行与持久化的工作区来源；激活无项目会话会清除旧项目上下文。输入栏下方的项目选择器是唯一连接入口，可搜索配置中的未隐藏项目、添加项目或回到纯对话，但仅允许尚无消息且未运行任务的空会话切换。`run_context.workspace_mode` 区分 `chat_only` 与 `project`，工具注册根据 handler 是否接收 `workspace_dir` 标记依赖，并在纯对话的工具列表和发现结果中统一过滤。
 *   **右侧上下文抽屉**：文件、任务观测、子 Agent 监控以隐藏抽屉承载；文件页内用“全部文件 / 交付物”分段承载工作区文件树和最近交付物列表，并共用同一套预览栈。助手回复由工作区约束的路径识别器生成 `cowork-file` 内部链接和消息末尾文件卡片，点击后再次验证路径并直达交付物视图；流式内容形成完整有效路径时同步更新卡片。当前会话已打开交付物视图后，后续新路径自动选择并渲染，关闭抽屉或切换到全部文件即停止跟随，同一路径文件更新仍标记过期并等待手动刷新。HTML 与 Markdown 通过延迟加载的 QtWebEngine 渲染；图片由 QPixmap 解码并按预览区域等比缩放；PDF 使用延迟加载的 QtPdf，并在创建 `QPdfView` 时绑定同一个 `QPdfDocument`，组件不可用时使用 pypdf 显示文本预览；DOCX/PPTX/XLSX 由 python-docx、python-pptx、openpyxl 生成结构化 HTML 预览，旧版 DOC/PPT/XLS 二进制格式显示明确不支持提示。
 *   **动态对话阅读列**：消息列表与输入栏保持原有视觉样式，并根据主窗口可用宽度、右侧抽屉开合状态和保底留白动态计算；项目栏默认宽度为 232px，主区水平边距为 12px，抽屉外边距与中右栏间距为 8px。抽屉关闭时对话列使用居中的舒适阅读宽度并允许右侧留白；抽屉打开时继续按可用空间避让，窄窗口仍由 compact minimum 与 drawer width limit 防止重叠。
-*   **会话工具栏**：添加文件、智能体提及、自动化模板绑定、指定能力、反问模式统一从输入区入口触发。
+*   **会话工具栏**：添加文件、智能体提及、指定能力、反问模式统一从输入区入口触发；低频的自动化模板绑定与从对话生成 SOP 不再显示在输入区 `+` 菜单。
 *   **设置中心**：设置弹窗采用更接近 Apple 桌面偏好设置的左侧导航 + 右侧内容区结构，内容区使用轻量无边框分区；模型渠道可在后台线程中用未保存的地址、密钥、当前模型和 20 秒请求超时执行真实连接测试。常规文案偏产品表达，MCP 相关术语保持英文。
 *   **模型与推理选择**：对话栏模型菜单使用 `channel / model` 标签区分同名模型。OpenAI-compatible 模型通过 profile 的 `reasoning_efforts` 声明允许档位，`reasoning_effort` 保存该模型上次选择；运行上下文把本轮档位显式传给 `LLMFactory`。没有能力声明时 UI 不显示推理项且 provider 不发送 `reasoning_effort`。
 *   **消息原地编辑**：已完成的用户气泡可切换到内嵌编辑态；提交时在当前会话截断目标消息及其后续内容并重新生成。首条消息被截断时会短暂重建空状态，新气泡加入后无条件显式隐藏欢迎开屏，避免页面显隐时序令其重新出现；删除仅移除目标用户消息。运行中或历史尚未加载时明确阻止改写。
@@ -122,8 +122,8 @@ DeepSeek Cowork 采用 **Interleaved Chain-of-Thought** 架构，在推理阶段
 5.  保存时写入 `SKILL.md`、`skill.json`、`experience/entries.jsonl`、可选 `impl.py` 与勾选的 `scripts/`/`script_entries`，然后重新加载技能；热加载失败只提示，不中断已保存结果。
 
 **对话内创建 SOP**
-1.  用户在输入区 `+` 菜单点击 `从对话生成 SOP`。
-2.  `ConversationSopDraftWorker` 将当前会话渲染为转录文本，调用 `core/sop_from_conversation.py` 一次性生成完整 SOP 草稿。
+1.  `ConversationSopDraftWorker` 相关流程继续作为内部能力保留，但不再从输入区 `+` 菜单暴露入口。
+2.  Worker 将当前会话渲染为转录文本，调用 `core/sop_from_conversation.py` 一次性生成完整 SOP 草稿。
 3.  用户在预览对话框中确认生成，或输入修改意见让模型基于上一版草稿重新生成。
 4.  确认后保存为任务模板，并通过现有 `create_sop_run()` 绑定到当前会话；后续执行复用 SOP 状态机，但改为应用层逐步派发当前步骤，而不是整段提示词一次性交给模型。单步执行器可为 Agent、上传 Python 文件或 Bash 命令。
 

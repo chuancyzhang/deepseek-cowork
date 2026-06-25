@@ -6,7 +6,7 @@
 
 Built by **deepseek-cowork team**.
 
-Current app version: **4.9.3**.
+Current app version: **4.9.4**.
 
 While a foreground task is running, you can add text, images, or files in the main composer and choose **Guide** to steer the active turn. Guidance is applied at the next safe model-request boundary without stopping or starting a new task. Local and daemon-backed desktop runs are supported; automations, standalone sub-agents, and enterprise IM are not steerable yet.
 
@@ -53,7 +53,7 @@ For installation, model setup, project conversations, and editable PPTX generati
 *   **Daemon Context Snapshots**: Desktop-to-daemon requests include the current in-memory conversation snapshot, so continuing an idle chat keeps the visible context even after the daemon has suspended and restored its own session cache.
 *   **History Load Guard**: A restored session keeps input and background saves disabled until its SQLite history has been loaded and rebound as the window's canonical message list, preventing an early empty snapshot from overwriting existing context.
 *   **Automation Center**: A dedicated sidebar button opens automation management with `Configured`, `Run History`, and `Task Templates` tabs, with both cron-expression scheduling and guided quick configuration.
-*   **Session Controls**: Attach files as user-added file chips, mention configured agents, bind a session automation template, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; the prompt box auto-resizes with content and re-wraps cleanly in narrower layouts, and active automation and selected-skill chips can be removed with one click.
+*   **Session Controls**: Attach files as user-added file chips, mention configured agents, restrict the session to selected skills, or switch into clarifying mode from the prompt toolbar; the prompt box auto-resizes with content and re-wraps cleanly in narrower layouts, and active selected-skill chips can be removed with one click.
 *   **Inline Message Editing**: Finished user bubbles can switch into a compact inline editor with Cancel and Send controls. Sending replaces the current turn in place, truncates later history, and regenerates the answer; deleting a user message removes only that message and keeps later content.
 *   **Pinned and Archived Conversations**: Conversation rows inside projects and the unassigned conversation group expose compact pin and archive actions on hover. Pinned conversations sort first without changing their last-activity timestamp, while archived conversations leave the sidebar immediately.
 *   **Complete Prompt Bubble Wrapping**: User chat bubbles wrap full questions, including long Chinese prompts, identifiers, filenames, and hyphenated English text, instead of clipping or hiding content inside the blue bubble.
@@ -140,7 +140,6 @@ Examples:
 *   *"Summarize all PDFs in this folder into a single report."*
 *   *"Create a new skill to download videos using yt-dlp."*
 *   *"Read the text in this screenshot."* OCR-style extraction stays lightweight by using the selected vision model directly instead of adding a separate local OCR dependency.
-*   Use **从对话生成 SOP** in the input `+` menu to extract a complete SOP draft from the current conversation in one pass. Confirming saves it as a task template and binds it to the current session; feedback can regenerate the draft first.
 
 ### 4. Manage Automation
 Open **自动化** from the sidebar:
@@ -148,7 +147,7 @@ Open **自动化** from the sidebar:
 *   **Scheduled Task Editor** splits setup into clear sections for basics, schedule, template preview, and execution notes. Schedules still support direct 5-field crontab syntax as well as guided daily/weekly/monthly/interval/once setup.
 *   **Run History** presents a calmer detail view for completed, failed, interrupted, missed, or awaiting-confirmation runs, and can still reopen the related task session.
 *   **Task Templates** continue to hide manual template IDs by default; templates and steps can be set to manual confirmation or auto-advance, and each step can run through the agent, an uploaded Python file, or a Bash command.
-*   **Conversation Automation Entry Points** are more consistent: binding an automation to the current session and previewing a generated SOP draft use the same Apple-style surfaces; manual step confirmation now happens directly in the chat stream.
+*   **Session Automation Runs** keep manual step confirmation directly in the chat stream when an automation opens or resumes its related conversation.
 *   **AI-callable Automation Tools** let the agent inspect templates, create or update templates and scheduled tasks, pause or enable tasks, and review run history through normal `tool_search` discovery. Deleting or immediately running a task still requires explicit user approval, and newly created scheduled tasks default to paused unless the user clearly asks to enable them.
 
 ### 5. Close the Feedback Loop

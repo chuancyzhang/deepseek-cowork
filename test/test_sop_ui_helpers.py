@@ -32,6 +32,7 @@ from main import (
     SidebarHoverTipController,
     SessionActivityIndicator,
     SessionState,
+    StartupLoadingWindow,
     sidebar_symbol_icon,
     UI_ERROR_LOG_FILENAME,
     SkillsCenterDialog,
@@ -52,6 +53,7 @@ from main import (
     summarize_skill_terms,
     log_ui_exception,
     initialize_desktop_theme,
+    schedule_main_window_startup,
 )
 from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData, QTimer
 from PySide6.QtGui import QTextOption, QShowEvent
@@ -995,6 +997,57 @@ class TestSopUiHelpers(unittest.TestCase):
 
         self.assertFalse(indicator.isVisible())
         self.assertFalse(indicator._timer.isActive())
+
+    def test_startup_loading_window_starts_indicator_when_shown(self):
+        app = QApplication.instance() or QApplication([])
+        window = StartupLoadingWindow()
+
+        try:
+            self.assertTrue(window.indicator._running)
+            self.assertFalse(window.indicator._timer.isActive())
+
+            window.show_centered()
+            app.processEvents()
+
+            self.assertTrue(window.isVisible())
+            self.assertTrue(window.indicator._timer.isActive())
+        finally:
+            window.close()
+            window.deleteLater()
+            app.processEvents()
+
+    def test_schedule_main_window_startup_defers_window_construction(self):
+        app = QApplication.instance() or QApplication([])
+        old_main_window = getattr(app, "main_window", None)
+        startup_window = MagicMock()
+        server = MagicMock()
+        pending_activation = {"requested": True}
+
+        try:
+            with patch("main.QTimer.singleShot") as single_shot, \
+                 patch("main.MainWindow") as main_window_cls, \
+                 patch("main.finish_startup_loading_window") as finish_startup:
+                fake_window = MagicMock()
+                main_window_cls.return_value = fake_window
+
+                holder = schedule_main_window_startup(app, startup_window, server, True, pending_activation)
+
+                main_window_cls.assert_not_called()
+                self.assertIsNone(holder["window"])
+                single_shot.assert_called_once()
+                self.assertEqual(single_shot.call_args.args[0], 0)
+
+                callback = single_shot.call_args.args[1]
+                callback()
+
+            self.assertIs(holder["window"], fake_window)
+            self.assertIs(app.main_window, fake_window)
+            fake_window.attach_single_instance_server.assert_called_once_with(server)
+            fake_window.showMaximized.assert_called_once()
+            finish_startup.assert_called_once_with(startup_window)
+            fake_window.activate_existing_window.assert_called_once()
+        finally:
+            app.main_window = old_main_window
 
     def test_ui_exception_log_keeps_full_traceback_context(self):
         receiver = QWidget()

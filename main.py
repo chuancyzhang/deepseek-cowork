@@ -11193,14 +11193,14 @@ class SubAgentMonitorWindow(QDialog):
 class SessionActivityIndicator(QWidget):
     """Small, quiet activity ring used by live conversations in the sidebar."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, size=None):
         super().__init__(parent)
         self._angle = 90
         self._running = False
         self._timer = QTimer(self)
         self._timer.setInterval(DesignTokens.activity_indicator_interval_ms)
         self._timer.timeout.connect(self._advance)
-        size = DesignTokens.activity_indicator_size
+        size = int(size or DesignTokens.activity_indicator_size)
         self.setFixedSize(size, size)
         self.setToolTip("运行中")
         self.setAccessibleName("运行中")
@@ -11250,6 +11250,113 @@ class SessionActivityIndicator(QWidget):
         active_pen.setCapStyle(Qt.RoundCap)
         painter.setPen(active_pen)
         painter.drawArc(rect, self._angle * 16, 104 * 16)
+
+
+class StartupLoadingWindow(QWidget):
+    """Small first-paint window shown while the full main window is built."""
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setWindowTitle("DeepSeek Cowork")
+        icon_path = resolve_app_icon_path()
+        if icon_path:
+            self.setWindowIcon(QIcon(icon_path))
+
+        shell = QFrame(self)
+        shell.setObjectName("StartupShell")
+        shell.setStyleSheet(
+            f"""
+            QFrame#StartupShell {{
+                background: rgba(255, 255, 255, 0.96);
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 24px;
+            }}
+            QLabel#StartupTitle {{
+                color: {DesignTokens.text_primary};
+                font-size: 20px;
+                font-weight: 700;
+            }}
+            QLabel#StartupCaption {{
+                color: {DesignTokens.text_secondary};
+                font-size: 12px;
+            }}
+            """
+        )
+        shadow = QGraphicsDropShadowEffect(shell)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 12)
+        shadow.setColor(QColor(15, 23, 42, 24))
+        shell.setGraphicsEffect(shadow)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(18, 18, 18, 18)
+        outer_layout.addWidget(shell)
+
+        layout = QVBoxLayout(shell)
+        layout.setContentsMargins(30, 28, 30, 26)
+        layout.setSpacing(14)
+
+        self.indicator = SessionActivityIndicator(shell, size=24)
+        self.indicator.setRunning(True)
+        layout.addWidget(self.indicator, 0, Qt.AlignHCenter)
+
+        title = QLabel("DeepSeek Cowork")
+        title.setObjectName("StartupTitle")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        caption = QLabel("正在准备工作台")
+        caption.setObjectName("StartupCaption")
+        caption.setAlignment(Qt.AlignCenter)
+        layout.addWidget(caption)
+
+        self.resize(300, 188)
+
+    def show_centered(self):
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            self.move(geometry.center() - self.rect().center())
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+
+def show_startup_loading_window(app):
+    startup_window = StartupLoadingWindow()
+    startup_window.show_centered()
+    app.processEvents()
+    log_startup_stage("startup_loading_show_requested")
+    return startup_window
+
+
+def finish_startup_loading_window(startup_window):
+    if startup_window is None:
+        return
+    startup_window.hide()
+    startup_window.deleteLater()
+    log_startup_stage("startup_loading_closed")
+
+
+def schedule_main_window_startup(app, startup_window, single_instance_server, single_instance_server_started, pending_activation):
+    holder = {"window": None}
+
+    def build_main_window():
+        window = MainWindow()
+        holder["window"] = window
+        app.main_window = window
+        if single_instance_server_started:
+            window.attach_single_instance_server(single_instance_server)
+        log_startup_stage("window_created", single_instance_server_started=single_instance_server_started)
+        window.showMaximized()
+        log_startup_stage("window_show_requested")
+        finish_startup_loading_window(startup_window)
+        if pending_activation.get("requested"):
+            window.activate_existing_window()
+
+    QTimer.singleShot(0, build_main_window)
+    return holder
 
 
 class SessionState:
@@ -22916,10 +23023,15 @@ if __name__ == "__main__":
         app.setWindowIcon(QIcon(icon_path))
     initialize_desktop_theme(app)
     pending_activation = {"requested": False}
+    startup_state = {"window": None}
 
     def activate_main_window():
         if app.main_window:
             app.main_window.activate_existing_window()
+        elif startup_state["window"] and startup_state["window"].isVisible():
+            startup_state["window"].raise_()
+            startup_state["window"].activateWindow()
+            pending_activation["requested"] = True
         else:
             pending_activation["requested"] = True
 
@@ -22928,13 +23040,13 @@ if __name__ == "__main__":
     if not single_instance_server_started and notify_existing_ui_with_retries(ui_server_name):
         sys.exit(0)
 
-    window = MainWindow()
-    app.main_window = window
-    if single_instance_server_started:
-        window.attach_single_instance_server(single_instance_server)
-    log_startup_stage("window_created", single_instance_server_started=single_instance_server_started)
-    window.showMaximized()
-    log_startup_stage("window_show_requested")
-    if pending_activation["requested"]:
-        window.activate_existing_window()
+    startup_window = show_startup_loading_window(app)
+    startup_state["window"] = startup_window
+    schedule_main_window_startup(
+        app,
+        startup_window,
+        single_instance_server,
+        single_instance_server_started,
+        pending_activation,
+    )
     sys.exit(app.exec())

@@ -9,8 +9,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PySide6.QtWidgets import QComboBox, QPushButton
-
 from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
 from core.chat_storage import ChatStorage
 from core.theme import DesignTokens
@@ -922,8 +920,8 @@ class TestSopUiHelpers(unittest.TestCase):
         meta = window._compose_session_meta(state)
 
         self.assertEqual(meta["workspace_dir"], session_workspace)
-        self.assertEqual(meta["workflow_mode"], "")
-        self.assertEqual(meta["office_output_profile"], OFFICE_OUTPUT_PROFILE_FREE)
+        self.assertNotIn("workflow_mode", meta)
+        self.assertNotIn("office_output_profile", meta)
 
     def test_new_conversation_for_project_binds_new_session_workspace(self):
         temp_dir = tempfile.mkdtemp()
@@ -985,8 +983,6 @@ class TestSopUiHelpers(unittest.TestCase):
                 "persisted_conversation_meta": {},
                 "clarify_mode_state": "exploring",
                 "pending_clarify_questions": [],
-                "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
-                "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
                 "sop_run": None,
             },
         )()
@@ -994,6 +990,15 @@ class TestSopUiHelpers(unittest.TestCase):
         context = window._build_run_context(state, "execution")
 
         self.assertEqual(context["workspace_mode"], "chat_only")
+        self.assertEqual(context["workflow_mode"], "")
+        self.assertEqual(context["office_output_profile"], OFFICE_OUTPUT_PROFILE_FREE)
+
+        context = window._build_run_context(
+            state,
+            "execution",
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+        )
         self.assertEqual(context["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
         self.assertEqual(context["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
 
@@ -1166,64 +1171,37 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertNotIn("从对话生成 SOP", [label for _key, label in entries])
         self.assertNotIn("能力中心", [label for _key, label in entries])
 
-    def test_workflow_controls_reflect_office_mode_and_profile(self):
+    def test_agent_bubble_shows_office_draft_action_for_final_content(self):
         app = QApplication.instance() or QApplication([])
-        window = MainWindow.__new__(MainWindow)
-        window.current_session_id = "session-1"
-        state = type(
-            "_Session",
-            (),
-            {
-                "session_id": "session-1",
-                "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
-                "office_output_profile": OFFICE_OUTPUT_PROFILE_DESIGN,
-                "llm_worker": None,
-                "code_worker": None,
-                "daemon_running": False,
-            },
-        )()
-        window.sessions = {"session-1": state}
-        window.get_session = MagicMock(return_value=state)
-        window.office_mode_btn = QPushButton()
-        window.office_mode_btn.setCheckable(True)
-        window.office_profile_combo = QComboBox()
-        window.office_profile_combo.addItem("自由", OFFICE_OUTPUT_PROFILE_FREE)
-        window.office_profile_combo.addItem("PPT", OFFICE_OUTPUT_PROFILE_PPT)
-        window.office_profile_combo.addItem("设计稿", OFFICE_OUTPUT_PROFILE_DESIGN)
+        bubble = ChatBubble("Agent", "")
 
         try:
-            window.refresh_workflow_mode_controls("session-1")
+            self.assertTrue(bubble.office_draft_btn.isHidden())
+            bubble.set_main_content("这是一段可以生成办公稿的回复", final=True)
             app.processEvents()
 
-            self.assertTrue(window.office_mode_btn.isChecked())
-            self.assertTrue(window.office_profile_combo.isVisible())
-            self.assertEqual(window.office_profile_combo.currentData(), OFFICE_OUTPUT_PROFILE_DESIGN)
+            self.assertFalse(bubble.copy_result_btn.isHidden())
+            self.assertFalse(bubble.office_draft_btn.isHidden())
+            self.assertEqual(bubble.office_draft_btn.text(), "生成办公稿")
         finally:
-            window.office_mode_btn.deleteLater()
-            window.office_profile_combo.deleteLater()
+            bubble.deleteLater()
             app.processEvents()
 
-    def test_set_session_office_profile_enables_workflow_and_saves(self):
-        window = MainWindow.__new__(MainWindow)
-        state = type(
-            "_Session",
-            (),
-            {
-                "session_id": "session-1",
-                "workflow_mode": "",
-                "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
-            },
-        )()
-        window.get_session = MagicMock(return_value=state)
-        window.refresh_workflow_mode_controls = MagicMock()
-        window.normalize_session_ui = MagicMock()
-        window.save_chat_history = MagicMock()
+    def test_agent_bubble_office_draft_menu_emits_selected_profile(self):
+        app = QApplication.instance() or QApplication([])
+        bubble = ChatBubble("Agent", "")
+        emitted = []
+        bubble.officeDraftRequested.connect(lambda profile, msg_id, text: emitted.append((profile, msg_id, text)))
 
-        window.set_session_office_output_profile(OFFICE_OUTPUT_PROFILE_PPT, session_id="session-1")
+        try:
+            bubble.set_source_message_id("assistant-1")
+            bubble.set_main_content("把这段内容做成演示稿", final=True)
+            bubble._emit_office_draft_request(OFFICE_OUTPUT_PROFILE_PPT)
 
-        self.assertEqual(state.workflow_mode, WORKFLOW_MODE_OFFICE_HTML_FIRST)
-        self.assertEqual(state.office_output_profile, OFFICE_OUTPUT_PROFILE_PPT)
-        window.save_chat_history.assert_called_once_with(session_id="session-1")
+            self.assertEqual(emitted, [(OFFICE_OUTPUT_PROFILE_PPT, "assistant-1", "把这段内容做成演示稿")])
+        finally:
+            bubble.deleteLater()
+            app.processEvents()
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):
         window = MainWindow.__new__(MainWindow)

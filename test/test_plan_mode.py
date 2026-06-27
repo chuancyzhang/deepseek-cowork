@@ -370,7 +370,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.run()
 
             runtime_prompt = events[0].get("runtime_context", "")
-            self.assertIn("策略 [办公模式]", runtime_prompt)
+            self.assertIn("策略 [办公稿生成]", runtime_prompt)
             self.assertIn("当前类型: PPT", runtime_prompt)
             self.assertIn("不要称为 HTML 模式", runtime_prompt)
             self.assertIn("继续生成 PPTX", runtime_prompt)

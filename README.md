@@ -15,12 +15,12 @@ Current app version: **4.9.4**
 - Extend capabilities through built-in skills, bundled optional plugins, user skills, and MCP tools.
 - Manage reusable agents, automation templates, scheduled runs, and long-term memory from the UI.
 - Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
-- Use Office Mode to create previewable work products for free-form reports, slide-style drafts, design mockups, and document-style outputs.
+- Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles.
 
 ## Product Surface
 
 - **Conversation + project model**: start a pure chat, or bind a conversation to a project workspace.
-- **Office Mode**: keep an office deliverable workflow active from the input bar, with Free, PPT, Design, and DOCX output profiles.
+- **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply.
 - **Right-side context drawer**: open files, deliverables, observability, and sub-agent status on demand.
 - **Settings center**: manage models, agents, workspace defaults, MCP servers, enterprise messaging, and runtime components.
 - **Automation center**: manage task templates, schedules, run history, and step confirmation.

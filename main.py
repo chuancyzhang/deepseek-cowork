@@ -9245,11 +9245,6 @@ class EmptyStateWidget(QWidget):
         return btn
 
     def activate_action_prompt(self, prompt, title=""):
-        if title == "办公交付物":
-            if hasattr(self.main_window, "set_session_workflow_mode"):
-                self.main_window.set_session_workflow_mode(WORKFLOW_MODE_OFFICE_HTML_FIRST)
-            if hasattr(self.main_window, "set_session_office_output_profile"):
-                self.main_window.set_session_office_output_profile(OFFICE_OUTPUT_PROFILE_FREE)
         self.main_window.input_field.setText(prompt)
 
 class SystemToast(QFrame):
@@ -9544,6 +9539,7 @@ class ChatBubble(QFrame):
     deleteRequested = Signal(str)
     deliverablePathActivated = Signal(str)
     deliverablePathsChanged = Signal(object)
+    officeDraftRequested = Signal(str, str, str)
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(
@@ -9809,9 +9805,27 @@ class ChatBubble(QFrame):
                 }}
             """)
             self.copy_result_btn.clicked.connect(self.copy_main_content)
+            self.office_draft_btn = QPushButton("生成办公稿")
+            self.office_draft_btn.setCursor(Qt.PointingHandCursor)
+            self.office_draft_btn.setIcon(qta.icon('fa5s.file-code', color='#4b5563'))
+            self.office_draft_btn.setVisible(False)
+            self.office_draft_btn.setFixedHeight(26)
+            self.office_draft_btn.setStyleSheet(self.copy_result_btn.styleSheet())
+            self.office_draft_menu = create_styled_menu(self.office_draft_btn)
+            for label, profile in (
+                ("自由", OFFICE_OUTPUT_PROFILE_FREE),
+                ("PPT", OFFICE_OUTPUT_PROFILE_PPT),
+                ("设计稿", OFFICE_OUTPUT_PROFILE_DESIGN),
+                ("DOCX", OFFICE_OUTPUT_PROFILE_DOCX),
+            ):
+                action = QAction(label, self.office_draft_menu)
+                action.triggered.connect(lambda _checked=False, value=profile: self._emit_office_draft_request(value))
+                self.office_draft_menu.addAction(action)
+            self.office_draft_btn.clicked.connect(self.show_office_draft_menu)
             copy_row = QHBoxLayout()
             copy_row.setContentsMargins(0, 0, 0, 0)
             copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
+            copy_row.addWidget(self.office_draft_btn, 0, Qt.AlignLeft)
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
 
@@ -9981,6 +9995,19 @@ class ChatBubble(QFrame):
     def _emit_delete_request(self):
         if self.source_message_id:
             self.deleteRequested.emit(self.source_message_id)
+
+    def show_office_draft_menu(self):
+        if not getattr(self, "office_draft_menu", None) or not getattr(self, "office_draft_btn", None):
+            return
+        self.office_draft_menu.exec(self.office_draft_btn.mapToGlobal(self.office_draft_btn.rect().bottomLeft()))
+
+    def _emit_office_draft_request(self, profile):
+        text = (getattr(self, "main_content_text", "") or "").strip()
+        if not text and self.content_edit is not None:
+            text = self.content_edit.toPlainText().strip()
+        if not text:
+            return
+        self.officeDraftRequested.emit(str(profile or OFFICE_OUTPUT_PROFILE_FREE), self.source_message_id, text)
 
     def set_source_message_id(self, source_message_id):
         self.source_message_id = str(source_message_id or "").strip()
@@ -10346,6 +10373,8 @@ class ChatBubble(QFrame):
         self._pending_main_content_parts = content_parts
         self._pending_main_content_final = bool(final)
         self.copy_result_btn.setVisible(bool(text.strip()))
+        if getattr(self, "office_draft_btn", None) is not None:
+            self.office_draft_btn.setVisible(bool(final and text.strip()))
 
         already_rendered = (
             self._rendered_main_content_text == text
@@ -11526,6 +11555,7 @@ class SessionState:
         self.selected_skill_names = []
         self.workflow_mode = ""
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
+        self.office_draft_preview_pending = False
         self.sop_run = None
         self.sop_confirmation_bar = None
         self.persisted_conversation_meta = {}
@@ -13964,42 +13994,6 @@ class MainWindow(QMainWindow):
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
-        self.office_mode_btn = QPushButton("办公模式")
-        self.office_mode_btn.setIcon(qta.icon('fa5s.briefcase', color=DesignTokens.text_secondary))
-        self.office_mode_btn.setToolTip("用可预览的工作稿协作，适合报告、PPT、文档和设计稿")
-        self.office_mode_btn.setCursor(Qt.PointingHandCursor)
-        self.office_mode_btn.setCheckable(True)
-        self.office_mode_btn.setFixedHeight(32)
-        self.office_mode_btn.setMinimumWidth(92)
-        self.office_mode_btn.setStyleSheet(
-            f"QPushButton {{ background: rgba(255, 255, 255, 0.72); color: {DesignTokens.text_secondary}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 16px; "
-            "padding: 5px 11px; font-size: 12px; font-weight: 650; text-align: left; }}"
-            f"QPushButton:hover {{ background: rgba(255, 255, 255, 0.94); color: {DesignTokens.text_primary}; border-color: {DesignTokens.border}; }}"
-            f"QPushButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-            f"border-color: {rgba_from_hex(DesignTokens.primary, 0.22)}; }}"
-        )
-        self.office_mode_btn.clicked.connect(self.on_office_mode_toggled)
-
-        self.office_profile_combo = QComboBox()
-        self.office_profile_combo.setToolTip("选择办公交付物类型")
-        self.office_profile_combo.setFixedHeight(32)
-        self.office_profile_combo.setMinimumWidth(84)
-        self.office_profile_combo.addItem("自由", OFFICE_OUTPUT_PROFILE_FREE)
-        self.office_profile_combo.addItem("PPT", OFFICE_OUTPUT_PROFILE_PPT)
-        self.office_profile_combo.addItem("设计稿", OFFICE_OUTPUT_PROFILE_DESIGN)
-        self.office_profile_combo.addItem("DOCX", OFFICE_OUTPUT_PROFILE_DOCX)
-        self.office_profile_combo.setStyleSheet(
-            f"QComboBox {{ background: rgba(255, 255, 255, 0.72); color: {DesignTokens.text_primary}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 16px; "
-            "padding: 4px 24px 4px 10px; font-size: 12px; font-weight: 650; }}"
-            f"QComboBox:hover {{ background: rgba(255, 255, 255, 0.94); border-color: {DesignTokens.border}; }}"
-            "QComboBox::drop-down { border: none; width: 20px; }"
-            "QComboBox::down-arrow { image: none; width: 0px; }"
-        )
-        self.office_profile_combo.currentIndexChanged.connect(self.on_office_profile_changed)
-        self.office_profile_combo.setVisible(False)
-
         self.sop_badge = SessionContextChip(" 自动化", qta.icon('fa5s.tasks', color=DesignTokens.primary))
         self.sop_badge.setToolTip("查看或调整当前会话自动化")
         self.sop_badge.setCloseToolTip("移除当前会话自动化")
@@ -14111,8 +14105,6 @@ class MainWindow(QMainWindow):
         prompt_toolbar.setContentsMargins(0, 0, 0, 0)
         prompt_toolbar.setSpacing(8)
         prompt_toolbar.addWidget(self.tool_menu_btn)
-        prompt_toolbar.addWidget(self.office_mode_btn)
-        prompt_toolbar.addWidget(self.office_profile_combo)
         prompt_toolbar.addWidget(self.sop_badge)
         prompt_toolbar.addWidget(self.selected_skills_badge)
         prompt_toolbar.addWidget(self.clarify_mode_badge)
@@ -15376,21 +15368,11 @@ class MainWindow(QMainWindow):
             )
         }
 
-    def _session_workflow_meta(self, state):
-        if not state:
-            return {}
-        workflow_mode = normalize_workflow_mode(getattr(state, "workflow_mode", ""))
-        meta = {"workflow_mode": workflow_mode}
-        if workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
-            meta["office_output_profile"] = normalize_office_output_profile(
-                getattr(state, "office_output_profile", OFFICE_OUTPUT_PROFILE_FREE)
-            )
-        else:
-            meta["office_output_profile"] = OFFICE_OUTPUT_PROFILE_FREE
-        return meta
-
     def _is_office_workflow_enabled(self, state):
-        return normalize_workflow_mode(getattr(state, "workflow_mode", "")) == WORKFLOW_MODE_OFFICE_HTML_FIRST
+        return bool(getattr(state, "office_draft_preview_pending", False))
+
+    def _is_office_workflow_context(self, workflow_mode):
+        return normalize_workflow_mode(workflow_mode) == WORKFLOW_MODE_OFFICE_HTML_FIRST
 
     def _session_sop_meta(self, state):
         if not state:
@@ -17006,7 +16988,6 @@ class MainWindow(QMainWindow):
         self.refresh_context_badges(session_id)
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
-        self.refresh_workflow_mode_controls(session_id)
         self.refresh_prompt_file_chips(session_id)
         self.refresh_token_usage_label(session_id)
         if (
@@ -17092,27 +17073,11 @@ class MainWindow(QMainWindow):
             self.tool_menu_btn.setEnabled(bool(workspace_dir) and history_ready)
             self.tool_menu_btn.setToolTip("" if workspace_dir else "连接项目后可添加文件、自动化和本地能力")
             self.stop_btn.setVisible(False)
-            office_enabled = self._is_office_workflow_enabled(state)
-            office_profile = normalize_office_output_profile(
-                getattr(state, "office_output_profile", OFFICE_OUTPUT_PROFILE_FREE)
-            )
             if not history_ready:
                 self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
                 self.action_btn.setText("加载中")
             if awaiting_sop_confirmation:
                 self.input_field.setPlaceholderText("请先在聊天中的自动化确认条处理当前步骤")
-            elif office_enabled:
-                placeholder_map = {
-                    OFFICE_OUTPUT_PROFILE_PPT: "描述要生成或修改的演示内容，例如：做一份 8 页产品发布 PPT",
-                    OFFICE_OUTPUT_PROFILE_DESIGN: "描述要生成或修改的设计稿，例如：做一个设置页的桌面端 UI 方案",
-                    OFFICE_OUTPUT_PROFILE_DOCX: "描述要生成或修改的文档，例如：整理成一份正式方案文档",
-                }
-                self.input_field.setPlaceholderText(
-                    placeholder_map.get(
-                        office_profile,
-                        "描述要生成或修改的办公交付物，例如：整理一份数据分析报告",
-                    )
-                )
             elif workspace_dir:
                 self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             else:
@@ -17120,7 +17085,6 @@ class MainWindow(QMainWindow):
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
-        self.refresh_workflow_mode_controls(state.session_id)
         self.refresh_project_selector(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -17313,6 +17277,7 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = []
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
+        state.office_draft_preview_pending = False
         state.sop_run = None
         state.sop_confirmation_bar = None
         state.persisted_conversation_meta = {}
@@ -17467,10 +17432,9 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = normalize_selected_skill_names(
             conversation_meta.get("selected_skill_names")
         )
-        state.workflow_mode = normalize_workflow_mode(conversation_meta.get("workflow_mode"))
-        state.office_output_profile = normalize_office_output_profile(
-            conversation_meta.get("office_output_profile")
-        )
+        state.workflow_mode = ""
+        state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
+        state.office_draft_preview_pending = False
         state.sop_run = normalize_sop_run(conversation_meta.get("sop_run"))
         state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
         state.clarify_mode_state = normalize_clarify_phase(
@@ -17526,7 +17490,6 @@ class MainWindow(QMainWindow):
         self.normalize_session_ui(self.get_current_session())
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
-        self.refresh_workflow_mode_controls(session_id)
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
 
@@ -19371,7 +19334,6 @@ class MainWindow(QMainWindow):
             meta.pop("last_token_usage", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
-        meta.update(self._session_workflow_meta(state))
         meta.update(self._session_sop_meta(state))
         return meta
 
@@ -19385,9 +19347,8 @@ class MainWindow(QMainWindow):
             or bool(getattr(state, "pending_clarify_questions", []))
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        has_workflow_state = bool(normalize_workflow_mode(getattr(state, "workflow_mode", "")))
         has_sop_state = bool(normalize_sop_run(getattr(state, "sop_run", None)))
-        if not state.messages and not has_clarify_state and not has_selected_skills and not has_workflow_state and not has_sop_state:
+        if not state.messages and not has_clarify_state and not has_selected_skills and not has_sop_state:
             return None
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
         meta = self._compose_session_meta(state)
@@ -19905,6 +19866,8 @@ class MainWindow(QMainWindow):
         if office_enabled:
             self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
             self.show_context_drawer(self.RIGHT_TAB_FILES)
+            if state:
+                state.office_draft_preview_pending = False
         self.select_deliverable(latest, render_html=True)
 
     def select_deliverable(self, path, render_html=True):
@@ -20591,80 +20554,85 @@ class MainWindow(QMainWindow):
             names.append(display_map.get(skill_name, skill_name))
         return names
 
-    def refresh_workflow_mode_controls(self, session_id=None):
-        state = self.get_session(session_id)
-        if not state or state.session_id != self.current_session_id:
-            return
-        enabled = self._is_office_workflow_enabled(state)
-        running = bool(
-            (getattr(state, "llm_worker", None) and state.llm_worker.isRunning())
-            or (getattr(state, "code_worker", None) and state.code_worker.isRunning())
-            or getattr(state, "daemon_running", False)
+    def _office_profile_label(self, profile):
+        profile = normalize_office_output_profile(profile)
+        return {
+            OFFICE_OUTPUT_PROFILE_PPT: "PPT",
+            OFFICE_OUTPUT_PROFILE_DESIGN: "设计稿",
+            OFFICE_OUTPUT_PROFILE_DOCX: "DOCX",
+        }.get(profile, "自由")
+
+    def _build_office_draft_prompt(self, profile, source_text):
+        profile = normalize_office_output_profile(profile)
+        profile_label = self._office_profile_label(profile)
+        profile_instruction = {
+            OFFICE_OUTPUT_PROFILE_PPT: (
+                "请生成 PPT 形式的 HTML 工作稿：默认 16:9，按幻灯片分页组织，"
+                "每页有清晰标题、主体内容和演示节奏，后续可继续生成 PPTX。"
+            ),
+            OFFICE_OUTPUT_PROFILE_DESIGN: (
+                "请生成设计稿形式的 HTML 工作稿：以画板组织页面，突出组件、状态、间距、颜色、层级和交互说明，"
+                "适合 UI 或视觉方案评审。"
+            ),
+            OFFICE_OUTPUT_PROFILE_DOCX: (
+                "请生成文档形式的 HTML 工作稿：突出标题层级、段落、表格、引用、目录感和分页语义，"
+                "后续可继续生成 DOCX。"
+            ),
+        }.get(
+            profile,
+            "请生成自由形式的 HTML 工作稿：适合报告、分析、方案或页面型交付物，优先保证结构完整、可读和可预览。",
         )
-        if hasattr(self, "office_mode_btn"):
-            blocked = self.office_mode_btn.blockSignals(True)
-            self.office_mode_btn.setChecked(enabled)
-            self.office_mode_btn.setText("办公模式")
-            icon_color = DesignTokens.primary if enabled else DesignTokens.text_secondary
-            self.office_mode_btn.setIcon(qta.icon('fa5s.briefcase', color=icon_color))
-            self.office_mode_btn.setEnabled(not running)
-            self.office_mode_btn.blockSignals(blocked)
-        if hasattr(self, "office_profile_combo"):
-            profile = normalize_office_output_profile(
-                getattr(state, "office_output_profile", OFFICE_OUTPUT_PROFILE_FREE)
-            )
-            blocked = self.office_profile_combo.blockSignals(True)
-            index = self.office_profile_combo.findData(profile)
-            self.office_profile_combo.setCurrentIndex(index if index >= 0 else 0)
-            self.office_profile_combo.setVisible(enabled)
-            self.office_profile_combo.setEnabled(enabled and not running)
-            self.office_profile_combo.blockSignals(blocked)
+        source = str(source_text or "").strip()
+        return (
+            f"请基于下面这段 AI 回复，生成一份「{profile_label}」类型的可预览办公稿，并保存为当前项目工作区内的 HTML 文件。\n\n"
+            f"{profile_instruction}\n\n"
+            "要求：\n"
+            "- 生成完整 HTML 文件，而不是只给 Markdown 或片段。\n"
+            "- 文件名请使用清晰主题名；如果冲突，请追加时间戳。\n"
+            "- 完成后明确告诉我 HTML 文件的完整路径，方便右侧交付物视图自动预览。\n\n"
+            "[源回复]\n"
+            f"{source}"
+        )
 
-    def set_session_workflow_mode(self, mode, session_id=None):
+    def handle_office_draft_requested(self, profile, source_message_id, source_text, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state:
-            return
-        state.workflow_mode = normalize_workflow_mode(mode)
-        if state.workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
-            state.office_output_profile = normalize_office_output_profile(
-                getattr(state, "office_output_profile", OFFICE_OUTPUT_PROFILE_FREE)
+            return False
+        if not self._workspace_dir_for_state(state):
+            self.add_system_toast(
+                "请先连接项目工作区，再生成办公稿。",
+                "warning",
+                session_id=state.session_id,
+                auto_close_ms=3600,
             )
-        else:
-            state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
-        self.refresh_workflow_mode_controls(state.session_id)
-        self.normalize_session_ui(state)
-        self.save_chat_history(session_id=state.session_id)
-
-    def set_session_office_output_profile(self, profile, session_id=None):
-        state = self.get_session(session_id) if session_id else self.get_current_session()
-        if not state:
-            return
-        state.office_output_profile = normalize_office_output_profile(profile)
-        if not self._is_office_workflow_enabled(state):
-            state.workflow_mode = WORKFLOW_MODE_OFFICE_HTML_FIRST
-        self.refresh_workflow_mode_controls(state.session_id)
-        self.normalize_session_ui(state)
-        self.save_chat_history(session_id=state.session_id)
-
-    def clear_session_workflow_mode(self, session_id=None):
-        self.set_session_workflow_mode("", session_id=session_id)
-
-    def on_office_mode_toggled(self, checked):
-        state = self.get_current_session()
-        if not state:
-            return
-        if checked:
-            self.set_session_workflow_mode(WORKFLOW_MODE_OFFICE_HTML_FIRST, session_id=state.session_id)
-            self.add_system_toast("办公模式已开启", "success", session_id=state.session_id, auto_close_ms=2600)
-        else:
-            self.clear_session_workflow_mode(session_id=state.session_id)
-            self.add_system_toast("办公模式已关闭", "info", session_id=state.session_id, auto_close_ms=2400)
-
-    def on_office_profile_changed(self, _index):
-        state = self.get_current_session()
-        if not state or not hasattr(self, "office_profile_combo"):
-            return
-        self.set_session_office_output_profile(self.office_profile_combo.currentData(), session_id=state.session_id)
+            return False
+        source = str(source_text or "").strip()
+        if source_message_id:
+            message = self._find_message_by_id(getattr(state, "messages", []), source_message_id)
+            if isinstance(message, dict) and str(message.get("content") or "").strip():
+                source = str(message.get("content") or "").strip()
+        if not source:
+            self.add_system_toast("这条回复没有可用于生成办公稿的内容。", "warning", session_id=state.session_id)
+            return False
+        profile = normalize_office_output_profile(profile)
+        prompt = self._build_office_draft_prompt(profile, source)
+        submitted = self._submit_session_request(
+            state,
+            prompt,
+            [],
+            check_duplicates=False,
+            clear_current_input=False,
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            office_output_profile=profile,
+        )
+        if submitted:
+            self.add_system_toast(
+                f"正在生成{self._office_profile_label(profile)}办公稿",
+                "info",
+                session_id=state.session_id,
+                auto_close_ms=2800,
+            )
+        return submitted
 
     def refresh_selected_skill_controls(self, session_id=None):
         state = self.get_session(session_id)
@@ -21255,7 +21223,7 @@ class MainWindow(QMainWindow):
         self.save_chat_history(session_id=state.session_id)
         self.normalize_session_ui(state)
 
-    def _build_run_context(self, state, mode):
+    def _build_run_context(self, state, mode, workflow_mode="", office_output_profile=None):
         effective_skill_names = self._effective_sop_skill_names(state)
         return normalize_run_context(
             {
@@ -21271,9 +21239,9 @@ class MainWindow(QMainWindow):
                 "selected_model_id": self.config_manager.get_selected_model_id(),
                 "reasoning_effort": self._selected_reasoning_effort(),
                 "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
-                "workflow_mode": normalize_workflow_mode(getattr(state, "workflow_mode", "")),
+                "workflow_mode": normalize_workflow_mode(workflow_mode),
                 "office_output_profile": normalize_office_output_profile(
-                    getattr(state, "office_output_profile", OFFICE_OUTPUT_PROFILE_FREE)
+                    office_output_profile if office_output_profile is not None else OFFICE_OUTPUT_PROFILE_FREE
                 ),
                 "sop_run": normalize_sop_run(getattr(state, "sop_run", None)),
             }
@@ -21320,10 +21288,8 @@ class MainWindow(QMainWindow):
                 "agent_system_prompt": profile.get("system_prompt"),
                 "agent_summon_source": summon_source,
                 "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
-                "workflow_mode": normalize_workflow_mode(getattr(state, "workflow_mode", "")) if state else "",
-                "office_output_profile": normalize_office_output_profile(
-                    getattr(state, "office_output_profile", OFFICE_OUTPUT_PROFILE_FREE)
-                ) if state else OFFICE_OUTPUT_PROFILE_FREE,
+                "workflow_mode": "",
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
                 "sop_run": normalize_sop_run(getattr(state, "sop_run", None)) if state else None,
             }
         )
@@ -21672,6 +21638,8 @@ class MainWindow(QMainWindow):
         linked_template=None,
         check_duplicates=True,
         clear_current_input=False,
+        workflow_mode="",
+        office_output_profile=None,
     ):
         if not state:
             return False
@@ -21752,6 +21720,7 @@ class MainWindow(QMainWindow):
         state.runtime_context_text = ""
         state.prompt_cache_meta = {}
         state.system_prompt_appends = []
+        state.office_draft_preview_pending = self._is_office_workflow_context(workflow_mode)
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -21810,7 +21779,12 @@ class MainWindow(QMainWindow):
             return True
         if not self.daemon_available:
             self.queue_daemon_connection(allow_start=True, retries=4)
-        run_context = self._build_run_context(state, run_mode)
+        run_context = self._build_run_context(
+            state,
+            run_mode,
+            workflow_mode=workflow_mode,
+            office_output_profile=office_output_profile,
+        )
         if self.daemon_available:
             self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
         else:
@@ -22139,6 +22113,9 @@ class MainWindow(QMainWindow):
         )
         bubble.deliverablePathsChanged.connect(
             lambda paths, sid=state.session_id: self.handle_chat_deliverable_paths_changed(paths, sid)
+        )
+        bubble.officeDraftRequested.connect(
+            lambda profile, msg_id, text, sid=state.session_id: self.handle_office_draft_requested(profile, msg_id, text, sid)
         )
 
     def _system_toast_duration(self, type="info", auto_close_ms=None):

@@ -17,6 +17,7 @@ from main import (
     DeliverableWebPreview,
     MainWindow,
     OFFICE_OUTPUT_PROFILE_FREE,
+    OFFICE_OUTPUT_PROFILE_PPT,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     deliverable_preview_bootstrap_script,
     deliverable_preview_settle_script,
@@ -141,12 +142,6 @@ class TestDeliverableScanning(unittest.TestCase):
                 self.workflow_mode = ""
                 self.office_output_profile = ""
 
-            def set_session_workflow_mode(self, mode):
-                self.workflow_mode = mode
-
-            def set_session_office_output_profile(self, profile):
-                self.office_output_profile = profile
-
         main_window = MainWindowStub()
         widget = EmptyStateWidget(main_window)
         try:
@@ -161,10 +156,58 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(office_card[3], "fa5s.file-code")
             widget.action_cards[titles.index("办公交付物")].click()
             self.assertEqual(main_window.input_field.text, office_card[2])
-            self.assertEqual(main_window.workflow_mode, WORKFLOW_MODE_OFFICE_HTML_FIRST)
-            self.assertEqual(main_window.office_output_profile, OFFICE_OUTPUT_PROFILE_FREE)
+            self.assertEqual(main_window.workflow_mode, "")
+            self.assertEqual(main_window.office_output_profile, "")
         finally:
             widget.deleteLater()
+
+    def test_office_draft_request_submits_profiled_generation_prompt(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            window = MainWindow.__new__(MainWindow)
+            state = type(
+                "_Session",
+                (),
+                {
+                    "session_id": "session-1",
+                    "messages": [{"id": "assistant-1", "role": "assistant", "content": "做 Agent 的行业观点"}],
+                },
+            )()
+            window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._submit_session_request = MagicMock(return_value=True)
+            window.add_system_toast = MagicMock()
+
+            submitted = window.handle_office_draft_requested(
+                OFFICE_OUTPUT_PROFILE_PPT,
+                "assistant-1",
+                "fallback",
+                session_id="session-1",
+            )
+
+            self.assertTrue(submitted)
+            submit_call = window._submit_session_request.call_args
+            self.assertIs(submit_call.args[0], state)
+            self.assertIn("PPT", submit_call.args[1])
+            self.assertIn("做 Agent 的行业观点", submit_call.args[1])
+            self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
+            self.assertEqual(submit_call.kwargs["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
+            self.assertFalse(submit_call.kwargs["check_duplicates"])
+            window.add_system_toast.assert_called_once()
+
+    def test_office_draft_request_requires_workspace(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type("_Session", (), {"session_id": "session-1", "messages": []})()
+        window.get_session = MagicMock(return_value=state)
+        window._workspace_dir_for_state = MagicMock(return_value="")
+        window._submit_session_request = MagicMock()
+        window.add_system_toast = MagicMock()
+
+        submitted = window.handle_office_draft_requested("ppt", "", "source", session_id="session-1")
+
+        self.assertFalse(submitted)
+        window._submit_session_request.assert_not_called()
+        window.add_system_toast.assert_called_once()
+        self.assertIn("连接项目工作区", window.add_system_toast.call_args.args[0])
 
     def test_conversion_continues_in_current_conversation_for_all_formats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -260,7 +303,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window = MainWindow.__new__(MainWindow)
             window.current_session_id = "session-1"
             window.right_drawer_open = False
-            state = type("_Session", (), {"workflow_mode": ""})()
+            state = type("_Session", (), {"office_draft_preview_pending": False})()
             window.get_session = MagicMock(return_value=state)
             window.select_deliverable = MagicMock()
 
@@ -269,7 +312,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window.get_session.assert_called_once_with("session-1")
             window.select_deliverable.assert_not_called()
 
-    def test_office_mode_opens_deliverables_view_for_new_chat_path(self):
+    def test_office_draft_opens_deliverables_view_for_new_chat_path(self):
         with tempfile.TemporaryDirectory() as workspace:
             latest = os.path.join(workspace, "latest.html")
             with open(latest, "wb") as handle:
@@ -282,7 +325,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 "_Session",
                 (),
                 {
-                    "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    "office_draft_preview_pending": True,
                     "selected_deliverable_path": "",
                 },
             )()

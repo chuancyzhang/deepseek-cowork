@@ -28,7 +28,10 @@ from main import (
     ConversationHistoryRow,
     DaemonConnectWorker,
     DaemonStreamWorker,
+    format_token_usage_chip_text,
+    format_token_usage_tooltip,
     MainWindow,
+    normalize_token_usage_summary,
     SidebarHoverTipController,
     SessionActivityIndicator,
     SessionState,
@@ -721,6 +724,10 @@ class _ObservabilityState:
         self.prompt_cache_meta = {}
         self.system_prompt_appends = []
         self.observability_events = []
+        self.token_usage_summary = normalize_token_usage_summary({})
+        self.last_token_usage = {}
+        self.persisted_conversation_meta = {}
+        self.token_usage_label = None
 
 
 class _HistoryActionState:
@@ -1997,6 +2004,99 @@ class TestSopUiHelpers(unittest.TestCase):
 
         self.assertTrue(preview.startswith("x" * 12))
         self.assertIn("truncated", preview)
+
+    def test_token_usage_formatting_includes_cache_summary(self):
+        summary = {
+            "input_tokens": 12000,
+            "output_tokens": 400,
+            "total_tokens": 12400,
+            "cached_input_tokens": 7500,
+            "uncached_input_tokens": 4500,
+            "request_count": 2,
+        }
+
+        self.assertEqual(format_token_usage_chip_text(summary), "12.4K tokens · 缓存 7.5K / 62%")
+        tooltip = format_token_usage_tooltip(summary)
+
+        self.assertIn("总量：12,400", tooltip)
+        self.assertIn("缓存输入：7,500 (62.5%)", tooltip)
+
+    def test_llm_usage_event_updates_conversation_token_summary(self):
+        window = MainWindow.__new__(MainWindow)
+        state = _ObservabilityState()
+        window.current_session_id = state.session_id
+        window.get_session = lambda session_id=None: state
+        window.set_context_tab_hint = MagicMock()
+        window.refresh_observability_view = MagicMock()
+        window.refresh_context_badges = MagicMock()
+
+        window.handle_observability_event(
+            {
+                "type": "llm_usage",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                    "cached_input_tokens": 60,
+                    "uncached_input_tokens": 40,
+                },
+            },
+            state.session_id,
+        )
+        window.handle_observability_event(
+            {
+                "type": "llm_usage",
+                "usage": {
+                    "input_tokens": 30,
+                    "output_tokens": 10,
+                    "total_tokens": 40,
+                    "cached_input_tokens": 15,
+                    "uncached_input_tokens": 15,
+                },
+            },
+            state.session_id,
+        )
+
+        self.assertEqual(state.token_usage_summary["input_tokens"], 130)
+        self.assertEqual(state.token_usage_summary["output_tokens"], 30)
+        self.assertEqual(state.token_usage_summary["total_tokens"], 160)
+        self.assertEqual(state.token_usage_summary["cached_input_tokens"], 75)
+        self.assertEqual(state.token_usage_summary["request_count"], 2)
+        self.assertEqual(state.persisted_conversation_meta["token_usage_summary"]["total_tokens"], 160)
+        self.assertEqual(len(state.observability_events), 2)
+
+    def test_compose_session_meta_persists_token_summary(self):
+        window = MainWindow.__new__(MainWindow)
+        state = _HistoryActionState()
+        state.persisted_conversation_meta = {}
+        state.run_phase = "Idle"
+        state.session_status = "draft"
+        state.has_file_changes = False
+        state.clarify_mode_enabled = False
+        state.clarify_phase = "disabled"
+        state.clarify_mode_state = "exploring"
+        state.pending_clarify_questions = []
+        state.selected_skill_names = []
+        state.sop_run = None
+        state.token_usage_summary = {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cached_input_tokens": 50,
+            "request_count": 1,
+        }
+        state.last_token_usage = {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cached_input_tokens": 50,
+        }
+        window._workspace_dir_for_state = lambda state=None: ""
+
+        meta = window._compose_session_meta(state)
+
+        self.assertEqual(meta["token_usage_summary"]["total_tokens"], 120)
+        self.assertEqual(meta["last_token_usage"]["cached_input_tokens"], 50)
 
     def test_observability_prompt_preview_prefers_append_content(self):
         window = MainWindow.__new__(MainWindow)

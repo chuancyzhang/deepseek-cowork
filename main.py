@@ -907,6 +907,87 @@ def apple_status_chip_style(status, subtle=False):
     )
 
 
+def normalize_token_usage_summary(summary):
+    normalized = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_input_tokens": 0,
+        "uncached_input_tokens": 0,
+        "request_count": 0,
+        "missing_usage_count": 0,
+    }
+    if not isinstance(summary, dict):
+        return normalized
+    for key in normalized:
+        try:
+            normalized[key] = max(0, int(summary.get(key, 0) or 0))
+        except Exception:
+            normalized[key] = 0
+    return normalized
+
+
+def compact_token_count(value):
+    try:
+        count = max(0, int(value or 0))
+    except Exception:
+        count = 0
+    if count >= 1_000_000:
+        text = f"{count / 1_000_000:.1f}M"
+    elif count >= 1_000:
+        text = f"{count / 1_000:.1f}K"
+    else:
+        text = str(count)
+    return text.replace(".0", "")
+
+
+def token_usage_cache_rate(summary):
+    usage = normalize_token_usage_summary(summary)
+    input_tokens = usage.get("input_tokens", 0)
+    cached_tokens = usage.get("cached_input_tokens", 0)
+    if input_tokens <= 0:
+        return 0.0
+    return max(0.0, min(1.0, cached_tokens / input_tokens))
+
+
+def format_token_usage_chip_text(summary):
+    usage = normalize_token_usage_summary(summary)
+    total_tokens = usage.get("total_tokens", 0)
+    cached_tokens = usage.get("cached_input_tokens", 0)
+    if cached_tokens > 0:
+        rate = token_usage_cache_rate(usage) * 100
+        return f"{compact_token_count(total_tokens)} tokens · 缓存 {compact_token_count(cached_tokens)} / {rate:.0f}%"
+    return f"{compact_token_count(total_tokens)} tokens · 缓存 0"
+
+
+def format_token_usage_tooltip(summary, last_usage=None):
+    usage = normalize_token_usage_summary(summary)
+    lines = [
+        "本对话累计 token 用量",
+        f"总量：{usage.get('total_tokens', 0):,}",
+        f"输入：{usage.get('input_tokens', 0):,}",
+        f"输出：{usage.get('output_tokens', 0):,}",
+        f"缓存输入：{usage.get('cached_input_tokens', 0):,} ({token_usage_cache_rate(usage) * 100:.1f}%)",
+        f"未缓存输入：{usage.get('uncached_input_tokens', 0):,}",
+        f"已统计请求：{usage.get('request_count', 0):,}",
+    ]
+    if usage.get("missing_usage_count", 0):
+        lines.append(f"未返回用量的请求：{usage.get('missing_usage_count', 0):,}")
+    if isinstance(last_usage, dict) and last_usage:
+        last = normalize_token_usage_summary(last_usage)
+        lines.extend(
+            [
+                "",
+                "最近一轮",
+                f"总量：{last.get('total_tokens', 0):,}",
+                f"输入：{last.get('input_tokens', 0):,}",
+                f"输出：{last.get('output_tokens', 0):,}",
+                f"缓存输入：{last.get('cached_input_tokens', 0):,}",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def apple_search_field_style():
     return f"""
         QLineEdit {{
@@ -11360,7 +11441,7 @@ def schedule_main_window_startup(app, startup_window, single_instance_server, si
 
 
 class SessionState:
-    def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll):
+    def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll, token_usage_label=None):
         self.session_id = session_id
         self.workspace_dir = ""
         self.prompt_files = []
@@ -11381,6 +11462,7 @@ class SessionState:
         self.sop_executor_worker = None
         self.chat_layout = chat_layout
         self.active_skills_label = active_skills_label
+        self.token_usage_label = token_usage_label
         self.session_widget = session_widget
         self.chat_scroll = chat_scroll
         self.empty_state = None
@@ -11437,6 +11519,8 @@ class SessionState:
         self.automation_template_id = ""
         self.selected_deliverable_path = ""
         self.deliverable_preview_rendered = False
+        self.token_usage_summary = normalize_token_usage_summary({})
+        self.last_token_usage = {}
 
 
 class DrawerResizeHandle(QWidget):
@@ -14688,6 +14772,47 @@ class MainWindow(QMainWindow):
         self.prompt_files_row.addStretch()
         self.prompt_files_section.setVisible(True)
 
+    def refresh_token_usage_label(self, session_id=None):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        label = getattr(state, "token_usage_label", None)
+        if not label or not _qt_object_alive(label):
+            return
+        summary = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
+        state.token_usage_summary = summary
+        label.setText(format_token_usage_chip_text(summary))
+        label.setToolTip(format_token_usage_tooltip(summary, getattr(state, "last_token_usage", {})))
+
+    def apply_token_usage_event(self, state, usage):
+        if not state:
+            return
+        if not isinstance(usage, dict) or not usage:
+            summary = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
+            summary["missing_usage_count"] += 1
+            state.token_usage_summary = summary
+            self.refresh_token_usage_label(state.session_id)
+            return
+        current = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
+        last = normalize_token_usage_summary(usage)
+        counted = False
+        for key in ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "uncached_input_tokens"):
+            value = last.get(key, 0)
+            if value:
+                current[key] += value
+                counted = True
+        if counted:
+            current["request_count"] += 1
+            state.last_token_usage = last
+        else:
+            current["missing_usage_count"] += 1
+            state.last_token_usage = {}
+        state.token_usage_summary = current
+        meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
+        meta["token_usage_summary"] = copy.deepcopy(current)
+        state.persisted_conversation_meta = meta
+        self.refresh_token_usage_label(state.session_id)
+
     def _remove_prompt_file(self, path):
         remaining = [
             item
@@ -16062,6 +16187,11 @@ class MainWindow(QMainWindow):
                 ]
             elif event_type == "system_prompt_append":
                 state.system_prompt_appends.append(event)
+            elif event_type == "llm_usage":
+                self.apply_token_usage_event(
+                    state,
+                    event.get("usage") if isinstance(event.get("usage"), dict) else {},
+                )
             state.observability_events.append(event)
             if len(state.observability_events) > 500:
                 state.observability_events = state.observability_events[-500:]
@@ -16806,6 +16936,7 @@ class MainWindow(QMainWindow):
         self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         self.refresh_prompt_file_chips(session_id)
+        self.refresh_token_usage_label(session_id)
         if (
             getattr(state, "history_loaded", True)
             and getattr(self, "right_drawer_open", False)
@@ -16983,10 +17114,29 @@ class MainWindow(QMainWindow):
         session_layout.setContentsMargins(0, 0, 0, 0)
         session_layout.setSpacing(10)
 
+        session_header = QWidget()
+        session_header.setStyleSheet("background: transparent; border: none;")
+        session_header_layout = QHBoxLayout(session_header)
+        session_header_layout.setContentsMargins(22, 10, 26, 0)
+        session_header_layout.setSpacing(8)
+
         active_skills_label = QLabel("本次会话使用的功能: ")
-        active_skills_label.setStyleSheet("color: #9ca3af; font-size: 11px; margin-left: 12px;")
+        active_skills_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px;")
         active_skills_label.setVisible(False)
-        session_layout.addWidget(active_skills_label)
+        session_header_layout.addWidget(active_skills_label)
+        session_header_layout.addStretch(1)
+
+        token_usage_label = QLabel()
+        token_usage_label.setObjectName("TokenUsageChip")
+        token_usage_label.setAlignment(Qt.AlignCenter)
+        token_usage_label.setMinimumHeight(26)
+        token_usage_label.setStyleSheet(
+            f"QLabel#TokenUsageChip {{ background: rgba(255, 255, 255, 0.72); "
+            f"color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border_subtle}; "
+            "border-radius: 13px; padding: 3px 10px; font-size: 11px; font-weight: 650; }}"
+        )
+        session_header_layout.addWidget(token_usage_label, 0, Qt.AlignRight)
+        session_layout.addWidget(session_header)
 
         chat_scroll = QScrollArea()
         chat_scroll.setWidgetResizable(True)
@@ -17009,7 +17159,7 @@ class MainWindow(QMainWindow):
         tab_index = self.session_tabs.addTab(session_widget, tab_title)
         self.session_tabs.tabBar().hide()
 
-        state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll)
+        state = SessionState(session_id, chat_layout, active_skills_label, session_widget, chat_scroll, token_usage_label)
         state.content_flush_timer = QTimer(self)
         state.content_flush_timer.setSingleShot(True)
         state.content_flush_timer.setInterval(CONTENT_FLUSH_INTERVAL_MS)
@@ -17031,6 +17181,7 @@ class MainWindow(QMainWindow):
         state.history_loaded = is_fresh_session
         self._set_session_workspace(state, workspace_dir if workspace_dir is not None else self._active_workspace_dir())
         self.sessions[session_id] = state
+        self.refresh_token_usage_label(state.session_id)
         if make_current:
             self.session_tabs.setCurrentIndex(tab_index)
             self.set_current_session(session_id)
@@ -17085,6 +17236,9 @@ class MainWindow(QMainWindow):
         state.sub_agent_events = []
         state.sub_agent_history_loaded = False
         state.virtualization_active = False
+        state.token_usage_summary = normalize_token_usage_summary({})
+        state.last_token_usage = {}
+        self.refresh_token_usage_label(state.session_id)
 
     def _show_session_loading_state(self, state, text="正在加载历史会话…"):
         self.clear_chat_layout(state.chat_layout)
@@ -17208,6 +17362,15 @@ class MainWindow(QMainWindow):
             or "draft"
         )
         state.persisted_conversation_meta = copy.deepcopy(conversation_meta or {})
+        state.token_usage_summary = normalize_token_usage_summary(
+            conversation_meta.get("token_usage_summary")
+        )
+        state.last_token_usage = (
+            normalize_token_usage_summary(conversation_meta.get("last_token_usage"))
+            if isinstance(conversation_meta.get("last_token_usage"), dict)
+            else {}
+        )
+        self.refresh_token_usage_label(state.session_id)
         state.run_phase = conversation_meta.get("run_phase") or "Idle"
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
         state.selected_skill_names = normalize_selected_skill_names(
@@ -19102,6 +19265,14 @@ class MainWindow(QMainWindow):
         meta["run_phase"] = getattr(state, "run_phase", "Idle")
         meta["session_status"] = getattr(state, "session_status", "draft")
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
+        meta["token_usage_summary"] = normalize_token_usage_summary(
+            getattr(state, "token_usage_summary", {})
+        )
+        last_token_usage = getattr(state, "last_token_usage", {})
+        if isinstance(last_token_usage, dict) and last_token_usage:
+            meta["last_token_usage"] = normalize_token_usage_summary(last_token_usage)
+        else:
+            meta.pop("last_token_usage", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
         meta.update(self._session_sop_meta(state))

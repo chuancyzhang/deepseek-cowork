@@ -8,8 +8,10 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.clarify_mode import (
+    OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_CLARIFYING,
     RUN_MODE_EXECUTION,
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
     get_clarifying_read_tools,
     is_tool_allowed_in_clarifying,
     normalize_selected_skill_names,
@@ -39,6 +41,8 @@ class TestClarifyModeHelpers(unittest.TestCase):
                 "selected_model_id": "openai-fast",
                 "im_provider": "feishu",
                 "channel": "feishu",
+                "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
             }
         )
 
@@ -46,6 +50,8 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertEqual(ctx["selected_model_id"], "openai-fast")
         self.assertEqual(ctx["im_provider"], "feishu")
         self.assertEqual(ctx["channel"], "feishu")
+        self.assertEqual(ctx["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
+        self.assertEqual(ctx["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
 
     def test_normalize_selected_skill_names_deduplicates_and_filters_blanks(self):
         self.assertEqual(
@@ -107,6 +113,18 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertEqual(ctx["sop_run"]["template_id"], "office")
         self.assertEqual(ctx["sop_run"]["steps"][0]["title"], "Step 1")
         self.assertEqual(ctx["selected_skill_names"], ["browser-automation"])
+
+    def test_normalize_run_context_defaults_invalid_office_profile_to_free(self):
+        ctx = normalize_run_context(
+            {
+                "mode": RUN_MODE_EXECUTION,
+                "workflow_mode": "unknown",
+                "office_output_profile": "slides",
+            }
+        )
+
+        self.assertEqual(ctx["workflow_mode"], "")
+        self.assertEqual(ctx["office_output_profile"], "free")
 
 
 class TestClarifyModeLLMWorker(unittest.TestCase):
@@ -297,6 +315,65 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("本轮只允许完成当前步骤", runtime_prompt)
             self.assertEqual(system_prompt, provider_events[0][1][0])
             self.assertEqual(runtime_prompt, provider_events[0][1][-1])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_includes_office_mode_prompt(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, query_text=""):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self, events):
+                self.events = events
+
+            def chat_stream(self, messages, tools=None):
+                system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
+                self.events.append(("request", system_messages))
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        events = []
+        provider_events = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_events)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "make slides"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={
+                        "mode": RUN_MODE_EXECUTION,
+                        "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                        "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+                    },
+                )
+                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.run()
+
+            runtime_prompt = events[0].get("runtime_context", "")
+            self.assertIn("策略 [办公模式]", runtime_prompt)
+            self.assertIn("当前类型: PPT", runtime_prompt)
+            self.assertIn("不要称为 HTML 模式", runtime_prompt)
+            self.assertIn("继续生成 PPTX", runtime_prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

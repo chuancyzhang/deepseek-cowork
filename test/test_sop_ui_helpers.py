@@ -9,6 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from PySide6.QtWidgets import QComboBox, QPushButton
+
 from core.sop_manager import create_sop_run, mark_step_awaiting_confirmation
 from core.chat_storage import ChatStorage
 from core.theme import DesignTokens
@@ -31,6 +33,9 @@ from main import (
     format_token_usage_chip_text,
     format_token_usage_tooltip,
     MainWindow,
+    OFFICE_OUTPUT_PROFILE_DESIGN,
+    OFFICE_OUTPUT_PROFILE_FREE,
+    OFFICE_OUTPUT_PROFILE_PPT,
     normalize_token_usage_summary,
     SidebarHoverTipController,
     SessionActivityIndicator,
@@ -38,6 +43,7 @@ from main import (
     StartupLoadingWindow,
     sidebar_symbol_icon,
     UI_ERROR_LOG_FILENAME,
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
     SkillsCenterDialog,
     SopTemplateManager,
     SystemToast,
@@ -907,6 +913,8 @@ class TestSopUiHelpers(unittest.TestCase):
                 "clarify_mode_enabled": False,
                 "pending_clarify_questions": [],
                 "selected_skill_names": [],
+                "workflow_mode": "",
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
                 "sop_run": None,
             },
         )()
@@ -914,6 +922,8 @@ class TestSopUiHelpers(unittest.TestCase):
         meta = window._compose_session_meta(state)
 
         self.assertEqual(meta["workspace_dir"], session_workspace)
+        self.assertEqual(meta["workflow_mode"], "")
+        self.assertEqual(meta["office_output_profile"], OFFICE_OUTPUT_PROFILE_FREE)
 
     def test_new_conversation_for_project_binds_new_session_workspace(self):
         temp_dir = tempfile.mkdtemp()
@@ -975,6 +985,8 @@ class TestSopUiHelpers(unittest.TestCase):
                 "persisted_conversation_meta": {},
                 "clarify_mode_state": "exploring",
                 "pending_clarify_questions": [],
+                "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
                 "sop_run": None,
             },
         )()
@@ -982,6 +994,8 @@ class TestSopUiHelpers(unittest.TestCase):
         context = window._build_run_context(state, "execution")
 
         self.assertEqual(context["workspace_mode"], "chat_only")
+        self.assertEqual(context["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
+        self.assertEqual(context["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
 
     def test_session_activity_indicator_runs_only_for_live_runtime_state(self):
         window = MainWindow.__new__(MainWindow)
@@ -1116,6 +1130,8 @@ class TestSopUiHelpers(unittest.TestCase):
                 "clarify_mode_enabled": False,
                 "pending_clarify_questions": [],
                 "selected_skill_names": [],
+                "workflow_mode": "",
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
                 "sop_run": None,
                 "persisted_conversation_meta": {},
                 "run_phase": "Idle",
@@ -1149,6 +1165,65 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertNotIn("添加自动化", [label for _key, label in entries])
         self.assertNotIn("从对话生成 SOP", [label for _key, label in entries])
         self.assertNotIn("能力中心", [label for _key, label in entries])
+
+    def test_workflow_controls_reflect_office_mode_and_profile(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = "session-1"
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_DESIGN,
+                "llm_worker": None,
+                "code_worker": None,
+                "daemon_running": False,
+            },
+        )()
+        window.sessions = {"session-1": state}
+        window.get_session = MagicMock(return_value=state)
+        window.office_mode_btn = QPushButton()
+        window.office_mode_btn.setCheckable(True)
+        window.office_profile_combo = QComboBox()
+        window.office_profile_combo.addItem("自由", OFFICE_OUTPUT_PROFILE_FREE)
+        window.office_profile_combo.addItem("PPT", OFFICE_OUTPUT_PROFILE_PPT)
+        window.office_profile_combo.addItem("设计稿", OFFICE_OUTPUT_PROFILE_DESIGN)
+
+        try:
+            window.refresh_workflow_mode_controls("session-1")
+            app.processEvents()
+
+            self.assertTrue(window.office_mode_btn.isChecked())
+            self.assertTrue(window.office_profile_combo.isVisible())
+            self.assertEqual(window.office_profile_combo.currentData(), OFFICE_OUTPUT_PROFILE_DESIGN)
+        finally:
+            window.office_mode_btn.deleteLater()
+            window.office_profile_combo.deleteLater()
+            app.processEvents()
+
+    def test_set_session_office_profile_enables_workflow_and_saves(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "workflow_mode": "",
+                "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
+            },
+        )()
+        window.get_session = MagicMock(return_value=state)
+        window.refresh_workflow_mode_controls = MagicMock()
+        window.normalize_session_ui = MagicMock()
+        window.save_chat_history = MagicMock()
+
+        window.set_session_office_output_profile(OFFICE_OUTPUT_PROFILE_PPT, session_id="session-1")
+
+        self.assertEqual(state.workflow_mode, WORKFLOW_MODE_OFFICE_HTML_FIRST)
+        self.assertEqual(state.office_output_profile, OFFICE_OUTPUT_PROFILE_PPT)
+        window.save_chat_history.assert_called_once_with(session_id="session-1")
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):
         window = MainWindow.__new__(MainWindow)

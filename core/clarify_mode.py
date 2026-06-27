@@ -44,6 +44,23 @@ CLARIFY_READ_TOOLS = (
 
 CLARIFY_ALLOWED_TOOLS = set(CLARIFY_INTERACTION_TOOLS) | set(CLARIFY_READ_TOOLS)
 
+WORKFLOW_MODE_OFFICE_HTML_FIRST = "office_html_first"
+WORKFLOW_MODES = {
+    "",
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
+}
+
+OFFICE_OUTPUT_PROFILE_FREE = "free"
+OFFICE_OUTPUT_PROFILE_PPT = "ppt"
+OFFICE_OUTPUT_PROFILE_DESIGN = "design"
+OFFICE_OUTPUT_PROFILE_DOCX = "docx"
+OFFICE_OUTPUT_PROFILES = {
+    OFFICE_OUTPUT_PROFILE_FREE,
+    OFFICE_OUTPUT_PROFILE_PPT,
+    OFFICE_OUTPUT_PROFILE_DESIGN,
+    OFFICE_OUTPUT_PROFILE_DOCX,
+}
+
 
 def json_copy(value, fallback):
     if value is None:
@@ -129,6 +146,16 @@ def normalize_selected_skill_names(values):
     return normalized
 
 
+def normalize_workflow_mode(value):
+    text = str(value or "").strip().lower()
+    return text if text in WORKFLOW_MODES else ""
+
+
+def normalize_office_output_profile(value):
+    text = str(value or "").strip().lower()
+    return text if text in OFFICE_OUTPUT_PROFILES else OFFICE_OUTPUT_PROFILE_FREE
+
+
 def normalize_run_context(run_context):
     ctx = dict(run_context or {})
     pending_questions = ctx.get("pending_clarify_questions")
@@ -159,6 +186,10 @@ def normalize_run_context(run_context):
         "im_provider": str(ctx.get("im_provider") or "").strip().lower(),
         "channel": str(ctx.get("channel") or "").strip().lower(),
         "workspace_mode": "chat_only" if str(ctx.get("workspace_mode") or "").strip().lower() == "chat_only" else "project",
+        "workflow_mode": normalize_workflow_mode(ctx.get("workflow_mode")),
+        "office_output_profile": normalize_office_output_profile(
+            ctx.get("office_output_profile")
+        ),
         "sop_run": normalize_sop_run(ctx.get("sop_run")),
     }
 

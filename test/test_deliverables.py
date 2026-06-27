@@ -16,6 +16,8 @@ from main import (
     EmptyStateWidget,
     DeliverableWebPreview,
     MainWindow,
+    OFFICE_OUTPUT_PROFILE_FREE,
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
     deliverable_preview_bootstrap_script,
     deliverable_preview_settle_script,
     load_qwebengine_view,
@@ -127,7 +129,7 @@ class TestDeliverableScanning(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in items], ["page.html"])
 
-    def test_empty_state_replaces_report_card_with_html_deliverable_card(self):
+    def test_empty_state_replaces_report_card_with_office_deliverable_card(self):
         app = QApplication.instance() or QApplication([])
         class PromptBox:
             def setText(self, text):
@@ -136,21 +138,31 @@ class TestDeliverableScanning(unittest.TestCase):
         class MainWindowStub:
             def __init__(self):
                 self.input_field = PromptBox()
+                self.workflow_mode = ""
+                self.office_output_profile = ""
+
+            def set_session_workflow_mode(self, mode):
+                self.workflow_mode = mode
+
+            def set_session_office_output_profile(self, profile):
+                self.office_output_profile = profile
 
         main_window = MainWindowStub()
         widget = EmptyStateWidget(main_window)
         try:
             titles = [item[0] for item in widget.actions_data]
             self.assertEqual(len(titles), 4)
-            self.assertIn("生成 HTML 交付物", titles)
+            self.assertIn("办公交付物", titles)
             self.assertNotIn("生成报告", titles)
-            html_card = next(item for item in widget.actions_data if item[0] == "生成 HTML 交付物")
-            self.assertEqual(html_card[1], "预览修改，再生成 PPT")
-            self.assertIn("右侧文件页的交付物视图", html_card[2])
-            self.assertIn("生成 PPTX", html_card[2])
-            self.assertEqual(html_card[3], "fa5s.file-code")
-            widget.action_cards[titles.index("生成 HTML 交付物")].click()
-            self.assertEqual(main_window.input_field.text, html_card[2])
+            office_card = next(item for item in widget.actions_data if item[0] == "办公交付物")
+            self.assertEqual(office_card[1], "预览修改，再生成文件")
+            self.assertIn("右侧交付物视图", office_card[2])
+            self.assertIn("PPTX、DOCX 或 PDF", office_card[2])
+            self.assertEqual(office_card[3], "fa5s.file-code")
+            widget.action_cards[titles.index("办公交付物")].click()
+            self.assertEqual(main_window.input_field.text, office_card[2])
+            self.assertEqual(main_window.workflow_mode, WORKFLOW_MODE_OFFICE_HTML_FIRST)
+            self.assertEqual(main_window.office_output_profile, OFFICE_OUTPUT_PROFILE_FREE)
         finally:
             widget.deleteLater()
 
@@ -248,13 +260,46 @@ class TestDeliverableScanning(unittest.TestCase):
             window = MainWindow.__new__(MainWindow)
             window.current_session_id = "session-1"
             window.right_drawer_open = False
-            window.get_session = MagicMock()
+            state = type("_Session", (), {"workflow_mode": ""})()
+            window.get_session = MagicMock(return_value=state)
             window.select_deliverable = MagicMock()
 
             window.handle_chat_deliverable_paths_changed([latest], "session-1")
 
-            window.get_session.assert_not_called()
+            window.get_session.assert_called_once_with("session-1")
             window.select_deliverable.assert_not_called()
+
+    def test_office_mode_opens_deliverables_view_for_new_chat_path(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            latest = os.path.join(workspace, "latest.html")
+            with open(latest, "wb") as handle:
+                handle.write(b"x")
+            window = MainWindow.__new__(MainWindow)
+            window.current_session_id = "session-1"
+            window.right_drawer_open = False
+            window.current_deliverable_path = ""
+            state = type(
+                "_Session",
+                (),
+                {
+                    "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    "selected_deliverable_path": "",
+                },
+            )()
+            window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._apply_deliverable_layout_mode = MagicMock()
+            window.set_file_workspace_section = MagicMock()
+            window.show_context_drawer = MagicMock()
+            window.select_deliverable = MagicMock()
+
+            window.handle_chat_deliverable_paths_changed([latest], "session-1")
+
+            self.assertEqual(state.selected_deliverable_path, os.path.normpath(latest))
+            window._apply_deliverable_layout_mode.assert_called_once_with("focus")
+            window.set_file_workspace_section.assert_called_once_with(window.FILE_SECTION_DELIVERABLES, refresh=False)
+            window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
+            window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
 
     def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

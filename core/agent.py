@@ -21,8 +21,12 @@ from core.chat_storage import ChatStorage
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.clarify_mode import (
     get_clarifying_read_tools,
+    OFFICE_OUTPUT_PROFILE_DESIGN,
+    OFFICE_OUTPUT_PROFILE_DOCX,
+    OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_EXECUTION,
     RUN_MODE_CLARIFYING,
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
     is_tool_allowed_in_clarifying,
     json_copy,
     normalize_selected_skill_names,
@@ -1040,6 +1044,38 @@ class LLMWorker(QThread):
                     "7. 允许多轮反问；如果本轮回答后仍缺少关键决策，继续调用 'request_user_input'。",
                     "8. 当信息足够执行时，输出一段简短的已确认需求总结，不要输出计划文档或 XML 标签；UI 会切回正常执行模式继续同一任务。",
                     "9. 反问模式不会放宽任何权限边界：工作区外访问、写操作、命令执行、系统自动化等限制仍然有效。",
+                ]
+            )
+        workflow_mode = str(self.run_context.get("workflow_mode") or "").strip()
+        if workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
+            profile = str(self.run_context.get("office_output_profile") or "free").strip()
+            profile_guidance = {
+                OFFICE_OUTPUT_PROFILE_PPT: (
+                    "当前类型: PPT。请把 HTML 组织成演示文稿形态: 默认 16:9 画布、按页/幻灯片拆分、"
+                    "清晰的标题层级和演示节奏，方便用户预览后继续生成 PPTX。"
+                ),
+                OFFICE_OUTPUT_PROFILE_DESIGN: (
+                    "当前类型: 设计稿。请把 HTML 组织成设计稿形态: 画板、组件、状态、间距、色彩和视觉层级清晰，"
+                    "方便用户直接评审 UI/视觉方案。"
+                ),
+                OFFICE_OUTPUT_PROFILE_DOCX: (
+                    "当前类型: DOCX。请把 HTML 组织成文档形态: 标题层级、段落、表格、引用和分页语义清晰，"
+                    "方便用户预览后继续生成 DOCX。"
+                ),
+            }.get(
+                profile,
+                "当前类型: 自由。请按报告、方案、分析或页面型交付物自由组织 HTML，优先保证内容完整和预览体验。",
+            )
+            dynamic_state_lines.extend(
+                [
+                    "",
+                    "策略 [办公模式]:",
+                    "1. 你当前处于办公模式。对用户不要称为 HTML 模式，但内部应优先用 HTML 作为可预览、可迭代的工作稿。",
+                    f"2. {profile_guidance}",
+                    "3. 新建或修改交付物时，优先在当前项目工作区生成 HTML 文件，并在完成回复中明确给出项目内文件路径。",
+                    "4. 用户继续修改时，围绕已有 HTML 预览稿迭代；除非用户明确要求重做，尽量维护同一个主交付物。",
+                    "5. 用户要求 PPTX、DOCX 或 PDF 时，先以已确认的 HTML 作为源稿，再生成对应办公文件，并说明源 HTML 与输出文件路径。",
+                    "6. 不要只给 Markdown 摘要或口头描述；需要形成可交付内容时应落盘为可预览文件。",
                 ]
             )
         if self.parent_agent_id:

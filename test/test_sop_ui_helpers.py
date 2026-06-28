@@ -43,6 +43,7 @@ from main import (
     sidebar_symbol_icon,
     UI_ERROR_LOG_FILENAME,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
+    WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     SkillsCenterDialog,
     SopTemplateManager,
     SystemToast,
@@ -1219,6 +1220,8 @@ class TestSopUiHelpers(unittest.TestCase):
 
             self.assertTrue(card.process_container.isHidden())
             self.assertFalse(card.result_container.isHidden())
+            label_text = "\n".join(label.text() for label in card.findChildren(QLabel))
+            self.assertNotIn("生成过程已折叠", label_text)
             self.assertEqual(card.result_layout.count(), 1)
             result_button = card.result_layout.itemAt(0).widget()
             self.assertIsNotNone(result_button)
@@ -1233,6 +1236,95 @@ class TestSopUiHelpers(unittest.TestCase):
             self.assertEqual(activated, [html_path])
         finally:
             card.deleteLater()
+            app.processEvents()
+
+    def test_office_draft_task_card_syncs_visible_result_paths(self):
+        app = QApplication.instance() or QApplication([])
+        card = OfficeDraftTaskCard("PPT", target_format="pptx")
+        first = os.path.join(tempfile.gettempdir(), "deck.pptx")
+        second = os.path.join(tempfile.gettempdir(), "deck-final.pptx")
+
+        try:
+            card.set_completed([first])
+            card.add_result_paths([first, second])
+            app.processEvents()
+
+            self.assertEqual(card.title_label.text(), "已生成 PPTX")
+            self.assertFalse(card.result_container.isHidden())
+            self.assertEqual(card.result_layout.count(), 2)
+            label_text = "\n".join(label.text() for label in card.findChildren(QLabel))
+            self.assertNotIn("生成过程已折叠", label_text)
+        finally:
+            card.deleteLater()
+            app.processEvents()
+
+    def test_render_session_history_spans_keeps_later_office_task_collapsed(self):
+        app = QApplication.instance() or QApplication([])
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+        deck_path = os.path.join(temp_dir, "deck.pptx")
+        with open(deck_path, "wb") as handle:
+            handle.write(b"pptx")
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.addStretch()
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "chat_layout": layout,
+                "messages": [
+                    {"id": "u0", "role": "user", "content": "普通消息"},
+                    {
+                        "id": "u1",
+                        "role": "user",
+                        "content": "生成 PPTX",
+                        "meta": {
+                            "workflow_mode": WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+                            "office_conversion_target": "pptx",
+                        },
+                    },
+                    {
+                        "id": "a1",
+                        "role": "assistant",
+                        "content": f"已生成 {deck_path}",
+                    },
+                ],
+                "last_agent_bubble": None,
+                "tool_cards": {},
+                "empty_state": None,
+                "office_draft_task_card": None,
+            },
+        )()
+        window = MainWindow.__new__(MainWindow)
+        window.sessions = {"session-1": state}
+        window.current_session_id = "session-1"
+        window.last_message_time = 0
+        window.dynamic_message_width = 760
+        window.dynamic_user_bubble_width = 620
+        window._workspace_dir_for_state = MagicMock(return_value=temp_dir)
+        window.process_ui_events = MagicMock()
+        window.request_session_scroll_to_bottom = MagicMock()
+        window.queue_session_bubble_virtualization = MagicMock()
+        window.open_deliverable_from_chat = MagicMock()
+        window.handle_chat_deliverable_paths_changed = MagicMock()
+        window.handle_office_draft_requested = MagicMock()
+
+        try:
+            spans = [
+                {"start": 0, "end": 1},
+                {"start": 1, "end": 3},
+            ]
+            window._render_session_history_spans(state, spans)
+            app.processEvents()
+
+            office_cards = host.findChildren(OfficeDraftTaskCard)
+            self.assertEqual(len(office_cards), 1)
+            self.assertEqual(office_cards[0].title_label.text(), "已生成 PPTX")
+            self.assertTrue(office_cards[0].process_container.isHidden())
+        finally:
+            host.deleteLater()
             app.processEvents()
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):

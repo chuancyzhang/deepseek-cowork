@@ -125,6 +125,23 @@ class TestConversationRender(unittest.TestCase):
         )
         self.assertEqual(spans, [{"start": 0, "end": 4}, {"start": 4, "end": 5}])
 
+    def test_build_conversation_render_spans_keeps_office_conversion_turn_collapsible(self):
+        spans = build_conversation_render_spans(
+            [
+                {"id": "u0", "role": "user", "content": "普通消息"},
+                {
+                    "id": "u1",
+                    "role": "user",
+                    "content": "生成 PPTX",
+                    "meta": {"workflow_mode": "office_file_conversion", "office_conversion_target": "pptx"},
+                },
+                {"id": "a1", "role": "assistant", "content": "working"},
+                {"id": "t1", "role": "tool", "tool_call_id": "tool-1", "content": "ok"},
+                {"id": "a2", "role": "assistant", "content": "done"},
+            ]
+        )
+        self.assertEqual(spans, [{"start": 0, "end": 1}, {"start": 1, "end": 5}])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,11 +35,14 @@ def _is_hidden_context_message(message):
     return bool(meta.get("hidden")) and meta.get("kind") in {"skill_context", "skill_context_update"}
 
 
+OFFICE_WORKFLOW_MODES = {"office_html_first", "office_file_conversion"}
+
+
 def _is_office_draft_request(message):
     if not isinstance(message, dict):
         return False
     meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-    return meta.get("workflow_mode") == "office_html_first"
+    return meta.get("workflow_mode") in OFFICE_WORKFLOW_MODES
 
 
 def _new_assistant_group():

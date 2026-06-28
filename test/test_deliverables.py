@@ -18,6 +18,7 @@ from main import (
     MainWindow,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
+    WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     deliverable_preview_bootstrap_script,
     deliverable_preview_settle_script,
@@ -241,6 +242,8 @@ class TestDeliverableScanning(unittest.TestCase):
                     self.assertEqual(submit_call.args[2], [html_path])
                     self.assertFalse(submit_call.kwargs["check_duplicates"])
                     self.assertTrue(submit_call.kwargs["clear_current_input"])
+                    self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_FILE_CONVERSION)
+                    self.assertEqual(submit_call.kwargs["office_conversion_target"], target_format)
                     window.add_system_toast.assert_called_once_with(
                         f"已在当前对话中开始生成 {target_format.upper()}",
                         "info",

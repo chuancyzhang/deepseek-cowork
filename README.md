@@ -16,7 +16,7 @@ Current app version: **4.9.5**
 - Manage reusable agents, automation templates, scheduled runs, and long-term memory from the UI.
 - Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
 - Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default while result files stay visible below the card.
-- Generate PPTX from an HTML draft with an optional PPT template, preserving theme, masters, fonts, colors, pacing, and header/footer images.
+- Generate PPTX, DOCX, or PDF from an HTML draft in a folded task card with the finished file shown directly below the card; PPTX can use an optional template while preserving theme, masters, fonts, colors, pacing, and header/footer images.
 
 ## Product Surface
 

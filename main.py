@@ -152,6 +152,7 @@ from core.clarify_mode import (
     OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_EXECUTION,
     RUN_MODE_CLARIFYING,
+    WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     derive_clarify_phase,
     normalize_office_output_profile,
@@ -10560,9 +10561,10 @@ class ChatBubble(QFrame):
 class OfficeDraftTaskCard(QFrame):
     deliverablePathActivated = Signal(str)
 
-    def __init__(self, profile_label="办公稿", parent=None):
+    def __init__(self, profile_label="办公稿", parent=None, target_format="html"):
         super().__init__(parent)
         self.profile_label = str(profile_label or "办公稿")
+        self.target_format = str(target_format or "html").strip().lower()
         self.result_paths = []
         self.setObjectName("OfficeDraftTaskCard")
         self.setFrameShape(QFrame.NoFrame)
@@ -10599,19 +10601,16 @@ class OfficeDraftTaskCard(QFrame):
         title_layout = QVBoxLayout(title_col)
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(1)
-        self.title_label = QLabel(f"正在生成{self.profile_label}办公稿")
+        self.title_label = QLabel(self._running_title())
         self.title_label.setStyleSheet(
             f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;"
         )
-        self.meta_label = QLabel("生成过程已折叠")
-        self.meta_label.setStyleSheet(apple_caption_style())
         title_layout.addWidget(self.title_label)
-        title_layout.addWidget(self.meta_label)
         header_layout.addWidget(title_col, 1)
 
         self.open_btn = QToolButton()
         self.open_btn.setIcon(qta.icon("fa5s.external-link-alt", color=DesignTokens.primary))
-        self.open_btn.setToolTip("预览生成的 HTML")
+        self.open_btn.setToolTip("打开生成文件")
         self.open_btn.setCursor(Qt.PointingHandCursor)
         self.open_btn.setFixedSize(30, 30)
         self.open_btn.setVisible(False)
@@ -10658,30 +10657,60 @@ class OfficeDraftTaskCard(QFrame):
         self.toggle_btn.setText("收起过程" if visible else "展开过程")
 
     def set_running(self):
-        self.title_label.setText(f"正在生成{self.profile_label}办公稿")
-        self.meta_label.setText("生成过程已折叠")
+        self.title_label.setText(self._running_title())
         self.open_btn.setVisible(False)
         self._render_result_cards([])
 
     def set_failed(self, message="生成失败"):
         self.title_label.setText(str(message or "生成失败"))
-        self.meta_label.setText("展开可查看完整过程")
         self.open_btn.setVisible(False)
         self._render_result_cards([])
 
     def set_completed(self, paths=None):
-        paths = [str(path or "") for path in (paths or []) if str(path or "").strip()]
+        paths = self._merged_paths(paths)
         self.result_paths = paths
         primary = self._primary_html_path()
-        if primary:
-            self.title_label.setText("已生成 HTML")
-            self.meta_label.setText("结果已在下方，可直接打开；展开可查看完整过程")
+        if paths:
+            self.title_label.setText(self._completed_title())
             self.open_btn.setVisible(True)
         else:
-            self.title_label.setText(f"{self.profile_label}办公稿生成完成")
-            self.meta_label.setText("展开可查看完整回复")
+            self.title_label.setText(self._completed_title())
             self.open_btn.setVisible(False)
         self._render_result_cards(paths)
+
+    def add_result_paths(self, paths=None):
+        merged = self._merged_paths(paths)
+        if merged != self.result_paths:
+            self.set_completed(merged)
+
+    def _merged_paths(self, paths=None):
+        merged = []
+        seen = set()
+        for path in list(self.result_paths or []) + list(paths or []):
+            text = str(path or "").strip()
+            if not text:
+                continue
+            key = os.path.normcase(os.path.abspath(text))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(text)
+        return merged
+
+    def _target_label(self):
+        return (self.target_format or "html").upper()
+
+    def _running_title(self):
+        if self.target_format in {"pptx", "docx", "pdf"}:
+            return f"正在生成 {self._target_label()}"
+        return f"正在生成{self.profile_label}办公稿"
+
+    def _completed_title(self):
+        if self.target_format in {"pptx", "docx", "pdf"}:
+            return f"已生成 {self._target_label()}"
+        if self._primary_html_path():
+            return "已生成 HTML"
+        return f"{self.profile_label}办公稿生成完成"
 
     def _render_result_cards(self, paths):
         while self.result_layout.count():
@@ -15272,8 +15301,8 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble = None
         self._rebuild_session_render_spans(state)
         state.displayed_render_count = len(state.render_items)
-        if state.messages:
-            self.render_message_batch(state.messages, state.session_id, animate=False)
+        if state.render_items:
+            self._render_session_history_spans(state, state.render_items)
         else:
             self._render_initial_session_history(state)
 
@@ -15583,7 +15612,10 @@ class MainWindow(QMainWindow):
         return bool(getattr(state, "office_draft_preview_pending", False))
 
     def _is_office_workflow_context(self, workflow_mode):
-        return normalize_workflow_mode(workflow_mode) == WORKFLOW_MODE_OFFICE_HTML_FIRST
+        return normalize_workflow_mode(workflow_mode) in {
+            WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+        }
 
     def _message_is_office_draft_request(self, message):
         if not isinstance(message, dict):
@@ -15595,12 +15627,27 @@ class MainWindow(QMainWindow):
         if not isinstance(message, dict):
             return self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE)
         meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        if normalize_workflow_mode(meta.get("workflow_mode")) == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            target = str(meta.get("office_conversion_target") or "").strip().upper()
+            return target or "办公文件"
         return self._office_profile_label(meta.get("office_output_profile"))
 
-    def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True):
+    def _office_target_format_from_message(self, message):
+        if not isinstance(message, dict):
+            return "html"
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        if normalize_workflow_mode(meta.get("workflow_mode")) == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            target = str(meta.get("office_conversion_target") or "").strip().lower()
+            return target if target in {"pptx", "docx", "pdf"} else "file"
+        return "html"
+
+    def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True, target_format=None):
         if not state:
             return None
-        card = OfficeDraftTaskCard(profile_label or self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE))
+        card = OfficeDraftTaskCard(
+            profile_label or self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE),
+            target_format=target_format or getattr(state, "office_task_target_format", "html") or "html",
+        )
         card.deliverablePathActivated.connect(
             lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
         )
@@ -15629,6 +15676,25 @@ class MainWindow(QMainWindow):
         workspace_dir = self._workspace_dir_for_state(state)
         paths = [path for _start, _end, path in iter_workspace_file_paths(content or "", workspace_dir)]
         card.set_completed(paths)
+
+    def _office_task_failed_title(self, state):
+        target = str(getattr(state, "office_task_target_format", "") or "").strip().upper()
+        if target in {"PPTX", "DOCX", "PDF"}:
+            return f"{target} 生成失败"
+        return "办公稿生成失败"
+
+    def _sync_office_task_card_paths(self, state, paths):
+        card = self._office_draft_card_for_state(state)
+        if card is None:
+            return
+        workspace_dir = self._workspace_dir_for_state(state)
+        valid_paths = [
+            normalized
+            for path in (paths or [])
+            if (normalized := normalize_workspace_file(path, workspace_dir))
+        ]
+        if valid_paths:
+            card.add_result_paths(valid_paths)
 
     def _session_sop_meta(self, state):
         if not state:
@@ -17574,16 +17640,20 @@ class MainWindow(QMainWindow):
     def _render_session_history_spans(self, state, spans, insert_index=None):
         if not state or not spans:
             return
-        start = spans[0].get("start", 0)
-        end = spans[-1].get("end", start)
-        if end <= start:
-            return
-        self.render_message_batch(
-            state.messages[start:end],
-            state.session_id,
-            insert_index=insert_index,
-            animate=False,
-        )
+        current_index = insert_index
+        for span in spans:
+            start = span.get("start", 0)
+            end = span.get("end", start)
+            if end <= start:
+                continue
+            inserted = self.render_message_batch(
+                state.messages[start:end],
+                state.session_id,
+                insert_index=current_index,
+                animate=False,
+            )
+            if current_index is not None:
+                current_index += int(inserted or 0)
 
     def _render_initial_session_history(self, state):
         spans = getattr(state, "render_items", []) or []
@@ -19330,9 +19400,10 @@ class MainWindow(QMainWindow):
 
     def render_message_batch(self, messages, session_id, insert_index=None, animate=True):
         state = self.get_session(session_id)
-        if not state: return
+        if not state: return 0
         
         current_idx = insert_index
+        inserted_count = 0
         backup_last_agent = state.last_agent_bubble
         state.last_agent_bubble = None 
         messages = list(messages or [])
@@ -19344,8 +19415,10 @@ class MainWindow(QMainWindow):
                 self._office_profile_label_from_message(messages[0]),
                 insert_index=current_idx,
                 running=False,
+                target_format=self._office_target_format_from_message(messages[0]),
             )
             target_layout = office_card.process_layout if office_card is not None else None
+            inserted_count += 1
             if current_idx is not None:
                 current_idx += 1
         active_agent_bubble = None
@@ -19423,6 +19496,8 @@ class MainWindow(QMainWindow):
                     target_layout=target_layout,
                 )
                 if current_idx is not None and target_layout is None: current_idx += 1
+                if target_layout is None:
+                    inserted_count += 1
                 state.last_agent_bubble = None
                 
             elif role == 'assistant':
@@ -19436,6 +19511,8 @@ class MainWindow(QMainWindow):
                         target_layout=target_layout,
                     )
                     if current_idx is not None and target_layout is None: current_idx += 1
+                    if target_layout is None:
+                        inserted_count += 1
                     state.last_agent_bubble = active_agent_bubble
                 if reasoning:
                     active_agent_bubble.update_thinking(reasoning)
@@ -19463,6 +19540,8 @@ class MainWindow(QMainWindow):
                         }, session_id=session_id, index=current_idx, animate=animate)
                         if not active_agent_bubble and current_idx is not None:
                             current_idx += 1
+                        if not active_agent_bubble and target_layout is None:
+                            inserted_count += 1
 
             elif role == 'tool':
                 t_id = msg.get('tool_call_id')
@@ -19477,6 +19556,8 @@ class MainWindow(QMainWindow):
                         }, session_id=session_id, index=current_idx, animate=animate)
                         if current_idx is not None:
                             current_idx += 1
+                        if target_layout is None:
+                            inserted_count += 1
                     if t_id in state.tool_cards:
                         self.update_tool_card({
                             'id': t_id,
@@ -19496,6 +19577,7 @@ class MainWindow(QMainWindow):
             )
         if insert_index is not None:
             state.last_agent_bubble = backup_last_agent
+        return inserted_count
 
     def _normalize_and_persist_session_messages(self, session_id, messages, force_persist=False, existing_meta=None):
         source_messages = messages if isinstance(messages, list) else []
@@ -20143,6 +20225,8 @@ class MainWindow(QMainWindow):
         ]
         if not valid_paths:
             return
+        if state:
+            self._sync_office_task_card_paths(state, valid_paths)
         latest = valid_paths[-1]
         current = getattr(self, "current_deliverable_path", "") or ""
         if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(latest)):
@@ -20517,6 +20601,8 @@ class MainWindow(QMainWindow):
             prompt_files,
             check_duplicates=False,
             clear_current_input=True,
+            workflow_mode=WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+            office_conversion_target=target_format,
         )
         if submitted:
             self.add_system_toast(
@@ -21959,6 +22045,7 @@ class MainWindow(QMainWindow):
         clear_current_input=False,
         workflow_mode="",
         office_output_profile=None,
+        office_conversion_target="",
     ):
         if not state:
             return False
@@ -22018,13 +22105,21 @@ class MainWindow(QMainWindow):
                 return False
             self._last_submit_text = submit_signature
             self._last_submit_ts = now
-        office_workflow = self._is_office_workflow_context(workflow_mode)
+        normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
+        office_workflow = self._is_office_workflow_context(normalized_workflow_mode)
+        office_conversion_target = str(office_conversion_target or "").strip().lower()
+        if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            office_conversion_target = office_conversion_target if office_conversion_target in {"pptx", "docx", "pdf"} else ""
+        else:
+            office_conversion_target = ""
         office_card = None
         if state.session_id == self.current_session_id and office_workflow:
+            state.office_task_target_format = office_conversion_target or "html"
             office_card = self._create_office_draft_task_card(
                 state,
-                self._office_profile_label(office_output_profile),
+                office_conversion_target.upper() if office_conversion_target else self._office_profile_label(office_output_profile),
                 running=True,
+                target_format=office_conversion_target or "html",
             )
         if state.session_id == self.current_session_id:
             self.add_chat_bubble(
@@ -22049,6 +22144,7 @@ class MainWindow(QMainWindow):
         state.prompt_cache_meta = {}
         state.system_prompt_appends = []
         state.office_draft_preview_pending = office_workflow
+        state.office_task_target_format = office_conversion_target or ("html" if office_workflow else "")
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -22061,8 +22157,11 @@ class MainWindow(QMainWindow):
             message_payload["content_parts"] = payload.get("content_parts")
         message_meta = dict(payload.get("meta") or {})
         if office_workflow:
-            message_meta["workflow_mode"] = WORKFLOW_MODE_OFFICE_HTML_FIRST
-            message_meta["office_output_profile"] = normalize_office_output_profile(office_output_profile)
+            message_meta["workflow_mode"] = normalized_workflow_mode
+            if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+                message_meta["office_conversion_target"] = office_conversion_target
+            else:
+                message_meta["office_output_profile"] = normalize_office_output_profile(office_output_profile)
         if message_meta:
             message_payload["meta"] = message_meta
         state.messages.append(message_payload)
@@ -22114,7 +22213,7 @@ class MainWindow(QMainWindow):
         run_context = self._build_run_context(
             state,
             run_mode,
-            workflow_mode=workflow_mode,
+            workflow_mode=normalized_workflow_mode,
             office_output_profile=office_output_profile,
         )
         if self.daemon_available:
@@ -23407,7 +23506,7 @@ class MainWindow(QMainWindow):
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
             bubble.set_main_content(f"⚠️ Error: {result['error']}", final=True)
-            self._finish_office_draft_task_card(state, failed_message="办公稿生成失败")
+            self._finish_office_draft_task_card(state, failed_message=self._office_task_failed_title(state))
             self.request_session_scroll_to_bottom(state.session_id, force=False)
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""

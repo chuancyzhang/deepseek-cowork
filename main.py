@@ -13204,6 +13204,121 @@ class SessionContextChip(QWidget):
         self.main_btn.setEnabled(enabled)
 
 
+class TokenUsagePopover(QFrame):
+    """Light app-owned popover for token details."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setObjectName("TokenUsagePopover")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(8, 6, 8, 10)
+        outer_layout.setSpacing(0)
+
+        surface = QFrame(self)
+        surface.setObjectName("TokenUsagePopoverSurface")
+        outer_layout.addWidget(surface)
+
+        layout = QVBoxLayout(surface)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(0)
+
+        self.detail_label = QLabel()
+        self.detail_label.setObjectName("TokenUsagePopoverText")
+        self.detail_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.detail_label.setWordWrap(False)
+        layout.addWidget(self.detail_label)
+
+        self.setStyleSheet(
+            f"""
+            QFrame#TokenUsagePopover {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#TokenUsagePopoverSurface {{
+                background-color: rgba(255, 255, 255, 0.96);
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 14px;
+            }}
+            QLabel#TokenUsagePopoverText {{
+                color: {DesignTokens.text_primary};
+                background: transparent;
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            """
+        )
+        add_soft_shadow(surface, blur=18, y_offset=6, alpha=12)
+
+    def set_detail_text(self, text):
+        self.detail_label.setText(str(text or ""))
+        self.adjustSize()
+
+    def show_for(self, anchor):
+        if not anchor or not _qt_object_alive(anchor):
+            return
+        self.adjustSize()
+        anchor_rect = anchor.rect()
+        global_bottom = anchor.mapToGlobal(anchor_rect.bottomLeft())
+        x = global_bottom.x() + (anchor.width() - self.width()) // 2
+        y = global_bottom.y() + 8
+        screen = anchor.screen() or QGuiApplication.primaryScreen()
+        if screen:
+            available = screen.availableGeometry()
+            x = max(available.left() + 8, min(x, available.right() - self.width() - 8))
+            y = max(available.top() + 8, min(y, available.bottom() - self.height() - 8))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
+
+class TokenUsageChip(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("TokenUsageChip")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(26)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._detail_text = ""
+        self._popover = TokenUsagePopover(self)
+        self.clicked.connect(self.toggle_popover)
+        self.setStyleSheet(
+            f"""
+            QPushButton#TokenUsageChip {{
+                background: rgba(255, 255, 255, 0.72);
+                color: {DesignTokens.text_secondary};
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 13px;
+                padding: 3px 10px;
+                font-size: 11px;
+                font-weight: 650;
+                text-align: center;
+            }}
+            QPushButton#TokenUsageChip:hover {{
+                background: rgba(255, 255, 255, 0.9);
+                color: {DesignTokens.text_primary};
+                border-color: {DesignTokens.border};
+            }}
+            QPushButton#TokenUsageChip:pressed {{
+                background: {DesignTokens.bg_secondary};
+            }}
+            """
+        )
+
+    def setDetailText(self, text):
+        self._detail_text = str(text or "")
+        self._popover.set_detail_text(self._detail_text)
+
+    def toggle_popover(self):
+        if self._popover.isVisible():
+            self._popover.hide()
+            return
+        self._popover.set_detail_text(self._detail_text)
+        self._popover.show_for(self)
+
+
 def resolve_app_icon_path():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
@@ -15069,7 +15184,7 @@ class MainWindow(QMainWindow):
         summary = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
         state.token_usage_summary = summary
         label.setText(format_token_usage_chip_text(summary))
-        label.setToolTip(format_token_usage_tooltip(summary, getattr(state, "last_token_usage", {})))
+        label.setDetailText(format_token_usage_tooltip(summary, getattr(state, "last_token_usage", {})))
 
     def apply_token_usage_event(self, state, usage):
         if not state:
@@ -17501,15 +17616,7 @@ class MainWindow(QMainWindow):
         session_header_layout.addWidget(active_skills_label)
         session_header_layout.addStretch(1)
 
-        token_usage_label = QLabel()
-        token_usage_label.setObjectName("TokenUsageChip")
-        token_usage_label.setAlignment(Qt.AlignCenter)
-        token_usage_label.setMinimumHeight(26)
-        token_usage_label.setStyleSheet(
-            f"QLabel#TokenUsageChip {{ background: rgba(255, 255, 255, 0.72); "
-            f"color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 13px; padding: 3px 10px; font-size: 11px; font-weight: 650; }}"
-        )
+        token_usage_label = TokenUsageChip()
         session_header_layout.addWidget(token_usage_label, 0, Qt.AlignRight)
         session_layout.addWidget(session_header)
 

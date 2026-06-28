@@ -50,6 +50,7 @@ from main import (
     SubAgentEventSummaryRow,
     SubAgentEventTile,
     SubAgentMonitor,
+    TokenUsageChip,
     SOP_EXECUTOR_BASH_COMMAND,
     SOP_EXECUTOR_PYTHON_FILE,
     _MARKDOWN_RENDER_CACHE,
@@ -2197,6 +2198,51 @@ class TestSopUiHelpers(unittest.TestCase):
 
         self.assertIn("总量：12,400", tooltip)
         self.assertIn("缓存输入：7,500 (62.5%)", tooltip)
+
+    def test_token_usage_chip_uses_app_owned_popover_detail(self):
+        chip = TokenUsageChip()
+
+        chip.setText("12.4K tokens · 缓存 7.5K / 62%")
+        chip.setDetailText("本对话累计 token 用量\n总量：12,400")
+
+        self.assertEqual(chip.text(), "12.4K tokens · 缓存 7.5K / 62%")
+        self.assertEqual(chip._popover.detail_label.text(), "本对话累计 token 用量\n总量：12,400")
+
+    def test_refresh_token_usage_label_updates_detail_without_native_tooltip(self):
+        class _TokenLabel:
+            def __init__(self):
+                self.text_value = ""
+                self.detail_text = ""
+                self.tooltip_called = False
+
+            def setText(self, text):
+                self.text_value = text
+
+            def setDetailText(self, text):
+                self.detail_text = text
+
+            def setToolTip(self, text):
+                self.tooltip_called = True
+
+        window = MainWindow.__new__(MainWindow)
+        state = _ObservabilityState()
+        state.token_usage_label = _TokenLabel()
+        state.token_usage_summary = {
+            "input_tokens": 12000,
+            "output_tokens": 400,
+            "total_tokens": 12400,
+            "cached_input_tokens": 7500,
+            "uncached_input_tokens": 4500,
+            "request_count": 2,
+        }
+        state.last_token_usage = {}
+        window.get_session = lambda session_id=None: state
+
+        window.refresh_token_usage_label(state.session_id)
+
+        self.assertEqual(state.token_usage_label.text_value, "12.4K tokens · 缓存 7.5K / 62%")
+        self.assertIn("总量：12,400", state.token_usage_label.detail_text)
+        self.assertFalse(state.token_usage_label.tooltip_called)
 
     def test_llm_usage_event_updates_conversation_token_summary(self):
         window = MainWindow.__new__(MainWindow)

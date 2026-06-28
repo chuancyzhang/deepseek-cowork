@@ -23,6 +23,7 @@ Current app version: **4.9.5**
 - **Conversation + project model**: start a pure chat, or bind a conversation to a project workspace.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **Right-side context drawer**: open files, deliverables, observability, and sub-agent status on demand.
+- **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Settings center**: manage models, agents, workspace defaults, MCP servers, enterprise messaging, and runtime components.
 - **Automation center**: manage task templates, schedules, run history, and step confirmation.
 - **Skill center**: enable, import, export, debug, and review skills without restarting the app.

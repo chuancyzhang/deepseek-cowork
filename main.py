@@ -14668,10 +14668,9 @@ class MainWindow(QMainWindow):
         for key, btn in getattr(self, "file_section_buttons", {}).items():
             btn.setChecked(key == section)
         deliverable_controls_visible = section == self.FILE_SECTION_DELIVERABLES
-        for name in ("deliverable_layout_btn", "deliverable_render_btn", "deliverable_expand_btn", "deliverables_refresh_btn"):
-            btn = getattr(self, name, None)
-            if btn is not None:
-                btn.setVisible(deliverable_controls_visible)
+        expand_btn = getattr(self, "deliverable_expand_btn", None)
+        if expand_btn is not None:
+            expand_btn.setVisible(deliverable_controls_visible)
         self._sync_deliverable_action_visibility()
         if deliverable_controls_visible and refresh:
             self.refresh_deliverables(render_current=True)

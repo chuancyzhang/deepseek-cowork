@@ -355,6 +355,33 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertIs(window.file_workspace_stack.current, window.file_browse_page)
         window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
 
+    def test_deliverable_section_does_not_show_unmounted_legacy_buttons(self):
+        class Stack:
+            def setCurrentIndex(self, index):
+                self.index = index
+
+            def setVisible(self, visible):
+                self.visible = visible
+
+        window = MainWindow.__new__(MainWindow)
+        window.file_source_stack = Stack()
+        window.file_section_buttons = {}
+        window.file_workspace_view_mode = "browse"
+        window.deliverable_layout_btn = MagicMock()
+        window.deliverable_render_btn = MagicMock()
+        window.deliverables_refresh_btn = MagicMock()
+        window.deliverable_expand_btn = MagicMock()
+        window._sync_deliverable_action_visibility = MagicMock()
+        window.refresh_deliverables = MagicMock()
+        window.update_context_drawer_header = MagicMock()
+
+        window.set_file_workspace_section(window.FILE_SECTION_DELIVERABLES, refresh=False)
+
+        window.deliverable_layout_btn.setVisible.assert_not_called()
+        window.deliverable_render_btn.setVisible.assert_not_called()
+        window.deliverables_refresh_btn.setVisible.assert_not_called()
+        window.deliverable_expand_btn.setVisible.assert_called_once_with(True)
+
     def test_chat_path_does_not_follow_when_deliverables_view_is_closed(self):
         with tempfile.TemporaryDirectory() as workspace:
             latest = os.path.join(workspace, "latest.html")

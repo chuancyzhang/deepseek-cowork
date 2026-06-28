@@ -13379,6 +13379,10 @@ class MainWindow(QMainWindow):
         self.context_available_tabs = set()
         self.current_deliverable_path = ""
         self.current_deliverable_stale = False
+        self.file_workspace_view_mode = "browse"
+        self.file_workspace_route_origin = "browse"
+        self.file_workspace_return_section = self.FILE_SECTION_DELIVERABLES
+        self.deliverable_conversion_running_target = ""
         self.deliverable_items = []
         self.deliverable_render_fingerprint = None
         self.deliverable_render_path = ""
@@ -13529,7 +13533,13 @@ class MainWindow(QMainWindow):
         
         self.config_manager = ConfigManager()
         self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
-        self.deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
+        legacy_deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
+        configured_file_workspace_mode = self.config_manager.get("file_workspace_view_mode", "")
+        if configured_file_workspace_mode in {"browse", "detail"}:
+            self.file_workspace_view_mode = configured_file_workspace_mode
+        else:
+            self.file_workspace_view_mode = "detail" if legacy_deliverable_layout_mode == "focus" else "browse"
+        self.deliverable_layout_mode = "focus" if self.file_workspace_view_mode == "detail" else "list"
         self.deliverables_splitter_sizes = self.config_manager.get("deliverables_splitter_sizes", [180, 320])
         self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
         self.skill_manager = SkillManager(None, self.config_manager)
@@ -13752,6 +13762,17 @@ class MainWindow(QMainWindow):
         ws_tab_layout.setContentsMargins(14, 12, 14, 14)
         ws_tab_layout.setSpacing(10)
 
+        self.file_workspace_stack = QStackedWidget()
+        self.file_workspace_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
+        self.file_browse_page = QWidget()
+        file_browse_layout = QVBoxLayout(self.file_browse_page)
+        file_browse_layout.setContentsMargins(0, 0, 0, 0)
+        file_browse_layout.setSpacing(10)
+        self.file_detail_page = QWidget()
+        file_detail_layout = QVBoxLayout(self.file_detail_page)
+        file_detail_layout.setContentsMargins(0, 0, 0, 0)
+        file_detail_layout.setSpacing(10)
+
         file_segment_bar = QFrame()
         file_segment_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.55)"))
         file_segment_layout = QHBoxLayout(file_segment_bar)
@@ -13767,7 +13788,7 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, value=section: self.set_file_workspace_section(value))
             file_segment_layout.addWidget(btn)
             self.file_section_buttons[section] = btn
-        ws_tab_layout.addWidget(file_segment_bar)
+        file_browse_layout.addWidget(file_segment_bar)
         
         self.right_inner_splitter = SmartSplitter(Qt.Vertical)
         self.right_inner_splitter.setChildrenCollapsible(False)
@@ -13798,7 +13819,7 @@ class MainWindow(QMainWindow):
         self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
         self.file_source_stack.addWidget(self.deliverables_list)
 
-        self.right_inner_splitter.addWidget(self.file_source_stack)
+        file_browse_layout.addWidget(self.file_source_stack, 1)
         
         # Unified Preview Area in Workspace Tab
         preview_container = QWidget()
@@ -13811,6 +13832,13 @@ class MainWindow(QMainWindow):
         r_preview_header_layout = QHBoxLayout(r_preview_header)
         r_preview_header_layout.setContentsMargins(12, 10, 10, 10)
         r_preview_header_layout.setSpacing(8)
+        self.file_detail_back_btn = QPushButton("返回列表")
+        self.file_detail_back_btn.setIcon(qta.icon("fa5s.chevron-left", color=DesignTokens.text_secondary))
+        self.file_detail_back_btn.setCursor(Qt.PointingHandCursor)
+        self.file_detail_back_btn.setFixedHeight(30)
+        self.file_detail_back_btn.setStyleSheet(apple_button_style("ghost", radius=15))
+        self.file_detail_back_btn.clicked.connect(self.show_file_workspace_browse_view)
+        r_preview_header_layout.addWidget(self.file_detail_back_btn)
         preview_title_box = QVBoxLayout()
         preview_title_box.setContentsMargins(0, 0, 0, 0)
         preview_title_box.setSpacing(2)
@@ -13862,6 +13890,36 @@ class MainWindow(QMainWindow):
         self.deliverable_expand_btn.setFixedSize(30, 30)
         self.deliverable_expand_btn.setStyleSheet(apple_tool_button_style(False))
         self.deliverable_expand_btn.clicked.connect(self.toggle_deliverable_preview_expanded)
+        self.deliverable_source_btn = QToolButton()
+        self.deliverable_source_btn.setIcon(qta.icon("fa5s.code", color=DesignTokens.text_secondary))
+        self.deliverable_source_btn.setToolTip("源码视图")
+        self.deliverable_source_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_source_btn.setFixedSize(30, 30)
+        self.deliverable_source_btn.setCheckable(True)
+        self.deliverable_source_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_source_btn.clicked.connect(self.toggle_deliverable_source_view)
+        self.deliverable_more_btn = QToolButton()
+        self.deliverable_more_btn.setIcon(qta.icon("fa5s.ellipsis-h", color=DesignTokens.text_secondary))
+        self.deliverable_more_btn.setToolTip("更多操作")
+        self.deliverable_more_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_more_btn.setFixedSize(30, 30)
+        self.deliverable_more_btn.setPopupMode(QToolButton.InstantPopup)
+        self.deliverable_more_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_more_menu = create_styled_menu(self.deliverable_more_btn)
+        self.deliverable_more_open_action = QAction(qta.icon('fa5s.external-link-alt', color=DesignTokens.text_secondary), "打开", self.deliverable_more_menu)
+        self.deliverable_more_open_action.triggered.connect(lambda: self.open_path_in_system(getattr(self, "current_preview_path", "")))
+        self.deliverable_more_reveal_action = QAction(qta.icon('fa5s.folder-open', color=DesignTokens.text_secondary), "在资源管理器中显示", self.deliverable_more_menu)
+        self.deliverable_more_reveal_action.triggered.connect(lambda: self.reveal_in_explorer(getattr(self, "current_preview_path", "")))
+        self.deliverable_more_copy_action = QAction(qta.icon('fa5s.copy', color=DesignTokens.text_secondary), "复制路径", self.deliverable_more_menu)
+        self.deliverable_more_copy_action.triggered.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_preview_path", "")))
+        self.deliverable_more_refresh_action = QAction(qta.icon('fa5s.sync-alt', color=DesignTokens.text_secondary), "刷新预览", self.deliverable_more_menu)
+        self.deliverable_more_refresh_action.triggered.connect(lambda: self.render_selected_deliverable(force=True))
+        self.deliverable_more_menu.addAction(self.deliverable_more_open_action)
+        self.deliverable_more_menu.addAction(self.deliverable_more_reveal_action)
+        self.deliverable_more_menu.addAction(self.deliverable_more_copy_action)
+        self.deliverable_more_menu.addSeparator()
+        self.deliverable_more_menu.addAction(self.deliverable_more_refresh_action)
+        self.deliverable_more_btn.setMenu(self.deliverable_more_menu)
         self.deliverables_refresh_btn = QToolButton()
         self.deliverables_refresh_btn.setIcon(qta.icon("fa5s.file-code", color=DesignTokens.text_secondary))
         self.deliverables_refresh_btn.setToolTip("刷新交付物列表")
@@ -13874,30 +13932,36 @@ class MainWindow(QMainWindow):
         self.deliverable_copy_btn = self.preview_copy_btn
         for btn in (self.preview_open_btn, self.preview_reveal_btn, self.preview_copy_btn):
             btn.setEnabled(False)
-            r_preview_header_layout.addWidget(btn)
-        for btn in (
-            self.deliverable_layout_btn,
-            self.deliverable_render_btn,
-            self.deliverable_expand_btn,
-            self.deliverables_refresh_btn,
-        ):
             btn.setVisible(False)
+        for btn in (
+            self.deliverable_expand_btn,
+            self.deliverable_source_btn,
+            self.deliverable_more_btn,
+        ):
             r_preview_header_layout.addWidget(btn)
+        for btn in (self.deliverable_layout_btn, self.deliverable_render_btn, self.deliverables_refresh_btn):
+            btn.setVisible(False)
         preview_layout.addWidget(r_preview_header)
 
         conversion_row_widget = QWidget()
+        conversion_row_widget.setObjectName("DeliverableConversionBar")
+        conversion_row_widget.setStyleSheet(
+            f"QWidget#DeliverableConversionBar {{ background: rgba(255, 255, 255, 0.82); "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 18px; }}"
+        )
         conversion_row = QHBoxLayout(conversion_row_widget)
-        conversion_row.setContentsMargins(0, 0, 0, 0)
-        conversion_row.setSpacing(6)
-        conversion_title = QLabel("基于当前 HTML 继续创作")
-        conversion_title.setStyleSheet(f"font-weight: 650; color: {DesignTokens.text_primary}; font-size: 11px;")
+        conversion_row.setContentsMargins(10, 8, 10, 8)
+        conversion_row.setSpacing(8)
+        conversion_title = QLabel("继续创作")
+        conversion_title.setStyleSheet(f"font-weight: 650; color: {DesignTokens.text_secondary}; font-size: 11px;")
         conversion_row.addWidget(conversion_title)
         self.deliverable_convert_buttons = []
         for fmt in ("PPTX", "DOCX", "PDF"):
             btn = QPushButton(f"生成 {fmt}")
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(28)
-            btn.setStyleSheet(apple_button_style("secondary", radius=14))
+            btn.setFixedHeight(32)
+            btn.setProperty("conversionTarget", fmt.lower())
+            btn.setStyleSheet(apple_button_style("primary" if fmt == "PPTX" else "secondary", radius=16))
             btn.clicked.connect(lambda checked=False, target=fmt.lower(): self.start_deliverable_conversion(target))
             conversion_row.addWidget(btn)
             self.deliverable_convert_buttons.append(btn)
@@ -13914,8 +13978,18 @@ class MainWindow(QMainWindow):
                 conversion_row.addWidget(template_btn)
                 self.deliverable_convert_buttons.append(template_btn)
         conversion_row.addStretch()
+        self.deliverable_conversion_status_label = QLabel("")
+        self.deliverable_conversion_status_label.setStyleSheet(apple_caption_style())
+        self.deliverable_conversion_status_label.setVisible(False)
+        conversion_row.addWidget(self.deliverable_conversion_status_label)
+        self.deliverable_conversion_cancel_btn = QPushButton("取消")
+        self.deliverable_conversion_cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_conversion_cancel_btn.setFixedHeight(28)
+        self.deliverable_conversion_cancel_btn.setStyleSheet(apple_button_style("ghost", radius=14))
+        self.deliverable_conversion_cancel_btn.clicked.connect(self.cancel_deliverable_conversion)
+        self.deliverable_conversion_cancel_btn.setVisible(False)
+        conversion_row.addWidget(self.deliverable_conversion_cancel_btn)
         self.deliverable_conversion_row = conversion_row_widget
-        preview_layout.addWidget(self.deliverable_conversion_row)
 
         self.deliverable_status_label = QLabel("选择文件后会在这里预览")
         self.deliverable_status_label.setWordWrap(True)
@@ -13953,11 +14027,10 @@ class MainWindow(QMainWindow):
         self.preview_stack.setCurrentWidget(self.preview_text)
         self.preview_pixmap = None
         
-        preview_layout.addWidget(self.preview_stack)
+        preview_layout.addWidget(self.preview_stack, 1)
+        preview_layout.addWidget(self.deliverable_conversion_row)
         
-        self.right_inner_splitter.addWidget(preview_container)
-        self.right_inner_splitter.setStretchFactor(0, 2)
-        self.right_inner_splitter.setStretchFactor(1, 3)
+        file_detail_layout.addWidget(preview_container, 1)
         self.deliverables_splitter = self.right_inner_splitter
         sizes = self.deliverables_splitter_sizes
         if not isinstance(sizes, list) or len(sizes) != 2:
@@ -13965,7 +14038,9 @@ class MainWindow(QMainWindow):
         self.right_inner_splitter.setSizes([max(80, int(sizes[0])), max(160, int(sizes[1]))])
         self.right_inner_splitter.splitterMoved.connect(self.persist_deliverables_splitter_sizes)
         
-        ws_tab_layout.addWidget(self.right_inner_splitter)
+        self.file_workspace_stack.addWidget(self.file_browse_page)
+        self.file_workspace_stack.addWidget(self.file_detail_page)
+        ws_tab_layout.addWidget(self.file_workspace_stack, 1)
         self.set_file_workspace_section(self.FILE_SECTION_ALL, refresh=False)
         self._apply_deliverable_layout_mode(self.deliverable_layout_mode, persist=False)
         self._set_deliverable_controls_enabled("")
@@ -14240,7 +14315,10 @@ class MainWindow(QMainWindow):
             btn.setFixedSize(36, 36)
             btn.setCheckable(True)
             btn.setStyleSheet(apple_tool_button_style(False))
-            btn.clicked.connect(lambda checked=False, tab=tab_index: self.show_context_drawer(tab))
+            if tab_index == self.RIGHT_TAB_FILES:
+                btn.clicked.connect(lambda checked=False: self.open_file_workspace_from_rail())
+            else:
+                btn.clicked.connect(lambda checked=False, tab=tab_index: self.show_context_drawer(tab))
             context_rail_layout.addWidget(btn)
             self.context_rail_buttons[tab_index] = btn
         top_bar.addWidget(self.context_rail)
@@ -14586,7 +14664,7 @@ class MainWindow(QMainWindow):
         stack = getattr(self, "file_source_stack", None)
         if stack is not None:
             stack.setCurrentIndex(1 if section == self.FILE_SECTION_DELIVERABLES else 0)
-            stack.setVisible(section != self.FILE_SECTION_DELIVERABLES or getattr(self, "deliverable_layout_mode", "list") == "list")
+            stack.setVisible(True)
         for key, btn in getattr(self, "file_section_buttons", {}).items():
             btn.setChecked(key == section)
         deliverable_controls_visible = section == self.FILE_SECTION_DELIVERABLES
@@ -14598,27 +14676,69 @@ class MainWindow(QMainWindow):
         if deliverable_controls_visible and refresh:
             self.refresh_deliverables(render_current=True)
         self.update_context_drawer_header(getattr(self, "right_drawer_tab", self.RIGHT_TAB_FILES))
+        if getattr(self, "file_workspace_view_mode", "browse") == "browse":
+            self.file_workspace_return_section = section
 
     def _sync_deliverable_action_visibility(self):
         section = getattr(self, "file_workspace_section", getattr(self, "FILE_SECTION_ALL", "all"))
         in_deliverables = section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables")
-        path = getattr(self, "current_deliverable_path", "") if in_deliverables else ""
+        path = getattr(self, "current_deliverable_path", "")
         ext = os.path.splitext(path)[1].lower() if path else ""
         is_html = ext in {".html", ".htm"} and os.path.isfile(path)
         row = getattr(self, "deliverable_conversion_row", None)
         if row is not None:
-            row.setVisible(in_deliverables and is_html)
+            row.setVisible(
+                getattr(self, "file_workspace_view_mode", "browse") == "detail"
+                and is_html
+            )
         status = getattr(self, "deliverable_status_label", None)
         if status is not None:
             status.setVisible(True)
 
+    def _sync_file_workspace_detail_header(self):
+        back_btn = getattr(self, "file_detail_back_btn", None)
+        if not back_btn:
+            return
+        origin = getattr(self, "file_workspace_route_origin", "browse")
+        section = getattr(self, "file_workspace_return_section", getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"))
+        if origin == "chat":
+            label = "返回交付物列表"
+        elif section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
+            label = "返回交付物"
+        else:
+            label = "返回文件"
+        back_btn.setText(label)
+
+    def _set_file_workspace_view_mode(self, mode, origin="browse", persist=True):
+        mode = "detail" if mode == "detail" else "browse"
+        self.file_workspace_view_mode = mode
+        if origin:
+            self.file_workspace_route_origin = origin
+        stack = getattr(self, "file_workspace_stack", None)
+        if stack is not None:
+            stack.setCurrentWidget(self.file_detail_page if mode == "detail" else self.file_browse_page)
+        self.deliverable_layout_mode = "focus" if mode == "detail" else "list"
+        self._sync_file_workspace_detail_header()
+        self._sync_deliverable_action_visibility()
+        if persist and getattr(self, "config_manager", None):
+            self.config_manager.set("file_workspace_view_mode", mode)
+            self.config_manager.set("deliverable_layout_mode", self.deliverable_layout_mode)
+
+    def show_file_workspace_browse_view(self):
+        self._set_file_workspace_view_mode("browse", origin="browse")
+        self.set_file_workspace_section(
+            getattr(self, "file_workspace_return_section", self.FILE_SECTION_DELIVERABLES),
+            refresh=False,
+        )
+
+    def show_file_workspace_detail_view(self, origin="browse"):
+        self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_DELIVERABLES)
+        self._set_file_workspace_view_mode("detail", origin=origin)
+
     def _apply_deliverable_layout_mode(self, mode, persist=True):
         mode = "focus" if mode == "focus" else "list"
         self.deliverable_layout_mode = mode
-        source_stack = getattr(self, "file_source_stack", None)
-        if source_stack is not None:
-            in_deliverables = getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables")
-            source_stack.setVisible(mode == "list" or not in_deliverables)
+        self._set_file_workspace_view_mode("detail" if mode == "focus" else "browse", origin=getattr(self, "file_workspace_route_origin", "browse"), persist=persist)
         btn = getattr(self, "deliverable_layout_btn", None)
         if btn is not None:
             if mode == "focus":
@@ -14871,6 +14991,14 @@ class MainWindow(QMainWindow):
 
     def position_context_drawer(self):
         self.sync_context_drawer_layout()
+
+    def open_file_workspace_from_rail(self):
+        self._set_file_workspace_view_mode("browse", origin="browse")
+        self.set_file_workspace_section(
+            getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL),
+            refresh=False,
+        )
+        self.show_context_drawer(self.RIGHT_TAB_FILES)
 
     def show_context_drawer(self, tab_index=None):
         if tab_index is None:
@@ -15784,6 +15912,8 @@ class MainWindow(QMainWindow):
 
     def _finish_office_draft_task_card(self, state, content="", failed_message="", bubble=None):
         card = self._office_draft_card_for_state(state)
+        if state and getattr(state, "session_id", None) == getattr(self, "current_session_id", None):
+            self._set_deliverable_conversion_running("")
         if card is None:
             return
         if failed_message:
@@ -20122,11 +20252,46 @@ class MainWindow(QMainWindow):
             btn = getattr(self, name, None)
             if btn:
                 btn.setEnabled(is_file)
+        for name in (
+            "deliverable_more_open_action",
+            "deliverable_more_reveal_action",
+            "deliverable_more_copy_action",
+            "deliverable_more_refresh_action",
+        ):
+            action = getattr(self, name, None)
+            if action:
+                action.setEnabled(is_file)
+        source_btn = getattr(self, "deliverable_source_btn", None)
+        if source_btn:
+            source_btn.setEnabled(is_file and ext in {".html", ".htm", ".md", ".markdown", ".txt", ".py", ".js", ".css", ".json"})
+            source_btn.setChecked(False)
         if hasattr(self, "deliverable_render_btn"):
             self.deliverable_render_btn.setEnabled(is_file and ext in DELIVERABLE_EXTENSIONS)
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
             btn.setEnabled(is_file and is_html)
         self._sync_deliverable_action_visibility()
+
+    def toggle_deliverable_source_view(self):
+        path = getattr(self, "current_deliverable_path", "") or getattr(self, "current_preview_path", "")
+        if not path or not os.path.isfile(path):
+            return
+        checked = bool(getattr(self, "deliverable_source_btn", None) and self.deliverable_source_btn.isChecked())
+        if not checked:
+            self.render_selected_deliverable(force=False)
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                content = handle.read(40000)
+            if os.path.getsize(path) > 40000:
+                content += "\n\n... 文件较大，仅显示开头。"
+            self.deliverable_text_preview.setPlainText(content)
+        except UnicodeDecodeError:
+            self.deliverable_text_preview.setPlainText("当前文件不是可直接显示的文本源码。")
+        except Exception as exc:
+            self.deliverable_text_preview.setPlainText(f"无法读取源码：{exc}")
+        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        if hasattr(self, "deliverable_status_label"):
+            self.deliverable_status_label.setText(f"源码视图 · {os.path.basename(path)}")
 
     def _configure_deliverable_web_view(self):
         view = getattr(self, "deliverable_web_view", None)
@@ -20316,6 +20481,7 @@ class MainWindow(QMainWindow):
     def on_deliverable_item_clicked(self, item):
         path = item.data(Qt.UserRole) if item else ""
         self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
+        self.show_file_workspace_detail_view(origin="browse")
         self.select_deliverable(path)
 
     def open_deliverable_from_chat(self, path, session_id=None):
@@ -20333,8 +20499,8 @@ class MainWindow(QMainWindow):
         if state:
             state.selected_deliverable_path = normalized
         self.current_deliverable_path = normalized
-        self._apply_deliverable_layout_mode("focus")
         self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
+        self.show_file_workspace_detail_view(origin="chat")
         self.show_context_drawer(self.RIGHT_TAB_FILES)
         self.select_deliverable(normalized, render_html=True)
 
@@ -20368,12 +20534,14 @@ class MainWindow(QMainWindow):
         if state:
             state.selected_deliverable_path = latest
         self.current_deliverable_path = latest
-        self._apply_deliverable_layout_mode("focus")
         if office_enabled:
             self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
+            self.show_file_workspace_detail_view(origin="chat")
             self.show_context_drawer(self.RIGHT_TAB_FILES)
             if state:
                 state.office_draft_preview_pending = False
+        else:
+            self.show_file_workspace_detail_view(origin="chat")
         self.select_deliverable(latest, render_html=True)
 
     def select_deliverable(self, path, render_html=True):
@@ -20669,6 +20837,40 @@ class MainWindow(QMainWindow):
             self.deliverable_render_fingerprint = None
             self.deliverable_status_label.setText("页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。")
 
+    def _set_deliverable_conversion_running(self, target_format=""):
+        target_format = str(target_format or "").strip().lower()
+        self.deliverable_conversion_running_target = target_format
+        running = bool(target_format)
+        label = getattr(self, "deliverable_conversion_status_label", None)
+        if label:
+            label.setText(f"正在生成 {target_format.upper()}..." if running else "")
+            label.setVisible(running)
+        cancel_btn = getattr(self, "deliverable_conversion_cancel_btn", None)
+        if cancel_btn:
+            cancel_btn.setVisible(running)
+        for btn in getattr(self, "deliverable_convert_buttons", []) or []:
+            button_target = str(btn.property("conversionTarget") or "").lower()
+            if running:
+                btn.setEnabled(button_target == target_format)
+                if isinstance(btn, QPushButton) and button_target == target_format:
+                    btn.setText(f"正在生成 {target_format.upper()}...")
+            else:
+                if isinstance(btn, QPushButton) and button_target:
+                    btn.setText(f"生成 {button_target.upper()}")
+        if not running:
+            self._set_deliverable_controls_enabled(getattr(self, "current_deliverable_path", ""))
+
+    def cancel_deliverable_conversion(self):
+        target = str(getattr(self, "deliverable_conversion_running_target", "") or "").upper()
+        self.stop_agent()
+        self._set_deliverable_conversion_running("")
+        self.add_system_toast(
+            f"已请求停止当前{target or '办公文件'}生成任务",
+            "warning",
+            session_id=getattr(self, "current_session_id", None),
+            auto_close_ms=3600,
+        )
+
     def start_deliverable_conversion(self, target_format, ask_template=False, template_path=""):
         path = getattr(self, "current_deliverable_path", "")
         target_format = str(target_format or "").lower()
@@ -20739,13 +20941,17 @@ class MainWindow(QMainWindow):
             office_conversion_target=target_format,
         )
         if submitted:
+            self._set_deliverable_conversion_running(target_format)
+            if hasattr(self, "set_context_tab_hint"):
+                self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
             self.add_system_toast(
-                f"已在当前对话中开始生成 {target_format.upper()}",
+                f"已在当前对话中开始生成 {target_format.upper()}，你可以先收起面板继续工作。",
                 "info",
                 session_id=session_id,
                 auto_close_ms=3200,
             )
         else:
+            self._set_deliverable_conversion_running("")
             self.add_system_toast(
                 "生成任务未能提交，HTML 已保留在当前对话中，可直接重试。",
                 "warning",
@@ -20888,8 +21094,12 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
+            self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+            self.show_file_workspace_detail_view(origin="browse")
             self.select_deliverable(path, render_html=True)
             return
+        self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+        self.show_file_workspace_detail_view(origin="browse")
         self.current_deliverable_path = ""
         if hasattr(self, "deliverable_render_btn"):
             self.deliverable_render_btn.setEnabled(False)

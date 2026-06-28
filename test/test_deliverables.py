@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QByteArray, QBuffer, QEventLoop, QIODevice, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QPixmap, QWheelEvent
-from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QTextEdit, QWidget
 
 from main import (
     ChatBubble,
@@ -88,7 +88,7 @@ class TestDeliverableScanning(unittest.TestCase):
 
         config_init = source.index("self.config_manager = ConfigManager()")
         layout_preference = source.index(
-            'self.deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")'
+            'legacy_deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")'
         )
 
         self.assertLess(config_init, layout_preference)
@@ -246,7 +246,7 @@ class TestDeliverableScanning(unittest.TestCase):
                     self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_FILE_CONVERSION)
                     self.assertEqual(submit_call.kwargs["office_conversion_target"], target_format)
                     window.add_system_toast.assert_called_once_with(
-                        f"已在当前对话中开始生成 {target_format.upper()}",
+                        f"已在当前对话中开始生成 {target_format.upper()}，你可以先收起面板继续工作。",
                         "info",
                         session_id="current-session",
                         auto_close_ms=3200,
@@ -291,7 +291,6 @@ class TestDeliverableScanning(unittest.TestCase):
             state = type("_Session", (), {"selected_deliverable_path": ""})()
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
-            window._apply_deliverable_layout_mode = MagicMock()
             window.show_context_drawer = MagicMock()
             window.select_deliverable = MagicMock()
             window.add_system_toast = MagicMock()
@@ -299,7 +298,8 @@ class TestDeliverableScanning(unittest.TestCase):
             window.open_deliverable_from_chat(path, "session-1")
 
             self.assertEqual(state.selected_deliverable_path, os.path.normpath(path))
-            window._apply_deliverable_layout_mode.assert_called_once_with("focus")
+            self.assertEqual(window.file_workspace_view_mode, "detail")
+            self.assertEqual(window.file_workspace_route_origin, "chat")
             window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_DELIVERABLES)
             window.select_deliverable.assert_called_once_with(os.path.normpath(path), render_html=True)
             window.add_system_toast.assert_not_called()
@@ -320,14 +320,40 @@ class TestDeliverableScanning(unittest.TestCase):
             window.current_deliverable_path = first
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
-            window._apply_deliverable_layout_mode = MagicMock()
             window.select_deliverable = MagicMock()
 
             window.handle_chat_deliverable_paths_changed([first, latest], "session-1")
 
             self.assertEqual(state.selected_deliverable_path, os.path.normpath(latest))
-            window._apply_deliverable_layout_mode.assert_called_once_with("focus")
+            self.assertEqual(window.file_workspace_view_mode, "detail")
+            self.assertEqual(window.file_workspace_route_origin, "chat")
             window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
+
+    def test_file_rail_entry_opens_browse_view(self):
+        class Stack:
+            def __init__(self):
+                self.current = None
+
+            def setCurrentWidget(self, widget):
+                self.current = widget
+
+        window = MainWindow.__new__(MainWindow)
+        window.file_workspace_view_mode = "detail"
+        window.file_workspace_route_origin = "chat"
+        window.file_workspace_return_section = window.FILE_SECTION_DELIVERABLES
+        window.file_workspace_section = window.FILE_SECTION_DELIVERABLES
+        window.file_workspace_stack = Stack()
+        window.file_browse_page = object()
+        window.file_detail_page = object()
+        window.config_manager = MagicMock()
+        window.show_context_drawer = MagicMock()
+
+        window.open_file_workspace_from_rail()
+
+        self.assertEqual(window.file_workspace_view_mode, "browse")
+        self.assertEqual(window.file_workspace_route_origin, "browse")
+        self.assertIs(window.file_workspace_stack.current, window.file_browse_page)
+        window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
 
     def test_chat_path_does_not_follow_when_deliverables_view_is_closed(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -365,7 +391,6 @@ class TestDeliverableScanning(unittest.TestCase):
             )()
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
-            window._apply_deliverable_layout_mode = MagicMock()
             window.set_file_workspace_section = MagicMock()
             window.show_context_drawer = MagicMock()
             window.select_deliverable = MagicMock()
@@ -373,7 +398,8 @@ class TestDeliverableScanning(unittest.TestCase):
             window.handle_chat_deliverable_paths_changed([latest], "session-1")
 
             self.assertEqual(state.selected_deliverable_path, os.path.normpath(latest))
-            window._apply_deliverable_layout_mode.assert_called_once_with("focus")
+            self.assertEqual(window.file_workspace_view_mode, "detail")
+            self.assertEqual(window.file_workspace_route_origin, "chat")
             window.set_file_workspace_section.assert_called_once_with(window.FILE_SECTION_DELIVERABLES, refresh=False)
             window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
             window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
@@ -415,6 +441,40 @@ class TestDeliverableScanning(unittest.TestCase):
             finally:
                 card.deleteLater()
                 app.processEvents()
+
+    def test_deliverable_conversion_running_state_is_local_to_action_bar(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as handle:
+                handle.write("<html></html>")
+            window = MainWindow.__new__(MainWindow)
+            window.current_deliverable_path = html_path
+            window.file_workspace_view_mode = "detail"
+            window.deliverable_conversion_status_label = QLabel()
+            window.deliverable_conversion_cancel_btn = QPushButton("取消")
+            pptx_btn = QPushButton("生成 PPTX")
+            pptx_btn.setProperty("conversionTarget", "pptx")
+            docx_btn = QPushButton("生成 DOCX")
+            docx_btn.setProperty("conversionTarget", "docx")
+            window.deliverable_convert_buttons = [pptx_btn, docx_btn]
+            window.deliverable_conversion_row = QWidget()
+
+            window._set_deliverable_conversion_running("pptx")
+
+            self.assertEqual(window.deliverable_conversion_running_target, "pptx")
+            self.assertFalse(window.deliverable_conversion_status_label.isHidden())
+            self.assertIn("PPTX", window.deliverable_conversion_status_label.text())
+            self.assertFalse(window.deliverable_conversion_cancel_btn.isHidden())
+            self.assertEqual(pptx_btn.text(), "正在生成 PPTX...")
+            self.assertTrue(pptx_btn.isEnabled())
+            self.assertFalse(docx_btn.isEnabled())
+
+            window._set_deliverable_conversion_running("")
+
+            self.assertEqual(window.deliverable_conversion_running_target, "")
+            self.assertEqual(pptx_btn.text(), "生成 PPTX")
+            self.assertEqual(docx_btn.text(), "生成 DOCX")
 
     def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

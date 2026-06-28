@@ -16,13 +16,13 @@ Current app version: **4.9.5**
 - Manage reusable agents, automation templates, scheduled runs, and long-term memory from the UI.
 - Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
 - Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default while result files stay visible below the card.
-- Generate PPTX, DOCX, or PDF from an HTML draft in a folded task card with the finished file shown directly below the card; PPTX can use an optional template while preserving theme, masters, fonts, colors, pacing, and header/footer images.
+- Generate PPTX, DOCX, or PDF from an HTML draft in a folded task card with local action feedback; the drawer stays usable or closable while completion returns through toast and refreshed deliverable shortcuts.
 
 ## Product Surface
 
 - **Conversation + project model**: start a pure chat, or bind a conversation to a project workspace.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
-- **Right-side context drawer**: open files, deliverables, observability, and sub-agent status on demand.
+- **Right-side context drawer**: browse files and deliverables in a list view, then drill into a focused preview/action view; chat deliverable cards open directly in preview.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Settings center**: manage models, agents, workspace defaults, MCP servers, enterprise messaging, and runtime components.
 - **Automation center**: manage task templates, schedules, run history, and step confirmation.
@@ -73,7 +73,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 1. Open **Settings** and configure a model service.
 2. Start a pure chat or attach the conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
-4. Use the drawer to preview deliverables and inspect tool activity.
+4. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
 5. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
 
 ## Architecture

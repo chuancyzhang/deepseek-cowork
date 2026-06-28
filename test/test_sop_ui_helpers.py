@@ -1259,6 +1259,38 @@ class TestSopUiHelpers(unittest.TestCase):
             card.deleteLater()
             app.processEvents()
 
+    def test_office_task_finish_collects_paths_from_hidden_bubble(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            html_path = os.path.join(workspace, "draft.html")
+            with open(html_path, "w", encoding="utf-8") as handle:
+                handle.write("<html></html>")
+            card = OfficeDraftTaskCard("自由")
+            state = type(
+                "_Session",
+                (),
+                {
+                    "office_draft_task_card": card,
+                    "office_task_result_paths": [],
+                    "changed_files": [],
+                },
+            )()
+            bubble = type("_Bubble", (), {"_deliverable_paths": [html_path]})()
+            window = MainWindow.__new__(MainWindow)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+
+            try:
+                window._finish_office_draft_task_card(state, content="生成完成", bubble=bubble)
+                app.processEvents()
+
+                self.assertEqual(card.result_layout.count(), 1)
+                self.assertFalse(card.result_container.isHidden())
+                result_button = card.result_layout.itemAt(0).widget()
+                self.assertIn("draft.html", result_button.text())
+            finally:
+                card.deleteLater()
+                app.processEvents()
+
     def test_render_session_history_spans_keeps_later_office_task_collapsed(self):
         app = QApplication.instance() or QApplication([])
         temp_dir = tempfile.mkdtemp()

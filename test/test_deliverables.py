@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QStackedWidget, QTextEdit, Q
 from main import (
     ChatBubble,
     EmptyStateWidget,
+    OfficeDraftTaskCard,
     DeliverableWebPreview,
     MainWindow,
     OFFICE_OUTPUT_PROFILE_FREE,
@@ -376,6 +377,44 @@ class TestDeliverableScanning(unittest.TestCase):
             window.set_file_workspace_section.assert_called_once_with(window.FILE_SECTION_DELIVERABLES, refresh=False)
             window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
             window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
+
+    def test_office_task_card_syncs_path_after_preview_pending_is_cleared(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            latest = os.path.join(workspace, "latest.html")
+            with open(latest, "wb") as handle:
+                handle.write(b"x")
+            card = OfficeDraftTaskCard("自由")
+            window = MainWindow.__new__(MainWindow)
+            window.current_session_id = "session-1"
+            window.right_drawer_open = False
+            window.current_deliverable_path = latest
+            state = type(
+                "_Session",
+                (),
+                {
+                    "office_draft_preview_pending": False,
+                    "office_draft_task_card": card,
+                    "office_task_result_paths": [],
+                    "selected_deliverable_path": "",
+                },
+            )()
+            window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._apply_deliverable_layout_mode = MagicMock()
+            window.select_deliverable = MagicMock()
+
+            try:
+                window.handle_chat_deliverable_paths_changed([latest], "session-1")
+                app.processEvents()
+
+                self.assertEqual(card.result_layout.count(), 1)
+                self.assertFalse(card.result_container.isHidden())
+                window._apply_deliverable_layout_mode.assert_not_called()
+                window.select_deliverable.assert_not_called()
+            finally:
+                card.deleteLater()
+                app.processEvents()
 
     def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

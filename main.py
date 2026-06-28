@@ -11784,6 +11784,7 @@ class SessionState:
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         self.office_draft_preview_pending = False
         self.office_draft_task_card = None
+        self.office_task_result_paths = []
         self.sop_run = None
         self.sop_confirmation_bar = None
         self.persisted_conversation_meta = {}
@@ -15781,16 +15782,14 @@ class MainWindow(QMainWindow):
             return card
         return None
 
-    def _finish_office_draft_task_card(self, state, content="", failed_message=""):
+    def _finish_office_draft_task_card(self, state, content="", failed_message="", bubble=None):
         card = self._office_draft_card_for_state(state)
         if card is None:
             return
         if failed_message:
             card.set_failed(failed_message)
             return
-        workspace_dir = self._workspace_dir_for_state(state)
-        paths = [path for _start, _end, path in iter_workspace_file_paths(content or "", workspace_dir)]
-        card.set_completed(paths)
+        card.set_completed(self._collect_office_task_result_paths(state, content=content, bubble=bubble))
 
     def _office_task_failed_title(self, state):
         target = str(getattr(state, "office_task_target_format", "") or "").strip().upper()
@@ -15799,17 +15798,45 @@ class MainWindow(QMainWindow):
         return "办公稿生成失败"
 
     def _sync_office_task_card_paths(self, state, paths):
-        card = self._office_draft_card_for_state(state)
-        if card is None:
-            return
         workspace_dir = self._workspace_dir_for_state(state)
         valid_paths = [
             normalized
             for path in (paths or [])
             if (normalized := normalize_workspace_file(path, workspace_dir))
         ]
-        if valid_paths:
+        if not valid_paths:
+            return
+        existing = list(getattr(state, "office_task_result_paths", []) or [])
+        merged = []
+        seen = set()
+        for path in existing + valid_paths:
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(path)
+        state.office_task_result_paths = merged
+        card = self._office_draft_card_for_state(state)
+        if card is not None:
             card.add_result_paths(valid_paths)
+
+    def _collect_office_task_result_paths(self, state, content="", bubble=None):
+        workspace_dir = self._workspace_dir_for_state(state)
+        candidates = []
+        candidates.extend(getattr(state, "office_task_result_paths", []) or [])
+        candidates.extend(path for _start, _end, path in iter_workspace_file_paths(content or "", workspace_dir))
+        if bubble is not None:
+            candidates.extend(getattr(bubble, "_deliverable_paths", []) or [])
+        for item in getattr(state, "changed_files", []) or []:
+            if isinstance(item, dict):
+                candidates.append(item.get("path") or "")
+        valid_paths = [
+            normalized
+            for path in candidates
+            if (normalized := normalize_workspace_file(path, workspace_dir))
+        ]
+        self._sync_office_task_card_paths(state, valid_paths)
+        return list(getattr(state, "office_task_result_paths", []) or [])
 
     def _session_sop_meta(self, state):
         if not state:
@@ -17708,6 +17735,7 @@ class MainWindow(QMainWindow):
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
         state.office_draft_task_card = None
+        state.office_task_result_paths = []
         state.sop_run = None
         state.sop_confirmation_bar = None
         state.persisted_conversation_meta = {}
@@ -19679,9 +19707,7 @@ class MainWindow(QMainWindow):
                 for msg in messages
                 if isinstance(msg, dict) and msg.get("role") == "assistant"
             )
-            office_card.set_completed(
-                [path for _start, _end, path in iter_workspace_file_paths(assistant_text, self._workspace_dir_for_state(state))]
-            )
+            office_card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
         if insert_index is not None:
             state.last_agent_bubble = backup_last_agent
         return inserted_count
@@ -20316,14 +20342,8 @@ class MainWindow(QMainWindow):
         if session_id != getattr(self, "current_session_id", None):
             return
         state = self.get_session(session_id)
-        office_enabled = self._is_office_workflow_enabled(state)
-        if not office_enabled:
-            if not getattr(self, "right_drawer_open", False):
-                return
-            if getattr(self, "right_drawer_tab", None) != self.RIGHT_TAB_FILES:
-                return
-            if getattr(self, "file_workspace_section", "") != self.FILE_SECTION_DELIVERABLES:
-                return
+        office_card = self._office_draft_card_for_state(state)
+        office_enabled = self._is_office_workflow_enabled(state) or office_card is not None
         workspace_dir = self._workspace_dir_for_state(state)
         valid_paths = [
             normalized
@@ -20332,8 +20352,15 @@ class MainWindow(QMainWindow):
         ]
         if not valid_paths:
             return
-        if state:
+        if state and office_card is not None:
             self._sync_office_task_card_paths(state, valid_paths)
+        if not office_enabled:
+            if not getattr(self, "right_drawer_open", False):
+                return
+            if getattr(self, "right_drawer_tab", None) != self.RIGHT_TAB_FILES:
+                return
+            if getattr(self, "file_workspace_section", "") != self.FILE_SECTION_DELIVERABLES:
+                return
         latest = valid_paths[-1]
         current = getattr(self, "current_deliverable_path", "") or ""
         if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(latest)):
@@ -22252,6 +22279,7 @@ class MainWindow(QMainWindow):
         state.system_prompt_appends = []
         state.office_draft_preview_pending = office_workflow
         state.office_task_target_format = office_conversion_target or ("html" if office_workflow else "")
+        state.office_task_result_paths = []
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -23702,7 +23730,7 @@ class MainWindow(QMainWindow):
             bubble.set_main_content(content, content_parts=content_parts, final=True)
         if assistant_source_message_id:
             bubble.set_source_message_id(assistant_source_message_id)
-        self._finish_office_draft_task_card(state, content=content)
+        self._finish_office_draft_task_card(state, content=content, bubble=bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:

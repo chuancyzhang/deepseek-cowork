@@ -31,6 +31,7 @@ from main import (
     format_token_usage_chip_text,
     format_token_usage_tooltip,
     MainWindow,
+    OfficeDraftTaskCard,
     OFFICE_OUTPUT_PROFILE_DESIGN,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
@@ -1203,6 +1204,35 @@ class TestSopUiHelpers(unittest.TestCase):
             self.assertEqual(emitted, [(OFFICE_OUTPUT_PROFILE_PPT, "assistant-1", "把这段内容做成演示稿")])
         finally:
             bubble.deleteLater()
+            app.processEvents()
+
+    def test_office_draft_task_card_keeps_result_visible_when_process_collapsed(self):
+        app = QApplication.instance() or QApplication([])
+        card = OfficeDraftTaskCard("自由")
+        activated = []
+        html_path = os.path.join(tempfile.gettempdir(), "office-draft-result.html")
+        card.deliverablePathActivated.connect(activated.append)
+
+        try:
+            card.set_completed([html_path])
+            app.processEvents()
+
+            self.assertTrue(card.process_container.isHidden())
+            self.assertFalse(card.result_container.isHidden())
+            self.assertEqual(card.result_layout.count(), 1)
+            result_button = card.result_layout.itemAt(0).widget()
+            self.assertIsNotNone(result_button)
+            self.assertIn("office-draft-result.html", result_button.text())
+
+            card.toggle_btn.setChecked(True)
+            app.processEvents()
+            self.assertFalse(card.process_container.isHidden())
+            self.assertFalse(card.result_container.isHidden())
+
+            result_button.click()
+            self.assertEqual(activated, [html_path])
+        finally:
+            card.deleteLater()
             app.processEvents()
 
     def test_should_block_send_for_sop_only_when_awaiting_confirmation(self):

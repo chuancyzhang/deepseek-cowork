@@ -10635,6 +10635,15 @@ class OfficeDraftTaskCard(QFrame):
         header_layout.addWidget(self.toggle_btn)
         layout.addWidget(header)
 
+        self.result_container = QWidget()
+        self.result_container.setVisible(False)
+        self.result_container.setStyleSheet("background: transparent; border: none;")
+        self.result_layout = QHBoxLayout(self.result_container)
+        self.result_layout.setContentsMargins(40, 0, 0, 0)
+        self.result_layout.setSpacing(8)
+        self.result_layout.setAlignment(Qt.AlignLeft)
+        layout.addWidget(self.result_container)
+
         self.process_container = QWidget()
         self.process_container.setVisible(False)
         self.process_container.setStyleSheet("background: transparent; border: none;")
@@ -10652,11 +10661,13 @@ class OfficeDraftTaskCard(QFrame):
         self.title_label.setText(f"正在生成{self.profile_label}办公稿")
         self.meta_label.setText("生成过程已折叠")
         self.open_btn.setVisible(False)
+        self._render_result_cards([])
 
     def set_failed(self, message="生成失败"):
         self.title_label.setText(str(message or "生成失败"))
         self.meta_label.setText("展开可查看完整过程")
         self.open_btn.setVisible(False)
+        self._render_result_cards([])
 
     def set_completed(self, paths=None):
         paths = [str(path or "") for path in (paths or []) if str(path or "").strip()]
@@ -10664,12 +10675,61 @@ class OfficeDraftTaskCard(QFrame):
         primary = self._primary_html_path()
         if primary:
             self.title_label.setText("已生成 HTML")
-            self.meta_label.setText(os.path.basename(primary))
+            self.meta_label.setText("结果已在下方，可直接打开；展开可查看完整过程")
             self.open_btn.setVisible(True)
         else:
             self.title_label.setText(f"{self.profile_label}办公稿生成完成")
             self.meta_label.setText("展开可查看完整回复")
             self.open_btn.setVisible(False)
+        self._render_result_cards(paths)
+
+    def _render_result_cards(self, paths):
+        while self.result_layout.count():
+            item = self.result_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for path in paths or []:
+            self.result_layout.addWidget(self._create_result_button(path))
+        self.result_container.setVisible(bool(paths))
+
+    def _create_result_button(self, path):
+        ext = os.path.splitext(path)[1].lower()
+        kind, type_label, icon_name = DELIVERABLE_EXTENSIONS.get(
+            ext, ("file", ext.lstrip(".").upper() or "文件", "fa5s.file")
+        )
+        button = QPushButton(os.path.basename(path) or path)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setIcon(qta.icon(icon_name, color=DesignTokens.primary))
+        button.setToolTip(path)
+        button.setAccessibleName(f"预览交付物 {os.path.basename(path) or path}")
+        button.setStatusTip(type_label)
+        button.setProperty("deliverableType", kind)
+        button.setMinimumWidth(120)
+        button.setMaximumWidth(260)
+        button.setFixedHeight(34)
+        button.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(255, 255, 255, 0.84);
+                color: {DesignTokens.text_primary};
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 16px;
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: 650;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background: {DesignTokens.primary_soft};
+                border-color: {rgba_from_hex(DesignTokens.primary, 0.28)};
+                color: {DesignTokens.primary};
+            }}
+            QPushButton:pressed {{
+                background: {rgba_from_hex(DesignTokens.primary, 0.14)};
+            }}
+        """)
+        button.clicked.connect(lambda checked=False, value=path: self.deliverablePathActivated.emit(value))
+        return button
 
     def _primary_html_path(self):
         for path in self.result_paths:

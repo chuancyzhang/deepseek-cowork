@@ -8285,6 +8285,8 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
             self.linkActivated.emit(anchor)
 
     def scheduleAdjustHeight(self):
+        if not _qt_object_alive(self):
+            return
         if self._height_adjust_pending:
             return
         self._height_adjust_pending = True
@@ -8295,6 +8297,8 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         根据文档内容调整文本框高度
         添加最大高度限制防止初始渲染时高度异常
         """
+        if not _qt_object_alive(self):
+            return
         self._height_adjust_pending = False
         viewport_width = self.viewport().width()
         if viewport_width <= 0:
@@ -8370,12 +8374,16 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         self.setStyleSheet("background: transparent;")
 
     def scheduleAdjustHeight(self):
+        if not _qt_object_alive(self):
+            return
         if self._height_adjust_pending:
             return
         self._height_adjust_pending = True
         QTimer.singleShot(0, self.adjustHeight)
 
     def adjustHeight(self):
+        if not _qt_object_alive(self):
+            return
         self._height_adjust_pending = False
         text_option = self.document().defaultTextOption()
         if text_option.wrapMode() != QTextOption.WrapAtWordBoundaryOrAnywhere:
@@ -8437,12 +8445,16 @@ class AutoResizingInputEdit(QTextEdit):
         super().insertFromMimeData(source)
 
     def scheduleAdjustHeight(self):
+        if not _qt_object_alive(self):
+            return
         if self._height_adjust_pending:
             return
         self._height_adjust_pending = True
         QTimer.singleShot(0, self.adjustHeight)
 
     def adjustHeight(self):
+        if not _qt_object_alive(self):
+            return
         self._height_adjust_pending = False
         self.document().setTextWidth(max(0.0, float(self.viewport().width())))
         doc_height = self.document().documentLayout().documentSize().height()
@@ -10544,6 +10556,132 @@ class ChatBubble(QFrame):
         if not self.think_toggle_btn.isChecked():
             self.think_toggle_btn.setChecked(True)
 
+
+class OfficeDraftTaskCard(QFrame):
+    deliverablePathActivated = Signal(str)
+
+    def __init__(self, profile_label="办公稿", parent=None):
+        super().__init__(parent)
+        self.profile_label = str(profile_label or "办公稿")
+        self.result_paths = []
+        self.setObjectName("OfficeDraftTaskCard")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet(
+            f"""
+            QFrame#OfficeDraftTaskCard {{
+                background: rgba(255, 255, 255, 0.78);
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 20px;
+            }}
+            """
+        )
+        add_soft_shadow(self, blur=18, y_offset=5, alpha=12)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(10)
+
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.file-code", color=DesignTokens.primary).pixmap(16, 16))
+        icon.setFixedSize(30, 30)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet(
+            f"background: {DesignTokens.primary_soft}; border-radius: 15px;"
+        )
+        header_layout.addWidget(icon)
+
+        title_col = QWidget()
+        title_layout = QVBoxLayout(title_col)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(1)
+        self.title_label = QLabel(f"正在生成{self.profile_label}办公稿")
+        self.title_label.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;"
+        )
+        self.meta_label = QLabel("生成过程已折叠")
+        self.meta_label.setStyleSheet(apple_caption_style())
+        title_layout.addWidget(self.title_label)
+        title_layout.addWidget(self.meta_label)
+        header_layout.addWidget(title_col, 1)
+
+        self.open_btn = QToolButton()
+        self.open_btn.setIcon(qta.icon("fa5s.external-link-alt", color=DesignTokens.primary))
+        self.open_btn.setToolTip("预览生成的 HTML")
+        self.open_btn.setCursor(Qt.PointingHandCursor)
+        self.open_btn.setFixedSize(30, 30)
+        self.open_btn.setVisible(False)
+        self.open_btn.setStyleSheet(apple_tool_button_style(False))
+        self.open_btn.clicked.connect(self._activate_primary_path)
+        header_layout.addWidget(self.open_btn)
+
+        self.toggle_btn = QToolButton()
+        self.toggle_btn.setText("展开过程")
+        self.toggle_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setFixedHeight(30)
+        self.toggle_btn.setStyleSheet(
+            f"QToolButton {{ border: none; border-radius: 15px; padding: 4px 10px; "
+            f"color: {DesignTokens.text_secondary}; font-size: 12px; font-weight: 600; }}"
+            f"QToolButton:hover {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}"
+            f"QToolButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}"
+        )
+        self.toggle_btn.toggled.connect(self.set_process_visible)
+        header_layout.addWidget(self.toggle_btn)
+        layout.addWidget(header)
+
+        self.process_container = QWidget()
+        self.process_container.setVisible(False)
+        self.process_container.setStyleSheet("background: transparent; border: none;")
+        self.process_layout = QVBoxLayout(self.process_container)
+        self.process_layout.setContentsMargins(0, 2, 0, 0)
+        self.process_layout.setSpacing(6)
+        layout.addWidget(self.process_container)
+
+    def set_process_visible(self, visible):
+        visible = bool(visible)
+        self.process_container.setVisible(visible)
+        self.toggle_btn.setText("收起过程" if visible else "展开过程")
+
+    def set_running(self):
+        self.title_label.setText(f"正在生成{self.profile_label}办公稿")
+        self.meta_label.setText("生成过程已折叠")
+        self.open_btn.setVisible(False)
+
+    def set_failed(self, message="生成失败"):
+        self.title_label.setText(str(message or "生成失败"))
+        self.meta_label.setText("展开可查看完整过程")
+        self.open_btn.setVisible(False)
+
+    def set_completed(self, paths=None):
+        paths = [str(path or "") for path in (paths or []) if str(path or "").strip()]
+        self.result_paths = paths
+        primary = self._primary_html_path()
+        if primary:
+            self.title_label.setText("已生成 HTML")
+            self.meta_label.setText(os.path.basename(primary))
+            self.open_btn.setVisible(True)
+        else:
+            self.title_label.setText(f"{self.profile_label}办公稿生成完成")
+            self.meta_label.setText("展开可查看完整回复")
+            self.open_btn.setVisible(False)
+
+    def _primary_html_path(self):
+        for path in self.result_paths:
+            if os.path.splitext(path)[1].lower() in {".html", ".htm"}:
+                return path
+        return self.result_paths[0] if self.result_paths else ""
+
+    def _activate_primary_path(self):
+        path = self._primary_html_path()
+        if path:
+            self.deliverablePathActivated.emit(path)
+
 class ToolCallCard(QFrame):
     clicked = Signal(str, str, str, dict) # tool_id, args, result, meta
 
@@ -11556,6 +11694,7 @@ class SessionState:
         self.workflow_mode = ""
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         self.office_draft_preview_pending = False
+        self.office_draft_task_card = None
         self.sop_run = None
         self.sop_confirmation_bar = None
         self.persisted_conversation_meta = {}
@@ -13557,6 +13696,18 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, target=fmt.lower(): self.start_deliverable_conversion(target))
             conversion_row.addWidget(btn)
             self.deliverable_convert_buttons.append(btn)
+            if fmt == "PPTX":
+                template_btn = QToolButton()
+                template_btn.setIcon(qta.icon("fa5s.clone", color=DesignTokens.text_secondary))
+                template_btn.setToolTip("选择 PPT 模板生成")
+                template_btn.setCursor(Qt.PointingHandCursor)
+                template_btn.setFixedSize(28, 28)
+                template_btn.setStyleSheet(apple_tool_button_style(False))
+                template_btn.clicked.connect(
+                    lambda checked=False: self.start_deliverable_conversion("pptx", ask_template=True)
+                )
+                conversion_row.addWidget(template_btn)
+                self.deliverable_convert_buttons.append(template_btn)
         conversion_row.addStretch()
         self.deliverable_conversion_row = conversion_row_widget
         preview_layout.addWidget(self.deliverable_conversion_row)
@@ -15373,6 +15524,51 @@ class MainWindow(QMainWindow):
 
     def _is_office_workflow_context(self, workflow_mode):
         return normalize_workflow_mode(workflow_mode) == WORKFLOW_MODE_OFFICE_HTML_FIRST
+
+    def _message_is_office_draft_request(self, message):
+        if not isinstance(message, dict):
+            return False
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        return self._is_office_workflow_context(meta.get("workflow_mode"))
+
+    def _office_profile_label_from_message(self, message):
+        if not isinstance(message, dict):
+            return self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE)
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        return self._office_profile_label(meta.get("office_output_profile"))
+
+    def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True):
+        if not state:
+            return None
+        card = OfficeDraftTaskCard(profile_label or self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE))
+        card.deliverablePathActivated.connect(
+            lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
+        )
+        if running:
+            card.set_running()
+        if insert_index is not None:
+            state.chat_layout.insertWidget(insert_index, card)
+        else:
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, card)
+        state.office_draft_task_card = card
+        return card
+
+    def _office_draft_card_for_state(self, state):
+        card = getattr(state, "office_draft_task_card", None)
+        if card is not None and _qt_object_alive(card):
+            return card
+        return None
+
+    def _finish_office_draft_task_card(self, state, content="", failed_message=""):
+        card = self._office_draft_card_for_state(state)
+        if card is None:
+            return
+        if failed_message:
+            card.set_failed(failed_message)
+            return
+        workspace_dir = self._workspace_dir_for_state(state)
+        paths = [path for _start, _end, path in iter_workspace_file_paths(content or "", workspace_dir)]
+        card.set_completed(paths)
 
     def _session_sop_meta(self, state):
         if not state:
@@ -17278,6 +17474,7 @@ class MainWindow(QMainWindow):
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
+        state.office_draft_task_card = None
         state.sop_run = None
         state.sop_confirmation_bar = None
         state.persisted_conversation_meta = {}
@@ -19078,6 +19275,19 @@ class MainWindow(QMainWindow):
         current_idx = insert_index
         backup_last_agent = state.last_agent_bubble
         state.last_agent_bubble = None 
+        messages = list(messages or [])
+        office_card = None
+        target_layout = None
+        if messages and self._message_is_office_draft_request(messages[0]):
+            office_card = self._create_office_draft_task_card(
+                state,
+                self._office_profile_label_from_message(messages[0]),
+                insert_index=current_idx,
+                running=False,
+            )
+            target_layout = office_card.process_layout if office_card is not None else None
+            if current_idx is not None:
+                current_idx += 1
         active_agent_bubble = None
         pending_content_parts = []
         pending_struct_parts = []
@@ -19146,17 +19356,26 @@ class MainWindow(QMainWindow):
                 self.add_chat_bubble(
                     'User',
                     self._message_display_content(msg),
-                    index=current_idx,
+                    index=current_idx if target_layout is None else None,
                     animate=animate,
                     attachments=self._message_user_attachments(msg),
+                    source_message_id=str(msg.get("id") or "").strip(),
+                    target_layout=target_layout,
                 )
-                if current_idx is not None: current_idx += 1
+                if current_idx is not None and target_layout is None: current_idx += 1
                 state.last_agent_bubble = None
                 
             elif role == 'assistant':
                 if not active_agent_bubble and (content or reasoning or msg.get('tool_calls')):
-                    active_agent_bubble = self.add_chat_bubble('Agent', "", thinking=None, index=current_idx, animate=animate)
-                    if current_idx is not None: current_idx += 1
+                    active_agent_bubble = self.add_chat_bubble(
+                        'Agent',
+                        "",
+                        thinking=None,
+                        index=current_idx if target_layout is None else None,
+                        animate=animate,
+                        target_layout=target_layout,
+                    )
+                    if current_idx is not None and target_layout is None: current_idx += 1
                     state.last_agent_bubble = active_agent_bubble
                 if reasoning:
                     active_agent_bubble.update_thinking(reasoning)
@@ -19206,8 +19425,17 @@ class MainWindow(QMainWindow):
                         }, session_id=session_id)
                     
         finalize_active_bubble()
+        if office_card is not None:
+            assistant_text = "\n\n".join(
+                str(msg.get("content") or "")
+                for msg in messages
+                if isinstance(msg, dict) and msg.get("role") == "assistant"
+            )
+            office_card.set_completed(
+                [path for _start, _end, path in iter_workspace_file_paths(assistant_text, self._workspace_dir_for_state(state))]
+            )
         if insert_index is not None:
-             state.last_agent_bubble = backup_last_agent
+            state.last_agent_bubble = backup_last_agent
 
     def _normalize_and_persist_session_messages(self, session_id, messages, force_persist=False, existing_meta=None):
         source_messages = messages if isinstance(messages, list) else []
@@ -20163,7 +20391,7 @@ class MainWindow(QMainWindow):
             self.deliverable_render_fingerprint = None
             self.deliverable_status_label.setText("页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。")
 
-    def start_deliverable_conversion(self, target_format):
+    def start_deliverable_conversion(self, target_format, ask_template=False, template_path=""):
         path = getattr(self, "current_deliverable_path", "")
         target_format = str(target_format or "").lower()
         if target_format not in {"pptx", "docx", "pdf"} or not path or not os.path.isfile(path):
@@ -20175,15 +20403,43 @@ class MainWindow(QMainWindow):
         if not self._workspace_dir_for_state():
             QMessageBox.information(self, "生成办公文件", "请先选择项目工作区。")
             return
+        template_path = str(template_path or "").strip()
+        if target_format == "pptx" and ask_template and not template_path:
+            start_dir = self._workspace_dir_for_state() or os.path.dirname(path)
+            selected, _filter = QFileDialog.getOpenFileName(
+                self,
+                "选择 PPT 模板",
+                start_dir,
+                "PowerPoint 模板 (*.pptx)",
+            )
+            template_path = str(selected or "").strip()
+            if not template_path:
+                return
+        if template_path:
+            template_path = os.path.normpath(template_path)
+            if target_format != "pptx" or os.path.splitext(template_path)[1].lower() != ".pptx" or not os.path.isfile(template_path):
+                QMessageBox.information(self, "生成办公文件", "请选择有效的 PPTX 模板文件。")
+                return
         output_stem = os.path.splitext(os.path.basename(path))[0]
-        prompt = (
-            f"请读取并分析这个 HTML 文件，并根据它的内容、结构和视觉层级生成 {target_format.upper()} 办公文件。\n"
-            f"- 源 HTML: {path}\n"
-            f"- 输出目录: {os.path.dirname(path)}\n"
-            f"- 默认文件名: {output_stem}.{target_format}\n"
-            "- 如果文件名冲突，请追加时间戳。\n"
-            "- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。"
-        )
+        prompt_lines = [
+            f"请读取并分析这个 HTML 文件，并根据它的内容、结构和视觉层级生成 {target_format.upper()} 办公文件。",
+            f"- 源 HTML: {path}",
+            f"- 输出目录: {os.path.dirname(path)}",
+            f"- 默认文件名: {output_stem}.{target_format}",
+            "- 如果文件名冲突，请追加时间戳。",
+        ]
+        if template_path:
+            prompt_lines.extend(
+                [
+                    f"- PPT 模板: {template_path}",
+                    "- 生成 PPTX 时，源 HTML 是内容来源，PPT 模板是视觉与结构来源。",
+                    "- 请优先继承模板的主题、母版、字号、色彩和版式节奏。",
+                    "- 请识别并保留模板页面顶部和底部的图片元素，包括页眉图、页脚图、品牌条、装饰横幅、底部水印或版权区图片。",
+                    "- 新增页面也要延续这些顶部/底部图片的位置、尺寸和层级，不要改动原模板文件。",
+                ]
+            )
+        prompt_lines.append("- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。")
+        prompt = "\n".join(prompt_lines)
         state = self.get_current_session()
         if not state:
             self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
@@ -20191,11 +20447,14 @@ class MainWindow(QMainWindow):
         session_id = state.session_id
         state.selected_deliverable_path = path
         self.current_deliverable_path = path
-        self._set_prompt_files([path], session_id=session_id, refresh=True)
+        prompt_files = [path]
+        if template_path:
+            prompt_files.append(template_path)
+        self._set_prompt_files(prompt_files, session_id=session_id, refresh=True)
         submitted = self._submit_session_request(
             state,
             prompt,
-            [path],
+            prompt_files,
             check_duplicates=False,
             clear_current_input=True,
         )
@@ -21699,6 +21958,14 @@ class MainWindow(QMainWindow):
                 return False
             self._last_submit_text = submit_signature
             self._last_submit_ts = now
+        office_workflow = self._is_office_workflow_context(workflow_mode)
+        office_card = None
+        if state.session_id == self.current_session_id and office_workflow:
+            office_card = self._create_office_draft_task_card(
+                state,
+                self._office_profile_label(office_output_profile),
+                running=True,
+            )
         if state.session_id == self.current_session_id:
             self.add_chat_bubble(
                 "User",
@@ -21707,6 +21974,7 @@ class MainWindow(QMainWindow):
                 force_scroll=True,
                 attachments=payload.get("attachments") or [],
                 source_message_id=user_message_id,
+                target_layout=office_card.process_layout if office_card is not None else None,
             )
             if clear_current_input:
                 self.input_field.clear()
@@ -21720,7 +21988,7 @@ class MainWindow(QMainWindow):
         state.runtime_context_text = ""
         state.prompt_cache_meta = {}
         state.system_prompt_appends = []
-        state.office_draft_preview_pending = self._is_office_workflow_context(workflow_mode)
+        state.office_draft_preview_pending = office_workflow
         self.refresh_change_list(state.session_id)
         self.refresh_step_list(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -21731,8 +21999,12 @@ class MainWindow(QMainWindow):
         message_payload = {"id": user_message_id, "role": "user", "content": user_text}
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
-        if payload.get("meta"):
-            message_payload["meta"] = payload.get("meta")
+        message_meta = dict(payload.get("meta") or {})
+        if office_workflow:
+            message_meta["workflow_mode"] = WORKFLOW_MODE_OFFICE_HTML_FIRST
+            message_meta["office_output_profile"] = normalize_office_output_profile(office_output_profile)
+        if message_meta:
+            message_payload["meta"] = message_meta
         state.messages.append(message_payload)
         self._rebuild_session_render_spans(state)
         # Keep rendered-count in sync for live messages; otherwise load-more
@@ -22056,6 +22328,7 @@ class MainWindow(QMainWindow):
         attachments=None,
         source_message_id="",
         session_id=None,
+        target_layout=None,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state: return
@@ -22085,10 +22358,14 @@ class MainWindow(QMainWindow):
         self._connect_chat_bubble_actions(bubble, state)
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         
+        layout = target_layout or state.chat_layout
         if index is not None:
-            state.chat_layout.insertWidget(index, bubble)
+            layout.insertWidget(index, bubble)
         else:
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
+            if layout is state.chat_layout:
+                layout.insertWidget(layout.count() - 1, bubble)
+            else:
+                layout.addWidget(bubble)
         self.process_ui_events(force=False)
         
         # Keep latest message in view when appending.
@@ -22287,7 +22564,11 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble.workspace_dir = self._workspace_dir_for_state(state)
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
-        state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
+        office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
+        if office_card is not None:
+            office_card.process_layout.addWidget(state.temp_thinking_bubble)
+        else:
+            state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
 
@@ -22338,7 +22619,11 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble.workspace_dir = self._workspace_dir_for_state(state)
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
-        state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
+        office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
+        if office_card is not None:
+            office_card.process_layout.addWidget(state.temp_thinking_bubble)
+        else:
+            state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
         state.daemon_running = True
@@ -23044,7 +23329,11 @@ class MainWindow(QMainWindow):
             bubble.workspace_dir = self._workspace_dir_for_state(state)
             self._connect_chat_bubble_actions(bubble, state)
             bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
+            office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
+            if office_card is not None:
+                office_card.process_layout.addWidget(bubble)
+            else:
+                state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         
         state.last_agent_bubble = bubble
         if is_current:
@@ -23058,6 +23347,7 @@ class MainWindow(QMainWindow):
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
             bubble.set_main_content(f"⚠️ Error: {result['error']}", final=True)
+            self._finish_office_draft_task_card(state, failed_message="办公稿生成失败")
             self.request_session_scroll_to_bottom(state.session_id, force=False)
             state.current_content_buffer = ""
             state.current_thinking_buffer = ""
@@ -23146,6 +23436,7 @@ class MainWindow(QMainWindow):
             bubble.set_main_content(content, content_parts=content_parts, final=True)
         if assistant_source_message_id:
             bubble.set_source_message_id(assistant_source_message_id)
+        self._finish_office_draft_task_card(state, content=content)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
         for tc in tool_calls:

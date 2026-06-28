@@ -796,6 +796,8 @@ class TestSopUiHelpers(unittest.TestCase):
         return session_ids
 
     def _history_button_texts(self, window):
+        if not hasattr(window, "history_layout"):
+            return []
         texts = []
         for index in range(window.history_layout.count()):
             item = window.history_layout.itemAt(index)

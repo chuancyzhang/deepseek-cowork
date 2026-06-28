@@ -248,6 +248,36 @@ class TestDeliverableScanning(unittest.TestCase):
                         auto_close_ms=3200,
                     )
 
+    def test_pptx_conversion_can_attach_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            template_path = os.path.join(tmp, "template.pptx")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write("<html><body>Report</body></html>")
+            with open(template_path, "wb") as f:
+                f.write(b"pptx")
+
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"session_id": "current-session"})()
+            window.current_deliverable_path = html_path
+            window.workspace_dir = tmp
+            window._workspace_dir_for_state = MagicMock(return_value=tmp)
+            window.get_current_session = MagicMock(return_value=state)
+            window._set_prompt_files = MagicMock()
+            window._submit_session_request = MagicMock(return_value=True)
+            window.add_system_toast = MagicMock()
+
+            window.start_deliverable_conversion("pptx", template_path=template_path)
+
+            window._set_prompt_files.assert_called_once_with(
+                [html_path, template_path], session_id="current-session", refresh=True
+            )
+            submit_call = window._submit_session_request.call_args
+            self.assertIn(f"PPT 模板: {template_path}", submit_call.args[1])
+            self.assertIn("主题、母版、字号、色彩和版式节奏", submit_call.args[1])
+            self.assertIn("顶部和底部的图片元素", submit_call.args[1])
+            self.assertEqual(submit_call.args[2], [html_path, template_path])
+
     def test_chat_file_link_opens_deliverable_in_focus_mode(self):
         with tempfile.TemporaryDirectory() as workspace:
             path = os.path.join(workspace, "报告.doc")

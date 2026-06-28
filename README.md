@@ -6,7 +6,7 @@ DeepSeek Cowork is a Windows desktop agent workspace built around DeepSeek-style
 
 This project is a personal exploration and is not an official DeepSeek product.
 
-Current app version: **4.9.4**
+Current app version: **4.9.5**
 
 ## What It Does
 
@@ -15,12 +15,13 @@ Current app version: **4.9.4**
 - Extend capabilities through built-in skills, bundled optional plugins, user skills, and MCP tools.
 - Manage reusable agents, automation templates, scheduled runs, and long-term memory from the UI.
 - Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
-- Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles.
+- Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default.
+- Generate PPTX from an HTML draft with an optional PPT template, preserving theme, masters, fonts, colors, pacing, and header/footer images.
 
 ## Product Surface
 
 - **Conversation + project model**: start a pure chat, or bind a conversation to a project workspace.
-- **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply.
+- **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card.
 - **Right-side context drawer**: open files, deliverables, observability, and sub-agent status on demand.
 - **Settings center**: manage models, agents, workspace defaults, MCP servers, enterprise messaging, and runtime components.
 - **Automation center**: manage task templates, schedules, run history, and step confirmation.

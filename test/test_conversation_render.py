@@ -108,6 +108,23 @@ class TestConversationRender(unittest.TestCase):
         )
         self.assertEqual(spans, [{"start": 0, "end": 1}, {"start": 1, "end": 4}, {"start": 4, "end": 5}])
 
+    def test_build_conversation_render_spans_keeps_office_draft_turn_collapsible(self):
+        spans = build_conversation_render_spans(
+            [
+                {
+                    "id": "u1",
+                    "role": "user",
+                    "content": "generate",
+                    "meta": {"workflow_mode": "office_html_first", "office_output_profile": "ppt"},
+                },
+                {"id": "a1", "role": "assistant", "content": "working"},
+                {"id": "t1", "role": "tool", "tool_call_id": "tool-1", "content": "ok"},
+                {"id": "a2", "role": "assistant", "content": "done"},
+                {"id": "u2", "role": "user", "content": "next"},
+            ]
+        )
+        self.assertEqual(spans, [{"start": 0, "end": 4}, {"start": 4, "end": 5}])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,13 @@ def _is_hidden_context_message(message):
     return bool(meta.get("hidden")) and meta.get("kind") in {"skill_context", "skill_context_update"}
 
 
+def _is_office_draft_request(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return meta.get("workflow_mode") == "office_html_first"
+
+
 def _new_assistant_group():
     return {
         "messages": [],
@@ -154,6 +161,7 @@ def build_conversation_render_items(messages):
 def build_conversation_render_spans(messages):
     spans = []
     group_start = None
+    office_group_start = None
 
     def flush_group(end_index):
         nonlocal group_start
@@ -162,6 +170,15 @@ def build_conversation_render_spans(messages):
         spans.append({"start": group_start, "end": end_index})
         group_start = None
 
+    def flush_office_group(end_index):
+        nonlocal office_group_start, group_start
+        if office_group_start is None:
+            return False
+        flush_group(end_index)
+        spans.append({"start": office_group_start, "end": end_index})
+        office_group_start = None
+        return True
+
     for index, raw_message in enumerate(messages or []):
         if not isinstance(raw_message, dict):
             continue
@@ -169,11 +186,19 @@ def build_conversation_render_spans(messages):
             continue
         role = raw_message.get("role") or ""
         if role == "user":
+            flush_office_group(index)
             flush_group(index)
+            if _is_office_draft_request(raw_message):
+                office_group_start = index
+                continue
             spans.append({"start": index, "end": index + 1})
+            continue
+        if office_group_start is not None:
             continue
         if group_start is None:
             group_start = index
 
+    if office_group_start is not None:
+        flush_office_group(len(messages or []))
     flush_group(len(messages or []))
     return spans

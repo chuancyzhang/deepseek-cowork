@@ -192,6 +192,13 @@ def normalize_run_context(run_context):
         "office_output_profile": normalize_office_output_profile(
             ctx.get("office_output_profile")
         ),
+        "office_conversion_target": str(ctx.get("office_conversion_target") or "").strip().lower(),
+        "office_source_files": [
+            str(path or "").strip()
+            for path in (ctx.get("office_source_files") or [])
+            if str(path or "").strip()
+        ],
+        "office_template_file": str(ctx.get("office_template_file") or "").strip(),
         "sop_run": normalize_sop_run(ctx.get("sop_run")),
     }
 

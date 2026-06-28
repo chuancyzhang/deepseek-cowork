@@ -282,6 +282,96 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIn("顶部和底部的图片元素", submit_call.args[1])
             self.assertEqual(submit_call.args[2], [html_path, template_path])
 
+    def test_office_file_conversion_run_messages_are_isolated_from_previous_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as handle:
+                handle.write("<html><body>Report</body></html>")
+            window = MainWindow.__new__(MainWindow)
+            window._normalize_prompt_file_paths = lambda paths: [
+                os.path.normpath(path) for path in paths if os.path.isfile(path)
+            ]
+            state = type(
+                "_Session",
+                (),
+                {
+                    "office_conversion_source_files": [html_path],
+                    "office_conversion_template_file": "",
+                    "office_task_target_format": "pptx",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "请基于下面这段 AI 回复，生成一份自由类型的可预览办公稿",
+                            "meta": {"workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST},
+                        },
+                        {"role": "assistant", "content": "已生成 HTML"},
+                        {
+                            "role": "user",
+                            "content": f"请读取本轮附加的源 HTML 文件并生成 PPTX。\n- 源 HTML 文件: {html_path}",
+                            "content_parts": [
+                                {"type": "text", "text": "请读取本轮附加的源 HTML 文件并生成 PPTX。"},
+                                {"type": "input_file", "path": os.path.normpath(html_path), "name": "report.html"},
+                            ],
+                            "meta": {
+                                "workflow_mode": WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+                                "office_conversion_target": "pptx",
+                            },
+                        },
+                    ],
+                },
+            )()
+
+            messages = window._office_file_conversion_run_messages(state)
+
+            joined = "\n".join(str(message.get("content") or "") for message in messages)
+            self.assertEqual(len(messages), 2)
+            self.assertNotIn("下面这段 AI 回复", joined)
+            self.assertIn(os.path.normpath(html_path), joined)
+            self.assertEqual(messages[-1]["content_parts"][1]["type"], "input_file")
+            self.assertEqual(messages[-1]["content_parts"][1]["path"], os.path.normpath(html_path))
+
+    def test_worker_messages_use_isolated_context_for_office_file_conversion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "report.html")
+            with open(html_path, "w", encoding="utf-8") as handle:
+                handle.write("<html></html>")
+            window = MainWindow.__new__(MainWindow)
+            window._normalize_prompt_file_paths = lambda paths: [
+                os.path.normpath(path) for path in paths if os.path.isfile(path)
+            ]
+            state = type(
+                "_Session",
+                (),
+                {
+                    "office_conversion_source_files": [html_path],
+                    "office_conversion_template_file": "",
+                    "office_task_target_format": "pptx",
+                    "messages": [
+                        {"role": "user", "content": "旧的办公稿生成请求"},
+                        {
+                            "role": "user",
+                            "content": "生成 PPTX",
+                            "content_parts": [
+                                {"type": "text", "text": "生成 PPTX"},
+                                {"type": "input_file", "path": os.path.normpath(html_path), "name": "report.html"},
+                            ],
+                            "meta": {
+                                "workflow_mode": WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+                                "office_conversion_target": "pptx",
+                            },
+                        },
+                    ],
+                },
+            )()
+
+            messages = window._messages_for_worker(
+                state,
+                {"workflow_mode": WORKFLOW_MODE_OFFICE_FILE_CONVERSION},
+            )
+
+            self.assertEqual(len(messages), 2)
+            self.assertNotIn("旧的办公稿生成请求", "\n".join(message.get("content", "") for message in messages))
+
     def test_chat_file_link_opens_deliverable_in_focus_mode(self):
         with tempfile.TemporaryDirectory() as workspace:
             path = os.path.join(workspace, "报告.doc")

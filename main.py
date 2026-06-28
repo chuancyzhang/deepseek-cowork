@@ -20901,8 +20901,8 @@ class MainWindow(QMainWindow):
                 return
         output_stem = os.path.splitext(os.path.basename(path))[0]
         prompt_lines = [
-            f"请读取并分析这个 HTML 文件，并根据它的内容、结构和视觉层级生成 {target_format.upper()} 办公文件。",
-            f"- 源 HTML: {path}",
+            f"请读取本轮附加的源 HTML 文件，并根据文件内容、结构和视觉层级生成 {target_format.upper()} 办公文件。",
+            f"- 源 HTML 文件: {path}",
             f"- 输出目录: {os.path.dirname(path)}",
             f"- 默认文件名: {output_stem}.{target_format}",
             "- 如果文件名冲突，请追加时间戳。",
@@ -20929,6 +20929,12 @@ class MainWindow(QMainWindow):
         prompt_files = [path]
         if template_path:
             prompt_files.append(template_path)
+        source_files = self._normalize_prompt_file_paths([path])
+        if not source_files:
+            QMessageBox.information(self, "生成办公文件", "源 HTML 文件不存在或无法访问。")
+            return
+        state.office_conversion_source_files = source_files
+        state.office_conversion_template_file = template_path if template_path else ""
         self._set_prompt_files(prompt_files, session_id=session_id, refresh=True)
         submitted = self._submit_session_request(
             state,
@@ -21971,8 +21977,27 @@ class MainWindow(QMainWindow):
         self.save_chat_history(session_id=state.session_id)
         self.normalize_session_ui(state)
 
-    def _build_run_context(self, state, mode, workflow_mode="", office_output_profile=None):
+    def _build_run_context(
+        self,
+        state,
+        mode,
+        workflow_mode="",
+        office_output_profile=None,
+        office_conversion_target="",
+    ):
         effective_skill_names = self._effective_sop_skill_names(state)
+        normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
+        source_files = []
+        template_file = ""
+        normalized_conversion_target = ""
+        if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            normalized_conversion_target = str(office_conversion_target or "").strip().lower()
+            if normalized_conversion_target not in {"pptx", "docx", "pdf"}:
+                normalized_conversion_target = str(getattr(state, "office_task_target_format", "") or "").strip().lower()
+            if normalized_conversion_target not in {"pptx", "docx", "pdf"}:
+                normalized_conversion_target = ""
+            source_files = self._normalize_prompt_file_paths(getattr(state, "office_conversion_source_files", []) or [])
+            template_file = str(getattr(state, "office_conversion_template_file", "") or "").strip()
         return normalize_run_context(
             {
                 "mode": mode,
@@ -21987,10 +22012,13 @@ class MainWindow(QMainWindow):
                 "selected_model_id": self.config_manager.get_selected_model_id(),
                 "reasoning_effort": self._selected_reasoning_effort(),
                 "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
-                "workflow_mode": normalize_workflow_mode(workflow_mode),
+                "workflow_mode": normalized_workflow_mode,
                 "office_output_profile": normalize_office_output_profile(
                     office_output_profile if office_output_profile is not None else OFFICE_OUTPUT_PROFILE_FREE
                 ),
+                "office_conversion_target": normalized_conversion_target,
+                "office_source_files": source_files,
+                "office_template_file": template_file,
                 "sop_run": normalize_sop_run(getattr(state, "sop_run", None)),
             }
         )
@@ -22455,6 +22483,24 @@ class MainWindow(QMainWindow):
             office_conversion_target = office_conversion_target if office_conversion_target in {"pptx", "docx", "pdf"} else ""
         else:
             office_conversion_target = ""
+        if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            source_files = [
+                path
+                for path in prompt_files
+                if os.path.splitext(path)[1].lower() in {".html", ".htm"}
+            ]
+            if not source_files:
+                if state.session_id == self.current_session_id:
+                    self.add_system_toast("没有找到本轮转换需要的源 HTML 文件。", "warning", session_id=state.session_id)
+                return False
+            state.office_conversion_source_files = source_files[:1]
+            template_candidates = [
+                path
+                for path in prompt_files
+                if os.path.splitext(path)[1].lower() == ".pptx"
+                and os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(source_files[0]))
+            ]
+            state.office_conversion_template_file = template_candidates[0] if template_candidates else ""
         office_card = None
         if state.session_id == self.current_session_id and office_workflow:
             state.office_task_target_format = office_conversion_target or "html"
@@ -22559,6 +22605,7 @@ class MainWindow(QMainWindow):
             run_mode,
             workflow_mode=normalized_workflow_mode,
             office_output_profile=office_output_profile,
+            office_conversion_target=office_conversion_target,
         )
         if self.daemon_available:
             self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
@@ -23049,6 +23096,43 @@ class MainWindow(QMainWindow):
     def append_log(self, text):
         print(f"[Log] {text}")
 
+    def _office_file_conversion_run_messages(self, state):
+        if not state:
+            return []
+        source_files = self._normalize_prompt_file_paths(getattr(state, "office_conversion_source_files", []) or [])
+        if not source_files:
+            return copy.deepcopy(getattr(state, "messages", []) or [])
+        target = str(getattr(state, "office_task_target_format", "") or "").strip().upper() or "办公文件"
+        template_file = str(getattr(state, "office_conversion_template_file", "") or "").strip()
+        context_lines = [
+            "我已经生成了下面的源 HTML 交付物。本轮任务只需要读取这些文件并执行格式转换；不要参考或延续之前的办公稿生成过程。",
+            "",
+        ]
+        context_lines.extend(f"- 源 HTML: {path}" for path in source_files)
+        if template_file:
+            context_lines.append(f"- PPT 模板: {template_file}")
+        context_lines.append(f"- 目标格式: {target}")
+        current_message = None
+        for message in reversed(getattr(state, "messages", []) or []):
+            if not isinstance(message, dict):
+                continue
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            if normalize_workflow_mode(meta.get("workflow_mode")) == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+                current_message = copy.deepcopy(message)
+                break
+        if current_message is None:
+            return copy.deepcopy(getattr(state, "messages", []) or [])
+        return [
+            {"role": "assistant", "content": "\n".join(context_lines)},
+            current_message,
+        ]
+
+    def _messages_for_worker(self, state, run_context=None):
+        workflow_mode = normalize_workflow_mode((run_context or {}).get("workflow_mode"))
+        if workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            return self._office_file_conversion_run_messages(state)
+        return copy.deepcopy(getattr(state, "messages", []) or [])
+
     def process_agent_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
         state = self.get_session(session_id)
         if not state: return
@@ -23076,7 +23160,7 @@ class MainWindow(QMainWindow):
         self.process_ui_events(force=True)
 
         state.llm_worker = LLMWorker(
-            state.messages,
+            self._messages_for_worker(state, run_context),
             self.config_manager,
             self._workspace_dir_for_state(state),
             automation_runner=self.run_automation_task_now,
@@ -23137,7 +23221,7 @@ class MainWindow(QMainWindow):
             user_text,
             self._workspace_dir_for_state(state),
             run_context=run_context,
-            messages=copy.deepcopy(state.messages),
+            messages=self._messages_for_worker(state, run_context),
             turn_id=turn_id,
         )
         state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid), Qt.QueuedConnection)

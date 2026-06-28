@@ -1007,6 +1007,29 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertEqual(context["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
         self.assertEqual(context["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
 
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = os.path.join(tmp, "draft.html")
+            template_path = os.path.join(tmp, "template.pptx")
+            with open(html_path, "w", encoding="utf-8") as handle:
+                handle.write("<html></html>")
+            with open(template_path, "wb") as handle:
+                handle.write(b"pptx")
+            state.office_conversion_source_files = [html_path]
+            state.office_conversion_template_file = template_path
+            state.office_task_target_format = "pptx"
+
+            context = window._build_run_context(
+                state,
+                "execution",
+                workflow_mode=WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+                office_conversion_target="pptx",
+            )
+
+        self.assertEqual(context["workflow_mode"], WORKFLOW_MODE_OFFICE_FILE_CONVERSION)
+        self.assertEqual(context["office_conversion_target"], "pptx")
+        self.assertEqual(context["office_source_files"], [os.path.normpath(html_path)])
+        self.assertEqual(context["office_template_file"], template_path)
+
     def test_session_activity_indicator_runs_only_for_live_runtime_state(self):
         window = MainWindow.__new__(MainWindow)
         state = _HistoryActionState("session-1")

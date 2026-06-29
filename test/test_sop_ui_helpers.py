@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import shutil
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -533,6 +534,63 @@ class SkillCenterHelperTests(unittest.TestCase):
             "feishu-docs",
             {"app_id": "cli_a", "app_secret": "new-secret"},
         )
+
+    def test_capability_workbench_reads_dict_tool_record_schema(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.is_skill_editable.return_value = False
+        skill_manager.get_skill_config_fields.return_value = []
+        skill_manager.get_skill_config_status.return_value = {"missing_required": [], "complete": True}
+        skill_manager.list_skill_files.return_value = {"ok": True, "editable": False, "files": []}
+        skill_manager.get_tool_record.return_value = {
+            "parameters_schema": {
+                "type": "object",
+                "properties": {"skill_name": {"type": "string"}},
+                "required": ["skill_name"],
+            }
+        }
+        config_manager = MagicMock()
+        config_manager.get_skill_config.return_value = {}
+        skill = {
+            "name": "tencent-docs",
+            "display_name": "Tencent Docs",
+            "tools": ["run_skill_script"],
+            "script_entries": [{"name": "setup", "path": "scripts/setup.js"}],
+            "config_fields": [],
+        }
+
+        dialog = CapabilityWorkbenchDialog(skill, skill_manager, config_manager)
+
+        self.assertIn("skill_name", dialog.tool_schema.toPlainText())
+        self.assertEqual(dialog.script_combo.count(), 1)
+
+    def test_capability_workbench_keeps_object_tool_record_schema_compatible(self):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.is_skill_editable.return_value = False
+        skill_manager.get_skill_config_fields.return_value = []
+        skill_manager.get_skill_config_status.return_value = {"missing_required": [], "complete": True}
+        skill_manager.list_skill_files.return_value = {"ok": True, "editable": False, "files": []}
+        skill_manager.get_tool_record.return_value = SimpleNamespace(
+            parameters_schema={
+                "type": "object",
+                "properties": {"args": {"type": "array"}},
+                "required": [],
+            }
+        )
+        config_manager = MagicMock()
+        config_manager.get_skill_config.return_value = {}
+        skill = {
+            "name": "feishu-docs",
+            "display_name": "Feishu Docs",
+            "tools": ["run_skill_script"],
+            "script_entries": [],
+            "config_fields": [],
+        }
+
+        dialog = CapabilityWorkbenchDialog(skill, skill_manager, config_manager)
+
+        self.assertIn("args", dialog.tool_schema.toPlainText())
 
     def test_skill_center_toggle_defers_runtime_reload_until_next_use(self):
         app = QApplication.instance() or QApplication([])

@@ -2526,7 +2526,10 @@ class CapabilityWorkbenchDialog(QDialog):
     def _refresh_tool_schema(self):
         tool_name = str(self.tool_combo.currentData() or "")
         record = self.skill_manager.get_tool_record(tool_name) if tool_name else None
-        schema = record.parameters_schema if record else {}
+        if isinstance(record, dict):
+            schema = record.get("parameters_schema") or {}
+        else:
+            schema = getattr(record, "parameters_schema", {}) if record else {}
         self.tool_schema.setPlainText(self._format_payload(schema))
 
     def _confirm_high_risk_debug(self):

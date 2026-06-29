@@ -1,0 +1,57 @@
+{
+  "version": 2,
+  "name": "feishu-docs",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
+  "description": "Configuration preset for Feishu document skills.",
+  "description_cn": "飞书文档能力配置预设，用于保存并注入文档操作所需凭据。",
+  "tags": ["feishu", "lark", "docs", "document", "飞书文档"],
+  "triggers": ["飞书文档", "飞书云文档", "Feishu Docs", "Lark Docs"],
+  "anti_triggers": [],
+  "tool_refs": [],
+  "references": [],
+  "script_refs": [],
+  "script_entries": [],
+  "config_fields": [
+    {
+      "name": "app_id",
+      "label": "App ID",
+      "kind": "text",
+      "required": true,
+      "env": "FEISHU_APP_ID",
+      "placeholder": "飞书开放平台 App ID"
+    },
+    {
+      "name": "app_secret",
+      "label": "App Secret",
+      "kind": "secret",
+      "required": true,
+      "env": "FEISHU_APP_SECRET",
+      "placeholder": "飞书开放平台 App Secret"
+    },
+    {
+      "name": "tenant_access_token",
+      "label": "Tenant Access Token",
+      "kind": "secret",
+      "required": false,
+      "env": "FEISHU_TENANT_ACCESS_TOKEN",
+      "placeholder": "可选：已有 tenant_access_token"
+    },
+    {
+      "name": "user_access_token",
+      "label": "User Access Token",
+      "kind": "secret",
+      "required": false,
+      "env": "FEISHU_USER_ACCESS_TOKEN",
+      "placeholder": "可选：已有 user_access_token"
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use the workbench configuration tab to save Feishu credentials.",
+    "Imported script skills should read FEISHU_APP_ID, FEISHU_APP_SECRET, and optional token environment variables."
+  ]
+}

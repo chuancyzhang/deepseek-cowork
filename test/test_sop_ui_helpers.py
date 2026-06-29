@@ -24,6 +24,7 @@ from main import (
     AutoResizingPlainTextEdit,
     AutoResizingTextEdit,
     AutomationTaskDialog,
+    CapabilityWorkbenchDialog,
     ChatBubble,
     ConversationHistoryRow,
     DaemonConnectWorker,
@@ -68,7 +69,7 @@ from main import (
 from PySide6.QtCore import QEvent, QPoint, Qt, QMimeData, QTimer
 from PySide6.QtGui import QTextOption, QShowEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QDialog, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLineEdit, QMainWindow, QLabel, QMessageBox, QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget
 
 
 class _State:
@@ -496,6 +497,42 @@ class SkillCenterHelperTests(unittest.TestCase):
         self.assertTrue(toggle.isEnabled())
         toggle.click()
         config_manager.set_skill_enabled.assert_called_once_with("showdoc-mcp", False)
+
+    @patch("main.QMessageBox.information")
+    def test_capability_workbench_renders_and_saves_skill_config(self, _info_mock):
+        app = QApplication.instance() or QApplication([])
+        skill_manager = MagicMock()
+        skill_manager.is_skill_editable.return_value = False
+        skill_manager.get_skill_config_fields.return_value = []
+        skill_manager.get_skill_config_status.return_value = {"missing_required": [], "complete": True}
+        skill_manager.list_skill_files.return_value = {"ok": True, "editable": False, "files": []}
+        skill_manager.get_tool_record.return_value = None
+        config_manager = MagicMock()
+        config_manager.get_skill_config.return_value = {"app_id": "cli_a", "app_secret": "old"}
+        skill = {
+            "name": "feishu-docs",
+            "display_name": "飞书文档",
+            "tools": [],
+            "script_entries": [],
+            "config_fields": [
+                {"name": "app_id", "label": "App ID", "required": True, "env": "FEISHU_APP_ID"},
+                {"name": "app_secret", "label": "App Secret", "kind": "secret", "required": True, "env": "FEISHU_APP_SECRET"},
+            ],
+        }
+
+        dialog = CapabilityWorkbenchDialog(skill, skill_manager, config_manager)
+        self.assertEqual(dialog.tabs.tabText(0), "配置")
+        editors = dialog.findChildren(QLineEdit)
+        secret_editors = [editor for editor in editors if editor.echoMode() == QLineEdit.Password]
+        self.assertTrue(secret_editors)
+
+        dialog.config_editors["app_secret"].setText("new-secret")
+        dialog.save_skill_config()
+
+        config_manager.set_skill_config.assert_called_once_with(
+            "feishu-docs",
+            {"app_id": "cli_a", "app_secret": "new-secret"},
+        )
 
     def test_skill_center_toggle_defers_runtime_reload_until_next_use(self):
         app = QApplication.instance() or QApplication([])

@@ -1,6 +1,6 @@
 # Skill System
 
-Current implementation sync: app version **4.9.4**
+Current implementation sync: app version **4.9.5**
 
 ## 1. Core Idea
 
@@ -21,6 +21,7 @@ A skill can include:
 - `experience/entries.jsonl`: optional structured lessons
 - `references/`: optional long-form reference material
 - `scripts/`: optional assets used through declared script entries
+- `config_fields`: optional runtime configuration schema stored in `skill.json`
 
 Recommended structure:
 
@@ -75,6 +76,10 @@ Default behavior:
 
 If a matched skill exposes tools, those tools still execute through the normal tool-calling path. If a skill is guidance-only, it appears as experience, not as a callable executor.
 
+### Runtime configuration
+
+`skill.json` may declare `config_fields` with `name`, `label`, `kind`, `required`, `env`, `help`, and `placeholder`. The workbench renders these fields in a configuration tab. Saved values are stored in local `skill_configs` and injected into script or tool execution through the declared environment variable names. Missing required values fail explicitly before execution.
+
 ### `parallel_tools`
 
 `parallel_tools` exists for one narrow case: several independent read-only calls can run concurrently.
@@ -95,7 +100,7 @@ Cowork loads capabilities from:
 - `ai_skills/`: bundled optional plugins and user-created skills
 - MCP servers: exposed as synthetic tool providers
 
-Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. User-created skills remain editable, importable, exportable, and deletable.
+Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, and DingTalk Docs ship as configuration presets for document-oriented skills. User-created skills remain editable, importable, exportable, and deletable.
 
 ## 7. Import, Export, and Editing
 

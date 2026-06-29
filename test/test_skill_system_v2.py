@@ -103,6 +103,92 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("HTTP API interface notes", prompts)
         self.assertEqual(sm.get_tools_for_skill("http-guide"), ["bash"])
 
+    def test_skill_config_fields_are_normalized_and_report_status(self):
+        skill_dir = os.path.join(self.skills_dir, "doc-skill")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: doc-skill\ndescription: Docs\nkind: knowledge\n---\n# Docs\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "doc-skill",
+                    "kind": "knowledge",
+                    "description": "Docs",
+                    "config_fields": [
+                        {"name": "app_id", "label": "App ID", "required": True, "env": "DOC_APP_ID"},
+                        {"name": "secret", "kind": "secret", "required": True, "env": "DOC_SECRET"},
+                    ],
+                },
+                f,
+            )
+
+        class ConfigStub:
+            def is_skill_enabled(self, _skill_name, default_enabled=True):
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get_skill_config(self, skill_name):
+                return {"app_id": "cli_x"} if skill_name == "doc-skill" else {}
+
+        sm = SkillManager(workspace_dir=self.temp_dir, config_manager=ConfigStub())
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills()
+
+        fields = sm.get_skill_config_fields("doc-skill")
+        self.assertEqual(fields[0]["env"], "DOC_APP_ID")
+        status = sm.get_skill_config_status("doc-skill")
+        self.assertFalse(status["complete"])
+        self.assertEqual(status["missing_required"], ["secret"])
+
+    def test_build_skill_config_env_requires_required_fields(self):
+        skill_dir = os.path.join(self.skills_dir, "doc-skill")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: doc-skill\ndescription: Docs\nkind: knowledge\n---\n# Docs\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "doc-skill",
+                    "kind": "knowledge",
+                    "description": "Docs",
+                    "config_fields": [
+                        {"name": "app_id", "required": True, "env": "DOC_APP_ID"},
+                        {"name": "secret", "kind": "secret", "required": True, "env": "DOC_SECRET"},
+                    ],
+                },
+                f,
+            )
+
+        class ConfigStub:
+            def __init__(self, values):
+                self.values = values
+
+            def is_skill_enabled(self, _skill_name, default_enabled=True):
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get_skill_config(self, _skill_name):
+                return self.values
+
+        sm = SkillManager(workspace_dir=self.temp_dir, config_manager=ConfigStub({"app_id": "cli_x"}))
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills()
+
+        with self.assertRaises(ValueError):
+            sm.build_skill_config_env("doc-skill")
+
+        sm.config_manager = ConfigStub({"app_id": "cli_x", "secret": "shh"})
+        self.assertEqual(
+            sm.build_skill_config_env("doc-skill"),
+            {"DOC_APP_ID": "cli_x", "DOC_SECRET": "shh"},
+        )
+
     def test_frozen_internal_ai_skills_are_discovered_as_default_off_plugins(self):
         exe_dir = os.path.join(self.temp_dir, "dist", "deepseek-cowork")
         internal_skills = os.path.join(exe_dir, "_internal", "skills")

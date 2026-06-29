@@ -2236,6 +2236,7 @@ class CapabilityWorkbenchDialog(QDialog):
         self.tool_worker = None
         self.mcp_worker = None
         self.mcp_tools = []
+        self.config_editors = {}
         self.setWindowTitle("能力工作台")
         self.resize(980, 680)
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
@@ -2301,9 +2302,102 @@ class CapabilityWorkbenchDialog(QDialog):
             return None
 
     def _build_skill_tabs(self):
+        self._build_config_tab()
         self._build_files_tab()
         self._build_tool_debug_tab()
         self._build_script_debug_tab()
+
+    def _skill_config_fields(self):
+        fields = self.skill.get("config_fields") or []
+        if fields:
+            return fields
+        if hasattr(self.skill_manager, "get_skill_config_fields"):
+            return self.skill_manager.get_skill_config_fields(self.skill_name)
+        return []
+
+    def _build_config_tab(self):
+        fields = [field for field in self._skill_config_fields() if isinstance(field, dict)]
+        if not fields:
+            return
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(12)
+
+        hint = QLabel("这些配置会在运行该能力的脚本或工具时提供给它。必填项缺失时会直接报错。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(apple_settings_inline_note_style())
+        layout.addWidget(hint)
+
+        card, card_layout = build_settings_surface("运行配置", "保存后下次调试或调用该能力时生效。", radius=18)
+        form = QFormLayout()
+        form.setSpacing(12)
+        configure_responsive_form_layout(form)
+        values = self.config_manager.get_skill_config(self.skill_name) if hasattr(self.config_manager, "get_skill_config") else {}
+        self.config_editors = {}
+        for field in fields:
+            name = str(field.get("name") or "").strip()
+            if not name:
+                continue
+            editor = QLineEdit()
+            editor.setText(str(values.get(name, "") or ""))
+            editor.setPlaceholderText(str(field.get("placeholder") or ""))
+            if str(field.get("kind") or "text").lower() == "secret":
+                editor.setEchoMode(QLineEdit.Password)
+            editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            label = str(field.get("label") or name)
+            if field.get("required"):
+                label += " *"
+            help_text = str(field.get("help") or "").strip()
+            if help_text:
+                editor.setToolTip(help_text)
+            form.addRow(build_form_row_label(label), editor)
+            self.config_editors[name] = editor
+        card_layout.addLayout(form)
+        layout.addWidget(card)
+
+        self.config_status = QLabel("")
+        self.config_status.setWordWrap(True)
+        self.config_status.setStyleSheet(apple_settings_inline_note_style())
+        layout.addWidget(self.config_status)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        save_btn = QPushButton("保存配置")
+        save_btn.setStyleSheet(apple_button_style("primary", radius=14))
+        save_btn.clicked.connect(self.save_skill_config)
+        row.addWidget(save_btn)
+        layout.addLayout(row)
+        layout.addStretch()
+        self.tabs.addTab(page, "配置")
+        self._refresh_config_status()
+
+    def _refresh_config_status(self):
+        label = getattr(self, "config_status", None)
+        if label is None:
+            return
+        if not hasattr(self.skill_manager, "get_skill_config_status"):
+            label.setText("")
+            return
+        status = self.skill_manager.get_skill_config_status(self.skill_name)
+        missing = status.get("missing_required") or []
+        if missing:
+            label.setText("还缺少必填配置：" + "、".join(missing))
+        else:
+            label.setText("配置完整。")
+
+    def save_skill_config(self):
+        if not hasattr(self.config_manager, "set_skill_config"):
+            QMessageBox.warning(self, "能力配置", "当前配置管理器不支持能力配置。")
+            return
+        values = {
+            name: editor.text().strip()
+            for name, editor in self.config_editors.items()
+            if editor.text().strip()
+        }
+        self.config_manager.set_skill_config(self.skill_name, values)
+        self._refresh_config_status()
+        QMessageBox.information(self, "能力配置", "配置已保存。")
 
     def _build_files_tab(self):
         page = QWidget()

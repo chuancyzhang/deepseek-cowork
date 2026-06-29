@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "name": "tencent-docs",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
+  "description": "Configuration preset for Tencent Docs document skills.",
+  "description_cn": "腾讯文档能力配置预设，用于保存并注入文档操作所需凭据。",
+  "tags": ["tencent docs", "docs.qq.com", "document", "腾讯文档"],
+  "triggers": ["腾讯文档", "docs.qq.com", "Tencent Docs", "文档协作"],
+  "anti_triggers": [],
+  "tool_refs": [],
+  "references": [],
+  "script_refs": [],
+  "script_entries": [],
+  "config_fields": [
+    {
+      "name": "client_id",
+      "label": "Client ID / App ID",
+      "kind": "text",
+      "required": true,
+      "env": "TENCENT_DOCS_CLIENT_ID",
+      "placeholder": "腾讯文档开放平台应用 ID"
+    },
+    {
+      "name": "client_secret",
+      "label": "Client Secret / App Secret",
+      "kind": "secret",
+      "required": true,
+      "env": "TENCENT_DOCS_CLIENT_SECRET",
+      "placeholder": "腾讯文档开放平台应用 Secret"
+    },
+    {
+      "name": "access_token",
+      "label": "Access Token",
+      "kind": "secret",
+      "required": false,
+      "env": "TENCENT_DOCS_ACCESS_TOKEN",
+      "placeholder": "可选：已有访问令牌"
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use the workbench configuration tab to save Tencent Docs credentials.",
+    "Imported script skills should read TENCENT_DOCS_CLIENT_ID, TENCENT_DOCS_CLIENT_SECRET, and optional TENCENT_DOCS_ACCESS_TOKEN."
+  ]
+}

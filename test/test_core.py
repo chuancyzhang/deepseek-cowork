@@ -88,6 +88,25 @@ class TestConfigManager(unittest.TestCase):
 
         self.assertEqual(write_mock.call_count, 0)
 
+    def test_skill_config_normalizes_and_persists_values(self):
+        cm = self._create_config_manager()
+
+        cm.set_skill_config("feishu-docs", {" app_id ": "cli_a", "app_secret": None, "": "ignored"})
+
+        self.assertEqual(
+            cm.get_skill_config("feishu-docs"),
+            {"app_id": "cli_a", "app_secret": ""},
+        )
+        self.assertEqual(cm.get_skill_config("missing"), {})
+
+    def test_skill_config_empty_values_remove_skill_entry(self):
+        cm = self._create_config_manager()
+        cm.set_skill_config("dingtalk-docs", {"app_key": "key"})
+
+        cm.set_skill_config("dingtalk-docs", {})
+
+        self.assertEqual(cm.get_skill_config("dingtalk-docs"), {})
+
     def test_defaults_include_new_deepseek_settings(self):
         cm = self._create_config_manager()
         self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)

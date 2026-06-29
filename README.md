@@ -35,7 +35,7 @@ Cowork treats tools as the only direct execution surface.
 - `tool`: executable capability the model can call directly
 - `skill`: structured experience package that guides when and how to use tools
 
-Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`.
+Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`. Skills may declare `config_fields`; the workbench renders those fields in a configuration tab and injects saved values into script/tool execution through explicit environment variables.
 
 See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the detailed model.
 
@@ -73,8 +73,9 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 1. Open **Settings** and configure a model service.
 2. Start a pure chat or attach the conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
-4. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
-5. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
+4. Enable optional skills from **Skill Center**; document presets for Tencent Docs, Feishu Docs, and DingTalk Docs expose configuration fields for required platform credentials.
+5. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
+6. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
 
 ## Architecture
 

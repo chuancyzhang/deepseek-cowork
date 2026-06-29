@@ -327,6 +327,29 @@ class SkillManager:
             normalized.append(normalized_item)
         return normalized
 
+    def _normalize_config_fields(self, fields):
+        normalized = []
+        seen = set()
+        for item in self._coerce_dict_list(fields):
+            name = str(item.get("name") or item.get("key") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            kind = str(item.get("kind") or item.get("type") or "text").strip().lower()
+            if kind not in {"text", "secret"}:
+                kind = "text"
+            env_name = str(item.get("env") or name).strip()
+            normalized.append({
+                "name": name,
+                "label": str(item.get("label") or name).strip(),
+                "kind": kind,
+                "required": self._coerce_bool(item.get("required"), default=False),
+                "env": env_name,
+                "help": str(item.get("help") or item.get("description") or "").strip(),
+                "placeholder": str(item.get("placeholder") or "").strip(),
+            })
+        return normalized
+
     def _infer_capability_group(self, skill_name, meta, spec):
         group = (
             spec.get("capability_group")
@@ -423,6 +446,7 @@ class SkillManager:
         spec["script_refs"] = self._coerce_string_list(spec.get("script_refs"))
         spec["asset_refs"] = self._coerce_string_list(spec.get("asset_refs"))
         spec["script_entries"] = self._normalize_script_entries(spec.get("script_entries"))
+        spec["config_fields"] = self._normalize_config_fields(spec.get("config_fields"))
         spec["python_dependencies"] = self._coerce_string_list(spec.get("python_dependencies"))
         spec["node_dependencies"] = self._coerce_string_list(spec.get("node_dependencies"))
         source_format = spec.get("source_format")
@@ -1030,6 +1054,57 @@ class SkillManager:
             "execution_hint": self._script_execution_hint(spec),
             "score": round(float(score), 3),
         }
+
+    def get_skill_config_fields(self, skill_name):
+        record = self.skill_records.get(str(skill_name or "").strip()) or {}
+        spec = record.get("spec") or {}
+        return json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+
+    def _skill_config_values(self, skill_name):
+        if not self.config_manager or not hasattr(self.config_manager, "get_skill_config"):
+            return {}
+        return self.config_manager.get_skill_config(skill_name)
+
+    def get_skill_config_status(self, skill_name):
+        fields = self.get_skill_config_fields(skill_name)
+        values = self._skill_config_values(skill_name)
+        missing = []
+        configured = []
+        for field in fields:
+            name = str(field.get("name") or "").strip()
+            if not name:
+                continue
+            value = str(values.get(name, "") or "").strip()
+            if value:
+                configured.append(name)
+            elif field.get("required"):
+                missing.append(name)
+        return {
+            "has_config": bool(fields),
+            "configured_count": len(configured),
+            "required_count": len([field for field in fields if field.get("required")]),
+            "missing_required": missing,
+            "complete": not missing,
+        }
+
+    def build_skill_config_env(self, skill_name):
+        fields = self.get_skill_config_fields(skill_name)
+        values = self._skill_config_values(skill_name)
+        env = {}
+        missing = []
+        for field in fields:
+            name = str(field.get("name") or "").strip()
+            env_name = str(field.get("env") or name).strip()
+            if not name or not env_name:
+                continue
+            value = str(values.get(name, "") or "")
+            if value:
+                env[env_name] = value
+            elif field.get("required"):
+                missing.append(name)
+        if missing:
+            raise ValueError(f"Skill '{skill_name}' is missing required config: {', '.join(missing)}")
+        return env
 
     def is_tool_allowed(self, name, run_mode):
         return self.tool_registry.is_allowed(name, run_mode)
@@ -1842,6 +1917,8 @@ class SkillManager:
                     "dependency_status": record.get("dependency_status") or {"ok": True},
                     "script_refs": list(record["spec"].get("script_refs") or []),
                     "script_entries": list(record["spec"].get("script_entries") or []),
+                    "config_fields": list(record["spec"].get("config_fields") or []),
+                    "config_status": self.get_skill_config_status(skill_name),
                     "source_format": record["spec"].get("source_format"),
                 }
                 if is_ai_dir:
@@ -1881,6 +1958,8 @@ class SkillManager:
                 "dependency_status": record.get("dependency_status") or {"ok": True},
                 "script_refs": list(record["spec"].get("script_refs") or []),
                 "script_entries": list(record["spec"].get("script_entries") or []),
+                "config_fields": list(record["spec"].get("config_fields") or []),
+                "config_status": self.get_skill_config_status(skill_name),
                 "source_format": record["spec"].get("source_format"),
             }
             if self.config_manager:
@@ -2465,6 +2544,11 @@ class SkillManager:
                 record["dependency_status"] = dependency_status
                 if not dependency_status.get("ok"):
                     return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
+            effective_context["skill_config"] = self._skill_config_values(skill_name)
+            try:
+                effective_context["skill_config_env"] = self.build_skill_config_env(skill_name)
+            except Exception as exc:
+                return f"Error: {exc}"
         func = self.tools[resolved_name]
         sig = inspect.signature(func)
         args = dict(args or {})

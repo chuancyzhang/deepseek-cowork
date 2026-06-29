@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "name": "dingtalk-docs",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
+  "description": "Configuration preset for DingTalk document skills.",
+  "description_cn": "钉钉文档能力配置预设，用于保存并注入文档操作所需凭据。",
+  "tags": ["dingtalk", "docs", "document", "钉钉文档"],
+  "triggers": ["钉钉文档", "DingTalk Docs", "dingtalk-skills", "钉钉知识库"],
+  "anti_triggers": [],
+  "tool_refs": [],
+  "references": [],
+  "script_refs": [],
+  "script_entries": [],
+  "config_fields": [
+    {
+      "name": "app_key",
+      "label": "App Key",
+      "kind": "text",
+      "required": true,
+      "env": "DINGTALK_APP_KEY",
+      "placeholder": "钉钉开放平台 appKey"
+    },
+    {
+      "name": "app_secret",
+      "label": "App Secret",
+      "kind": "secret",
+      "required": true,
+      "env": "DINGTALK_APP_SECRET",
+      "placeholder": "钉钉开放平台 appSecret"
+    },
+    {
+      "name": "operator_id",
+      "label": "Operator ID",
+      "kind": "text",
+      "required": true,
+      "env": "DINGTALK_OPERATOR_ID",
+      "placeholder": "执行文档操作的用户 ID"
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use the workbench configuration tab to save DingTalk credentials.",
+    "Imported script skills should read DINGTALK_APP_KEY, DINGTALK_APP_SECRET, and DINGTALK_OPERATOR_ID."
+  ]
+}

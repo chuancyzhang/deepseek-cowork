@@ -241,6 +241,7 @@ class ConfigManager:
             "automation_tasks": [],
             "automation_run_history": [],
             "mcp_servers": [],
+            "skill_configs": {},
             "projects": [],
             "god_mode": False,
             "download_sources": default_download_sources(),
@@ -357,6 +358,10 @@ class ConfigManager:
         normalized_mcp_servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
         if normalized_mcp_servers != self.config.get("mcp_servers"):
             self.config["mcp_servers"] = normalized_mcp_servers
+            updated = True
+        normalized_skill_configs = self._normalize_skill_configs(self.config.get("skill_configs"))
+        if normalized_skill_configs != self.config.get("skill_configs"):
+            self.config["skill_configs"] = normalized_skill_configs
             updated = True
         normalized_projects = self._normalize_projects(self.config.get("projects"))
         if normalized_projects != self.config.get("projects"):
@@ -511,6 +516,30 @@ class ConfigManager:
 
     def _normalize_mcp_servers(self, value):
         return normalize_mcp_servers(value)
+
+    def _normalize_skill_config_values(self, value):
+        if not isinstance(value, dict):
+            return {}
+        normalized = {}
+        for key, item in value.items():
+            text_key = str(key or "").strip()
+            if not text_key:
+                continue
+            normalized[text_key] = str(item if item is not None else "")
+        return normalized
+
+    def _normalize_skill_configs(self, value):
+        if not isinstance(value, dict):
+            return {}
+        normalized = {}
+        for skill_name, item in value.items():
+            name = str(skill_name or "").strip()
+            if not name:
+                continue
+            values = self._normalize_skill_config_values(item)
+            if values:
+                normalized[name] = values
+        return normalized
 
     def _normalize_project_path(self, path):
         text = str(path or "").strip()
@@ -1131,6 +1160,34 @@ class ConfigManager:
         if normalized == self.config.get("mcp_servers"):
             return
         self.config["mcp_servers"] = normalized
+        self.save_config()
+
+    def get_skill_configs(self):
+        configs = self._normalize_skill_configs(self.config.get("skill_configs"))
+        if configs != self.config.get("skill_configs"):
+            self.config["skill_configs"] = configs
+            self.save_config()
+        return json.loads(json.dumps(configs, ensure_ascii=False))
+
+    def get_skill_config(self, skill_name):
+        name = str(skill_name or "").strip()
+        if not name:
+            return {}
+        return self.get_skill_configs().get(name, {})
+
+    def set_skill_config(self, skill_name, values):
+        name = str(skill_name or "").strip()
+        if not name:
+            return
+        configs = self.get_skill_configs()
+        normalized_values = self._normalize_skill_config_values(values)
+        if normalized_values:
+            configs[name] = normalized_values
+        else:
+            configs.pop(name, None)
+        if configs == self.config.get("skill_configs"):
+            return
+        self.config["skill_configs"] = configs
         self.save_config()
 
     def upsert_project(self, path, name=None, pinned=None):

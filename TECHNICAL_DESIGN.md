@@ -50,6 +50,7 @@ Cowork 采用交错式推理流程：
 
 - 直接执行面只有 `tool`
 - `skill` 只负责经验和边界，不作为独立调用协议
+- `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量
 - 生成办公稿使用本次请求级 `workflow_mode = office_html_first` 和 `office_output_profile` 注入提示；从 HTML 继续生成 PPTX、DOCX、PDF 使用 `workflow_mode = office_file_conversion` 和 `office_conversion_target` 标记；两者都不新增 `RUN_MODE`，因此不改变工具权限。
 - UI 通过用户消息 `meta.workflow_mode` 将该轮用户消息、工具调用和助手结果渲染成可展开的办公任务卡；消息本体仍按原结构持久化，交付物文件卡渲染在折叠过程外。任务卡会合并最终回复、隐藏气泡识别到的文件卡路径和本轮工具变更中的有效工作区文件，避免最终回复未写完整路径时结果区为空。历史消息按 render span 独立渲染，避免普通消息和办公任务混排时丢失折叠状态。
 - 从 HTML 生成 PPTX 时可附加 PPTX 模板文件，提示要求以 HTML 为内容源、模板为视觉结构源，并保留模板主题、母版、字号、色彩、版式节奏和顶部/底部图片；PPTX、DOCX、PDF 转换提交后只更新交付物详情页底部的局部运行态，并用隔离运行上下文只传入源 HTML、目标格式和模板文件，不把上一轮办公稿生成过程带给模型；完成后仍通过任务卡、Toast 和交付物扫描回填结果。
@@ -70,6 +71,7 @@ Cowork 采用交错式推理流程：
 - 工具负责执行
 - 技能负责经验
 - 技能按需披露，默认只给最小摘要
+- 技能运行配置由工作台表单维护，缺少必填配置时直接失败，不走静默降级
 - 用户可以通过“沉淀为 Skill”把会话经验转为可复用能力
 
 详细模型见 [SKILL_SYSTEM.md](SKILL_SYSTEM.md)。
@@ -90,7 +92,7 @@ Cowork 采用交错式推理流程：
 ## 7. 数据与持久化
 
 - **会话**：`core/chat_storage.py` 负责本地消息历史、归档、置顶和项目归属
-- **配置**：`core/config_manager.py` 统一管理模型、MCP、工作区、智能体和 UI 偏好
+- **配置**：`core/config_manager.py` 统一管理模型、MCP、Skill 运行配置、工作区、智能体和 UI 偏好
 - **记忆**：`core/memory_store.py` 与 `core/memory_update.py` 管理灵魂提示词、全局摘要和工作区摘要
 - **技能**：文件系统中的 `SKILL.md`、`skill.json`、`impl.py`、`experience/entries.jsonl`
 - **自动化**：模板、计划任务和执行历史保存在本地配置数据中

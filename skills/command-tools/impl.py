@@ -400,6 +400,7 @@ def run_skill_script(skill_name, script_name, args=None, input_text=None, timeou
     default_args = target.get("default_args") if isinstance(target.get("default_args"), list) else []
     runtime = str(target.get("runtime") or "bash").strip().lower() or "bash"
     try:
+        extra_env = skill_manager.build_skill_config_env(skill_name) if hasattr(skill_manager, "build_skill_config_env") else {}
         result = run_skill_script_in_sandbox(
             skill_name,
             script_abs_path,
@@ -408,6 +409,7 @@ def run_skill_script(skill_name, script_name, args=None, input_text=None, timeou
             cwd=record["path"],
             input_text=input_text,
             timeout_seconds=int(timeout_seconds) if timeout_seconds is not None else 120,
+            extra_env=extra_env,
         )
         payload = {
             "skill_name": skill_name,

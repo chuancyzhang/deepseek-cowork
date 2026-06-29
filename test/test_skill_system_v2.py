@@ -189,6 +189,22 @@ class TestSkillSystemV2(unittest.TestCase):
             {"DOC_APP_ID": "cli_x", "DOC_SECRET": "shh"},
         )
 
+    def test_bundled_document_skills_have_runtime_script_entries(self):
+        for skill_name in ("tencent-docs", "feishu-docs", "dingtalk-docs"):
+            self._copy_repo_ai_skill(skill_name)
+
+        sm = self._build_manager()
+        skills = {item["name"]: item for item in sm.get_all_skills()}
+
+        for skill_name in ("tencent-docs", "feishu-docs", "dingtalk-docs"):
+            with self.subTest(skill_name=skill_name):
+                self.assertIn(skill_name, skills)
+                self.assertFalse(skills[skill_name]["enabled"])
+                self.assertTrue(skills[skill_name]["config_fields"])
+                self.assertTrue(skills[skill_name]["script_entries"])
+                self.assertEqual(skills[skill_name]["source_type"], "bundled_plugin")
+                self.assertEqual(skills[skill_name]["source_format"], "agent_skill")
+
     def test_frozen_internal_ai_skills_are_discovered_as_default_off_plugins(self):
         exe_dir = os.path.join(self.temp_dir, "dist", "deepseek-cowork")
         internal_skills = os.path.join(exe_dir, "_internal", "skills")

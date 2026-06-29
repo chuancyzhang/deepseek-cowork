@@ -73,7 +73,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 1. Open **Settings** and configure a model service.
 2. Start a pure chat or attach the conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
-4. Enable optional skills from **Skill Center**; document presets for Tencent Docs, Feishu Docs, and DingTalk Docs expose configuration fields for required platform credentials.
+4. Enable optional skills from **Skill Center**; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills with their own configuration fields and script entries.
 5. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
 6. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
 

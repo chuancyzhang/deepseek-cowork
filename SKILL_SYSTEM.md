@@ -100,7 +100,7 @@ Cowork loads capabilities from:
 - `ai_skills/`: bundled optional plugins and user-created skills
 - MCP servers: exposed as synthetic tool providers
 
-Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, and DingTalk Docs ship as configuration presets for document-oriented skills. User-created skills remain editable, importable, exportable, and deletable.
+Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, and DingTalk Docs ship as separate document-oriented skills with independent config fields and script entries. User-created skills remain editable, importable, exportable, and deletable.
 
 ## 7. Import, Export, and Editing
 

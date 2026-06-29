@@ -4,46 +4,77 @@
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
   "default_enabled": false,
-  "description": "Configuration preset for Tencent Docs document skills.",
-  "description_cn": "腾讯文档能力配置预设，用于保存并注入文档操作所需凭据。",
-  "tags": ["tencent docs", "docs.qq.com", "document", "腾讯文档"],
-  "triggers": ["腾讯文档", "docs.qq.com", "Tencent Docs", "文档协作"],
+  "description": "Tencent Docs MCP skill for creating, editing, searching, importing, exporting, and reading Tencent Docs content through the upstream tencent-docs MCP workflow.",
+  "description_cn": "腾讯文档 MCP 能力，支持通过上游 tencent-docs MCP 工作流创建、编辑、搜索、导入导出和读取腾讯文档内容。",
+  "tags": ["tencent docs", "docs.qq.com", "mcp", "document", "腾讯文档"],
+  "triggers": ["腾讯文档", "docs.qq.com", "Tencent Docs", "新建腾讯文档", "编辑腾讯文档", "搜索腾讯文档", "文档上云"],
   "anti_triggers": [],
-  "tool_refs": [],
-  "references": [],
-  "script_refs": [],
-  "script_entries": [],
+  "tool_refs": ["run_skill_script"],
+  "references": [
+    "references/auth.md",
+    "references/workflows.md",
+    "references/manage_references.md",
+    "references/docengine_references.md",
+    "references/slide_references.md",
+    "references/slideengine_references.md",
+    "references/smartsheet_references.md"
+  ],
+  "script_refs": [
+    "setup.sh",
+    "import_file.sh",
+    "aipage_pack.js",
+    "ocr.js",
+    "generate_slide.js"
+  ],
+  "script_entries": [
+    {
+      "name": "setup",
+      "path": "setup.sh",
+      "runtime": "bash",
+      "description": "Configure mcporter for the Tencent Docs MCP services. Pass args ['tdoc_set_token', '<token>'] to configure a known token."
+    },
+    {
+      "name": "import_file",
+      "path": "import_file.sh",
+      "runtime": "bash",
+      "description": "Import a local file into Tencent Docs through pre_import and async_import."
+    },
+    {
+      "name": "aipage_pack",
+      "path": "aipage_pack.js",
+      "runtime": "node",
+      "description": "Package local HTML into a Tencent Docs .aipage archive."
+    },
+    {
+      "name": "ocr",
+      "path": "ocr.js",
+      "runtime": "node",
+      "description": "Run local image OCR helper through the Tencent Docs MCP OCR workflow."
+    },
+    {
+      "name": "generate_slide",
+      "path": "generate_slide.js",
+      "runtime": "node",
+      "description": "Create Tencent Docs slides through the slide MCP workflow."
+    }
+  ],
   "config_fields": [
     {
-      "name": "client_id",
-      "label": "Client ID / App ID",
-      "kind": "text",
-      "required": true,
-      "env": "TENCENT_DOCS_CLIENT_ID",
-      "placeholder": "腾讯文档开放平台应用 ID"
-    },
-    {
-      "name": "client_secret",
-      "label": "Client Secret / App Secret",
+      "name": "token",
+      "label": "Tencent Docs Token",
       "kind": "secret",
       "required": true,
-      "env": "TENCENT_DOCS_CLIENT_SECRET",
-      "placeholder": "腾讯文档开放平台应用 Secret"
-    },
-    {
-      "name": "access_token",
-      "label": "Access Token",
-      "kind": "secret",
-      "required": false,
-      "env": "TENCENT_DOCS_ACCESS_TOKEN",
-      "placeholder": "可选：已有访问令牌"
+      "env": "TENCENT_DOCS_TOKEN",
+      "placeholder": "从腾讯文档授权页获取的 Token"
     }
   ],
   "python_dependencies": [],
   "node_dependencies": [],
   "workflow": [
-    "Use the workbench configuration tab to save Tencent Docs credentials.",
-    "Imported script skills should read TENCENT_DOCS_CLIENT_ID, TENCENT_DOCS_CLIENT_SECRET, and optional TENCENT_DOCS_ACCESS_TOKEN."
+    "Use this skill for Tencent Docs requests only.",
+    "Run the setup script before MCP calls if mcporter has not been configured.",
+    "Use the bundled references to choose the correct Tencent Docs MCP tool family."
   ]
 }

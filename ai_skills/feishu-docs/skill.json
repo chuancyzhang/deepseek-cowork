@@ -4,16 +4,51 @@
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
   "default_enabled": false,
-  "description": "Configuration preset for Feishu document skills.",
-  "description_cn": "飞书文档能力配置预设，用于保存并注入文档操作所需凭据。",
-  "tags": ["feishu", "lark", "docs", "document", "飞书文档"],
-  "triggers": ["飞书文档", "飞书云文档", "Feishu Docs", "Lark Docs"],
-  "anti_triggers": [],
-  "tool_refs": [],
-  "references": [],
-  "script_refs": [],
-  "script_entries": [],
+  "description": "Feishu document skill pack with vendored document, wiki, drive, sheet, media, comment, and auth scripts from hashSTACS-Global/feishu-skills.",
+  "description_cn": "飞书文档能力包，内置来自 hashSTACS-Global/feishu-skills 的文档、知识库、云空间、表格、媒体、评论与授权脚本。",
+  "tags": ["feishu", "lark", "docs", "wiki", "drive", "sheet", "document", "飞书文档"],
+  "triggers": ["飞书文档", "飞书云文档", "飞书知识库", "Feishu Docs", "Lark Docs", "创建飞书文档", "读取飞书文档", "搜索飞书文档"],
+  "anti_triggers": ["钉钉", "腾讯文档", "DingTalk", "Tencent Docs"],
+  "tool_refs": ["run_skill_script"],
+  "references": [
+    "UPSTREAM_README.md",
+    "feishu-auth/SKILL.md",
+    "feishu-create-doc/SKILL.md",
+    "feishu-fetch-doc/SKILL.md",
+    "feishu-search-doc/SKILL.md",
+    "feishu-update-doc/SKILL.md",
+    "feishu-wiki/SKILL.md",
+    "feishu-drive/SKILL.md",
+    "feishu-sheet/SKILL.md"
+  ],
+  "script_refs": [
+    "feishu-auth/auth.mjs",
+    "feishu-create-doc/create-doc.mjs",
+    "feishu-fetch-doc/fetch-doc.mjs",
+    "feishu-search-doc/search-doc.mjs",
+    "feishu-update-doc/update-doc.mjs",
+    "feishu-docx-download/download-doc.mjs",
+    "feishu-drive/drive.mjs",
+    "feishu-wiki/wiki.mjs",
+    "feishu-doc-comment/comment.mjs",
+    "feishu-doc-media/media.mjs",
+    "feishu-sheet/sheet.mjs"
+  ],
+  "script_entries": [
+    {"name": "auth", "path": "feishu-auth/auth.mjs", "runtime": "node", "description": "Feishu OAuth Device Flow authorization and token status."},
+    {"name": "create_doc", "path": "feishu-create-doc/create-doc.mjs", "runtime": "node", "description": "Create a Feishu document from Markdown."},
+    {"name": "fetch_doc", "path": "feishu-fetch-doc/fetch-doc.mjs", "runtime": "node", "description": "Read a Feishu Docs or Wiki page as Markdown."},
+    {"name": "search_doc", "path": "feishu-search-doc/search-doc.mjs", "runtime": "node", "description": "Search Feishu cloud documents, wiki spaces/nodes, and drive folder entries."},
+    {"name": "update_doc", "path": "feishu-update-doc/update-doc.mjs", "runtime": "node", "description": "Append to or overwrite Feishu document content."},
+    {"name": "download_doc", "path": "feishu-docx-download/download-doc.mjs", "runtime": "node", "description": "Download Feishu document files and attachments."},
+    {"name": "drive", "path": "feishu-drive/drive.mjs", "runtime": "node", "description": "Operate Feishu Drive folders and files."},
+    {"name": "wiki", "path": "feishu-wiki/wiki.mjs", "runtime": "node", "description": "Operate Feishu Wiki spaces and nodes."},
+    {"name": "comment", "path": "feishu-doc-comment/comment.mjs", "runtime": "node", "description": "Operate Feishu document comments."},
+    {"name": "media", "path": "feishu-doc-media/media.mjs", "runtime": "node", "description": "Operate Feishu document media."},
+    {"name": "sheet", "path": "feishu-sheet/sheet.mjs", "runtime": "node", "description": "Read and write Feishu spreadsheets."}
+  ],
   "config_fields": [
     {
       "name": "app_id",
@@ -32,26 +67,19 @@
       "placeholder": "飞书开放平台 App Secret"
     },
     {
-      "name": "tenant_access_token",
-      "label": "Tenant Access Token",
-      "kind": "secret",
+      "name": "brand",
+      "label": "Brand",
+      "kind": "text",
       "required": false,
-      "env": "FEISHU_TENANT_ACCESS_TOKEN",
-      "placeholder": "可选：已有 tenant_access_token"
-    },
-    {
-      "name": "user_access_token",
-      "label": "User Access Token",
-      "kind": "secret",
-      "required": false,
-      "env": "FEISHU_USER_ACCESS_TOKEN",
-      "placeholder": "可选：已有 user_access_token"
+      "env": "FEISHU_BRAND",
+      "placeholder": "feishu 或 lark"
     }
   ],
   "python_dependencies": [],
   "node_dependencies": [],
   "workflow": [
-    "Use the workbench configuration tab to save Feishu credentials.",
-    "Imported script skills should read FEISHU_APP_ID, FEISHU_APP_SECRET, and optional token environment variables."
+    "Use this skill for Feishu document, wiki, drive, sheet, media, and comment requests only.",
+    "Run the auth script first when a user token is missing.",
+    "Use the relevant sub-skill SKILL.md files for exact arguments before calling a script entry."
   ]
 }

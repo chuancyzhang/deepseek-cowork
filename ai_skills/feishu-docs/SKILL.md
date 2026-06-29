@@ -1,7 +1,7 @@
 ---
 name: feishu-docs
-description: Configuration preset for Feishu document skills.
-description_cn: 飞书文档能力配置预设，用于保存并注入文档操作所需凭据。
+description: Feishu document, wiki, drive, sheet, media, comment, and OAuth skill pack.
+description_cn: 飞书文档、知识库、云空间、表格、媒体、评论和 OAuth 授权能力包。
 license: Apache-2.0
 type: bundled_plugin
 source_type: bundled_plugin
@@ -11,9 +11,20 @@ security_level: medium
 
 # Feishu Docs
 
-This bundled preset stores Feishu application credentials for imported or script-based document skills.
+This bundled optional skill vendors the document-related parts of `hashSTACS-Global/feishu-skills`.
 
-## Usage
-- Configure App ID and App Secret in the Cowork skill workbench.
-- Script-based skills can read the configured values from the declared environment variables.
-- Tenant or user access tokens can be supplied when a skill expects pre-issued tokens.
+## Capabilities
+
+- Authorize a Feishu user with OAuth Device Flow.
+- Create Feishu Docs from Markdown.
+- Fetch Feishu Docs or Wiki pages as Markdown.
+- Search cloud docs, Wiki nodes, and Drive folder entries.
+- Append to or overwrite document content.
+- Download document files and attachments.
+- Manage Feishu Drive folders, Wiki nodes, document comments, document media, and sheets.
+
+## Runtime
+
+- Configure `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in the Cowork skill workbench.
+- Run the `auth` script entry first when a Feishu user token is missing.
+- Use each vendored sub-skill `SKILL.md` for exact script arguments before running a script entry.

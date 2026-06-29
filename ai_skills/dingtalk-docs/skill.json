@@ -4,16 +4,24 @@
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
   "default_enabled": false,
-  "description": "Configuration preset for DingTalk document skills.",
-  "description_cn": "钉钉文档能力配置预设，用于保存并注入文档操作所需凭据。",
-  "tags": ["dingtalk", "docs", "document", "钉钉文档"],
-  "triggers": ["钉钉文档", "DingTalk Docs", "dingtalk-skills", "钉钉知识库"],
+  "description": "DingTalk document and knowledge-base skill vendored from breath57/dingtalk-skills dingtalk-document.",
+  "description_cn": "钉钉文档与知识库能力，基于 breath57/dingtalk-skills 的 dingtalk-document 独立内置。",
+  "tags": ["dingtalk", "docs", "wiki", "knowledge base", "document", "钉钉文档", "钉钉知识库"],
+  "triggers": ["钉钉文档", "钉钉知识库", "DingTalk Docs", "dingtalk document", "新建钉钉文档", "读取钉钉文档"],
   "anti_triggers": [],
-  "tool_refs": [],
-  "references": [],
-  "script_refs": [],
-  "script_entries": [],
+  "tool_refs": ["run_skill_script", "bash"],
+  "references": ["references/api.md"],
+  "script_refs": ["scripts/dt_helper.sh"],
+  "script_entries": [
+    {
+      "name": "dt_helper",
+      "path": "scripts/dt_helper.sh",
+      "runtime": "bash",
+      "description": "DingTalk helper for token management, config checks, and userId/unionId conversion."
+    }
+  ],
   "config_fields": [
     {
       "name": "app_key",
@@ -21,7 +29,7 @@
       "kind": "text",
       "required": true,
       "env": "DINGTALK_APP_KEY",
-      "placeholder": "钉钉开放平台 appKey"
+      "placeholder": "钉钉开放平台 AppKey"
     },
     {
       "name": "app_secret",
@@ -29,21 +37,30 @@
       "kind": "secret",
       "required": true,
       "env": "DINGTALK_APP_SECRET",
-      "placeholder": "钉钉开放平台 appSecret"
+      "placeholder": "钉钉开放平台 AppSecret"
     },
     {
-      "name": "operator_id",
-      "label": "Operator ID",
+      "name": "my_user_id",
+      "label": "My User ID",
       "kind": "text",
       "required": true,
-      "env": "DINGTALK_OPERATOR_ID",
-      "placeholder": "执行文档操作的用户 ID"
+      "env": "DINGTALK_MY_USER_ID",
+      "placeholder": "当前操作人的钉钉 userId"
+    },
+    {
+      "name": "my_operator_id",
+      "label": "My Operator ID",
+      "kind": "text",
+      "required": false,
+      "env": "DINGTALK_MY_OPERATOR_ID",
+      "placeholder": "可选：当前操作人的 unionId，可由 dt_helper 转换"
     }
   ],
   "python_dependencies": [],
   "node_dependencies": [],
   "workflow": [
-    "Use the workbench configuration tab to save DingTalk credentials.",
-    "Imported script skills should read DINGTALK_APP_KEY, DINGTALK_APP_SECRET, and DINGTALK_OPERATOR_ID."
+    "Use this skill for DingTalk document and knowledge-base requests only.",
+    "Use scripts/dt_helper.sh to obtain tokens and convert DINGTALK_MY_USER_ID to DINGTALK_MY_OPERATOR_ID when needed.",
+    "Use references/api.md for concrete DingTalk document API requests."
   ]
 }

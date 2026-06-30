@@ -16545,7 +16545,7 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
             return
-        self.refresh_context_badges(state.session_id)
+        return
 
     def set_session_phase(self, phase, session_id=None):
         state = self.get_session(session_id)

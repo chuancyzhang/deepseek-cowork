@@ -1494,6 +1494,57 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertFalse(window._should_block_send_for_sop(_State(active_run)))
         self.assertTrue(window._should_block_send_for_sop(_State(awaiting_run)))
 
+    def test_refresh_clarify_controls_does_not_reenter_context_badges(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type("_Session", (), {"session_id": "session-1"})()
+        window.current_session_id = "session-1"
+        window.get_session = MagicMock(return_value=state)
+        window.refresh_context_badges = MagicMock()
+
+        window.refresh_clarify_controls("session-1")
+
+        window.refresh_context_badges.assert_not_called()
+
+    def test_refresh_context_badges_handles_current_session_without_recursion(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "run_phase": "Idle",
+                "pending_clarify_questions": [],
+                "observability_events": [],
+                "system_prompt_text": "",
+                "system_prompt_appends": [],
+                "sop_run": None,
+                "step_records": [],
+                "has_file_changes": False,
+                "sub_agent_events": [],
+                "persisted_agents": [],
+            },
+        )()
+        window.current_session_id = "session-1"
+        window.config_manager = MagicMock()
+        window.config_manager.get_model_profile.return_value = {
+            "provider_display_name": "OpenAI 兼容服务",
+            "display_name": "deepseek-v4-pro",
+        }
+        window.config_manager.get_god_mode.return_value = False
+        window.model_badge = MagicMock()
+        window.security_badge = MagicMock()
+        window.phase_badge = MagicMock()
+        window.get_session = MagicMock(return_value=state)
+        window._workspace_dir_for_state = MagicMock(return_value="")
+        window.update_context_rail_badges = MagicMock()
+        window.refresh_sop_controls = MagicMock()
+
+        window.refresh_context_badges("session-1")
+
+        window.update_context_rail_badges.assert_called_once()
+        window.refresh_sop_controls.assert_called_once_with("session-1")
+        window.phase_badge.setText.assert_called_once_with("Phase: Idle")
+
     def test_clear_session_sop_removes_current_run_and_refreshes_ui(self):
         window = MainWindow.__new__(MainWindow)
         state = type(

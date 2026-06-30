@@ -777,16 +777,21 @@ class TestSkillSystemV2(unittest.TestCase):
             os.makedirs(claim_dir, exist_ok=True)
             os.makedirs(review_dir, exist_ok=True)
             with open(os.path.join(claim_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-                f.write("# Claim Expert\n\nReview claim evidence and consistency.\n")
+                f.write(
+                    "---\nname: claim-expert\ndescription: Review claim evidence and consistency.\n---\n"
+                    "# Claim Expert\n\nReview claim evidence and consistency.\n"
+                )
             with open(os.path.join(review_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-                f.write("# Policy Review\n\nCheck policy wording and exceptions.\n")
+                f.write(
+                    "---\nname: policy-review\ndescription: Check policy wording and exceptions.\n---\n"
+                    "# Policy Review\n\nCheck policy wording and exceptions.\n"
+                )
 
             sm = self._build_manager()
             success, message = sm.import_skill(collection_dir)
             self.assertTrue(success, message)
             self.assertIn("2 个成功", message)
 
-            sm.load_skills()
             self.assertIn("claim-expert", sm.skill_records)
             self.assertIn("policy-review", sm.skill_records)
             self.assertIn("claim-expert", sm.select_relevant_skills("CLAIM EXPERT", limit=5))
@@ -967,27 +972,32 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(called_kwargs["args"], ["--flag"])
         self.assertEqual(called_kwargs["cwd"], skill_dir)
 
-    def test_import_skill_adapts_openclaw_folder_into_experience_package(self):
+    def test_import_skill_installs_standard_agent_skill_with_original_skill_md(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)
         try:
-            source_dir = os.path.join(source_root, "openclaw-guide")
-            os.makedirs(os.path.join(source_dir, "prompts"), exist_ok=True)
-            with open(os.path.join(source_dir, "openclaw.json"), "w", encoding="utf-8") as f:
-                json.dump({"name": "openclaw-guide"}, f)
+            source_dir = os.path.join(source_root, "aihot")
+            os.makedirs(source_dir, exist_ok=True)
+            original_md = (
+                "---\n"
+                "name: aihot\n"
+                "description: AI HOT 中文 AI 资讯查询 Skill。今天 AI 圈有什么时使用。\n"
+                "---\n"
+                "# AI HOT Skill\n\n原始规则。\n"
+            )
             with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-                f.write("# External Skill\n\nOriginal OpenClaw instructions.\n")
+                f.write(original_md)
 
             sm = self._build_manager()
             success, message = sm.import_skill(source_dir)
             self.assertTrue(success, message)
 
-            sm.load_skills()
-            self.assertIn("openclaw-guide", sm.skill_records)
-            record = sm.skill_records["openclaw-guide"]
-            self.assertEqual(record["spec"]["creation_hints"]["source_format"], "openclaw")
+            self.assertIn("aihot", sm.skill_records)
+            record = sm.skill_records["aihot"]
+            self.assertEqual(record["spec"]["creation_hints"]["source_format"], "agent_skill")
             self.assertEqual(record["tool_refs"], [])
-            self.assertIn("openclaw", record["spec"]["tags"])
-            self.assertTrue(os.path.exists(os.path.join(self.ai_skills_dir, "openclaw-guide", "references", "source-SKILL.md")))
+            self.assertIn("今天 AI 圈有什么", record["spec"]["description"])
+            with open(os.path.join(self.ai_skills_dir, "aihot", "SKILL.md"), "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), original_md)
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
 

@@ -1,10 +1,11 @@
 import json
 import os
 import re
+import shutil
 
 from core.env_utils import get_app_data_dir
 from core.sandbox_runtime import install_skill_dependencies
-from core.skill_adapter import adapt_skill_directory, detect_external_skill_format
+from core.skill_adapter import adapt_skill_directory, parse_skill_md_content, resolve_agent_skill_source
 
 
 def _is_valid_skill_name(skill_name):
@@ -403,21 +404,22 @@ def update_skill(
         return f"Error: {str(e)}"
 
 
-def convert_claude_skill(source_path, skill_name=None):
-    return convert_external_skill(source_path, skill_name=skill_name, source_format="claude")
+def _read_agent_skill_name(source_dir):
+    meta, _body = parse_skill_md_content(os.path.join(source_dir, "SKILL.md"))
+    name = meta.get("name") if isinstance(meta.get("name"), str) else ""
+    return name.strip()
 
 
-def convert_openclaw_skill(source_path, skill_name=None):
-    return convert_external_skill(source_path, skill_name=skill_name, source_format="openclaw")
-
-
-def convert_external_skill(source_path, skill_name=None, source_format="auto"):
+def install_agent_skill(source_path, skill_name=None, _context=None):
     try:
         if not os.path.exists(source_path):
             return f"Error: Source path '{source_path}' does not exist."
-        source_name = os.path.basename(os.path.normpath(source_path))
+        resolved_source, temp_dir = resolve_agent_skill_source(source_path)
         if not skill_name:
-            skill_name = source_name
+            skill_name = _read_agent_skill_name(resolved_source)
+        if not skill_name:
+            return "Error: Source SKILL.md must include a frontmatter 'name'."
+        skill_name = skill_name.strip()
         if not _is_valid_skill_name(skill_name):
             return "Error: Skill name must be alphanumeric (hyphens allowed)."
         target_dir, error = _resolve_skill_dir(skill_name, target_scope="ai_only")
@@ -425,8 +427,26 @@ def convert_external_skill(source_path, skill_name=None, source_format="auto"):
             return error
         if os.path.exists(target_dir):
             return f"Error: Target skill directory '{target_dir}' already exists. Please delete it or choose a different name."
-        result = adapt_skill_directory(source_path, target_dir, skill_name=skill_name, source_format=source_format)
-        detected = result.get("source_format") or detect_external_skill_format(source_path)
-        return f"Success: Adapted '{source_path}' to '{target_dir}' as Cowork skill format from source '{detected}'."
+        result = adapt_skill_directory(resolved_source, target_dir, skill_name=skill_name, source_format="agent_skill")
+        skill_json_path = os.path.join(target_dir, "skill.json")
+        skill_json = {}
+        if os.path.isfile(skill_json_path):
+            with open(skill_json_path, "r", encoding="utf-8") as f:
+                skill_json = json.load(f)
+        dependency_status = install_skill_dependencies(
+            skill_name,
+            skill_json.get("python_dependencies") or [],
+            skill_json.get("node_dependencies") or [],
+        )
+        context = _context or {}
+        skill_manager = context.get("skill_manager") if isinstance(context, dict) else None
+        if skill_manager and hasattr(skill_manager, "load_skills"):
+            skill_manager.load_skills()
+        if not dependency_status.get("ok"):
+            return f"Success: Installed agent skill '{result.get('skill_name')}' at '{target_dir}', but dependency setup is incomplete: {dependency_status.get('message')}"
+        return f"Success: Installed agent skill '{result.get('skill_name')}' at '{target_dir}'."
     except Exception as e:
-        return f"Error converting skill: {str(e)}"
+        return f"Error installing agent skill: {str(e)}"
+    finally:
+        if "temp_dir" in locals() and temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)

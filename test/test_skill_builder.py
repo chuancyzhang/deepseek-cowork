@@ -4,6 +4,7 @@ import sys
 import shutil
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,52 +62,25 @@ class TestSkillBuilder(unittest.TestCase):
             )
             self.assertIn("not found", update_result.lower())
 
-    def test_convert_openclaw_skill_adapts_to_cowork_format(self):
-        source_dir = os.path.join(self.temp_dir, "openclaw-sample")
-        os.makedirs(os.path.join(source_dir, "prompts"), exist_ok=True)
-        with open(os.path.join(source_dir, "openclaw.json"), "w", encoding="utf-8") as f:
-            f.write("{\"name\": \"openclaw-sample\"}")
-        with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-            f.write("# Original OpenClaw Skill\n\nExternal instructions.\n")
-
-        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
-            result = skill_builder_impl.convert_openclaw_skill(source_dir, skill_name="openclaw-sample")
-            self.assertIn("Success", result)
-
-        target_dir = os.path.join(self.ai_dir, "openclaw-sample")
-        self.assertTrue(os.path.exists(os.path.join(target_dir, "skill.json")))
-        self.assertTrue(os.path.exists(os.path.join(target_dir, "SKILL.md")))
-        self.assertTrue(os.path.exists(os.path.join(target_dir, "references", "source-SKILL.md")))
-
-        with open(os.path.join(target_dir, "skill.json"), "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        self.assertEqual(payload["creation_hints"]["source_format"], "openclaw")
-        self.assertEqual(payload["tool_refs"], [])
-
-        with open(os.path.join(target_dir, "SKILL.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        self.assertIn("Cowork skill system", content)
-
-    def test_convert_agent_skill_preserves_native_skill_md_and_generates_script_metadata(self):
+    def test_install_agent_skill_preserves_native_skill_md_and_generates_script_metadata(self):
         source_dir = os.path.join(self.temp_dir, "agent-skill-sample")
         os.makedirs(os.path.join(source_dir, "scripts"), exist_ok=True)
+        original_md = (
+            "---\nname: agent-skill-sample\ndescription: Native agent skill\nkind: knowledge\n---\n"
+            "# Native Skill\n\nKeep this body.\n"
+        )
         with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-            f.write(
-                "---\nname: agent-skill-sample\ndescription: Native agent skill\nkind: knowledge\n---\n"
-                "# Native Skill\n\nKeep this body.\n"
-            )
+            f.write(original_md)
         with open(os.path.join(source_dir, "scripts", "hello.py"), "w", encoding="utf-8") as f:
             f.write("print('hello')\n")
 
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
-            result = skill_builder_impl.convert_external_skill(source_dir, skill_name="agent-skill-sample", source_format="auto")
+            result = skill_builder_impl.install_agent_skill(source_dir)
             self.assertIn("Success", result)
 
         target_dir = os.path.join(self.ai_dir, "agent-skill-sample")
         with open(os.path.join(target_dir, "SKILL.md"), "r", encoding="utf-8") as f:
-            content = f.read()
-        self.assertIn("# Native Skill", content)
-        self.assertIn("Keep this body.", content)
+            self.assertEqual(f.read(), original_md)
 
         with open(os.path.join(target_dir, "skill.json"), "r", encoding="utf-8") as f:
             payload = json.load(f)
@@ -114,6 +88,47 @@ class TestSkillBuilder(unittest.TestCase):
         self.assertEqual(payload["script_refs"], [os.path.normpath("scripts\\hello.py")])
         self.assertEqual(payload["script_entries"][0]["runtime"], "python")
         self.assertEqual(payload["script_entries"][0]["name"], "hello")
+
+    def test_install_agent_skill_accepts_single_markdown_file(self):
+        md_path = os.path.join(self.temp_dir, "SKILL_aihot.md")
+        original_md = (
+            "---\n"
+            "name: aihot\n"
+            "description: AI HOT 中文 AI 资讯查询 Skill。今天 AI 圈有什么时使用。\n"
+            "---\n"
+            "# AI HOT\n"
+        )
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(original_md)
+
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.install_agent_skill(md_path)
+            self.assertIn("Success", result)
+
+        target_dir = os.path.join(self.ai_dir, "aihot")
+        with open(os.path.join(target_dir, "SKILL.md"), "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), original_md)
+        self.assertFalse(os.path.exists(os.path.join(self.temp_dir, "SKILL_aihot")))
+
+    def test_install_agent_skill_accepts_zip_package(self):
+        source_dir = os.path.join(self.temp_dir, "zip-source", "zip-skill")
+        os.makedirs(source_dir, exist_ok=True)
+        with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: zip-skill\ndescription: Zipped agent skill\n---\n# Zip Skill\n")
+        zip_path = os.path.join(self.temp_dir, "zip-skill.zip")
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(os.path.join(source_dir, "SKILL.md"), arcname="zip-skill/SKILL.md")
+
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.install_agent_skill(zip_path)
+            self.assertIn("Success", result)
+
+        self.assertTrue(os.path.isfile(os.path.join(self.ai_dir, "zip-skill", "SKILL.md")))
+
+    def test_old_convert_tools_are_removed(self):
+        self.assertFalse(hasattr(skill_builder_impl, "convert_claude_skill"))
+        self.assertFalse(hasattr(skill_builder_impl, "convert_openclaw_skill"))
+        self.assertFalse(hasattr(skill_builder_impl, "convert_external_skill"))
 
 
 if __name__ == "__main__":

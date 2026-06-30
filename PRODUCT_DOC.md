@@ -39,6 +39,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 
 - 内置技能位于 `skills/`
 - 随包可选插件和用户技能位于 `ai_skills/`
+- 支持安装符合标准的 Agent Skill 包，原始 `SKILL.md` 保留为权威说明，`skill.json` 仅作为本地检索、工作台和调试元数据
 - MCP 服务器可通过 `stdio` 或 Streamable HTTP 接入
 - 腾讯文档、飞书文档、钉钉文档以三套独立可选 skill 内置，用户可在技能工作台填写平台凭据并调试对应脚本入口
 - `tool` 是直接执行面，`skill` 是经验包
@@ -53,7 +54,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 
 - Memory Center 维护长期摘要
 - “沉淀为 Skill”把会话片段转成技能草稿
-- 技能支持导入、导出、调试和热加载
+- 技能支持导入、安装标准 Agent Skill、导出、调试和热加载
 
 ## 4. 典型使用流程
 

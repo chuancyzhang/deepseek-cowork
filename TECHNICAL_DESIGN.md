@@ -51,6 +51,7 @@ Cowork 采用交错式推理流程：
 - 直接执行面只有 `tool`
 - `skill` 只负责经验和边界，不作为独立调用协议
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量
+- 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 生成办公稿使用本次请求级 `workflow_mode = office_html_first` 和 `office_output_profile` 注入提示；从 HTML 继续生成 PPTX、DOCX、PDF 使用 `workflow_mode = office_file_conversion` 和 `office_conversion_target` 标记；两者都不新增 `RUN_MODE`，因此不改变工具权限。
 - UI 通过用户消息 `meta.workflow_mode` 将该轮用户消息、工具调用和助手结果渲染成可展开的办公任务卡；消息本体仍按原结构持久化，交付物文件卡渲染在折叠过程外。任务卡会合并最终回复、隐藏气泡识别到的文件卡路径和本轮工具变更中的有效工作区文件，避免最终回复未写完整路径时结果区为空。历史消息按 render span 独立渲染，避免普通消息和办公任务混排时丢失折叠状态。
 - 从 HTML 生成 PPTX 时可附加 PPTX 模板文件，提示要求以 HTML 为内容源、模板为视觉结构源，并保留模板主题、母版、字号、色彩、版式节奏和顶部/底部图片；PPTX、DOCX、PDF 转换提交后只更新交付物详情页底部的局部运行态，并用隔离运行上下文只传入源 HTML、目标格式和模板文件，不把上一轮办公稿生成过程带给模型；完成后仍通过任务卡、Toast 和交付物扫描回填结果。
@@ -63,6 +64,7 @@ Cowork 采用交错式推理流程：
 
 - `skills/`：核心内置技能
 - `ai_skills/`：随包可选插件与用户技能
+- 标准 Agent Skill：通过 `install_agent_skill` 写入用户级 `ai_skills`，保留原始 `SKILL.md`
 - MCP servers：通过 `stdio` 或 Streamable HTTP 接入的外部工具
 - 常驻执行工具：例如 `run_python_code`
 

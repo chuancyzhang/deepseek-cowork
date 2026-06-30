@@ -23,6 +23,11 @@ A skill can include:
 - `scripts/`: optional assets used through declared script entries
 - `config_fields`: optional runtime configuration schema stored in `skill.json`
 
+Cowork can install any standard Agent Skill package that has a root `SKILL.md`
+with `name` and `description` frontmatter. Installation preserves that upstream
+`SKILL.md` as the authoritative instruction file and generates `skill.json` only
+as local Cowork indexing, workbench, and debug metadata.
+
 Recommended structure:
 
 ```text
@@ -109,6 +114,7 @@ The Skill Center supports:
 - importing a single skill folder
 - importing a folder that contains multiple skills
 - importing ZIP packages
+- installing standard Agent Skill packages through `install_agent_skill`
 - exporting one skill as ZIP
 - exporting multiple skills as a collection ZIP
 - validating files and debugging tools or scripts
@@ -118,6 +124,7 @@ Import safety rules:
 - ZIP extraction paths must stay inside a temporary directory
 - final skill names come from metadata when available
 - existing target names are rejected instead of overwritten
+- standard Agent Skill installs keep the original root `SKILL.md`; Cowork does not rewrite it into an app-specific template
 
 ## 8. Experience Lifecycle
 

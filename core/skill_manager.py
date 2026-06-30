@@ -33,12 +33,12 @@ from .clarify_mode import normalize_selected_skill_names
 
 
 def _tokenize(text):
-    return set(re.findall(r"[a-z0-9][a-z0-9_\-]+", str(text or "").casefold()))
+    return set(re.findall(r"[a-z0-9][a-z0-9_\-]+|[\u4e00-\u9fff]{2,}", str(text or "").casefold()))
 
 
 def _normalize_search_text(text):
     lowered = str(text or "").casefold()
-    return re.sub(r"[^a-z0-9]+", "", lowered)
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", lowered)
 
 
 def _json_copy(value, fallback):
@@ -387,7 +387,7 @@ class SkillManager:
     def _infer_prompt_disclosure(self, spec):
         prompt_disclosure = spec.get("prompt_disclosure")
         source_format = str(spec.get("source_format") or "").strip().lower()
-        should_upgrade = source_format in {"agent_skill", "claude", "openclaw"} or bool(spec.get("script_entries"))
+        should_upgrade = source_format == "agent_skill" or bool(spec.get("script_entries"))
         if isinstance(prompt_disclosure, str) and prompt_disclosure.strip():
             normalized = prompt_disclosure.strip()
             if normalized == "full_on_match" or not should_upgrade:
@@ -974,6 +974,8 @@ class SkillManager:
 
     def _skill_search_score(self, record, query_tokens, query_text):
         spec = record.get("spec") or {}
+        if spec.get("allow_implicit_invocation") is False:
+            return 0.0
         meta = record.get("meta") or {}
         search_text = "\n".join(
             [
@@ -1993,6 +1995,8 @@ class SkillManager:
                 result = self._import_single_skill_dir(candidate_dirs[0], source_format=source_format)
                 if result.get("status") == "skipped_existing":
                     return False, result.get("message") or "Skill already exists"
+                if result.get("status") == "imported":
+                    self.load_skills()
                 return True, result.get("message") or f"Skill '{result.get('skill_name')}' imported successfully"
 
             summary = {"imported": [], "skipped_existing": [], "failed": []}
@@ -2011,6 +2015,8 @@ class SkillManager:
                 success = True
             if not summary["imported"] and not summary["skipped_existing"]:
                 success = False
+            if summary["imported"]:
+                self.load_skills()
             return success, self._format_import_summary_message(summary)
         except Exception as e:
             return False, f"Import failed: {e}"

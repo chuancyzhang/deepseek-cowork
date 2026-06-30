@@ -35,7 +35,7 @@ Cowork treats tools as the only direct execution surface.
 - `tool`: executable capability the model can call directly
 - `skill`: structured experience package that guides when and how to use tools
 
-Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`. Skills may declare `config_fields`; the workbench renders those fields in a configuration tab and injects saved values into script/tool execution through explicit environment variables.
+Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`. Cowork can install standard Agent Skill packages as user AI skills, preserving the original root `SKILL.md` and generating `skill.json` only for local discovery, workbench, and debug metadata. Skills may declare `config_fields`; the workbench renders those fields in a configuration tab and injects saved values into script/tool execution through explicit environment variables.
 
 See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the detailed model.
 
@@ -73,7 +73,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 1. Open **Settings** and configure a model service.
 2. Start a pure chat or attach the conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
-4. Enable optional skills from **Skill Center**; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.
+4. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.
 5. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
 6. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
 

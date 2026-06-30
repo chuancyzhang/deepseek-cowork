@@ -775,6 +775,93 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             self.assertIn("skills", result)
             self.assertEqual(result["skills"][0]["name"], "claim-expert")
 
+    def test_tool_search_returns_chinese_agent_skill_matches(self):
+        skill_dir = os.path.join(self.skills_dir, "aihot")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\n"
+                "name: aihot\n"
+                "description: AI HOT 中文 AI 资讯查询 Skill。当用户想知道今天 AI 圈有什么时使用。\n"
+                "---\n"
+                "# AI HOT Skill\n\n查询 AI 日报、AI 资讯、AI 热点。\n"
+            )
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "aihot",
+                    "kind": "knowledge",
+                    "description": "AI HOT 中文 AI 资讯查询 Skill。当用户想知道今天 AI 圈有什么时使用。",
+                    "source_format": "agent_skill",
+                    "triggers": ["今天 AI 圈有什么", "AI 日报", "AI 热点"],
+                    "prompt_disclosure": "full_on_match",
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        sm = self._build_manager()
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "今天 AI 圈有什么"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("skills", result)
+        self.assertEqual(result["skills"][0]["name"], "aihot")
+        self.assertEqual(result["skills"][0]["prompt_level"], "full")
+
+    def test_agent_skill_can_disable_implicit_tool_search_match(self):
+        skill_dir = os.path.join(self.skills_dir, "private-guide")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: private-guide\ndescription: Private Guide\n---\n# Private Guide\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": 2,
+                    "name": "private-guide",
+                    "kind": "knowledge",
+                    "description": "Private Guide",
+                    "source_format": "agent_skill",
+                    "allow_implicit_invocation": False,
+                    "triggers": ["Private Guide"],
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        sm = self._build_manager()
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "Private Guide"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["skills"], [])
+
+    def test_skill_builder_exposes_only_install_agent_skill_for_agent_skill_install(self):
+        self._copy_repo_skill("skill_builder")
+
+        sm = self._build_manager()
+        tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
+
+        self.assertIn("install_agent_skill", tool_names)
+        self.assertNotIn("convert_claude_skill", tool_names)
+        self.assertNotIn("convert_openclaw_skill", tool_names)
+        self.assertNotIn("convert_external_skill", tool_names)
+
     def test_tool_search_skill_results_respect_allowed_skill_scope(self):
         skill_dir = os.path.join(self.skills_dir, "claim-expert")
         os.makedirs(skill_dir, exist_ok=True)

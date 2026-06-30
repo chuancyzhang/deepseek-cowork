@@ -1288,8 +1288,9 @@ class TestSopUiHelpers(unittest.TestCase):
         entries = window._prompt_tool_menu_entries()
         self.assertEqual(
             [label for _key, label in entries],
-            ["添加文件", "添加智能体", "指定能力", "反问模式"],
+            ["添加文件", "添加智能体", "指定能力"],
         )
+        self.assertNotIn("反问模式", [label for _key, label in entries])
         self.assertNotIn("添加自动化", [label for _key, label in entries])
         self.assertNotIn("从对话生成 SOP", [label for _key, label in entries])
         self.assertNotIn("能力中心", [label for _key, label in entries])

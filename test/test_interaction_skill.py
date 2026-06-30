@@ -8,6 +8,7 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from skills.interaction import impl as interaction_impl
+from core.interaction import interaction_service
 
 
 class TestInteractionSkill(unittest.TestCase):
@@ -86,7 +87,7 @@ class TestInteractionSkill(unittest.TestCase):
                 "raw_value": {"compatibility_target": "彻底重做"},
                 "resolved_at": "2026-04-12T00:00:00+00:00",
             },
-        ):
+        ) as create_mock:
             result = interaction_impl.request_user_input(
                 message="请选择方案",
                 questions=[
@@ -101,8 +102,36 @@ class TestInteractionSkill(unittest.TestCase):
             )
 
         self.assertEqual(result["interaction_request"]["kind"], "questionnaire")
+        sent_questions = create_mock.call_args.kwargs["questions"]
+        self.assertEqual(sent_questions[0]["options"][-1]["label"], "自定义")
+        self.assertEqual(sent_questions[0]["options"][-1]["value"], "__custom__")
+        self.assertTrue(create_mock.call_args.kwargs["allow_free_text"])
         self.assertIn("compatibility_target", result["answers"])
         self.assertTrue(result["interaction_response"]["approved"])
+
+    def test_questionnaire_timeout_auto_selects_recommended_option(self):
+        result = interaction_service.create_request(
+            "session-timeout",
+            "questionnaire",
+            "请选择方案",
+            questions=[
+                {
+                    "id": "scope",
+                    "question": "处理范围？",
+                    "options": [
+                        {"label": "当前文件", "value": "current"},
+                        {"label": "自定义", "value": "__custom__"},
+                    ],
+                }
+            ],
+            timeout_seconds=0.01,
+            source_tool="request_user_input",
+            metadata={"auto_select_first_on_timeout": True},
+        )
+
+        self.assertEqual(result["status"], "auto_selected")
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["answers"]["scope"]["selected_options"], ["current"])
 
     def test_publish_artifacts_feishu_context_returns_structured_payload(self):
         with tempfile.TemporaryDirectory() as tmp:

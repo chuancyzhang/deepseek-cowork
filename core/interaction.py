@@ -115,6 +115,24 @@ def _build_response_payload(
     }
 
 
+def _recommended_questionnaire_answers(request: dict[str, Any]) -> dict[str, Any]:
+    answers = {}
+    for item in _normalize_questions(request.get("questions")):
+        qid = str(item.get("id") or "").strip()
+        options = _normalize_options(item.get("options"))
+        if not qid or not options:
+            continue
+        selected = str(options[0].get("value") or options[0].get("label") or "").strip()
+        if not selected:
+            continue
+        answers[qid] = {
+            "selected_options": [selected],
+            "text": "",
+            "raw_value": selected,
+        }
+    return answers
+
+
 def parse_interaction_reply(
     request: dict[str, Any] | None,
     raw_value: Any,
@@ -391,6 +409,19 @@ class InteractionService(QObject):
         with self._lock:
             entry = self._pending.pop(request.request_id, None)
         if not resolved or not entry or not isinstance(entry.get("response"), dict):
+            if (
+                payload.get("kind") == "questionnaire"
+                and payload.get("metadata", {}).get("auto_select_first_on_timeout")
+            ):
+                answers = _recommended_questionnaire_answers(payload)
+                if answers:
+                    return InteractionResponse(
+                        request_id=request.request_id,
+                        status="auto_selected",
+                        approved=True,
+                        answers=answers,
+                        raw_value=answers,
+                    ).to_dict()
             return InteractionResponse(
                 request_id=request.request_id,
                 status="timeout",

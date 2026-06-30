@@ -279,7 +279,7 @@ TOOL_EXPORTS = [
         "kind": "meta_parallel",
         "read_only": True,
         "destructive": False,
-        "allowed_modes": ["clarifying", "execution"],
+        "allowed_modes": ["execution"],
         "always_load": True,
         "should_defer": False,
         "search_hint": "parallel concurrent read-only tools files search",

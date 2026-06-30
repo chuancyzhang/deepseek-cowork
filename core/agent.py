@@ -20,14 +20,11 @@ from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
 from core.agent_manager import AGENT_MANAGEMENT_TOOLS, get_agent_manager_registry
 from core.clarify_mode import (
-    get_clarifying_read_tools,
     OFFICE_OUTPUT_PROFILE_DESIGN,
     OFFICE_OUTPUT_PROFILE_DOCX,
     OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_EXECUTION,
-    RUN_MODE_CLARIFYING,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
-    is_tool_allowed_in_clarifying,
     json_copy,
     normalize_selected_skill_names,
     normalize_run_context,
@@ -580,21 +577,11 @@ class LLMWorker(QThread):
                         pass
                 except Exception:
                     pass
-            if (
-                self._is_clarifying_mode()
-                and name
-                and not hasattr(self.skill_manager, "is_tool_allowed")
-                and not is_tool_allowed_in_clarifying(name)
-            ):
-                continue
             filtered.append(item)
         self.tools = filtered
 
     def _current_run_mode(self):
         return self.run_context.get("mode") or RUN_MODE_EXECUTION
-
-    def _is_clarifying_mode(self):
-        return self._current_run_mode() == RUN_MODE_CLARIFYING
 
     def _is_tool_allowed_for_mode(self, name):
         if hasattr(self.skill_manager, "is_tool_allowed"):
@@ -602,8 +589,6 @@ class LLMWorker(QThread):
                 return self.skill_manager.is_tool_allowed(name, self._current_run_mode())
             except Exception:
                 return False
-        if self._is_clarifying_mode():
-            return is_tool_allowed_in_clarifying(name)
         return True
 
     def _is_tool_visible_for_run(self, name):
@@ -627,6 +612,22 @@ class LLMWorker(QThread):
             except Exception:
                 return True
         return True
+
+    def _request_user_input_validation_error(self, args):
+        if not isinstance(args, dict):
+            return ""
+        questions = args.get("questions")
+        if not questions:
+            return ""
+        if not isinstance(questions, list):
+            return "request_user_input questions must be a list."
+        for index, item in enumerate(questions, start=1):
+            if not isinstance(item, dict):
+                return f"request_user_input question {index} must be an object."
+            options = item.get("options")
+            if not isinstance(options, list) or not options:
+                return f"request_user_input question {index} must provide selectable options."
+        return ""
 
     def _current_turn_has_image_input(self, messages):
         for msg in reversed(messages or []):
@@ -858,6 +859,7 @@ class LLMWorker(QThread):
             (self.run_context.get("im_provider") or "").strip().lower() in enterprise_channels
             or (self.run_context.get("channel") or "").strip().lower() in enterprise_channels
         )
+        clarify_round_count = max(0, int(self.run_context.get("clarify_round_count") or 0))
 
         stable_policy_lines = [
             "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于当前工作区。",
@@ -895,6 +897,13 @@ class LLMWorker(QThread):
             "",
             "策略 [交互]: 如果你需要向用户获取确认，请使用 'request_user_approval'。如果你需要向用户提问、收集文本或选项，请使用 'request_user_input'。",
             "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。",
+            "",
+            "策略 [必要澄清]:",
+            "1. 默认直接执行用户任务；不要为了偏好、风格、可合理默认的细节、可先做草稿的内容，或可通过上下文/只读探索查明的信息打断用户。",
+            "2. 只有不澄清就无法可靠执行、很可能执行错对象/错范围，或会带来明显风险时，才允许调用 'request_user_input'。",
+            "3. 必须澄清时只能使用 questionnaire；每个问题必须提供互斥选项，第一个选项是推荐最佳选项，最后一个选项必须是“自定义”。",
+            "4. 不要直接让用户自由输入；只有用户选择“自定义”时才让用户补充自定义内容。",
+            f"5. 当前任务已澄清 {clarify_round_count}/3 轮；达到 3 轮后禁止继续澄清，必须采用推荐/最安全选项继续，或明确说明仍无法安全执行。",
             "",
             "策略 [并行工具]: 当需要并行读取多个文件、并行执行 grep/glob、或同时查询多个彼此独立的只读数据源时，优先使用 'parallel_tools'。",
             "策略 [并行工具]: 'parallel_tools' 只适用于彼此独立的只读工具调用；涉及写文件、命令执行、审批、用户输入、经验更新、子代理管理时，保持普通单工具调用。",
@@ -979,7 +988,6 @@ class LLMWorker(QThread):
         )
         run_mode = self._current_run_mode()
         available_tool_names = self._available_tool_names()
-        clarifying_read_tools = get_clarifying_read_tools(available_tool_names)
 
         capability_lines = []
         if available_tool_names:
@@ -1026,26 +1034,6 @@ class LLMWorker(QThread):
             package_line,
             missing_line,
         ]
-        if self._is_clarifying_mode():
-            if clarifying_read_tools:
-                read_tool_line = "、".join(f"`{name}`" for name in clarifying_read_tools)
-            else:
-                read_tool_line = "当前 tool schema 中未暴露工作区读取工具"
-            dynamic_state_lines.extend(
-                [
-                    "",
-                    "策略 [反问模式]:",
-                    "1. 你当前处于 clarifying 模式。你必须先做只读探索，禁止执行会修改工作区或系统状态的操作。",
-                    f"2. 当前反问模式下可用只读工具: {read_tool_line}。",
-                    "3. 先探索再提问：优先通过代码和配置消除不确定性，不要提可以从仓库直接查到的问题。",
-                    "4. 若需求仍不清楚，必须立即通过 'request_user_input' 以问卷卡片提出澄清问题；不要在普通文本回复中询问用户是否愿意进入反问。",
-                    "5. 问题数量应弹性控制在 3-4 个；需求已经足够清楚时可以少问或不问。",
-                    "6. 每个问题都要 materially 改变执行方案、确认重要假设，或选择真实取舍；选项要互斥且带简短说明。",
-                    "7. 允许多轮反问；如果本轮回答后仍缺少关键决策，继续调用 'request_user_input'。",
-                    "8. 当信息足够执行时，输出一段简短的已确认需求总结，不要输出计划文档或 XML 标签；UI 会切回正常执行模式继续同一任务。",
-                    "9. 反问模式不会放宽任何权限边界：工作区外访问、写操作、命令执行、系统自动化等限制仍然有效。",
-                ]
-            )
         workflow_mode = str(self.run_context.get("workflow_mode") or "").strip()
         if workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
             profile = str(self.run_context.get("office_output_profile") or "free").strip()
@@ -1624,12 +1612,34 @@ class LLMWorker(QThread):
                                     "mode": self._current_run_mode(),
                                     "content": f"请先调用 tool_search 发现 {name}，再在下一轮使用它。",
                                 }
+                            elif (
+                                name == "request_user_input"
+                                and int(self.run_context.get("clarify_round_count") or 0) >= 3
+                            ):
+                                result = {
+                                    "error": "clarification limit reached",
+                                    "blocked_tool": name,
+                                    "status": "denied",
+                                    "content": "本任务已达到 3 轮澄清上限，请采用推荐或最安全的合理假设继续。",
+                                }
+                            elif name == "request_user_input" and self._request_user_input_validation_error(args):
+                                result = {
+                                    "error": self._request_user_input_validation_error(args),
+                                    "blocked_tool": name,
+                                    "status": "denied",
+                                    "content": "澄清问题必须提供可选择的选项；请改用 questionnaire 选项卡片。",
+                                }
                             else:
                                 result = self.skill_manager.call_tool(
                                     name,
                                     args,
                                     context=tool_context,
                                 )
+                                if name == "request_user_input":
+                                    self.run_context["clarify_round_count"] = min(
+                                        3,
+                                        int(self.run_context.get("clarify_round_count") or 0) + 1,
+                                    )
                                 if name == "tool_search":
                                     self._refresh_tool_definitions()
                             end_tool_time = time.time()

@@ -460,7 +460,7 @@ TOOL_EXPORTS = [
             "required": [],
         },
         "read_only": True,
-        "allowed_modes": ["clarifying", "execution"],
+        "allowed_modes": ["execution"],
         "search_hint": "file glob find names",
     },
     {
@@ -479,7 +479,7 @@ TOOL_EXPORTS = [
             "required": ["pattern"],
         },
         "read_only": True,
-        "allowed_modes": ["clarifying", "execution"],
+        "allowed_modes": ["execution"],
         "search_hint": "grep search code text",
     },
     {

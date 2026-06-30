@@ -154,6 +154,8 @@ def request_user_input(
     timeout_seconds=120,
     _context=None,
 ):
+    custom_option = {"label": "自定义", "value": "__custom__", "description": "选择后填写选项以外的自定义内容。"}
+
     def _normalize_question_specs(raw_questions):
         normalized = []
         seen_ids = set()
@@ -182,6 +184,17 @@ def request_user_input(
                 elif isinstance(option, str) and option.strip():
                     value = option.strip()
                     q_options.append({"label": value, "value": value, "description": ""})
+            if not q_options:
+                continue
+            q_options = [
+                option
+                for option in q_options
+                if str(option.get("value") or "").strip() != custom_option["value"]
+                and str(option.get("label") or "").strip() != custom_option["label"]
+            ]
+            if not q_options:
+                continue
+            q_options.append(dict(custom_option))
             normalized.append(
                 {
                     "header": str(item.get("header") or "").strip(),
@@ -200,10 +213,10 @@ def request_user_input(
             message,
             title=title or "需要你的输入",
             questions=normalized_questions,
-            allow_free_text=bool(allow_free_text),
+            allow_free_text=True,
             timeout_seconds=timeout_seconds,
             source_tool="request_user_input",
-            metadata={"input_mode": "questionnaire"},
+            metadata={"input_mode": "questionnaire", "auto_select_first_on_timeout": True},
         )
         answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
         answered_count = len(answers)
@@ -228,7 +241,7 @@ def request_user_input(
                 "message": message,
                 "title": title or "需要你的输入",
                 "questions": normalized_questions,
-                "allow_free_text": bool(allow_free_text),
+                "allow_free_text": True,
                 "timeout_seconds": timeout_seconds,
             },
             "interaction_response": response,
@@ -764,7 +777,7 @@ TOOL_EXPORTS = [
     {
         "name": "request_user_input",
         "handler": request_user_input,
-        "description": "Ask the user for text, choices, or a multi-question questionnaire.",
+        "description": "Ask the user for choices or a multi-question questionnaire. Clarifying questions must use questionnaire options: first option recommended, last option custom.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -786,7 +799,7 @@ TOOL_EXPORTS = [
                 },
                 "questions": {
                     "type": "array",
-                    "description": "Optional questionnaire definition. When provided, input_mode/options are ignored.",
+                    "description": "Optional questionnaire definition. When provided, input_mode/options are ignored. Every question must include choices; the first is treated as recommended and a custom option is appended last.",
                     "items": {
                         "type": "object",
                         "properties": {

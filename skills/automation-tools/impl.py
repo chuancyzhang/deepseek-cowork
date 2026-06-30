@@ -346,7 +346,7 @@ TOOL_EXPORTS = [
             "required": [],
         },
         "read_only": True,
-        "allowed_modes": ["clarifying", "execution"],
+        "allowed_modes": ["execution"],
         "search_hint": "automation sop template list schedule workflow",
     },
     {
@@ -376,7 +376,7 @@ TOOL_EXPORTS = [
             "required": [],
         },
         "read_only": True,
-        "allowed_modes": ["clarifying", "execution"],
+        "allowed_modes": ["execution"],
         "search_hint": "automation scheduled task list cron",
     },
     {
@@ -450,7 +450,7 @@ TOOL_EXPORTS = [
             "required": [],
         },
         "read_only": True,
-        "allowed_modes": ["clarifying", "execution"],
+        "allowed_modes": ["execution"],
         "search_hint": "automation history runs status",
     },
 ]

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.clarify_mode import RUN_MODE_CLARIFYING, RUN_MODE_EXECUTION
+from core.clarify_mode import RUN_MODE_EXECUTION
 from core.skill_manager import SkillManager
 from core.tool_registry import ToolRegistry
 
@@ -36,15 +36,11 @@ class TestToolRegistry(unittest.TestCase):
             {"type": "object", "properties": {}, "required": []},
         )
 
-        clarifying_names = [item["function"]["name"] for item in registry.definitions(RUN_MODE_CLARIFYING)]
-        self.assertIn("text_file_read", clarifying_names)
-        self.assertNotIn("text_file_write", clarifying_names)
-
         execution_initial = [
             item["function"]["name"]
             for item in registry.definitions(RUN_MODE_EXECUTION, discovered_tool_names=set())
         ]
-        self.assertIn("text_file_read", execution_initial)
+        self.assertNotIn("text_file_read", execution_initial)
         self.assertNotIn("text_file_write", execution_initial)
 
         matches = registry.search("write file", run_mode=RUN_MODE_EXECUTION)
@@ -57,7 +53,8 @@ class TestToolRegistry(unittest.TestCase):
             )
         ]
         self.assertIn("text_file_write", execution_after_search)
-        self.assertEqual(registry.search("write file", run_mode=RUN_MODE_CLARIFYING), [])
+        legacy_matches = registry.search("write file", run_mode="clarifying")
+        self.assertEqual(legacy_matches[0]["name"], "text_file_write")
 
     def test_alias_resolution(self):
         registry = ToolRegistry()
@@ -74,7 +71,7 @@ class TestToolRegistry(unittest.TestCase):
         )
 
         self.assertEqual(registry.resolve_name("open_file"), "text_file_read")
-        self.assertTrue(registry.is_allowed("open_file", RUN_MODE_CLARIFYING))
+        self.assertTrue(registry.is_allowed("open_file", "clarifying"))
 
 
 class TestSkillManagerToolDiscovery(unittest.TestCase):
@@ -164,18 +161,6 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("read_note", after_search)
         self.assertIn("write_note", after_search)
 
-        clarifying_discovered = {"read_note", "write_note"}
-        clarifying_tools = {
-            item["function"]["name"]
-            for item in sm.get_tool_definitions(
-                run_mode=RUN_MODE_CLARIFYING,
-                discovered_tool_names=clarifying_discovered,
-            )
-        }
-        self.assertIn("tool_search", clarifying_tools)
-        self.assertIn("read_note", clarifying_tools)
-        self.assertNotIn("write_note", clarifying_tools)
-
     def test_chat_only_mode_hides_workspace_tools_from_definitions_and_search(self):
         skill_dir = os.path.join(self.skills_dir, "mixed-tools")
         os.makedirs(skill_dir, exist_ok=True)
@@ -244,17 +229,8 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
                 discovered_tool_names=set(),
             )
         }
-        clarifying_initial = {
-            item["function"]["name"]
-            for item in sm.get_tool_definitions(
-                run_mode=RUN_MODE_CLARIFYING,
-                discovered_tool_names=set(),
-            )
-        }
-
         self.assertIn("run_python_code", execution_initial)
         self.assertNotIn("install_package", execution_initial)
-        self.assertNotIn("run_python_code", clarifying_initial)
 
     def test_skill_manager_registers_mcp_tools_from_config(self):
         config_manager = MagicMock()
@@ -560,18 +536,17 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             },
             context={
                 "run_context": {
-                    "mode": RUN_MODE_CLARIFYING,
+                    "mode": RUN_MODE_EXECUTION,
                     "allowed_skill_names": ["notes-tools"],
                 },
                 "discovered_tool_names": {"resize_image", "execution_only_read"},
             },
         )
 
-        self.assertEqual(result["status"], "error")
-        self.assertEqual([item["status"] for item in result["results"]], ["denied", "denied", "denied"])
+        self.assertEqual(result["status"], "partial_error")
+        self.assertEqual([item["status"] for item in result["results"]], ["denied", "denied", "ok"])
         self.assertIn("not been discovered", result["results"][0]["error"])
         self.assertIn("not allowed for this agent profile", result["results"][1]["error"])
-        self.assertIn("not allowed in the current mode", result["results"][2]["error"])
 
     def test_parallel_tools_returns_partial_error_when_one_subcall_fails(self):
         self._copy_repo_skill("meta-tools")

@@ -151,7 +151,6 @@ from core.clarify_mode import (
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_EXECUTION,
-    RUN_MODE_CLARIFYING,
     WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     derive_clarify_phase,
@@ -11876,6 +11875,7 @@ class SessionState:
         self.pending_clarify_questions = []
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
+        self.clarify_round_count = 0
         self.selected_skill_names = []
         self.workflow_mode = ""
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
@@ -14505,15 +14505,6 @@ class MainWindow(QMainWindow):
         self.input_field.returnPressed.connect(self.handle_send)
         self.input_field.mentionRequested.connect(self.show_agent_mention_menu)
 
-        self.clarify_mode_check = QCheckBox("反问模式")
-        self.clarify_mode_check.setCursor(Qt.PointingHandCursor)
-        self.clarify_mode_check.toggled.connect(self.on_clarify_mode_toggled)
-        self.clarify_mode_check.hide()
-
-        self.clarify_mode_action = QAction("反问模式", self)
-        self.clarify_mode_action.setCheckable(True)
-        self.clarify_mode_action.triggered.connect(self.on_clarify_mode_toggled)
-
         self.tool_menu_btn = QPushButton()
         self.tool_menu_btn.setIcon(sidebar_plus_icon("#6b7280", 16))
         self.tool_menu_btn.setToolTip("工具")
@@ -14542,24 +14533,6 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setVisible(False)
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
         self.selected_skills_badge.closeClicked.connect(self.clear_session_selected_skills)
-
-        self.clarify_mode_badge = QPushButton("  反问模式")
-        self.clarify_mode_badge.setIcon(qta.icon('fa5s.question-circle', color=DesignTokens.primary))
-        self.clarify_mode_badge.setToolTip("反问模式已开启，点击关闭")
-        self.clarify_mode_badge.setCursor(Qt.PointingHandCursor)
-        self.clarify_mode_badge.setCheckable(True)
-        self.clarify_mode_badge.setFixedHeight(30)
-        self.clarify_mode_badge.setMinimumWidth(96)
-        self.clarify_mode_badge.setVisible(False)
-        self.clarify_mode_badge.setStyleSheet(
-            f"QPushButton {{ background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_secondary}; "
-            f"border: 1px solid {DesignTokens.border}; border-radius: 15px; "
-            "padding: 4px 10px; font-size: 12px; font-weight: 600; text-align: left; }}"
-            f"QPushButton:hover {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}"
-            f"QPushButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
-            f"border-color: rgba(0, 122, 255, 0.32); }}"
-        )
-        self.clarify_mode_badge.clicked.connect(self.on_clarify_mode_toggled)
 
         self.model_select_btn = QToolButton()
         self.model_select_btn.setCursor(Qt.PointingHandCursor)
@@ -14638,7 +14611,6 @@ class MainWindow(QMainWindow):
         prompt_toolbar.addWidget(self.tool_menu_btn)
         prompt_toolbar.addWidget(self.sop_badge)
         prompt_toolbar.addWidget(self.selected_skills_badge)
-        prompt_toolbar.addWidget(self.clarify_mode_badge)
         prompt_toolbar.addWidget(self.pause_btn)
         prompt_toolbar.addWidget(self.loop_hint, 1)
         prompt_toolbar.addStretch()
@@ -15267,7 +15239,6 @@ class MainWindow(QMainWindow):
             ("add_files", "添加文件"),
             ("add_agent", "添加智能体"),
             ("select_skills", "指定能力"),
-            ("clarify_mode", "反问模式"),
         ]
 
     def _normalize_prompt_file_paths(self, paths):
@@ -15746,7 +15717,6 @@ class MainWindow(QMainWindow):
         select_skills_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "指定能力", self)
         select_skills_action.triggered.connect(self.open_session_skill_picker)
         menu.addAction(select_skills_action)
-        menu.addAction(self.clarify_mode_action)
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
     def refresh_model_selector(self):
@@ -15885,10 +15855,7 @@ class MainWindow(QMainWindow):
         has_workspace = bool(self._workspace_dir_for_state(state))
         has_clarify_context = bool(
             state
-            and (
-                state.clarify_mode_enabled
-                or bool(getattr(state, "pending_clarify_questions", []))
-            )
+            and bool(getattr(state, "pending_clarify_questions", []))
         )
         has_observability_context = bool(
             state
@@ -15922,11 +15889,11 @@ class MainWindow(QMainWindow):
         if not state:
             return {}
         return {
-            "clarify_mode_enabled": bool(getattr(state, "clarify_mode_enabled", False)),
+            "clarify_mode_enabled": False,
             "clarify_phase": normalize_clarify_phase(
                 getattr(state, "clarify_phase", ""),
                 default=derive_clarify_phase(
-                    getattr(state, "clarify_mode_enabled", False),
+                    bool(getattr(state, "pending_clarify_questions", [])),
                     getattr(state, "clarify_mode_state", CLARIFY_MODE_EXPLORING),
                 ),
             ),
@@ -15937,6 +15904,7 @@ class MainWindow(QMainWindow):
             "pending_clarify_questions": normalize_pending_clarify_questions(
                 getattr(state, "pending_clarify_questions", [])
             ),
+            "clarify_round_count": max(0, int(getattr(state, "clarify_round_count", 0) or 0)),
         }
 
     def _session_selected_skills_meta(self, state):
@@ -16444,13 +16412,10 @@ class MainWindow(QMainWindow):
         mentioned_profiles = []
         delegated_payload = step_content
         run_mode = RUN_MODE_EXECUTION
-        if state.clarify_mode_enabled:
-            state.clarify_phase = CLARIFY_MODE_EXPLORING
-            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-            state.pending_clarify_questions = []
-            state.clarify_source_user_text = step_content
-            state.clarify_answers_context = []
-            run_mode = RUN_MODE_CLARIFYING
+        state.pending_clarify_questions = []
+        state.clarify_source_user_text = step_content
+        state.clarify_answers_context = []
+        state.clarify_round_count = 0
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
         sop_default_profile = self._resolve_sop_default_profile(state)
@@ -16580,26 +16545,7 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
             return
-        clarify_enabled = bool(state.clarify_mode_enabled)
-        blocked_check = self.clarify_mode_check.blockSignals(True)
-        self.clarify_mode_check.setChecked(clarify_enabled)
-        self.clarify_mode_check.blockSignals(blocked_check)
-        clarify_enabled_for_ui = (
-            not ((state.llm_worker and state.llm_worker.isRunning()) or getattr(state, "daemon_running", False))
-        )
-        self.clarify_mode_check.setEnabled(clarify_enabled_for_ui)
-        self.clarify_mode_check.setText("反问模式")
-        if hasattr(self, "clarify_mode_badge"):
-            self.clarify_mode_badge.setVisible(clarify_enabled)
-            self.clarify_mode_badge.setEnabled(clarify_enabled_for_ui)
-            blocked_badge = self.clarify_mode_badge.blockSignals(True)
-            self.clarify_mode_badge.setChecked(clarify_enabled)
-            self.clarify_mode_badge.blockSignals(blocked_badge)
-        if hasattr(self, "clarify_mode_action"):
-            blocked_action = self.clarify_mode_action.blockSignals(True)
-            self.clarify_mode_action.setChecked(clarify_enabled)
-            self.clarify_mode_action.blockSignals(blocked_action)
-            self.clarify_mode_action.setEnabled(clarify_enabled_for_ui)
+        self.refresh_context_badges(state.session_id)
 
     def set_session_phase(self, phase, session_id=None):
         state = self.get_session(session_id)
@@ -17753,7 +17699,7 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setToolTip("暂停")
         else:
             awaiting_sop_confirmation = is_sop_awaiting_confirmation(getattr(state, "sop_run", None))
-            idle_text = "等待确认" if awaiting_sop_confirmation else ("开始反问" if state.clarify_mode_enabled else "开始")
+            idle_text = "等待确认" if awaiting_sop_confirmation else "开始"
             self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
@@ -17956,6 +17902,7 @@ class MainWindow(QMainWindow):
         state.pending_clarify_questions = []
         state.clarify_source_user_text = ""
         state.clarify_answers_context = []
+        state.clarify_round_count = 0
         state.selected_skill_names = []
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
@@ -18124,7 +18071,7 @@ class MainWindow(QMainWindow):
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
         state.sop_run = normalize_sop_run(conversation_meta.get("sop_run"))
-        state.clarify_mode_enabled = bool(conversation_meta.get("clarify_mode_enabled"))
+        state.clarify_mode_enabled = False
         state.clarify_mode_state = normalize_clarify_phase(
             conversation_meta.get("clarify_mode_state"),
             default=CLARIFY_MODE_EXPLORING,
@@ -18132,10 +18079,11 @@ class MainWindow(QMainWindow):
         state.pending_clarify_questions = normalize_pending_clarify_questions(
             conversation_meta.get("pending_clarify_questions")
         )
+        state.clarify_round_count = max(0, int(conversation_meta.get("clarify_round_count") or 0))
         state.clarify_phase = normalize_clarify_phase(
             conversation_meta.get("clarify_phase"),
             default=derive_clarify_phase(
-                state.clarify_mode_enabled,
+                bool(state.pending_clarify_questions),
                 state.clarify_mode_state,
             ),
         )
@@ -18305,9 +18253,15 @@ class MainWindow(QMainWindow):
                     q_combo.addItem(f"{idx}. {q_label}", q_value)
                 q_layout.addWidget(q_combo)
                 q_input = QLineEdit()
-                q_input.setPlaceholderText("可选：补充说明")
-                q_input.setVisible(bool(allow_free_text))
+                q_input.setPlaceholderText("选择“自定义”后填写…")
+                q_input.setEnabled(False)
+                q_input.setVisible(True)
                 q_layout.addWidget(q_input)
+                q_combo.currentIndexChanged.connect(
+                    lambda _idx, combo=q_combo, field=q_input: field.setEnabled(
+                        str(combo.currentData() or "").strip() == "__custom__"
+                    )
+                )
                 question_controls.append(
                     {
                         "id": question_item.get("id"),
@@ -18397,6 +18351,14 @@ class MainWindow(QMainWindow):
                         selected = str(combo_widget.currentData() or "").strip()
                     if input_widget is not None:
                         text_value = input_widget.text().strip()
+                    if selected == "__custom__":
+                        if not text_value:
+                            QMessageBox.information(dialog, "提示", "选择“自定义”后请填写内容。")
+                            input_widget.setFocus()
+                            return
+                        selected = ""
+                    else:
+                        text_value = ""
                     if not selected and not text_value:
                         continue
                     answers[question_id] = {
@@ -20072,8 +20034,7 @@ class MainWindow(QMainWindow):
         if not session_history_ready(state):
             return None
         has_clarify_state = bool(
-            state.clarify_mode_enabled
-            or bool(getattr(state, "pending_clarify_questions", []))
+            bool(getattr(state, "pending_clarify_questions", []))
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
         has_sop_state = bool(normalize_sop_run(getattr(state, "sop_run", None)))
@@ -22047,29 +22008,10 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state:
             return
-        state.clarify_mode_enabled = bool(checked)
-        if hasattr(self, "clarify_mode_badge"):
-            self.clarify_mode_badge.setVisible(state.clarify_mode_enabled)
-            blocked_badge = self.clarify_mode_badge.blockSignals(True)
-            self.clarify_mode_badge.setChecked(state.clarify_mode_enabled)
-            self.clarify_mode_badge.blockSignals(blocked_badge)
-        if hasattr(self, "clarify_mode_action"):
-            blocked_action = self.clarify_mode_action.blockSignals(True)
-            self.clarify_mode_action.setChecked(state.clarify_mode_enabled)
-            self.clarify_mode_action.blockSignals(blocked_action)
-        blocked_check = self.clarify_mode_check.blockSignals(True)
-        self.clarify_mode_check.setChecked(state.clarify_mode_enabled)
-        self.clarify_mode_check.blockSignals(blocked_check)
-        if not state.clarify_mode_enabled:
-            state.clarify_phase = CLARIFY_MODE_DISABLED
-            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-            state.pending_clarify_questions = []
-        else:
-            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-            state.clarify_phase = derive_clarify_phase(
-                True,
-                state.clarify_mode_state,
-            )
+        state.clarify_mode_enabled = False
+        state.clarify_phase = CLARIFY_MODE_DISABLED
+        state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+        state.pending_clarify_questions = []
         self.refresh_clarify_controls(state.session_id)
         self.save_chat_history(session_id=state.session_id)
         self.normalize_session_ui(state)
@@ -22105,6 +22047,7 @@ class MainWindow(QMainWindow):
                 "pending_clarify_questions": normalize_pending_clarify_questions(
                     getattr(state, "pending_clarify_questions", [])
                 ),
+                "clarify_round_count": max(0, int(getattr(state, "clarify_round_count", 0) or 0)),
                 "selected_skill_names": effective_skill_names,
                 "selected_model_id": self.config_manager.get_selected_model_id(),
                 "reasoning_effort": self._selected_reasoning_effort(),
@@ -22675,13 +22618,10 @@ class MainWindow(QMainWindow):
                 set_running=True,
             )
         run_mode = RUN_MODE_EXECUTION
-        if state.clarify_mode_enabled:
-            state.clarify_phase = CLARIFY_MODE_EXPLORING
-            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-            state.pending_clarify_questions = []
-            state.clarify_source_user_text = user_text
-            state.clarify_answers_context = []
-            run_mode = RUN_MODE_CLARIFYING
+        state.pending_clarify_questions = []
+        state.clarify_source_user_text = user_text
+        state.clarify_answers_context = []
+        state.clarify_round_count = 0
         current_turn_id = state.active_turn_id
         if mentioned_profiles:
             self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
@@ -22847,7 +22787,7 @@ class MainWindow(QMainWindow):
         }
         state.step_records = [r for r in state.step_records if r.get("tool_id") != data["id"]]
         state.step_records.append(record)
-        if state.clarify_mode_enabled and data.get("name") == "request_user_input":
+        if data.get("name") == "request_user_input":
             pending_questions = self._extract_pending_clarify_questions_from_args(
                 args_obj if isinstance(args_obj, dict) else {}
             )
@@ -22855,6 +22795,10 @@ class MainWindow(QMainWindow):
                 state.pending_clarify_questions = pending_questions
                 state.clarify_mode_state = CLARIFY_MODE_AWAITING_USER_INPUT
                 state.clarify_phase = CLARIFY_MODE_AWAITING_USER_INPUT
+                state.clarify_round_count = min(
+                    3,
+                    max(0, int(getattr(state, "clarify_round_count", 0) or 0)) + 1,
+                )
         if related_files:
             for path in related_files:
                 state.changed_files.append({"path": path, "type": "related", "summary": summary})
@@ -22887,7 +22831,7 @@ class MainWindow(QMainWindow):
                 "result_obj": pending_result.get("result_obj"),
             }, session_id=session_id)
 
-        if state.clarify_mode_enabled:
+        if state.pending_clarify_questions:
             self.set_session_phase("Clarifying", state.session_id)
         else:
             self.set_session_phase("Executing", state.session_id)
@@ -22916,7 +22860,7 @@ class MainWindow(QMainWindow):
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")
-        if state.clarify_mode_enabled and isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
+        if isinstance(result_obj, dict) and result_obj.get("source_tool") == "request_user_input":
             state.pending_clarify_questions = []
             state.clarify_mode_state = CLARIFY_MODE_EXPLORING
             state.clarify_phase = CLARIFY_MODE_EXPLORING
@@ -23857,7 +23801,7 @@ class MainWindow(QMainWindow):
             return
         delta = text or ""
         if delta.strip():
-            if state.clarify_mode_enabled:
+            if state.pending_clarify_questions:
                 self.set_session_phase("Clarifying", state.session_id)
             else:
                 self.set_session_phase("Analyzing", state.session_id)
@@ -24167,22 +24111,16 @@ class MainWindow(QMainWindow):
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
         self.update_session_tab_title(state.session_id)
-        clarify_active = bool(state.clarify_mode_enabled)
+        clarify_active = bool(normalize_pending_clarify_questions(getattr(state, "pending_clarify_questions", [])))
         if clarify_active:
             self.set_session_phase("Clarifying", state.session_id)
         else:
             self.set_session_phase("Wrapping up", state.session_id)
 
-        if clarify_active and not normalize_pending_clarify_questions(getattr(state, "pending_clarify_questions", [])):
-            has_clarify_answers = bool(getattr(state, "clarify_answers_context", []))
+        if clarify_active:
             self.set_session_status("draft", state.session_id, save=True)
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
-            if has_clarify_answers:
-                if is_current:
-                    self.normalize_session_ui(state)
-                self._finish_clarification(state)
-                return
             self.set_session_phase("Clarifying", state.session_id)
             if is_current:
                 self.normalize_session_ui(state)

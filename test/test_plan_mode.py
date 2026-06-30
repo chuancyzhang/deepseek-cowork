@@ -9,11 +9,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.clarify_mode import (
     OFFICE_OUTPUT_PROFILE_PPT,
-    RUN_MODE_CLARIFYING,
     RUN_MODE_EXECUTION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
-    get_clarifying_read_tools,
-    is_tool_allowed_in_clarifying,
     normalize_selected_skill_names,
     normalize_run_context,
 )
@@ -34,7 +31,7 @@ class _ConfigStub:
 
 
 class TestClarifyModeHelpers(unittest.TestCase):
-    def test_normalize_run_context_maps_legacy_planning_to_clarifying(self):
+    def test_normalize_run_context_maps_legacy_planning_to_execution(self):
         ctx = normalize_run_context(
             {
                 "mode": "planning",
@@ -46,52 +43,19 @@ class TestClarifyModeHelpers(unittest.TestCase):
             }
         )
 
-        self.assertEqual(ctx["mode"], RUN_MODE_CLARIFYING)
+        self.assertEqual(ctx["mode"], RUN_MODE_EXECUTION)
         self.assertEqual(ctx["selected_model_id"], "openai-fast")
         self.assertEqual(ctx["im_provider"], "feishu")
         self.assertEqual(ctx["channel"], "feishu")
         self.assertEqual(ctx["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
         self.assertEqual(ctx["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
+        self.assertEqual(ctx["clarify_round_count"], 0)
 
     def test_normalize_selected_skill_names_deduplicates_and_filters_blanks(self):
         self.assertEqual(
             normalize_selected_skill_names([" browser ", "", None, "browser", "python-runner"]),
             ["browser", "python-runner"],
         )
-
-    def test_get_clarifying_read_tools_preserves_order_and_deduplicates(self):
-        available_tool_names = [
-            "bash",
-            "search_codebase",
-            "workspace_list_files",
-            "search_codebase",
-            "text_file_read",
-            "grep",
-            "glob",
-            "search_files",
-            "read_memories",
-            "text_file_write",
-        ]
-
-        self.assertEqual(
-            get_clarifying_read_tools(available_tool_names),
-            [
-                "workspace_list_files",
-                "text_file_read",
-                "glob",
-                "grep",
-                "search_files",
-                "search_codebase",
-                "read_memories",
-            ],
-        )
-
-    def test_is_tool_allowed_in_clarifying_supports_read_and_question_tools_only(self):
-        self.assertTrue(is_tool_allowed_in_clarifying("search_files"))
-        self.assertTrue(is_tool_allowed_in_clarifying("search_codebase"))
-        self.assertTrue(is_tool_allowed_in_clarifying("request_user_input"))
-        self.assertFalse(is_tool_allowed_in_clarifying("bash"))
-        self.assertFalse(is_tool_allowed_in_clarifying("text_file_write"))
 
     def test_normalize_run_context_preserves_sop_run(self):
         sop_run = create_sop_run(
@@ -128,7 +92,7 @@ class TestClarifyModeHelpers(unittest.TestCase):
 
 
 class TestClarifyModeLLMWorker(unittest.TestCase):
-    def test_llm_worker_emits_clarifying_system_prompt(self):
+    def test_llm_worker_emits_necessary_clarification_policy(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -170,7 +134,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     [{"role": "user", "content": "clarify this"}],
                     _ConfigStub(temp_dir),
                     workspace_dir=temp_dir,
-                    run_context={"mode": RUN_MODE_CLARIFYING},
+                    run_context={"mode": RUN_MODE_EXECUTION, "clarify_round_count": 2},
                 )
                 worker.observability_signal.connect(lambda data: events.append(data))
                 worker.run()
@@ -178,9 +142,11 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertTrue(events)
             system_prompt = events[0].get("content", "")
             runtime_prompt = events[0].get("runtime_context", "")
-            self.assertIn("策略 [反问模式]", runtime_prompt)
-            self.assertIn("request_user_input", runtime_prompt)
-            self.assertNotIn("策略 [计划模式]", runtime_prompt)
+            self.assertIn("策略 [必要澄清]", system_prompt)
+            self.assertIn("默认直接执行用户任务", system_prompt)
+            self.assertIn("当前任务已澄清 2/3 轮", system_prompt)
+            self.assertIn("request_user_input", system_prompt)
+            self.assertNotIn("策略 [反问模式]", runtime_prompt)
             self.assertNotIn("<proposed_plan>", runtime_prompt)
             self.assertTrue(provider_events)
             self.assertEqual(system_prompt, provider_events[0][1][0])
@@ -826,7 +792,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         self.assertEqual(skill_contexts[0]["meta"]["skill_name"], "claim-expert")
         self.assertTrue(skill_contexts[0]["meta"]["content_hash"])
 
-    def test_clarifying_mode_filters_to_allowed_read_and_interaction_tools(self):
+    def test_legacy_clarifying_context_runs_as_execution(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -859,22 +825,23 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     [{"role": "user", "content": "clarify this"}],
                     _ConfigStub(temp_dir),
                     workspace_dir=temp_dir,
-                    run_context={"mode": RUN_MODE_CLARIFYING},
+                    run_context={"mode": "clarifying"},
                 )
 
             tool_names = {item["function"]["name"] for item in worker.tools}
+            self.assertEqual(worker.run_context["mode"], RUN_MODE_EXECUTION)
             self.assertIn("search_codebase", tool_names)
             self.assertIn("workspace_list_files", tool_names)
             self.assertIn("text_file_read", tool_names)
             self.assertIn("glob", tool_names)
             self.assertIn("grep", tool_names)
             self.assertIn("request_user_input", tool_names)
-            self.assertNotIn("bash", tool_names)
-            self.assertNotIn("text_file_write", tool_names)
+            self.assertIn("bash", tool_names)
+            self.assertIn("text_file_write", tool_names)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_accepts_legacy_planning_context_as_clarifying(self):
+    def test_llm_worker_accepts_legacy_planning_context_as_execution(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -897,47 +864,90 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                     run_context={"mode": "planning"},
                 )
 
-            self.assertEqual(worker.run_context["mode"], RUN_MODE_CLARIFYING)
+            self.assertEqual(worker.run_context["mode"], RUN_MODE_EXECUTION)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_keeps_clarifying_hard_boundary_after_discovery(self):
+    def test_llm_worker_blocks_user_input_after_three_clarification_rounds(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
 
             def get_tool_definitions(self, run_mode=None, discovered_tool_names=None, include_deferred=False):
-                names = ["tool_search", "text_file_read", "text_file_write"]
+                names = ["request_user_input"]
                 return [
                     {"type": "function", "function": {"name": name, "description": "", "parameters": {}}}
                     for name in names
                 ]
 
             def is_tool_allowed(self, name, run_mode):
-                return not (run_mode == RUN_MODE_CLARIFYING and name == "text_file_write")
+                return True
 
             def is_tool_visible(self, name, run_mode, discovered_tool_names=None):
                 return True
 
+            def get_skill_of_tool(self, _tool_name):
+                return None
+
+            def get_brief_skill_prompt(self, _skill_name):
+                return ""
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                return {"source_tool": name, "content": "unexpected"}
+
             def check_for_updates(self):
                 return False
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, messages, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "input-1",
+                        "function": {
+                            "name": "request_user_input",
+                            "arguments": "{\"message\":\"choose\",\"questions\":[{\"id\":\"scope\",\"question\":\"scope?\",\"options\":[{\"label\":\"推荐\",\"value\":\"recommended\"}]}]}",
+                        },
+                    }
+                    return
+                yield {"type": "content", "content": "continued"}
 
         from core.agent import LLMWorker
 
         temp_dir = tempfile.mkdtemp()
+        results = []
         try:
-            with patch("core.agent.SkillManager", _SkillManagerStub):
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub()),
+            ):
                 worker = LLMWorker(
                     [{"role": "user", "content": "clarify this"}],
                     _ConfigStub(temp_dir),
                     workspace_dir=temp_dir,
-                    run_context={"mode": RUN_MODE_CLARIFYING},
+                    run_context={"mode": RUN_MODE_EXECUTION, "clarify_round_count": 3},
                 )
+                worker.finished_signal.connect(lambda payload: results.append(payload))
+                worker.run()
 
-            tool_names = {item["function"]["name"] for item in worker.tools}
-            self.assertIn("tool_search", tool_names)
-            self.assertIn("text_file_read", tool_names)
-            self.assertNotIn("text_file_write", tool_names)
+            self.assertTrue(results)
+            generated = results[0]["generated_messages"]
+            tool_messages = [msg for msg in generated if msg.get("role") == "tool"]
+            self.assertTrue(tool_messages)
+            self.assertIn("clarification limit reached", tool_messages[0].get("content", ""))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

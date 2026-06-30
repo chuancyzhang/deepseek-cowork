@@ -21114,10 +21114,19 @@ class MainWindow(QMainWindow):
     def reveal_in_explorer(self, path):
         if not path:
             return
+        normalized = os.path.abspath(path)
+        if not os.path.exists(normalized):
+            QMessageBox.warning(self, "无法打开资源管理器", f"路径不存在：\n{normalized}")
+            return
         if platform.system() == "Windows":
-            subprocess.Popen(["explorer", "/select,", path], **subprocess_kwargs_no_window())
+            if os.path.isdir(normalized):
+                subprocess.Popen(["explorer.exe", normalized], **subprocess_kwargs_no_window())
+            else:
+                subprocess.Popen(["explorer.exe", f"/select,{normalized}"], **subprocess_kwargs_no_window())
         else:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+            target_dir = normalized if os.path.isdir(normalized) else os.path.dirname(normalized)
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(target_dir)):
+                QMessageBox.warning(self, "无法打开资源管理器", f"无法打开路径：\n{target_dir}")
 
     def copy_path_to_clipboard(self, path):
         if not path:

@@ -52,6 +52,7 @@ from main import (
     SubAgentEventSummaryRow,
     SubAgentEventTile,
     SubAgentMonitor,
+    subprocess_kwargs_no_window,
     TokenUsageChip,
     SOP_EXECUTOR_BASH_COMMAND,
     SOP_EXECUTOR_PYTHON_FILE,
@@ -2853,6 +2854,49 @@ class TestSopUiHelpers(unittest.TestCase):
             window.start_gateway_process()
 
         popen.assert_not_called()
+
+    def test_reveal_in_explorer_selects_windows_file(self):
+        window = MainWindow.__new__(MainWindow)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = os.path.join(temp_dir, "draft file.html")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("<html></html>")
+
+            with patch("main.platform.system", return_value="Windows"), \
+                 patch("main.subprocess.Popen") as popen:
+                window.reveal_in_explorer(file_path)
+
+        popen.assert_called_once()
+        args, kwargs = popen.call_args
+        self.assertEqual(args[0], ["explorer.exe", f"/select,{os.path.abspath(file_path)}"])
+        expected_kwargs = subprocess_kwargs_no_window()
+        self.assertEqual(kwargs.get("creationflags"), expected_kwargs.get("creationflags"))
+        self.assertIsNotNone(kwargs.get("startupinfo"))
+
+    def test_reveal_in_explorer_opens_windows_directory(self):
+        window = MainWindow.__new__(MainWindow)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("main.platform.system", return_value="Windows"), \
+                 patch("main.subprocess.Popen") as popen:
+                window.reveal_in_explorer(temp_dir)
+
+            popen.assert_called_once()
+            args, kwargs = popen.call_args
+            self.assertEqual(args[0], ["explorer.exe", os.path.abspath(temp_dir)])
+            expected_kwargs = subprocess_kwargs_no_window()
+            self.assertEqual(kwargs.get("creationflags"), expected_kwargs.get("creationflags"))
+            self.assertIsNotNone(kwargs.get("startupinfo"))
+
+    def test_reveal_in_explorer_warns_for_missing_path(self):
+        window = MainWindow.__new__(MainWindow)
+        missing_path = os.path.join(tempfile.gettempdir(), "cowork-missing-reveal-path")
+
+        with patch("main.QMessageBox.warning") as warning, \
+             patch("main.subprocess.Popen") as popen:
+            window.reveal_in_explorer(missing_path)
+
+        popen.assert_not_called()
+        warning.assert_called_once()
 
     def test_render_sub_agent_monitor_truncates_to_stable_limit(self):
         window = MainWindow.__new__(MainWindow)

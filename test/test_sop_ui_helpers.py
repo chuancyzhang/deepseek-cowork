@@ -3090,6 +3090,36 @@ class TestSopUiHelpers(unittest.TestCase):
             clear_current_input=True,
         )
 
+    def test_accept_turn_guidance_uses_inline_card(self):
+        window = MainWindow.__new__(MainWindow)
+        state = SimpleNamespace(
+            session_id="session-1",
+            messages=[],
+            pending_guidance_messages=[],
+        )
+        message = {
+            "id": "guidance-1",
+            "role": "user",
+            "content": "优先修复失败测试",
+            "meta": {"same_turn_guidance": True},
+        }
+        attachments = [{"path": "C:\\work\\trace.png"}]
+        window.current_session_id = "session-1"
+        window.add_turn_guidance_inline = MagicMock()
+        window.add_system_toast = MagicMock()
+
+        window._accept_turn_guidance(state, message, "优先修复失败测试", attachments)
+
+        self.assertEqual(len(state.pending_guidance_messages), 1)
+        window.add_turn_guidance_inline.assert_called_once_with(
+            message,
+            display_content="优先修复失败测试",
+            attachments=attachments,
+            force_scroll=True,
+            session_id="session-1",
+        )
+        window.add_system_toast.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,7 @@ from core.single_instance import (
 )
 from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
-from core.conversation_render import build_conversation_render_spans
+from core.conversation_render import build_conversation_render_spans, is_same_turn_guidance_message
 from core.deliverable_preview import (
     DELIVERABLE_TYPES,
     OFFICE_EXTENSIONS,
@@ -19642,6 +19642,19 @@ class MainWindow(QMainWindow):
                 state.last_agent_bubble = None
                 continue
 
+            if item_type == "guidance":
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                self.add_turn_guidance_inline(
+                    message,
+                    display_content=self._message_display_content(message),
+                    attachments=self._message_user_attachments(message),
+                    index=current_idx,
+                    session_id=session_id,
+                )
+                if current_idx is not None:
+                    current_idx += 1
+                continue
+
             if item_type != "assistant":
                 continue
 
@@ -19808,6 +19821,21 @@ class MainWindow(QMainWindow):
             reasoning = msg.get('reasoning')
             
             if role == 'user':
+                if is_same_turn_guidance_message(msg):
+                    finalize_active_bubble()
+                    self.add_turn_guidance_inline(
+                        msg,
+                        display_content=self._message_display_content(msg),
+                        attachments=self._message_user_attachments(msg),
+                        index=current_idx if target_layout is None else None,
+                        session_id=session_id,
+                        target_layout=target_layout,
+                    )
+                    if current_idx is not None and target_layout is None:
+                        current_idx += 1
+                    if target_layout is None:
+                        inserted_count += 1
+                    continue
                 finalize_active_bubble()
                 self.add_chat_bubble(
                     'User',
@@ -22350,13 +22378,12 @@ class MainWindow(QMainWindow):
         if not already_persisted:
             state.pending_guidance_messages.append(copy.deepcopy(message))
         if state.session_id == self.current_session_id:
-            self.add_chat_bubble(
-                "User",
-                display_content or "",
-                animate=False,
-                force_scroll=True,
+            self.add_turn_guidance_inline(
+                message,
+                display_content=display_content or "",
                 attachments=attachments or [],
-                source_message_id=message.get("id"),
+                force_scroll=True,
+                session_id=state.session_id,
             )
             self.add_system_toast("已加入当前任务", "info", session_id=state.session_id, auto_close_ms=2200)
 
@@ -22974,6 +23001,109 @@ class MainWindow(QMainWindow):
         self.queue_session_bubble_virtualization(state.session_id)
             
         return bubble
+
+    def add_turn_guidance_inline(
+        self,
+        message,
+        display_content="",
+        attachments=None,
+        index=None,
+        force_scroll=False,
+        session_id=None,
+        target_layout=None,
+    ):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state:
+            return None
+
+        if state.empty_state is not None:
+            state.empty_state.setVisible(False)
+
+        text = str(display_content if display_content is not None else self._message_display_content(message)).strip()
+        if not text:
+            text = str((message or {}).get("content") or "").strip()
+        attachment_items = list(attachments or [])
+
+        wrapper = QWidget()
+        wrapper.setObjectName("TurnGuidanceInline")
+        wrapper_layout = QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(42, 4, 8, 4)
+        wrapper_layout.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("TurnGuidanceCard")
+        card.setMaximumWidth(DesignTokens.message_max_width)
+        card.setStyleSheet(f"""
+            QFrame#TurnGuidanceCard {{
+                background: rgba(255, 255, 255, 0.76);
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 14px;
+            }}
+        """)
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 12, 0)
+        card_layout.setSpacing(10)
+
+        rail = QFrame()
+        rail.setObjectName("TurnGuidanceRail")
+        rail.setFixedWidth(3)
+        rail.setStyleSheet(f"""
+            QFrame#TurnGuidanceRail {{
+                background: {DesignTokens.primary};
+                border: none;
+                border-top-left-radius: 14px;
+                border-bottom-left-radius: 14px;
+            }}
+        """)
+        card_layout.addWidget(rail)
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 9, 0, 9)
+        body_layout.setSpacing(5)
+
+        header = QLabel("补充引导")
+        header.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 12px; font-weight: 700;")
+        body_layout.addWidget(header)
+
+        content_label = QLabel(text)
+        content_label.setWordWrap(True)
+        content_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        content_label.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: 13px; line-height: 1.5; background: transparent;"
+        )
+        body_layout.addWidget(content_label)
+
+        if attachment_items:
+            chip_row = QWidget()
+            chip_layout = QHBoxLayout(chip_row)
+            chip_layout.setContentsMargins(0, 2, 0, 0)
+            chip_layout.setSpacing(6)
+            for attachment in attachment_items:
+                path = attachment.get("path") if isinstance(attachment, dict) else str(attachment or "")
+                if path:
+                    chip_layout.addWidget(FileChip(path, removable=False))
+            chip_layout.addStretch()
+            body_layout.addWidget(chip_row)
+
+        card_layout.addWidget(body, 1)
+        wrapper_layout.addWidget(card)
+        wrapper_layout.addStretch()
+
+        layout = target_layout or state.chat_layout
+        if index is not None:
+            layout.insertWidget(index, wrapper)
+        else:
+            if layout is state.chat_layout:
+                layout.insertWidget(layout.count() - 1, wrapper)
+            else:
+                layout.addWidget(wrapper)
+
+        self.process_ui_events(force=False)
+        if index is None:
+            self.request_session_scroll_to_bottom(state.session_id, force=force_scroll)
+        self.queue_session_bubble_virtualization(state.session_id)
+        return wrapper
 
     def _connect_chat_bubble_actions(self, bubble, state):
         if bubble is None or state is None or getattr(bubble, "_main_window_actions_connected", False):

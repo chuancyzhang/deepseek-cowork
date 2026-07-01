@@ -35,6 +35,13 @@ def _is_hidden_context_message(message):
     return bool(meta.get("hidden")) and meta.get("kind") in {"skill_context", "skill_context_update"}
 
 
+def is_same_turn_guidance_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return bool(meta.get("same_turn_guidance"))
+
+
 OFFICE_WORKFLOW_MODES = {"office_html_first", "office_file_conversion"}
 
 
@@ -111,6 +118,10 @@ def build_conversation_render_items(messages):
             continue
         role = raw_message.get("role") or ""
         if role == "user":
+            if is_same_turn_guidance_message(raw_message):
+                flush_group()
+                items.append({"type": "guidance", "message": raw_message})
+                continue
             flush_group()
             items.append({"type": "user", "message": raw_message})
             continue
@@ -189,6 +200,12 @@ def build_conversation_render_spans(messages):
             continue
         role = raw_message.get("role") or ""
         if role == "user":
+            if is_same_turn_guidance_message(raw_message):
+                if office_group_start is not None:
+                    continue
+                if group_start is None:
+                    group_start = index
+                continue
             flush_office_group(index)
             flush_group(index)
             if _is_office_draft_request(raw_message):

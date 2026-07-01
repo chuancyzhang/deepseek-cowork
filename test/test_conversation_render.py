@@ -108,6 +108,28 @@ class TestConversationRender(unittest.TestCase):
         )
         self.assertEqual(spans, [{"start": 0, "end": 1}, {"start": 1, "end": 4}, {"start": 4, "end": 5}])
 
+    def test_same_turn_guidance_stays_in_current_turn_span(self):
+        spans = build_conversation_render_spans(
+            [
+                {"id": "u1", "role": "user", "content": "start"},
+                {"id": "a1", "role": "assistant", "content": "working"},
+                {"id": "g1", "role": "user", "content": "focus tests", "meta": {"same_turn_guidance": True}},
+                {"id": "a2", "role": "assistant", "content": "done"},
+                {"id": "u2", "role": "user", "content": "next"},
+            ]
+        )
+        self.assertEqual(spans, [{"start": 0, "end": 1}, {"start": 1, "end": 4}, {"start": 4, "end": 5}])
+
+    def test_same_turn_guidance_has_dedicated_render_item(self):
+        items = build_conversation_render_items(
+            [
+                {"id": "a1", "role": "assistant", "content": "working"},
+                {"id": "g1", "role": "user", "content": "focus tests", "meta": {"same_turn_guidance": True}},
+                {"id": "a2", "role": "assistant", "content": "done"},
+            ]
+        )
+        self.assertEqual([item["type"] for item in items], ["assistant", "guidance", "assistant"])
+
     def test_build_conversation_render_spans_keeps_office_draft_turn_collapsible(self):
         spans = build_conversation_render_spans(
             [

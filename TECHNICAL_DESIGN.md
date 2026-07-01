@@ -98,7 +98,7 @@ Cowork 采用交错式推理流程：
 
 ## 7. 数据与持久化
 
-- **会话**：`core/chat_storage.py` 负责本地消息历史、归档、置顶和项目归属
+- **会话**：`core/chat_storage.py` 负责当前格式本地消息历史、归档、置顶和项目归属；UI 激活历史会话前会 flush 同会话保存队列，读取失败保持 `history_loaded=False` 并显示错误占位，避免把失败状态写成空历史。早期文本文件历史不再进入当前加载兼容链路。
 - **配置**：`core/config_manager.py` 统一管理模型、MCP、Skill 运行配置、工作区、智能体和 UI 偏好
 - **记忆**：`core/memory_store.py` 与 `core/memory_update.py` 管理灵魂提示词、全局摘要和工作区摘要
 - **技能**：文件系统中的 `SKILL.md`、`skill.json`、`impl.py`、`experience/entries.jsonl`

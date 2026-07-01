@@ -1989,6 +1989,8 @@ class SafeApplication(QApplication):
         self.main_window = None
 
     def notify(self, receiver, event):
+        if isinstance(receiver, QEvent) and isinstance(event, QObject):
+            receiver, event = event, receiver
         try:
             return super().notify(receiver, event)
         except Exception:
@@ -17937,6 +17939,17 @@ class MainWindow(QMainWindow):
         )
         state.chat_layout.insertWidget(0, placeholder)
 
+    def _show_session_load_error_state(self, state, text):
+        self.clear_chat_layout(state.chat_layout)
+        state.empty_state = None
+        placeholder = QLabel(str(text or "历史会话加载失败。"))
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setWordWrap(True)
+        placeholder.setStyleSheet(
+            f"color: {DesignTokens.error_text}; font-size: 13px; padding: 32px 0;"
+        )
+        state.chat_layout.insertWidget(0, placeholder)
+
     def _rebuild_session_render_spans(self, state):
         state.render_items = build_conversation_render_spans(state.messages)
         state.displayed_count = len(state.messages)
@@ -17979,6 +17992,9 @@ class MainWindow(QMainWindow):
         self.queue_session_bubble_virtualization(state.session_id)
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return
         state = self.sessions.get(session_id)
         if state is None:
             self.create_new_session(session_id=session_id, make_current=False)
@@ -18015,8 +18031,20 @@ class MainWindow(QMainWindow):
             self.queue_session_history_load(session_id)
 
     def queue_session_history_load(self, session_id):
+        session_id = str(session_id or "").strip()
         state = self.get_session(session_id)
         if not state:
+            return
+        if not self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000):
+            state.history_loaded = False
+            state.history_loading = False
+            self._show_session_load_error_state(
+                state,
+                "会话保存队列尚未落盘，暂时不能加载历史。请稍后重试。",
+            )
+            self.append_log(f"历史会话加载已暂停，等待保存队列落盘: {session_id}")
+            if session_id == self.current_session_id:
+                self.normalize_session_ui(state)
             return
         self._session_load_token_counter += 1
         state.history_load_token = self._session_load_token_counter
@@ -18034,19 +18062,26 @@ class MainWindow(QMainWindow):
         if not state or token != state.history_load_token:
             return
 
-        self._reset_session_history_state(state)
-        loaded_from_json = False
-        conversation_meta = {}
-        conversation_record = None
         try:
             conversation_meta = self.chat_storage.get_conversation_meta(session_id)
-        except Exception:
-            conversation_meta = {}
-        try:
             conversation_record = self.chat_storage.get_conversation_record(session_id)
-        except Exception:
-            conversation_record = None
+            loaded_messages = self.chat_storage.get_messages(session_id)
+            loaded_agents = self.chat_storage.list_agents(session_id)
+        except Exception as exc:
+            state.history_loaded = False
+            state.history_loading = False
+            self._show_session_load_error_state(state, f"历史会话加载失败：{exc}")
+            self.append_log(f"历史会话加载失败({session_id}): {exc}")
+            if session_id == self.current_session_id:
+                self.normalize_session_ui(state)
+            return
 
+        if token != state.history_load_token:
+            return
+
+        self._reset_session_history_state(state)
+        state.messages = loaded_messages
+        state.persisted_agents = loaded_agents
         state.session_status = (
             (conversation_record or {}).get("status")
             or conversation_meta.get("session_status")
@@ -18087,32 +18122,13 @@ class MainWindow(QMainWindow):
                 state.clarify_mode_state,
             ),
         )
-
-        try:
-            state.messages = self.chat_storage.get_messages(session_id)
-        except Exception:
-            state.messages = []
-        try:
-            state.persisted_agents = self.chat_storage.list_agents(session_id)
-        except Exception:
-            state.persisted_agents = []
         state.sub_agent_events = []
         state.sub_agent_history_loaded = False
-        if not state.messages:
-            history_path = os.path.join(self.chat_history_dir, f'chat_history_{session_id}.json')
-            if os.path.exists(history_path):
-                try:
-                    with open(history_path, 'r', encoding='utf-8') as f:
-                        state.messages = json.load(f)
-                    loaded_from_json = True
-                except Exception as e:
-                    print(f"Error loading session: {e}")
 
         if state.messages:
             state.messages = self._normalize_and_persist_session_messages(
                 session_id,
                 state.messages,
-                force_persist=loaded_from_json,
                 existing_meta=conversation_meta
             )
         self._rebuild_session_render_spans(state)

@@ -845,6 +845,44 @@ class _HistoryActionState:
 
 
 class TestSopUiHelpers(unittest.TestCase):
+    def _build_history_load_window(self):
+        QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        scroll = QScrollArea()
+        state = SessionState("session-1", layout, QLabel(), host, scroll, QLabel())
+        state.history_loaded = False
+        state.history_loading = False
+        window.sessions = {state.session_id: state}
+        window.current_session_id = state.session_id
+        window._session_load_token_counter = 0
+        window.get_session = lambda session_id=None: window.sessions.get(session_id or window.current_session_id)
+        window.clear_chat_layout = MainWindow.clear_chat_layout.__get__(window, MainWindow)
+        window._show_session_loading_state = MainWindow._show_session_loading_state.__get__(window, MainWindow)
+        window._show_session_load_error_state = MainWindow._show_session_load_error_state.__get__(window, MainWindow)
+        window.queue_session_history_load = MainWindow.queue_session_history_load.__get__(window, MainWindow)
+        window._load_session_history = MainWindow._load_session_history.__get__(window, MainWindow)
+        window.flush_pending_chat_saves = MagicMock(return_value=True)
+        window.normalize_session_ui = MagicMock()
+        window.append_log = MagicMock()
+        window.refresh_token_usage_label = MagicMock()
+        window._reset_session_history_state = MagicMock()
+        window._rebuild_session_render_spans = MagicMock()
+        window._render_initial_session_history = MagicMock()
+        window._finish_session_history_load = MagicMock()
+        window.update_session_tab_title = MagicMock()
+        window.update_history_selection = MagicMock()
+        window.refresh_change_list = MagicMock()
+        window.refresh_step_list = MagicMock()
+        window.refresh_sop_controls = MagicMock()
+        window.refresh_selected_skill_controls = MagicMock()
+        window._queue_render_sub_agent_monitor_for_state = MagicMock()
+        window.get_current_session = MagicMock(return_value=state)
+        window.chat_storage = MagicMock()
+        self.addCleanup(host.deleteLater)
+        return window, state
+
     def _build_history_sidebar_window(self, conversations, query=""):
         window = MainWindow.__new__(MainWindow)
         window.history_container = QWidget()
@@ -1283,6 +1321,45 @@ class TestSopUiHelpers(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(len(window.chat_save_worker.requests), 1)
         window.chat_storage.save_conversation.assert_not_called()
+
+    def test_queue_session_history_load_waits_for_pending_save_flush(self):
+        window, state = self._build_history_load_window()
+        window.flush_pending_chat_saves.return_value = False
+
+        window.queue_session_history_load("session-1")
+
+        window.flush_pending_chat_saves.assert_called_once_with(session_id="session-1", timeout_ms=3000)
+        self.assertFalse(state.history_loaded)
+        self.assertFalse(state.history_loading)
+        self.assertEqual(state.history_load_token, 0)
+        window.normalize_session_ui.assert_called_once_with(state)
+        window.append_log.assert_called_once()
+
+    def test_load_session_history_failure_keeps_session_unloaded(self):
+        window, state = self._build_history_load_window()
+        state.history_load_token = 7
+        state.history_loading = True
+        window.chat_storage.get_conversation_meta.side_effect = RuntimeError("db locked")
+
+        window._load_session_history("session-1", 7)
+
+        self.assertFalse(state.history_loaded)
+        self.assertFalse(state.history_loading)
+        window._reset_session_history_state.assert_not_called()
+        window._finish_session_history_load.assert_not_called()
+        window.normalize_session_ui.assert_called_once_with(state)
+        window.append_log.assert_called_once()
+
+    def test_load_session_history_ignores_stale_token(self):
+        window, state = self._build_history_load_window()
+        state.history_load_token = 8
+        state.history_loading = True
+
+        window._load_session_history("session-1", 7)
+
+        window.chat_storage.get_conversation_meta.assert_not_called()
+        window._reset_session_history_state.assert_not_called()
+        self.assertTrue(state.history_loading)
 
     def test_prompt_tool_menu_order_helper_matches_spec(self):
         window = MainWindow.__new__(MainWindow)

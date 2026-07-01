@@ -1495,15 +1495,23 @@ class LLMWorker(QThread):
                                 repetition_count = 0
                                 last_tool_signature = current_signature
                                 
-                            if repetition_count >= 3: # Same toolset called 4 times in a row
+                            if repetition_count >= 2: # Same toolset called 3 times in a row
+                                repeated_tools = ", ".join(
+                                    sorted({str(t.function.name or "unknown") for t in tool_calls})
+                                )
                                 self.step_signal.emit("系统: 🛑 检测到循环 (重复的工具调用)。自动停止。")
-                                final_content = "⚠️ 操作已停止: 检测到死循环 (重复的工具调用)。"
+                                final_content = (
+                                    "⚠️ 操作已停止: 检测到连续 3 次重复的工具调用"
+                                    f"（{repeated_tools or 'unknown'}）。请查看上方工具结果，"
+                                    "或调整请求后重新发送。"
+                                )
                                 break
                         except Exception as e:
                             print(f"Loop detection error: {e}")
                         # ----------------------
 
                         self.step_signal.emit(f"Tool Calls Detected: {len(tool_calls)}")
+                        successful_tool_results = []
                         for tool in tool_calls:
                             # Check Control Flags inside tool loop
                             while self.is_paused:
@@ -1695,10 +1703,25 @@ class LLMWorker(QThread):
                                 }
                             }
                             current_messages.append(tool_msg)
+                            if result_text.strip() and not (
+                                isinstance(result_obj, dict)
+                                and str(result_obj.get("status") or "").lower() in {"denied", "invalid_tool_call"}
+                            ):
+                                successful_tool_results.append(name)
                             if name == "tool_search":
                                 self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)
                             generated_messages.append(tool_msg)
                             self.step_signal.emit(f"Tool Result: {result_text}")
+                        if successful_tool_results:
+                            tool_names = ", ".join(sorted(set(successful_tool_results)))
+                            current_messages.append({
+                                "role": "system",
+                                "content": (
+                                    "上一轮工具调用已返回可用结果"
+                                    f"（{tool_names}）。除非缺少完成任务所必需的信息，"
+                                    "请优先基于已有工具结果直接回答用户，不要重复调用相同工具和参数。"
+                                ),
+                            })
                         # Loop continues to let LLM see tool results
                         continue
                     else:

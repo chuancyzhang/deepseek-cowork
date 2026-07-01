@@ -35,6 +35,36 @@ SUPPORTED_VISION_MIME_TYPES = {
     "image/gif",
 }
 
+MAX_INLINE_FILE_BYTES = 128 * 1024
+TEXT_ATTACHMENT_MIME_PREFIXES = ("text/",)
+TEXT_ATTACHMENT_MIME_TYPES = {
+    "application/json",
+    "application/javascript",
+    "application/xml",
+    "application/x-yaml",
+}
+TEXT_ATTACHMENT_EXTENSIONS = {
+    ".bat",
+    ".cmd",
+    ".conf",
+    ".config",
+    ".csv",
+    ".ini",
+    ".js",
+    ".json",
+    ".log",
+    ".md",
+    ".py",
+    ".rs",
+    ".sh",
+    ".toml",
+    ".ts",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+
 
 def _guess_image_mime_type(path):
     guessed, _encoding = mimetypes.guess_type(path)
@@ -51,6 +81,60 @@ def _build_data_url_from_path(path):
     return f"data:{mime_type};base64,{encoded}"
 
 
+def _is_text_attachment(path):
+    guessed, _encoding = mimetypes.guess_type(path)
+    guessed = str(guessed or "").strip().lower()
+    if guessed.startswith(TEXT_ATTACHMENT_MIME_PREFIXES) or guessed in TEXT_ATTACHMENT_MIME_TYPES:
+        return True
+    return os.path.splitext(str(path or ""))[1].lower() in TEXT_ATTACHMENT_EXTENSIONS
+
+
+def _attachment_display_name(part, path):
+    name = str(part.get("name") or "").strip() if isinstance(part, dict) else ""
+    return name or os.path.basename(path) or path
+
+
+def _build_file_attachment_text(part):
+    path = str(part.get("path") or "").strip()
+    name = _attachment_display_name(part, path)
+    if not path:
+        return f"[Attached file: {name}]\nError: missing local file path."
+    if not os.path.isfile(path):
+        return f"[Attached file: {name}]\nPath: {path}\nError: file does not exist."
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        return f"[Attached file: {name}]\nPath: {path}\nError: could not stat file: {exc}"
+    if size > MAX_INLINE_FILE_BYTES:
+        return (
+            f"[Attached file: {name}]\n"
+            f"Path: {path}\n"
+            f"Size: {size} bytes\n"
+            "Content was not inlined because the file is larger than 131072 bytes. "
+            "Use an appropriate file-reading tool if the exact content is needed."
+        )
+    if not _is_text_attachment(path):
+        return (
+            f"[Attached file: {name}]\n"
+            f"Path: {path}\n"
+            f"Size: {size} bytes\n"
+            "Content was not inlined because this file type is not treated as plain text. "
+            "Use an appropriate document or file-reading tool if the exact content is needed."
+        )
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            content = handle.read()
+    except UnicodeDecodeError:
+        try:
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                content = handle.read()
+        except UnicodeDecodeError as exc:
+            return f"[Attached file: {name}]\nPath: {path}\nError: could not decode as UTF-8 text: {exc}"
+    except OSError as exc:
+        return f"[Attached file: {name}]\nPath: {path}\nError: could not read file: {exc}"
+    return f"[Attached file: {name}]\nPath: {path}\nContent:\n{content}"
+
+
 def _extract_image_paths(content_parts):
     image_paths = []
     for part in content_parts or []:
@@ -64,13 +148,25 @@ def _extract_image_paths(content_parts):
     return image_paths
 
 
-def _build_openai_vision_content(text_content, content_parts):
+def _build_openai_user_content(text_content, content_parts, supports_vision=False):
     content = []
     if text_content:
         content.append({"type": "text", "text": text_content})
+    for part in content_parts or []:
+        if not isinstance(part, dict):
+            continue
+        if str(part.get("type") or "").strip().lower() != "input_file":
+            continue
+        content.append({"type": "text", "text": _build_file_attachment_text(part)})
+    if not supports_vision:
+        return content
     for path in _extract_image_paths(content_parts):
         data_url = _build_data_url_from_path(path)
         if not data_url:
+            content.append({
+                "type": "text",
+                "text": f"[Attached image]\nPath: {path}\nError: image could not be read or is not a supported image type.",
+            })
             continue
         content.append(
             {
@@ -82,6 +178,10 @@ def _build_openai_vision_content(text_content, content_parts):
             }
         )
     return content
+
+
+def _build_openai_vision_content(text_content, content_parts):
+    return _build_openai_user_content(text_content, content_parts, supports_vision=True)
 
 class OpenAIProvider(LLMProvider):
     protocol_family = "openai-compatible"
@@ -332,13 +432,16 @@ class OpenAIProvider(LLMProvider):
             if m.get("role") == "assistant" and "tool_calls" in m and not m.get("content"):
                 m["content"] = None
             elif (
-                self.supports_vision
-                and m.get("role") == "user"
+                m.get("role") == "user"
                 and isinstance(content_parts, list)
             ):
-                vision_content = _build_openai_vision_content(m.get("content") or "", content_parts)
-                if vision_content:
-                    m["content"] = vision_content
+                user_content = _build_openai_user_content(
+                    m.get("content") or "",
+                    content_parts,
+                    supports_vision=self.supports_vision,
+                )
+                if user_content:
+                    m["content"] = user_content
                 
             clean.append(m)
         return clean
@@ -390,13 +493,16 @@ class MoonshotProvider(OpenAIProvider):
             if m.get("role") == "assistant" and "tool_calls" in m and not m.get("content"):
                 m["content"] = None # OpenAI SDK handles None as null, which is valid when tool_calls exist
             elif (
-                self.supports_vision
-                and m.get("role") == "user"
+                m.get("role") == "user"
                 and isinstance(content_parts, list)
             ):
-                vision_content = _build_openai_vision_content(m.get("content") or "", content_parts)
-                if vision_content:
-                    m["content"] = vision_content
+                user_content = _build_openai_user_content(
+                    m.get("content") or "",
+                    content_parts,
+                    supports_vision=self.supports_vision,
+                )
+                if user_content:
+                    m["content"] = user_content
 
             clean.append(m)
         return clean
@@ -534,11 +640,14 @@ class AnthropicProvider(LLMProvider):
             # Handle multi-modal content
             new_content = []
             if (
-                self.supports_vision
-                and role == "user"
+                role == "user"
                 and isinstance(content_parts, list)
             ):
-                content = _build_openai_vision_content(content or "", content_parts)
+                content = _build_openai_user_content(
+                    content or "",
+                    content_parts,
+                    supports_vision=self.supports_vision,
+                )
             if isinstance(content, str):
                 new_content = content
             elif isinstance(content, list):

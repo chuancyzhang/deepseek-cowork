@@ -9373,6 +9373,7 @@ class EmptyStateWidget(QWidget):
         hint = QFrame()
         hint.setObjectName("ToolkitInstallHint")
         hint.setMaximumWidth(820)
+        hint.setMinimumHeight(78)
         hint.setStyleSheet(
             f"""
             QFrame#ToolkitInstallHint {{
@@ -9398,7 +9399,7 @@ class EmptyStateWidget(QWidget):
             f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary}; "
             "background: transparent; border: none;"
         )
-        desc = QLabel("可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格、数据分析和可视化任务。")
+        desc = QLabel("可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。")
         desc.setWordWrap(True)
         desc.setStyleSheet(
             f"font-size: 12px; color: {DesignTokens.text_secondary}; "

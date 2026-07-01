@@ -322,6 +322,59 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
 
         self.assertEqual(prepared[0]["content"], "Path only")
 
+    def test_prepare_messages_inlines_text_file_parts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = os.path.join(temp_dir, "brief.md")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("# Brief\nUse this content.")
+
+            provider, _client = self._build_provider(
+                base_url="https://api.openai.com/v1",
+                model_name="gpt-4.1-mini",
+            )
+            prepared = provider._prepare_messages(
+                [
+                    {
+                        "role": "user",
+                        "content": "Summarize the attached file",
+                        "content_parts": [
+                            {"type": "input_file", "path": file_path, "name": "brief.md"},
+                        ],
+                    }
+                ]
+            )
+
+        self.assertIsInstance(prepared[0]["content"], list)
+        self.assertEqual(prepared[0]["content"][0]["text"], "Summarize the attached file")
+        self.assertIn("[Attached file: brief.md]", prepared[0]["content"][1]["text"])
+        self.assertIn("# Brief\nUse this content.", prepared[0]["content"][1]["text"])
+
+    def test_prepare_messages_marks_large_file_without_inlining(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = os.path.join(temp_dir, "large.txt")
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("x" * (129 * 1024))
+
+            provider, _client = self._build_provider(
+                base_url="https://api.openai.com/v1",
+                model_name="gpt-4.1-mini",
+            )
+            prepared = provider._prepare_messages(
+                [
+                    {
+                        "role": "user",
+                        "content": "Read this",
+                        "content_parts": [
+                            {"type": "input_file", "path": file_path, "name": "large.txt"},
+                        ],
+                    }
+                ]
+            )
+
+        file_text = prepared[0]["content"][1]["text"]
+        self.assertIn("Content was not inlined", file_text)
+        self.assertIn("larger than 131072 bytes", file_text)
+
 
 class TestDeepSeekMessageSanitization(unittest.TestCase):
     def test_clear_reasoning_content_preserves_tool_call_turns_only(self):

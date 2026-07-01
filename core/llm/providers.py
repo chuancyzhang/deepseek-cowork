@@ -152,13 +152,17 @@ def _build_openai_user_content(text_content, content_parts, supports_vision=Fals
     content = []
     if text_content:
         content.append({"type": "text", "text": text_content})
+    file_attachment_count = 0
     for part in content_parts or []:
         if not isinstance(part, dict):
             continue
         if str(part.get("type") or "").strip().lower() != "input_file":
             continue
+        file_attachment_count += 1
         content.append({"type": "text", "text": _build_file_attachment_text(part)})
     if not supports_vision:
+        if file_attachment_count == 0:
+            return []
         return content
     for path in _extract_image_paths(content_parts):
         data_url = _build_data_url_from_path(path)

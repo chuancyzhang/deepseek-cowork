@@ -1344,6 +1344,78 @@ class TestAgentSystemPrompt(unittest.TestCase):
         self.assertEqual(tool_names, ["tool_search", "text_file_read"])
 
 
+class TestLLMWorkerToolLoopGuard(unittest.TestCase):
+    def test_repeated_tool_signature_stops_on_third_model_request(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                self.call_count = 0
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, skill_name):
+                return ""
+
+            def get_skill_display_name(self, skill_name):
+                return skill_name
+
+            def get_skill_of_tool(self, name):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                self.call_count += 1
+                return {"status": "ok", "content": f"result {self.call_count}"}
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                yield {
+                    "type": "tool_call",
+                    "index": 0,
+                    "id": f"call-{len([m for m in messages if m.get('role') == 'assistant'])}",
+                    "function": {"name": "read_file", "arguments": '{"path":"demo.txt"}'},
+                }
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        try:
+            skill_manager_instances = []
+
+            def _skill_manager_factory(*args, **kwargs):
+                manager = _SkillManagerStub()
+                skill_manager_instances.append(manager)
+                return manager
+
+            with (
+                patch("core.agent.SkillManager", side_effect=_skill_manager_factory),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub()),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "read demo"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(lambda data: finished.append(data))
+                worker.run()
+
+            self.assertTrue(finished)
+            self.assertIn("连续 3 次重复的工具调用", finished[0]["content"])
+            self.assertEqual(skill_manager_instances[0].call_count, 2)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 class TestSingleInstance(unittest.TestCase):
     def test_build_ui_server_name_is_stable_and_scoped(self):
         first = build_ui_server_name(os.path.join("C:\\Apps", "Cowork"))

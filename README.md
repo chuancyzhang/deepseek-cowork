@@ -25,6 +25,7 @@ Current app version: **4.9.5**
 - **Right-side context drawer**: browse files and deliverables in a list view, then drill into a focused preview/action view; chat deliverable cards open directly in preview.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Settings center**: manage models, agents, workspace defaults, MCP servers, enterprise messaging, and runtime components.
+- **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage task templates, schedules, run history, and step confirmation.
 - **Skill center**: enable, import, export, debug, and review skills without restarting the app.
 
@@ -73,9 +74,10 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 1. Open **Settings** and configure a model service.
 2. Start a pure chat or attach the conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
-4. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.
-5. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
-6. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
+4. For document, spreadsheet, or data-analysis tasks, use the home prompt to open **Settings → Components & dependencies** and install the document and data-analysis toolkits.
+5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.
+6. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
+7. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
 
 ## Architecture
 

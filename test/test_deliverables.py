@@ -143,6 +143,10 @@ class TestDeliverableScanning(unittest.TestCase):
                 self.input_field = PromptBox()
                 self.workflow_mode = ""
                 self.office_output_profile = ""
+                self.opened_settings_page = None
+
+            def open_settings(self, initial_page_label=None):
+                self.opened_settings_page = initial_page_label
 
         main_window = MainWindowStub()
         widget = EmptyStateWidget(main_window)
@@ -160,6 +164,12 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(main_window.input_field.text, office_card[2])
             self.assertEqual(main_window.workflow_mode, "")
             self.assertEqual(main_window.office_output_profile, "")
+            self.assertIsNotNone(widget.findChild(QPushButton, None))
+            labels = [label.text() for label in widget.findChildren(QLabel)]
+            self.assertIn("需要处理文档或数据？", labels)
+            self.assertTrue(any("文档工具包" in text and "数据分析工具包" in text for text in labels))
+            widget.toolkit_hint_button.click()
+            self.assertEqual(main_window.opened_settings_page, "组件与依赖")
         finally:
             widget.deleteLater()
 

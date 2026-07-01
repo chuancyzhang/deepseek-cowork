@@ -6537,7 +6537,7 @@ class AppUpdateWorker(QThread):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, config_manager, parent=None):
+    def __init__(self, config_manager, parent=None, initial_page_label=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
         screen = self.screen() or QGuiApplication.primaryScreen()
@@ -7101,7 +7101,7 @@ class SettingsDialog(QDialog):
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
         self.update_nav_item = add_settings_page("更新", "fa5s.download", update_page)
         self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
-        self.nav_list.setCurrentRow(0)
+        self.select_initial_page(initial_page_label)
 
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -7114,6 +7114,15 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(save_btn)
         layout.addLayout(btn_layout)
+
+    def select_initial_page(self, initial_page_label):
+        if not initial_page_label:
+            self.nav_list.setCurrentRow(0)
+            return
+        matches = self.nav_list.findItems(str(initial_page_label), Qt.MatchExactly)
+        if not matches:
+            raise ValueError(f"未找到设置页：{initial_page_label}")
+        self.nav_list.setCurrentItem(matches[0])
 
     def _source_config_from_editors(self):
         config = normalize_download_sources(self.download_sources)
@@ -9272,6 +9281,8 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(title)
         layout.addSpacing(40)
         layout.addWidget(self.grid_widget)
+        layout.addSpacing(18)
+        layout.addWidget(self.create_toolkit_hint(), 0, Qt.AlignHCenter)
         layout.addStretch()
         
         # Initial layout
@@ -9357,6 +9368,58 @@ class EmptyStateWidget(QWidget):
 
     def activate_action_prompt(self, prompt, title=""):
         self.main_window.input_field.setText(prompt)
+
+    def create_toolkit_hint(self):
+        hint = QFrame()
+        hint.setObjectName("ToolkitInstallHint")
+        hint.setMaximumWidth(820)
+        hint.setStyleSheet(
+            f"""
+            QFrame#ToolkitInstallHint {{
+                background: {DesignTokens.bg_panel_strong};
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 18px;
+            }}
+            """
+        )
+        hint_layout = QHBoxLayout(hint)
+        hint_layout.setContentsMargins(16, 12, 14, 12)
+        hint_layout.setSpacing(12)
+
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.puzzle-piece", color=DesignTokens.primary).pixmap(18, 18))
+        icon.setStyleSheet("background: transparent; border: none;")
+        hint_layout.addWidget(icon, 0, Qt.AlignTop)
+
+        text_box = QVBoxLayout()
+        text_box.setSpacing(3)
+        title = QLabel("需要处理文档或数据？")
+        title.setStyleSheet(
+            f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary}; "
+            "background: transparent; border: none;"
+        )
+        desc = QLabel("可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格、数据分析和可视化任务。")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(
+            f"font-size: 12px; color: {DesignTokens.text_secondary}; "
+            "background: transparent; border: none;"
+        )
+        text_box.addWidget(title)
+        text_box.addWidget(desc)
+        hint_layout.addLayout(text_box, 1)
+
+        open_btn = QPushButton("打开设置")
+        open_btn.setObjectName("SecondaryBtn")
+        open_btn.setCursor(Qt.PointingHandCursor)
+        open_btn.setFixedHeight(32)
+        open_btn.setStyleSheet(apple_button_style("secondary", radius=16))
+        open_btn.clicked.connect(self.open_toolkit_settings)
+        hint_layout.addWidget(open_btn, 0, Qt.AlignVCenter)
+        self.toolkit_hint_button = open_btn
+        return hint
+
+    def open_toolkit_settings(self):
+        self.main_window.open_settings("组件与依赖")
 
 class SystemToast(QFrame):
     """Compact floating system notification."""
@@ -21268,8 +21331,8 @@ class MainWindow(QMainWindow):
                 self.preview_stack.setCurrentWidget(self.preview_text)
         except Exception: pass
 
-    def open_settings(self):
-        dialog = SettingsDialog(self.config_manager, self)
+    def open_settings(self, initial_page_label=None):
+        dialog = SettingsDialog(self.config_manager, self, initial_page_label=initial_page_label)
         result = dialog.exec()
         if result == QDialog.Accepted and getattr(dialog, "requires_skill_reload", False):
             self.skill_manager.load_skills()

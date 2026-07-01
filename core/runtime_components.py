@@ -47,10 +47,10 @@ TOOLKITS = {
     },
     "finance": {
         "name": "金融分析工具包",
-        "description": "金融数据、策略回测与绩效分析",
-        "packages": ["pandas", "akshare", "yfinance", "tushare", "backtrader", "quantstats"],
-        "imports": ["pandas", "akshare", "yfinance", "tushare", "backtrader", "quantstats"],
-        "skills": ["financial-data-akshare", "quant-strategy-management"],
+        "description": "金融数据查询与研究辅助",
+        "packages": ["pandas", "akshare"],
+        "imports": ["pandas", "akshare"],
+        "skills": ["financial-data-akshare"],
     },
     "browser-automation": {
         "name": "浏览器自动化工具包",

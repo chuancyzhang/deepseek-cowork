@@ -12,6 +12,7 @@ from core import sandbox_runtime
 class TestSandboxRuntime(unittest.TestCase):
     def tearDown(self):
         sandbox_runtime._RUNTIME_CACHE = None
+        sandbox_runtime.reset_native_library_dir_caches()
 
     def test_build_skill_script_command_covers_python_node_and_bash(self):
         with patch("core.sandbox_runtime.get_runtime_executable") as get_exec:
@@ -81,6 +82,63 @@ class TestSandboxRuntime(unittest.TestCase):
                 self.assertIn(os.path.join(bash_root, "mingw64", "bin"), path_entries)
                 self.assertIn(skill_site_packages, env["COWORK_PYTHON_DLL_DIRS"].split(os.pathsep))
                 self.assertTrue(os.path.isfile(os.path.join(bootstrap_dir, "sitecustomize.py")))
+
+    def test_python_dll_dirs_reuses_base_scan_across_skills(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            python_root = os.path.join(temp_dir, "python")
+            runtime_site_packages = os.path.join(python_root, "Lib", "site-packages")
+            os.makedirs(runtime_site_packages, exist_ok=True)
+            with open(os.path.join(runtime_site_packages, "runtime_native.pyd"), "w", encoding="utf-8") as f:
+                f.write("")
+
+            calls = []
+            original_collect = sandbox_runtime._collect_native_library_dirs
+
+            def wrapped_collect(*roots):
+                calls.append(tuple(root for root in roots if root))
+                return original_collect(*roots)
+
+            fake_runtime = {"python": os.path.join(python_root, "python.exe")}
+            with patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime._toolkit_python_paths", return_value=[]), \
+                 patch("core.sandbox_runtime._collect_native_library_dirs", side_effect=wrapped_collect):
+                first = sandbox_runtime._python_dll_dirs(fake_runtime, skill_id="first")
+                second = sandbox_runtime._python_dll_dirs(fake_runtime, skill_id="second")
+
+        self.assertIn(runtime_site_packages, first)
+        self.assertIn(runtime_site_packages, second)
+        self.assertEqual(len(calls), 3)
+        self.assertIn(runtime_site_packages, calls[0])
+        self.assertTrue(calls[1][0].endswith(os.path.join("skills", "first", "python", "site-packages")))
+        self.assertTrue(calls[2][0].endswith(os.path.join("skills", "second", "python", "site-packages")))
+
+    def test_install_skill_dependencies_clears_skill_dll_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime_root = os.path.join(temp_dir, "sandbox")
+            python_exe = os.path.join(temp_dir, "python", "python.exe")
+            os.makedirs(os.path.dirname(python_exe), exist_ok=True)
+            with open(python_exe, "w", encoding="utf-8") as f:
+                f.write("")
+
+            fake_runtime = {
+                "root": runtime_root,
+                "python": python_exe,
+                "pip": python_exe,
+                "node": "",
+                "npm": "",
+                "npx": "",
+                "bash": "",
+            }
+
+            with patch("core.sandbox_runtime.ensure_sandbox_runtime", return_value=fake_runtime), \
+                 patch("core.sandbox_runtime.get_app_data_dir", return_value=temp_dir), \
+                 patch("core.sandbox_runtime.subprocess.check_output", return_value="installed"):
+                sandbox_runtime._python_dll_dirs(fake_runtime, skill_id="demo-skill")
+                self.assertIn("demo-skill", sandbox_runtime._SKILL_NATIVE_LIBRARY_DIRS_CACHE)
+                result = sandbox_runtime.install_skill_dependencies("demo-skill", python_dependencies=["Pillow"], force=True)
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("demo-skill", sandbox_runtime._SKILL_NATIVE_LIBRARY_DIRS_CACHE)
 
     def test_resolve_bash_detects_windows_frozen_internal_git_bash_layout(self):
         with tempfile.TemporaryDirectory() as temp_dir:

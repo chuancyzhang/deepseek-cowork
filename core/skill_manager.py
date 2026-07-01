@@ -63,7 +63,6 @@ def _humanize_skill_name(skill_name):
         "meta-tools": "任务辅助工具",
         "command-tools": "命令与搜索工具",
         "financial-data-akshare": "AKShare 金融数据",
-        "quant-strategy-management": "量化策略管理",
         "python-runner": "Python 执行",
         "skill-importer": "能力导入",
         "skill_builder": "能力创建",
@@ -80,7 +79,6 @@ class SkillManager:
     GROUP_DEFAULTS = {
         "file-system": "file-information-interaction",
         "financial-data-akshare": "file-information-interaction",
-        "quant-strategy-management": "file-information-interaction",
         "web-search": "file-information-interaction",
         "command-tools": "code-command-execution",
         "browser-automation": "file-information-interaction",

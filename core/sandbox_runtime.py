@@ -11,11 +11,22 @@ from core.process_utils import subprocess_kwargs_no_window
 
 SANDBOX_VERSION = "v1"
 _RUNTIME_CACHE = None
+_BASE_NATIVE_LIBRARY_DIRS_CACHE = {}
+_SKILL_NATIVE_LIBRARY_DIRS_CACHE = {}
 
 
 def reset_runtime_cache():
     global _RUNTIME_CACHE
     _RUNTIME_CACHE = None
+    reset_native_library_dir_caches()
+
+
+def reset_native_library_dir_caches(skill_id=None):
+    if skill_id is None:
+        _BASE_NATIVE_LIBRARY_DIRS_CACHE.clear()
+        _SKILL_NATIVE_LIBRARY_DIRS_CACHE.clear()
+        return
+    _SKILL_NATIVE_LIBRARY_DIRS_CACHE.pop(str(skill_id or ""), None)
 
 
 def _norm(path):
@@ -508,14 +519,34 @@ def _python_dll_dirs(runtime, skill_id=None):
     python_exe = runtime.get("python")
     runtime_root = _python_runtime_root(python_exe)
     runtime_site_packages = os.path.join(runtime_root, "Lib", "site-packages") if runtime_root else ""
-    skill_site_packages = _skill_python_path(skill_id) if skill_id else ""
-    return _collect_native_library_dirs(
-        runtime_root,
-        os.path.join(runtime_root, "DLLs") if runtime_root else "",
-        runtime_site_packages,
-        skill_site_packages,
-        *_toolkit_python_paths(),
+    toolkit_paths = tuple(_toolkit_python_paths())
+    base_cache_key = tuple(
+        os.path.normcase(os.path.abspath(path))
+        for path in (
+            runtime_root,
+            os.path.join(runtime_root, "DLLs") if runtime_root else "",
+            runtime_site_packages,
+            *toolkit_paths,
+        )
+        if path
     )
+    if base_cache_key not in _BASE_NATIVE_LIBRARY_DIRS_CACHE:
+        _BASE_NATIVE_LIBRARY_DIRS_CACHE[base_cache_key] = _collect_native_library_dirs(
+            runtime_root,
+            os.path.join(runtime_root, "DLLs") if runtime_root else "",
+            runtime_site_packages,
+            *toolkit_paths,
+        )
+
+    dll_dirs = list(_BASE_NATIVE_LIBRARY_DIRS_CACHE[base_cache_key])
+    if skill_id:
+        skill_key = str(skill_id or "")
+        if skill_key not in _SKILL_NATIVE_LIBRARY_DIRS_CACHE:
+            _SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key] = _collect_native_library_dirs(
+                _skill_python_path(skill_key)
+            )
+        dll_dirs.extend(_SKILL_NATIVE_LIBRARY_DIRS_CACHE[skill_key])
+    return _dedupe_paths(dll_dirs)
 
 
 def build_sandbox_env(workspace_dir=None, skill_id=None):
@@ -772,10 +803,12 @@ def install_skill_dependencies(skill_id, python_dependencies=None, node_dependen
             cmd = _node_script_command(npm_exe) + ["install", "--prefix", node_root] + node_dependencies
             out = subprocess.check_output(cmd, env=env, text=True, encoding="utf-8", errors="replace", stderr=subprocess.STDOUT, **_no_window_kwargs())
             logs.append(out.strip())
+        reset_native_library_dir_caches(skill_id)
         status = {"ok": True, "hash": dep_hash, "message": "\n".join([line for line in logs if line]), "installed": True}
         _write_dependency_status(skill_id, status)
         return status
     except Exception as exc:
+        reset_native_library_dir_caches(skill_id)
         status = {"ok": False, "hash": dep_hash, "message": str(exc), "installed": False}
         _write_dependency_status(skill_id, status)
         return status

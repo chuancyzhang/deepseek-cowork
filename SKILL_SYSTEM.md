@@ -53,6 +53,13 @@ The runtime flow is:
 
 This keeps prompts smaller and makes the system easier to reason about.
 
+Startup keeps Skill discovery lightweight: sandbox Python DLL/PYD directory
+scans are cached across legacy Skill implementations, and heavy specialist
+capabilities should be optional or user-installed instead of default built-ins.
+Bundled finance support is limited to financial data querying through
+`financial-data-akshare`; strategy backtesting is no longer shipped as a
+default built-in Skill.
+
 ## 4. Progressive Disclosure
 
 Cowork uses four practical disclosure levels:

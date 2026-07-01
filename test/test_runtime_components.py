@@ -38,7 +38,8 @@ class TestRuntimeComponents(unittest.TestCase):
             {"documents", "data-analysis", "finance", "browser-automation", "web-research"},
         )
         self.assertIn("scikit-learn", runtime_components.TOOLKITS["data-analysis"]["packages"])
-        self.assertIn("quantstats", runtime_components.TOOLKITS["finance"]["packages"])
+        self.assertEqual(runtime_components.TOOLKITS["finance"]["skills"], ["financial-data-akshare"])
+        self.assertEqual(runtime_components.TOOLKITS["finance"]["packages"], ["pandas", "akshare"])
         self.assertIn("reportlab", runtime_components.TOOLKITS["documents"]["packages"])
         self.assertIn("Pillow", runtime_components.TOOLKITS["documents"]["packages"])
         self.assertIn("PIL.Image", runtime_components.TOOLKITS["documents"]["imports"])

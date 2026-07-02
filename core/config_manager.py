@@ -22,7 +22,6 @@ from .automation_manager import (
     normalize_automation_tasks,
 )
 from .mcp_client import DEFAULT_MCP_TIMEOUT_SECONDS, TRANSPORT_STDIO, normalize_mcp_transport
-from .sop_manager import default_sop_templates, normalize_sop_templates
 from .runtime_components import default_download_sources, normalize_download_sources
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -237,7 +236,6 @@ class ConfigManager:
             "disabled_skills": [],
             "enabled_skills": [],
             "agent_profiles": self._default_agent_profiles(),
-            "sop_templates": self._default_sop_templates(),
             "automation_tasks": [],
             "automation_run_history": [],
             "mcp_servers": [],
@@ -336,15 +334,12 @@ class ConfigManager:
         if normalized_agent_profiles != self.config.get("agent_profiles"):
             self.config["agent_profiles"] = normalized_agent_profiles
             updated = True
-        normalized_sop_templates = self._normalize_sop_templates(
-            self.config.get("sop_templates")
-        )
-        if normalized_sop_templates != self.config.get("sop_templates"):
-            self.config["sop_templates"] = normalized_sop_templates
+        if self.config.get("sop_templates"):
+            self.config["sop_templates"] = []
             updated = True
         normalized_automation_tasks = self._normalize_automation_tasks(
             self.config.get("automation_tasks"),
-            valid_template_ids=[item.get("id") for item in normalized_sop_templates],
+            valid_agent_profile_ids=[item.get("id") for item in normalized_agent_profiles],
         )
         if normalized_automation_tasks != self.config.get("automation_tasks"):
             self.config["automation_tasks"] = normalized_automation_tasks
@@ -438,9 +433,6 @@ class ConfigManager:
     def _default_agent_profiles(self):
         return []
 
-    def _default_sop_templates(self):
-        return default_sop_templates()
-
     def _slug(self, value):
         return _slug_config_value(value)
 
@@ -496,11 +488,8 @@ class ConfigManager:
                 normalized.append(entry)
         return normalized
 
-    def _normalize_sop_templates(self, value):
-        return normalize_sop_templates(value)
-
-    def _normalize_automation_tasks(self, value, valid_template_ids=None):
-        return normalize_automation_tasks(value, valid_template_ids=valid_template_ids)
+    def _normalize_automation_tasks(self, value, valid_agent_profile_ids=None):
+        return normalize_automation_tasks(value, valid_agent_profile_ids=valid_agent_profile_ids)
 
     def _normalize_automation_history(self, value):
         return normalize_automation_history(value)
@@ -1051,38 +1040,11 @@ class ConfigManager:
                 return profile
         return None
 
-    def get_sop_templates(self):
-        templates = self._normalize_sop_templates(self.config.get("sop_templates"))
-        if templates != self.config.get("sop_templates"):
-            self.config["sop_templates"] = templates
-            self.save_config()
-        return json.loads(json.dumps(templates, ensure_ascii=False))
-
-    def set_sop_templates(self, templates):
-        normalized = self._normalize_sop_templates(templates)
-        if normalized == self.config.get("sop_templates"):
-            return
-        self.config["sop_templates"] = normalized
-        self.save_config()
-
-    def get_sop_template(self, template_id_or_name):
-        identifier = str(template_id_or_name or "").strip()
-        if not identifier:
-            return None
-        templates = self.get_sop_templates()
-        for template in templates:
-            if template.get("id") == identifier:
-                return template
-        for template in templates:
-            if template.get("name") == identifier:
-                return template
-        return None
-
     def get_automation_tasks(self):
-        valid_template_ids = [item.get("id") for item in self.get_sop_templates()]
+        valid_agent_profile_ids = [item.get("id") for item in self.get_agent_profiles()]
         tasks = self._normalize_automation_tasks(
             self.config.get("automation_tasks"),
-            valid_template_ids=valid_template_ids,
+            valid_agent_profile_ids=valid_agent_profile_ids,
         )
         if tasks != self.config.get("automation_tasks"):
             self.config["automation_tasks"] = tasks
@@ -1090,8 +1052,8 @@ class ConfigManager:
         return json.loads(json.dumps(tasks, ensure_ascii=False))
 
     def set_automation_tasks(self, tasks):
-        valid_template_ids = [item.get("id") for item in self.get_sop_templates()]
-        normalized = self._normalize_automation_tasks(tasks, valid_template_ids=valid_template_ids)
+        valid_agent_profile_ids = [item.get("id") for item in self.get_agent_profiles()]
+        normalized = self._normalize_automation_tasks(tasks, valid_agent_profile_ids=valid_agent_profile_ids)
         if normalized == self.config.get("automation_tasks"):
             return
         self.config["automation_tasks"] = normalized

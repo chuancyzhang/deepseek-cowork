@@ -89,7 +89,7 @@ Cowork 更强调桌面端的一体化工作流和可控执行体验。
 - 推理与调度：`core/agent.py`
 - 后台执行：`core/daemon.py`
 - 技能系统：`core/skill_manager.py`
-- 自动化：`core/sop_manager.py`、`core/automation_manager.py`
+- 自动化：`core/automation_manager.py` 负责提示词、引用能力、Agent 绑定、定时调度和运行历史
 - MCP：`core/mcp_client.py`
 - 本地存储：`core/chat_storage.py`、`core/config_manager.py`
 

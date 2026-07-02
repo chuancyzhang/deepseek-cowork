@@ -34,10 +34,10 @@ The project has moved past early framework assembly and is now focused on:
 
 ### Automation and workflow support
 
-- Automation Center supports configured tasks, run history, and task templates
-- Session-bound SOP / automation templates are supported
+- Automation Center supports prompt-based configured tasks, referenced skills, optional Agent binding, and run history
+- Legacy session-bound SOP and automation template flows have been removed from automation
 - Scheduled automation supports cron syntax and guided quick setup
-- Manual-confirmation and auto-advance step execution flows are implemented
+- Automation now executes a task prompt directly through the main assistant or the selected Agent
 
 ### Integration and operations
 
@@ -75,4 +75,3 @@ These are likely next areas, not hard commitments:
 - Prefer short factual updates over speculative planning
 - Reflect what is already true in the codebase before adding future work
 - When UI behavior changes, sync this file with `README.md`, `README_CN.md`, and other affected docs
-

@@ -87,8 +87,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 - `core/daemon.py`: optional headless execution path
 - `core/skill_manager.py`: skill loading, disclosure, and tool registry
 - `core/mcp_client.py`: MCP `stdio` and Streamable HTTP integration
-- `core/sop_manager.py`: automation templates and step execution state
-- `core/automation_manager.py`: scheduled automation and run history
+- `core/automation_manager.py`: prompt-based scheduled automation, referenced skills, optional Agent binding, and run history
 - `core/chat_storage.py`: local conversation persistence
 
 See [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) for the technical design and [PRODUCT_DOC.md](PRODUCT_DOC.md) for the product-facing summary.

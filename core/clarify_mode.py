@@ -1,5 +1,4 @@
 import json
-from .sop_manager import normalize_sop_run
 
 
 CLARIFY_MODE_DISABLED = "disabled"
@@ -174,7 +173,6 @@ def normalize_run_context(run_context):
             if str(path or "").strip()
         ],
         "office_template_file": str(ctx.get("office_template_file") or "").strip(),
-        "sop_run": normalize_sop_run(ctx.get("sop_run")),
     }
 
 

@@ -5,6 +5,8 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+from .clarify_mode import normalize_selected_skill_names
+
 try:
     from croniter import croniter
 except Exception:
@@ -28,7 +30,6 @@ AUTOMATION_SCHEDULE_TYPES = {
 }
 
 AUTOMATION_HISTORY_STATUS_RUNNING = "running"
-AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION = "awaiting_confirmation"
 AUTOMATION_HISTORY_STATUS_COMPLETED = "completed"
 AUTOMATION_HISTORY_STATUS_ERROR = "error"
 AUTOMATION_HISTORY_STATUS_INTERRUPTED = "interrupted"
@@ -36,7 +37,6 @@ AUTOMATION_HISTORY_STATUS_MISSED = "missed"
 
 AUTOMATION_HISTORY_STATUSES = {
     AUTOMATION_HISTORY_STATUS_RUNNING,
-    AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
     AUTOMATION_HISTORY_STATUS_COMPLETED,
     AUTOMATION_HISTORY_STATUS_ERROR,
     AUTOMATION_HISTORY_STATUS_INTERRUPTED,
@@ -337,16 +337,17 @@ def describe_schedule(task):
     return f"每天 {time_text}"
 
 
-def normalize_automation_task(task, valid_template_ids=None, now_ts=None):
+def normalize_automation_task(task, valid_agent_profile_ids=None, now_ts=None):
     source = dict(task or {})
-    valid_template_ids = set(valid_template_ids or [])
+    valid_agent_profile_ids = set(valid_agent_profile_ids or [])
     now_ts = int(now_ts or time.time())
     name = str(source.get("name") or "").strip()
-    template_id = str(source.get("template_id") or "").strip()
-    if not name or not template_id:
+    prompt = str(source.get("prompt") or "").strip()
+    if not name or not prompt:
         return None
-    if valid_template_ids and template_id not in valid_template_ids:
-        return None
+    agent_profile_id = str(source.get("agent_profile_id") or source.get("default_agent_profile_id") or "").strip()
+    if valid_agent_profile_ids and agent_profile_id not in valid_agent_profile_ids:
+        agent_profile_id = ""
     schedule_type = str(source.get("schedule_type") or AUTOMATION_SCHEDULE_DAILY).strip().lower()
     if schedule_type not in AUTOMATION_SCHEDULE_TYPES:
         schedule_type = AUTOMATION_SCHEDULE_DAILY
@@ -372,8 +373,11 @@ def normalize_automation_task(task, valid_template_ids=None, now_ts=None):
     normalized = {
         "id": str(source.get("id") or f"auto-{uuid.uuid4().hex[:8]}").strip(),
         "name": name,
-        "template_id": template_id,
-        "prompt": str(source.get("prompt") or "").strip(),
+        "prompt": prompt,
+        "skill_names": normalize_selected_skill_names(
+            source.get("skill_names") or source.get("selected_skill_names")
+        ),
+        "agent_profile_id": agent_profile_id,
         "enabled": bool(source.get("enabled", True)),
         "schedule_type": schedule_type,
         "cron_expression": normalize_cron_expression(
@@ -402,12 +406,12 @@ def normalize_automation_task(task, valid_template_ids=None, now_ts=None):
     return normalized
 
 
-def normalize_automation_tasks(value, valid_template_ids=None, now_ts=None):
+def normalize_automation_tasks(value, valid_agent_profile_ids=None, now_ts=None):
     tasks = value if isinstance(value, list) else []
     normalized = []
     used_ids = set()
     for task in tasks:
-        entry = normalize_automation_task(task, valid_template_ids=valid_template_ids, now_ts=now_ts)
+        entry = normalize_automation_task(task, valid_agent_profile_ids=valid_agent_profile_ids, now_ts=now_ts)
         if not entry:
             continue
         task_id = entry["id"]
@@ -432,8 +436,8 @@ def normalize_automation_history_record(record):
         "id": str(source.get("id") or f"run-{uuid.uuid4().hex[:10]}").strip(),
         "task_id": str(source.get("task_id") or "").strip(),
         "task_name": str(source.get("task_name") or "").strip(),
-        "template_id": str(source.get("template_id") or "").strip(),
-        "template_name": str(source.get("template_name") or "").strip(),
+        "agent_profile_id": str(source.get("agent_profile_id") or "").strip(),
+        "agent_profile_name": str(source.get("agent_profile_name") or "").strip(),
         "session_id": str(source.get("session_id") or "").strip(),
         "trigger_source": str(source.get("trigger_source") or "manual").strip(),
         "status": status,
@@ -465,16 +469,16 @@ def normalize_automation_history(value):
     return normalized[:AUTOMATION_HISTORY_LIMIT]
 
 
-def make_automation_history_record(task, template=None, status=AUTOMATION_HISTORY_STATUS_RUNNING, trigger_source="manual", session_id="", scheduled_at=0, summary="", error=""):
-    template = dict(template or {})
+def make_automation_history_record(task, agent_profile=None, status=AUTOMATION_HISTORY_STATUS_RUNNING, trigger_source="manual", session_id="", scheduled_at=0, summary="", error=""):
+    agent_profile = dict(agent_profile or {})
     task = dict(task or {})
     now_ts = int(time.time())
     return normalize_automation_history_record(
         {
             "task_id": task.get("id") or "",
             "task_name": task.get("name") or "",
-            "template_id": task.get("template_id") or "",
-            "template_name": template.get("name") or "",
+            "agent_profile_id": task.get("agent_profile_id") or agent_profile.get("id") or "",
+            "agent_profile_name": agent_profile.get("name") or "",
             "session_id": session_id,
             "trigger_source": trigger_source,
             "status": status,
@@ -500,18 +504,15 @@ def advance_task_to_next_run(task, now_ts=None, after_ts=None):
     return normalized
 
 
-def build_automation_execution_prompt(task, template):
+def build_automation_execution_prompt(task):
     task = dict(task or {})
-    template = dict(template or {})
     lines = [
         "# 自动化任务",
-        f"任务名称: {task.get('name') or template.get('name') or '未命名自动化'}",
+        f"任务名称: {task.get('name') or '未命名自动化'}",
     ]
-    description = str(template.get("description") or "").strip()
-    if description:
-        lines.append(f"模板目标: {description}")
     custom_prompt = str(task.get("prompt") or "").strip()
     if custom_prompt:
-        lines.extend(["任务要求:", custom_prompt])
-    lines.append("请按绑定的 SOP 状态机逐步执行当前步骤，直到流程完成、出现阻塞，或进入等待确认。")
+        lines.extend(["", "任务提示词:", custom_prompt])
+    lines.append("")
+    lines.append("请直接完成上述自动化任务；如果无法继续，请明确说明原因和需要用户处理的事项。")
     return "\n".join(lines)

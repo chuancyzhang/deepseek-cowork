@@ -66,28 +66,18 @@ class TestAutomationTools(unittest.TestCase):
         self.assertIn("upsert_automation_task", discovered)
         self.assertIn("run_automation_task_now", discovered)
 
-    def test_upsert_template_and_task_defaults_new_task_to_disabled(self):
+    def test_upsert_task_defaults_new_task_to_disabled(self):
         self._copy_repo_skill("automation-tools")
         cm = self._create_config_manager()
         sm = self._build_manager(cm)
 
-        template_result = sm.call_tool(
-            "upsert_automation_template",
-            {
-                "template": {
-                    "name": "日报模板",
-                    "description": "生成日报",
-                    "steps": [{"title": "收集信息", "instructions": "先收集当天更新"}],
-                }
-            },
-            context={"config_manager": cm, "run_context": {"mode": RUN_MODE_EXECUTION}},
-        )
         task_result = sm.call_tool(
             "upsert_automation_task",
             {
                 "task": {
                     "name": "每日 9 点日报",
-                    "template_name": "日报模板",
+                    "prompt": "汇总昨天的产品进展并生成日报。",
+                    "skill_names": ["browser-automation", "browser-automation", ""],
                     "schedule_type": "daily",
                     "time_of_day": "09:00",
                 }
@@ -95,23 +85,22 @@ class TestAutomationTools(unittest.TestCase):
             context={"config_manager": cm, "run_context": {"mode": RUN_MODE_EXECUTION}},
         )
 
-        self.assertEqual(template_result["status"], "ok")
         self.assertEqual(task_result["status"], "ok")
         self.assertFalse(task_result["item"]["enabled"])
+        self.assertEqual(task_result["item"]["skill_names"], ["browser-automation"])
         stored = cm.get_automation_task("每日 9 点日报")
         self.assertFalse(stored["enabled"])
-        self.assertEqual(stored["template_id"], cm.get_sop_template("日报模板")["id"])
+        self.assertEqual(stored["prompt"], "汇总昨天的产品进展并生成日报。")
 
     def test_delete_task_respects_approval(self):
         self._copy_repo_skill("automation-tools")
         cm = self._create_config_manager(
             {
-                "sop_templates": [{"id": "daily-report", "name": "日报模板", "steps": [{"title": "Step 1"}]}],
                 "automation_tasks": [
                     {
                         "id": "task-1",
                         "name": "日报任务",
-                        "template_id": "daily-report",
+                        "prompt": "生成日报。",
                         "schedule_type": "daily",
                         "time_of_day": "09:00",
                     }
@@ -137,12 +126,11 @@ class TestAutomationTools(unittest.TestCase):
         self._copy_repo_skill("automation-tools")
         cm = self._create_config_manager(
             {
-                "sop_templates": [{"id": "daily-report", "name": "日报模板", "steps": [{"title": "Step 1"}]}],
                 "automation_tasks": [
                     {
                         "id": "task-1",
                         "name": "日报任务",
-                        "template_id": "daily-report",
+                        "prompt": "生成日报。",
                         "schedule_type": "daily",
                         "time_of_day": "09:00",
                     }

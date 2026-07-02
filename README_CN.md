@@ -89,8 +89,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 - `core/daemon.py`：可选后台执行路径
 - `core/skill_manager.py`：技能加载、披露和工具注册
 - `core/mcp_client.py`：MCP `stdio` / Streamable HTTP 集成
-- `core/sop_manager.py`：自动化模板与步骤状态
-- `core/automation_manager.py`：定时任务与运行历史
+- `core/automation_manager.py`：基于提示词、引用能力、可选 Agent 绑定的定时任务与运行历史
 - `core/chat_storage.py`：本地会话持久化
 
 技术设计见 [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md)，产品说明见 [PRODUCT_DOC.md](PRODUCT_DOC.md)。

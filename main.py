@@ -104,12 +104,7 @@ from core.skill_from_conversation import (
     update_existing_skill_from_draft,
     validate_impl_py,
 )
-from core.sop_from_conversation import (
-    generate_sop_draft,
-    normalize_sop_draft,
-)
 from core.automation_manager import (
-    AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
     AUTOMATION_HISTORY_STATUS_COMPLETED,
     AUTOMATION_HISTORY_STATUS_ERROR,
     AUTOMATION_HISTORY_STATUS_INTERRUPTED,
@@ -161,31 +156,6 @@ from core.clarify_mode import (
     normalize_run_context,
     normalize_workflow_mode,
 )
-from core.sop_manager import (
-    SOP_ADVANCE_MODE_AUTO,
-    SOP_EXECUTOR_AGENT,
-    SOP_EXECUTOR_BASH_COMMAND,
-    SOP_EXECUTOR_PYTHON_FILE,
-    SOP_RUN_STATUS_AWAITING_CONFIRMATION,
-    SOP_RUN_STATUS_COMPLETED,
-    SOP_STEP_STATUS_AWAITING_CONFIRMATION,
-    append_step_output,
-    build_sop_prompt_fragment,
-    build_step_execution_request,
-    complete_current_step,
-    confirm_current_step,
-    create_sop_run,
-    get_current_step,
-    is_sop_awaiting_confirmation,
-    is_sop_completed,
-    mark_step_awaiting_confirmation,
-    mark_step_running,
-    normalize_sop_run,
-    resolve_step_advance_mode,
-    rerun_current_step,
-    skip_current_step,
-)
-from core.sop_executor import execute_sop_step
 import shutil
 import traceback
 import qtawesome as qta
@@ -3852,894 +3822,13 @@ class AgentProfileManager(QWidget):
         return profiles
 
 
-class SopTemplateManager(QWidget):
-    def __init__(
-        self,
-        templates,
-        skill_provider,
-        agent_profile_provider,
-        parent=None,
-        title_text="自动化模板",
-        noun="自动化",
-        show_id_field=False,
-        helper_text="自动化模板会约束会话按步骤执行；可按模板或步骤配置为人工确认或自动推进，仍可重跑或标记不适用。",
-    ):
-        super().__init__(parent)
-        self.skill_provider = skill_provider
-        self.agent_profile_provider = agent_profile_provider
-        self.title_text = str(title_text or "自动化模板")
-        self.noun = str(noun or "自动化")
-        self.show_id_field = bool(show_id_field)
-        self.helper_text = str(helper_text or "")
-        self.templates = json.loads(json.dumps(templates or [], ensure_ascii=False))
-        self._current_template_index = -1
-        self._current_step_index = -1
-        self._loading_template = False
-        self._loading_step = False
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(0, 0, 0, 0)
-        title = QLabel(self.title_text)
-        title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
-        toolbar.addWidget(title)
-        toolbar.addStretch()
-        for label, handler, icon_name in (
-            ("新增模板", self.add_template, "fa5s.plus"),
-            ("复制", self.copy_template, "fa5s.copy"),
-            ("删除", self.delete_template, "fa5s.trash"),
-        ):
-            btn = QPushButton(label)
-            btn.setObjectName("SecondaryBtn")
-            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
-            btn.clicked.connect(handler)
-            toolbar.addWidget(btn)
-        layout.addLayout(toolbar)
-
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(14)
-        layout.addLayout(body, 1)
-
-        self.template_list = QListWidget()
-        self.template_list.setMinimumWidth(180)
-        self.template_list.setMaximumWidth(280)
-        self.template_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.template_list.setStyleSheet(
-            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 14px; padding: 6px; }}"
-            f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
-            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
-        )
-        self.template_list.currentRowChanged.connect(self._on_template_changed)
-        body.addWidget(self.template_list)
-
-        editor_card = QFrame()
-        editor_card.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 16px; }}"
-        )
-        editor_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        editor_layout = QVBoxLayout(editor_card)
-        editor_layout.setContentsMargins(18, 18, 18, 18)
-        editor_layout.setSpacing(14)
-        body.addWidget(editor_card, 1)
-        body.setStretch(0, 0)
-        body.setStretch(1, 1)
-
-        form = QFormLayout()
-        form.setSpacing(12)
-        configure_responsive_form_layout(form)
-        self.template_id_input = QLineEdit()
-        self.template_id_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.template_id_input.setPlaceholderText("自动生成")
-        self.template_id_input.textChanged.connect(self._sync_current_template_from_fields)
-        if self.show_id_field:
-            form.addRow("ID", self.template_id_input)
-        self.template_name_input = QLineEdit()
-        self.template_name_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.template_name_input.setPlaceholderText(f"例如：{self.noun}任务模板")
-        self.template_name_input.textChanged.connect(self._sync_current_template_from_fields)
-        form.addRow("名称", self.template_name_input)
-        self.template_desc_edit = QTextEdit()
-        self.template_desc_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.template_desc_edit.setFixedHeight(72)
-        self.template_desc_edit.setPlaceholderText(f"描述这个{self.noun}模板的目标和适用范围")
-        self.template_desc_edit.textChanged.connect(self._sync_current_template_from_fields)
-        form.addRow("描述", self.template_desc_edit)
-        self.triggers_input = QLineEdit()
-        self.triggers_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.triggers_input.setPlaceholderText("用逗号分隔，例如：日报, 巡检, 示例")
-        self.triggers_input.textChanged.connect(self._sync_current_template_from_fields)
-        form.addRow("触发词", self.triggers_input)
-        self.default_agent_combo = QComboBox()
-        self.default_agent_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.default_agent_combo.currentIndexChanged.connect(self._sync_current_template_from_fields)
-        form.addRow("默认智能体", self.default_agent_combo)
-        self.template_advance_mode_combo = QComboBox()
-        self.template_advance_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.template_advance_mode_combo.addItem("人工确认", "manual")
-        self.template_advance_mode_combo.addItem("自动推进", "auto")
-        self.template_advance_mode_combo.currentIndexChanged.connect(self._sync_current_template_from_fields)
-        form.addRow("推进方式", self.template_advance_mode_combo)
-        editor_layout.addLayout(form)
-
-        skills_label = QLabel(f"{self.noun}自带能力")
-        skills_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
-        editor_layout.addWidget(skills_label)
-        self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(apple_checkable_list_style(radius=12, bg=DesignTokens.bg_card, padding=4))
-        self.skill_list.itemChanged.connect(lambda _item: self._sync_current_template_from_fields())
-        editor_layout.addWidget(self.skill_list, 1)
-
-        step_toolbar = QHBoxLayout()
-        step_title = QLabel("步骤")
-        step_title.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
-        step_toolbar.addWidget(step_title)
-        step_toolbar.addStretch()
-        for label, handler, icon_name in (
-            ("新增步骤", self.add_step, "fa5s.plus"),
-            ("复制步骤", self.copy_step, "fa5s.copy"),
-            ("删除步骤", self.delete_step, "fa5s.trash"),
-        ):
-            btn = QPushButton(label)
-            btn.setObjectName("SecondaryBtn")
-            btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
-            btn.clicked.connect(handler)
-            step_toolbar.addWidget(btn)
-        editor_layout.addLayout(step_toolbar)
-
-        step_body = QHBoxLayout()
-        step_body.setContentsMargins(0, 0, 0, 0)
-        step_body.setSpacing(12)
-        editor_layout.addLayout(step_body, 1)
-
-        self.step_list = QListWidget()
-        self.step_list.setMinimumWidth(180)
-        self.step_list.setMaximumWidth(280)
-        self.step_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.step_list.setStyleSheet(
-            f"QListWidget {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; padding: 4px; }}"
-            f"QListWidget::item {{ padding: 8px 10px; color: {DesignTokens.text_primary}; }}"
-            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
-        )
-        self.step_list.currentRowChanged.connect(self._on_step_changed)
-        step_body.addWidget(self.step_list)
-
-        step_editor = QFrame()
-        step_editor.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.bg_card}; border: 1px solid {DesignTokens.border}; border-radius: 12px; }}"
-        )
-        step_editor_layout = QFormLayout(step_editor)
-        step_editor_layout.setContentsMargins(14, 14, 14, 14)
-        step_editor_layout.setSpacing(12)
-        configure_responsive_form_layout(step_editor_layout)
-        self.step_title_input = QLineEdit()
-        self.step_title_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.step_title_input.setPlaceholderText("例如：确认当前步骤目标")
-        self.step_title_input.textChanged.connect(self._sync_current_step_from_fields)
-        step_editor_layout.addRow("标题", self.step_title_input)
-        self.step_instruction_edit = QTextEdit()
-        self.step_instruction_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.step_instruction_edit.setFixedHeight(96)
-        self.step_instruction_edit.setPlaceholderText("写清楚这一小步允许做什么")
-        self.step_instruction_edit.textChanged.connect(self._sync_current_step_from_fields)
-        step_editor_layout.addRow("执行指令", self.step_instruction_edit)
-        self.step_success_edit = QTextEdit()
-        self.step_success_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.step_success_edit.setFixedHeight(80)
-        self.step_success_edit.setPlaceholderText("用户如何判断这一步已经完成")
-        self.step_success_edit.textChanged.connect(self._sync_current_step_from_fields)
-        step_editor_layout.addRow("成功标准", self.step_success_edit)
-        self.step_allow_skip_check = QCheckBox("允许标记为不适用")
-        self.step_allow_skip_check.toggled.connect(self._sync_current_step_from_fields)
-        step_editor_layout.addRow("跳过", self.step_allow_skip_check)
-        self.step_advance_mode_combo = QComboBox()
-        self.step_advance_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.step_advance_mode_combo.addItem("继承模板", "inherit")
-        self.step_advance_mode_combo.addItem("人工确认", "manual")
-        self.step_advance_mode_combo.addItem("自动推进", "auto")
-        self.step_advance_mode_combo.currentIndexChanged.connect(self._sync_current_step_from_fields)
-        step_editor_layout.addRow("本步推进", self.step_advance_mode_combo)
-        self.step_executor_type_combo = QComboBox()
-        self.step_executor_type_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.step_executor_type_combo.addItem("Agent", SOP_EXECUTOR_AGENT)
-        self.step_executor_type_combo.addItem("Python 文件", SOP_EXECUTOR_PYTHON_FILE)
-        self.step_executor_type_combo.addItem("Bash 命令", SOP_EXECUTOR_BASH_COMMAND)
-        self.step_executor_type_combo.currentIndexChanged.connect(self._on_step_executor_type_changed)
-        step_editor_layout.addRow("执行器", self.step_executor_type_combo)
-
-        self.step_executor_stack = QStackedWidget()
-
-        agent_page = QWidget()
-        agent_layout = QVBoxLayout(agent_page)
-        agent_layout.setContentsMargins(0, 0, 0, 0)
-        agent_layout.setSpacing(6)
-        agent_hint = QLabel("使用当前会话 Agent/智能体能力执行本步。")
-        agent_hint.setWordWrap(True)
-        agent_hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        agent_layout.addWidget(agent_hint)
-        agent_layout.addStretch()
-        self.step_executor_stack.addWidget(agent_page)
-
-        python_page = QWidget()
-        python_layout = QVBoxLayout(python_page)
-        python_layout.setContentsMargins(0, 0, 0, 0)
-        python_layout.setSpacing(8)
-        python_actions = QHBoxLayout()
-        python_actions.setContentsMargins(0, 0, 0, 0)
-        python_actions.setSpacing(8)
-        self.step_python_file_label = QLabel("未选择 Python 文件")
-        self.step_python_file_label.setWordWrap(True)
-        self.step_python_file_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        self.step_python_select_btn = QPushButton("上传 .py")
-        self.step_python_select_btn.setObjectName("SecondaryBtn")
-        self.step_python_select_btn.clicked.connect(self._choose_step_python_script)
-        self.step_python_clear_btn = QPushButton("移除")
-        self.step_python_clear_btn.setObjectName("SecondaryBtn")
-        self.step_python_clear_btn.clicked.connect(self._clear_step_python_script)
-        python_actions.addWidget(self.step_python_select_btn)
-        python_actions.addWidget(self.step_python_clear_btn)
-        python_actions.addStretch()
-        python_layout.addLayout(python_actions)
-        python_layout.addWidget(self.step_python_file_label)
-        self.step_executor_stack.addWidget(python_page)
-
-        bash_page = QWidget()
-        bash_layout = QVBoxLayout(bash_page)
-        bash_layout.setContentsMargins(0, 0, 0, 0)
-        bash_layout.setSpacing(8)
-        self.step_bash_command_edit = QTextEdit()
-        self.step_bash_command_edit.setFixedHeight(92)
-        self.step_bash_command_edit.setPlaceholderText("例如：python -m pytest -q")
-        self.step_bash_command_edit.textChanged.connect(self._sync_current_step_from_fields)
-        bash_layout.addWidget(self.step_bash_command_edit)
-        self.step_executor_stack.addWidget(bash_page)
-        step_editor_layout.addRow("执行参数", self.step_executor_stack)
-
-        self.step_timeout_spin = QSpinBox()
-        self.step_timeout_spin.setRange(1, 24 * 60 * 60)
-        self.step_timeout_spin.setValue(300)
-        self.step_timeout_spin.setSuffix(" 秒")
-        self.step_timeout_spin.valueChanged.connect(self._sync_current_step_from_fields)
-        step_editor_layout.addRow("超时", self.step_timeout_spin)
-        step_body.addWidget(step_editor, 1)
-        step_body.setStretch(0, 0)
-        step_body.setStretch(1, 1)
-
-        helper = QLabel(self.helper_text)
-        helper.setWordWrap(True)
-        helper.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        editor_layout.addWidget(helper)
-
-        self._refresh_template_list()
-        if self.template_list.count():
-            self.template_list.setCurrentRow(0)
-        else:
-            self.add_template()
-
-    def _available_skills(self):
-        skills = list(self.skill_provider() or []) if callable(self.skill_provider) else []
-        skills.sort(key=lambda item: (readable_skill_name(item) or item.get("name") or "").lower())
-        return skills
-
-    def _available_agent_profiles(self):
-        profiles = list(self.agent_profile_provider() or []) if callable(self.agent_profile_provider) else []
-        profiles.sort(key=lambda item: str(item.get("name") or "").lower())
-        return profiles
-
-    def _csv_to_list(self, text):
-        values = []
-        seen = set()
-        for item in re.split(r"[,，\n]+", str(text or "")):
-            value = item.strip()
-            if not value or value in seen:
-                continue
-            seen.add(value)
-            values.append(value)
-        return values
-
-    def _step_python_asset_root(self):
-        root = os.path.join(get_app_data_dir(), "sop_assets", "python")
-        os.makedirs(root, exist_ok=True)
-        return root
-
-    def _copy_python_script_asset(self, source_path):
-        source = os.path.abspath(str(source_path or ""))
-        if not source.lower().endswith(".py"):
-            raise ValueError("只支持上传 .py 文件。")
-        if not os.path.isfile(source):
-            raise FileNotFoundError("选择的 Python 文件不存在。")
-        asset_id = f"py-{uuid.uuid4().hex[:12]}"
-        filename = os.path.basename(source)
-        target_name = f"{asset_id}-{filename}"
-        target_path = os.path.join(self._step_python_asset_root(), target_name)
-        shutil.copy2(source, target_path)
-        return {
-            "asset_id": asset_id,
-            "filename": filename,
-            "path": os.path.normpath(target_path),
-            "source_path": os.path.normpath(source),
-        }
-
-    def _set_step_python_script_widgets(self, script):
-        script = script if isinstance(script, dict) else {}
-        filename = str(script.get("filename") or "").strip()
-        source_path = str(script.get("source_path") or "").strip()
-        if filename:
-            text = filename
-            if source_path:
-                text = f"{filename}\n来源：{source_path}"
-            self.step_python_file_label.setText(text)
-        else:
-            self.step_python_file_label.setText("未选择 Python 文件")
-        self.step_python_clear_btn.setEnabled(bool(filename))
-
-    def _refresh_step_executor_ui(self):
-        executor_type = str(self.step_executor_type_combo.currentData() or SOP_EXECUTOR_AGENT).strip()
-        page_index = {
-            SOP_EXECUTOR_AGENT: 0,
-            SOP_EXECUTOR_PYTHON_FILE: 1,
-            SOP_EXECUTOR_BASH_COMMAND: 2,
-        }.get(executor_type, 0)
-        self.step_executor_stack.setCurrentIndex(page_index)
-
-    def _on_step_executor_type_changed(self):
-        self._refresh_step_executor_ui()
-        self._sync_current_step_from_fields()
-
-    def _choose_step_python_script(self):
-        template_index = self._current_template_index
-        step_index = self._current_step_index
-        if template_index < 0 or step_index < 0:
-            return
-        path, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            "选择 Python 文件",
-            "",
-            "Python Files (*.py)",
-        )
-        if not path:
-            return
-        try:
-            asset = self._copy_python_script_asset(path)
-        except Exception as exc:
-            QMessageBox.warning(self, "上传 Python 文件", str(exc))
-            return
-        steps = self.templates[template_index].setdefault("steps", [])
-        if step_index >= len(steps):
-            return
-        steps[step_index]["python_script"] = asset
-        self.step_executor_type_combo.setCurrentIndex(
-            self.step_executor_type_combo.findData(SOP_EXECUTOR_PYTHON_FILE)
-        )
-        self._set_step_python_script_widgets(asset)
-        self._sync_current_step_from_fields()
-
-    def _clear_step_python_script(self):
-        template_index = self._current_template_index
-        step_index = self._current_step_index
-        if template_index < 0 or step_index < 0:
-            return
-        steps = self.templates[template_index].setdefault("steps", [])
-        if step_index >= len(steps):
-            return
-        steps[step_index]["python_script"] = {}
-        self._set_step_python_script_widgets({})
-        self._sync_current_step_from_fields()
-
-    def _selected_skill_names_from_widgets(self):
-        names = []
-        for index in range(self.skill_list.count()):
-            item = self.skill_list.item(index)
-            if item.checkState() == Qt.Checked:
-                names.append(str(item.data(Qt.UserRole) or "").strip())
-        return normalize_selected_skill_names(names)
-
-    def _reload_skill_options(self):
-        selected = set(self._selected_skill_names_from_widgets())
-        if 0 <= self._current_template_index < len(self.templates):
-            selected = set(normalize_selected_skill_names(self.templates[self._current_template_index].get("skill_names")))
-        self.skill_list.blockSignals(True)
-        self.skill_list.clear()
-        for skill in self._available_skills():
-            skill_name = str(skill.get("name") or "").strip()
-            if not skill_name:
-                continue
-            item = QListWidgetItem(readable_skill_name(skill) or skill_name)
-            item.setData(Qt.UserRole, skill_name)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if skill_name in selected else Qt.Unchecked)
-            item.setToolTip(skill.get("user_description") or skill.get("description") or "")
-            self.skill_list.addItem(item)
-        self.skill_list.blockSignals(False)
-
-    def _reload_agent_profiles(self):
-        current_value = self.default_agent_combo.currentData()
-        self.default_agent_combo.blockSignals(True)
-        self.default_agent_combo.clear()
-        self.default_agent_combo.addItem("主 Agent（默认）", "")
-        for profile in self._available_agent_profiles():
-            self.default_agent_combo.addItem(profile.get("name") or "智能体", profile.get("id") or "")
-        index = self.default_agent_combo.findData(current_value)
-        if index < 0:
-            index = 0
-        self.default_agent_combo.setCurrentIndex(index)
-        self.default_agent_combo.blockSignals(False)
-
-    def _refresh_template_list(self):
-        self.template_list.blockSignals(True)
-        self.template_list.clear()
-        for template in self.templates:
-            name = str(template.get("name") or f"未命名{self.noun}").strip()
-            step_count = len(template.get("steps") or [])
-            item = QListWidgetItem(f"{name} ({step_count})")
-            item.setData(Qt.UserRole, template.get("id"))
-            item.setToolTip(template.get("description") or "")
-            self.template_list.addItem(item)
-        self.template_list.blockSignals(False)
-
-    def _refresh_step_list(self):
-        self.step_list.blockSignals(True)
-        self.step_list.clear()
-        template = self.templates[self._current_template_index] if 0 <= self._current_template_index < len(self.templates) else {}
-        for index, step in enumerate(template.get("steps") or []):
-            title = str(step.get("title") or f"步骤 {index + 1}").strip()
-            item = QListWidgetItem(title)
-            item.setData(Qt.UserRole, index)
-            item.setToolTip(step.get("instructions") or "")
-            self.step_list.addItem(item)
-        self.step_list.blockSignals(False)
-
-    def _load_template_into_fields(self, index):
-        self._loading_template = True
-        try:
-            template = self.templates[index] if 0 <= index < len(self.templates) else {}
-            self.template_id_input.setText(str(template.get("id") or ""))
-            self.template_id_input.setEnabled(self.show_id_field)
-            self.template_name_input.setText(str(template.get("name") or ""))
-            self.template_desc_edit.setPlainText(str(template.get("description") or ""))
-            self.triggers_input.setText("，".join(template.get("triggers") or []))
-            self._reload_agent_profiles()
-            combo_index = self.default_agent_combo.findData(str(template.get("default_agent_profile_id") or ""))
-            self.default_agent_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
-            advance_index = self.template_advance_mode_combo.findData(str(template.get("advance_mode") or "manual"))
-            self.template_advance_mode_combo.setCurrentIndex(advance_index if advance_index >= 0 else 0)
-            self._reload_skill_options()
-            self._refresh_step_list()
-            if self.step_list.count():
-                self.step_list.setCurrentRow(0)
-            else:
-                self._current_step_index = -1
-                self._clear_step_fields()
-        finally:
-            self._loading_template = False
-
-    def _clear_step_fields(self):
-        self._loading_step = True
-        try:
-            self.step_title_input.setText("")
-            self.step_instruction_edit.setPlainText("")
-            self.step_success_edit.setPlainText("")
-            self.step_allow_skip_check.setChecked(False)
-            self.step_advance_mode_combo.setCurrentIndex(0)
-            self.step_executor_type_combo.setCurrentIndex(0)
-            self.step_bash_command_edit.setPlainText("")
-            self.step_timeout_spin.setValue(300)
-            self._set_step_python_script_widgets({})
-            self._refresh_step_executor_ui()
-        finally:
-            self._loading_step = False
-
-    def _load_step_into_fields(self, index):
-        self._loading_step = True
-        try:
-            template = self.templates[self._current_template_index] if 0 <= self._current_template_index < len(self.templates) else {}
-            steps = template.get("steps") or []
-            step = steps[index] if 0 <= index < len(steps) else {}
-            self.step_title_input.setText(str(step.get("title") or ""))
-            self.step_instruction_edit.setPlainText(str(step.get("instructions") or ""))
-            self.step_success_edit.setPlainText(str(step.get("success_criteria") or ""))
-            self.step_allow_skip_check.setChecked(bool(step.get("allow_skip", False)))
-            combo_index = self.step_advance_mode_combo.findData(str(step.get("advance_mode") or "inherit"))
-            self.step_advance_mode_combo.setCurrentIndex(combo_index if combo_index >= 0 else 0)
-            executor_index = self.step_executor_type_combo.findData(str(step.get("executor_type") or SOP_EXECUTOR_AGENT))
-            self.step_executor_type_combo.setCurrentIndex(executor_index if executor_index >= 0 else 0)
-            self.step_bash_command_edit.setPlainText(str(step.get("bash_command") or ""))
-            self.step_timeout_spin.setValue(max(1, int(step.get("timeout_seconds") or 300)))
-            self._set_step_python_script_widgets(step.get("python_script"))
-            self._refresh_step_executor_ui()
-        finally:
-            self._loading_step = False
-
-    def _sync_current_template_from_fields(self):
-        if self._loading_template:
-            return
-        index = self._current_template_index
-        if index < 0 or index >= len(self.templates):
-            return
-        template = self.templates[index]
-        if self.show_id_field:
-            template["id"] = self.template_id_input.text().strip()
-        template["name"] = self.template_name_input.text().strip() or f"未命名{self.noun}"
-        template["description"] = self.template_desc_edit.toPlainText().strip()
-        template["triggers"] = self._csv_to_list(self.triggers_input.text())
-        template["skill_names"] = self._selected_skill_names_from_widgets()
-        template["default_agent_profile_id"] = str(self.default_agent_combo.currentData() or "").strip()
-        template["advance_mode"] = str(self.template_advance_mode_combo.currentData() or "manual").strip() or "manual"
-        template["updated_at"] = int(time.time())
-        self._refresh_template_list()
-        self.template_list.blockSignals(True)
-        self.template_list.setCurrentRow(index)
-        self.template_list.blockSignals(False)
-
-    def _sync_current_step_from_fields(self):
-        if self._loading_step:
-            return
-        template_index = self._current_template_index
-        step_index = self._current_step_index
-        if template_index < 0 or template_index >= len(self.templates):
-            return
-        steps = self.templates[template_index].setdefault("steps", [])
-        if step_index < 0 or step_index >= len(steps):
-            return
-        step = steps[step_index]
-        step["title"] = self.step_title_input.text().strip() or f"步骤 {step_index + 1}"
-        step["instructions"] = self.step_instruction_edit.toPlainText().strip()
-        step["success_criteria"] = self.step_success_edit.toPlainText().strip()
-        step["allow_skip"] = self.step_allow_skip_check.isChecked()
-        step["advance_mode"] = str(self.step_advance_mode_combo.currentData() or "inherit").strip() or "inherit"
-        step["executor_type"] = str(self.step_executor_type_combo.currentData() or SOP_EXECUTOR_AGENT).strip() or SOP_EXECUTOR_AGENT
-        step["python_script"] = dict(step.get("python_script") or {})
-        step["bash_command"] = self.step_bash_command_edit.toPlainText().strip()
-        step["timeout_seconds"] = int(self.step_timeout_spin.value())
-        self.templates[template_index]["updated_at"] = int(time.time())
-        self._refresh_step_list()
-        self.step_list.blockSignals(True)
-        self.step_list.setCurrentRow(step_index)
-        self.step_list.blockSignals(False)
-        self._sync_current_template_from_fields()
-
-    def _on_template_changed(self, index):
-        if self._current_template_index >= 0:
-            self._sync_current_step_from_fields()
-            self._sync_current_template_from_fields()
-        self._current_template_index = index
-        self._current_step_index = -1
-        if index < 0 or index >= len(self.templates):
-            return
-        self._load_template_into_fields(index)
-
-    def _on_step_changed(self, index):
-        if self._current_step_index >= 0:
-            self._sync_current_step_from_fields()
-        self._current_step_index = index
-        if index < 0:
-            self._clear_step_fields()
-            return
-        self._load_step_into_fields(index)
-
-    def add_template(self):
-        now = int(time.time())
-        self.templates.append(
-            {
-                "id": f"sop-{uuid.uuid4().hex[:8]}",
-                "name": f"新{self.noun}",
-                "description": "",
-                "triggers": [],
-                "skill_names": [],
-                "default_agent_profile_id": "",
-                "advance_mode": "manual",
-                "steps": [
-                    {
-                        "title": "步骤 1",
-                        "instructions": "",
-                        "success_criteria": "",
-                        "allow_skip": False,
-                        "advance_mode": "inherit",
-                        "executor_type": SOP_EXECUTOR_AGENT,
-                        "python_script": {},
-                        "bash_command": "",
-                        "timeout_seconds": 300,
-                    }
-                ],
-                "created_at": now,
-                "updated_at": now,
-            }
-        )
-        self._refresh_template_list()
-        self.template_list.setCurrentRow(len(self.templates) - 1)
-
-    def copy_template(self):
-        index = self.template_list.currentRow()
-        if index < 0 or index >= len(self.templates):
-            return
-        source = json.loads(json.dumps(self.templates[index], ensure_ascii=False))
-        now = int(time.time())
-        source["id"] = f"sop-{uuid.uuid4().hex[:8]}"
-        source["name"] = f"{source.get('name') or self.noun} 副本"
-        source["created_at"] = now
-        source["updated_at"] = now
-        self.templates.insert(index + 1, source)
-        self._refresh_template_list()
-        self.template_list.setCurrentRow(index + 1)
-
-    def delete_template(self):
-        index = self.template_list.currentRow()
-        if index < 0 or index >= len(self.templates):
-            return
-        reply = QMessageBox.question(
-            self,
-            f"删除{self.noun}",
-            f"确定删除这个{self.noun}模板吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-        del self.templates[index]
-        self._refresh_template_list()
-        if self.templates:
-            self.template_list.setCurrentRow(min(index, len(self.templates) - 1))
-        else:
-            self.add_template()
-
-    def add_step(self):
-        index = self._current_template_index
-        if index < 0 or index >= len(self.templates):
-            return
-        steps = self.templates[index].setdefault("steps", [])
-        steps.append(
-            {
-                "title": f"步骤 {len(steps) + 1}",
-                "instructions": "",
-                "success_criteria": "",
-                "allow_skip": False,
-                "advance_mode": "inherit",
-                "executor_type": SOP_EXECUTOR_AGENT,
-                "python_script": {},
-                "bash_command": "",
-                "timeout_seconds": 300,
-            }
-        )
-        self._refresh_step_list()
-        self.step_list.setCurrentRow(len(steps) - 1)
-        self._sync_current_template_from_fields()
-
-    def copy_step(self):
-        template_index = self._current_template_index
-        step_index = self._current_step_index
-        if template_index < 0 or step_index < 0:
-            return
-        steps = self.templates[template_index].setdefault("steps", [])
-        if step_index >= len(steps):
-            return
-        source = json.loads(json.dumps(steps[step_index], ensure_ascii=False))
-        source["title"] = f"{source.get('title') or '步骤'} 副本"
-        steps.insert(step_index + 1, source)
-        self._refresh_step_list()
-        self.step_list.setCurrentRow(step_index + 1)
-        self._sync_current_template_from_fields()
-
-    def delete_step(self):
-        template_index = self._current_template_index
-        step_index = self._current_step_index
-        if template_index < 0 or step_index < 0:
-            return
-        steps = self.templates[template_index].setdefault("steps", [])
-        if step_index >= len(steps):
-            return
-        del steps[step_index]
-        self._refresh_step_list()
-        if steps:
-            self.step_list.setCurrentRow(min(step_index, len(steps) - 1))
-        else:
-            self._current_step_index = -1
-            self._clear_step_fields()
-        self._sync_current_template_from_fields()
-
-    def get_templates(self):
-        self._sync_current_step_from_fields()
-        self._sync_current_template_from_fields()
-        valid_skill_names = {
-            str(skill.get("name") or "").strip()
-            for skill in self._available_skills()
-            if str(skill.get("name") or "").strip()
-        }
-        agent_ids = {
-            str(profile.get("id") or "").strip()
-            for profile in self._available_agent_profiles()
-            if str(profile.get("id") or "").strip()
-        }
-        templates = []
-        for template in self.templates:
-            name = str(template.get("name") or "").strip()
-            if not name:
-                continue
-            steps = []
-            for index, step in enumerate(template.get("steps") or []):
-                title = str(step.get("title") or "").strip()
-                instructions = str(step.get("instructions") or "").strip()
-                success_criteria = str(step.get("success_criteria") or "").strip()
-                if not title and not instructions and not success_criteria:
-                    continue
-                steps.append(
-                    {
-                        "title": title or f"步骤 {index + 1}",
-                        "instructions": instructions,
-                        "success_criteria": success_criteria,
-                        "allow_skip": bool(step.get("allow_skip", False)),
-                        "advance_mode": str(step.get("advance_mode") or "inherit").strip() or "inherit",
-                        "executor_type": str(step.get("executor_type") or SOP_EXECUTOR_AGENT).strip() or SOP_EXECUTOR_AGENT,
-                        "python_script": dict(step.get("python_script") or {}),
-                        "bash_command": str(step.get("bash_command") or "").strip(),
-                        "timeout_seconds": max(1, int(step.get("timeout_seconds") or 300)),
-                    }
-                )
-            default_agent_profile_id = str(template.get("default_agent_profile_id") or "").strip()
-            if default_agent_profile_id not in agent_ids:
-                default_agent_profile_id = ""
-            templates.append(
-                {
-                    "id": str(template.get("id") or f"sop-{uuid.uuid4().hex[:8]}").strip(),
-                    "name": name,
-                    "description": str(template.get("description") or "").strip(),
-                    "triggers": self._csv_to_list("，".join(template.get("triggers") or [])),
-                    "skill_names": [
-                        skill_name
-                        for skill_name in normalize_selected_skill_names(template.get("skill_names"))
-                        if skill_name in valid_skill_names
-                    ],
-                    "default_agent_profile_id": default_agent_profile_id,
-                    "advance_mode": str(template.get("advance_mode") or "manual").strip() or "manual",
-                    "steps": steps,
-                    "created_at": int(template.get("created_at") or int(time.time())),
-                    "updated_at": int(time.time()),
-                }
-            )
-        return templates
-
-
-class SessionSopPickerDialog(QDialog):
-    def __init__(self, templates, current_template_id="", parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("为当前会话添加自动化")
-        self.resize(780, 560)
-        self.templates = list(templates or [])
-        self.current_template_id = str(current_template_id or "").strip()
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
-
-        title = QLabel("为当前会话添加自动化")
-        title.setProperty("roleTitle", True)
-        subtitle = QLabel("选择后会把自动化模板绑定到当前会话。执行会按当前步骤推进，并根据模板配置选择人工确认或自动进入下一步。")
-        subtitle.setProperty("roleSubtitle", True)
-        subtitle.setWordWrap(True)
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(14)
-        layout.addLayout(body, 1)
-
-        self.template_list = QListWidget()
-        self.template_list.setMinimumWidth(260)
-        self.template_list.setMaximumWidth(320)
-        self.template_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=16, padding=6))
-        for template in self.templates:
-            item = QListWidgetItem(template.get("name") or "未命名自动化")
-            item.setData(Qt.UserRole, template.get("id"))
-            step_count = len(template.get("steps") or [])
-            desc = template.get("description") or "未填写描述"
-            item.setToolTip(f"{desc}\n步骤数：{step_count}")
-            self.template_list.addItem(item)
-        body.addWidget(self.template_list, 0)
-
-        detail_card = QFrame()
-        detail_card.setStyleSheet(apple_section_surface_style(radius=20, bg="rgba(255, 255, 255, 0.76)"))
-        detail_layout = QVBoxLayout(detail_card)
-        detail_layout.setContentsMargins(18, 18, 18, 18)
-        detail_layout.setSpacing(12)
-        body.addWidget(detail_card, 1)
-
-        detail_kicker = QLabel("会话中的执行方式")
-        detail_kicker.setStyleSheet(apple_section_kicker_style())
-        detail_layout.addWidget(detail_kicker)
-
-        self.detail_title = QLabel("选择一个自动化模板")
-        self.detail_title.setStyleSheet(apple_section_title_style())
-        detail_layout.addWidget(self.detail_title)
-
-        self.detail_meta_label = QLabel("绑定后会从第一步开始执行。")
-        self.detail_meta_label.setWordWrap(True)
-        self.detail_meta_label.setStyleSheet(apple_caption_style())
-        detail_layout.addWidget(self.detail_meta_label)
-
-        self.detail_label = QLabel("这里会展示模板说明和步骤概览。")
-        self.detail_label.setWordWrap(True)
-        self.detail_label.setStyleSheet(apple_caption_style())
-        detail_layout.addWidget(self.detail_label)
-
-        steps_title = QLabel("步骤概览")
-        steps_title.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
-        detail_layout.addWidget(steps_title)
-
-        self.step_preview_list = QListWidget()
-        self.step_preview_list.setFocusPolicy(Qt.NoFocus)
-        self.step_preview_list.setStyleSheet(
-            apple_list_style(border=True, bg="rgba(255, 255, 255, 0.64)", radius=14, padding=4)
-        )
-        detail_layout.addWidget(self.step_preview_list, 1)
-
-        actions = QHBoxLayout()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setObjectName("SecondaryBtn")
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("绑定到本会话")
-        save_btn.setObjectName("PrimaryBtn")
-        save_btn.clicked.connect(self.accept)
-        actions.addStretch()
-        actions.addWidget(cancel_btn)
-        actions.addWidget(save_btn)
-        layout.addLayout(actions)
-
-        self.template_list.currentRowChanged.connect(self.refresh_details)
-        initial_index = 0
-        if self.current_template_id:
-            for index, template in enumerate(self.templates):
-                if str(template.get("id") or "") == self.current_template_id:
-                    initial_index = index
-                    break
-        if self.template_list.count():
-            self.template_list.setCurrentRow(initial_index)
-
-    def refresh_details(self, index):
-        template = self.templates[index] if 0 <= index < len(self.templates) else {}
-        if not template:
-            self.detail_title.setText("选择一个自动化模板")
-            self.detail_meta_label.setText("绑定后会从第一步开始执行。")
-            self.detail_label.setText("这里会展示模板说明和步骤概览。")
-            self.step_preview_list.clear()
-            return
-        steps = template.get("steps") or []
-        self.detail_title.setText(template.get("name") or "未命名自动化")
-        advance_mode = "自动推进" if str(template.get("advance_mode") or "manual") == "auto" else "人工确认"
-        trigger_text = summarize_list(template.get("triggers") or [], max_items=3, max_chars=18) or "未设置触发词"
-        self.detail_meta_label.setText(f"{len(steps)} 个步骤 · 默认 {advance_mode} · 触发词 {trigger_text}")
-        self.detail_label.setText(template.get("description") or "未填写描述")
-        self.step_preview_list.clear()
-        for idx, step in enumerate(steps):
-            mode = resolve_step_advance_mode(template, step)
-            mode_text = "自动推进" if mode == SOP_ADVANCE_MODE_AUTO else "人工确认"
-            item = QListWidgetItem(
-                qta.icon("fa5s.chevron-right", color=DesignTokens.primary),
-                f"{idx + 1}. {step.get('title') or f'步骤 {idx + 1}'}\n{mode_text}",
-            )
-            item.setToolTip(step.get("instructions") or "")
-            self.step_preview_list.addItem(item)
-
-    def selected_template(self):
-        item = self.template_list.currentItem()
-        if not item:
-            return None
-        template_id = str(item.data(Qt.UserRole) or "").strip()
-        for template in self.templates:
-            if str(template.get("id") or "").strip() == template_id:
-                return template
-        return None
-
-
 class AutomationTaskDialog(QDialog):
-    def __init__(self, templates, task=None, parent=None):
+    def __init__(self, skills=None, agent_profiles=None, task=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("自动化任务")
-        self.resize(760, 620)
-        self.templates = list(templates or [])
+        self.resize(760, 680)
+        self.skills = list(skills or [])
+        self.agent_profiles = list(agent_profiles or [])
         self.task = dict(task or {})
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
@@ -4756,14 +3845,13 @@ class AutomationTaskDialog(QDialog):
 
         content = QWidget()
         scroll.setWidget(content)
-
         layout = QVBoxLayout(content)
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(16)
 
         title = QLabel("新建定时任务" if not self.task else "编辑定时任务")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("定时任务会按计划创建新任务，并结合任务模板一次性执行完整要求。")
+        subtitle = QLabel("定时任务会按计划提交提示词，并按指定 Agent 与引用能力执行。")
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
         layout.addWidget(title)
@@ -4795,10 +3883,10 @@ class AutomationTaskDialog(QDialog):
         guidance_layout = QVBoxLayout(guidance_card)
         guidance_layout.setContentsMargins(14, 12, 14, 12)
         guidance_layout.setSpacing(2)
-        guidance_kicker = QLabel("创建方式")
+        guidance_kicker = QLabel("执行方式")
         guidance_kicker.setStyleSheet(apple_section_kicker_style())
         guidance_layout.addWidget(guidance_kicker)
-        guidance_text = QLabel("适合先用快捷配置做稳定计划，需要精细控制时再切到 Cron。")
+        guidance_text = QLabel("提示词决定任务目标；能力和 Agent 只限定这次自动化的执行上下文。")
         guidance_text.setStyleSheet(apple_caption_style())
         guidance_text.setWordWrap(True)
         guidance_layout.addWidget(guidance_text)
@@ -4816,18 +3904,58 @@ class AutomationTaskDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(12)
         configure_responsive_form_layout(form)
-
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("例如：每日 AI 新闻简报")
         form.addRow("任务名称", self.name_input)
-
-        self.template_combo = QComboBox()
-        for template in self.templates:
-            self.template_combo.addItem(template.get("name") or "未命名模板", template.get("id") or "")
-        self.template_combo.currentIndexChanged.connect(self._refresh_template_preview)
-        form.addRow("任务模板", self.template_combo)
+        self.agent_combo = QComboBox()
+        self.agent_combo.addItem("默认主助手", "")
+        for profile in self.agent_profiles:
+            self.agent_combo.addItem(profile.get("name") or "未命名 Agent", profile.get("id") or "")
+        form.addRow("指定 Agent", self.agent_combo)
         basics_layout.addLayout(form)
         layout.addWidget(basics_card)
+
+        skills_card = QFrame()
+        skills_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        skills_layout = QVBoxLayout(skills_card)
+        skills_layout.setContentsMargins(16, 16, 16, 16)
+        skills_layout.setSpacing(10)
+        skills_label = QLabel("引用能力")
+        skills_label.setStyleSheet(apple_section_kicker_style())
+        skills_layout.addWidget(skills_label)
+        self.skill_list = QListWidget()
+        self.skill_list.setFixedHeight(140)
+        self.skill_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=14, padding=4))
+        for skill in self.skills:
+            name = str(skill.get("name") or "").strip()
+            if not name:
+                continue
+            item = QListWidgetItem(skill.get("display_name") or skill.get("label") or name)
+            item.setData(Qt.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setToolTip(str(skill.get("description") or ""))
+            self.skill_list.addItem(item)
+        skills_layout.addWidget(self.skill_list)
+        layout.addWidget(skills_card)
+
+        prompt_card = QFrame()
+        prompt_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        prompt_layout = QVBoxLayout(prompt_card)
+        prompt_layout.setContentsMargins(16, 16, 16, 16)
+        prompt_layout.setSpacing(10)
+        prompt_label = QLabel("提示词")
+        prompt_label.setStyleSheet(apple_section_kicker_style())
+        prompt_layout.addWidget(prompt_label)
+        prompt_hint = QLabel("写清楚自动化每次触发时要完成的目标、输入来源、输出格式和验收要求。")
+        prompt_hint.setStyleSheet(apple_caption_style())
+        prompt_hint.setWordWrap(True)
+        prompt_layout.addWidget(prompt_hint)
+        self.prompt_edit = QTextEdit()
+        self.prompt_edit.setPlaceholderText("例如：汇总今天 AI 行业重要新闻，按标题、来源、影响、后续动作输出。")
+        self.prompt_edit.setFixedHeight(180)
+        prompt_layout.addWidget(self.prompt_edit)
+        layout.addWidget(prompt_card, 1)
 
         schedule_card = QFrame()
         schedule_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
@@ -4871,7 +3999,6 @@ class AutomationTaskDialog(QDialog):
         self.schedule_type_combo.hide()
 
         self.schedule_stack = QStackedWidget()
-
         daily_page = QWidget()
         daily_layout = QHBoxLayout(daily_page)
         daily_layout.setContentsMargins(0, 0, 0, 0)
@@ -4959,15 +4086,7 @@ class AutomationTaskDialog(QDialog):
         type_layout.setHorizontalSpacing(4)
         type_layout.setVerticalSpacing(4)
         self.schedule_type_buttons = {}
-        for index, (label, value) in enumerate(
-            (
-                ("每天", AUTOMATION_SCHEDULE_DAILY),
-                ("每周", AUTOMATION_SCHEDULE_WEEKLY),
-                ("每月", AUTOMATION_SCHEDULE_MONTHLY),
-                ("间隔执行", AUTOMATION_SCHEDULE_INTERVAL),
-                ("单次", AUTOMATION_SCHEDULE_ONCE),
-            )
-        ):
+        for index, (label, value) in enumerate((("每天", AUTOMATION_SCHEDULE_DAILY), ("每周", AUTOMATION_SCHEDULE_WEEKLY), ("每月", AUTOMATION_SCHEDULE_MONTHLY), ("间隔执行", AUTOMATION_SCHEDULE_INTERVAL), ("单次", AUTOMATION_SCHEDULE_ONCE))):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -4995,13 +4114,10 @@ class AutomationTaskDialog(QDialog):
         cron_layout.addWidget(self.cron_expression_input)
         cron_layout.addWidget(self.cron_preview_label)
         self.schedule_mode_stack.addWidget(cron_page)
-
         schedule_card_layout.addWidget(self.schedule_mode_stack)
 
         self.schedule_preview_card = QFrame()
-        self.schedule_preview_card.setStyleSheet(
-            apple_section_surface_style(radius=16, bg="rgba(247, 249, 252, 0.92)")
-        )
+        self.schedule_preview_card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(247, 249, 252, 0.92)"))
         preview_meta_layout = QVBoxLayout(self.schedule_preview_card)
         preview_meta_layout.setContentsMargins(14, 12, 14, 12)
         preview_meta_layout.setSpacing(4)
@@ -5011,41 +4127,6 @@ class AutomationTaskDialog(QDialog):
         preview_meta_layout.addWidget(self.cron_preview_label)
         schedule_card_layout.addWidget(self.schedule_preview_card)
         layout.addWidget(schedule_card)
-
-        preview_card = QFrame()
-        preview_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
-        preview_layout = QVBoxLayout(preview_card)
-        preview_layout.setContentsMargins(16, 16, 16, 16)
-        preview_layout.setSpacing(8)
-        preview_title = QLabel("模板预览")
-        preview_title.setStyleSheet(apple_section_kicker_style())
-        preview_layout.addWidget(preview_title)
-        self.template_preview_title = QLabel("等待选择模板")
-        self.template_preview_title.setStyleSheet(apple_section_title_style(size=15))
-        preview_layout.addWidget(self.template_preview_title)
-        self.template_preview_label = QLabel("")
-        self.template_preview_label.setWordWrap(True)
-        self.template_preview_label.setStyleSheet(apple_caption_style())
-        preview_layout.addWidget(self.template_preview_label)
-        layout.addWidget(preview_card)
-
-        prompt_card = QFrame()
-        prompt_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
-        prompt_layout = QVBoxLayout(prompt_card)
-        prompt_layout.setContentsMargins(16, 16, 16, 16)
-        prompt_layout.setSpacing(10)
-        prompt_label = QLabel("执行补充说明")
-        prompt_label.setStyleSheet(apple_section_kicker_style())
-        prompt_layout.addWidget(prompt_label)
-        prompt_hint = QLabel("告诉助手这次自动化更关注什么，比如输出格式、过滤条件、优先级。")
-        prompt_hint.setStyleSheet(apple_caption_style())
-        prompt_hint.setWordWrap(True)
-        prompt_layout.addWidget(prompt_hint)
-        self.prompt_edit = QTextEdit()
-        self.prompt_edit.setPlaceholderText("补充本次自动化的执行要求、输出格式或关注重点。")
-        self.prompt_edit.setFixedHeight(180)
-        prompt_layout.addWidget(self.prompt_edit)
-        layout.addWidget(prompt_card, 1)
 
         actions = QHBoxLayout()
         cancel_btn = QPushButton("取消")
@@ -5061,14 +4142,6 @@ class AutomationTaskDialog(QDialog):
 
         self._load_task()
         self._on_schedule_type_changed()
-        self._refresh_template_preview()
-
-    def _current_template(self):
-        template_id = str(self.template_combo.currentData() or "").strip()
-        for template in self.templates:
-            if str(template.get("id") or "").strip() == template_id:
-                return template
-        return None
 
     def _set_schedule_mode(self, value):
         index = self.schedule_mode_combo.findData(value)
@@ -5106,15 +4179,25 @@ class AutomationTaskDialog(QDialog):
                 weekdays.append(int(check.property("weekdayIndex")))
         return weekdays or [0]
 
+    def _selected_skill_names(self):
+        names = []
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            if item.checkState() == Qt.Checked:
+                names.append(str(item.data(Qt.UserRole) or ""))
+        return normalize_selected_skill_names(names)
+
     def _load_task(self):
-        template_id = str(self.task.get("template_id") or "").strip()
-        if template_id:
-            index = self.template_combo.findData(template_id)
-            if index >= 0:
-                self.template_combo.setCurrentIndex(index)
         self.name_input.setText(str(self.task.get("name") or "").strip())
         self.prompt_edit.setPlainText(str(self.task.get("prompt") or "").strip())
         self.enabled_check.setChecked(bool(self.task.get("enabled", True)))
+        agent_index = self.agent_combo.findData(str(self.task.get("agent_profile_id") or ""))
+        if agent_index >= 0:
+            self.agent_combo.setCurrentIndex(agent_index)
+        selected_skills = set(normalize_selected_skill_names(self.task.get("skill_names")))
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            item.setCheckState(Qt.Checked if str(item.data(Qt.UserRole) or "") in selected_skills else Qt.Unchecked)
         schedule_type = str(self.task.get("schedule_type") or AUTOMATION_SCHEDULE_DAILY).strip()
         self.schedule_mode_combo.setCurrentIndex(1 if schedule_type == AUTOMATION_SCHEDULE_CRON else 0)
         combo_index = self.schedule_type_combo.findData(schedule_type)
@@ -5130,9 +4213,7 @@ class AutomationTaskDialog(QDialog):
         weekdays = set(self.task.get("weekdays") or [])
         for check in self.weekday_checks:
             check.setChecked(int(check.property("weekdayIndex")) in weekdays)
-        self.cron_expression_input.setText(
-            str(self.task.get("cron_expression") or cron_expression_from_legacy_schedule(self.task)).strip()
-        )
+        self.cron_expression_input.setText(str(self.task.get("cron_expression") or cron_expression_from_legacy_schedule(self.task)).strip())
         self._on_schedule_mode_changed()
         self._refresh_cron_preview()
         self._refresh_status_summary()
@@ -5145,13 +4226,7 @@ class AutomationTaskDialog(QDialog):
 
     def _on_schedule_type_changed(self):
         schedule_type = str(self.schedule_type_combo.currentData() or AUTOMATION_SCHEDULE_DAILY)
-        page_index = {
-            AUTOMATION_SCHEDULE_DAILY: 0,
-            AUTOMATION_SCHEDULE_WEEKLY: 1,
-            AUTOMATION_SCHEDULE_MONTHLY: 2,
-            AUTOMATION_SCHEDULE_INTERVAL: 3,
-            AUTOMATION_SCHEDULE_ONCE: 4,
-        }.get(schedule_type, 0)
+        page_index = {AUTOMATION_SCHEDULE_DAILY: 0, AUTOMATION_SCHEDULE_WEEKLY: 1, AUTOMATION_SCHEDULE_MONTHLY: 2, AUTOMATION_SCHEDULE_INTERVAL: 3, AUTOMATION_SCHEDULE_ONCE: 4}.get(schedule_type, 0)
         self.schedule_stack.setCurrentIndex(page_index)
         self._sync_schedule_type_buttons()
         self._refresh_cron_preview()
@@ -5172,11 +4247,7 @@ class AutomationTaskDialog(QDialog):
             payload["interval_minutes"] = int(self.interval_minutes_spin.value())
         elif schedule_type == AUTOMATION_SCHEDULE_ONCE:
             payload["one_time_at"] = int(self.once_datetime_edit.dateTime().toSecsSinceEpoch())
-        payload["cron_expression"] = (
-            ""
-            if schedule_type == AUTOMATION_SCHEDULE_ONCE
-            else cron_expression_from_legacy_schedule(payload)
-        )
+        payload["cron_expression"] = "" if schedule_type == AUTOMATION_SCHEDULE_ONCE else cron_expression_from_legacy_schedule(payload)
         return payload
 
     def _refresh_cron_preview(self):
@@ -5199,30 +4270,12 @@ class AutomationTaskDialog(QDialog):
         lead = "自定义 Cron" if cron_mode else "下次执行"
         self.cron_preview_label.setText(f"{lead}\n{next_run_text}\n{expression}")
 
-    def _refresh_template_preview(self):
-        template = self._current_template() or {}
-        steps = template.get("steps") or []
-        preview = " -> ".join(
-            [str(step.get("title") or f"步骤 {index + 1}") for index, step in enumerate(steps[:4])]
-        )
-        if len(steps) > 4:
-            preview += " -> ..."
-        self.template_preview_title.setText(template.get("name") or "等待选择模板")
-        self.template_preview_label.setText(
-            f"{template.get('description') or '未填写描述'}\n步骤：{preview or '暂无步骤'}"
-        )
-        if not self.name_input.text().strip() and template.get("name"):
-            self.name_input.setText(str(template.get("name") or "").strip())
-
     def _handle_accept(self):
-        if not self.templates:
-            QMessageBox.warning(self, "自动化任务", "请先创建至少一个任务模板。")
-            return
         if not self.name_input.text().strip():
             QMessageBox.warning(self, "自动化任务", "请填写任务名称。")
             return
-        if not str(self.template_combo.currentData() or "").strip():
-            QMessageBox.warning(self, "自动化任务", "请选择一个任务模板。")
+        if not self.prompt_edit.toPlainText().strip():
+            QMessageBox.warning(self, "自动化任务", "请填写提示词。")
             return
         if str(self.schedule_mode_combo.currentData() or "quick") == "cron":
             if not validate_cron_expression(self.cron_expression_input.text().strip()):
@@ -5232,19 +4285,12 @@ class AutomationTaskDialog(QDialog):
 
     def task_payload(self):
         payload = dict(self.task)
-        for key in (
-            "time_of_day",
-            "weekdays",
-            "day_of_month",
-            "interval_minutes",
-            "interval_anchor_at",
-            "one_time_at",
-            "cron_expression",
-        ):
+        for key in ("time_of_day", "weekdays", "day_of_month", "interval_minutes", "interval_anchor_at", "one_time_at", "cron_expression", "template_id"):
             payload.pop(key, None)
         payload["name"] = self.name_input.text().strip()
-        payload["template_id"] = str(self.template_combo.currentData() or "").strip()
         payload["prompt"] = self.prompt_edit.toPlainText().strip()
+        payload["skill_names"] = self._selected_skill_names()
+        payload["agent_profile_id"] = str(self.agent_combo.currentData() or "").strip()
         payload["enabled"] = self.enabled_check.isChecked()
         if str(self.schedule_mode_combo.currentData() or "quick") == "cron":
             payload["schedule_type"] = AUTOMATION_SCHEDULE_CRON
@@ -5275,7 +4321,7 @@ class AutomationDialog(QDialog):
         title_box.setSpacing(4)
         title = QLabel("自动化")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("把会话里的可复用流程沉淀成计划任务，安静地在后台替你推进。")
+        subtitle = QLabel("按计划提交提示词，并为每个任务指定可用能力和 Agent。")
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
@@ -5293,10 +4339,8 @@ class AutomationDialog(QDialog):
         summary_row.setSpacing(10)
         self.configured_summary_card = self._build_overview_card("已配置任务", "0")
         self.active_summary_card = self._build_overview_card("正在启用", "0")
-        self.template_summary_card = self._build_overview_card("任务模板", "0")
         summary_row.addWidget(self.configured_summary_card, 1)
         summary_row.addWidget(self.active_summary_card, 1)
-        summary_row.addWidget(self.template_summary_card, 1)
         layout.addLayout(summary_row)
 
         tab_bar = QFrame()
@@ -5305,7 +4349,7 @@ class AutomationDialog(QDialog):
         tab_bar_layout.setContentsMargins(4, 4, 4, 4)
         tab_bar_layout.setSpacing(4)
         self.tab_buttons = []
-        for index, label in enumerate(("已配置", "执行历史", "任务模板")):
+        for index, label in enumerate(("已配置", "执行历史")):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -5334,7 +4378,7 @@ class AutomationDialog(QDialog):
         self.tasks_layout.setContentsMargins(0, 0, 0, 0)
         self.tasks_layout.setSpacing(10)
         self.tasks_scroll.setWidget(self.tasks_container)
-        configured_hint = QLabel("定时任务更适合长期、稳定、可重复的流程。")
+        configured_hint = QLabel("每个任务由提示词、引用能力、Agent 和触发计划组成。")
         configured_hint.setStyleSheet(apple_caption_style())
         configured_hint.setWordWrap(True)
         configured_layout.addWidget(configured_hint)
@@ -5376,47 +4420,6 @@ class AutomationDialog(QDialog):
         history_layout.addWidget(history_detail_card)
         self.tabs.addWidget(history_tab)
 
-        templates_tab = QWidget()
-        templates_layout = QVBoxLayout(templates_tab)
-        templates_layout.setContentsMargins(0, 12, 0, 0)
-        templates_layout.setSpacing(10)
-        templates_hint = QLabel("模板负责定义流程本身，计划任务只负责什么时候触发。")
-        templates_hint.setStyleSheet(apple_caption_style())
-        templates_hint.setWordWrap(True)
-        templates_layout.addWidget(templates_hint)
-        templates_scroll = QScrollArea()
-        templates_scroll.setWidgetResizable(True)
-        templates_scroll.setFrameShape(QFrame.NoFrame)
-        templates_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        templates_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        templates_layout.addWidget(templates_scroll)
-        templates_content = QWidget()
-        templates_scroll.setWidget(templates_content)
-        templates_content_layout = QVBoxLayout(templates_content)
-        templates_content_layout.setContentsMargins(0, 0, 0, 0)
-        templates_content_layout.setSpacing(12)
-        skill_provider = (
-            self._main._available_session_skills
-            if self._main and hasattr(self._main, "_available_session_skills")
-            else (lambda: [])
-        )
-        agent_profile_provider = (
-            self._main._available_agent_profiles
-            if self._main and hasattr(self._main, "_available_agent_profiles")
-            else (lambda: [])
-        )
-        self.sop_template_manager = SopTemplateManager(
-            self.config_manager.get_sop_templates(),
-            skill_provider=skill_provider,
-            agent_profile_provider=agent_profile_provider,
-            title_text="任务模板",
-            noun="自动化",
-            show_id_field=False,
-            helper_text="",
-        )
-        templates_content_layout.addWidget(self.sop_template_manager)
-        self.tabs.addWidget(templates_tab)
-
         actions = QHBoxLayout()
         close_btn = QPushButton("关闭")
         close_btn.setObjectName("SecondaryBtn")
@@ -5434,8 +4437,24 @@ class AutomationDialog(QDialog):
         self._refresh_overview_cards()
         self._set_tab_index(0)
 
-    def _current_templates(self):
-        return self.sop_template_manager.get_templates()
+    def _available_skills(self):
+        if self._main and hasattr(self._main, "_available_session_skills"):
+            return list(self._main._available_session_skills() or [])
+        return []
+
+    def _available_agent_profiles(self):
+        if self._main and hasattr(self._main, "_available_agent_profiles"):
+            return list(self._main._available_agent_profiles() or [])
+        return list(self.config_manager.get_agent_profiles())
+
+    def _agent_name(self, profile_id):
+        identifier = str(profile_id or "").strip()
+        if not identifier:
+            return "默认主助手"
+        for profile in self._available_agent_profiles():
+            if str(profile.get("id") or "") == identifier:
+                return profile.get("name") or "未命名 Agent"
+        return "Agent 已删除"
 
     def _build_overview_card(self, title, value):
         card = QFrame()
@@ -5459,23 +4478,12 @@ class AutomationDialog(QDialog):
 
     def _refresh_overview_cards(self):
         self._set_summary_card_value(self.configured_summary_card, len(self.tasks))
-        self._set_summary_card_value(
-            self.active_summary_card,
-            len([task for task in self.tasks if task.get("enabled")]),
-        )
-        self._set_summary_card_value(self.template_summary_card, len(self._current_templates()))
+        self._set_summary_card_value(self.active_summary_card, len([task for task in self.tasks if task.get("enabled")]))
 
     def _set_tab_index(self, index):
         self.tabs.setCurrentIndex(index)
         for btn_index, btn in enumerate(self.tab_buttons):
             btn.setChecked(btn_index == index)
-
-    def _template_by_id(self, template_id):
-        identifier = str(template_id or "").strip()
-        for template in self._current_templates():
-            if str(template.get("id") or "").strip() == identifier:
-                return template
-        return None
 
     def _task_time_text(self, ts):
         try:
@@ -5486,10 +4494,9 @@ class AutomationDialog(QDialog):
             return "未设置"
 
     def _task_card_meta(self, task):
-        template = self._template_by_id(task.get("template_id"))
         next_run_text = self._task_time_text(task.get("next_run_at"))
-        template_name = template.get("name") if template else "模板已删除"
-        return f"{template_name} · {describe_schedule(task)}\n下次执行：{next_run_text}"
+        skill_count = len(normalize_selected_skill_names(task.get("skill_names")))
+        return f"{describe_schedule(task)} · {self._agent_name(task.get('agent_profile_id'))} · {skill_count} 个能力\n下次执行：{next_run_text}"
 
     def _build_task_action_button(self, icon_name, tooltip, callback, kind="neutral"):
         btn = QToolButton()
@@ -5520,7 +4527,7 @@ class AutomationDialog(QDialog):
             empty_layout.setSpacing(8)
             empty_title = QLabel("还没有任务")
             empty_title.setStyleSheet(apple_section_title_style(size=15))
-            empty_desc = QLabel("先创建一个稳定会重复发生的流程，比如日报、巡检、同步或清理。")
+            empty_desc = QLabel("先创建一个会按计划提交提示词的任务，比如日报、巡检、同步或清理。")
             empty_desc.setStyleSheet(apple_caption_style())
             empty_desc.setWordWrap(True)
             empty_btn = QPushButton("新建定时任务")
@@ -5560,35 +4567,17 @@ class AutomationDialog(QDialog):
             meta.setWordWrap(True)
             meta.setStyleSheet(apple_caption_style())
             card_layout.addWidget(meta)
-            if task.get("prompt"):
-                prompt = QLabel(task.get("prompt") or "")
-                prompt.setWordWrap(True)
-                prompt.setStyleSheet(apple_caption_style())
-                card_layout.addWidget(prompt)
+            prompt = QLabel(task.get("prompt") or "")
+            prompt.setWordWrap(True)
+            prompt.setStyleSheet(apple_caption_style())
+            card_layout.addWidget(prompt)
             actions = QHBoxLayout()
             actions.setContentsMargins(0, 0, 0, 0)
             actions.setSpacing(8)
-            edit_btn = self._build_task_action_button(
-                "fa5s.pen",
-                "编辑任务",
-                lambda checked=False, task_id=task.get("id"): self.edit_task(task_id),
-            )
-            toggle_btn = self._build_task_action_button(
-                "fa5s.pause" if task.get("enabled") else "fa5s.play",
-                "暂停任务" if task.get("enabled") else "启用任务",
-                lambda checked=False, task_id=task.get("id"): self.toggle_task(task_id),
-                kind="primary" if not task.get("enabled") else "neutral",
-            )
-            delete_btn = self._build_task_action_button(
-                "fa5s.trash-alt",
-                "删除任务",
-                lambda checked=False, task_id=task.get("id"): self.delete_task(task_id),
-                kind="danger",
-            )
-            actions.addWidget(edit_btn)
-            actions.addWidget(toggle_btn)
+            actions.addWidget(self._build_task_action_button("fa5s.pen", "编辑任务", lambda checked=False, task_id=task.get("id"): self.edit_task(task_id)))
+            actions.addWidget(self._build_task_action_button("fa5s.pause" if task.get("enabled") else "fa5s.play", "暂停任务" if task.get("enabled") else "启用任务", lambda checked=False, task_id=task.get("id"): self.toggle_task(task_id), kind="primary" if not task.get("enabled") else "neutral"))
             actions.addStretch()
-            actions.addWidget(delete_btn)
+            actions.addWidget(self._build_task_action_button("fa5s.trash-alt", "删除任务", lambda checked=False, task_id=task.get("id"): self.delete_task(task_id), kind="danger"))
             card_layout.addLayout(actions)
             self.tasks_layout.addWidget(card)
         self.tasks_layout.addStretch()
@@ -5599,7 +4588,6 @@ class AutomationDialog(QDialog):
         self.history_list.clear()
         status_labels = {
             AUTOMATION_HISTORY_STATUS_RUNNING: "运行中",
-            AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION: "等待确认",
             AUTOMATION_HISTORY_STATUS_COMPLETED: "已完成",
             AUTOMATION_HISTORY_STATUS_ERROR: "失败",
             AUTOMATION_HISTORY_STATUS_INTERRUPTED: "已中断",
@@ -5615,12 +4603,7 @@ class AutomationDialog(QDialog):
                 icon_name = "fa5s.exclamation-circle"
             elif status == AUTOMATION_HISTORY_STATUS_RUNNING:
                 icon_name = "fa5s.play-circle"
-            elif status == AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION:
-                icon_name = "fa5s.pause-circle"
-            item = QListWidgetItem(
-                qta.icon(icon_name, color=status_color(status or "")),
-                f"{record.get('task_name') or '未命名任务'} · {status_labels.get(record.get('status'), record.get('status') or '未知')}\n{when_text}"
-            )
+            item = QListWidgetItem(qta.icon(icon_name, color=status_color(status or "")), f"{record.get('task_name') or '未命名任务'} · {status_labels.get(record.get('status'), record.get('status') or '未知')}\n{when_text}")
             item.setData(Qt.UserRole, record.get("id"))
             self.history_list.addItem(item)
         if self.history_list.count():
@@ -5641,7 +4624,7 @@ class AutomationDialog(QDialog):
         self.history_detail_title.setText(record.get("task_name") or "未命名任务")
         lines = [
             f"任务：{record.get('task_name') or '未命名任务'}",
-            f"模板：{record.get('template_name') or '未命名模板'}",
+            f"Agent：{record.get('agent_profile_name') or '默认主助手'}",
             f"触发方式：{'定时触发' if record.get('trigger_source') == 'scheduler' else '手动触发'}",
             f"计划时间：{self._task_time_text(record.get('scheduled_at'))}",
             f"开始时间：{self._task_time_text(record.get('started_at'))}",
@@ -5662,12 +4645,7 @@ class AutomationDialog(QDialog):
         return -1
 
     def create_task(self):
-        templates = self._current_templates()
-        if not templates:
-            QMessageBox.information(self, "自动化", "请先在“任务模板”里创建至少一个模板。")
-            self._set_tab_index(2)
-            return
-        dialog = AutomationTaskDialog(templates, parent=self)
+        dialog = AutomationTaskDialog(self._available_skills(), self._available_agent_profiles(), parent=self)
         if dialog.exec():
             payload = dialog.task_payload()
             payload["next_run_at"] = compute_next_run_at(payload)
@@ -5679,7 +4657,7 @@ class AutomationDialog(QDialog):
         index = self._find_task_index(task_id)
         if index < 0:
             return
-        dialog = AutomationTaskDialog(self._current_templates(), task=self.tasks[index], parent=self)
+        dialog = AutomationTaskDialog(self._available_skills(), self._available_agent_profiles(), task=self.tasks[index], parent=self)
         if dialog.exec():
             payload = dialog.task_payload()
             payload["id"] = self.tasks[index].get("id")
@@ -5703,13 +4681,7 @@ class AutomationDialog(QDialog):
         index = self._find_task_index(task_id)
         if index < 0:
             return
-        reply = QMessageBox.question(
-            self,
-            "删除自动化",
-            "确定删除这个自动化任务吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
+        reply = QMessageBox.question(self, "删除自动化", "确定删除这个自动化任务吗？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
         del self.tasks[index]
@@ -5730,7 +4702,6 @@ class AutomationDialog(QDialog):
         self._main.activate_session(session_id)
 
     def save_changes(self):
-        self.config_manager.set_sop_templates(self._current_templates())
         self.config_manager.set_automation_tasks(self.tasks)
         self.tasks = list(self.config_manager.get_automation_tasks())
 
@@ -9518,155 +8489,6 @@ class SystemToast(QFrame):
         self.updateGeometry()
 
 
-class SopConfirmationBar(QFrame):
-    confirmRequested = Signal()
-    rerunRequested = Signal()
-    skipRequested = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("SopConfirmationBar")
-        self.setFrameShape(QFrame.NoFrame)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self._applied_max_width = min(DesignTokens.message_max_width - 60, 720)
-        self.setMinimumWidth(DesignTokens.toast_min_width)
-        self.setMaximumWidth(self._applied_max_width)
-        self.setStyleSheet(
-            f"""
-            QFrame#SopConfirmationBar {{
-                background-color: {DesignTokens.toast_bg};
-                border: 1px solid {DesignTokens.warning_border};
-                border-radius: 18px;
-            }}
-            QLabel#SopConfirmationTitle {{
-                color: {DesignTokens.text_primary};
-                font-size: 13px;
-                font-weight: 700;
-                background: transparent;
-            }}
-            QLabel#SopConfirmationText {{
-                color: {DesignTokens.text_secondary};
-                font-size: 12px;
-                font-weight: 500;
-                background: transparent;
-            }}
-            """
-        )
-        add_soft_shadow(self, blur=18, y_offset=6, alpha=DesignTokens.toast_shadow_alpha)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(8)
-        icon = QLabel()
-        icon.setPixmap(qta.icon("fa5s.tasks", color=DesignTokens.warning_icon).pixmap(14, 14))
-        header.addWidget(icon, 0, Qt.AlignTop)
-        title_box = QVBoxLayout()
-        title_box.setContentsMargins(0, 0, 0, 0)
-        title_box.setSpacing(3)
-        self.title_label = QLabel("自动化等待确认")
-        self.title_label.setObjectName("SopConfirmationTitle")
-        self.title_label.setWordWrap(True)
-        self.detail_label = QLabel("当前步骤已完成，请确认后继续。")
-        self.detail_label.setObjectName("SopConfirmationText")
-        self.detail_label.setWordWrap(True)
-        title_box.addWidget(self.title_label)
-        title_box.addWidget(self.detail_label)
-        header.addLayout(title_box, 1)
-        layout.addLayout(header)
-
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(8)
-        actions.addStretch()
-        self.confirm_btn = QPushButton("确认并继续")
-        self.confirm_btn.setCursor(Qt.PointingHandCursor)
-        self.confirm_btn.setFixedHeight(30)
-        self.confirm_btn.setStyleSheet(apple_button_style("primary", radius=15))
-        self.confirm_btn.clicked.connect(self.confirmRequested.emit)
-        self.rerun_btn = QPushButton("重跑本步")
-        self.rerun_btn.setCursor(Qt.PointingHandCursor)
-        self.rerun_btn.setFixedHeight(30)
-        self.rerun_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.rerun_btn.clicked.connect(self.rerunRequested.emit)
-        self.skip_btn = QPushButton("标记不适用")
-        self.skip_btn.setCursor(Qt.PointingHandCursor)
-        self.skip_btn.setFixedHeight(30)
-        self.skip_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.skip_btn.clicked.connect(self.skipRequested.emit)
-        actions.addWidget(self.confirm_btn)
-        actions.addWidget(self.rerun_btn)
-        actions.addWidget(self.skip_btn)
-        layout.addLayout(actions)
-
-    def update_state(self, sop_run, current_step=None, allow_skip=False, running=False):
-        template_name = (sop_run or {}).get("template_name") or "当前自动化"
-        step_index = int((sop_run or {}).get("current_step_index", 0) or 0) + 1
-        step_count = max(len((sop_run or {}).get("steps") or []), 1)
-        step_title = (current_step or {}).get("title") or f"步骤 {step_index}"
-        self.title_label.setText(f"{template_name} · 第 {min(step_index, step_count)} 步等待确认")
-        self.detail_label.setText(step_title)
-        allow_actions = bool(not running and (sop_run or {}).get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION)
-        self.confirm_btn.setEnabled(allow_actions)
-        self.rerun_btn.setEnabled(allow_actions)
-        self.skip_btn.setEnabled(allow_actions and bool(allow_skip))
-
-    def apply_dynamic_width(self, message_width):
-        target = max(DesignTokens.toast_min_width, min(int(message_width or 0), 720))
-        self._applied_max_width = target
-        self.setMinimumWidth(min(DesignTokens.toast_min_width, target))
-        self.setMaximumWidth(target)
-        self.updateGeometry()
-
-
-def file_chip_icon_name(path):
-    ext = os.path.splitext(str(path or ""))[1].lower()
-    mapping = {
-        ".doc": "fa5s.file-word",
-        ".docx": "fa5s.file-word",
-        ".ppt": "fa5s.file-powerpoint",
-        ".pptx": "fa5s.file-powerpoint",
-        ".xls": "fa5s.file-excel",
-        ".xlsx": "fa5s.file-excel",
-        ".pdf": "fa5s.file-pdf",
-        ".txt": "fa5s.file-alt",
-        ".md": "fa5s.file-alt",
-        ".csv": "fa5s.file-csv",
-        ".json": "fa5s.file-code",
-        ".html": "fa5s.file-code",
-        ".htm": "fa5s.file-code",
-        ".py": "fa5s.file-code",
-        ".js": "fa5s.file-code",
-        ".ts": "fa5s.file-code",
-        ".png": "fa5s.file-image",
-        ".jpg": "fa5s.file-image",
-        ".jpeg": "fa5s.file-image",
-        ".gif": "fa5s.file-image",
-        ".webp": "fa5s.file-image",
-        ".zip": "fa5s.file-archive",
-    }
-    return mapping.get(ext, "fa5s.file")
-
-
-def session_history_ready(state):
-    return bool(
-        state
-        and getattr(state, "history_loaded", True)
-        and not getattr(state, "history_loading", False)
-    )
-
-
-def is_auto_query_skill_context_message(message):
-    if not isinstance(message, dict):
-        return False
-    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-    return bool(
-        meta.get("kind") in ("skill_context", "skill_context_update")
-        and meta.get("source") == "skill_prompt_query_match"
-    )
 class FileChip(QFrame):
     removeRequested = Signal(str)
 
@@ -11892,7 +10714,6 @@ class SessionState:
         self.daemon_running = False
         self.daemon_worker = None
         self.code_worker = None
-        self.sop_executor_worker = None
         self.chat_layout = chat_layout
         self.active_skills_label = active_skills_label
         self.token_usage_label = token_usage_label
@@ -11948,14 +10769,11 @@ class SessionState:
         self.office_draft_preview_pending = False
         self.office_draft_task_card = None
         self.office_task_result_paths = []
-        self.sop_run = None
-        self.sop_confirmation_bar = None
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
         self.automation_task_id = ""
         self.automation_run_id = ""
         self.automation_trigger_source = ""
-        self.automation_template_id = ""
         self.selected_deliverable_path = ""
         self.deliverable_preview_rendered = False
         self.token_usage_summary = normalize_token_usage_summary({})
@@ -12670,636 +11488,6 @@ class ConversationSkillDraftWorker(QThread):
             })
 
 
-class ConversationSopDraftWorker(QThread):
-    progress_signal = Signal(str)
-    finished_signal = Signal(dict)
-
-    def __init__(
-        self,
-        config_manager,
-        session_id,
-        title,
-        messages,
-        meta=None,
-        previous_draft=None,
-        revision_feedback="",
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.config_manager = config_manager
-        self.session_id = session_id
-        self.title = title
-        self.messages = list(messages or [])
-        self.meta = dict(meta or {})
-        self.previous_draft = dict(previous_draft or {})
-        self.revision_feedback = str(revision_feedback or "")
-
-    def run(self):
-        try:
-            if not self.messages:
-                self.finished_signal.emit({
-                    "ok": False,
-                    "session_id": self.session_id,
-                    "error": "当前会话没有可提炼 SOP 的消息。",
-                })
-                return
-            self.progress_signal.emit("正在整理当前会话记录")
-            transcript = render_session_transcript(
-                self.session_id,
-                self.title,
-                self.messages,
-                meta=self.meta,
-            )
-            self.progress_signal.emit("正在让模型提炼 SOP 草稿")
-            provider = LLMFactory.create_provider(self.config_manager)
-            draft = generate_sop_draft(
-                provider,
-                transcript,
-                fallback_title=self.title,
-                previous_draft=self.previous_draft,
-                revision_feedback=self.revision_feedback,
-            )
-            self.finished_signal.emit({
-                "ok": True,
-                "session_id": self.session_id,
-                "draft": draft,
-            })
-        except Exception as exc:
-            self.finished_signal.emit({
-                "ok": False,
-                "session_id": self.session_id,
-                "error": str(exc),
-            })
-
-
-class SopStepExecutorWorker(QThread):
-    finished_signal = Signal(dict, str)
-
-    def __init__(self, session_id, sop_run, workspace_dir, parent=None):
-        super().__init__(parent)
-        self.session_id = str(session_id or "")
-        self.sop_run = json.loads(json.dumps(sop_run or {}, ensure_ascii=False))
-        self.workspace_dir = workspace_dir
-
-    def run(self):
-        result = execute_sop_step(self.sop_run, self.workspace_dir)
-        self.finished_signal.emit(result, self.session_id)
-
-
-class ConversationSkillOptionsDialog(QDialog):
-    def __init__(self, skills, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("沉淀为 Skill")
-        self.resize(520, 300)
-        self.skills = list(skills or [])
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("从当前会话生成或更新 Skill")
-        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
-        layout.addWidget(title)
-
-        hint = QLabel("会话记录会先交给当前模型提炼，生成草稿后你可以预览和编辑，再决定是否保存。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(hint)
-
-        form = QFormLayout()
-        self.options_form = form
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("生成新 Skill", "create")
-        self.mode_combo.addItem("更新已有 Skill", "update")
-        form.addRow("操作", self.mode_combo)
-
-        self.strategy_combo = QComboBox()
-        self.strategy_combo.addItem("追加经验", "append")
-        self.strategy_combo.addItem("重写说明", "rewrite")
-        form.addRow("更新方式", self.strategy_combo)
-
-        self.skill_combo = QComboBox()
-        for skill in self.skills:
-            name = skill.get("name") or ""
-            if not name:
-                continue
-            display = skill.get("display_name") or name
-            self.skill_combo.addItem(f"{display} ({name})", name)
-        form.addRow("目标 Skill", self.skill_combo)
-        layout.addLayout(form)
-
-        button_row = QHBoxLayout()
-        button_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.clicked.connect(self.reject)
-        self.generate_btn = QPushButton("生成草稿")
-        self.generate_btn.setCursor(Qt.PointingHandCursor)
-        self.generate_btn.setIcon(qta.icon('fa5s.magic', color='#ffffff'))
-        self.generate_btn.setStyleSheet(
-            f"background-color: {DesignTokens.primary}; color: white; border-radius: 12px; "
-            "padding: 8px 14px; font-weight: 700; border: none;"
-        )
-        self.generate_btn.clicked.connect(self.accept)
-        button_row.addWidget(cancel_btn)
-        button_row.addWidget(self.generate_btn)
-        layout.addLayout(button_row)
-
-        self.mode_combo.currentIndexChanged.connect(self.refresh_visibility)
-        self.refresh_visibility()
-
-    def refresh_visibility(self):
-        is_update = self.mode_combo.currentData() == "update"
-        self.strategy_combo.setVisible(is_update)
-        self.skill_combo.setVisible(is_update)
-        for row in (1, 2):
-            label_item = self.options_form.itemAt(row, QFormLayout.LabelRole)
-            if label_item and label_item.widget():
-                label_item.widget().setVisible(is_update)
-        self.generate_btn.setEnabled(not is_update or self.skill_combo.count() > 0)
-
-    def selected_options(self):
-        return {
-            "mode": self.mode_combo.currentData() or "create",
-            "update_strategy": self.strategy_combo.currentData() or "append",
-            "target_skill": self.skill_combo.currentData() if self.mode_combo.currentData() == "update" else None,
-        }
-
-
-class ConversationSkillRangeDialog(QDialog):
-    def __init__(self, messages, parent=None):
-        super().__init__(parent)
-        self.messages = [msg for msg in (messages or []) if isinstance(msg, dict)]
-        self.setWindowTitle("选择沉淀片段")
-        self.resize(620, 420)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("选择要沉淀为 Skill 的当前会话片段")
-        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
-        layout.addWidget(title)
-
-        hint = QLabel("默认使用完整会话。选择起止消息后，系统只会基于这段连续上下文生成 Skill 草稿。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(hint)
-
-        form = QFormLayout()
-        self.start_combo = QComboBox()
-        self.end_combo = QComboBox()
-        for index, message in enumerate(self.messages):
-            label = self._message_label(index, message)
-            self.start_combo.addItem(label, index)
-            self.end_combo.addItem(label, index)
-        if self.messages:
-            self.end_combo.setCurrentIndex(len(self.messages) - 1)
-        self.start_combo.currentIndexChanged.connect(self._sync_range)
-        self.end_combo.currentIndexChanged.connect(self._sync_range)
-        form.addRow("起始消息", self.start_combo)
-        form.addRow("结束消息", self.end_combo)
-        layout.addLayout(form)
-
-        self.preview = QListWidget()
-        self.preview.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_card, radius=12, padding=4))
-        layout.addWidget(self.preview, 1)
-        self._refresh_preview()
-
-        button_row = QHBoxLayout()
-        button_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        ok_btn = QPushButton("继续生成")
-        ok_btn.setObjectName("PrimaryBtn")
-        ok_btn.clicked.connect(self.accept)
-        button_row.addWidget(cancel_btn)
-        button_row.addWidget(ok_btn)
-        layout.addLayout(button_row)
-
-    def _message_label(self, index, message):
-        role = str(message.get("role") or "message")
-        content = str(message.get("content") or "")
-        if not content and message.get("tool_calls"):
-            content = "工具调用"
-        if not content and message.get("tool_call_id"):
-            content = "工具结果"
-        content = re.sub(r"\s+", " ", content).strip()[:72] or "空消息"
-        return f"{index + 1}. {role}: {content}"
-
-    def _range_indices(self):
-        start = int(self.start_combo.currentData() or 0)
-        end = int(self.end_combo.currentData() or 0)
-        if start > end:
-            start, end = end, start
-        return start, end
-
-    def _sync_range(self):
-        self._refresh_preview()
-
-    def _refresh_preview(self):
-        self.preview.clear()
-        if not self.messages:
-            return
-        start, end = self._range_indices()
-        for index in range(start, end + 1):
-            self.preview.addItem(QListWidgetItem(self._message_label(index, self.messages[index])))
-
-    def selected_messages(self):
-        if not self.messages:
-            return []
-        start, end = self._range_indices()
-        return [dict(item) for item in self.messages[start : end + 1]]
-
-
-class ConversationSkillPreviewDialog(QDialog):
-    def __init__(self, draft, mode="create", target_skill=None, update_strategy="append", parent=None):
-        super().__init__(parent)
-        self.mode = mode or "create"
-        self.target_skill = target_skill
-        self.update_strategy = update_strategy or "append"
-        self.setWindowTitle("Skill 草稿预览")
-        self.resize(860, 700)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
-
-        draft = dict(draft or {})
-        self.script_assets = [dict(item) for item in (draft.get("script_assets") or []) if isinstance(item, dict)]
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("预览并编辑即将保存的 Skill 草稿")
-        title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {DesignTokens.text_primary};")
-        layout.addWidget(title)
-
-        context = "生成新 Skill" if self.mode == "create" else f"更新 {target_skill} / {'追加经验' if self.update_strategy == 'append' else '重写说明'}"
-        subtitle = QLabel(context)
-        subtitle.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(subtitle)
-
-        form = QFormLayout()
-        self.name_input = QLineEdit(draft.get("skill_name") or "")
-        self.name_input.setEnabled(self.mode == "create")
-        self.description_input = QLineEdit(draft.get("description") or "")
-        self.description_cn_input = QLineEdit(draft.get("description_cn") or "")
-        self.tags_input = QLineEdit(", ".join(draft.get("tags") or []))
-        self.triggers_input = QLineEdit(", ".join(draft.get("triggers") or []))
-        form.addRow("Skill 名称", self.name_input)
-        form.addRow("英文描述", self.description_input)
-        form.addRow("中文说明", self.description_cn_input)
-        form.addRow("标签", self.tags_input)
-        form.addRow("触发词", self.triggers_input)
-        layout.addLayout(form)
-
-        tabs = QTabWidget()
-        self.guidelines_editor = QTextEdit()
-        self.guidelines_editor.setPlainText(draft.get("usage_guidelines") or "")
-        self.experience_editor = QTextEdit()
-        self.experience_editor.setPlainText("\n".join(draft.get("experience_items") or []))
-        self.workflow_editor = QTextEdit()
-        self.workflow_editor.setPlainText("\n".join(draft.get("workflow") or []))
-        self.impl_editor = QTextEdit()
-        self.impl_editor.setPlainText(draft.get("impl_py") or "")
-        for editor in (self.guidelines_editor, self.experience_editor, self.workflow_editor, self.impl_editor):
-            editor.setStyleSheet(
-                f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
-                f"background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; "
-                "font-family: 'Consolas', monospace; font-size: 12px; padding: 8px;"
-            )
-        tabs.addTab(self.guidelines_editor, "说明正文")
-        tabs.addTab(self.experience_editor, "经验条目")
-        tabs.addTab(self.workflow_editor, "推荐流程")
-        tabs.addTab(self.impl_editor, "impl.py")
-        self.script_checks = []
-        scripts_tab = QWidget()
-        scripts_layout = QVBoxLayout(scripts_tab)
-        scripts_layout.setContentsMargins(8, 8, 8, 8)
-        scripts_layout.setSpacing(8)
-        if self.script_assets:
-            for asset in self.script_assets:
-                row = QCheckBox(f"{asset.get('name') or 'script'} -> {asset.get('path') or ''}")
-                row.setChecked(bool(asset.get("selected", True)) and bool(asset.get("valid", True)))
-                row.setEnabled(bool(asset.get("valid", True)))
-                row.setToolTip(asset.get("error") or asset.get("description") or "")
-                scripts_layout.addWidget(row)
-                preview = QTextEdit()
-                preview.setReadOnly(True)
-                preview.setPlainText(str(asset.get("code") or "")[:4000])
-                preview.setFixedHeight(110)
-                preview.setStyleSheet(
-                    f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
-                    f"background: {DesignTokens.bg_code}; color: {DesignTokens.text_primary}; "
-                    "font-family: 'Consolas', monospace; font-size: 12px; padding: 8px;"
-                )
-                scripts_layout.addWidget(preview)
-                self.script_checks.append((row, asset))
-        else:
-            empty_label = QLabel("当前选择片段中没有检测到已运行的 run_python_code。")
-            empty_label.setWordWrap(True)
-            empty_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-            scripts_layout.addWidget(empty_label)
-        scripts_layout.addStretch()
-        tabs.addTab(scripts_tab, "已运行代码")
-        layout.addWidget(tabs, 1)
-
-        self.error_label = QLabel("")
-        self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
-        layout.addWidget(self.error_label)
-
-        button_row = QHBoxLayout()
-        button_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("保存 Skill")
-        save_btn.setCursor(Qt.PointingHandCursor)
-        save_btn.setIcon(qta.icon('fa5s.save', color='#ffffff'))
-        save_btn.setStyleSheet(
-            f"background-color: {DesignTokens.primary}; color: white; border-radius: 12px; "
-            "padding: 8px 14px; font-weight: 700; border: none;"
-        )
-        save_btn.clicked.connect(self.validate_and_accept)
-        button_row.addWidget(cancel_btn)
-        button_row.addWidget(save_btn)
-        layout.addLayout(button_row)
-
-    def _lines(self, text):
-        return [line.strip() for line in str(text or "").splitlines() if line.strip()]
-
-    def _csv(self, text):
-        return [item.strip() for item in str(text or "").split(",") if item.strip()]
-
-    def draft(self):
-        return {
-            "skill_name": self.name_input.text().strip(),
-            "description": self.description_input.text().strip(),
-            "description_cn": self.description_cn_input.text().strip(),
-            "usage_guidelines": self.guidelines_editor.toPlainText().strip(),
-            "experience_items": self._lines(self.experience_editor.toPlainText()),
-            "workflow": self._lines(self.workflow_editor.toPlainText()),
-            "tags": self._csv(self.tags_input.text()),
-            "triggers": self._csv(self.triggers_input.text()),
-            "impl_py": self.impl_editor.toPlainText().strip(),
-            "script_assets": [
-                {
-                    **asset,
-                    "selected": True,
-                }
-                for checkbox, asset in self.script_checks
-                if checkbox.isChecked()
-            ],
-        }
-
-    def validate_and_accept(self):
-        draft = self.draft()
-        if self.mode == "create" and not draft.get("skill_name"):
-            self.error_label.setText("请填写 Skill 名称。")
-            return
-        if not draft.get("description"):
-            self.error_label.setText("请填写英文描述。")
-            return
-        ok, error = validate_impl_py(draft.get("impl_py") or "")
-        if not ok:
-            self.error_label.setText(error)
-            return
-        self.accept()
-
-
-class ConversationSopPreviewDialog(QDialog):
-    REVISION_RESULT = 2
-
-    def __init__(self, draft, parent=None):
-        super().__init__(parent)
-        self._revision_feedback = ""
-        self.setWindowTitle("SOP 草稿预览")
-        self.resize(820, 680)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
-
-        draft = normalize_sop_draft(draft)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
-
-        title = QLabel("预览并确认即将生成的 SOP")
-        title.setStyleSheet(apple_section_title_style())
-        layout.addWidget(title)
-
-        hint = QLabel("确认后会保存为任务模板，并立即绑定到当前会话。也可以先提出修改意见，让模型重新整理一版。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(apple_caption_style())
-        layout.addWidget(hint)
-
-        summary_row = QHBoxLayout()
-        summary_row.setContentsMargins(0, 0, 0, 0)
-        summary_row.setSpacing(10)
-        self.step_count_card = self._build_summary_card("步骤数", str(len(draft.get("steps") or [])))
-        self.trigger_count_card = self._build_summary_card("触发词", str(len(draft.get("triggers") or [])))
-        summary_row.addWidget(self.step_count_card, 1)
-        summary_row.addWidget(self.trigger_count_card, 1)
-        layout.addLayout(summary_row)
-
-        basics_card = QFrame()
-        basics_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
-        basics_layout = QVBoxLayout(basics_card)
-        basics_layout.setContentsMargins(16, 16, 16, 16)
-        basics_layout.setSpacing(12)
-        form = QFormLayout()
-        configure_responsive_form_layout(form)
-        self.name_input = QLineEdit(draft.get("name") or "")
-        self.description_edit = QTextEdit()
-        self.description_edit.setFixedHeight(84)
-        self.description_edit.setPlainText(draft.get("description") or "")
-        self.triggers_input = QLineEdit(", ".join(draft.get("triggers") or []))
-        self.triggers_input.textChanged.connect(self._refresh_step_preview_from_editor)
-        form.addRow("名称", self.name_input)
-        form.addRow("描述", self.description_edit)
-        form.addRow("触发词", self.triggers_input)
-        basics_layout.addLayout(form)
-        layout.addWidget(basics_card)
-
-        steps_card = QFrame()
-        steps_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
-        steps_layout = QVBoxLayout(steps_card)
-        steps_layout.setContentsMargins(16, 16, 16, 16)
-        steps_layout.setSpacing(10)
-        steps_label = QLabel("步骤预览")
-        steps_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary};")
-        steps_layout.addWidget(steps_label)
-
-        self.step_preview_list = QListWidget()
-        self.step_preview_list.setStyleSheet(
-            apple_list_style(border=True, bg="rgba(255, 255, 255, 0.64)", radius=14, padding=4)
-        )
-        steps_layout.addWidget(self.step_preview_list, 1)
-
-        self.toggle_raw_btn = QPushButton("高级编辑 JSON")
-        self.toggle_raw_btn.setObjectName("SecondaryBtn")
-        self.toggle_raw_btn.setCheckable(True)
-        self.toggle_raw_btn.toggled.connect(self._toggle_steps_editor)
-        steps_layout.addWidget(self.toggle_raw_btn, 0, Qt.AlignLeft)
-
-        self.steps_editor = QTextEdit()
-        self.steps_editor.setPlainText(json.dumps(draft.get("steps") or [], ensure_ascii=False, indent=2))
-        self.steps_editor.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_code, radius=14, subtle=False, padding=10))
-        self.steps_editor.setVisible(False)
-        self.steps_editor.textChanged.connect(self._refresh_step_preview_from_editor)
-        steps_layout.addWidget(self.steps_editor)
-        layout.addWidget(steps_card, 1)
-
-        self.error_label = QLabel("")
-        self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px;")
-        layout.addWidget(self.error_label)
-
-        button_row = QHBoxLayout()
-        revise_btn = QPushButton("提出修改意见")
-        revise_btn.setCursor(Qt.PointingHandCursor)
-        revise_btn.setObjectName("SecondaryBtn")
-        revise_btn.clicked.connect(self.request_revision)
-        button_row.addWidget(revise_btn)
-        button_row.addStretch()
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setCursor(Qt.PointingHandCursor)
-        cancel_btn.setObjectName("SecondaryBtn")
-        cancel_btn.clicked.connect(self.reject)
-        confirm_btn = QPushButton("确认生成")
-        confirm_btn.setCursor(Qt.PointingHandCursor)
-        confirm_btn.setIcon(qta.icon('fa5s.check', color='#ffffff'))
-        confirm_btn.setStyleSheet(
-            f"background-color: {DesignTokens.primary}; color: white; border-radius: 12px; "
-            "padding: 8px 14px; font-weight: 700; border: none;"
-        )
-        confirm_btn.clicked.connect(self.validate_and_accept)
-        button_row.addWidget(cancel_btn)
-        button_row.addWidget(confirm_btn)
-        layout.addLayout(button_row)
-        self._refresh_step_preview_from_editor()
-
-    def _build_summary_card(self, title, value):
-        card = QFrame()
-        card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.74)"))
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(14, 12, 14, 12)
-        card_layout.setSpacing(2)
-        label = QLabel(title)
-        label.setStyleSheet(apple_section_kicker_style())
-        card_layout.addWidget(label)
-        value_label = QLabel(value)
-        value_label.setStyleSheet(apple_metric_value_style())
-        card_layout.addWidget(value_label)
-        card._value_label = value_label
-        return card
-
-    def _update_summary_cards(self, steps):
-        step_count = len(steps)
-        trigger_count = len(self._csv(self.triggers_input.text()))
-        for card, value in ((self.step_count_card, str(step_count)), (self.trigger_count_card, str(trigger_count))):
-            if hasattr(card, "_value_label"):
-                card._value_label.setText(value)
-
-    def _toggle_steps_editor(self, checked):
-        self.steps_editor.setVisible(bool(checked))
-        self.toggle_raw_btn.setText("收起 JSON 编辑" if checked else "高级编辑 JSON")
-
-    def _refresh_step_preview_from_editor(self):
-        raw = self.steps_editor.toPlainText().strip() or "[]"
-        try:
-            steps = json.loads(raw)
-        except Exception:
-            self.step_preview_list.clear()
-            self.step_preview_list.addItem("JSON 暂时无法解析，修正后这里会恢复步骤预览。")
-            self._update_summary_cards([])
-            return
-        if not isinstance(steps, list):
-            self.step_preview_list.clear()
-            self.step_preview_list.addItem("步骤需要是 JSON 数组。")
-            self._update_summary_cards([])
-            return
-        normalized = normalize_sop_draft(
-            {
-                "name": self.name_input.text().strip(),
-                "description": self.description_edit.toPlainText().strip(),
-                "triggers": self._csv(self.triggers_input.text()),
-                "steps": steps,
-            }
-        )
-        items = normalized.get("steps") or []
-        self.step_preview_list.clear()
-        if not items:
-            self.step_preview_list.addItem("还没有有效步骤。")
-        for index, step in enumerate(items):
-            summary = step.get("success_criteria") or step.get("instructions") or "等待补充步骤说明"
-            item = QListWidgetItem(
-                qta.icon("fa5s.check-circle", color=DesignTokens.primary),
-                f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}\n{preview_text(summary, limit=80)}",
-            )
-            self.step_preview_list.addItem(item)
-        self._update_summary_cards(items)
-
-    def _csv(self, text):
-        return [item.strip() for item in re.split(r"[,，\n]+", str(text or "")) if item.strip()]
-
-    def draft(self):
-        try:
-            steps = json.loads(self.steps_editor.toPlainText().strip() or "[]")
-        except Exception:
-            steps = []
-        return normalize_sop_draft(
-            {
-                "name": self.name_input.text().strip(),
-                "description": self.description_edit.toPlainText().strip(),
-                "triggers": self._csv(self.triggers_input.text()),
-                "steps": steps,
-            }
-        )
-
-    def revision_feedback(self):
-        return self._revision_feedback
-
-    def validate_and_accept(self):
-        if not self.name_input.text().strip():
-            self.error_label.setText("请填写 SOP 名称。")
-            return
-        try:
-            steps = json.loads(self.steps_editor.toPlainText().strip() or "[]")
-        except Exception as exc:
-            self.error_label.setText(f"步骤 JSON 格式不正确：{exc}")
-            return
-        if not isinstance(steps, list):
-            self.error_label.setText("步骤必须是 JSON 数组。")
-            return
-        draft = normalize_sop_draft(
-            {
-                "name": self.name_input.text().strip(),
-                "description": self.description_edit.toPlainText().strip(),
-                "triggers": self._csv(self.triggers_input.text()),
-                "steps": steps,
-            }
-        )
-        if not draft or not draft.get("steps"):
-            self.error_label.setText("至少需要一个有效步骤。")
-            return
-        self.accept()
-
-    def request_revision(self):
-        feedback, ok = QInputDialog.getMultiLineText(
-            self,
-            "修改 SOP 草稿",
-            "写下你希望调整的地方：",
-            "",
-        )
-        if not ok:
-            return
-        self._revision_feedback = str(feedback or "").strip()
-        if not self._revision_feedback:
-            self.error_label.setText("请先填写修改意见。")
-            return
-        self.done(self.REVISION_RESULT)
-
-
 class SessionContextChip(QWidget):
     clicked = Signal()
     closeClicked = Signal()
@@ -13501,7 +11689,6 @@ class MainWindow(QMainWindow):
 
     RIGHT_TAB_FILES = 0
     RIGHT_TAB_DELIVERABLES = RIGHT_TAB_FILES
-    RIGHT_TAB_SOP = RIGHT_TAB_FILES
     RIGHT_TAB_OBSERVABILITY = 1
     RIGHT_TAB_SUB_AGENTS = 2
     FILE_SECTION_ALL = "all"
@@ -13693,7 +11880,6 @@ class MainWindow(QMainWindow):
         self._last_memory_update_scope = "global"
         self._last_memory_update_workspace_dir = ""
         self.conversation_skill_worker = None
-        self.conversation_sop_worker = None
         
         self.config_manager = ConfigManager()
         self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
@@ -14583,15 +12769,6 @@ class MainWindow(QMainWindow):
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
-        self.sop_badge = SessionContextChip(" 自动化", qta.icon('fa5s.tasks', color=DesignTokens.primary))
-        self.sop_badge.setToolTip("查看或调整当前会话自动化")
-        self.sop_badge.setCloseToolTip("移除当前会话自动化")
-        self.sop_badge.setCursor(Qt.PointingHandCursor)
-        self.sop_badge.setFixedHeight(30)
-        self.sop_badge.setVisible(False)
-        self.sop_badge.clicked.connect(lambda: self.add_system_toast("自动化进度会在顶部提示，等待确认时可直接操作。", "info", auto_close_ms=3200))
-        self.sop_badge.closeClicked.connect(self.clear_session_sop)
-
         self.selected_skills_badge = SessionContextChip(" 已选能力", qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
         self.selected_skills_badge.setToolTip("查看或调整本会话指定能力")
         self.selected_skills_badge.setCloseToolTip("移除本会话指定能力")
@@ -14676,7 +12853,6 @@ class MainWindow(QMainWindow):
         prompt_toolbar.setContentsMargins(0, 0, 0, 0)
         prompt_toolbar.setSpacing(8)
         prompt_toolbar.addWidget(self.tool_menu_btn)
-        prompt_toolbar.addWidget(self.sop_badge)
         prompt_toolbar.addWidget(self.selected_skills_badge)
         prompt_toolbar.addWidget(self.pause_btn)
         prompt_toolbar.addWidget(self.loop_hint, 1)
@@ -15064,12 +13240,6 @@ class MainWindow(QMainWindow):
                 if isinstance(widget, ChatBubble):
                     yield widget
 
-    def _iter_session_sop_confirmation_bars(self):
-        for state in getattr(self, "sessions", {}).values():
-            bar = getattr(state, "sop_confirmation_bar", None)
-            if bar is not None and _qt_object_alive(bar):
-                yield bar
-
     def sync_conversation_widths(self, drawer_geometry=None):
         metrics = self._compute_conversation_shell_metrics(drawer_geometry)
         conversation_width = int(metrics.get("conversation_width", DesignTokens.conversation_min_width) or DesignTokens.conversation_min_width)
@@ -15096,8 +13266,6 @@ class MainWindow(QMainWindow):
 
         for bubble in self._iter_session_chat_bubbles():
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
-        for bar in self._iter_session_sop_confirmation_bars():
-            bar.apply_dynamic_width(message_width)
         self._position_active_system_toast()
 
     def sync_context_drawer_layout(self):
@@ -15771,9 +13939,6 @@ class MainWindow(QMainWindow):
             self.input_field.setFocus()
         return True
 
-    def _should_block_send_for_sop(self, state):
-        return bool(state and is_sop_awaiting_confirmation(getattr(state, "sop_run", None)))
-
     def show_prompt_tool_menu(self):
         menu = create_styled_menu(self)
         add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加文件", self)
@@ -15932,8 +14097,7 @@ class MainWindow(QMainWindow):
                 or getattr(state, "system_prompt_appends", [])
             )
         )
-        has_sop_context = bool(state and normalize_sop_run(getattr(state, "sop_run", None)))
-        has_context = bool(state and (state.step_records or state.has_file_changes or has_clarify_context or has_observability_context or has_sop_context))
+        has_context = bool(state and (state.step_records or state.has_file_changes or has_clarify_context or has_observability_context))
         self.context_available_tabs = set()
         if has_workspace:
             self.context_available_tabs.add(self.RIGHT_TAB_FILES)
@@ -15945,7 +14109,6 @@ class MainWindow(QMainWindow):
         self.update_context_rail_badges()
         if state and state.session_id == self.current_session_id:
             self.refresh_clarify_controls(state.session_id)
-            self.refresh_sop_controls(state.session_id)
 
     def _extract_pending_clarify_questions_from_args(self, args_obj):
         if not isinstance(args_obj, dict):
@@ -16098,515 +14261,6 @@ class MainWindow(QMainWindow):
         ]
         self._sync_office_task_card_paths(state, valid_paths)
         return list(getattr(state, "office_task_result_paths", []) or [])
-
-    def _session_sop_meta(self, state):
-        if not state:
-            return {}
-        return {
-            "sop_run": normalize_sop_run(getattr(state, "sop_run", None))
-        }
-
-    def _active_sop_template(self, state):
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run:
-            return None
-        return self.config_manager.get_sop_template(sop_run.get("template_id"))
-
-    def _resolve_sop_default_profile(self, state):
-        template = self._active_sop_template(state)
-        if not template:
-            return None
-        profile_id = str(template.get("default_agent_profile_id") or "").strip()
-        if not profile_id:
-            return None
-        profile = self.config_manager.get_agent_profile(profile_id)
-        if not profile or not bool(profile.get("enabled", True)):
-            return None
-        return profile
-
-    def _effective_sop_skill_names(self, state, extra_skill_names=None):
-        names = []
-        seen = set()
-        sources = [
-            getattr(state, "selected_skill_names", []),
-        ]
-        template = self._active_sop_template(state)
-        if template:
-            sources.append(template.get("skill_names") or [])
-        if extra_skill_names:
-            sources.append(extra_skill_names)
-        for source in sources:
-            for skill_name in normalize_selected_skill_names(source):
-                if skill_name in seen:
-                    continue
-                seen.add(skill_name)
-                names.append(skill_name)
-        return names
-
-    def _remove_sop_confirmation_bar(self, state):
-        bar = getattr(state, "sop_confirmation_bar", None) if state else None
-        if bar is not None and _qt_object_alive(bar):
-            bar.deleteLater()
-        if state is not None:
-            state.sop_confirmation_bar = None
-
-    def _sync_sop_confirmation_bar(self, state, sop_run, current_step, running=False):
-        if not state:
-            return
-        awaiting = bool(sop_run and sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION)
-        if not awaiting or state.session_id != self.current_session_id:
-            self._remove_sop_confirmation_bar(state)
-            return
-        bar = getattr(state, "sop_confirmation_bar", None)
-        if bar is None or not _qt_object_alive(bar):
-            bar = SopConfirmationBar()
-            bar.confirmRequested.connect(self.confirm_current_sop_step)
-            bar.rerunRequested.connect(self.rerun_current_sop_step)
-            bar.skipRequested.connect(self.skip_current_sop_step)
-            bar.apply_dynamic_width(self.dynamic_message_width)
-            state.sop_confirmation_bar = bar
-            if getattr(state, "empty_state", None) and state.empty_state.isVisible():
-                state.empty_state.setVisible(False)
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bar, 0, Qt.AlignHCenter)
-        bar.update_state(
-            sop_run,
-            current_step=current_step,
-            allow_skip=bool(current_step and current_step.get("allow_skip")),
-            running=running,
-        )
-        bar.apply_dynamic_width(self.dynamic_message_width)
-
-    def refresh_sop_controls(self, session_id=None):
-        state = self.get_session(session_id)
-        if not state or state.session_id != self.current_session_id:
-            return
-        if not hasattr(self, "sop_badge"):
-            self._remove_sop_confirmation_bar(state)
-            return
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        running = bool(
-            (state.llm_worker and state.llm_worker.isRunning())
-            or (state.code_worker and state.code_worker.isRunning())
-            or getattr(state, "daemon_running", False)
-        )
-        if not sop_run:
-            self.sop_badge.setVisible(False)
-            self._remove_sop_confirmation_bar(state)
-            if hasattr(self, "sop_progress_label"):
-                self.sop_progress_label.setText("尚未绑定自动化")
-                self.sop_intro_label.setText("当前会话未绑定自动化")
-                self.sop_status_label.setText("未启动")
-                self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
-                self.sop_step_list.clear()
-                self.sop_current_step_label.setText("当前步骤")
-                self.sop_instruction_label.setText("绑定自动化后，这里会显示当前步骤的执行要求。")
-                self.sop_success_label.setText("")
-                self.sop_confirm_btn.setEnabled(False)
-                self.sop_rerun_btn.setEnabled(False)
-                self.sop_skip_btn.setEnabled(False)
-            return
-        state.sop_run = sop_run
-        current_step = get_current_step(sop_run)
-        badge_text = f" 自动化 · {sop_run.get('template_name') or '未命名自动化'}"
-        if current_step:
-            badge_text = f"{badge_text} · {preview_text(current_step.get('title') or '当前步骤', limit=16)}"
-        self.sop_badge.setText(badge_text)
-        self.sop_badge.setToolTip(
-            f"当前自动化：{sop_run.get('template_name') or '未命名自动化'}"
-        )
-        self.sop_badge.setVisible(True)
-        self.sop_badge.setEnabled(not running)
-        if hasattr(self, "sop_progress_label"):
-            self.sop_progress_label.setText(
-                f"{sop_run.get('template_name') or '未命名自动化'} · 第 {min(sop_run.get('current_step_index', 0) + 1, max(len(sop_run.get('steps') or []), 1))} 步"
-            )
-
-        if hasattr(self, "sop_step_list"):
-            self.sop_step_list.blockSignals(True)
-            self.sop_step_list.clear()
-            for index, step in enumerate(sop_run.get("steps") or []):
-                status = str(step.get("status") or "")
-                icon_name = "fa5s.circle"
-                icon_color = DesignTokens.text_tertiary
-                if status in {"completed", "skipped"}:
-                    icon_name = "fa5s.check-circle" if status == "completed" else "fa5s.forward"
-                    icon_color = DesignTokens.status_success if status == "completed" else DesignTokens.warning_text
-                elif index == sop_run.get("current_step_index"):
-                    icon_name = "fa5s.play-circle"
-                    icon_color = DesignTokens.status_running
-                item = QListWidgetItem(
-                    qta.icon(icon_name, color=icon_color),
-                    f"{index + 1}. {step.get('title') or f'步骤 {index + 1}'}\n{status_label_text(status or ('active' if index == sop_run.get('current_step_index') else 'pending'))}",
-                )
-                item.setToolTip(step.get("success_criteria") or "")
-                self.sop_step_list.addItem(item)
-            if self.sop_step_list.count():
-                self.sop_step_list.setCurrentRow(min(sop_run.get("current_step_index", 0), self.sop_step_list.count() - 1))
-            self.sop_step_list.blockSignals(False)
-
-        intro = sop_run.get("template_description") or "当前会话正在按自动化模板逐步执行。"
-        if sop_run.get("status") == SOP_RUN_STATUS_COMPLETED:
-            intro = f"{intro}\n当前自动化已完成。"
-            if hasattr(self, "sop_status_label"):
-                self.sop_status_label.setText("已完成")
-                self.sop_status_label.setStyleSheet(apple_status_chip_style("completed"))
-        elif sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION:
-            intro = f"{intro}\n当前步骤已完成，等待你确认。"
-            if hasattr(self, "sop_status_label"):
-                self.sop_status_label.setText("等待确认")
-                self.sop_status_label.setStyleSheet(apple_status_chip_style("pending"))
-        elif running:
-            if hasattr(self, "sop_status_label"):
-                self.sop_status_label.setText("执行中")
-                self.sop_status_label.setStyleSheet(apple_status_chip_style("running"))
-        else:
-            if hasattr(self, "sop_status_label"):
-                self.sop_status_label.setText("待推进")
-                self.sop_status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
-        if hasattr(self, "sop_intro_label"):
-            self.sop_intro_label.setText(intro)
-
-        if current_step:
-            effective_mode = resolve_step_advance_mode(sop_run, current_step)
-            mode_text = "自动推进" if effective_mode == SOP_ADVANCE_MODE_AUTO else "人工确认"
-            if hasattr(self, "sop_current_step_label"):
-                self.sop_current_step_label.setText(
-                    f"当前步骤 {sop_run.get('current_step_index', 0) + 1} / {len(sop_run.get('steps') or [])}: {current_step.get('title') or '未命名步骤'}"
-                )
-                instructions = current_step.get("instructions") or "未填写执行指令。"
-                self.sop_instruction_label.setText(f"{instructions}\n推进方式：{mode_text}")
-                success_text = current_step.get("success_criteria") or "未填写成功标准。"
-                self.sop_success_label.setText(f"成功标准：{success_text}")
-        else:
-            if hasattr(self, "sop_current_step_label"):
-                self.sop_current_step_label.setText("当前步骤")
-                self.sop_instruction_label.setText("当前没有可执行步骤。")
-                self.sop_success_label.setText("")
-
-        allow_actions = sop_run.get("status") == SOP_RUN_STATUS_AWAITING_CONFIRMATION and not running
-        if hasattr(self, "sop_confirm_btn"):
-            self.sop_confirm_btn.setEnabled(allow_actions)
-            self.sop_rerun_btn.setEnabled(allow_actions)
-            self.sop_skip_btn.setEnabled(allow_actions and bool(current_step and current_step.get("allow_skip")))
-        self._sync_sop_confirmation_bar(state, sop_run, current_step, running=running)
-
-    def _mark_sop_step_done_for_confirmation(self, state, executor="", content="", agent_profile=None):
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run or is_sop_completed(sop_run):
-            return False
-        execution_info = {
-            "finished_at": int(time.time()),
-            "executor": executor or ((sop_run.get("last_execution") or {}).get("executor") or "main_agent"),
-            "content": str(content or "").strip(),
-        }
-        if agent_profile:
-            execution_info["agent_profile_id"] = agent_profile.get("id") or ""
-            execution_info["agent_profile_name"] = agent_profile.get("name") or ""
-        state.sop_run = mark_step_awaiting_confirmation(sop_run, execution_info=execution_info)
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        return True
-
-    def _current_sop_template_for_state(self, state):
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run:
-            return None
-        return self.config_manager.get_sop_template(sop_run.get("template_id"))
-
-    def _mark_session_automation_awaiting_confirmation(self, state):
-        if not state or not getattr(state, "automation_run_id", ""):
-            return
-        summary = self._automation_summary_from_state(state)
-        self._finalize_automation_history_record(
-            state.automation_run_id,
-            AUTOMATION_HISTORY_STATUS_AWAITING_CONFIRMATION,
-            summary=summary,
-        )
-
-    def _start_sop_executor_worker(self, state):
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not state or not sop_run:
-            return False
-        worker = SopStepExecutorWorker(
-            state.session_id,
-            sop_run,
-            self._workspace_dir_for_state(state),
-            parent=self,
-        )
-        state.sop_executor_worker = worker
-        worker.finished_signal.connect(self._handle_sop_executor_finished)
-        worker.finished.connect(lambda sid=state.session_id: self._cleanup_sop_executor_worker(sid))
-        worker.start()
-        return True
-
-    def _cleanup_sop_executor_worker(self, session_id):
-        state = self.get_session(session_id)
-        if not state:
-            return
-        worker = getattr(state, "sop_executor_worker", None)
-        if worker and not worker.isRunning():
-            try:
-                worker.deleteLater()
-            except Exception:
-                pass
-        state.sop_executor_worker = None
-
-    def _append_sop_executor_result_message(self, state, result):
-        if not state:
-            return
-        payload = dict(result or {})
-        message_id = self._new_message_id()
-        executor_type = str(payload.get("executor_type") or "sop_executor").strip()
-        ok = bool(payload.get("ok"))
-        heading = "SOP 执行完成" if ok else "SOP 执行失败"
-        content = str(payload.get("content") or "").strip() or "(No output)"
-        message_text = f"{heading}（{executor_type}）\n{content}"
-        state.messages.append(
-            {
-                "id": message_id,
-                "role": "assistant",
-                "content": message_text,
-                "meta": {
-                    "sop_executor_result": True,
-                    "sop_executor_type": executor_type,
-                },
-            }
-        )
-        self._rebuild_session_render_spans(state)
-        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
-        state.displayed_render_count = len(state.render_items)
-        self.save_chat_history(session_id=state.session_id)
-        if state.session_id == self.current_session_id:
-            self.add_chat_bubble(
-                "Assistant",
-                message_text,
-                animate=False,
-                force_scroll=True,
-                source_message_id=message_id,
-            )
-
-    def _handle_sop_executor_finished(self, result, session_id):
-        state = self.get_session(session_id)
-        if not state:
-            return
-        payload = dict(result or {})
-        ok = bool(payload.get("ok"))
-        self._append_sop_executor_result_message(state, payload)
-        metadata = {
-            "executor_type": payload.get("executor_type") or "",
-            "exit_code": payload.get("exit_code"),
-            "stdout": payload.get("stdout") or "",
-            "stderr": payload.get("stderr") or "",
-            "error": payload.get("error") or "",
-            "duration_seconds": payload.get("duration_seconds"),
-        }
-        self._finalize_sop_execution_step(
-            state,
-            executor=payload.get("executor") or "sop_executor",
-            content=payload.get("content") or "",
-            output_status="completed" if ok else "error",
-            metadata=metadata,
-            allow_auto_advance=ok,
-        )
-
-    def _dispatch_current_sop_step(
-        self,
-        state,
-        *,
-        linked_template=None,
-        create_user_bubble=True,
-        set_running=True,
-        submitted_at=None,
-    ):
-        if not state:
-            return False
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run or is_sop_completed(sop_run):
-            return False
-        step_payload = build_step_execution_request(sop_run)
-        step_content = str(step_payload.get("content") or "").strip()
-        if not step_content:
-            return False
-        step_display = str(step_payload.get("display_content") or "").strip() or step_content
-        current_step = get_current_step(sop_run)
-        current_step_index = int(sop_run.get("current_step_index", 0))
-        executor_type = str((current_step or {}).get("executor_type") or SOP_EXECUTOR_AGENT).strip() or SOP_EXECUTOR_AGENT
-        if set_running:
-            started_at = int(submitted_at or time.time())
-            state.sop_run = mark_step_running(
-                sop_run,
-                {
-                    "started_at": started_at,
-                    "executor": "main_agent" if executor_type == SOP_EXECUTOR_AGENT else executor_type,
-                    "trigger_message": step_content,
-                },
-            )
-            sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        message_meta = {
-            "display_content": step_display,
-            "sop_step_dispatch": True,
-            "sop_step_index": current_step_index,
-            "sop_step_title": (current_step or {}).get("title") or "",
-            "sop_executor_type": executor_type,
-        }
-        message_id = self._new_message_id()
-        state.messages.append(
-            {
-                "id": message_id,
-                "role": "user",
-                "content": step_content,
-                "meta": message_meta,
-            }
-        )
-        self._rebuild_session_render_spans(state)
-        state.displayed_count = min(len(state.messages), state.displayed_count + 1)
-        state.displayed_render_count = len(state.render_items)
-        if create_user_bubble and state.session_id == self.current_session_id:
-            self.add_chat_bubble(
-                "User",
-                step_display,
-                animate=False,
-                force_scroll=True,
-                source_message_id=message_id,
-            )
-
-        if executor_type != SOP_EXECUTOR_AGENT:
-            self.set_session_phase("Executing SOP step", state.session_id)
-            self.set_session_status("running", state.session_id)
-            return self._start_sop_executor_worker(state)
-
-        mentioned_profiles = []
-        delegated_payload = step_content
-        run_mode = RUN_MODE_EXECUTION
-        state.pending_clarify_questions = []
-        state.clarify_source_user_text = step_content
-        state.clarify_answers_context = []
-        state.clarify_round_count = 0
-        self.save_chat_history(session_id=state.session_id)
-        self.update_session_tab_title(state.session_id)
-        sop_default_profile = self._resolve_sop_default_profile(state)
-        if sop_default_profile:
-            self.refresh_sop_controls(state.session_id)
-            self._dispatch_agent_profiles(
-                state,
-                step_content,
-                delegated_payload,
-                [sop_default_profile],
-                summon_source="sop_default",
-            )
-            return True
-        template_default_profile = self._resolve_template_default_profile(linked_template)
-        if template_default_profile:
-            self._dispatch_agent_profiles(
-                state,
-                step_content,
-                delegated_payload,
-                [template_default_profile],
-                summon_source="automation_template",
-            )
-            return True
-        if not self.daemon_available:
-            self.queue_daemon_connection(allow_start=True, retries=4)
-        run_context = self._build_run_context(state, run_mode)
-        if self.daemon_available:
-            self.process_daemon_logic(step_content, turn_id=state.active_turn_id, run_context=run_context, session_id=state.session_id)
-        else:
-            self.process_agent_logic(step_content, turn_id=state.active_turn_id, run_context=run_context, session_id=state.session_id)
-        return True
-
-    def _continue_sop_after_step(self, state, *, create_user_bubble=True):
-        if not state:
-            return False
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run or is_sop_completed(sop_run):
-            self.set_session_phase("Completed", state.session_id)
-            self.set_session_status("completed", state.session_id, save=True)
-            return False
-        if getattr(state, "automation_run_id", ""):
-            self._finalize_automation_history_record(
-                state.automation_run_id,
-                AUTOMATION_HISTORY_STATUS_RUNNING,
-                summary=self._automation_summary_from_state(state),
-            )
-        state.step_records = []
-        state.changed_files = []
-        state.has_file_changes = False
-        state.pending_tool_results = {}
-        state.observability_events = []
-        state.system_prompt_text = ""
-        state.runtime_context_text = ""
-        state.prompt_cache_meta = {}
-        state.system_prompt_appends = []
-        self.refresh_change_list(state.session_id)
-        self.refresh_step_list(state.session_id)
-        self.refresh_observability_view(state.session_id)
-        self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
-        self.set_session_phase("Preparing", state.session_id)
-        self.set_session_status("running", state.session_id)
-        state.active_turn_id += 1
-        state.completed_turn_id = max(state.completed_turn_id, state.active_turn_id - 1)
-        linked_template = self._current_sop_template_for_state(state)
-        return self._dispatch_current_sop_step(
-            state,
-            linked_template=linked_template,
-            create_user_bubble=create_user_bubble,
-            set_running=True,
-        )
-
-    def _finalize_sop_execution_step(
-        self,
-        state,
-        *,
-        executor="",
-        content="",
-        agent_profile=None,
-        output_status="completed",
-        metadata=None,
-        allow_auto_advance=True,
-    ):
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run or is_sop_completed(sop_run):
-            return False
-        execution_info = {
-            "finished_at": int(time.time()),
-            "executor": executor or ((sop_run.get("last_execution") or {}).get("executor") or "main_agent"),
-            "content": str(content or "").strip(),
-        }
-        if isinstance(metadata, dict):
-            execution_info.update(metadata)
-        if agent_profile:
-            execution_info["agent_profile_id"] = agent_profile.get("id") or ""
-            execution_info["agent_profile_name"] = agent_profile.get("name") or ""
-        sop_run = append_step_output(
-            sop_run,
-            content=content,
-            executor=execution_info["executor"],
-            status=output_status,
-            metadata=metadata,
-        )
-        advance_mode = resolve_step_advance_mode(sop_run)
-        if allow_auto_advance and advance_mode == SOP_ADVANCE_MODE_AUTO:
-            state.sop_run = complete_current_step(sop_run, reason="auto_advanced", auto_advanced=True)
-            self.save_chat_history(session_id=state.session_id)
-            self.refresh_sop_controls(state.session_id)
-            self.refresh_context_badges(state.session_id)
-            if is_sop_completed(state.sop_run):
-                self.set_session_phase("Completed", state.session_id)
-                self.set_session_status("completed", state.session_id, save=True)
-                return True
-            self.set_session_phase("Preparing next step", state.session_id)
-            self.set_session_status("running", state.session_id, save=True)
-            QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
-            return True
-        state.sop_run = mark_step_awaiting_confirmation(sop_run, execution_info=execution_info)
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        self._mark_session_automation_awaiting_confirmation(state)
-        self.set_session_phase("Awaiting confirmation", state.session_id)
-        self.set_session_status("draft", state.session_id, save=True)
-        return True
 
     def refresh_clarify_controls(self, session_id=None):
         state = self.get_session(session_id)
@@ -17165,7 +14819,6 @@ class MainWindow(QMainWindow):
         state.automation_run_id = ""
         state.automation_task_id = ""
         state.automation_trigger_source = ""
-        state.automation_template_id = ""
 
     def run_automation_task_now(self, task_id):
         self._trigger_automation_task(task_id, trigger_source="manual", scheduled_at=0)
@@ -17174,23 +14827,12 @@ class MainWindow(QMainWindow):
         task = self.config_manager.get_automation_task(task_id)
         if not task:
             return False
-        template = self.config_manager.get_sop_template(task.get("template_id"))
-        if not template:
-            record = make_automation_history_record(
-                task,
-                {},
-                status=AUTOMATION_HISTORY_STATUS_ERROR,
-                trigger_source=trigger_source,
-                scheduled_at=scheduled_at,
-                error="任务模板不存在，已跳过执行。",
-            )
-            self._append_automation_history(record)
-            return False
+        agent_profile = self.config_manager.get_agent_profile(task.get("agent_profile_id"))
         workspace_dir = self._workspace_for_automation()
         if not workspace_dir:
             record = make_automation_history_record(
                 task,
-                template,
+                agent_profile,
                 status=AUTOMATION_HISTORY_STATUS_ERROR,
                 trigger_source=trigger_source,
                 scheduled_at=scheduled_at,
@@ -17198,20 +14840,16 @@ class MainWindow(QMainWindow):
             )
             self._append_automation_history(record)
             return False
-        session_title = task.get("name") or template.get("name") or "自动化任务"
+        session_title = task.get("name") or "自动化任务"
         session_id = self.create_new_session(title=session_title, make_current=False, workspace_dir=workspace_dir)
         state = self.get_session(session_id)
         if not state:
             return False
-        state.selected_skill_names = normalize_selected_skill_names(template.get("skill_names"))
-        state.sop_run = create_sop_run(template)
-        if state.sop_run:
-            state.sop_run["original_user_request"] = build_automation_execution_prompt(task, template)
-            state.sop_run["original_display_text"] = task.get("name") or template.get("name") or "自动化任务"
-        prompt = build_automation_execution_prompt(task, template)
+        state.selected_skill_names = normalize_selected_skill_names(task.get("skill_names"))
+        prompt = build_automation_execution_prompt(task)
         history_record = make_automation_history_record(
             task,
-            template,
+            agent_profile,
             status=AUTOMATION_HISTORY_STATUS_RUNNING,
             trigger_source=trigger_source,
             session_id=session_id,
@@ -17222,16 +14860,18 @@ class MainWindow(QMainWindow):
             state.automation_run_id = saved_record.get("id") or ""
         state.automation_task_id = str(task.get("id") or "")
         state.automation_trigger_source = trigger_source
-        state.automation_template_id = str(template.get("id") or "")
         self.activate_session(session_id)
-        submitted = self._submit_session_request(
-            state,
-            prompt,
-            [],
-            linked_template=template,
-            check_duplicates=False,
-            clear_current_input=False,
-        )
+        if agent_profile and bool(agent_profile.get("enabled", True)):
+            self._dispatch_agent_profiles(state, prompt, prompt, [agent_profile], summon_source="automation_task")
+            submitted = True
+        else:
+            submitted = self._submit_session_request(
+                state,
+                prompt,
+                [],
+                check_duplicates=False,
+                clear_current_input=False,
+            )
         if not submitted and state.automation_run_id:
             self._finalize_automation_history_record(
                 state.automation_run_id,
@@ -17241,7 +14881,6 @@ class MainWindow(QMainWindow):
             state.automation_run_id = ""
             state.automation_task_id = ""
             state.automation_trigger_source = ""
-            state.automation_template_id = ""
             return False
         if trigger_source == "manual":
             self.add_system_toast("自动化任务已启动", "success", session_id=session_id, auto_close_ms=3200)
@@ -17275,11 +14914,11 @@ class MainWindow(QMainWindow):
                     if current.get("schedule_type") == AUTOMATION_SCHEDULE_ONCE:
                         current["enabled"] = False
                         break
-                template = self.config_manager.get_sop_template(current.get("template_id"))
+                agent_profile = self.config_manager.get_agent_profile(current.get("agent_profile_id"))
                 summary = f"应用未运行，已跳过 {skipped_count} 次计划触发。"
                 missed_record = make_automation_history_record(
                     current,
-                    template,
+                    agent_profile,
                     status=AUTOMATION_HISTORY_STATUS_MISSED,
                     trigger_source="scheduler",
                     scheduled_at=next_run_at,
@@ -17689,7 +15328,6 @@ class MainWindow(QMainWindow):
         self.refresh_step_list(session_id)
         self.refresh_observability_view(session_id)
         self.refresh_context_badges(session_id)
-        self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         self.refresh_prompt_file_chips(session_id)
         self.refresh_token_usage_label(session_id)
@@ -17725,6 +15363,7 @@ class MainWindow(QMainWindow):
             self.loop_hint.setVisible(False)
         else:
             self.action_btn.setText("发送")
+            self.action_btn.setText("开始")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet("background-color: #4d6bfe; color: white; border-radius: 18px; font-weight: bold; border: none;")
             self.action_btn.setEnabled(True)
@@ -17765,9 +15404,6 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
                 self.pause_btn.setToolTip("暂停")
         else:
-            awaiting_sop_confirmation = is_sop_awaiting_confirmation(getattr(state, "sop_run", None))
-            idle_text = "等待确认" if awaiting_sop_confirmation else "开始"
-            self.action_btn.setText(idle_text)
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
             workspace_dir = self._workspace_dir_for_state(state)
@@ -17779,9 +15415,6 @@ class MainWindow(QMainWindow):
             if not history_ready:
                 self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
                 self.action_btn.setText("加载中")
-            if awaiting_sop_confirmation:
-                self.input_field.setPlaceholderText("请先在聊天中的自动化确认条处理当前步骤")
-            elif workspace_dir:
                 self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             else:
                 self.input_field.setPlaceholderText("直接开始对话；需要处理文件时再连接项目")
@@ -17976,14 +15609,11 @@ class MainWindow(QMainWindow):
         state.office_draft_preview_pending = False
         state.office_draft_task_card = None
         state.office_task_result_paths = []
-        state.sop_run = None
-        state.sop_confirmation_bar = None
         state.persisted_conversation_meta = {}
         state.completed_agent_result_ids = set()
         state.automation_task_id = ""
         state.automation_run_id = ""
         state.automation_trigger_source = ""
-        state.automation_template_id = ""
         state.changed_files = []
         state.step_records = []
         state.persisted_agents = []
@@ -18170,7 +15800,6 @@ class MainWindow(QMainWindow):
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
-        state.sop_run = normalize_sop_run(conversation_meta.get("sop_run"))
         state.clarify_mode_enabled = False
         state.clarify_mode_state = normalize_clarify_phase(
             conversation_meta.get("clarify_mode_state"),
@@ -18205,7 +15834,6 @@ class MainWindow(QMainWindow):
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.normalize_session_ui(self.get_current_session())
-        self.refresh_sop_controls(session_id)
         self.refresh_selected_skill_controls(session_id)
         if session_id == self.current_session_id:
             self._queue_render_sub_agent_monitor_for_state(state)
@@ -18730,8 +16358,6 @@ class MainWindow(QMainWindow):
         if bool(getattr(state, "pending_clarify_questions", [])):
             return True
         if normalize_selected_skill_names(getattr(state, "selected_skill_names", [])):
-            return True
-        if normalize_sop_run(getattr(state, "sop_run", None)):
             return True
         return False
 
@@ -20125,7 +17751,6 @@ class MainWindow(QMainWindow):
             if session_id in self.sessions:
                 merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
                 merged_meta.update(self._session_selected_skills_meta(self.sessions.get(session_id)))
-                merged_meta.update(self._session_sop_meta(self.sessions.get(session_id)))
             try:
                 self.chat_storage.save_conversation(session_id, normalized_messages, title=title, meta=merged_meta)
             except Exception as e:
@@ -20200,7 +17825,6 @@ class MainWindow(QMainWindow):
             meta.pop("last_token_usage", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
-        meta.update(self._session_sop_meta(state))
         return meta
 
     def _build_chat_save_request(self, state):
@@ -20212,8 +17836,7 @@ class MainWindow(QMainWindow):
             bool(getattr(state, "pending_clarify_questions", []))
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        has_sop_state = bool(normalize_sop_run(getattr(state, "sop_run", None)))
-        if not state.messages and not has_clarify_state and not has_selected_skills and not has_sop_state:
+        if not state.messages and not has_clarify_state and not has_selected_skills:
             return None
         title = self._compute_session_title(state.messages) if state.messages else "新任务"
         meta = self._compose_session_meta(state)
@@ -21688,194 +19311,6 @@ class MainWindow(QMainWindow):
             self.set_session_selected_skills(dialog.selected_skill_names(), session_id=state.session_id)
             self.add_system_toast("指定能力已更新", "success", session_id=state.session_id, auto_close_ms=3200)
 
-    def open_session_sop_picker(self):
-        state = self.get_current_session()
-        if not state:
-            return
-        templates = self.config_manager.get_sop_templates()
-        dialog = SessionSopPickerDialog(
-            templates,
-            current_template_id=(normalize_sop_run(getattr(state, "sop_run", None)) or {}).get("template_id", ""),
-            parent=self,
-        )
-        if dialog.exec():
-            template = dialog.selected_template()
-            if not template:
-                QMessageBox.information(self, "添加自动化", "请选择一个自动化模板。")
-                return
-            sop_run = create_sop_run(template)
-            if not sop_run:
-                QMessageBox.warning(self, "添加自动化", "这个自动化模板没有可执行步骤，请先在任务模板里补充。")
-                return
-            state.sop_run = sop_run
-            self.save_chat_history(session_id=state.session_id)
-            self.refresh_sop_controls(state.session_id)
-            self.refresh_context_badges(state.session_id)
-            self.add_system_toast("已绑定自动化", "success", session_id=state.session_id, auto_close_ms=3200)
-
-    def clear_session_sop(self, session_id=None):
-        state = self.get_session(session_id) if session_id else self.get_current_session()
-        if not state:
-            return
-        state.sop_run = None
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        self.normalize_session_ui(state)
-        self.add_system_toast("已移除自动化", "info", session_id=state.session_id, auto_close_ms=2600)
-
-    def confirm_current_sop_step(self):
-        state = self.get_current_session()
-        if not state:
-            return
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run or not is_sop_awaiting_confirmation(sop_run):
-            return
-        state.sop_run = confirm_current_step(sop_run)
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        if is_sop_completed(state.sop_run):
-            self.set_session_phase("Completed", state.session_id)
-            self.set_session_status("completed", state.session_id, save=True)
-            self.add_system_toast("自动化已完成", "success", session_id=state.session_id, auto_close_ms=3200)
-        else:
-            self.set_session_phase("Preparing next step", state.session_id)
-            self.set_session_status("running", state.session_id, save=True)
-            self.add_system_toast("已确认，进入下一步", "success", session_id=state.session_id, auto_close_ms=3200)
-            QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
-
-    def rerun_current_sop_step(self):
-        state = self.get_current_session()
-        if not state:
-            return
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if not sop_run or not is_sop_awaiting_confirmation(sop_run):
-            return
-        state.sop_run = rerun_current_step(sop_run)
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        self.set_session_phase("Preparing", state.session_id)
-        self.set_session_status("running", state.session_id, save=True)
-        self.add_system_toast("当前步骤已重置，正在重新执行", "info", session_id=state.session_id, auto_close_ms=3200)
-        QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
-
-    def skip_current_sop_step(self):
-        state = self.get_current_session()
-        if not state:
-            return
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        current_step = get_current_step(sop_run)
-        if not sop_run or not current_step or not current_step.get("allow_skip"):
-            return
-        text, ok = QInputDialog.getText(self, "标记不适用", "请填写原因（可选）")
-        if not ok:
-            return
-        state.sop_run = skip_current_step(sop_run, reason=(text or "").strip())
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        if is_sop_completed(state.sop_run):
-            self.set_session_phase("Completed", state.session_id)
-            self.set_session_status("completed", state.session_id, save=True)
-            self.add_system_toast("已标记不适用，自动化已完成", "info", session_id=state.session_id, auto_close_ms=3200)
-        else:
-            self.set_session_phase("Preparing next step", state.session_id)
-            self.set_session_status("running", state.session_id, save=True)
-            self.add_system_toast("已标记不适用，进入下一步", "info", session_id=state.session_id, auto_close_ms=3200)
-            QTimer.singleShot(0, lambda sid=state.session_id: self._continue_sop_after_step(self.get_session(sid)))
-
-    def start_conversation_sop_flow(self):
-        if self.conversation_sop_worker and self.conversation_sop_worker.isRunning():
-            self.add_system_toast("SOP 草稿生成中", "info", auto_close_ms=3000)
-            return
-        state = self.get_current_session()
-        if not state or not getattr(state, "messages", []):
-            self.add_system_toast("当前会话还没有可提炼的 SOP 内容", "info", auto_close_ms=4000)
-            return
-        self._start_conversation_sop_worker(state)
-
-    def _start_conversation_sop_worker(self, state, previous_draft=None, revision_feedback=""):
-        if not state:
-            return
-        self.save_chat_history(session_id=state.session_id)
-        title = self._compute_session_title(state.messages) if state.messages else "新任务"
-        meta = self._compose_session_meta(state)
-        toast_text = "正在根据修改意见重新生成 SOP 草稿" if revision_feedback else "正在根据当前会话生成 SOP 草稿"
-        self.add_system_toast(toast_text, "info", session_id=state.session_id, auto_close_ms=3500)
-        self.conversation_sop_worker = ConversationSopDraftWorker(
-            self.config_manager,
-            state.session_id,
-            title,
-            state.messages,
-            meta=meta,
-            previous_draft=previous_draft,
-            revision_feedback=revision_feedback,
-            parent=self,
-        )
-        self.conversation_sop_worker.progress_signal.connect(self.handle_conversation_sop_progress)
-        self.conversation_sop_worker.finished_signal.connect(self.handle_conversation_sop_finished)
-        self.conversation_sop_worker.finished.connect(self.conversation_sop_worker.deleteLater)
-        self.conversation_sop_worker.start()
-
-    def handle_conversation_sop_progress(self, text):
-        self.add_system_toast(text, "info", auto_close_ms=2500)
-
-    def handle_conversation_sop_finished(self, result):
-        worker = self.conversation_sop_worker
-        self.conversation_sop_worker = None
-        if worker:
-            try:
-                worker.finished_signal.disconnect(self.handle_conversation_sop_finished)
-            except Exception:
-                pass
-
-        session_id = result.get("session_id") or self.current_session_id
-        state = self.get_session(session_id)
-        if not result.get("ok"):
-            self.add_system_toast(f"生成 SOP 草稿失败：{result.get('error') or '未知错误'}", "error", session_id=session_id, auto_close_ms=8000)
-            return
-        if not state:
-            self.add_system_toast("SOP 草稿已生成，但当前会话不存在", "error", auto_close_ms=6000)
-            return
-
-        preview = ConversationSopPreviewDialog(result.get("draft") or {}, parent=self)
-        dialog_result = preview.exec()
-        if dialog_result == QDialog.Accepted:
-            draft = preview.draft()
-            self._save_conversation_sop_draft(state, draft)
-            return
-        if dialog_result == ConversationSopPreviewDialog.REVISION_RESULT:
-            self._start_conversation_sop_worker(
-                state,
-                previous_draft=preview.draft(),
-                revision_feedback=preview.revision_feedback(),
-            )
-            return
-        self.add_system_toast("已取消生成 SOP 草稿", "info", session_id=state.session_id, auto_close_ms=4000)
-
-    def _save_conversation_sop_draft(self, state, draft):
-        normalized_draft = normalize_sop_draft(draft)
-        if not normalized_draft or not normalized_draft.get("steps"):
-            QMessageBox.warning(self, "生成 SOP", "SOP 草稿没有有效步骤，无法生成。")
-            return False
-        templates = self.config_manager.get_sop_templates()
-        templates.append(normalized_draft)
-        self.config_manager.set_sop_templates(templates)
-        saved_templates = self.config_manager.get_sop_templates()
-        saved_template = saved_templates[-1] if saved_templates else normalized_draft
-        sop_run = create_sop_run(saved_template)
-        if not sop_run:
-            QMessageBox.warning(self, "生成 SOP", "SOP 已保存，但无法绑定到当前会话。请检查模板步骤。")
-            return False
-        state.sop_run = sop_run
-        self.save_chat_history(session_id=state.session_id)
-        self.refresh_sop_controls(state.session_id)
-        self.refresh_context_badges(state.session_id)
-        self.add_system_toast("SOP 已生成并绑定到当前会话", "success", session_id=state.session_id, auto_close_ms=4200)
-        return True
-
     def update_skill_capture_button_state(self):
         if not hasattr(self, "sidebar_skill_capture_btn"):
             return
@@ -22212,7 +19647,9 @@ class MainWindow(QMainWindow):
         office_output_profile=None,
         office_conversion_target="",
     ):
-        effective_skill_names = self._effective_sop_skill_names(state)
+        effective_skill_names = normalize_selected_skill_names(
+            getattr(state, "selected_skill_names", [])
+        )
         normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
         source_files = []
         template_file = ""
@@ -22247,7 +19684,6 @@ class MainWindow(QMainWindow):
                 "office_conversion_target": normalized_conversion_target,
                 "office_source_files": source_files,
                 "office_template_file": template_file,
-                "sop_run": normalize_sop_run(getattr(state, "sop_run", None)),
             }
         )
 
@@ -22276,10 +19712,17 @@ class MainWindow(QMainWindow):
             self.normalize_session_ui(state)
 
     def _build_agent_profile_run_context(self, profile, state=None, summon_source="mention"):
-        skill_names = self._effective_sop_skill_names(
-            state,
-            extra_skill_names=profile.get("skill_names") if profile else [],
-        )
+        skill_names = []
+        seen = set()
+        for source in (
+            getattr(state, "selected_skill_names", []) if state else [],
+            profile.get("skill_names") if profile else [],
+        ):
+            for skill_name in normalize_selected_skill_names(source):
+                if skill_name in seen:
+                    continue
+                seen.add(skill_name)
+                skill_names.append(skill_name)
         return normalize_run_context(
             {
                 "mode": RUN_MODE_EXECUTION,
@@ -22295,7 +19738,6 @@ class MainWindow(QMainWindow):
                 "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
                 "workflow_mode": "",
                 "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
-                "sop_run": normalize_sop_run(getattr(state, "sop_run", None)) if state else None,
             }
         )
 
@@ -22414,11 +19856,8 @@ class MainWindow(QMainWindow):
             return False
 
         summary_names = "、".join([str(item.get("name") or "") for item in started_profiles])
-        summary_prefix = "已按自动化模板启动" if summon_source == "sop_default" else "已召唤"
-        step = get_current_step(getattr(state, "sop_run", None))
+        summary_prefix = "已按自动化任务启动" if summon_source == "automation_task" else "已召唤"
         summary_text = f"{summary_prefix} {len(started_profiles)} 个智能体：{summary_names}\n任务：{task_text}"
-        if step:
-            summary_text = f"{summary_text}\n当前自动化步骤：{step.get('title') or '未命名步骤'}"
         state.last_agent_bubble = self.add_chat_bubble("agent", summary_text, animate=False, force_scroll=True)
         self.add_system_toast(
             f"已启动 {len(started_profiles)} 个智能体，结果会自动回填",
@@ -22443,7 +19882,7 @@ class MainWindow(QMainWindow):
     def _append_summoned_agent_result(self, state, data):
         if not state or not isinstance(data, dict):
             return
-        if data.get("summon_source") not in {"mention", "sop_default", "automation_template"}:
+        if data.get("summon_source") not in {"mention", "automation_task"}:
             return
         agent_id = str(data.get("agent_id") or "").strip()
         if not agent_id or agent_id in getattr(state, "completed_agent_result_ids", set()):
@@ -22458,10 +19897,7 @@ class MainWindow(QMainWindow):
             detail = error or content or "任务未成功完成。"
             text = f"[{profile_name}] {detail}"
         state.completed_agent_result_ids.add(agent_id)
-        step = get_current_step(getattr(state, "sop_run", None))
-        if data.get("summon_source") == "sop_default" and step:
-            text = f"[自动化: {step.get('title') or '当前步骤'}] {text}"
-        elif data.get("summon_source") == "automation_template":
+        if data.get("summon_source") == "automation_task":
             text = f"[自动化任务] {text}"
         message_id = self._new_message_id()
         state.messages.append(
@@ -22491,17 +19927,6 @@ class MainWindow(QMainWindow):
                 source_message_id=message_id,
             )
         self.save_chat_history(session_id=state.session_id)
-
-    def _resolve_template_default_profile(self, template):
-        if not isinstance(template, dict):
-            return None
-        profile_id = str(template.get("default_agent_profile_id") or "").strip()
-        if not profile_id:
-            return None
-        profile = self.config_manager.get_agent_profile(profile_id)
-        if not profile or not bool(profile.get("enabled", True)):
-            return None
-        return profile
 
     def _restore_rejected_guidance(self, state, raw_user_text, prompt_files):
         if not state:
@@ -22639,7 +20064,6 @@ class MainWindow(QMainWindow):
         raw_user_text,
         prompt_files=None,
         *,
-        linked_template=None,
         check_duplicates=True,
         clear_current_input=False,
         workflow_mode="",
@@ -22669,11 +20093,6 @@ class MainWindow(QMainWindow):
                 )
             if state.session_id == self.current_session_id:
                 self.add_system_toast("当前运行阶段不支持中途引导。", "warning", session_id=state.session_id)
-            return False
-        if self._should_block_send_for_sop(state):
-            if state.session_id == self.current_session_id:
-                QMessageBox.information(self, "自动化等待确认", "当前步骤已完成，请先在聊天中的自动化确认条里确认、重跑或标记不适用。")
-                self.refresh_sop_controls(state.session_id)
             return False
         if not raw_user_text and not prompt_files:
             return False
@@ -22788,23 +20207,8 @@ class MainWindow(QMainWindow):
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
-        sop_run = normalize_sop_run(getattr(state, "sop_run", None))
-        if sop_run:
-            if not sop_run.get("original_user_request"):
-                sop_run["original_user_request"] = user_text
-            if not sop_run.get("original_display_text"):
-                sop_run["original_display_text"] = payload.get("display_content") or user_text
-            state.sop_run = sop_run
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
-        if sop_run:
-            self.refresh_sop_controls(state.session_id)
-            return self._dispatch_current_sop_step(
-                state,
-                linked_template=linked_template,
-                create_user_bubble=False,
-                set_running=True,
-            )
         run_mode = RUN_MODE_EXECUTION
         state.pending_clarify_questions = []
         state.clarify_source_user_text = user_text
@@ -22813,15 +20217,6 @@ class MainWindow(QMainWindow):
         current_turn_id = state.active_turn_id
         if mentioned_profiles:
             self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
-            return True
-        sop_default_profile = self._resolve_sop_default_profile(state)
-        if sop_default_profile:
-            self.refresh_sop_controls(state.session_id)
-            self._dispatch_agent_profiles(state, user_text, user_text, [sop_default_profile], summon_source="sop_default")
-            return True
-        template_default_profile = self._resolve_template_default_profile(linked_template)
-        if template_default_profile:
-            self._dispatch_agent_profiles(state, user_text, user_text, [template_default_profile], summon_source="automation_template")
             return True
         if not self.daemon_available:
             self.queue_daemon_connection(allow_start=True, retries=4)
@@ -23500,10 +20895,7 @@ class MainWindow(QMainWindow):
             run_context=run_context,
             turn_id=turn_id,
         )
-        state.turn_steerable = not bool(
-            normalize_sop_run(getattr(state, "sop_run", None))
-            or getattr(state, "automation_task_id", "")
-        )
+        state.turn_steerable = not bool(getattr(state, "automation_task_id", ""))
         if state.session_id == self.current_session_id:
             self.llm_worker = state.llm_worker
         session_id = state.session_id
@@ -23582,10 +20974,7 @@ class MainWindow(QMainWindow):
             return
         if str(daemon_turn_id or "") != str(turn_id or ""):
             return
-        state.turn_steerable = not bool(
-            normalize_sop_run(getattr(state, "sop_run", None))
-            or getattr(state, "automation_task_id", "")
-        )
+        state.turn_steerable = not bool(getattr(state, "automation_task_id", ""))
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
@@ -24043,20 +21432,8 @@ class MainWindow(QMainWindow):
                     (state.llm_worker and state.llm_worker.isRunning())
                     or getattr(state, "daemon_running", False)
                 ):
-                    if normalize_sop_run(getattr(state, "sop_run", None)) and status == "completed":
-                        content = payload.get("content") or ""
-                        self._finalize_sop_execution_step(
-                            state,
-                            executor="sub_agent",
-                            content=content,
-                            agent_profile={
-                                "id": payload.get("agent_profile_id") or "",
-                                "name": payload.get("agent_profile_name") or payload.get("agent_name") or "",
-                            },
-                        )
-                    else:
-                        self.set_session_phase("Completed", state.session_id)
-                        self.set_session_status("completed", state.session_id, save=True)
+                    self.set_session_phase("Completed", state.session_id)
+                    self.set_session_status("completed", state.session_id, save=True)
             _log_stage("final_status_update", "ui_agent_state_stage_done", session_id=state.session_id)
         except Exception:
             _log_stage("final_status_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
@@ -24442,15 +21819,8 @@ class MainWindow(QMainWindow):
             if clarify_active:
                 self.set_session_status("draft", state.session_id, save=True)
             else:
-                if self._finalize_sop_execution_step(
-                    state,
-                    executor="main_agent",
-                    content=content,
-                ):
-                    pass
-                else:
-                    self.set_session_phase("Completed", state.session_id)
-                    self.set_session_status("completed", state.session_id, save=True)
+                self.set_session_phase("Completed", state.session_id)
+                self.set_session_status("completed", state.session_id, save=True)
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
             if is_current: self.normalize_session_ui(state)
@@ -24486,11 +21856,8 @@ class MainWindow(QMainWindow):
                     code_text = state.last_agent_bubble.code_output_edit.toPlainText().strip()
                 except Exception:
                     code_text = ""
-            if self._finalize_sop_execution_step(state, executor="main_agent", content=code_text):
-                pass
-            else:
-                self.set_session_phase("Completed", state.session_id)
-                self.set_session_status("completed", state.session_id, save=True)
+            self.set_session_phase("Completed", state.session_id)
+            self.set_session_status("completed", state.session_id, save=True)
             self.refresh_step_list(state.session_id)
             self.refresh_change_list(state.session_id)
         if session_id == self.current_session_id:

@@ -14,7 +14,6 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
-from core.sop_manager import create_sop_run
 
 
 class _ConfigStub:
@@ -57,25 +56,16 @@ class TestClarifyModeHelpers(unittest.TestCase):
             ["browser", "python-runner"],
         )
 
-    def test_normalize_run_context_preserves_sop_run(self):
-        sop_run = create_sop_run(
-            {
-                "id": "office",
-                "name": "Office",
-                "steps": [{"title": "Step 1", "instructions": "Do it"}],
-            }
-        )
-
+    def test_normalize_run_context_discards_legacy_sop_run(self):
         ctx = normalize_run_context(
             {
                 "mode": RUN_MODE_EXECUTION,
                 "selected_skill_names": ["browser-automation"],
-                "sop_run": sop_run,
+                "sop_run": {"template_id": "office", "steps": [{"title": "Step 1"}]},
             }
         )
 
-        self.assertEqual(ctx["sop_run"]["template_id"], "office")
-        self.assertEqual(ctx["sop_run"]["steps"][0]["title"], "Step 1")
+        self.assertNotIn("sop_run", ctx)
         self.assertEqual(ctx["selected_skill_names"], ["browser-automation"])
 
     def test_normalize_run_context_defaults_invalid_office_profile_to_free(self):
@@ -216,71 +206,6 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("`browser-automation`: 浏览器自动化", runtime_prompt)
             self.assertIn("Browser automation brief", runtime_prompt)
             self.assertNotIn("General skill prompt", runtime_prompt)
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def test_llm_worker_includes_sop_step_prompt(self):
-        class _SkillManagerStub:
-            def __init__(self, *_args, **_kwargs):
-                pass
-
-            def get_tool_definitions(self, *args, **kwargs):
-                return []
-
-            def check_for_updates(self):
-                return False
-
-            def get_system_prompts(self, query_text=""):
-                return ""
-
-        class _ProviderStub:
-            provider_name = "stub"
-            model_name = "stub-model"
-            base_url = ""
-            thinking_enabled = False
-
-            def __init__(self, events):
-                self.events = events
-
-            def chat_stream(self, messages, tools=None):
-                system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
-                self.events.append(("request", system_messages))
-                yield {"type": "content", "content": "done"}
-
-        from core.agent import LLMWorker
-
-        temp_dir = tempfile.mkdtemp()
-        events = []
-        provider_events = []
-        sop_run = create_sop_run(
-            {
-                "id": "office",
-                "name": "Office",
-                "description": "Handle office work",
-                "steps": [{"title": "Step 1", "instructions": "Only do step 1", "success_criteria": "Step 1 is done"}],
-            }
-        )
-        try:
-            with (
-                patch("core.agent.SkillManager", _SkillManagerStub),
-                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_events)),
-            ):
-                worker = LLMWorker(
-                    [{"role": "user", "content": "do the task"}],
-                    _ConfigStub(temp_dir),
-                    workspace_dir=temp_dir,
-                    run_context={"mode": RUN_MODE_EXECUTION, "sop_run": sop_run},
-                )
-                worker.observability_signal.connect(lambda data: events.append(data))
-                worker.run()
-
-            system_prompt = events[0].get("content", "")
-            runtime_prompt = events[0].get("runtime_context", "")
-            self.assertIn("# SOP 当前步骤", runtime_prompt)
-            self.assertIn("当前 SOP: Office", runtime_prompt)
-            self.assertIn("本轮只允许完成当前步骤", runtime_prompt)
-            self.assertEqual(system_prompt, provider_events[0][1][0])
-            self.assertEqual(runtime_prompt, provider_events[0][1][-1])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -3,14 +3,12 @@
   "name": "automation-tools",
   "kind": "knowledge",
   "capability_group": "automation",
-  "description": "Manage SOP templates, scheduled automation tasks, and automation run history through AI-callable tools.",
-  "description_cn": "让 AI 可以管理 SOP 模板、定时自动化任务和执行历史。",
-  "tags": ["automation", "sop", "schedule", "task", "cron"],
-  "triggers": ["automation", "scheduled task", "SOP template", "自动化", "定时任务", "任务模板"],
+  "description": "Manage prompt-based scheduled automation tasks and automation run history through AI-callable tools.",
+  "description_cn": "让 AI 可以管理基于提示词、引用能力和 Agent 的定时自动化任务与执行历史。",
+  "tags": ["automation", "schedule", "task", "cron", "agent"],
+  "triggers": ["automation", "scheduled task", "自动化", "定时任务", "任务提示词"],
   "anti_triggers": [],
   "tool_refs": [
-    "list_automation_templates",
-    "upsert_automation_template",
     "list_automation_tasks",
     "upsert_automation_task",
     "set_automation_task_enabled",
@@ -30,8 +28,8 @@
     "include_experience_entries": false
   },
   "workflow": [
-    "List templates or tasks first when the current automation state is unclear.",
-    "Create or update templates before binding a scheduled task to them.",
+    "List tasks first when the current automation state is unclear.",
+    "Create or update tasks with prompt, skill_names, and agent_profile_id.",
     "Ask for approval before deleting or running a task."
   ]
 }

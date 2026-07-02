@@ -10919,6 +10919,14 @@ class SessionState:
         self.last_token_usage = {}
 
 
+def session_history_ready(state):
+    if not state:
+        return False
+    if getattr(state, "history_loading", False):
+        return False
+    return bool(getattr(state, "history_loaded", False))
+
+
 class DrawerResizeHandle(QWidget):
     widthRequested = Signal(int)
     resizeFinished = Signal()

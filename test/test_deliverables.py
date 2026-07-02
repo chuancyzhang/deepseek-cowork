@@ -25,10 +25,36 @@ from main import (
     deliverable_preview_settle_script,
     load_qwebengine_view,
     scan_workspace_deliverables,
+    session_history_ready,
 )
 
 
 class TestDeliverableScanning(unittest.TestCase):
+    def test_session_history_ready_requires_loaded_and_not_loading(self):
+        state = type("State", (), {})()
+        state.history_loaded = True
+        state.history_loading = False
+        self.assertTrue(session_history_ready(state))
+
+        state.history_loading = True
+        self.assertFalse(session_history_ready(state))
+
+        state.history_loading = False
+        state.history_loaded = False
+        self.assertFalse(session_history_ready(state))
+        self.assertFalse(session_history_ready(None))
+
+    def test_refresh_clarify_controls_does_not_reenter_context_badges(self):
+        state = type("State", (), {"session_id": "session-1"})()
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = "session-1"
+        window.get_session = MagicMock(return_value=state)
+        window.refresh_context_badges = MagicMock()
+
+        MainWindow.refresh_clarify_controls(window, "session-1")
+
+        window.refresh_context_badges.assert_not_called()
+
     def test_agent_bubble_builds_clickable_cards_for_workspace_deliverables(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as workspace:

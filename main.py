@@ -165,7 +165,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -1008,14 +1008,18 @@ def apple_history_group_style():
 
 
 def apple_sidebar_icon_button_style(active=False):
-    bg = rgba_from_hex(DesignTokens.primary, 0.14) if active else "rgba(255, 255, 255, 0.22)"
+    bg = rgba_from_hex(DesignTokens.primary, 0.12) if active else "transparent"
     color = DesignTokens.primary if active else DesignTokens.text_secondary
+    border = rgba_from_hex(DesignTokens.primary, 0.18) if active else "transparent"
     return (
         "QToolButton { "
-        f"background: {bg}; color: {color}; border: 1px solid transparent; border-radius: 13px; padding: 0px;"
+        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 13px; padding: 0px;"
         "} "
         "QToolButton:hover { "
-        f"background: rgba(255, 255, 255, 0.72); color: {DesignTokens.text_primary}; border-color: {DesignTokens.border_subtle};"
+        f"background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_primary}; border-color: {DesignTokens.border_subtle};"
+        "} "
+        "QToolButton:pressed { "
+        f"background: rgba(255, 255, 255, 0.82); color: {DesignTokens.primary};"
         "} "
     )
 
@@ -1023,11 +1027,11 @@ def apple_sidebar_icon_button_style(active=False):
 def apple_sidebar_action_button_style(selected=False):
     color = DesignTokens.primary if selected else DesignTokens.text_tertiary
     hover_color = DesignTokens.primary if selected else DesignTokens.text_secondary
-    border = rgba_from_hex(DesignTokens.primary, 0.14) if selected else "transparent"
-    bg = rgba_from_hex(DesignTokens.primary, 0.08) if selected else "transparent"
-    hover_bg = rgba_from_hex(DesignTokens.primary, 0.10) if selected else "rgba(255, 255, 255, 0.62)"
-    hover_border = rgba_from_hex(DesignTokens.primary, 0.22) if selected else DesignTokens.border_subtle
-    pressed_bg = rgba_from_hex(DesignTokens.primary, 0.16) if selected else "rgba(255, 255, 255, 0.82)"
+    border = rgba_from_hex(DesignTokens.primary, 0.18) if selected else "transparent"
+    bg = rgba_from_hex(DesignTokens.primary, 0.10) if selected else "transparent"
+    hover_bg = rgba_from_hex(DesignTokens.primary, 0.12) if selected else "rgba(255, 255, 255, 0.56)"
+    hover_border = rgba_from_hex(DesignTokens.primary, 0.24) if selected else DesignTokens.border_subtle
+    pressed_bg = rgba_from_hex(DesignTokens.primary, 0.16) if selected else "rgba(255, 255, 255, 0.78)"
     return (
         "QToolButton { "
         f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 11px; padding: 0px;"
@@ -1044,51 +1048,61 @@ def apple_sidebar_action_button_style(selected=False):
 def sidebar_symbol_icon(kind, color, size=16):
     """Draw sidebar symbols without relying on optional icon-font glyphs."""
     pixel_size = max(12, int(size))
-    pixmap = QPixmap(pixel_size, pixel_size)
+    scale = 2
+    canvas_size = pixel_size * scale
+    pixmap = QPixmap(canvas_size, canvas_size)
+    pixmap.setDevicePixelRatio(scale)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
+    painter.scale(scale, scale)
     pen = QPen(QColor(color))
-    pen.setWidthF(max(1.6, pixel_size / 8.0))
+    pen.setWidthF(max(1.25, pixel_size / 12.5))
     pen.setCapStyle(Qt.RoundCap)
     pen.setJoinStyle(Qt.RoundJoin)
     painter.setPen(pen)
     color_obj = QColor(color)
     if kind == "ellipsis":
         painter.setBrush(QBrush(color_obj))
-        radius = max(1.4, pixel_size / 13.0)
+        radius = max(1.15, pixel_size / 15.5)
         y = pixel_size / 2.0
-        for x in (pixel_size * 0.32, pixel_size * 0.50, pixel_size * 0.68):
-            painter.drawEllipse(QPoint(int(x), int(y)), int(radius), int(radius))
+        for x in (pixel_size * 0.34, pixel_size * 0.50, pixel_size * 0.66):
+            painter.drawEllipse(QPointF(x, y), radius, radius)
     elif kind in {"folder", "folder-open", "folder-plus"}:
         fill = QColor(color_obj)
-        fill.setAlpha(36)
+        fill.setAlpha(18 if kind == "folder-plus" else 26)
         painter.setBrush(QBrush(fill))
         path = QPainterPath()
-        path.moveTo(pixel_size * 0.16, pixel_size * 0.34)
-        path.lineTo(pixel_size * 0.40, pixel_size * 0.34)
-        path.lineTo(pixel_size * 0.48, pixel_size * 0.44)
-        path.lineTo(pixel_size * 0.84, pixel_size * 0.44)
-        path.lineTo(pixel_size * 0.84, pixel_size * 0.74)
-        path.quadTo(pixel_size * 0.84, pixel_size * 0.82, pixel_size * 0.76, pixel_size * 0.82)
-        path.lineTo(pixel_size * 0.20, pixel_size * 0.82)
-        path.quadTo(pixel_size * 0.12, pixel_size * 0.82, pixel_size * 0.12, pixel_size * 0.74)
-        path.lineTo(pixel_size * 0.12, pixel_size * 0.42)
-        path.quadTo(pixel_size * 0.12, pixel_size * 0.34, pixel_size * 0.16, pixel_size * 0.34)
+        path.moveTo(pixel_size * 0.14, pixel_size * 0.38)
+        path.quadTo(pixel_size * 0.14, pixel_size * 0.31, pixel_size * 0.21, pixel_size * 0.31)
+        path.lineTo(pixel_size * 0.40, pixel_size * 0.31)
+        path.quadTo(pixel_size * 0.44, pixel_size * 0.31, pixel_size * 0.47, pixel_size * 0.36)
+        path.lineTo(pixel_size * 0.52, pixel_size * 0.43)
+        path.lineTo(pixel_size * 0.79, pixel_size * 0.43)
+        path.quadTo(pixel_size * 0.86, pixel_size * 0.43, pixel_size * 0.86, pixel_size * 0.50)
+        path.lineTo(pixel_size * 0.86, pixel_size * 0.73)
+        path.quadTo(pixel_size * 0.86, pixel_size * 0.80, pixel_size * 0.79, pixel_size * 0.80)
+        path.lineTo(pixel_size * 0.21, pixel_size * 0.80)
+        path.quadTo(pixel_size * 0.14, pixel_size * 0.80, pixel_size * 0.14, pixel_size * 0.73)
+        path.closeSubpath()
         painter.drawPath(path)
         if kind == "folder-plus":
             painter.setBrush(Qt.NoBrush)
-            center = pixel_size * 0.64
+            plus_pen = QPen(QColor(color))
+            plus_pen.setWidthF(max(1.35, pixel_size / 11.5))
+            plus_pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(plus_pen)
+            center = pixel_size * 0.67
             span = pixel_size * 0.12
-            painter.drawLine(QPoint(int(center), int(center - span)), QPoint(int(center), int(center + span)))
-            painter.drawLine(QPoint(int(center - span), int(center)), QPoint(int(center + span), int(center)))
+            painter.drawLine(QPointF(center, center - span), QPointF(center, center + span))
+            painter.drawLine(QPointF(center - span, center), QPointF(center + span, center))
         elif kind == "folder-open":
-            painter.drawLine(QPoint(int(pixel_size * 0.24), int(pixel_size * 0.66)), QPoint(int(pixel_size * 0.78), int(pixel_size * 0.66)))
+            painter.drawLine(QPointF(pixel_size * 0.24, pixel_size * 0.66), QPointF(pixel_size * 0.77, pixel_size * 0.66))
     else:
-        center = pixel_size // 2
-        inset = max(3, pixel_size // 4)
-        painter.drawLine(QPoint(center, inset), QPoint(center, pixel_size - inset))
-        painter.drawLine(QPoint(inset, center), QPoint(pixel_size - inset, center))
+        center = pixel_size / 2.0
+        inset = pixel_size * 0.30
+        painter.drawLine(QPointF(center, inset), QPointF(center, pixel_size - inset))
+        painter.drawLine(QPointF(inset, center), QPointF(pixel_size - inset, center))
     painter.end()
     return QIcon(pixmap)
 

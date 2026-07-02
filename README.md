@@ -20,7 +20,7 @@ Current app version: **4.9.6**
 
 ## Product Surface
 
-- **Conversation + project model**: start a pure chat, or bind a conversation to a project workspace; newly submitted conversations appear in the sidebar immediately while the background save queue catches up.
+- **Conversation + project model**: start a pure chat, or bind a conversation to a project workspace; newly submitted conversations appear in the sidebar immediately while the background save queue catches up, and the project controls use quiet Apple-style icon buttons.
 - **Prompt attachments**: attached text files are inlined into the model request when small enough, images are sent as vision parts on vision-capable models, and large or non-text files are surfaced with explicit path/size guidance for tool-based reading.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **Right-side context drawer**: browse files and deliverables in a list view, then drill into a focused preview/action view; chat deliverable cards open directly in preview.

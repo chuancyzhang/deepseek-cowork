@@ -559,7 +559,9 @@ class ConfigManager:
             "path": path,
             "name": name,
             "pinned": bool(source.get("pinned", False)),
-            "hidden": bool(source.get("hidden", False)),
+            "archived": bool(source.get("archived", source.get("hidden", False))),
+            "archived_at": int(source.get("archived_at") or 0),
+            "hidden": bool(source.get("archived", source.get("hidden", False))),
             "created_at": int(source.get("created_at") or time.time()),
             "updated_at": int(source.get("updated_at") or time.time()),
         }
@@ -1100,7 +1102,7 @@ class ConfigManager:
             self.config["projects"] = projects
             self.save_config()
         if not include_hidden:
-            projects = [item for item in projects if not item.get("hidden")]
+            projects = [item for item in projects if not item.get("archived") and not item.get("hidden")]
         return json.loads(json.dumps(projects, ensure_ascii=False))
 
     def set_projects(self, projects):
@@ -1167,6 +1169,8 @@ class ConfigManager:
                 project["name"] = str(name or "").strip() or os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path
             if pinned is not None:
                 project["pinned"] = bool(pinned)
+            project["archived"] = False
+            project["archived_at"] = 0
             project["hidden"] = False
             project["path"] = normalized_path
             project["updated_at"] = now
@@ -1177,6 +1181,8 @@ class ConfigManager:
                 "path": normalized_path,
                 "name": str(name or "").strip() or os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path,
                 "pinned": bool(pinned) if pinned is not None else False,
+                "archived": False,
+                "archived_at": 0,
                 "hidden": False,
                 "created_at": now,
                 "updated_at": now,
@@ -1185,27 +1191,31 @@ class ConfigManager:
         self.set_projects(projects)
         return json.loads(json.dumps(updated, ensure_ascii=False))
 
-    def hide_project(self, path):
+    def archive_project(self, path):
         normalized_path = self._normalize_project_path(path)
         if not normalized_path:
             return False
         projects = self.get_projects(include_hidden=True)
         key = self._project_key(normalized_path)
         changed = False
+        now = int(time.time())
         for project in projects:
             if self._project_key(project.get("path")) != key:
                 continue
+            project["archived"] = True
+            project["archived_at"] = now
             project["hidden"] = True
-            project["updated_at"] = int(time.time())
+            project["updated_at"] = now
             changed = True
             break
         if not changed:
-            now = int(time.time())
             projects.append(
                 {
                     "path": normalized_path,
                     "name": os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path,
                     "pinned": False,
+                    "archived": True,
+                    "archived_at": now,
                     "hidden": True,
                     "created_at": now,
                     "updated_at": now,
@@ -1214,6 +1224,9 @@ class ConfigManager:
             changed = True
         self.set_projects(projects)
         return changed
+
+    def hide_project(self, path):
+        return self.archive_project(path)
 
     def restore_project(self, path):
         normalized_path = self._normalize_project_path(path)
@@ -1225,6 +1238,8 @@ class ConfigManager:
         for project in projects:
             if self._project_key(project.get("path")) != key:
                 continue
+            project["archived"] = False
+            project["archived_at"] = 0
             project["hidden"] = False
             project["updated_at"] = int(time.time())
             changed = True

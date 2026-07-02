@@ -136,9 +136,36 @@ class TestConfigManager(unittest.TestCase):
         self.assertFalse(projects[0]["pinned"])
 
         self.assertTrue(cm.hide_project(project_dir))
+        archived = cm.get_projects(include_hidden=True)[0]
+        self.assertTrue(archived["archived"])
+        self.assertGreater(archived["archived_at"], 0)
         self.assertEqual(cm.get_projects(include_hidden=False), [])
         self.assertTrue(cm.restore_project(project_dir))
-        self.assertEqual(len(cm.get_projects(include_hidden=False)), 1)
+        restored = cm.get_projects(include_hidden=False)
+        self.assertEqual(len(restored), 1)
+        self.assertFalse(restored[0]["archived"])
+        self.assertEqual(restored[0]["archived_at"], 0)
+
+    def test_project_config_migrates_hidden_to_archived(self):
+        project_dir = os.path.join(self.temp_dir, "legacy-hidden")
+        os.makedirs(project_dir)
+        cm = self._create_config_manager(
+            {
+                "projects": [
+                    {
+                        "path": project_dir,
+                        "name": "Legacy Hidden",
+                        "hidden": True,
+                    }
+                ]
+            }
+        )
+
+        project = cm.get_projects(include_hidden=True)[0]
+
+        self.assertTrue(project["archived"])
+        self.assertTrue(project["hidden"])
+        self.assertEqual(cm.get_projects(include_hidden=False), [])
 
     def test_migrates_legacy_model_config_to_provider_group(self):
         cm = self._create_config_manager(

@@ -994,6 +994,19 @@ class ChatStorage:
             result.append(conversation)
         return result
 
+    def list_archived_conversations(self):
+        result = []
+        for conversation in self.list_conversations():
+            meta = conversation.get("meta") or {}
+            if meta.get("archived"):
+                result.append(conversation)
+        return result
+
+    def restore_conversation(self, conversation_id):
+        if not str(conversation_id or "").strip():
+            return None
+        return self.update_conversation_meta(conversation_id, {"archived": False})
+
     def archive_conversations_for_workspace(self, workspace_dir):
         target = str(workspace_dir or "").strip()
         if not target:

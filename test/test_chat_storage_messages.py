@@ -360,6 +360,18 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertTrue(storage.get_conversation_meta("target").get("archived"))
         self.assertFalse(storage.get_conversation_meta("other").get("archived"))
 
+    def test_list_and_restore_archived_conversations(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation("archived", [{"role": "user", "content": "a"}], title="Archived", meta={"archived": True})
+        storage.save_conversation("active", [{"role": "user", "content": "b"}], title="Active")
+
+        self.assertEqual([item["id"] for item in storage.list_archived_conversations()], ["archived"])
+
+        record = storage.restore_conversation("archived")
+
+        self.assertFalse(record["meta"]["archived"])
+        self.assertEqual(storage.list_archived_conversations(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

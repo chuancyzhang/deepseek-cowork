@@ -5602,6 +5602,10 @@ class SettingsDialog(QDialog):
             "工作区",
             "把默认落点和聊天存储位置整理好，减少每次启动后的重复调整。",
         )
+        archive_page, archive_layout = make_scroll_page(
+            "归档",
+            "从侧边栏收起不常用的项目与对话，需要时可以随时恢复。",
+        )
         storage_group, storage_group_layout = build_settings_surface(
             "工作区与存储",
             "默认工作区决定首次进入的任务范围；聊天记录目录会同时承载历史和长期记忆。",
@@ -5663,6 +5667,53 @@ class SettingsDialog(QDialog):
                 self.history_dir_input.setText(directory)
 
         history_dir_btn.clicked.connect(choose_history_dir)
+
+        archive_project_group, archive_project_layout = build_settings_surface(
+            "已归档项目",
+            "归档项目会从左侧栏和项目选择器中隐藏，恢复后未归档对话会重新出现。",
+            radius=20,
+            show_subtitle=False,
+        )
+        self.archived_project_list = QListWidget()
+        self.archived_project_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
+        self.archived_project_list.setMinimumHeight(140)
+        archived_project_actions = QHBoxLayout()
+        self.restore_project_btn = QPushButton("恢复项目")
+        self.restore_project_btn.setObjectName("SecondaryBtn")
+        self.open_archived_project_btn = QPushButton("在资源管理器中打开")
+        self.open_archived_project_btn.setObjectName("SecondaryBtn")
+        archived_project_actions.addWidget(self.restore_project_btn)
+        archived_project_actions.addWidget(self.open_archived_project_btn)
+        archived_project_actions.addStretch()
+        archive_project_layout.addWidget(self.archived_project_list)
+        archive_project_layout.addLayout(archived_project_actions)
+        archive_layout.addWidget(archive_project_group)
+
+        archive_conversation_group, archive_conversation_layout = build_settings_surface(
+            "已归档对话",
+            "恢复对话后会回到原项目或独立对话列表中。",
+            radius=20,
+            show_subtitle=False,
+        )
+        self.archived_conversation_list = QListWidget()
+        self.archived_conversation_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=16, padding=6))
+        self.archived_conversation_list.setMinimumHeight(180)
+        archived_conversation_actions = QHBoxLayout()
+        self.restore_conversation_btn = QPushButton("恢复对话")
+        self.restore_conversation_btn.setObjectName("SecondaryBtn")
+        archived_conversation_actions.addWidget(self.restore_conversation_btn)
+        archived_conversation_actions.addStretch()
+        archive_conversation_layout.addWidget(self.archived_conversation_list)
+        archive_conversation_layout.addLayout(archived_conversation_actions)
+        archive_layout.addWidget(archive_conversation_group)
+        archive_layout.addStretch()
+
+        self.restore_project_btn.clicked.connect(self.restore_selected_archived_project)
+        self.open_archived_project_btn.clicked.connect(self.open_selected_archived_project)
+        self.restore_conversation_btn.clicked.connect(self.restore_selected_archived_conversation)
+        self.archived_project_list.itemSelectionChanged.connect(self.update_archive_action_state)
+        self.archived_conversation_list.itemSelectionChanged.connect(self.update_archive_action_state)
+        self.refresh_archive_lists()
 
         permission_page, permission_page_layout = make_scroll_page(
             "权限",
@@ -6066,6 +6117,7 @@ class SettingsDialog(QDialog):
         add_settings_page("模型与服务", "fa5s.brain", model_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
+        add_settings_page("归档", "fa5s.archive", archive_page)
         add_settings_page("MCP", "fa5s.plug", mcp_page)
         add_settings_page("企业消息", "fa5s.comments", im_page)
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
@@ -6094,6 +6146,93 @@ class SettingsDialog(QDialog):
         if not matches:
             raise ValueError(f"未找到设置页：{initial_page_label}")
         self.nav_list.setCurrentItem(matches[0])
+
+    def refresh_archive_lists(self):
+        def format_time(timestamp):
+            if not timestamp:
+                return ""
+            try:
+                return datetime.fromtimestamp(int(timestamp)).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return ""
+
+        self.archived_project_list.clear()
+        for project in self.config_manager.get_projects(include_hidden=True):
+            if not project.get("archived") and not project.get("hidden"):
+                continue
+            path = str(project.get("path") or "")
+            name = str(project.get("name") or "").strip() or os.path.basename(path.rstrip(os.sep)) or path
+            archived_at = format_time(project.get("archived_at") or project.get("updated_at"))
+            suffix = f" · {archived_at}" if archived_at else ""
+            item = QListWidgetItem(f"{name}{suffix}\n{path}")
+            item.setData(Qt.UserRole, path)
+            self.archived_project_list.addItem(item)
+        if self.archived_project_list.count() == 0:
+            item = QListWidgetItem("暂无已归档项目")
+            item.setFlags(Qt.NoItemFlags)
+            self.archived_project_list.addItem(item)
+
+        self.archived_conversation_list.clear()
+        conversations = []
+        if self._main and hasattr(self._main, "chat_storage"):
+            conversations = self._main.chat_storage.list_archived_conversations()
+        for conversation in conversations:
+            title = str(conversation.get("title") or "新任务")
+            updated_at = format_time(conversation.get("updated_at"))
+            meta = conversation.get("meta") or {}
+            workspace_dir = str(meta.get("workspace_dir") or "")
+            detail = workspace_dir or "独立对话"
+            suffix = f" · {updated_at}" if updated_at else ""
+            item = QListWidgetItem(f"{title}{suffix}\n{detail}")
+            item.setData(Qt.UserRole, conversation.get("id"))
+            self.archived_conversation_list.addItem(item)
+        if self.archived_conversation_list.count() == 0:
+            item = QListWidgetItem("暂无已归档对话")
+            item.setFlags(Qt.NoItemFlags)
+            self.archived_conversation_list.addItem(item)
+        self.update_archive_action_state()
+
+    def update_archive_action_state(self):
+        project_item = self.archived_project_list.currentItem()
+        project_path = str(project_item.data(Qt.UserRole) or "") if project_item else ""
+        self.restore_project_btn.setEnabled(bool(project_path))
+        self.open_archived_project_btn.setEnabled(bool(project_path and os.path.isdir(project_path)))
+        conversation_item = self.archived_conversation_list.currentItem()
+        conversation_id = str(conversation_item.data(Qt.UserRole) or "") if conversation_item else ""
+        self.restore_conversation_btn.setEnabled(bool(conversation_id))
+
+    def restore_selected_archived_project(self):
+        item = self.archived_project_list.currentItem()
+        path = str(item.data(Qt.UserRole) or "") if item else ""
+        if not path:
+            return
+        self.config_manager.restore_project(path)
+        if self._main and hasattr(self._main, "refresh_history_list"):
+            self._main.refresh_history_list()
+            if hasattr(self._main, "refresh_project_selector"):
+                self._main.refresh_project_selector()
+        self.refresh_archive_lists()
+
+    def open_selected_archived_project(self):
+        item = self.archived_project_list.currentItem()
+        path = str(item.data(Qt.UserRole) or "") if item else ""
+        if not path:
+            return
+        if self._main and hasattr(self._main, "reveal_in_explorer"):
+            self._main.reveal_in_explorer(path)
+
+    def restore_selected_archived_conversation(self):
+        item = self.archived_conversation_list.currentItem()
+        conversation_id = str(item.data(Qt.UserRole) or "") if item else ""
+        if not conversation_id or not self._main or not hasattr(self._main, "chat_storage"):
+            return
+        self._main.chat_storage.restore_conversation(conversation_id)
+        if hasattr(self._main, "sessions") and conversation_id in self._main.sessions:
+            record = self._main.chat_storage.get_conversation_record(conversation_id) or {}
+            self._main.sessions[conversation_id].persisted_conversation_meta = copy.deepcopy(record.get("meta") or {})
+        if hasattr(self._main, "refresh_history_list"):
+            self._main.refresh_history_list()
+        self.refresh_archive_lists()
 
     def _source_config_from_editors(self):
         config = normalize_download_sources(self.download_sources)
@@ -16848,8 +16987,8 @@ class MainWindow(QMainWindow):
         menu.addAction(archive_action)
 
         menu.addSeparator()
-        remove_action = QAction("移除", self)
-        remove_action.triggered.connect(lambda checked=False, p=normalized: self.remove_project(p))
+        remove_action = QAction("归档项目", self)
+        remove_action.triggered.connect(lambda checked=False, p=normalized: self.archive_project(p))
         menu.addAction(remove_action)
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
@@ -16866,8 +17005,11 @@ class MainWindow(QMainWindow):
         self.config_manager.upsert_project(path, name=name)
         self.refresh_history_list()
 
-    def remove_project(self, path):
-        self.config_manager.hide_project(path)
+    def archive_project(self, path):
+        confirm = QMessageBox.question(self, "归档项目", "归档后该项目会从左侧栏和项目选择器中隐藏，可在设置的归档页恢复。")
+        if confirm != QMessageBox.Yes:
+            return
+        self.config_manager.archive_project(path)
         if self._project_key(path) == self._project_key(self.current_project_path):
             self.current_project_path = ""
             self.workspace_dir = None
@@ -16881,6 +17023,10 @@ class MainWindow(QMainWindow):
             self.refresh_deliverables()
             self.update_ui_state_for_workspace()
         self.refresh_history_list()
+        self.add_system_toast("项目已归档，可在设置中恢复", "success", auto_close_ms=3200)
+
+    def remove_project(self, path):
+        self.archive_project(path)
 
     def archive_project_conversations(self, path):
         confirm = QMessageBox.question(self, "归档对话", "归档该项目下的所有对话？")
@@ -16962,7 +17108,7 @@ class MainWindow(QMainWindow):
         restored = 0
         cleaned = []
         for project in projects:
-            if project.get("hidden") and os.path.isdir(project.get("path") or ""):
+            if project.get("hidden") and not project.get("archived") and os.path.isdir(project.get("path") or ""):
                 project["hidden"] = False
                 restored += 1
             if os.path.isdir(project.get("path") or ""):
@@ -17043,7 +17189,7 @@ class MainWindow(QMainWindow):
         hidden_project_keys = {
             self._project_key(project.get("path"))
             for project in config_projects
-            if project.get("hidden") and project.get("path")
+            if (project.get("archived") or project.get("hidden")) and project.get("path")
         }
 
         grouped = {}

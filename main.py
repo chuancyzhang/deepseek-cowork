@@ -13664,6 +13664,7 @@ class MainWindow(QMainWindow):
         self.project_buttons = {}
         self.project_preview_paths = set()
         self.project_full_expanded_paths = set()
+        self.optimistic_history_session_ids = set()
         self.unassigned_history_full_expanded = False
         self.sidebar_sort_mode = "recent"
         self.current_project_path = ""
@@ -18721,6 +18722,66 @@ class MainWindow(QMainWindow):
                 paths.append(path)
         return paths
 
+    def _session_has_history_content(self, state):
+        if not state:
+            return False
+        if getattr(state, "messages", None):
+            return True
+        if bool(getattr(state, "pending_clarify_questions", [])):
+            return True
+        if normalize_selected_skill_names(getattr(state, "selected_skill_names", [])):
+            return True
+        if normalize_sop_run(getattr(state, "sop_run", None)):
+            return True
+        return False
+
+    def _live_history_conversation_record(self, state):
+        if not self._session_has_history_content(state):
+            return None
+        session_id = str(getattr(state, "session_id", "") or "").strip()
+        if not session_id:
+            return None
+        meta = self._compose_session_meta(state)
+        return {
+            "id": session_id,
+            "title": self._compute_session_title(getattr(state, "messages", []) or []),
+            "updated_at": int(time.time()),
+            "status": getattr(state, "session_status", "draft") or "draft",
+            "meta": meta,
+            "im_provider": "",
+        }
+
+    def _merged_history_conversations(self, stored_conversations):
+        merged = {}
+        for conversation in stored_conversations or []:
+            if isinstance(conversation, dict) and conversation.get("id"):
+                merged[str(conversation.get("id"))] = dict(conversation)
+        for state in (getattr(self, "sessions", {}) or {}).values():
+            record = self._live_history_conversation_record(state)
+            if record:
+                merged[record["id"]] = record
+        return sorted(
+            merged.values(),
+            key=lambda item: int((item or {}).get("updated_at") or 0),
+            reverse=True,
+        )
+
+    def _ensure_session_visible_in_history(self, state):
+        if not self._session_has_history_content(state):
+            return
+        session_id = str(getattr(state, "session_id", "") or "").strip()
+        if not session_id:
+            return
+        optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
+        if not isinstance(optimistic_ids, set):
+            self.optimistic_history_session_ids = set()
+            optimistic_ids = self.optimistic_history_session_ids
+        optimistic_ids.add(session_id)
+        workspace_dir = self._workspace_dir_for_state(state)
+        if workspace_dir:
+            self.project_preview_paths.add(workspace_dir)
+        self.refresh_history_list()
+
     def _add_history_group_label(self, text):
         label = QLabel(text)
         label.setStyleSheet(apple_history_group_style())
@@ -19346,7 +19407,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 search_ids = set()
 
-        conversations = self.chat_storage.list_conversations()
+        conversations = self._merged_history_conversations(self.chat_storage.list_conversations())
         config_projects = self.config_manager.get_projects(include_hidden=True)
         project_meta_by_key = {
             self._project_key(project.get("path")): project
@@ -19531,6 +19592,9 @@ class MainWindow(QMainWindow):
         state = self.sessions.get(session_id)
         if state:
             state.persisted_conversation_meta = copy.deepcopy(meta)
+        optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
+        if isinstance(optimistic_ids, set):
+            optimistic_ids.discard(session_id)
         self.refresh_history_list()
 
     def set_conversation_pinned(self, session_id, pinned):
@@ -19796,6 +19860,9 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
         self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
+        optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
+        if isinstance(optimistic_ids, set):
+            optimistic_ids.discard(session_id)
         state = self.sessions.get(session_id)
         if state:
             index = self.session_tabs.indexOf(state.session_widget)
@@ -20187,6 +20254,10 @@ class MainWindow(QMainWindow):
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if isinstance(notified, dict):
             notified.pop(session_id, None)
+        optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
+        if isinstance(optimistic_ids, set) and session_id in optimistic_ids:
+            optimistic_ids.discard(session_id)
+            self.refresh_history_list()
 
     def save_chat_history(self, session_id=None, flush=False):
         state = self.get_session(session_id)
@@ -22199,6 +22270,7 @@ class MainWindow(QMainWindow):
         self.set_session_phase("Clarified", state.session_id)
         self.set_session_status("draft", state.session_id)
         self.save_chat_history(session_id=state.session_id)
+        self._ensure_session_visible_in_history(state)
         self.update_session_tab_title(state.session_id)
         if is_current:
             self.normalize_session_ui(state)

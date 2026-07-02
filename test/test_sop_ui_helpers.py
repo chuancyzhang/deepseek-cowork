@@ -893,10 +893,12 @@ class TestSopUiHelpers(unittest.TestCase):
         window.project_buttons = {}
         window.project_preview_paths = set()
         window.project_full_expanded_paths = set()
+        window.optimistic_history_session_ids = set()
         window.unassigned_history_full_expanded = False
         window.current_session_id = ""
         window.current_project_path = ""
         window.workspace_dir = ""
+        window.sessions = {}
         window.sidebar_sort_mode = "recent"
         window.chat_storage = MagicMock()
         window.chat_storage.list_conversations.return_value = list(conversations)
@@ -905,7 +907,9 @@ class TestSopUiHelpers(unittest.TestCase):
         window.config_manager.get_projects.return_value = []
         window.config_manager.get.return_value = []
         window._history_query_text = lambda: query
-        window._conversation_workspace_path = lambda conv: conv.get("workspace_dir")
+        window._conversation_workspace_path = lambda conv: conv.get("workspace_dir") or (conv.get("meta") or {}).get("workspace_dir")
+        window._compute_session_title = lambda messages: (messages[0].get("content") if messages else "新任务")
+        window._compose_session_meta = lambda state: {"workspace_dir": getattr(state, "workspace_dir", "")} if getattr(state, "workspace_dir", "") else {}
         window._project_key = lambda path: str(path or "")
         window._project_display_name = lambda path, project=None: str((project or {}).get("name") or path or "")
         window._normalize_project_path = lambda path: path or ""
@@ -999,6 +1003,72 @@ class TestSopUiHelpers(unittest.TestCase):
             self._history_session_ids(window),
             ["session-0", "session-1", "session-2", "session-3", "session-4"],
         )
+
+    def test_live_session_appears_before_sqlite_save_completes(self):
+        window = self._build_history_sidebar_window([])
+        window.current_session_id = "live-session"
+        window.sessions = {
+            "live-session": type(
+                "_Session",
+                (),
+                {
+                    "session_id": "live-session",
+                    "messages": [{"role": "user", "content": "即时任务"}],
+                    "workspace_dir": "",
+                    "session_status": "running",
+                    "pending_clarify_questions": [],
+                    "selected_skill_names": [],
+                    "sop_run": None,
+                },
+            )()
+        }
+
+        window.refresh_history_list()
+
+        self.assertEqual(self._history_session_ids(window), ["live-session"])
+
+    def test_live_project_session_previews_project_group(self):
+        window = self._build_history_sidebar_window([])
+        window.config_manager.get_projects.return_value = [{"path": "D:/project", "name": "Demo"}]
+        captured = []
+
+        def _make_project_row(project, sessions, query=""):
+            captured.append((project, list(sessions)))
+            return QLabel(project.get("name") or "")
+
+        window._make_project_row = _make_project_row
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "project-session",
+                "messages": [{"role": "user", "content": "项目任务"}],
+                "workspace_dir": "D:/project",
+                "session_status": "running",
+                "pending_clarify_questions": [],
+                "selected_skill_names": [],
+                "sop_run": None,
+            },
+        )()
+        window.sessions = {"project-session": state}
+        window._ensure_session_visible_in_history(state)
+
+        self.assertIn("D:/project", window.project_preview_paths)
+        self.assertTrue(captured)
+        self.assertEqual(captured[0][1][0]["id"], "project-session")
+
+    def test_chat_save_completed_refreshes_optimistic_history_once(self):
+        window = MainWindow.__new__(MainWindow)
+        window.optimistic_history_session_ids = {"session-1"}
+        window._chat_save_failure_notified_at = {"session-1": 1.0}
+        window.refresh_history_list = MagicMock()
+
+        window.handle_chat_save_completed("session-1")
+        window.handle_chat_save_completed("session-1")
+
+        self.assertNotIn("session-1", window.optimistic_history_session_ids)
+        self.assertNotIn("session-1", window._chat_save_failure_notified_at)
+        window.refresh_history_list.assert_called_once()
 
     def test_handle_project_click_only_toggles_project_visibility(self):
         temp_dir = tempfile.mkdtemp()

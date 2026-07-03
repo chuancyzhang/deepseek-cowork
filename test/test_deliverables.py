@@ -318,20 +318,19 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertFalse(submit_call.kwargs["check_duplicates"])
             window.add_system_toast.assert_called_once()
 
-    def test_office_draft_request_requires_workspace(self):
+    def test_office_draft_request_uses_chat_workspace_without_project(self):
         window = MainWindow.__new__(MainWindow)
         state = type("_Session", (), {"session_id": "session-1", "messages": []})()
         window.get_session = MagicMock(return_value=state)
-        window._workspace_dir_for_state = MagicMock(return_value="")
+        window._ensure_session_workspace = MagicMock(return_value="D:/app/conversation_workspaces/session-1")
         window._submit_session_request = MagicMock()
         window.add_system_toast = MagicMock()
 
         submitted = window.handle_office_draft_requested("ppt", "", "source", session_id="session-1")
 
-        self.assertFalse(submitted)
-        window._submit_session_request.assert_not_called()
+        self.assertTrue(submitted)
+        window._submit_session_request.assert_called_once()
         window.add_system_toast.assert_called_once()
-        self.assertIn("连接项目工作区", window.add_system_toast.call_args.args[0])
 
     def test_conversion_continues_in_current_conversation_for_all_formats(self):
         with tempfile.TemporaryDirectory() as tmp:

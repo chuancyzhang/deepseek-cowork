@@ -10848,6 +10848,7 @@ class SessionState:
     def __init__(self, session_id, chat_layout, active_skills_label, session_widget, chat_scroll, token_usage_label=None):
         self.session_id = session_id
         self.workspace_dir = ""
+        self.workspace_source = ""
         self.prompt_files = []
         self.messages = []
         self.render_items = []
@@ -15735,8 +15736,14 @@ class MainWindow(QMainWindow):
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
         state.history_loaded = is_fresh_session
-        self._set_session_workspace(state, workspace_dir if workspace_dir is not None else self._active_workspace_dir())
         self.sessions[session_id] = state
+        requested_workspace = workspace_dir if workspace_dir is not None else (
+            self._active_workspace_dir() if self._session_workspace_source() == "project" else ""
+        )
+        if self._normalize_project_path(requested_workspace):
+            self._set_session_workspace(state, requested_workspace, source="project")
+        elif is_fresh_session or workspace_dir is not None:
+            self._ensure_session_workspace(state)
         self.refresh_token_usage_label(state.session_id)
         if make_current:
             self.session_tabs.setCurrentIndex(tab_index)
@@ -15877,7 +15884,11 @@ class MainWindow(QMainWindow):
                 meta = self.chat_storage.get_conversation_meta(session_id)
             except Exception:
                 meta = {}
-            self._set_session_workspace(state, (meta or {}).get("workspace_dir"))
+            self._set_session_workspace(
+                state,
+                (meta or {}).get("workspace_dir"),
+                source=(meta or {}).get("workspace_source"),
+            )
 
         index = self.session_tabs.indexOf(state.session_widget)
         if switch_tab and index >= 0 and self.session_tabs.currentIndex() != index:
@@ -16404,6 +16415,42 @@ class MainWindow(QMainWindow):
             return ""
         return os.path.normpath(os.path.abspath(os.path.expanduser(text)))
 
+    def _chat_workspace_root(self):
+        return os.path.join(get_base_dir(), "conversation_workspaces")
+
+    def _chat_workspace_dir_for_session(self, session_id):
+        session_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
+        if not session_key:
+            raise ValueError("会话 ID 为空，无法创建对话工作目录。")
+        return os.path.normpath(os.path.abspath(os.path.join(self._chat_workspace_root(), session_key)))
+
+    def _is_chat_workspace_path(self, path, session_id=None):
+        normalized = self._normalize_project_path(path)
+        if not normalized:
+            return False
+        if session_id:
+            return self._project_key(normalized) == self._project_key(self._chat_workspace_dir_for_session(session_id))
+        root = self._normalize_project_path(self._chat_workspace_root())
+        try:
+            return os.path.commonpath([root, normalized]) == root
+        except ValueError:
+            return False
+
+    def _ensure_session_workspace(self, state):
+        if not state:
+            raise ValueError("当前会话不可用，无法准备工作目录。")
+        workspace_dir = self._workspace_dir_for_state(state)
+        if workspace_dir:
+            source = self._session_workspace_source(state)
+            if not source:
+                source = "chat" if self._is_chat_workspace_path(workspace_dir, getattr(state, "session_id", "")) else "project"
+            if source == "chat":
+                os.makedirs(workspace_dir, exist_ok=True)
+            return self._set_session_workspace(state, workspace_dir, source=source)
+        directory = self._chat_workspace_dir_for_session(getattr(state, "session_id", ""))
+        os.makedirs(directory, exist_ok=True)
+        return self._set_session_workspace(state, directory, source="chat")
+
     def _project_key(self, path):
         normalized = self._normalize_project_path(path)
         return os.path.normcase(normalized)
@@ -16435,6 +16482,8 @@ class MainWindow(QMainWindow):
 
     def _conversation_workspace_path(self, conversation):
         meta = (conversation or {}).get("meta") or {}
+        if str(meta.get("workspace_source") or "").strip().lower() == "chat":
+            return ""
         return self._normalize_project_path(meta.get("workspace_dir"))
 
     def _workspace_dir_for_state(self, state=None):
@@ -16455,19 +16504,43 @@ class MainWindow(QMainWindow):
                 return workspace_dir
         return ""
 
+    def _session_workspace_source(self, state=None):
+        if state is None:
+            state = self.get_current_session()
+        if not state:
+            return ""
+        source = str(getattr(state, "workspace_source", "") or "").strip().lower()
+        if source in {"chat", "project"}:
+            return source
+        meta = getattr(state, "persisted_conversation_meta", {}) or {}
+        if isinstance(meta, dict):
+            source = str(meta.get("workspace_source") or "").strip().lower()
+            if source in {"chat", "project"}:
+                state.workspace_source = source
+                return source
+        return ""
+
     def _workspace_dir_for_session_id(self, session_id):
         return self._workspace_dir_for_state(self.get_session(session_id))
 
-    def _set_session_workspace(self, state, workspace_dir):
+    def _set_session_workspace(self, state, workspace_dir, source=None):
         if not state:
             return ""
         normalized = self._normalize_project_path(workspace_dir)
+        normalized_source = str(source or "").strip().lower()
+        if normalized and normalized_source not in {"chat", "project"}:
+            normalized_source = "chat" if self._is_chat_workspace_path(normalized, getattr(state, "session_id", "")) else "project"
+        if not normalized:
+            normalized_source = ""
         state.workspace_dir = normalized
+        state.workspace_source = normalized_source
         meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
         if normalized:
             meta["workspace_dir"] = normalized
+            meta["workspace_source"] = normalized_source
         else:
             meta.pop("workspace_dir", None)
+            meta.pop("workspace_source", None)
         state.persisted_conversation_meta = meta
         return normalized
 
@@ -16713,7 +16786,7 @@ class MainWindow(QMainWindow):
     def _make_project_row(self, project, sessions, query=""):
         path = project.get("path") or ""
         name = project.get("name") or self._project_display_name(path, project)
-        selected = self._project_key(path) == self._project_key(self._workspace_dir_for_state())
+        selected = self._session_workspace_source() == "project" and self._project_key(path) == self._project_key(self._workspace_dir_for_state())
         query_active = bool(query)
         previewed = query_active or path in self.project_preview_paths or path in self.project_full_expanded_paths
         fully_expanded = query_active or path in self.project_full_expanded_paths
@@ -16906,10 +16979,13 @@ class MainWindow(QMainWindow):
             if self._project_key(item.get("path")) == self._project_key(workspace_dir):
                 project_meta = item
                 break
-        label = self._project_display_name(workspace_dir, project_meta) if workspace_dir else "不使用项目"
+        workspace_source = self._session_workspace_source(state)
+        label = "对话工作目录" if workspace_source == "chat" else (
+            self._project_display_name(workspace_dir, project_meta) if workspace_dir else "对话工作目录"
+        )
         metrics = QFontMetrics(button.font())
         button.setText(metrics.elidedText(label, Qt.ElideRight, 210))
-        button.setIcon(sidebar_symbol_icon("folder-open" if workspace_dir else "folder", DesignTokens.text_secondary, 16))
+        button.setIcon(sidebar_symbol_icon("folder-open" if workspace_source == "project" else "folder", DesignTokens.text_secondary, 16))
         allowed = self._project_selector_switch_allowed(state)
         button.setEnabled(allowed)
         if allowed:
@@ -16930,9 +17006,11 @@ class MainWindow(QMainWindow):
             return False
         if normalized:
             self.config_manager.upsert_project(normalized)
-        self._set_session_workspace(state, normalized)
+            workspace_dir = self._set_session_workspace(state, normalized, source="project")
+        else:
+            workspace_dir = self._ensure_session_workspace(state)
         self._apply_workspace_to_ui(
-            normalized,
+            workspace_dir,
             refresh_sidebar=True,
             remember_workspace=bool(normalized),
             persist_default=bool(normalized),
@@ -16966,6 +17044,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         current_workspace = self._workspace_dir_for_state()
+        current_source = self._session_workspace_source()
         project_actions = []
         for project in self.config_manager.get_projects(include_hidden=False):
             path = self._normalize_project_path(project.get("path"))
@@ -16973,7 +17052,7 @@ class MainWindow(QMainWindow):
                 continue
             action = QAction(self._project_display_name(path, project), menu)
             action.setCheckable(True)
-            action.setChecked(self._project_key(path) == self._project_key(current_workspace))
+            action.setChecked(current_source == "project" and self._project_key(path) == self._project_key(current_workspace))
             action.setData(path)
             action.triggered.connect(lambda checked=False, p=path: self.select_project_for_current_conversation(p))
             menu.addAction(action)
@@ -16988,9 +17067,9 @@ class MainWindow(QMainWindow):
         add_action = QAction("添加新项目", menu)
         add_action.triggered.connect(self.add_project_from_selector)
         menu.addAction(add_action)
-        none_action = QAction("不使用项目", menu)
+        none_action = QAction("使用对话工作目录", menu)
         none_action.setCheckable(True)
-        none_action.setChecked(not bool(current_workspace))
+        none_action.setChecked(current_source != "project")
         none_action.triggered.connect(lambda: self.select_project_for_current_conversation(""))
         menu.addAction(none_action)
 
@@ -17363,7 +17442,7 @@ class MainWindow(QMainWindow):
             button = self.history_buttons.get(session_id)
             if button:
                 button.setStyleSheet(apple_history_title_style(is_current))
-        current_key = self._project_key(self._workspace_dir_for_state())
+        current_key = self._project_key(self._workspace_dir_for_state()) if self._session_workspace_source() == "project" else ""
         for path, button in self.project_buttons.items():
             button.setIcon(sidebar_symbol_icon("folder-open" if self._project_key(path) == current_key else "folder", DesignTokens.text_secondary, 16))
 
@@ -18002,8 +18081,12 @@ class MainWindow(QMainWindow):
         workspace_dir = self._workspace_dir_for_state(state) or meta.get("workspace_dir") or ""
         if workspace_dir:
             meta["workspace_dir"] = workspace_dir
+            meta["workspace_source"] = self._session_workspace_source(state) or (
+                "chat" if self._is_chat_workspace_path(workspace_dir, getattr(state, "session_id", "")) else "project"
+            )
         else:
             meta.pop("workspace_dir", None)
+            meta.pop("workspace_source", None)
         meta["run_phase"] = getattr(state, "run_phase", "Idle")
         meta["session_status"] = getattr(state, "session_status", "draft")
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
@@ -18931,12 +19014,18 @@ class MainWindow(QMainWindow):
         if ext not in {".html", ".htm"}:
             QMessageBox.information(self, "生成办公文件", "请先选择一个 HTML 文件。")
             return
-        if not self._workspace_dir_for_state():
-            QMessageBox.information(self, "生成办公文件", "请先选择项目工作区。")
+        state = self.get_current_session()
+        if not state:
+            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
+            return
+        try:
+            workspace_dir = self._ensure_session_workspace(state)
+        except Exception as exc:
+            QMessageBox.information(self, "生成办公文件", f"对话工作目录不可用：{exc}")
             return
         template_path = str(template_path or "").strip()
         if target_format == "pptx" and ask_template and not template_path:
-            start_dir = self._workspace_dir_for_state() or os.path.dirname(path)
+            start_dir = workspace_dir or os.path.dirname(path)
             selected, _filter = QFileDialog.getOpenFileName(
                 self,
                 "选择 PPT 模板",
@@ -18971,10 +19060,6 @@ class MainWindow(QMainWindow):
             )
         prompt_lines.append("- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。")
         prompt = "\n".join(prompt_lines)
-        state = self.get_current_session()
-        if not state:
-            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
-            return
         session_id = state.session_id
         state.selected_deliverable_path = path
         self.current_deliverable_path = path
@@ -19413,12 +19498,14 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state:
             return False
-        if not self._workspace_dir_for_state(state):
+        try:
+            self._ensure_session_workspace(state)
+        except Exception as exc:
             self.add_system_toast(
-                "请先连接项目工作区，再生成办公稿。",
-                "warning",
+                f"对话工作目录不可用：{exc}",
+                "error",
                 session_id=state.session_id,
-                auto_close_ms=3600,
+                auto_close_ms=6000,
             )
             return False
         source = str(source_text or "").strip()
@@ -19854,6 +19941,7 @@ class MainWindow(QMainWindow):
                 normalized_conversion_target = ""
             source_files = self._normalize_prompt_file_paths(getattr(state, "office_conversion_source_files", []) or [])
             template_file = str(getattr(state, "office_conversion_template_file", "") or "").strip()
+        effective_workspace_dir = self._ensure_session_workspace(state)
         return normalize_run_context(
             {
                 "mode": mode,
@@ -19868,7 +19956,7 @@ class MainWindow(QMainWindow):
                 "selected_skill_names": effective_skill_names,
                 "selected_model_id": self.config_manager.get_selected_model_id(),
                 "reasoning_effort": self._selected_reasoning_effort(),
-                "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
+                "workspace_mode": "project" if effective_workspace_dir else "chat_only",
                 "workflow_mode": normalized_workflow_mode,
                 "office_output_profile": normalize_office_output_profile(
                     office_output_profile if office_output_profile is not None else OFFICE_OUTPUT_PROFILE_FREE
@@ -19915,6 +20003,7 @@ class MainWindow(QMainWindow):
                     continue
                 seen.add(skill_name)
                 skill_names.append(skill_name)
+        effective_workspace_dir = self._ensure_session_workspace(state) if state else ""
         return normalize_run_context(
             {
                 "mode": RUN_MODE_EXECUTION,
@@ -19927,7 +20016,7 @@ class MainWindow(QMainWindow):
                 "agent_description": profile.get("description"),
                 "agent_system_prompt": profile.get("system_prompt"),
                 "agent_summon_source": summon_source,
-                "workspace_mode": "project" if self._workspace_dir_for_state(state) else "chat_only",
+                "workspace_mode": "project" if effective_workspace_dir else "chat_only",
                 "workflow_mode": "",
                 "office_output_profile": OFFICE_OUTPUT_PROFILE_FREE,
             }
@@ -19953,11 +20042,12 @@ class MainWindow(QMainWindow):
             {"emit": lambda _self, payload, sid=state.session_id: self.handle_agent_state(payload, sid)},
         )()
         try:
+            effective_workspace_dir = self._ensure_session_workspace(state)
             manager = get_agent_manager_registry().get_session_manager(
                 state.session_id,
                 chat_storage=self.chat_storage,
                 config_manager=self.config_manager,
-                workspace_dir=self._workspace_dir_for_state(state),
+                workspace_dir=effective_workspace_dir,
                 agent_state_signal=agent_state_proxy,
             )
         except Exception as exc:
@@ -20297,6 +20387,12 @@ class MainWindow(QMainWindow):
         payload = self._build_user_message_payload(raw_user_text, prompt_files, supports_vision=supports_vision)
         user_text = payload.get("content") or ""
         if not user_text:
+            return False
+        try:
+            self._ensure_session_workspace(state)
+        except Exception as exc:
+            if state.session_id == self.current_session_id:
+                self.add_system_toast(f"对话工作目录不可用：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
             return False
         user_message_id = self._new_message_id()
         delegated_payload = self._build_user_message_payload(
@@ -21064,10 +21160,11 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
+        effective_workspace_dir = self._ensure_session_workspace(state)
         
         # Insert "Thinking" bubble
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
-        state.temp_thinking_bubble.workspace_dir = self._workspace_dir_for_state(state)
+        state.temp_thinking_bubble.workspace_dir = effective_workspace_dir
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
@@ -21081,7 +21178,7 @@ class MainWindow(QMainWindow):
         state.llm_worker = LLMWorker(
             self._messages_for_worker(state, run_context),
             self.config_manager,
-            self._workspace_dir_for_state(state),
+            effective_workspace_dir,
             automation_runner=self.run_automation_task_now,
             session_id=state.session_id,
             run_context=run_context,
@@ -21118,8 +21215,9 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
+        effective_workspace_dir = self._ensure_session_workspace(state)
         state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
-        state.temp_thinking_bubble.workspace_dir = self._workspace_dir_for_state(state)
+        state.temp_thinking_bubble.workspace_dir = effective_workspace_dir
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
@@ -21135,7 +21233,7 @@ class MainWindow(QMainWindow):
             self.daemon_client,
             state.session_id,
             user_text,
-            self._workspace_dir_for_state(state),
+            effective_workspace_dir,
             run_context=run_context,
             messages=self._messages_for_worker(state, run_context),
             turn_id=turn_id,

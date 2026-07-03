@@ -13,7 +13,7 @@ Current app version: **4.9.6**
 - Run a local desktop agent that can read files, use tools, and complete multi-step tasks.
 - Keep project work inside a selected workspace boundary.
 - Extend capabilities through built-in skills, bundled optional plugins, user skills, and MCP tools.
-- Manage reusable agents, automation templates, scheduled runs, and long-term memory from the UI.
+- Manage reusable agents, prompt-based automation tasks, scheduled runs, and long-term memory from the UI.
 - Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
 - Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default while result files stay visible below the card.
 - Generate PPTX, DOCX, or PDF from an HTML draft in a folded task card with local action feedback; the drawer stays usable or closable while completion returns through toast and refreshed deliverable shortcuts.
@@ -27,7 +27,7 @@ Current app version: **4.9.6**
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Settings center**: manage models, agents, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
-- **Automation center**: manage task templates, schedules, run history, and step confirmation.
+- **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings.
 - **Skill center**: enable, import, export, debug, and review skills without restarting the app.
 
 ## Skill Model

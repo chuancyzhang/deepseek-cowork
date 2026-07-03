@@ -343,6 +343,15 @@ def normalize_automation_task(task, valid_agent_profile_ids=None, now_ts=None):
     now_ts = int(now_ts or time.time())
     name = str(source.get("name") or "").strip()
     prompt = str(source.get("prompt") or "").strip()
+    legacy_template_id = str(source.get("template_id") or "").strip()
+    legacy_template_name = str(source.get("template_name") or "").strip()
+    legacy_requires_prompt = bool(legacy_template_id and not prompt)
+    if legacy_requires_prompt:
+        name = name or legacy_template_name or "旧版自动化任务"
+        prompt = (
+            "这个任务来自已下线的旧版 SOP 自动化模板。"
+            "请编辑任务，把原流程目标改写成可直接执行的提示词后再启用。"
+        )
     if not name or not prompt:
         return None
     agent_profile_id = str(source.get("agent_profile_id") or source.get("default_agent_profile_id") or "").strip()
@@ -378,7 +387,7 @@ def normalize_automation_task(task, valid_agent_profile_ids=None, now_ts=None):
             source.get("skill_names") or source.get("selected_skill_names")
         ),
         "agent_profile_id": agent_profile_id,
-        "enabled": bool(source.get("enabled", True)),
+        "enabled": False if legacy_requires_prompt else bool(source.get("enabled", True)),
         "schedule_type": schedule_type,
         "cron_expression": normalize_cron_expression(
             source.get("cron_expression")
@@ -397,6 +406,16 @@ def normalize_automation_task(task, valid_agent_profile_ids=None, now_ts=None):
         "last_history_id": str(source.get("last_history_id") or "").strip(),
         "description": str(source.get("description") or "").strip(),
     }
+    migration_note = str(source.get("migration_note") or "").strip()
+    if legacy_requires_prompt:
+        migration_note = (
+            f"旧版 SOP 模板已下线，原 template_id={legacy_template_id}。"
+            "任务已停用，请补充提示词后再启用。"
+        )
+    if migration_note:
+        normalized["migration_note"] = migration_note
+    if legacy_requires_prompt:
+        normalized["enabled"] = False
     try:
         next_run_at = int(source.get("next_run_at") or 0)
     except Exception:

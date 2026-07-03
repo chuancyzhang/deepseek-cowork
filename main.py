@@ -1048,14 +1048,10 @@ def apple_sidebar_action_button_style(selected=False):
 def sidebar_symbol_icon(kind, color, size=16):
     """Draw sidebar symbols without relying on optional icon-font glyphs."""
     pixel_size = max(12, int(size))
-    scale = 2
-    canvas_size = pixel_size * scale
-    pixmap = QPixmap(canvas_size, canvas_size)
-    pixmap.setDevicePixelRatio(scale)
+    pixmap = QPixmap(pixel_size, pixel_size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.scale(scale, scale)
     pen = QPen(QColor(color))
     pen.setWidthF(max(1.25, pixel_size / 12.5))
     pen.setCapStyle(Qt.RoundCap)
@@ -16789,6 +16785,16 @@ class MainWindow(QMainWindow):
             return False
         self.current_project_path = normalized
         self.config_manager.upsert_project(normalized)
+        state = self.get_current_session()
+        if not query_active and self._project_selector_switch_allowed(state):
+            self._set_session_workspace(state, normalized)
+            self._apply_workspace_to_ui(
+                normalized,
+                refresh_sidebar=False,
+                remember_workspace=True,
+                persist_default=True,
+            )
+            self.normalize_session_ui(state)
         was_visible = (
             normalized in self.project_preview_paths
             or normalized in self.project_full_expanded_paths

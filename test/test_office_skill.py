@@ -2,6 +2,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import unittest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -20,50 +21,49 @@ document_impl = importlib.util.module_from_spec(doc_spec)
 doc_spec.loader.exec_module(document_impl)
 
 
-def test_plain_text_tool_refuses_structured_documents():
-    workspace_dir = os.path.abspath("test_workspace")
-    if os.path.exists(workspace_dir):
-        shutil.rmtree(workspace_dir)
-    os.makedirs(workspace_dir)
-    try:
-        result = file_impl.text_file_read(workspace_dir, "test.docx")
-        assert "structured_document_not_supported" in result
+class TestOfficeSkill(unittest.TestCase):
+    def setUp(self):
+        self.workspace_dir = os.path.abspath("test_workspace")
+        if os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir)
+        os.makedirs(self.workspace_dir)
 
-        result = file_impl.text_file_write(workspace_dir, "test.pdf", "content")
-        assert "structured_document_not_supported" in result
-    finally:
-        shutil.rmtree(workspace_dir, ignore_errors=True)
+    def tearDown(self):
+        shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
+    def test_plain_text_tool_refuses_structured_documents(self):
+        result = file_impl.text_file_read(self.workspace_dir, "test.docx")
+        self.assertIn("structured_document_not_supported", result)
 
-def test_document_read_handles_docx_xlsx_and_plain_text_stays_separate():
-    workspace_dir = os.path.abspath("test_workspace")
-    if os.path.exists(workspace_dir):
-        shutil.rmtree(workspace_dir)
-    os.makedirs(workspace_dir)
-    try:
+        result = file_impl.text_file_write(self.workspace_dir, "test.pdf", "content")
+        self.assertIn("structured_document_not_supported", result)
+
+    def test_document_read_handles_docx_xlsx_and_plain_text_stays_separate(self):
         from docx import Document
         import openpyxl
 
         doc = Document()
         doc.add_paragraph("Hello World")
-        doc.save(os.path.join(workspace_dir, "test.docx"))
+        doc.save(os.path.join(self.workspace_dir, "test.docx"))
 
         workbook = openpyxl.Workbook()
         sheet = workbook.active
         sheet.append(["Name", "Age"])
         sheet.append(["Alice", 30])
-        workbook.save(os.path.join(workspace_dir, "test.xlsx"))
+        workbook.save(os.path.join(self.workspace_dir, "test.xlsx"))
 
-        with open(os.path.join(workspace_dir, "test.txt"), "w", encoding="utf-8") as handle:
+        with open(os.path.join(self.workspace_dir, "test.txt"), "w", encoding="utf-8") as handle:
             handle.write("Just some text")
 
-        docx_content = document_impl.document_read(workspace_dir, "test.docx")
-        assert "Hello World" in docx_content
+        docx_content = document_impl.document_read(self.workspace_dir, "test.docx")
+        self.assertIn("Hello World", docx_content)
 
-        xlsx_content = document_impl.document_read(workspace_dir, "test.xlsx")
-        assert "Alice" in xlsx_content
+        xlsx_content = document_impl.document_read(self.workspace_dir, "test.xlsx")
+        self.assertIn("Alice", xlsx_content)
 
-        text_content = file_impl.text_file_read(workspace_dir, "test.txt")
-        assert "Just some text" in text_content
-    finally:
-        shutil.rmtree(workspace_dir, ignore_errors=True)
+        text_content = file_impl.text_file_read(self.workspace_dir, "test.txt")
+        self.assertIn("Just some text", text_content)
+
+
+if __name__ == "__main__":
+    unittest.main()

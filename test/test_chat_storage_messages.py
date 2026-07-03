@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 import json
+from contextlib import closing
 
 from core.chat_storage import ChatStorage
 
@@ -83,7 +84,7 @@ class TestChatStorageMessages(unittest.TestCase):
 
         messages = storage.get_messages("conv-incremental")
         self.assertEqual([msg["id"] for msg in messages], ["m1", "m2"])
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             rows = conn.execute(
                 "SELECT id, position FROM messages WHERE conversation_id = ? ORDER BY position",
                 ("conv-incremental",),
@@ -109,8 +110,9 @@ class TestChatStorageMessages(unittest.TestCase):
                 "conversation_branch": {"parent_session_id": "legacy"},
             },
         )
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute("UPDATE conversations SET updated_at = 123 WHERE id = ?", ("conv-pin",))
+            conn.commit()
 
         record = storage.update_conversation_meta("conv-pin", {"pinned": True})
 
@@ -141,7 +143,7 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertTrue(record["meta"]["migrated_from_legacy_json"])
 
     def test_existing_database_is_migrated_with_new_message_columns(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute(
                 """
                 CREATE TABLE messages (
@@ -235,6 +237,7 @@ class TestChatStorageMessages(unittest.TestCase):
                 )
                 """
             )
+            conn.commit()
 
         storage = ChatStorage(self.db_path)
         with storage._connect() as conn:
@@ -249,7 +252,7 @@ class TestChatStorageMessages(unittest.TestCase):
             self.assertIn(column_name, agent_message_columns)
 
     def test_legacy_plan_meta_is_cleaned_on_load_and_save(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute(
                 """
                 CREATE TABLE conversations (
@@ -284,6 +287,7 @@ class TestChatStorageMessages(unittest.TestCase):
                     ),
                 ),
             )
+            conn.commit()
 
         storage = ChatStorage(self.db_path)
         meta = storage.get_conversation_meta("conv-plan")

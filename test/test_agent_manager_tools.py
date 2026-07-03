@@ -259,6 +259,14 @@ class TestAgentManagerTools(unittest.TestCase):
         )
 
     def tearDown(self):
+        try:
+            self.manager.wait_agent([], timeout_ms=2000, return_when="all")
+        except Exception:
+            pass
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            self.app.processEvents()
+            time.sleep(0.01)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_spawn_agent_persists_record_and_transcript(self):

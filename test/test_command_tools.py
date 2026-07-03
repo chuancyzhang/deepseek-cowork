@@ -105,7 +105,7 @@ class TestCommandTools(unittest.TestCase):
         with patch.object(self.module, "get_runtime_executable", return_value=""):
             result = self.module.run_node_code(self.workspace_dir, "console.log('x')")
 
-        self.assertIn("Bundled Node.js runtime is missing", result)
+        self.assertIn("Node.js runtime is not installed", result)
 
     def test_run_node_code_is_exported(self):
         export_names = {item["name"] for item in self.module.TOOL_EXPORTS}

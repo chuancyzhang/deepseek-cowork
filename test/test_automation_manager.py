@@ -225,7 +225,12 @@ class TestAutomationConfigManager(unittest.TestCase):
             }
         )
         self.assertEqual(cm.config.get("sop_templates"), [])
-        self.assertEqual(cm.get_automation_tasks(), [])
+        tasks = cm.get_automation_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["name"], "旧任务")
+        self.assertFalse(tasks[0]["enabled"])
+        self.assertIn("旧版 SOP", tasks[0]["migration_note"])
+        self.assertIn("请编辑任务", tasks[0]["prompt"])
 
     def test_append_automation_history_persists_entry(self):
         cm = self._create_config_manager()

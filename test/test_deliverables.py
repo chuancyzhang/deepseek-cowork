@@ -26,10 +26,19 @@ from main import (
     load_qwebengine_view,
     scan_workspace_deliverables,
     session_history_ready,
+    sidebar_symbol_icon,
 )
 
 
 class TestDeliverableScanning(unittest.TestCase):
+    def test_sidebar_symbol_icons_render_expected_size(self):
+        QApplication.instance() or QApplication([])
+        for kind in ("folder", "folder-open", "folder-plus", "ellipsis", "plus"):
+            pixmap = sidebar_symbol_icon(kind, "#4b5563", 16).pixmap(16, 16)
+            self.assertFalse(pixmap.isNull())
+            self.assertEqual(pixmap.width(), 16)
+            self.assertEqual(pixmap.height(), 16)
+
     def test_session_history_ready_requires_loaded_and_not_loading(self):
         state = type("State", (), {})()
         state.history_loaded = True

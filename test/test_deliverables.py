@@ -53,6 +53,38 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertFalse(session_history_ready(state))
         self.assertFalse(session_history_ready(None))
 
+    def test_normalize_session_ui_resets_guidance_label_when_idle(self):
+        QApplication.instance() or QApplication([])
+        state = type("State", (), {})()
+        state.session_id = "session-idle"
+        state.history_loaded = True
+        state.history_loading = False
+        state.llm_worker = None
+        state.code_worker = None
+        state.daemon_running = False
+        state.turn_steerable = False
+        state.selected_skill_names = []
+        state.persisted_conversation_meta = {}
+        state.workspace_dir = ""
+
+        window = MainWindow.__new__(MainWindow)
+        window.action_btn = QPushButton("引导")
+        window.input_field = QTextEdit()
+        window.tool_menu_btn = QPushButton()
+        window.stop_btn = QPushButton()
+        window.pause_btn = QPushButton()
+        window.loop_hint = QLabel()
+        window.refresh_selected_skill_controls = MagicMock()
+        window.refresh_project_selector = MagicMock()
+        window.refresh_context_badges = MagicMock()
+        window.refresh_observability_view = MagicMock()
+        window.update_skill_capture_button_state = MagicMock()
+
+        MainWindow.normalize_session_ui(window, state)
+
+        self.assertEqual(window.action_btn.text(), "开始")
+        self.assertFalse(window.stop_btn.isVisible())
+
     def test_refresh_clarify_controls_does_not_reenter_context_badges(self):
         state = type("State", (), {"session_id": "session-1"})()
         window = MainWindow.__new__(MainWindow)

@@ -15561,6 +15561,7 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
                 self.pause_btn.setToolTip("暂停")
         else:
+            self.action_btn.setText("开始")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
             workspace_dir = self._workspace_dir_for_state(state)
@@ -21784,6 +21785,9 @@ class MainWindow(QMainWindow):
             if turn_id <= state.completed_turn_id:
                 return
             state.completed_turn_id = turn_id
+        state.llm_worker = None
+        if state.session_id == self.current_session_id:
+            self.llm_worker = None
         if state.content_flush_timer and state.content_flush_timer.isActive():
             state.content_flush_timer.stop()
         if state.thinking_flush_timer and state.thinking_flush_timer.isActive():

@@ -45,6 +45,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 - MCP 服务器可通过 `stdio` 或 Streamable HTTP 接入
 - 腾讯文档、飞书文档、钉钉文档以三套独立可选 skill 内置，用户可在技能工作台填写平台凭据并调试对应脚本入口
 - `tool` 是直接执行面，`skill` 是经验包
+- 自动工具发现命中的技能全文只参与当前轮推理，不进入会话历史，避免临时技能上下文降低后续 prompt cache 命中稳定性
 
 ### 3.4 自动化
 

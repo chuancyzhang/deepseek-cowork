@@ -10937,13 +10937,20 @@ def session_history_ready(state):
     return bool(getattr(state, "history_loaded", False))
 
 
+AUTO_QUERY_SKILL_CONTEXT_SOURCES = {
+    "skill_prompt",
+    "skill_prompt_query_match",
+    "skill_prompt_tool_search",
+}
+
+
 def is_auto_query_skill_context_message(message):
     if not isinstance(message, dict):
         return False
     meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
     return bool(
         meta.get("kind") in ("skill_context", "skill_context_update")
-        and meta.get("source") == "skill_prompt_query_match"
+        and meta.get("source") in AUTO_QUERY_SKILL_CONTEXT_SOURCES
     )
 
 
@@ -21733,7 +21740,11 @@ class MainWindow(QMainWindow):
     def _merge_generated_messages(self, existing_messages, generated_messages):
         if not isinstance(generated_messages, list):
             return []
-        new_messages = [msg for msg in generated_messages if isinstance(msg, dict)]
+        new_messages = [
+            msg for msg in generated_messages
+            if isinstance(msg, dict)
+            and not is_auto_query_skill_context_message(msg)
+        ]
         if not new_messages:
             return []
 

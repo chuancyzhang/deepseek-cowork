@@ -25,6 +25,7 @@ Current app version: **4.9.6**
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **Right-side context drawer**: browse files and deliverables in a list view, then drill into a focused preview/action view; chat deliverable cards open directly in preview.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
+- **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
 - **Settings center**: manage models, agents, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings.

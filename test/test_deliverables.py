@@ -55,18 +55,19 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertFalse(session_history_ready(None))
 
     def test_auto_query_skill_context_detection_is_source_specific(self):
-        self.assertTrue(
-            is_auto_query_skill_context_message(
-                {
-                    "role": "system",
-                    "content": "auto matched skill prompt",
-                    "meta": {
-                        "kind": "skill_context",
-                        "source": "skill_prompt_query_match",
-                    },
-                }
+        for source in ("skill_prompt", "skill_prompt_query_match", "skill_prompt_tool_search"):
+            self.assertTrue(
+                is_auto_query_skill_context_message(
+                    {
+                        "role": "system",
+                        "content": "auto matched skill prompt",
+                        "meta": {
+                            "kind": "skill_context",
+                            "source": source,
+                        },
+                    }
+                )
             )
-        )
         self.assertFalse(
             is_auto_query_skill_context_message(
                 {
@@ -80,6 +81,22 @@ class TestDeliverableScanning(unittest.TestCase):
             )
         )
         self.assertFalse(is_auto_query_skill_context_message({"role": "user", "content": "hello"}))
+
+    def test_merge_generated_messages_skips_auto_skill_contexts(self):
+        window = MainWindow.__new__(MainWindow)
+        existing = [{"role": "user", "content": "生成报告"}]
+        generated = [
+            {
+                "role": "system",
+                "content": "auto skill prompt",
+                "meta": {"kind": "skill_context", "source": "skill_prompt_tool_search"},
+            },
+            {"role": "assistant", "content": "完成"},
+        ]
+
+        merged = MainWindow._merge_generated_messages(window, existing, generated)
+
+        self.assertEqual(merged, [{"role": "assistant", "content": "完成"}])
 
     def test_normalize_session_ui_resets_guidance_label_when_idle(self):
         QApplication.instance() or QApplication([])

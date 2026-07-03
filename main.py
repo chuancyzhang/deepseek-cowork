@@ -10937,6 +10937,16 @@ def session_history_ready(state):
     return bool(getattr(state, "history_loaded", False))
 
 
+def is_auto_query_skill_context_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return bool(
+        meta.get("kind") in ("skill_context", "skill_context_update")
+        and meta.get("source") == "skill_prompt_query_match"
+    )
+
+
 class DrawerResizeHandle(QWidget):
     widthRequested = Signal(int)
     resizeFinished = Signal()

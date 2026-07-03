@@ -25,6 +25,7 @@ from main import (
     deliverable_preview_settle_script,
     load_qwebengine_view,
     scan_workspace_deliverables,
+    is_auto_query_skill_context_message,
     session_history_ready,
     sidebar_symbol_icon,
 )
@@ -52,6 +53,33 @@ class TestDeliverableScanning(unittest.TestCase):
         state.history_loaded = False
         self.assertFalse(session_history_ready(state))
         self.assertFalse(session_history_ready(None))
+
+    def test_auto_query_skill_context_detection_is_source_specific(self):
+        self.assertTrue(
+            is_auto_query_skill_context_message(
+                {
+                    "role": "system",
+                    "content": "auto matched skill prompt",
+                    "meta": {
+                        "kind": "skill_context",
+                        "source": "skill_prompt_query_match",
+                    },
+                }
+            )
+        )
+        self.assertFalse(
+            is_auto_query_skill_context_message(
+                {
+                    "role": "system",
+                    "content": "user selected skill prompt",
+                    "meta": {
+                        "kind": "skill_context",
+                        "source": "selected_skill",
+                    },
+                }
+            )
+        )
+        self.assertFalse(is_auto_query_skill_context_message({"role": "user", "content": "hello"}))
 
     def test_normalize_session_ui_resets_guidance_label_when_idle(self):
         QApplication.instance() or QApplication([])

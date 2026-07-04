@@ -106,9 +106,10 @@ class SkillManager:
         for folder in ("skills", "ai_skills"):
             self._append_skill_dir(os.path.join(base_dir, folder))
 
-    def __init__(self, workspace_dir=None, config_manager=None):
+    def __init__(self, workspace_dir=None, config_manager=None, auto_load=True, load_mcp_tools=True):
         self.workspace_dir = workspace_dir
         self.config_manager = config_manager
+        self.load_mcp_tools = bool(load_mcp_tools)
         self.skills_dirs = []
 
         data_dir = get_app_data_dir()
@@ -139,7 +140,11 @@ class SkillManager:
         self.skill_records = {}
         self.experience_packages = {}
         self.last_load_time = 0
-        self.load_skills()
+        if auto_load:
+            self.load_skills(load_mcp_tools=load_mcp_tools)
+        else:
+            self.last_load_time = time.time()
+            self._register_builtin_tools()
 
     def set_workspace_dir(self, workspace_dir):
         self.workspace_dir = workspace_dir
@@ -920,6 +925,9 @@ class SkillManager:
         discovered = context.get("discovered_tool_names")
         if discovered is None:
             discovered = set()
+        skill_results = self._search_skills(query, limit=limit, run_context=run_context)
+        self._ensure_mcp_tools_for_skill_results(skill_results)
+        skill_results = self._search_skills(query, limit=limit, run_context=run_context)
         results = self.tool_registry.search(
             query,
             run_mode=run_mode,
@@ -930,7 +938,6 @@ class SkillManager:
         results = self._filter_results_by_allowed_skills(results, run_context)
         results = self._filter_enterprise_tool_results(results, run_context)
         results = self._filter_workspace_tool_results(results, run_context)
-        skill_results = self._search_skills(query, limit=limit, run_context=run_context)
         if (
             self._is_enterprise_tool_allowed("publish_artifacts", run_context)
             and self._is_tool_allowed_by_skill_scope("publish_artifacts", run_context)
@@ -1229,6 +1236,8 @@ class SkillManager:
             "prompt": prompt,
             "search_text": "\n".join([skill_name, server_name, transport, summary, " ".join(tool_refs), body]),
             "dependency_status": dict(dependency_status or {"ok": True, "message": "MCP server configured."}),
+            "mcp_server": json.loads(json.dumps(server_config or {}, ensure_ascii=False)),
+            "mcp_tools_loaded": bool(tool_refs),
         }
 
     def _register_mcp_tools_for_server(self, skill_name, server_config, tools_payload):
@@ -1286,12 +1295,13 @@ class SkillManager:
                 tool_refs.append(local_name)
         return tool_refs
 
-    def _load_mcp_servers(self):
+    def _load_mcp_servers(self, load_tools=None):
         if not self.config_manager or not hasattr(self.config_manager, "get_mcp_servers"):
             return
         servers = self.config_manager.get_mcp_servers()
         if not isinstance(servers, list):
             return
+        load_tools = self.load_mcp_tools if load_tools is None else bool(load_tools)
         package_ready = mcp_package_available()
         for index, server_config in enumerate(servers):
             if not isinstance(server_config, dict):
@@ -1307,6 +1317,11 @@ class SkillManager:
             dependency_status = {"ok": True, "message": "MCP server is available."}
             if not package_ready:
                 dependency_status = {"ok": False, "message": "Python package 'mcp' is not installed."}
+            elif not load_tools:
+                dependency_status = {
+                    "ok": True,
+                    "message": "MCP server configured. Tools will be discovered on demand.",
+                }
             else:
                 result = list_mcp_server_tools(server_config)
                 if result.get("ok"):
@@ -1326,6 +1341,50 @@ class SkillManager:
             self.skill_prompts_full[skill_name] = record["prompt"]
             self.skill_records[skill_name] = record
             self.skill_to_tools.setdefault(skill_name, list(tool_refs))
+
+    def _ensure_mcp_tools_for_skill(self, skill_name):
+        record = self.skill_records.get(str(skill_name or "").strip())
+        if not record or record.get("spec", {}).get("source_format") != self.MCP_SOURCE_FORMAT:
+            return False
+        if record.get("mcp_tools_loaded"):
+            return True
+        server_config = record.get("mcp_server") or {}
+        if not bool(server_config.get("enabled", True)):
+            record["dependency_status"] = {"ok": False, "message": "MCP server is disabled in settings."}
+            return False
+        if not mcp_package_available():
+            record["dependency_status"] = {"ok": False, "message": "Python package 'mcp' is not installed."}
+            return False
+        result = list_mcp_server_tools(server_config)
+        if not result.get("ok"):
+            record["dependency_status"] = {
+                "ok": False,
+                "message": result.get("error") or "Failed to connect to MCP server.",
+            }
+            return False
+        tool_refs = self._register_mcp_tools_for_server(skill_name, server_config, result.get("tools"))
+        updated = self._build_mcp_skill_record(
+            skill_name,
+            server_config,
+            tool_refs,
+            {
+                "ok": True,
+                "message": f"Loaded {len(tool_refs)} MCP tools.",
+            },
+        )
+        self.loaded_skills_meta[skill_name] = updated["meta"]
+        self.skill_prompts_full[skill_name] = updated["prompt"]
+        self.skill_records[skill_name] = updated
+        self.skill_to_tools[skill_name] = list(tool_refs)
+        return True
+
+    def _ensure_mcp_tools_for_skill_results(self, skill_results):
+        for item in skill_results or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("source_format") != self.MCP_SOURCE_FORMAT:
+                continue
+            self._ensure_mcp_tools_for_skill(item.get("name"))
 
     def _load_skill_record(self, skill_name, skill_path):
         md_path = os.path.join(skill_path, "SKILL.md")
@@ -2151,7 +2210,7 @@ class SkillManager:
             print(f"Error checking for updates: {e}")
         return False
 
-    def load_skills(self):
+    def load_skills(self, load_mcp_tools=None):
         if not hasattr(self, "tool_registry"):
             self.tool_registry = ToolRegistry()
         if not hasattr(self, "workspace_dir"):
@@ -2170,6 +2229,8 @@ class SkillManager:
         self.skill_prompts_full = {}
         self.skill_records = {}
         self.experience_packages = self.skill_records
+        if load_mcp_tools is not None:
+            self.load_mcp_tools = bool(load_mcp_tools)
         self.last_load_time = time.time()
         self._register_builtin_tools()
 
@@ -2230,7 +2291,7 @@ class SkillManager:
             self.skill_prompts_full[skill_name] = record["prompt"]
             self.skill_records[skill_name] = record
             self.skill_to_tools.setdefault(skill_name, list(record.get("tool_refs") or []))
-        self._load_mcp_servers()
+        self._load_mcp_servers(load_tools=self.load_mcp_tools)
 
     def _explicit_skill_matches(self, query_tokens):
         matches = []

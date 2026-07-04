@@ -121,6 +121,27 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual(record["meta"]["workspace_dir"], "D:/demo")
         self.assertEqual(record["meta"]["conversation_branch"]["parent_session_id"], "legacy")
 
+    def test_list_conversation_summaries_supports_limit_and_offset(self):
+        storage = ChatStorage(self.db_path)
+        for index in range(5):
+            conversation_id = f"conv-{index + 1}"
+            storage.save_conversation(
+                conversation_id,
+                [{"id": f"u{index}", "role": "user", "content": conversation_id}],
+                title=conversation_id,
+            )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            for index in range(5):
+                conn.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (index + 1, f"conv-{index + 1}"),
+                )
+            conn.commit()
+
+        page = storage.list_conversation_summaries(limit=2, offset=1)
+
+        self.assertEqual([item["id"] for item in page], ["conv-4", "conv-3"])
+
     def test_migrate_legacy_json_histories_imports_missing_sessions(self):
         storage = ChatStorage(self.db_path)
         legacy_path = os.path.join(self.temp_dir, "chat_history_legacy-session.json")

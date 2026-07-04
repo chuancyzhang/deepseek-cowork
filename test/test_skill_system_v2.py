@@ -297,6 +297,59 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(sm.call_tool("echo", {"message": "hello"}, context={}), "ECHO:hello")
         self.assertEqual(sm.get_skill_of_tool("echo"), "echo-tools")
 
+    def test_mcp_tools_are_discovered_on_demand_when_loading_is_deferred(self):
+        class ConfigStub:
+            def is_skill_enabled(self, _skill_name, default_enabled=True):
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return [
+                    {
+                        "id": "demo",
+                        "name": "Demo MCP",
+                        "enabled": True,
+                        "transport": "stdio",
+                        "command": "demo",
+                        "args": [],
+                    }
+                ]
+
+            def get(self, _key, default=None):
+                return default
+
+        tool_payload = {
+            "ok": True,
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Echo from Demo MCP",
+                    "input_schema": {"type": "object", "properties": {}, "required": []},
+                }
+            ],
+        }
+        with patch("core.skill_manager.mcp_package_available", return_value=True), patch(
+            "core.skill_manager.list_mcp_server_tools", return_value=tool_payload
+        ) as list_tools:
+            sm = SkillManager(
+                workspace_dir=self.temp_dir,
+                config_manager=ConfigStub(),
+                auto_load=False,
+                load_mcp_tools=False,
+            )
+            sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+            sm.load_skills(load_mcp_tools=False)
+
+            list_tools.assert_not_called()
+            result = sm.call_tool(
+                "tool_search",
+                {"query": "Demo MCP echo"},
+                context={"discovered_tool_names": set(), "run_context": {"mode": "execution"}},
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["discovered_tools"])
+        self.assertEqual(list_tools.call_count, 1)
+
     def test_explicit_tool_exports_are_registered_before_legacy_reflection(self):
         skill_dir = os.path.join(self.skills_dir, "interaction-tools")
         os.makedirs(skill_dir, exist_ok=True)

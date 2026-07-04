@@ -936,20 +936,7 @@ class ChatStorage:
         self.upsert_conversation(conversation_id, title=title, status=status, meta=meta)
         self.replace_messages(conversation_id, self.normalize_messages(messages))
 
-    def list_conversations(self):
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT c.id, c.title, c.updated_at, c.status, c.meta, im.provider AS im_provider
-                FROM conversations c
-                LEFT JOIN (
-                    SELECT conversation_id, MIN(provider) AS provider
-                    FROM im_sessions
-                    GROUP BY conversation_id
-                ) im ON im.conversation_id = c.id
-                ORDER BY c.updated_at DESC
-                """
-            ).fetchall()
+    def _conversation_rows_to_dicts(self, rows):
         conversations = []
         for row in rows:
             meta = {}
@@ -971,6 +958,32 @@ class ChatStorage:
                 }
             )
         return conversations
+
+    def list_conversation_summaries(self, limit=None, offset=0):
+        with self._connect() as conn:
+            params = []
+            limit_clause = ""
+            if limit is not None:
+                limit_clause = "LIMIT ? OFFSET ?"
+                params.extend([max(0, int(limit)), max(0, int(offset or 0))])
+            rows = conn.execute(
+                f"""
+                SELECT c.id, c.title, c.updated_at, c.status, c.meta, im.provider AS im_provider
+                FROM conversations c
+                LEFT JOIN (
+                    SELECT conversation_id, MIN(provider) AS provider
+                    FROM im_sessions
+                    GROUP BY conversation_id
+                ) im ON im.conversation_id = c.id
+                ORDER BY c.updated_at DESC
+                {limit_clause}
+                """,
+                params,
+            ).fetchall()
+        return self._conversation_rows_to_dicts(rows)
+
+    def list_conversations(self):
+        return self.list_conversation_summaries()
 
     def list_conversations_by_workspace(self):
         grouped = {}

@@ -494,7 +494,7 @@ class LLMWorker(QThread):
         self._guidance_open = True
         
         # Initialize Skill Manager
-        self.skill_manager = SkillManager(workspace_dir, config_manager)
+        self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
         self.discovered_tool_names = set()
         self.tools = []
         self._refresh_tool_definitions()

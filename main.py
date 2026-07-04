@@ -336,6 +336,8 @@ EXTREME_FINAL_PLAIN_TEXT_THRESHOLD = 120000
 LONG_TEXT_PLAIN_LINE_THRESHOLD = 120
 UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
+HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT = 80
+HISTORY_SIDEBAR_PAGE_SIZE = 80
 SUB_AGENT_MONITOR_RENDER_LIMIT = 80
 MARKDOWN_RENDER_CACHE_SIZE = 160
 CHAT_BUBBLE_VIRTUALIZATION_MIN_BUBBLES = 48
@@ -1511,6 +1513,32 @@ class DeliverableScanWorker(QThread):
 
     def run(self):
         self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
+
+
+class SkillManagerLoadWorker(QThread):
+    completed = Signal(object)
+
+    def __init__(self, config_manager, workspace_dir=None, load_mcp_tools=False, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.workspace_dir = workspace_dir
+        self.load_mcp_tools = bool(load_mcp_tools)
+
+    def run(self):
+        try:
+            manager = SkillManager(
+                self.workspace_dir,
+                self.config_manager,
+                auto_load=True,
+                load_mcp_tools=self.load_mcp_tools,
+            )
+            self.completed.emit({"ok": True, "skill_manager": manager})
+        except Exception as exc:
+            self.completed.emit({
+                "ok": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            })
 
 
 def clarify_phase_label(phase):
@@ -12480,7 +12508,11 @@ class MainWindow(QMainWindow):
         self.deliverable_layout_mode = "focus" if self.file_workspace_view_mode == "detail" else "list"
         self.deliverables_splitter_sizes = self.config_manager.get("deliverables_splitter_sizes", [180, 320])
         self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
-        self.skill_manager = SkillManager(None, self.config_manager)
+        self.skill_manager = SkillManager(None, self.config_manager, auto_load=False, load_mcp_tools=False)
+        self.skill_manager_ready = False
+        self.skill_manager_loading = False
+        self.skill_load_worker = None
+        self.skill_load_error = ""
         self.skill_generator = SkillGenerator(self.config_manager)
         self.daemon_host = DEFAULT_HOST
         self.daemon_port = self.config_manager.get("daemon_port", DEFAULT_PORT)
@@ -12504,6 +12536,7 @@ class MainWindow(QMainWindow):
         self._background_services_scheduled = False
         self._startup_hydration_scheduled = False
         self._startup_hydration_completed = False
+        self.history_sidebar_limit = HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT
         self._running_automation_history_ids = set()
         self._chat_save_failure_notified_at = {}
         
@@ -12606,6 +12639,7 @@ class MainWindow(QMainWindow):
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
         sidebar_skills_btn.clicked.connect(self.open_skills_center)
+        self.sidebar_skills_btn = sidebar_skills_btn
         sidebar_layout.addWidget(sidebar_skills_btn)
 
         self.sidebar_agent_module_btn = QPushButton(" 智能体")
@@ -12955,19 +12989,10 @@ class MainWindow(QMainWindow):
         )
         self.preview_stack.addWidget(self.preview_text)
         self.preview_stack.addWidget(self.preview_image)
-        webengine_view_cls = load_qwebengine_view()
-        if webengine_view_cls is not None:
-            self.deliverable_web_view = webengine_view_cls()
-            self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
-            self.deliverable_web_configuration_error = self._configure_deliverable_web_view()
-            self.deliverable_web_preview = DeliverableWebPreview(self.deliverable_web_view)
-            self.deliverable_web_view.loadProgress.connect(self.handle_deliverable_render_progress)
-            self.deliverable_web_view.loadFinished.connect(self.handle_deliverable_render_finished)
-            self.preview_stack.addWidget(self.deliverable_web_preview)
-        else:
-            self.deliverable_web_view = None
-            self.deliverable_web_preview = None
-            self.deliverable_web_configuration_error = ""
+        self.deliverable_web_view = None
+        self.deliverable_web_preview = None
+        self.deliverable_web_configuration_error = ""
+        self.deliverable_web_init_attempted = False
         self.deliverable_preview_stack = self.preview_stack
         self.preview_stack.setCurrentWidget(self.preview_text)
         self.preview_pixmap = None
@@ -14543,6 +14568,9 @@ class MainWindow(QMainWindow):
         self._populate_agent_menu(add_agent_menu)
         select_skills_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "指定能力", self)
         select_skills_action.triggered.connect(self.open_session_skill_picker)
+        if not getattr(self, "skill_manager_ready", False):
+            select_skills_action.setEnabled(False)
+            select_skills_action.setToolTip(self.skill_load_error or "能力加载中")
         menu.addAction(select_skills_action)
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
@@ -15233,6 +15261,7 @@ class MainWindow(QMainWindow):
         if self._background_services_started:
             return
         self._background_services_started = True
+        self._schedule_background_service_start(40, self.start_background_skill_load)
         self._schedule_background_service_start(BACKGROUND_TRAY_START_DELAY_MS, self.setup_tray)
         self._schedule_background_service_start(BACKGROUND_DAEMON_PREWARM_DELAY_MS, self._start_background_daemon_prewarm)
         self._schedule_background_service_start(BACKGROUND_DAEMON_MONITOR_DELAY_MS, self.start_daemon_monitor)
@@ -15240,6 +15269,51 @@ class MainWindow(QMainWindow):
 
     def _schedule_background_service_start(self, delay_ms, callback):
         QTimer.singleShot(max(int(delay_ms or 0), 0), callback)
+
+    def start_background_skill_load(self, force=False):
+        if self.skill_manager_loading:
+            return
+        if self.skill_manager_ready and not force:
+            return
+        self.skill_manager_loading = True
+        self.skill_load_error = ""
+        log_startup_stage("skill_load_begin")
+        log_startup_stage("mcp_probe_deferred")
+        worker = SkillManagerLoadWorker(self.config_manager, None, load_mcp_tools=False, parent=self)
+        self.skill_load_worker = worker
+        worker.completed.connect(self.handle_background_skill_load_completed, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        self.refresh_selected_skill_controls()
+
+    def handle_background_skill_load_completed(self, payload):
+        payload = payload if isinstance(payload, dict) else {}
+        self.skill_manager_loading = False
+        if payload.get("ok"):
+            manager = payload.get("skill_manager")
+            if manager is not None:
+                self.skill_manager = manager
+                self.skill_manager_ready = True
+            log_startup_stage(
+                "skill_load_done",
+                ok=True,
+                skill_count=len(getattr(self.skill_manager, "skill_records", {}) or {}),
+            )
+            self.add_system_toast("能力已加载完成", "success", auto_close_ms=2600)
+        else:
+            self.skill_manager_ready = False
+            self.skill_load_error = payload.get("error") or "未知错误"
+            log_startup_stage("skill_load_done", ok=False, error=self.skill_load_error)
+            log_sub_agent_runtime(
+                "skill_manager_background_load_failed",
+                error=self.skill_load_error,
+                traceback=payload.get("traceback") or "",
+            )
+            self.add_system_toast(f"能力加载失败：{self.skill_load_error}", "error", auto_close_ms=8000)
+        self.skill_load_worker = None
+        self.refresh_selected_skill_controls()
+        self.update_skill_capture_button_state()
+        self.refresh_context_badges()
 
     def _start_background_daemon_prewarm(self):
         self.setup_daemon_client(retries=6)
@@ -17724,7 +17798,24 @@ class MainWindow(QMainWindow):
             except Exception:
                 search_ids = set()
 
-        conversations = self._merged_history_conversations(self.chat_storage.list_conversations())
+        history_has_more = False
+        if query_active:
+            stored_conversations = self.chat_storage.list_conversations()
+        else:
+            limit = max(
+                HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT,
+                int(getattr(self, "history_sidebar_limit", HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT) or 0),
+            )
+            stored_conversations = self.chat_storage.list_conversation_summaries(limit=limit + 1)
+            history_has_more = len(stored_conversations) > limit
+            stored_conversations = stored_conversations[:limit]
+        log_startup_stage(
+            "history_sidebar_begin",
+            query=bool(query_active),
+            loaded=len(stored_conversations),
+            has_more=history_has_more,
+        )
+        conversations = self._merged_history_conversations(stored_conversations)
         config_projects = self.config_manager.get_projects(include_hidden=True)
         project_meta_by_key = {
             self._project_key(project.get("path")): project
@@ -17849,10 +17940,30 @@ class MainWindow(QMainWindow):
                 empty_text = "还没有项目，点击项目标题栏的文件夹按钮添加"
             self._add_history_empty_state(empty_text)
 
+        if history_has_more:
+            more_btn = QPushButton(" 显示更多历史")
+            more_btn.setCursor(Qt.PointingHandCursor)
+            more_btn.setStyleSheet(apple_disclosure_button_style())
+            more_btn.clicked.connect(self.load_more_sidebar_history)
+            self.history_layout.addWidget(more_btn)
+
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
         self.update_history_selection()
+        log_startup_stage(
+            "history_sidebar_done",
+            query=bool(query_active),
+            rendered_projects=len(project_entries),
+            rendered_unassigned=len(unassigned_entries),
+            has_more=history_has_more,
+        )
+
+    def load_more_sidebar_history(self):
+        self.history_sidebar_limit = int(
+            getattr(self, "history_sidebar_limit", HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT) or 0
+        ) + HISTORY_SIDEBAR_PAGE_SIZE
+        self.refresh_history_list()
 
     def update_history_selection(self):
         for session_id, row in self.history_rows.items():
@@ -18848,6 +18959,47 @@ class MainWindow(QMainWindow):
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(f"源码视图 · {os.path.basename(path)}")
 
+    def _ensure_deliverable_web_view(self):
+        if getattr(self, "deliverable_web_view", None) is not None:
+            return True
+        if getattr(self, "deliverable_web_init_attempted", False) and WEBENGINE_AVAILABLE is False:
+            return False
+        self.deliverable_web_init_attempted = True
+        log_startup_stage("webengine_init_begin")
+        webengine_view_cls = load_qwebengine_view()
+        if webengine_view_cls is None:
+            message = webengine_unavailable_message()
+            self.deliverable_web_configuration_error = message
+            log_startup_stage("webengine_init_done", ok=False, error=message)
+            log_sub_agent_runtime(
+                "deliverable_webengine_init_failed",
+                error=message,
+                traceback=WEBENGINE_IMPORT_TRACEBACK,
+            )
+            return False
+        try:
+            self.deliverable_web_view = webengine_view_cls()
+            self.deliverable_web_view.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border-radius: 16px;")
+            self.deliverable_web_configuration_error = self._configure_deliverable_web_view()
+            self.deliverable_web_preview = DeliverableWebPreview(self.deliverable_web_view)
+            self.deliverable_web_view.loadProgress.connect(self.handle_deliverable_render_progress)
+            self.deliverable_web_view.loadFinished.connect(self.handle_deliverable_render_finished)
+            self.preview_stack.addWidget(self.deliverable_web_preview)
+            log_startup_stage("webengine_init_done", ok=True)
+            return True
+        except Exception as exc:
+            message = f"HTML 预览初始化失败：{exc}"
+            self.deliverable_web_view = None
+            self.deliverable_web_preview = None
+            self.deliverable_web_configuration_error = message
+            log_startup_stage("webengine_init_done", ok=False, error=message)
+            log_sub_agent_runtime(
+                "deliverable_webengine_init_failed",
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            return False
+
     def _configure_deliverable_web_view(self):
         view = getattr(self, "deliverable_web_view", None)
         if view is None:
@@ -18871,6 +19023,9 @@ class MainWindow(QMainWindow):
 
     def _show_deliverable_web_preview(self):
         preview = getattr(self, "deliverable_web_preview", None) or self.deliverable_web_view
+        if preview is None:
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            return
         self.deliverable_preview_stack.setCurrentWidget(preview)
         if hasattr(preview, "schedule_scrollbar_sync"):
             preview.schedule_scrollbar_sync()
@@ -19124,7 +19279,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(self.describe_path_for_preview(self.current_deliverable_path))
         if ext in {".html", ".htm"}:
-            if render_html and can_reuse_render and self.deliverable_web_view is not None:
+            if render_html and can_reuse_render and self._ensure_deliverable_web_view():
                 self._show_deliverable_web_preview()
                 self.deliverable_status_label.setText(
                     f"正在预览 {os.path.basename(self.current_deliverable_path)} · 轻量模式"
@@ -19173,8 +19328,8 @@ class MainWindow(QMainWindow):
         if kind != "html":
             self.deliverable_status_label.setText("当前格式暂不支持内嵌渲染，可使用系统应用打开。")
             return
-        if self.deliverable_web_view is None:
-            self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
+        if not self._ensure_deliverable_web_view():
+            self.deliverable_text_preview.setPlainText(self.deliverable_web_configuration_error or webengine_unavailable_message())
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             return
         configuration_error = getattr(self, "deliverable_web_configuration_error", "")
@@ -19243,8 +19398,8 @@ class MainWindow(QMainWindow):
         )
 
     def _render_markdown_deliverable(self, path, force=False):
-        if self.deliverable_web_view is None:
-            self.deliverable_text_preview.setPlainText(webengine_unavailable_message())
+        if not self._ensure_deliverable_web_view():
+            self.deliverable_text_preview.setPlainText(self.deliverable_web_configuration_error or webengine_unavailable_message())
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             return
         fingerprint = self._deliverable_fingerprint(path)
@@ -19334,7 +19489,10 @@ class MainWindow(QMainWindow):
         self.deliverable_render_path = path
         self.deliverable_render_loading = False
         self.current_deliverable_stale = False
-        configuration_error = getattr(self, "deliverable_web_configuration_error", "")
+        if not self._ensure_deliverable_web_view():
+            configuration_error = self.deliverable_web_configuration_error or webengine_unavailable_message()
+        else:
+            configuration_error = getattr(self, "deliverable_web_configuration_error", "")
         if self.deliverable_web_view is None or configuration_error:
             note = "应用内网页预览组件不可用，正在显示纯文本结构化预览。"
             if configuration_error:
@@ -19748,7 +19906,8 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.config_manager, self, initial_page_label=initial_page_label)
         result = dialog.exec()
         if result == QDialog.Accepted and getattr(dialog, "requires_skill_reload", False):
-            self.skill_manager.load_skills()
+            self.skill_manager_ready = False
+            self.start_background_skill_load(force=True)
         self.refresh_model_selector()
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()
@@ -19766,12 +19925,20 @@ class MainWindow(QMainWindow):
         self.refresh_context_badges()
 
     def open_skills_center(self):
+        if not self.skill_manager_ready:
+            message = self.skill_load_error or "能力仍在加载中，请稍后再打开能力中心。"
+            self.add_system_toast(message, "error" if self.skill_load_error else "info", auto_close_ms=5000)
+            return
         SkillsCenterDialog(self.skill_manager, self.config_manager, self).exec()
 
     def _flush_pending_skill_runtime_reload(self):
+        if not self.skill_manager_ready:
+            return False
         return flush_pending_skill_runtime_reload(self.skill_manager)
 
     def _available_session_skills(self):
+        if not self.skill_manager_ready:
+            return []
         self._flush_pending_skill_runtime_reload()
         skills = []
         for skill in self.skill_manager.get_all_skills():
@@ -20096,9 +20263,16 @@ class MainWindow(QMainWindow):
         return submitted
 
     def refresh_selected_skill_controls(self, session_id=None):
-        state = self.get_session(session_id)
+        state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state or state.session_id != self.current_session_id:
             return
+        skills_available = bool(self.skill_manager_ready)
+        skills_status = self.skill_load_error or ("能力加载完成" if skills_available else "能力加载中")
+        if hasattr(self, "sidebar_skills_btn"):
+            self.sidebar_skills_btn.setEnabled(skills_available)
+            self.sidebar_skills_btn.setToolTip("打开能力中心" if skills_available else skills_status)
+        if hasattr(self, "sidebar_skill_capture_btn"):
+            self.sidebar_skill_capture_btn.setToolTip("沉淀当前会话为 Skill" if skills_available else skills_status)
         selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
         running = bool(
             (state.llm_worker and state.llm_worker.isRunning())
@@ -20107,8 +20281,8 @@ class MainWindow(QMainWindow):
         )
         if not selected:
             self.selected_skills_badge.setVisible(False)
-            self.selected_skills_badge.setEnabled(not running)
-            self.selected_skills_badge.setToolTip("为当前会话指定能力")
+            self.selected_skills_badge.setEnabled(skills_available and not running)
+            self.selected_skills_badge.setToolTip("为当前会话指定能力" if skills_available else skills_status)
             return
         display_names = self._selected_skill_display_names(selected)
         label = f" 已选 {len(selected)} 个能力"
@@ -20117,7 +20291,7 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setText(label)
         self.selected_skills_badge.setToolTip("本会话指定能力: " + "、".join(display_names))
         self.selected_skills_badge.setVisible(True)
-        self.selected_skills_badge.setEnabled(not running)
+        self.selected_skills_badge.setEnabled(skills_available and not running)
 
     def set_session_selected_skills(self, skill_names, session_id=None):
         state = self.get_session(session_id)
@@ -20139,6 +20313,10 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state:
             return
+        if not self.skill_manager_ready:
+            message = self.skill_load_error or "能力仍在加载中，请稍后再指定能力。"
+            self.add_system_toast(message, "error" if self.skill_load_error else "info", session_id=state.session_id, auto_close_ms=5000)
+            return
         skills = self._available_session_skills()
         dialog = SessionSkillPickerDialog(
             skills,
@@ -20155,14 +20333,24 @@ class MainWindow(QMainWindow):
         worker_running = bool(self.conversation_skill_worker and self.conversation_skill_worker.isRunning())
         state = self.get_current_session()
         has_messages = bool(state and getattr(state, "messages", []))
-        self.sidebar_skill_capture_btn.setEnabled(has_messages and not worker_running)
+        skills_available = bool(getattr(self, "skill_manager_ready", False))
+        self.sidebar_skill_capture_btn.setEnabled(has_messages and not worker_running and skills_available)
         if worker_running:
             self.sidebar_skill_capture_btn.setText(" 正在生成草稿")
+        elif not skills_available:
+            self.sidebar_skill_capture_btn.setText(" 能力加载中")
         else:
             self.sidebar_skill_capture_btn.setText(" 沉淀为 Skill")
 
     def start_conversation_skill_flow(self):
         if self.conversation_skill_worker and self.conversation_skill_worker.isRunning():
+            return
+        if not self.skill_manager_ready:
+            self.add_system_toast(
+                self.skill_load_error or "能力仍在加载中，请稍后再沉淀 Skill。",
+                "error" if self.skill_load_error else "info",
+                auto_close_ms=5000,
+            )
             return
         state = self.get_current_session()
         if not state or not getattr(state, "messages", []):

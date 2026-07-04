@@ -19,6 +19,9 @@ from main import (
     MainWindow,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
+    PPT_AGENT_PREFERENCE_BUSINESS,
+    PPT_AGENT_STRATEGY_AUTO,
+    PPT_AGENT_STRATEGY_HUASHU,
     WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     deliverable_preview_bootstrap_script,
@@ -264,7 +267,8 @@ class TestDeliverableScanning(unittest.TestCase):
         widget = EmptyStateWidget(main_window)
         try:
             titles = [item[0] for item in widget.actions_data]
-            self.assertEqual(len(titles), 4)
+            self.assertEqual(len(titles), 5)
+            self.assertIn("PPT Agent", titles)
             self.assertIn("办公交付物", titles)
             self.assertNotIn("生成报告", titles)
             office_card = next(item for item in widget.actions_data if item[0] == "办公交付物")
@@ -284,6 +288,46 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(main_window.opened_settings_page, "组件与依赖")
         finally:
             widget.deleteLater()
+
+    def test_ppt_agent_request_submits_ppt_office_workflow(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            source_path = os.path.join(workspace, "research.md")
+            template_path = os.path.join(workspace, "template.pptx")
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write("# 研究材料")
+            with open(template_path, "wb") as handle:
+                handle.write(b"pptx")
+
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"session_id": "session-1", "messages": []})()
+            window.get_session = MagicMock(return_value=state)
+            window.get_current_session = MagicMock(return_value=state)
+            window._ensure_session_workspace = MagicMock(return_value=workspace)
+            window._submit_session_request = MagicMock(return_value=True)
+            window.add_system_toast = MagicMock()
+
+            submitted = window.handle_ppt_agent_requested(
+                "做一份高级感商业汇报",
+                preference=PPT_AGENT_PREFERENCE_BUSINESS,
+                strategy=PPT_AGENT_STRATEGY_AUTO,
+                source_files=[source_path],
+                template_file=template_path,
+                session_id="session-1",
+            )
+
+            self.assertTrue(submitted)
+            submit_call = window._submit_session_request.call_args
+            self.assertIs(submit_call.args[0], state)
+            self.assertIn("PPT Agent", submit_call.args[1])
+            self.assertIn("HTML 工作稿", submit_call.args[1])
+            self.assertIn(source_path, submit_call.args[1])
+            self.assertIn(template_path, submit_call.args[1])
+            self.assertEqual(submit_call.args[2], [source_path, template_path])
+            self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
+            self.assertEqual(submit_call.kwargs["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
+            self.assertTrue(submit_call.kwargs["ppt_agent_mode"])
+            self.assertEqual(submit_call.kwargs["ppt_agent_selected_strategy"], PPT_AGENT_STRATEGY_HUASHU)
+            window.add_system_toast.assert_called_once()
 
     def test_office_draft_request_submits_profiled_generation_prompt(self):
         with tempfile.TemporaryDirectory() as workspace:

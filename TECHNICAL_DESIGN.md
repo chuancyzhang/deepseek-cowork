@@ -31,6 +31,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 - **项目式对话**：直接对话默认绑定 exe 运行目录下的 `conversation_workspaces/<session_id>/` 独立工作目录；项目对话把文件能力限制在所选项目目录内；左侧项目导航使用轻量图标按钮承载添加、排序和项目操作。
 - **首页工具包提示**：新会话空态提示用户可在设置的“组件与依赖”中安装文档工具包和数据分析工具包，帮助用户在文档、表格和数据分析任务前发现可选依赖。
 - **生成办公稿**：AI 回复末尾的消息级动作，按自由、PPT、设计稿、DOCX 注入办公交付策略，并把该生成轮次默认折叠为任务卡；结果文件入口保持外显。
+- **PPT Mode / PPT Agent**：侧栏和新会话空态提供 PPT Agent 入口；`main.py` 的 `PptAgentModeDialog` 收集需求、生成偏好、内置 html-ppt 策略、资料附件和 PPTX 模板，提交后仍进入 `office_html_first` 工作流。
 - **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 状态默认隐藏，按需展开；文件区域在浏览态和详情态之间切换，聊天交付物入口直接进入详情态。
 - **设置中心**：集中配置模型、智能体、工作区、MCP、企业消息、更新和运行组件。
 - **自动化中心**：承载提示词任务、引用能力、Agent 绑定、计划任务和执行历史。
@@ -58,10 +59,11 @@ Cowork 采用交错式推理流程：
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 生成办公稿使用本次请求级 `workflow_mode = office_html_first` 和 `office_output_profile` 注入提示；从 HTML 继续生成 PPTX、DOCX、PDF 使用 `workflow_mode = office_file_conversion` 和 `office_conversion_target` 标记；两者都不新增 `RUN_MODE`，因此不改变工具权限。
+- PPT Agent 是 `office_html_first + office_output_profile = ppt` 上的一层产品工作流；`core/ppt_agent.py` 注册默认 PPT Agent、Guizang PPT Skill、Frontend Slides、Huashu Design 等 html-ppt 策略，并根据显式选择、偏好、模板和关键词自动选择策略。`core/agent.py` 通过 `ppt_agent_mode`、`ppt_agent_strategy`、`ppt_agent_selected_strategy`、`ppt_agent_preference` 和 `ppt_agent_template_file` 注入 PPT Agent 运行提示，但仍要求最终输出 HTML deliverable。
 - UI 通过用户消息 `meta.workflow_mode` 将该轮用户消息、工具调用和助手结果渲染成可展开的办公任务卡；消息本体仍按原结构持久化，交付物文件卡渲染在折叠过程外。任务卡会合并最终回复、隐藏气泡识别到的文件卡路径和本轮工具变更中的有效工作区文件，避免最终回复未写完整路径时结果区为空。历史消息按 render span 独立渲染，避免普通消息和办公任务混排时丢失折叠状态。
 - 运行中引导使用用户消息 `meta.same_turn_guidance` 标记，通过 steer 注入当前 in-flight turn；UI 将其渲染为当前任务流里的内联“补充引导”片段，而不是新的用户气泡或新的对话轮次。
 - 用户添加的文件同时保留 UI 附件元数据和模型可见内容：小体积文本附件内联到用户消息，图片在支持视觉的模型中转为图片 part，大文件或非文本文件只提供明确路径、大小和工具读取提示。
-- 从 HTML 生成 PPTX 时可附加 PPTX 模板文件，提示要求以 HTML 为内容源、模板为视觉结构源，并保留模板主题、母版、字号、色彩、版式节奏和顶部/底部图片；PPTX、DOCX、PDF 转换提交后只更新交付物详情页底部的局部运行态，并用隔离运行上下文只传入源 HTML、目标格式和模板文件，不把上一轮办公稿生成过程带给模型；完成后仍通过任务卡、Toast 和交付物扫描回填结果。
+- 从 HTML 生成 PPTX 时可附加 PPTX 模板文件，提示要求以 HTML 为内容源、模板为视觉结构源，并保留模板主题、母版、字号、色彩、版式节奏和顶部/底部图片；PPTX、DOCX、PDF 转换提交后只更新交付物详情页底部的局部运行态，并用隔离运行上下文只传入源 HTML、目标格式和模板文件，不把上一轮办公稿生成过程带给模型；完成后仍通过任务卡、Toast 和交付物扫描回填结果。`main.py` 的 `_submit_html_deliverable_conversion` 是可复用提交入口，右侧交付物预览和后续 PPT Mode 都应复用它，不另建转换器。
 - `tool_search` 负责延迟发现工具与匹配技能
 - `parallel_tools` 只允许并行只读调用
 - 同一轮内如果模型连续 3 次请求完全相同的工具签名，Agent 会停止该轮并提示重复工具调用，避免工具结果已返回后继续空转。

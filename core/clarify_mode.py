@@ -173,6 +173,11 @@ def normalize_run_context(run_context):
             if str(path or "").strip()
         ],
         "office_template_file": str(ctx.get("office_template_file") or "").strip(),
+        "ppt_agent_mode": bool(ctx.get("ppt_agent_mode")),
+        "ppt_agent_strategy": str(ctx.get("ppt_agent_strategy") or "").strip(),
+        "ppt_agent_selected_strategy": str(ctx.get("ppt_agent_selected_strategy") or "").strip(),
+        "ppt_agent_preference": str(ctx.get("ppt_agent_preference") or "").strip(),
+        "ppt_agent_template_file": str(ctx.get("ppt_agent_template_file") or "").strip(),
     }
 
 

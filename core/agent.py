@@ -29,6 +29,12 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
+from core.ppt_agent import (
+    PPT_AGENT_STRATEGY_DEFAULT,
+    normalize_ppt_agent_strategy,
+    ppt_agent_capability_prompt_lines,
+    ppt_agent_strategy_label,
+)
 from core.memory_store import MemoryStore
 from core.llm.deepseek import is_deepseek_request
 
@@ -1036,6 +1042,7 @@ class LLMWorker(QThread):
         workflow_mode = str(self.run_context.get("workflow_mode") or "").strip()
         if workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
             profile = str(self.run_context.get("office_output_profile") or "free").strip()
+            ppt_agent_mode = bool(self.run_context.get("ppt_agent_mode"))
             profile_guidance = {
                 OFFICE_OUTPUT_PROFILE_PPT: (
                     "当前类型: PPT。请把 HTML 组织成演示文稿形态: 默认 16:9 画布、按页/幻灯片拆分、"
@@ -1065,6 +1072,40 @@ class LLMWorker(QThread):
                     "6. 不要只给 Markdown 摘要或口头描述；需要形成可交付内容时应落盘为可预览文件。",
                 ]
             )
+            if ppt_agent_mode:
+                requested_strategy = normalize_ppt_agent_strategy(self.run_context.get("ppt_agent_strategy"))
+                selected_strategy = normalize_ppt_agent_strategy(
+                    self.run_context.get("ppt_agent_selected_strategy")
+                    or requested_strategy
+                    or PPT_AGENT_STRATEGY_DEFAULT
+                )
+                selected_label = ppt_agent_strategy_label(selected_strategy)
+                dynamic_state_lines.extend(
+                    [
+                        "",
+                        "策略 [PPT Agent]:",
+                        "1. 你是当前 PPT Mode 的唯一 PPT 生成主控；负责判断 PPT 类型、生成大纲和页面规划，并输出演示文稿形态 HTML 工作稿。",
+                        f"2. 当前策略: {selected_label}。用户显式策略: {ppt_agent_strategy_label(requested_strategy)}。",
+                        "3. 内置 html-ppt 能力是策略选项，不是新的导出引擎；它们的输出必须进入 HTML deliverable preview。",
+                        "4. 后续 PPTX、DOCX、PDF 都通过现有 HTML→PPTX/DOCX/PDF 转换链路完成，不要绕过交付物系统直接另建一套 PPTX 导出。",
+                        "5. 如果某个外部能力不可用，必须在回复中清晰说明，并使用默认 PPT Agent HTML 工作稿完成，不要静默降级。",
+                        "6. 支持用户后续修改，如缩短某页、切换咨询风、套模板或改成发布会风格；优先迭代同一个 HTML 工作稿。",
+                        "",
+                        "可调用的内置 html-ppt 策略:",
+                        *ppt_agent_capability_prompt_lines(),
+                    ]
+                )
+                template_file = str(self.run_context.get("ppt_agent_template_file") or "").strip()
+                if template_file:
+                    dynamic_state_lines.extend(
+                        [
+                            "",
+                            "PPT 模板约束:",
+                            f"- 用户提供的 PPTX 模板: {template_file}",
+                            "- HTML 是内容来源，PPTX 模板是后续导出的视觉与结构来源。",
+                            "- 不要修改原模板文件；生成 HTML 时要保留适合模板化转换的清晰章节、标题和页面节奏。",
+                        ]
+                    )
         if self.parent_agent_id:
             dynamic_state_lines.append(f"Note: You are a sub-agent (ID: {self.parent_agent_id}). Perform your assigned task efficiently.")
 

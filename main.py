@@ -156,6 +156,22 @@ from core.clarify_mode import (
     normalize_run_context,
     normalize_workflow_mode,
 )
+from core.ppt_agent import (
+    PPT_AGENT_PREFERENCE_AUTO,
+    PPT_AGENT_PREFERENCE_BUSINESS,
+    PPT_AGENT_PREFERENCE_TECH,
+    PPT_AGENT_PREFERENCE_TEMPLATE,
+    PPT_AGENT_PREFERENCE_WEB,
+    PPT_AGENT_STRATEGY_AUTO,
+    PPT_AGENT_STRATEGY_DEFAULT,
+    PPT_AGENT_STRATEGY_FRONTEND_SLIDES,
+    PPT_AGENT_STRATEGY_GUIZANG,
+    PPT_AGENT_STRATEGY_HUASHU,
+    build_ppt_agent_prompt,
+    normalize_ppt_agent_preference,
+    normalize_ppt_agent_strategy,
+    ppt_agent_strategy_label,
+)
 import shutil
 import traceback
 import qtawesome as qta
@@ -8381,6 +8397,12 @@ class EmptyStateWidget(QWidget):
             ("🖼️ 处理图片", "批量重命名/压缩", "帮我把所有图片重命名为日期格式"),
             ("🔍 代码搜索", "在项目中查找内容", "搜索当前项目中关于 'TODO' 的代码"),
             (
+                "PPT Agent",
+                "进入 PPT Mode",
+                "让 PPT Agent 生成演示文稿 HTML 工作稿，再从交付物预览导出 PPTX、DOCX 或 PDF。",
+                "fa5s.file-powerpoint",
+            ),
+            (
                 "办公交付物",
                 "预览修改，再生成文件",
                 "请帮我生成一份可预览的办公交付物，保存到工作区。完成后我会在右侧交付物视图里预览并继续修改，最后可按需要生成 PPTX、DOCX 或 PDF。",
@@ -8487,6 +8509,9 @@ class EmptyStateWidget(QWidget):
         return btn
 
     def activate_action_prompt(self, prompt, title=""):
+        if title == "PPT Agent" and hasattr(self.main_window, "open_ppt_agent_mode"):
+            self.main_window.open_ppt_agent_mode()
+            return
         self.main_window.input_field.setText(prompt)
 
     def create_toolkit_hint(self):
@@ -8541,6 +8566,220 @@ class EmptyStateWidget(QWidget):
 
     def open_toolkit_settings(self):
         self.main_window.open_settings("组件与依赖")
+
+
+class PptAgentModeDialog(QDialog):
+    def __init__(self, workspace_dir="", parent=None):
+        super().__init__(parent)
+        self.workspace_dir = workspace_dir or ""
+        self.source_files = []
+        self.template_file = ""
+        self.setWindowTitle("PPT Mode")
+        self.setModal(True)
+        self.resize(720, 680)
+        self.setStyleSheet(
+            f"""
+            QDialog {{
+                background: {DesignTokens.bg_main};
+                color: {DesignTokens.text_primary};
+            }}
+            QLabel {{
+                color: {DesignTokens.text_primary};
+                background: transparent;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary).pixmap(28, 28))
+        header.addWidget(icon, 0, Qt.AlignTop)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title = QLabel("PPT Agent")
+        title.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {DesignTokens.text_primary};")
+        desc = QLabel("让智能体根据你的内容和目标自动选择最合适的 PPT 生成方式。")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary};")
+        title_box.addWidget(title)
+        title_box.addWidget(desc)
+        header.addLayout(title_box, 1)
+        layout.addLayout(header)
+
+        self.request_edit = QPlainTextEdit()
+        self.request_edit.setPlaceholderText("描述你要做的 PPT，例如：把这份调研资料做成 12 页路演 BP，风格高级、适合投资人快速理解。")
+        self.request_edit.setMinimumHeight(150)
+        self.request_edit.setStyleSheet(
+            f"""
+            QPlainTextEdit {{
+                background: {DesignTokens.bg_panel_strong};
+                color: {DesignTokens.text_primary};
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 14px;
+                padding: 10px 12px;
+                font-size: 13px;
+            }}
+            QPlainTextEdit:focus {{
+                border-color: {rgba_from_hex(DesignTokens.primary, 0.42)};
+                background: #ffffff;
+            }}
+            """
+        )
+        layout.addWidget(self._field_block("需求", self.request_edit))
+
+        option_row = QHBoxLayout()
+        option_row.setContentsMargins(0, 0, 0, 0)
+        option_row.setSpacing(12)
+
+        self.preference_combo = QComboBox()
+        self.preference_combo.addItem("自动选择", PPT_AGENT_PREFERENCE_AUTO)
+        self.preference_combo.addItem("更适合网页演示", PPT_AGENT_PREFERENCE_WEB)
+        self.preference_combo.addItem("更适合技术分享", PPT_AGENT_PREFERENCE_TECH)
+        self.preference_combo.addItem("更适合高审美商业汇报", PPT_AGENT_PREFERENCE_BUSINESS)
+        self.preference_combo.addItem("更适合模板化办公 PPT", PPT_AGENT_PREFERENCE_TEMPLATE)
+        apply_settings_combo_style(self.preference_combo)
+        option_row.addWidget(self._field_block("生成偏好", self.preference_combo), 1)
+
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItem("自动选择", PPT_AGENT_STRATEGY_AUTO)
+        self.strategy_combo.addItem("默认 PPT Agent", PPT_AGENT_STRATEGY_DEFAULT)
+        self.strategy_combo.addItem("Guizang PPT Skill", PPT_AGENT_STRATEGY_GUIZANG)
+        self.strategy_combo.addItem("Frontend Slides", PPT_AGENT_STRATEGY_FRONTEND_SLIDES)
+        self.strategy_combo.addItem("Huashu Design", PPT_AGENT_STRATEGY_HUASHU)
+        apply_settings_combo_style(self.strategy_combo)
+        option_row.addWidget(self._field_block("内置能力", self.strategy_combo), 1)
+        layout.addLayout(option_row)
+
+        files_bar = QFrame()
+        files_bar.setObjectName("PptAgentFilesBar")
+        files_bar.setStyleSheet(apple_section_surface_style(radius=16, bg=DesignTokens.bg_panel_strong))
+        files_layout = QVBoxLayout(files_bar)
+        files_layout.setContentsMargins(14, 12, 14, 12)
+        files_layout.setSpacing(10)
+
+        file_actions = QHBoxLayout()
+        file_actions.setContentsMargins(0, 0, 0, 0)
+        add_source_btn = QPushButton("添加资料")
+        add_source_btn.setIcon(qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary))
+        add_source_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        add_source_btn.clicked.connect(self.add_source_files)
+        file_actions.addWidget(add_source_btn)
+
+        choose_template_btn = QPushButton("选择 PPTX 模板")
+        choose_template_btn.setIcon(qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary))
+        choose_template_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        choose_template_btn.clicked.connect(self.choose_template_file)
+        file_actions.addWidget(choose_template_btn)
+
+        clear_files_btn = QPushButton("清空")
+        clear_files_btn.setStyleSheet(apple_button_style("ghost", radius=14))
+        clear_files_btn.clicked.connect(self.clear_files)
+        file_actions.addWidget(clear_files_btn)
+        file_actions.addStretch()
+        files_layout.addLayout(file_actions)
+
+        self.files_label = QLabel("未附加资料或模板")
+        self.files_label.setWordWrap(True)
+        self.files_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+        files_layout.addWidget(self.files_label)
+        layout.addWidget(files_bar)
+
+        capability_box = QFrame()
+        capability_box.setObjectName("PptAgentCapabilityBox")
+        capability_box.setStyleSheet("QFrame#PptAgentCapabilityBox { background: transparent; border: none; }")
+        capability_layout = QVBoxLayout(capability_box)
+        capability_layout.setContentsMargins(0, 0, 0, 0)
+        capability_layout.setSpacing(6)
+        for name, summary in (
+            ("Guizang PPT Skill", "HTML 横向翻页 PPT / PPT 配图 / 强视觉表达"),
+            ("Frontend Slides", "前端技术生成 HTML Slides / 产品和技术演示"),
+            ("Huashu Design", "高审美设计型 HTML PPT / 商业视觉表达"),
+        ):
+            label = QLabel(f"{name}  ·  {summary}")
+            label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+            label.setWordWrap(True)
+            capability_layout.addWidget(label)
+        layout.addWidget(capability_box)
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 4, 0, 0)
+        action_row.addStretch()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        cancel_btn.clicked.connect(self.reject)
+        action_row.addWidget(cancel_btn)
+        submit_btn = QPushButton("交给 PPT Agent")
+        submit_btn.setIcon(qta.icon("fa5s.magic", color="white"))
+        submit_btn.setStyleSheet(apple_button_style("primary", radius=15))
+        submit_btn.clicked.connect(self.accept)
+        action_row.addWidget(submit_btn)
+        layout.addLayout(action_row)
+
+    def _field_block(self, title, widget):
+        block = QWidget()
+        block_layout = QVBoxLayout(block)
+        block_layout.setContentsMargins(0, 0, 0, 0)
+        block_layout.setSpacing(6)
+        label = QLabel(title)
+        label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
+        block_layout.addWidget(label)
+        block_layout.addWidget(widget)
+        return block
+
+    def _start_dir(self):
+        return self.workspace_dir if self.workspace_dir and os.path.isdir(self.workspace_dir) else os.path.expanduser("~")
+
+    def add_source_files(self):
+        paths, _filter = QFileDialog.getOpenFileNames(
+            self,
+            "选择资料",
+            self._start_dir(),
+            "资料文件 (*.docx *.pptx *.pdf *.md *.markdown *.txt *.html *.htm);;所有文件 (*.*)",
+        )
+        for path in paths or []:
+            normalized = os.path.normpath(path)
+            if normalized and normalized not in self.source_files:
+                self.source_files.append(normalized)
+        self.refresh_files_label()
+
+    def choose_template_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "选择 PPTX 模板",
+            self._start_dir(),
+            "PowerPoint 模板 (*.pptx)",
+        )
+        if path:
+            self.template_file = os.path.normpath(path)
+            self.refresh_files_label()
+
+    def clear_files(self):
+        self.source_files = []
+        self.template_file = ""
+        self.refresh_files_label()
+
+    def refresh_files_label(self):
+        parts = []
+        if self.source_files:
+            parts.append("资料: " + "、".join(os.path.basename(path) for path in self.source_files))
+        if self.template_file:
+            parts.append("模板: " + os.path.basename(self.template_file))
+        self.files_label.setText("\n".join(parts) if parts else "未附加资料或模板")
+
+    def values(self):
+        return {
+            "request_text": self.request_edit.toPlainText().strip(),
+            "preference": normalize_ppt_agent_preference(self.preference_combo.currentData()),
+            "strategy": normalize_ppt_agent_strategy(self.strategy_combo.currentData()),
+            "source_files": list(self.source_files),
+            "template_file": self.template_file,
+        }
 
 class SystemToast(QFrame):
     """Compact floating system notification."""
@@ -10919,6 +11158,11 @@ class SessionState:
         self.office_draft_preview_pending = False
         self.office_draft_task_card = None
         self.office_task_result_paths = []
+        self.ppt_agent_mode = False
+        self.ppt_agent_strategy = PPT_AGENT_STRATEGY_AUTO
+        self.ppt_agent_selected_strategy = PPT_AGENT_STRATEGY_DEFAULT
+        self.ppt_agent_preference = PPT_AGENT_PREFERENCE_AUTO
+        self.ppt_agent_template_file = ""
         self.persisted_conversation_meta = {}
         self.completed_agent_result_ids = set()
         self.automation_task_id = ""
@@ -12194,6 +12438,13 @@ class MainWindow(QMainWindow):
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
         sidebar_skills_btn.clicked.connect(self.open_skills_center)
         sidebar_layout.addWidget(sidebar_skills_btn)
+
+        sidebar_ppt_agent_btn = QPushButton(" PPT Agent")
+        sidebar_ppt_agent_btn.setIcon(qta.icon('fa5s.file-powerpoint', color='#4b5563'))
+        sidebar_ppt_agent_btn.setCursor(Qt.PointingHandCursor)
+        sidebar_ppt_agent_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_ppt_agent_btn.clicked.connect(self.open_ppt_agent_mode)
+        sidebar_layout.addWidget(sidebar_ppt_agent_btn)
 
         sidebar_automation_btn = QPushButton(" 自动化")
         sidebar_automation_btn.setIcon(qta.icon('fa5s.tasks', color='#4b5563'))
@@ -19005,6 +19256,90 @@ class MainWindow(QMainWindow):
             auto_close_ms=3600,
         )
 
+    def _submit_html_deliverable_conversion(self, state, path, target_format, template_path=""):
+        target_format = str(target_format or "").lower()
+        if target_format not in {"pptx", "docx", "pdf"} or not path or not os.path.isfile(path):
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in {".html", ".htm"}:
+            QMessageBox.information(self, "生成办公文件", "请先选择一个 HTML 文件。")
+            return False
+        if not state:
+            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
+            return False
+        try:
+            workspace_dir = self._ensure_session_workspace(state)
+        except Exception as exc:
+            QMessageBox.information(self, "生成办公文件", f"对话工作目录不可用：{exc}")
+            return False
+        template_path = str(template_path or "").strip()
+        if template_path:
+            template_path = os.path.normpath(template_path)
+            if target_format != "pptx" or os.path.splitext(template_path)[1].lower() != ".pptx" or not os.path.isfile(template_path):
+                QMessageBox.information(self, "生成办公文件", "请选择有效的 PPTX 模板文件。")
+                return False
+        output_stem = os.path.splitext(os.path.basename(path))[0]
+        prompt_lines = [
+            f"请读取本轮附加的源 HTML 文件，并根据文件内容、结构和视觉层级生成 {target_format.upper()} 办公文件。",
+            f"- 源 HTML 文件: {path}",
+            f"- 输出目录: {os.path.dirname(path)}",
+            f"- 默认文件名: {output_stem}.{target_format}",
+            "- 如果文件名冲突，请追加时间戳。",
+        ]
+        if template_path:
+            prompt_lines.extend(
+                [
+                    f"- PPT 模板: {template_path}",
+                    "- 生成 PPTX 时，源 HTML 是内容来源，PPT 模板是视觉与结构来源。",
+                    "- 请优先继承模板的主题、母版、字号、色彩和版式节奏。",
+                    "- 请识别并保留模板页面顶部和底部的图片元素，包括页眉图、页脚图、品牌条、装饰横幅、底部水印或版权区图片。",
+                    "- 新增页面也要延续这些顶部/底部图片的位置、尺寸和层级，不要改动原模板文件。",
+                ]
+            )
+        prompt_lines.append("- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。")
+        prompt = "\n".join(prompt_lines)
+        session_id = state.session_id
+        state.selected_deliverable_path = path
+        self.current_deliverable_path = path
+        prompt_files = [path]
+        if template_path:
+            prompt_files.append(template_path)
+        source_files = self._normalize_prompt_file_paths([path])
+        if not source_files:
+            QMessageBox.information(self, "生成办公文件", "源 HTML 文件不存在或无法访问。")
+            return False
+        state.office_conversion_source_files = source_files
+        state.office_conversion_template_file = template_path if template_path else ""
+        self._set_prompt_files(prompt_files, session_id=session_id, refresh=True)
+        submitted = self._submit_session_request(
+            state,
+            prompt,
+            prompt_files,
+            check_duplicates=False,
+            clear_current_input=True,
+            workflow_mode=WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
+            office_conversion_target=target_format,
+        )
+        if submitted:
+            self._set_deliverable_conversion_running(target_format)
+            if hasattr(self, "set_context_tab_hint"):
+                self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
+            self.add_system_toast(
+                f"已在当前对话中开始生成 {target_format.upper()}，你可以先收起面板继续工作。",
+                "info",
+                session_id=session_id,
+                auto_close_ms=3200,
+            )
+            return True
+        self._set_deliverable_conversion_running("")
+        self.add_system_toast(
+            "生成任务未能提交，HTML 已保留在当前对话中，可直接重试。",
+            "warning",
+            session_id=session_id,
+            auto_close_ms=4200,
+        )
+        return False
+
     def start_deliverable_conversion(self, target_format, ask_template=False, template_path=""):
         path = getattr(self, "current_deliverable_path", "")
         target_format = str(target_format or "").lower()
@@ -19035,71 +19370,7 @@ class MainWindow(QMainWindow):
             template_path = str(selected or "").strip()
             if not template_path:
                 return
-        if template_path:
-            template_path = os.path.normpath(template_path)
-            if target_format != "pptx" or os.path.splitext(template_path)[1].lower() != ".pptx" or not os.path.isfile(template_path):
-                QMessageBox.information(self, "生成办公文件", "请选择有效的 PPTX 模板文件。")
-                return
-        output_stem = os.path.splitext(os.path.basename(path))[0]
-        prompt_lines = [
-            f"请读取本轮附加的源 HTML 文件，并根据文件内容、结构和视觉层级生成 {target_format.upper()} 办公文件。",
-            f"- 源 HTML 文件: {path}",
-            f"- 输出目录: {os.path.dirname(path)}",
-            f"- 默认文件名: {output_stem}.{target_format}",
-            "- 如果文件名冲突，请追加时间戳。",
-        ]
-        if template_path:
-            prompt_lines.extend(
-                [
-                    f"- PPT 模板: {template_path}",
-                    "- 生成 PPTX 时，源 HTML 是内容来源，PPT 模板是视觉与结构来源。",
-                    "- 请优先继承模板的主题、母版、字号、色彩和版式节奏。",
-                    "- 请识别并保留模板页面顶部和底部的图片元素，包括页眉图、页脚图、品牌条、装饰横幅、底部水印或版权区图片。",
-                    "- 新增页面也要延续这些顶部/底部图片的位置、尺寸和层级，不要改动原模板文件。",
-                ]
-            )
-        prompt_lines.append("- 可以按需要使用现有 Python/命令能力生成文件，完成后告诉我生成路径。")
-        prompt = "\n".join(prompt_lines)
-        session_id = state.session_id
-        state.selected_deliverable_path = path
-        self.current_deliverable_path = path
-        prompt_files = [path]
-        if template_path:
-            prompt_files.append(template_path)
-        source_files = self._normalize_prompt_file_paths([path])
-        if not source_files:
-            QMessageBox.information(self, "生成办公文件", "源 HTML 文件不存在或无法访问。")
-            return
-        state.office_conversion_source_files = source_files
-        state.office_conversion_template_file = template_path if template_path else ""
-        self._set_prompt_files(prompt_files, session_id=session_id, refresh=True)
-        submitted = self._submit_session_request(
-            state,
-            prompt,
-            prompt_files,
-            check_duplicates=False,
-            clear_current_input=True,
-            workflow_mode=WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
-            office_conversion_target=target_format,
-        )
-        if submitted:
-            self._set_deliverable_conversion_running(target_format)
-            if hasattr(self, "set_context_tab_hint"):
-                self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
-            self.add_system_toast(
-                f"已在当前对话中开始生成 {target_format.upper()}，你可以先收起面板继续工作。",
-                "info",
-                session_id=session_id,
-                auto_close_ms=3200,
-            )
-        else:
-            self._set_deliverable_conversion_running("")
-            self.add_system_toast(
-                "生成任务未能提交，HTML 已保留在当前对话中，可直接重试。",
-                "warning",
-                session_id=session_id,
-                auto_close_ms=4200,
-            )
+        self._submit_html_deliverable_conversion(state, path, target_format, template_path=template_path)
 
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""
@@ -19493,6 +19764,113 @@ class MainWindow(QMainWindow):
             "[源回复]\n"
             f"{source}"
         )
+
+    def open_ppt_agent_mode(self):
+        state = self.get_current_session()
+        workspace_dir = ""
+        if state:
+            try:
+                workspace_dir = self._ensure_session_workspace(state)
+            except Exception:
+                workspace_dir = self.workspace_dir or ""
+        dialog = PptAgentModeDialog(workspace_dir=workspace_dir or self.workspace_dir, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        values = dialog.values()
+        return self.handle_ppt_agent_requested(
+            values.get("request_text") or "",
+            preference=values.get("preference") or PPT_AGENT_PREFERENCE_AUTO,
+            strategy=values.get("strategy") or PPT_AGENT_STRATEGY_AUTO,
+            source_files=values.get("source_files") or [],
+            template_file=values.get("template_file") or "",
+        )
+
+    def handle_ppt_agent_requested(
+        self,
+        request_text,
+        preference=PPT_AGENT_PREFERENCE_AUTO,
+        strategy=PPT_AGENT_STRATEGY_AUTO,
+        source_files=None,
+        template_file="",
+        session_id=None,
+    ):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state:
+            return False
+        try:
+            self._ensure_session_workspace(state)
+        except Exception as exc:
+            self.add_system_toast(
+                f"对话工作目录不可用：{exc}",
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=6000,
+            )
+            return False
+        request = str(request_text or "").strip()
+        if not request:
+            self.add_system_toast("请先描述要生成的 PPT。", "warning", session_id=state.session_id, auto_close_ms=3200)
+            return False
+        source_files = [os.path.normpath(str(path or "").strip()) for path in (source_files or []) if str(path or "").strip()]
+        template_file = os.path.normpath(str(template_file or "").strip()) if str(template_file or "").strip() else ""
+        missing_files = [path for path in source_files if not os.path.isfile(path)]
+        if missing_files:
+            self.add_system_toast(
+                "附加资料不存在：" + "、".join(os.path.basename(path) for path in missing_files[:3]),
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=6000,
+            )
+            return False
+        if template_file and (not os.path.isfile(template_file) or os.path.splitext(template_file)[1].lower() != ".pptx"):
+            self.add_system_toast("请选择有效的 PPTX 模板文件。", "error", session_id=state.session_id, auto_close_ms=5200)
+            return False
+        prompt_result = build_ppt_agent_prompt(
+            request,
+            preference=preference,
+            explicit_strategy=strategy,
+            template_file=template_file,
+        )
+        prompt = prompt_result.get("prompt") or request
+        prompt_lines = [prompt]
+        if source_files:
+            prompt_lines.extend(["", "本轮附加资料:"])
+            prompt_lines.extend(f"- {path}" for path in source_files)
+        if template_file:
+            prompt_lines.extend(
+                [
+                    "",
+                    "模板化导出提示:",
+                    "- 当前任务先生成 HTML 工作稿；用户需要 PPTX 时，从右侧交付物预览使用模板化 HTML→PPTX 导出。",
+                    f"- PPTX 模板文件: {template_file}",
+                ]
+            )
+        prompt_files = list(OrderedDict.fromkeys(source_files + ([template_file] if template_file else [])))
+        normalized_strategy = normalize_ppt_agent_strategy(strategy)
+        selected_strategy = normalize_ppt_agent_strategy(prompt_result.get("selected_strategy"))
+        normalized_preference = normalize_ppt_agent_preference(preference)
+        submitted = self._submit_session_request(
+            state,
+            "\n".join(prompt_lines),
+            prompt_files,
+            check_duplicates=False,
+            clear_current_input=True,
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+            ppt_agent_mode=True,
+            ppt_agent_strategy=normalized_strategy,
+            ppt_agent_selected_strategy=selected_strategy,
+            ppt_agent_preference=normalized_preference,
+            ppt_agent_template_file=template_file,
+        )
+        if submitted:
+            self.add_system_toast(
+                f"PPT Agent 已启动：{ppt_agent_strategy_label(selected_strategy)}",
+                "info",
+                session_id=state.session_id,
+                auto_close_ms=3200,
+            )
+        return submitted
 
     def handle_office_draft_requested(self, profile, source_message_id, source_text, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
@@ -19925,6 +20303,11 @@ class MainWindow(QMainWindow):
         workflow_mode="",
         office_output_profile=None,
         office_conversion_target="",
+        ppt_agent_mode=False,
+        ppt_agent_strategy=PPT_AGENT_STRATEGY_AUTO,
+        ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_DEFAULT,
+        ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
+        ppt_agent_template_file="",
     ):
         effective_skill_names = normalize_selected_skill_names(
             getattr(state, "selected_skill_names", [])
@@ -19964,6 +20347,11 @@ class MainWindow(QMainWindow):
                 "office_conversion_target": normalized_conversion_target,
                 "office_source_files": source_files,
                 "office_template_file": template_file,
+                "ppt_agent_mode": bool(ppt_agent_mode),
+                "ppt_agent_strategy": normalize_ppt_agent_strategy(ppt_agent_strategy),
+                "ppt_agent_selected_strategy": normalize_ppt_agent_strategy(ppt_agent_selected_strategy),
+                "ppt_agent_preference": normalize_ppt_agent_preference(ppt_agent_preference),
+                "ppt_agent_template_file": str(ppt_agent_template_file or "").strip(),
             }
         )
 
@@ -20351,6 +20739,11 @@ class MainWindow(QMainWindow):
         workflow_mode="",
         office_output_profile=None,
         office_conversion_target="",
+        ppt_agent_mode=False,
+        ppt_agent_strategy=PPT_AGENT_STRATEGY_AUTO,
+        ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_DEFAULT,
+        ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
+        ppt_agent_template_file="",
     ):
         if not state:
             return False
@@ -20413,6 +20806,16 @@ class MainWindow(QMainWindow):
             self._last_submit_ts = now
         normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
         office_workflow = self._is_office_workflow_context(normalized_workflow_mode)
+        ppt_agent_mode = bool(ppt_agent_mode and normalized_workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST)
+        ppt_agent_strategy = normalize_ppt_agent_strategy(ppt_agent_strategy)
+        ppt_agent_selected_strategy = normalize_ppt_agent_strategy(ppt_agent_selected_strategy)
+        ppt_agent_preference = normalize_ppt_agent_preference(ppt_agent_preference)
+        ppt_agent_template_file = str(ppt_agent_template_file or "").strip()
+        state.ppt_agent_mode = ppt_agent_mode
+        state.ppt_agent_strategy = ppt_agent_strategy if ppt_agent_mode else PPT_AGENT_STRATEGY_AUTO
+        state.ppt_agent_selected_strategy = ppt_agent_selected_strategy if ppt_agent_mode else PPT_AGENT_STRATEGY_DEFAULT
+        state.ppt_agent_preference = ppt_agent_preference if ppt_agent_mode else PPT_AGENT_PREFERENCE_AUTO
+        state.ppt_agent_template_file = ppt_agent_template_file if ppt_agent_mode else ""
         office_conversion_target = str(office_conversion_target or "").strip().lower()
         if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
             office_conversion_target = office_conversion_target if office_conversion_target in {"pptx", "docx", "pdf"} else ""
@@ -20487,6 +20890,13 @@ class MainWindow(QMainWindow):
                 message_meta["office_conversion_target"] = office_conversion_target
             else:
                 message_meta["office_output_profile"] = normalize_office_output_profile(office_output_profile)
+                if ppt_agent_mode:
+                    message_meta["ppt_agent_mode"] = True
+                    message_meta["ppt_agent_strategy"] = ppt_agent_strategy
+                    message_meta["ppt_agent_selected_strategy"] = ppt_agent_selected_strategy
+                    message_meta["ppt_agent_preference"] = ppt_agent_preference
+                    if ppt_agent_template_file:
+                        message_meta["ppt_agent_template_file"] = ppt_agent_template_file
         if message_meta:
             message_payload["meta"] = message_meta
         state.messages.append(message_payload)
@@ -20514,6 +20924,11 @@ class MainWindow(QMainWindow):
             workflow_mode=normalized_workflow_mode,
             office_output_profile=office_output_profile,
             office_conversion_target=office_conversion_target,
+            ppt_agent_mode=ppt_agent_mode,
+            ppt_agent_strategy=ppt_agent_strategy,
+            ppt_agent_selected_strategy=ppt_agent_selected_strategy,
+            ppt_agent_preference=ppt_agent_preference,
+            ppt_agent_template_file=ppt_agent_template_file,
         )
         if self.daemon_available:
             self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)

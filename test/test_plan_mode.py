@@ -14,6 +14,12 @@ from core.clarify_mode import (
     normalize_selected_skill_names,
     normalize_run_context,
 )
+from core.ppt_agent import (
+    PPT_AGENT_PREFERENCE_BUSINESS,
+    PPT_AGENT_STRATEGY_HUASHU,
+    build_ppt_agent_prompt,
+    choose_ppt_agent_strategy,
+)
 
 
 class _ConfigStub:
@@ -79,6 +85,16 @@ class TestClarifyModeHelpers(unittest.TestCase):
 
         self.assertEqual(ctx["workflow_mode"], "")
         self.assertEqual(ctx["office_output_profile"], "free")
+
+    def test_ppt_agent_strategy_rules_select_huashu_for_business_visuals(self):
+        self.assertEqual(
+            choose_ppt_agent_strategy("生成一份高级感路演 BP", preference=PPT_AGENT_PREFERENCE_BUSINESS),
+            PPT_AGENT_STRATEGY_HUASHU,
+        )
+        prompt = build_ppt_agent_prompt("生成一份高级感路演 BP")
+        self.assertIn("PPT Agent", prompt["prompt"])
+        self.assertIn("Huashu Design", prompt["prompt"])
+        self.assertIn("HTML deliverable", prompt["prompt"])
 
 
 class TestClarifyModeLLMWorker(unittest.TestCase):
@@ -265,6 +281,69 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("当前类型: PPT", runtime_prompt)
             self.assertIn("不要称为 HTML 模式", runtime_prompt)
             self.assertIn("继续生成 PPTX", runtime_prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_includes_ppt_agent_strategy_prompt(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, query_text=""):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self, events):
+                self.events = events
+
+            def chat_stream(self, messages, tools=None):
+                system_messages = [msg.get("content", "") for msg in messages if msg.get("role") == "system"]
+                self.events.append(("request", system_messages))
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        events = []
+        provider_events = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_events)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "make slides"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={
+                        "mode": RUN_MODE_EXECUTION,
+                        "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                        "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+                        "ppt_agent_mode": True,
+                        "ppt_agent_strategy": PPT_AGENT_STRATEGY_HUASHU,
+                        "ppt_agent_selected_strategy": PPT_AGENT_STRATEGY_HUASHU,
+                        "ppt_agent_preference": PPT_AGENT_PREFERENCE_BUSINESS,
+                    },
+                )
+                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.run()
+
+            runtime_prompt = events[0].get("runtime_context", "")
+            self.assertIn("策略 [PPT Agent]", runtime_prompt)
+            self.assertIn("Huashu Design", runtime_prompt)
+            self.assertIn("HTML deliverable preview", runtime_prompt)
+            self.assertIn("HTML→PPTX/DOCX/PDF", runtime_prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

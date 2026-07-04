@@ -34,6 +34,7 @@ PPT_AGENT_PREFERENCES = {
 class PptHtmlCapability:
     key: str
     name: str
+    skill_name: str
     summary: str
     suitable_for: str
     output: str = "HTML"
@@ -43,18 +44,21 @@ PPT_HTML_CAPABILITIES = {
     PPT_AGENT_STRATEGY_GUIZANG: PptHtmlCapability(
         key=PPT_AGENT_STRATEGY_GUIZANG,
         name="Guizang PPT Skill",
+        skill_name="guizang-ppt-skill",
         summary="HTML 横向翻页 PPT / PPT 配图 / 强视觉表达",
         suitable_for="网页演示、视觉分享、封面图、风格化内容",
     ),
     PPT_AGENT_STRATEGY_FRONTEND_SLIDES: PptHtmlCapability(
         key=PPT_AGENT_STRATEGY_FRONTEND_SLIDES,
         name="Frontend Slides",
+        skill_name="frontend-slides",
         summary="前端技术生成 HTML Slides / 适合产品和技术演示",
         suitable_for="产品发布、技术分享、网页化演示、交互式演示",
     ),
     PPT_AGENT_STRATEGY_HUASHU: PptHtmlCapability(
         key=PPT_AGENT_STRATEGY_HUASHU,
         name="Huashu Design",
+        skill_name="huashu-design",
         summary="高审美设计型 HTML PPT / 商业视觉表达",
         suitable_for="商业汇报、路演、品牌提案、发布会、产品介绍",
     ),
@@ -145,12 +149,22 @@ def ppt_agent_strategy_label(strategy):
     return capability.name if capability else "自动选择"
 
 
+def ppt_agent_strategy_skill_name(strategy):
+    strategy = normalize_ppt_agent_strategy(strategy)
+    capability = PPT_HTML_CAPABILITIES.get(strategy)
+    return capability.skill_name if capability else ""
+
+
+def ppt_agent_builtin_skill_names():
+    return [capability.skill_name for capability in PPT_HTML_CAPABILITIES.values()]
+
+
 def ppt_agent_capability_prompt_lines():
     lines = []
     for capability in PPT_HTML_CAPABILITIES.values():
         lines.extend(
             [
-                f"- {capability.name}: {capability.summary}",
+                f"- {capability.name}（已内置 Skill: {capability.skill_name}）: {capability.summary}",
                 f"  适合: {capability.suitable_for}",
                 f"  输出: {capability.output}，必须注册为 HTML deliverable，再复用 HTML→PPTX/DOCX/PDF 转换链路。",
             ]
@@ -195,7 +209,7 @@ def build_ppt_agent_prompt(request_text, preference=PPT_AGENT_PREFERENCE_AUTO, e
         "- 内容适合投影展示，控制文字密度，保留图片、图表、布局和视觉层级信息。\n"
         "- 如果使用 CSS/JS/图片资源，请放在可迁移的本地目录，并确保 HTML deliverable preview 能正常打开。\n"
         "- HTML 应让后续转换 PPTX 时不需要重新理解整篇长文。\n\n"
-        "内置 html-ppt 能力:\n"
+        "已内置 html-ppt Skill:\n"
         f"{capability_lines}\n\n"
         "自动选择规则:\n"
         "- 普通汇报、课件、研究报告、会议总结: 默认 PPT Agent。\n"
@@ -204,7 +218,7 @@ def build_ppt_agent_prompt(request_text, preference=PPT_AGENT_PREFERENCE_AUTO, e
         "- 网页 PPT、横向翻页、封面图、强风格内容分享: Guizang PPT Skill。\n"
         "- 产品发布、技术分享、交互式演示、前端风格 slides: Frontend Slides。\n"
         "- 高级感、商业汇报、发布会、路演、品牌提案、高审美: Huashu Design。\n"
-        "- 如果某个外部 html-ppt 能力不可用，请清晰告知并使用默认 PPT Agent HTML 工作稿生成，不要静默降级。\n"
+        "- 如果选中的内置 Skill 不可用，请清晰告知并停止，不要静默降级。\n"
         f"{template_lines}\n"
         "[用户需求]\n"
         f"{request}"

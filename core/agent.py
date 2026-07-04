@@ -33,6 +33,7 @@ from core.ppt_agent import (
     PPT_AGENT_STRATEGY_DEFAULT,
     normalize_ppt_agent_strategy,
     ppt_agent_capability_prompt_lines,
+    ppt_agent_strategy_skill_name,
     ppt_agent_strategy_label,
 )
 from core.memory_store import MemoryStore
@@ -1086,15 +1087,27 @@ class LLMWorker(QThread):
                         "策略 [PPT Agent]:",
                         "1. 你是当前 PPT Mode 的唯一 PPT 生成主控；负责判断 PPT 类型、生成大纲和页面规划，并输出演示文稿形态 HTML 工作稿。",
                         f"2. 当前策略: {selected_label}。用户显式策略: {ppt_agent_strategy_label(requested_strategy)}。",
-                        "3. 内置 html-ppt 能力是策略选项，不是新的导出引擎；它们的输出必须进入 HTML deliverable preview。",
+                        "3. 内置 html-ppt 能力是 Cowork 已加载 Skill，不是新的导出引擎；它们的输出必须进入 HTML deliverable preview。",
                         "4. 后续 PPTX、DOCX、PDF 都通过现有 HTML→PPTX/DOCX/PDF 转换链路完成，不要绕过交付物系统直接另建一套 PPTX 导出。",
-                        "5. 如果某个外部能力不可用，必须在回复中清晰说明，并使用默认 PPT Agent HTML 工作稿完成，不要静默降级。",
+                        "5. 如果选中的内置 Skill 不可用，必须清晰说明并停止，不要静默降级。",
                         "6. 支持用户后续修改，如缩短某页、切换咨询风、套模板或改成发布会风格；优先迭代同一个 HTML 工作稿。",
                         "",
-                        "可调用的内置 html-ppt 策略:",
+                        "可调用的已内置 html-ppt Skill:",
                         *ppt_agent_capability_prompt_lines(),
                     ]
                 )
+                selected_skill_name = ppt_agent_strategy_skill_name(selected_strategy)
+                brief_getter = getattr(self.skill_manager, "get_brief_skill_prompt", None)
+                selected_skill_loaded = bool(callable(brief_getter) and brief_getter(selected_skill_name)) if selected_skill_name else True
+                if selected_skill_name and not selected_skill_loaded:
+                    dynamic_state_lines.extend(
+                        [
+                            "",
+                            "PPT Agent Skill 加载错误:",
+                            f"- 选中的内置 Skill `{selected_skill_name}` 未被当前运行时加载。",
+                            "- 不要改用默认 PPT Agent 或其他策略；请直接报告该加载错误。",
+                        ]
+                    )
                 template_file = str(self.run_context.get("ppt_agent_template_file") or "").strip()
                 if template_file:
                     dynamic_state_lines.extend(
@@ -1244,6 +1257,14 @@ class LLMWorker(QThread):
                 self._refresh_tool_definitions()
                 disclosed_skills.clear()
             # -------------------------
+
+            self._append_skill_prompts_for_names(
+                self._selected_skill_names(),
+                current_messages,
+                disclosed_skills,
+                generated_messages,
+                source="selected_skill_prompt",
+            )
 
             stable_system_prompt = self._get_stable_system_prompt()
             current_messages[0]["content"] = stable_system_prompt

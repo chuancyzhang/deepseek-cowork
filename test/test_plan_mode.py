@@ -112,6 +112,9 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_system_prompts(self, query_text=""):
                 return ""
 
+            def get_brief_skill_prompt(self, skill_name):
+                return "Huashu Design brief" if skill_name == "huashu-design" else ""
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -298,6 +301,9 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_system_prompts(self, query_text=""):
                 return ""
 
+            def get_brief_skill_prompt(self, skill_name):
+                return "Huashu Design brief" if skill_name == "huashu-design" else ""
+
         class _ProviderStub:
             provider_name = "stub"
             model_name = "stub-model"
@@ -344,6 +350,77 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("Huashu Design", runtime_prompt)
             self.assertIn("HTML deliverable preview", runtime_prompt)
             self.assertIn("HTML→PPTX/DOCX/PDF", runtime_prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_llm_worker_injects_selected_skill_prompt_for_ppt_agent(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, query_text=""):
+                return ""
+
+            def get_brief_skill_prompt(self, skill_name):
+                return "Huashu Design brief" if skill_name == "huashu-design" else ""
+
+            def get_skill_display_name(self, skill_name):
+                return "Huashu Design" if skill_name == "huashu-design" else skill_name
+
+            def get_full_skill_prompt(self, skill_name):
+                return "# Huashu Design Full Skill\nUse HTML as design medium." if skill_name == "huashu-design" else ""
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self, events):
+                self.events = events
+
+            def chat_stream(self, messages, tools=None):
+                self.events.append(("request", [msg.get("content", "") for msg in messages if msg.get("role") == "system"]))
+                yield {"type": "content", "content": "done"}
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        events = []
+        provider_events = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_events)),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "make slides"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={
+                        "mode": RUN_MODE_EXECUTION,
+                        "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                        "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+                        "ppt_agent_mode": True,
+                        "ppt_agent_strategy": PPT_AGENT_STRATEGY_HUASHU,
+                        "ppt_agent_selected_strategy": PPT_AGENT_STRATEGY_HUASHU,
+                        "selected_skill_names": ["huashu-design"],
+                    },
+                )
+                worker.observability_signal.connect(lambda data: events.append(data))
+                worker.run()
+
+            request_system_text = "\n".join(provider_events[0][1])
+            self.assertIn("Huashu Design Full Skill", request_system_text)
+            append_events = [event for event in events if event.get("type") == "system_prompt_append"]
+            self.assertEqual(append_events[0]["source"], "selected_skill_prompt")
+            self.assertEqual(append_events[0]["skill_names"], ["huashu-design"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

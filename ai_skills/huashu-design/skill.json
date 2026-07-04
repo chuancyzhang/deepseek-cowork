@@ -1,0 +1,47 @@
+{
+  "version": 2,
+  "name": "huashu-design",
+  "display_name": "Huashu Design",
+  "kind": "knowledge",
+  "description": "Use HTML as a high-fidelity design medium for slides, prototypes, animation, visualization, and expert review.",
+  "default_enabled": true,
+  "source_type": "builtin_ai_skill",
+  "source_format": "agent_skill",
+  "tags": [
+    "ppt",
+    "html design",
+    "presentation",
+    "high fidelity",
+    "prototype",
+    "visual design",
+    "animation"
+  ],
+  "triggers": [
+    "PPT Agent",
+    "Huashu Design",
+    "花叔Design",
+    "高审美",
+    "高级感",
+    "商业汇报",
+    "路演",
+    "品牌提案",
+    "发布会",
+    "做个好看的"
+  ],
+  "anti_triggers": [
+    "生产级 Web App",
+    "需要后端的系统"
+  ],
+  "asset_refs": [
+    "assets",
+    "demos"
+  ],
+  "references": [
+    "references",
+    "test-prompts.json"
+  ],
+  "script_refs": [
+    "scripts"
+  ],
+  "priority": 12
+}

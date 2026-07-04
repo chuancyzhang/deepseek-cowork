@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "name": "frontend-slides",
+  "display_name": "Frontend Slides",
+  "kind": "knowledge",
+  "description": "Create fixed-stage 16:9, animation-rich HTML presentations from scratch or by converting PowerPoint files.",
+  "default_enabled": true,
+  "source_type": "builtin_ai_skill",
+  "source_format": "agent_skill",
+  "tags": [
+    "ppt",
+    "html slides",
+    "presentation",
+    "frontend",
+    "animation",
+    "fixed stage",
+    "pptx conversion"
+  ],
+  "triggers": [
+    "PPT Agent",
+    "Frontend Slides",
+    "技术分享",
+    "产品发布",
+    "HTML Slides",
+    "固定 16:9",
+    "PPT 转网页",
+    "交互式演示"
+  ],
+  "asset_refs": [
+    "bold-template-pack",
+    "plugins",
+    "viewport-base.css"
+  ],
+  "references": [
+    "STYLE_PRESETS.md",
+    "animation-patterns.md",
+    "html-template.md",
+    "viewport-base.css"
+  ],
+  "script_refs": [
+    "scripts"
+  ],
+  "priority": 12
+}

@@ -1,0 +1,44 @@
+{
+  "version": 2,
+  "name": "guizang-ppt-skill",
+  "display_name": "Guizang PPT Skill",
+  "kind": "knowledge",
+  "description": "Generate horizontal swipe HTML PPT decks with strong visual expression, magazine/e-ink and Swiss international style systems.",
+  "default_enabled": true,
+  "source_type": "builtin_ai_skill",
+  "source_format": "agent_skill",
+  "tags": [
+    "ppt",
+    "html slides",
+    "presentation",
+    "web ppt",
+    "magazine",
+    "swiss style",
+    "visual storytelling"
+  ],
+  "triggers": [
+    "PPT Agent",
+    "Guizang PPT Skill",
+    "网页 PPT",
+    "横向翻页",
+    "杂志风 PPT",
+    "瑞士风 PPT",
+    "Swiss Style",
+    "视觉分享",
+    "封面图"
+  ],
+  "anti_triggers": [
+    "生产级 Web App",
+    "多人协作编辑"
+  ],
+  "asset_refs": [
+    "assets"
+  ],
+  "references": [
+    "references"
+  ],
+  "script_refs": [
+    "scripts"
+  ],
+  "priority": 12
+}

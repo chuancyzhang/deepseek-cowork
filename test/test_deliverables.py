@@ -23,6 +23,7 @@ from main import (
     PPT_AGENT_PREFERENCE_BUSINESS,
     PPT_AGENT_STRATEGY_AUTO,
     PPT_AGENT_STRATEGY_HUASHU,
+    RUN_MODE_EXECUTION,
     WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     deliverable_preview_bootstrap_script,
@@ -59,7 +60,7 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertFalse(session_history_ready(None))
 
     def test_auto_query_skill_context_detection_is_source_specific(self):
-        for source in ("skill_prompt", "skill_prompt_query_match", "skill_prompt_tool_search"):
+        for source in ("skill_prompt", "skill_prompt_query_match", "skill_prompt_tool_search", "selected_skill_prompt"):
             self.assertTrue(
                 is_auto_query_skill_context_message(
                     {
@@ -93,7 +94,7 @@ class TestDeliverableScanning(unittest.TestCase):
             {
                 "role": "system",
                 "content": "auto skill prompt",
-                "meta": {"kind": "skill_context", "source": "skill_prompt_tool_search"},
+                "meta": {"kind": "skill_context", "source": "selected_skill_prompt"},
             },
             {"role": "assistant", "content": "完成"},
         ]
@@ -425,6 +426,43 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(submit_call.args[2], [source_path])
             self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
             self.assertTrue(submit_call.kwargs["ppt_agent_mode"])
+
+    def test_ppt_agent_run_context_injects_builtin_skill_without_mutating_session_selection(self):
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "selected_skill_names": ["browser-automation"],
+            },
+        )()
+        window = MainWindow.__new__(MainWindow)
+        window.config_manager = type("_Config", (), {"get_selected_model_id": lambda _self: "model-1"})()
+        window._selected_reasoning_effort = MagicMock(return_value="高")
+        window._ensure_session_workspace = MagicMock(return_value=r"D:\workspace")
+
+        run_context = MainWindow._build_run_context(
+            window,
+            state,
+            RUN_MODE_EXECUTION,
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+            office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+            ppt_agent_mode=True,
+            ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_HUASHU,
+        )
+
+        self.assertEqual(state.selected_skill_names, ["browser-automation"])
+        self.assertEqual(run_context["selected_skill_names"], ["browser-automation", "huashu-design"])
+
+    def test_ppt_agent_missing_builtin_skill_reports_unavailable(self):
+        window = MainWindow.__new__(MainWindow)
+        window.skill_manager = type("_SkillManager", (), {"_find_skill_path": lambda _self, _name: ""})()
+
+        ok, skill_name, message = MainWindow._ppt_agent_skill_status(window, PPT_AGENT_STRATEGY_HUASHU)
+
+        self.assertFalse(ok)
+        self.assertEqual(skill_name, "huashu-design")
+        self.assertIn("未找到", message)
 
     def test_office_draft_request_submits_profiled_generation_prompt(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -835,6 +873,21 @@ class TestDeliverableScanning(unittest.TestCase):
 
             self.assertEqual(card.process_widget_count(), 1)
             self.assertTrue(card.process_placeholder.isHidden())
+        finally:
+            card.deleteLater()
+            app.processEvents()
+
+    def test_office_task_card_process_note_hides_placeholder(self):
+        app = QApplication.instance() or QApplication([])
+        card = OfficeDraftTaskCard("PPT")
+        try:
+            card.set_process_visible(True)
+            note = card.add_process_note("已提交 PPT Agent 请求")
+
+            self.assertIsNotNone(note)
+            self.assertEqual(card.process_widget_count(), 1)
+            self.assertTrue(card.process_placeholder.isHidden())
+            self.assertIn("已提交", note.text())
         finally:
             card.deleteLater()
             app.processEvents()

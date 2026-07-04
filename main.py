@@ -170,6 +170,7 @@ from core.ppt_agent import (
     build_ppt_agent_prompt,
     normalize_ppt_agent_preference,
     normalize_ppt_agent_strategy,
+    ppt_agent_strategy_skill_name,
     ppt_agent_strategy_label,
 )
 import shutil
@@ -8676,11 +8677,11 @@ class PptAgentModeDialog(QDialog):
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItem("自动选择", PPT_AGENT_STRATEGY_AUTO)
         self.strategy_combo.addItem("默认 PPT Agent", PPT_AGENT_STRATEGY_DEFAULT)
-        self.strategy_combo.addItem("Guizang PPT Skill", PPT_AGENT_STRATEGY_GUIZANG)
-        self.strategy_combo.addItem("Frontend Slides", PPT_AGENT_STRATEGY_FRONTEND_SLIDES)
-        self.strategy_combo.addItem("Huashu Design", PPT_AGENT_STRATEGY_HUASHU)
+        self.strategy_combo.addItem("Guizang PPT Skill（已内置 Skill）", PPT_AGENT_STRATEGY_GUIZANG)
+        self.strategy_combo.addItem("Frontend Slides（已内置 Skill）", PPT_AGENT_STRATEGY_FRONTEND_SLIDES)
+        self.strategy_combo.addItem("Huashu Design（已内置 Skill）", PPT_AGENT_STRATEGY_HUASHU)
         apply_settings_combo_style(self.strategy_combo)
-        option_row.addWidget(self._field_block("内置能力", self.strategy_combo), 1)
+        option_row.addWidget(self._field_block("内置 Skill", self.strategy_combo), 1)
         layout.addLayout(option_row)
 
         files_bar = QFrame()
@@ -8728,7 +8729,7 @@ class PptAgentModeDialog(QDialog):
             ("Frontend Slides", "前端技术生成 HTML Slides / 产品和技术演示"),
             ("Huashu Design", "高审美设计型 HTML PPT / 商业视觉表达"),
         ):
-            label = QLabel(f"{name}  ·  {summary}")
+            label = QLabel(f"{name}  ·  已内置 Skill  ·  {summary}")
             label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
             label.setWordWrap(True)
             capability_layout.addWidget(label)
@@ -10221,6 +10222,25 @@ class OfficeDraftTaskCard(QFrame):
         self.process_layout.addWidget(widget)
         self._sync_process_placeholder()
 
+    def add_process_note(self, text, tone="info"):
+        message = str(text or "").strip()
+        if not message:
+            return None
+        colors = {
+            "error": ("#b42318", "rgba(180, 35, 24, 0.08)"),
+            "success": (DesignTokens.status_success, "rgba(34, 197, 94, 0.10)"),
+            "muted": (DesignTokens.text_tertiary, "rgba(148, 163, 184, 0.10)"),
+        }
+        fg, bg = colors.get(str(tone or "info"), (DesignTokens.text_secondary, "rgba(0, 122, 255, 0.08)"))
+        label = QLabel(message)
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            f"color: {fg}; background: {bg}; border: none; border-radius: 10px; "
+            "font-size: 12px; padding: 7px 12px; margin-left: 40px;"
+        )
+        self.add_process_widget(label)
+        return label
+
     def set_running(self):
         self.title_label.setText(self._running_title())
         self.open_btn.setVisible(False)
@@ -11383,6 +11403,7 @@ AUTO_QUERY_SKILL_CONTEXT_SOURCES = {
     "skill_prompt",
     "skill_prompt_query_match",
     "skill_prompt_tool_search",
+    "selected_skill_prompt",
 }
 
 
@@ -14827,6 +14848,43 @@ class MainWindow(QMainWindow):
             return card
         return None
 
+    def _append_office_process_note(self, state, text, tone="info"):
+        card = self._office_draft_card_for_state(state)
+        if card is None:
+            return None
+        return card.add_process_note(text, tone=tone)
+
+    def _ppt_agent_skill_status(self, strategy):
+        skill_name = ppt_agent_strategy_skill_name(strategy)
+        if not skill_name:
+            return True, "", ""
+        manager = getattr(self, "skill_manager", None)
+        if manager is None:
+            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 未找到: 技能管理器尚未初始化。"
+        finder = getattr(manager, "_find_skill_path", None)
+        skill_path = finder(skill_name) if callable(finder) else ""
+        if not skill_path:
+            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 未找到，请检查 ai_skills 目录。"
+        enabled_checker = getattr(manager, "_is_skill_enabled_for_path", None)
+        if callable(enabled_checker) and not enabled_checker(skill_name, skill_path):
+            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 已被禁用，请先在能力中心启用。"
+        return True, skill_name, ""
+
+    def _fail_office_request_before_worker(self, state, message, title=None):
+        text = str(message or "").strip() or "办公任务启动失败。"
+        self._append_office_process_note(state, text, tone="error")
+        card = self._office_draft_card_for_state(state)
+        if card is not None:
+            card.set_failed(title or self._office_task_failed_title(state))
+        self.add_system_toast(text, "error", session_id=getattr(state, "session_id", None), auto_close_ms=6000)
+        self.set_session_phase("Failed", state.session_id)
+        self.set_session_status("failed", state.session_id, save=True)
+        self.refresh_step_list(state.session_id)
+        self.refresh_change_list(state.session_id)
+        self.save_chat_history(session_id=state.session_id)
+        if state.session_id == self.current_session_id:
+            self.normalize_session_ui(state)
+
     def _finish_office_draft_task_card(self, state, content="", failed_message="", bubble=None):
         card = self._office_draft_card_for_state(state)
         if state and getattr(state, "session_id", None) == getattr(self, "current_session_id", None):
@@ -15218,8 +15276,20 @@ class MainWindow(QMainWindow):
                     item for item in (event.get("skill_contexts") or [])
                     if isinstance(item, dict)
                 ]
+                if self._is_office_workflow_enabled(state):
+                    skill_count = len(state.system_prompt_appends)
+                    suffix = f"，包含 {skill_count} 个 Skill 上下文" if skill_count else ""
+                    self._append_office_process_note(state, f"已收到系统提示词与运行时上下文{suffix}。", tone="success")
             elif event_type == "system_prompt_append":
                 state.system_prompt_appends.append(event)
+                if self._is_office_workflow_enabled(state):
+                    names = [
+                        str(name)
+                        for name in (event.get("skill_names") or [])
+                        if str(name or "").strip()
+                    ]
+                    suffix = "：" + "、".join(names) if names else ""
+                    self._append_office_process_note(state, f"已注入 Skill 运行上下文{suffix}。", tone="success")
             elif event_type == "llm_usage":
                 self.apply_token_usage_event(
                     state,
@@ -20687,6 +20757,16 @@ class MainWindow(QMainWindow):
             getattr(state, "selected_skill_names", [])
         )
         normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
+        normalized_ppt_agent_mode = bool(ppt_agent_mode and normalized_workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST)
+        normalized_ppt_strategy = normalize_ppt_agent_strategy(ppt_agent_strategy)
+        normalized_ppt_selected_strategy = normalize_ppt_agent_strategy(ppt_agent_selected_strategy)
+        ppt_agent_skill_name = (
+            ppt_agent_strategy_skill_name(normalized_ppt_selected_strategy)
+            if normalized_ppt_agent_mode
+            else ""
+        )
+        if ppt_agent_skill_name and ppt_agent_skill_name not in effective_skill_names:
+            effective_skill_names.append(ppt_agent_skill_name)
         source_files = []
         template_file = ""
         normalized_conversion_target = ""
@@ -20721,9 +20801,9 @@ class MainWindow(QMainWindow):
                 "office_conversion_target": normalized_conversion_target,
                 "office_source_files": source_files,
                 "office_template_file": template_file,
-                "ppt_agent_mode": bool(ppt_agent_mode),
-                "ppt_agent_strategy": normalize_ppt_agent_strategy(ppt_agent_strategy),
-                "ppt_agent_selected_strategy": normalize_ppt_agent_strategy(ppt_agent_selected_strategy),
+                "ppt_agent_mode": normalized_ppt_agent_mode,
+                "ppt_agent_strategy": normalized_ppt_strategy,
+                "ppt_agent_selected_strategy": normalized_ppt_selected_strategy,
                 "ppt_agent_preference": normalize_ppt_agent_preference(ppt_agent_preference),
                 "ppt_agent_template_file": str(ppt_agent_template_file or "").strip(),
             }
@@ -21234,6 +21314,19 @@ class MainWindow(QMainWindow):
             )
             if office_card is not None:
                 office_card._sync_process_placeholder()
+                if ppt_agent_mode:
+                    ok, skill_name, status_message = self._ppt_agent_skill_status(ppt_agent_selected_strategy)
+                    skill_label = skill_name or "默认 PPT Agent"
+                    office_card.add_process_note("已提交 PPT Agent 请求，正在准备生成 PPT 文稿。")
+                    office_card.add_process_note(f"已选择内置 Skill: {ppt_agent_strategy_label(ppt_agent_selected_strategy)} ({skill_label})")
+                    if prompt_files:
+                        office_card.add_process_note(f"已附加 {len(prompt_files)} 个资料/模板文件。", tone="muted")
+                    if not ok:
+                        office_card.add_process_note(status_message, tone="error")
+                else:
+                    office_card.add_process_note(f"已提交{self._office_profile_label(office_output_profile)}办公稿请求。")
+                    if prompt_files:
+                        office_card.add_process_note(f"已附加 {len(prompt_files)} 个文件。", tone="muted")
             if clear_current_input:
                 self.input_field.clear()
                 self._clear_prompt_files()
@@ -21292,6 +21385,15 @@ class MainWindow(QMainWindow):
         if mentioned_profiles:
             self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
             return True
+        if ppt_agent_mode:
+            ok, _skill_name, status_message = self._ppt_agent_skill_status(ppt_agent_selected_strategy)
+            if not ok:
+                self._fail_office_request_before_worker(
+                    state,
+                    status_message,
+                    title="PPT Agent 启动失败",
+                )
+                return True
         if not self.daemon_available:
             self.queue_daemon_connection(allow_start=True, retries=4)
         run_context = self._build_run_context(
@@ -21307,8 +21409,10 @@ class MainWindow(QMainWindow):
             ppt_agent_template_file=ppt_agent_template_file,
         )
         if self.daemon_available:
+            self._append_office_process_note(state, "正在启动后台模型流。", tone="muted")
             self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
         else:
+            self._append_office_process_note(state, "正在启动本地模型流。", tone="muted")
             self.process_agent_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
         return True
 
@@ -21964,6 +22068,7 @@ class MainWindow(QMainWindow):
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
             office_card.add_process_widget(state.temp_thinking_bubble)
+            office_card.add_process_note("本地模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
         else:
             state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -22017,6 +22122,7 @@ class MainWindow(QMainWindow):
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
             office_card.add_process_widget(state.temp_thinking_bubble)
+            office_card.add_process_note("后台模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
         else:
             state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)

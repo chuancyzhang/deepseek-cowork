@@ -41,7 +41,7 @@ Cowork treats tools as the only direct execution surface.
 - `tool`: executable capability the model can call directly
 - `skill`: structured experience package that guides when and how to use tools
 
-Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`. Cowork can install standard Agent Skill packages as user AI skills, preserving the original root `SKILL.md` and generating `skill.json` only for local discovery, workbench, and debug metadata. Skills may declare `config_fields`; the workbench renders those fields in a configuration tab and injects saved values into script/tool execution through explicit environment variables.
+Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`. Cowork can install standard Agent Skill packages as user AI skills, preserving the original root `SKILL.md` and generating `skill.json` only for local discovery, workbench, and debug metadata. PPT Agent's Guizang PPT Skill, Frontend Slides, and Huashu Design strategies are bundled as real `ai_skills` packages, so their upstream `SKILL.md`, resources, and source metadata can enter the runtime context and observability view when selected. Skills may declare `config_fields`; the workbench renders those fields in a configuration tab and injects saved values into script/tool execution through explicit environment variables.
 
 See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the detailed model.
 

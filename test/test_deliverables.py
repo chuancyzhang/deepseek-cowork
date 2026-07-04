@@ -396,6 +396,36 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(submit_call.kwargs["ppt_agent_selected_strategy"], PPT_AGENT_STRATEGY_HUASHU)
             window.add_system_toast.assert_called_once()
 
+    def test_ppt_agent_request_accepts_source_file_without_manual_prompt(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            source_path = os.path.join(workspace, "markDown1782479938589.md")
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write("# 会议资料")
+
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"session_id": "session-1", "messages": []})()
+            window.get_session = MagicMock(return_value=state)
+            window.get_current_session = MagicMock(return_value=state)
+            window._ensure_session_workspace = MagicMock(return_value=workspace)
+            window._submit_session_request = MagicMock(return_value=True)
+            window.add_system_toast = MagicMock()
+
+            submitted = window.handle_ppt_agent_requested(
+                "",
+                preference=PPT_AGENT_PREFERENCE_BUSINESS,
+                strategy=PPT_AGENT_STRATEGY_AUTO,
+                source_files=[source_path],
+                session_id="session-1",
+            )
+
+            self.assertTrue(submitted)
+            submit_call = window._submit_session_request.call_args
+            self.assertIn("请基于附加资料生成一份演示文稿 PPT 工作稿", submit_call.args[1])
+            self.assertIn(os.path.basename(source_path), submit_call.args[1])
+            self.assertEqual(submit_call.args[2], [source_path])
+            self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
+            self.assertTrue(submit_call.kwargs["ppt_agent_mode"])
+
     def test_office_draft_request_submits_profiled_generation_prompt(self):
         with tempfile.TemporaryDirectory() as workspace:
             window = MainWindow.__new__(MainWindow)

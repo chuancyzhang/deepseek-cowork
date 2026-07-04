@@ -20155,12 +20155,17 @@ class MainWindow(QMainWindow):
                 auto_close_ms=6000,
             )
             return False
-        request = str(request_text or "").strip()
-        if not request:
-            self.add_system_toast("请先描述要生成的 PPT。", "warning", session_id=state.session_id, auto_close_ms=3200)
-            return False
         source_files = [os.path.normpath(str(path or "").strip()) for path in (source_files or []) if str(path or "").strip()]
         template_file = os.path.normpath(str(template_file or "").strip()) if str(template_file or "").strip() else ""
+        request = str(request_text or "").strip()
+        if not request and source_files:
+            source_names = "、".join(os.path.basename(path) for path in source_files[:3])
+            if len(source_files) > 3:
+                source_names += f" 等 {len(source_files)} 个资料"
+            request = f"请基于附加资料生成一份演示文稿 PPT 工作稿。资料包括：{source_names}。"
+        if not request:
+            self.add_system_toast("请先描述要生成的 PPT，或先添加资料。", "warning", session_id=state.session_id, auto_close_ms=3200)
+            return False
         missing_files = [path for path in source_files if not os.path.isfile(path)]
         if missing_files:
             self.add_system_toast(

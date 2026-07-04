@@ -24,7 +24,7 @@ Current app version: **4.9.6**
 - **Conversation + project model**: direct chats get their own workspace under `conversation_workspaces/<session_id>/` next to the executable, or you can bind a conversation to a project workspace; newly submitted conversations appear in the sidebar immediately while the background save queue catches up, and the project controls use quiet Apple-style icon buttons.
 - **Prompt attachments**: attached text files are inlined into the model request when small enough, images are sent as vision parts on vision-capable models, and large or non-text files are surfaced with explicit path/size guidance for tool-based reading.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
-- **PPT Mode / PPT Agent**: a sidebar and home entry for presentation workflows. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
+- **PPT Mode / PPT Agent**: a home card and built-in entry inside the Agent module for presentation workflows. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
 - **Right-side context drawer**: browse files and deliverables in a list view, then drill into a focused preview/action view; chat deliverable cards open directly in preview.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
@@ -80,7 +80,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
 4. For document, spreadsheet, or data-analysis tasks, use the home prompt to open **Settings → Components & dependencies** and install the document and data-analysis toolkits.
 5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.
-6. Use **PPT Agent** when you want a focused presentation workflow; choose automatic strategy selection, a web/technical/business/template preference, optional source files, and an optional PPTX template.
+6. Use the home **PPT Agent** card or the built-in **PPT Agent** inside the Agent module when you want a focused presentation workflow; choose automatic strategy selection, a web/technical/business/template preference, optional source files, and an optional PPTX template.
 7. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
 8. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
 

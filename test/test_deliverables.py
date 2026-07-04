@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QTextEdit, QWidget
 
 from main import (
+    AgentModuleDialog,
     ChatBubble,
     EmptyStateWidget,
     OfficeDraftTaskCard,
@@ -144,6 +145,49 @@ class TestDeliverableScanning(unittest.TestCase):
 
         window.refresh_context_badges.assert_not_called()
 
+    def test_ppt_agent_observability_records_prompt_and_tool_events(self):
+        state = type(
+            "State",
+            (),
+            {
+                "session_id": "session-1",
+                "system_prompt_text": "",
+                "runtime_context_text": "",
+                "prompt_cache_meta": {},
+                "system_prompt_appends": [],
+                "observability_events": [],
+            },
+        )()
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = "session-1"
+        window.get_session = MagicMock(return_value=state)
+        window.set_context_tab_hint = MagicMock()
+        window.refresh_observability_view = MagicMock()
+        window.refresh_context_badges = MagicMock()
+
+        MainWindow.handle_observability_event(
+            window,
+            {
+                "type": "system_prompt",
+                "content": "stable prompt",
+                "runtime_context": "策略 [PPT Agent]: 生成 HTML deliverable",
+                "skill_contexts": [{"source": "ppt_agent", "content": "Huashu Design"}],
+            },
+            "session-1",
+        )
+        MainWindow.handle_observability_event(
+            window,
+            {"type": "tool_call", "name": "run_python_code", "id": "tool-1", "args": {"x": 1}},
+            "session-1",
+        )
+
+        self.assertEqual(state.system_prompt_text, "stable prompt")
+        self.assertIn("PPT Agent", state.runtime_context_text)
+        self.assertEqual(state.system_prompt_appends[0]["source"], "ppt_agent")
+        self.assertEqual([event["type"] for event in state.observability_events], ["system_prompt", "tool_call"])
+        window.set_context_tab_hint.assert_called()
+        window.refresh_observability_view.assert_called_with("session-1")
+
     def test_agent_bubble_builds_clickable_cards_for_workspace_deliverables(self):
         app = QApplication.instance() or QApplication([])
         with tempfile.TemporaryDirectory() as workspace:
@@ -259,18 +303,24 @@ class TestDeliverableScanning(unittest.TestCase):
                 self.workflow_mode = ""
                 self.office_output_profile = ""
                 self.opened_settings_page = None
+                self.ppt_opened = False
 
             def open_settings(self, initial_page_label=None):
                 self.opened_settings_page = initial_page_label
+
+            def open_ppt_agent_mode(self):
+                self.ppt_opened = True
 
         main_window = MainWindowStub()
         widget = EmptyStateWidget(main_window)
         try:
             titles = [item[0] for item in widget.actions_data]
-            self.assertEqual(len(titles), 5)
-            self.assertIn("PPT Agent", titles)
+            self.assertEqual(titles, ["PPT Agent", "📁 整理文件", "🖼️ 处理图片", "办公交付物"])
             self.assertIn("办公交付物", titles)
+            self.assertNotIn("代码搜索", titles)
             self.assertNotIn("生成报告", titles)
+            widget.action_cards[0].click()
+            self.assertTrue(main_window.ppt_opened)
             office_card = next(item for item in widget.actions_data if item[0] == "办公交付物")
             self.assertEqual(office_card[1], "预览修改，再生成文件")
             self.assertIn("右侧交付物视图", office_card[2])
@@ -288,6 +338,23 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(main_window.opened_settings_page, "组件与依赖")
         finally:
             widget.deleteLater()
+
+    def test_agent_module_exposes_builtin_ppt_agent_without_custom_profile_storage(self):
+        app = QApplication.instance() or QApplication([])
+        dialog = AgentModuleDialog(
+            agent_profiles=[
+                {"id": "agent-writer", "name": "写作助手", "description": "润色输出", "skill_names": []}
+            ]
+        )
+        try:
+            self.assertEqual(dialog.selected_builtin, "")
+            self.assertIsNone(dialog.selected_profile)
+            dialog.ppt_agent_button.click()
+            self.assertEqual(dialog.selected_builtin, "ppt_agent")
+            self.assertIsNone(dialog.selected_profile)
+        finally:
+            dialog.deleteLater()
+            app.processEvents()
 
     def test_ppt_agent_request_submits_ppt_office_workflow(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -723,6 +790,24 @@ class TestDeliverableScanning(unittest.TestCase):
             finally:
                 card.deleteLater()
                 app.processEvents()
+
+    def test_office_task_card_process_placeholder_hides_when_process_content_arrives(self):
+        app = QApplication.instance() or QApplication([])
+        card = OfficeDraftTaskCard("PPT")
+        try:
+            self.assertEqual(card._running_title(), "正在生成PPT文稿")
+            self.assertEqual(card.process_widget_count(), 0)
+            card.set_process_visible(True)
+            self.assertFalse(card.process_placeholder.isHidden())
+
+            process_widget = QLabel("生成过程")
+            card.add_process_widget(process_widget)
+
+            self.assertEqual(card.process_widget_count(), 1)
+            self.assertTrue(card.process_placeholder.isHidden())
+        finally:
+            card.deleteLater()
+            app.processEvents()
 
     def test_deliverable_conversion_running_state_is_local_to_action_bar(self):
         app = QApplication.instance() or QApplication([])

@@ -8393,15 +8393,14 @@ class EmptyStateWidget(QWidget):
         self.grid_layout.setSpacing(24) # Increase spacing
         
         self.actions_data = [
-            ("📁 整理文件", "按类型自动分类", "帮我把当前目录下的文件按类型分类整理"),
-            ("🖼️ 处理图片", "批量重命名/压缩", "帮我把所有图片重命名为日期格式"),
-            ("🔍 代码搜索", "在项目中查找内容", "搜索当前项目中关于 'TODO' 的代码"),
             (
                 "PPT Agent",
                 "进入 PPT Mode",
                 "让 PPT Agent 生成演示文稿 HTML 工作稿，再从交付物预览导出 PPTX、DOCX 或 PDF。",
                 "fa5s.file-powerpoint",
             ),
+            ("📁 整理文件", "按类型自动分类", "帮我把当前目录下的文件按类型分类整理"),
+            ("🖼️ 处理图片", "批量重命名/压缩", "帮我把所有图片重命名为日期格式"),
             (
                 "办公交付物",
                 "预览修改，再生成文件",
@@ -8780,6 +8779,144 @@ class PptAgentModeDialog(QDialog):
             "source_files": list(self.source_files),
             "template_file": self.template_file,
         }
+
+
+class AgentModuleDialog(QDialog):
+    def __init__(self, agent_profiles=None, parent=None):
+        super().__init__(parent)
+        self.agent_profiles = list(agent_profiles or [])
+        self.selected_builtin = ""
+        self.selected_profile = None
+        self.setWindowTitle("智能体")
+        self.setModal(True)
+        self.resize(640, 560)
+        self.setStyleSheet(
+            f"""
+            QDialog {{
+                background: {DesignTokens.bg_main};
+                color: {DesignTokens.text_primary};
+            }}
+            QLabel {{
+                color: {DesignTokens.text_primary};
+                background: transparent;
+            }}
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(16)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.user-astronaut", color=DesignTokens.primary).pixmap(26, 26))
+        header.addWidget(icon, 0, Qt.AlignTop)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title = QLabel("智能体")
+        title.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {DesignTokens.text_primary};")
+        desc = QLabel("选择内置智能体或把自定义智能体加入当前输入。")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary};")
+        title_box.addWidget(title)
+        title_box.addWidget(desc)
+        header.addLayout(title_box, 1)
+        layout.addLayout(header)
+
+        builtin_title = QLabel("内置智能体")
+        builtin_title.setStyleSheet(apple_settings_section_title_style())
+        layout.addWidget(builtin_title)
+        layout.addWidget(self._create_ppt_agent_card())
+
+        custom_title = QLabel("自定义智能体")
+        custom_title.setStyleSheet(apple_settings_section_title_style())
+        layout.addWidget(custom_title)
+        layout.addWidget(self._create_custom_agent_list(), 1)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        close_btn.clicked.connect(self.reject)
+        action_row.addWidget(close_btn)
+        layout.addLayout(action_row)
+
+    def _create_ppt_agent_card(self):
+        card = QPushButton()
+        card.setCursor(Qt.PointingHandCursor)
+        card.setMinimumHeight(96)
+        card.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {DesignTokens.bg_panel_strong};
+                color: {DesignTokens.text_primary};
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 16px;
+                padding: 16px;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background: {DesignTokens.bg_secondary};
+                border-color: {rgba_from_hex(DesignTokens.primary, 0.34)};
+            }}
+            """
+        )
+        row = QHBoxLayout(card)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        icon = QLabel()
+        icon.setPixmap(qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary).pixmap(22, 22))
+        icon.setStyleSheet("background: transparent; border: none;")
+        row.addWidget(icon, 0, Qt.AlignTop)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(5)
+        title = QLabel("PPT Agent")
+        title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary}; background: transparent; border: none;")
+        desc = QLabel("从主题、资料或模板生成演示文稿 HTML 工作稿，再导出 PPTX、DOCX 或 PDF。")
+        desc.setWordWrap(True)
+        desc.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
+        text_box.addWidget(title)
+        text_box.addWidget(desc)
+        row.addLayout(text_box, 1)
+        card.clicked.connect(self._select_ppt_agent)
+        self.ppt_agent_button = card
+        return card
+
+    def _create_custom_agent_list(self):
+        container = QFrame()
+        container.setStyleSheet(apple_section_surface_style(radius=16, bg=DesignTokens.bg_panel_strong))
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+        if not self.agent_profiles:
+            empty = QLabel("暂无可用自定义智能体。可在设置里创建，也可以先使用内置 PPT Agent。")
+            empty.setWordWrap(True)
+            empty.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
+            layout.addWidget(empty)
+            return container
+        for profile in self.agent_profiles:
+            button = QPushButton(str(profile.get("name") or "智能体"))
+            button.setCursor(Qt.PointingHandCursor)
+            button.setMinimumHeight(42)
+            button.setStyleSheet(apple_button_style("ghost", radius=14, align="left"))
+            desc = str(profile.get("description") or "").strip()
+            if desc:
+                button.setToolTip(desc)
+            button.clicked.connect(lambda checked=False, item=profile: self._select_profile(item))
+            layout.addWidget(button)
+        layout.addStretch()
+        return container
+
+    def _select_ppt_agent(self):
+        self.selected_builtin = "ppt_agent"
+        self.selected_profile = None
+        self.accept()
+
+    def _select_profile(self, profile):
+        self.selected_builtin = ""
+        self.selected_profile = dict(profile or {})
+        self.accept()
 
 class SystemToast(QFrame):
     """Compact floating system notification."""
@@ -10021,12 +10158,40 @@ class OfficeDraftTaskCard(QFrame):
         self.process_layout = QVBoxLayout(self.process_container)
         self.process_layout.setContentsMargins(0, 2, 0, 0)
         self.process_layout.setSpacing(6)
+        self.process_placeholder = QLabel("正在准备生成过程…")
+        self.process_placeholder.setWordWrap(True)
+        self.process_placeholder.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: 12px; padding: 6px 42px;"
+        )
+        self.process_layout.addWidget(self.process_placeholder)
         layout.addWidget(self.process_container)
+        self._sync_process_placeholder()
 
     def set_process_visible(self, visible):
         visible = bool(visible)
+        self._sync_process_placeholder()
         self.process_container.setVisible(visible)
         self.toggle_btn.setText("收起过程" if visible else "展开过程")
+
+    def process_widget_count(self):
+        count = 0
+        for index in range(self.process_layout.count()):
+            item = self.process_layout.itemAt(index)
+            widget = item.widget()
+            if widget is not None and widget is not self.process_placeholder:
+                count += 1
+        return count
+
+    def _sync_process_placeholder(self):
+        if not hasattr(self, "process_placeholder"):
+            return
+        self.process_placeholder.setVisible(self.process_widget_count() == 0)
+
+    def add_process_widget(self, widget):
+        if widget is None:
+            return
+        self.process_layout.addWidget(widget)
+        self._sync_process_placeholder()
 
     def set_running(self):
         self.title_label.setText(self._running_title())
@@ -10075,6 +10240,8 @@ class OfficeDraftTaskCard(QFrame):
     def _running_title(self):
         if self.target_format in {"pptx", "docx", "pdf"}:
             return f"正在生成 {self._target_label()}"
+        if self.profile_label.strip().upper() == "PPT":
+            return "正在生成PPT文稿"
         return f"正在生成{self.profile_label}办公稿"
 
     def _completed_title(self):
@@ -10082,6 +10249,8 @@ class OfficeDraftTaskCard(QFrame):
             return f"已生成 {self._target_label()}"
         if self._primary_html_path():
             return "已生成 HTML"
+        if self.profile_label.strip().upper() == "PPT":
+            return "PPT文稿生成完成"
         return f"{self.profile_label}办公稿生成完成"
 
     def _render_result_cards(self, paths):
@@ -12439,12 +12608,12 @@ class MainWindow(QMainWindow):
         sidebar_skills_btn.clicked.connect(self.open_skills_center)
         sidebar_layout.addWidget(sidebar_skills_btn)
 
-        sidebar_ppt_agent_btn = QPushButton(" PPT Agent")
-        sidebar_ppt_agent_btn.setIcon(qta.icon('fa5s.file-powerpoint', color='#4b5563'))
-        sidebar_ppt_agent_btn.setCursor(Qt.PointingHandCursor)
-        sidebar_ppt_agent_btn.setStyleSheet(sidebar_btn_style)
-        sidebar_ppt_agent_btn.clicked.connect(self.open_ppt_agent_mode)
-        sidebar_layout.addWidget(sidebar_ppt_agent_btn)
+        self.sidebar_agent_module_btn = QPushButton(" 智能体")
+        self.sidebar_agent_module_btn.setIcon(qta.icon('fa5s.user-astronaut', color='#4b5563'))
+        self.sidebar_agent_module_btn.setCursor(Qt.PointingHandCursor)
+        self.sidebar_agent_module_btn.setStyleSheet(sidebar_btn_style)
+        self.sidebar_agent_module_btn.clicked.connect(self.open_agent_module)
+        sidebar_layout.addWidget(self.sidebar_agent_module_btn)
 
         sidebar_automation_btn = QPushButton(" 自动化")
         sidebar_automation_btn.setIcon(qta.icon('fa5s.tasks', color='#4b5563'))
@@ -18219,6 +18388,7 @@ class MainWindow(QMainWindow):
                 if isinstance(msg, dict) and msg.get("role") == "assistant"
             )
             office_card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
+            office_card._sync_process_placeholder()
         if insert_index is not None:
             state.last_agent_bubble = backup_last_agent
         return inserted_count
@@ -19785,6 +19955,17 @@ class MainWindow(QMainWindow):
             template_file=values.get("template_file") or "",
         )
 
+    def open_agent_module(self):
+        dialog = AgentModuleDialog(agent_profiles=self._available_agent_profiles(), parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return False
+        if dialog.selected_builtin == "ppt_agent":
+            return self.open_ppt_agent_mode()
+        if dialog.selected_profile:
+            self._insert_agent_mention(dialog.selected_profile)
+            return True
+        return False
+
     def handle_ppt_agent_requested(
         self,
         request_text,
@@ -20849,7 +21030,7 @@ class MainWindow(QMainWindow):
                 target_format=office_conversion_target or "html",
             )
         if state.session_id == self.current_session_id:
-            self.add_chat_bubble(
+            user_bubble = self.add_chat_bubble(
                 "User",
                 payload.get("display_content") or "",
                 animate=False,
@@ -20858,6 +21039,8 @@ class MainWindow(QMainWindow):
                 source_message_id=user_message_id,
                 target_layout=office_card.process_layout if office_card is not None else None,
             )
+            if office_card is not None:
+                office_card._sync_process_placeholder()
             if clear_current_input:
                 self.input_field.clear()
                 self._clear_prompt_files()
@@ -21103,7 +21286,10 @@ class MainWindow(QMainWindow):
             layout.addWidget(card)
             layout.addStretch()
 
-            if index is not None:
+            office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
+            if office_card is not None:
+                office_card.add_process_widget(wrapper)
+            elif index is not None:
                 state.chat_layout.insertWidget(index, wrapper)
             else:
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, wrapper)
@@ -21584,7 +21770,7 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
-            office_card.process_layout.addWidget(state.temp_thinking_bubble)
+            office_card.add_process_widget(state.temp_thinking_bubble)
         else:
             state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -21637,7 +21823,7 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
-            office_card.process_layout.addWidget(state.temp_thinking_bubble)
+            office_card.add_process_widget(state.temp_thinking_bubble)
         else:
             state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -22339,7 +22525,7 @@ class MainWindow(QMainWindow):
             bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
             office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
             if office_card is not None:
-                office_card.process_layout.addWidget(bubble)
+                office_card.add_process_widget(bubble)
             else:
                 state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
         

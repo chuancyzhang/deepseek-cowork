@@ -1567,6 +1567,55 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertFalse(rejected["accepted"])
         self.assertEqual(rejected["error"], "turn_mismatch")
 
+    def test_stream_message_waits_for_worker_without_model_response_timeout(self):
+        from PySide6.QtCore import QThread, Signal
+
+        class _SlowStreamWorker(QThread):
+            thinking_signal = Signal(str)
+            content_signal = Signal(str)
+            tool_call_signal = Signal(dict)
+            tool_result_signal = Signal(dict)
+            observability_signal = Signal(dict)
+            agent_state_signal = Signal(dict)
+            output_signal = Signal(str)
+            finished_signal = Signal(object)
+
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+                self.stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+            def run(self):
+                time.sleep(0.05)
+                self.content_signal.emit("delayed")
+                self.finished_signal.emit({"content": "done"})
+
+        with patch("core.daemon.LLMWorker", _SlowStreamWorker), patch(
+            "core.daemon.DAEMON_STREAM_RESPONSE_TIMEOUT_SEC",
+            0.01,
+            create=True,
+        ):
+            chunks = list(
+                self.client.send_message_stream(
+                    "session-stream-wait",
+                    "hello",
+                    workspace_dir=self.temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+            )
+
+        self.assertIn({"type": "content", "delta": "delayed"}, chunks)
+        self.assertTrue(
+            any(
+                chunk.get("type") == "final"
+                and chunk.get("result", {}).get("content") == "done"
+                for chunk in chunks
+            )
+        )
+        self.assertFalse(any(chunk.get("type") == "error" for chunk in chunks))
+
 class TestImSessionKey(unittest.TestCase):
     def test_build_and_parse_im_session_key(self):
         key = build_im_session_key("u1", "c1", "2026-03-06")

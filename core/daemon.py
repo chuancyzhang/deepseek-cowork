@@ -21,9 +21,6 @@ from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 23333
-DAEMON_STREAM_RESPONSE_TIMEOUT_SEC = 180
-
-
 def get_runtime_signature():
     try:
         if getattr(__import__("sys"), "frozen", False):
@@ -862,20 +859,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                     f"send_message_stream worker_started session_id={session_id} "
                     f"turn_id={turn_id} is_running={worker.isRunning()}"
                 )
-                if not done.wait(DAEMON_STREAM_RESPONSE_TIMEOUT_SEC):
-                    message = (
-                        f"Daemon stream timed out after {DAEMON_STREAM_RESPONSE_TIMEOUT_SEC} seconds "
-                        "without a model response."
-                    )
-                    _log_daemon(f"send_message_stream timeout session_id={session_id} timeout={DAEMON_STREAM_RESPONSE_TIMEOUT_SEC}")
-                    result_holder["result"] = {"error": message, "_streamed": True}
-                    send_stream({"type": "error", "error": message})
-                    try:
-                        worker.stop()
-                    except Exception as e:
-                        _log_daemon(f"send_message_stream timeout worker.stop failed session_id={session_id} error={e}")
-                    done.set()
-                    state.clear_active_worker(session_id)
+                done.wait()
                 if not worker.wait(2000):
                     state.detach_worker_until_finished(
                         session_id,

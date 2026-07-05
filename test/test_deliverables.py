@@ -15,6 +15,7 @@ from main import (
     AgentModuleDialog,
     ChatBubble,
     EmptyStateWidget,
+    FileChip,
     OfficeDraftTaskCard,
     DeliverableWebPreview,
     MainWindow,
@@ -38,6 +39,16 @@ from main import (
 
 
 class TestDeliverableScanning(unittest.TestCase):
+    def test_file_chip_uses_icon_for_supported_attachment(self):
+        app = QApplication.instance() or QApplication([])
+        chip = FileChip(r"D:\tmp\slides.pptx", removable=False)
+        try:
+            self.assertEqual(chip.path, os.path.normpath(r"D:\tmp\slides.pptx"))
+            self.assertFalse(chip.toolTip() == "")
+        finally:
+            chip.deleteLater()
+            app.processEvents()
+
     def test_sidebar_symbol_icons_render_expected_size(self):
         QApplication.instance() or QApplication([])
         for kind in ("folder", "folder-open", "folder-plus", "ellipsis", "plus"):
@@ -1042,6 +1053,91 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertIn("ds官方 / deepseek-v4-flash", process_text)
         card.deleteLater()
         app.processEvents()
+
+    def test_ppt_agent_submit_initializes_process_before_user_bubble_render(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as workspace:
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {})()
+            state.session_id = "session-1"
+            state.history_loaded = True
+            state.history_loading = False
+            state.llm_worker = None
+            state.code_worker = None
+            state.daemon_running = False
+            state.turn_steerable = False
+            state.selected_skill_names = []
+            state.messages = []
+            state.render_items = []
+            state.displayed_count = 0
+            state.displayed_render_count = 0
+            state.active_turn_id = 0
+            state.completed_turn_id = 0
+            state.pending_guidance_messages = []
+
+            window.current_session_id = "session-1"
+            window.get_session = MagicMock(return_value=state)
+            window.get_current_session = MagicMock(return_value=state)
+            window._normalize_prompt_file_paths = lambda paths: list(paths or [])
+            window._session_is_busy = MagicMock(return_value=False)
+            window._extract_agent_mentions = MagicMock(return_value=([], ""))
+            window._selected_model_supports_vision = MagicMock(return_value=False)
+            window._build_user_message_payload = MagicMock(
+                return_value={"content": "PPT Agent prompt", "display_content": "PPT Agent prompt", "attachments": []}
+            )
+            window._ensure_session_workspace = MagicMock(return_value=workspace)
+            window._office_profile_label = MagicMock(return_value="PPT")
+            window._current_model_process_label = MagicMock(return_value=("gpt / gpt-5.4", "gpt-5.4"))
+            window._ppt_agent_skill_status = MagicMock(return_value=(True, "guizang-ppt-skill", ""))
+            window._build_run_context = MagicMock(return_value={"selected_model_id": "gpt-5.4"})
+            window.daemon_available = False
+            window.daemon_bootstrapping = False
+            window.queue_daemon_connection = MagicMock()
+            window.process_agent_logic = MagicMock()
+            window.add_chat_bubble = MagicMock(side_effect=RuntimeError("bubble render failed"))
+            window.refresh_change_list = MagicMock()
+            window.refresh_step_list = MagicMock()
+            window.refresh_observability_view = MagicMock()
+            window.set_context_tab_hint = MagicMock()
+            window.set_session_phase = MagicMock()
+            window.set_session_status = MagicMock()
+            window.save_chat_history = MagicMock()
+            window.update_session_tab_title = MagicMock()
+            window.add_system_toast = MagicMock()
+            window._rebuild_session_render_spans = MagicMock()
+            window._last_submit_text = ""
+            window._last_submit_ts = 0
+
+            card = OfficeDraftTaskCard("PPT")
+            window._create_office_draft_task_card = MagicMock(return_value=card)
+            try:
+                submitted = MainWindow._submit_session_request(
+                    window,
+                    state,
+                    "PPT Agent prompt",
+                    [],
+                    check_duplicates=False,
+                    workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    office_output_profile=OFFICE_OUTPUT_PROFILE_PPT,
+                    ppt_agent_mode=True,
+                    ppt_agent_selected_strategy=PPT_AGENT_STRATEGY_GUIZANG,
+                )
+
+                self.assertTrue(submitted)
+                self.assertTrue(state.office_draft_preview_pending)
+                self.assertGreater(card.process_widget_count(), 1)
+                self.assertTrue(card.process_placeholder.isHidden())
+                window.process_agent_logic.assert_called_once()
+                process_text = "\n".join(
+                    card.process_layout.itemAt(index).widget().text()
+                    for index in range(card.process_layout.count())
+                    if isinstance(card.process_layout.itemAt(index).widget(), QLabel)
+                )
+                self.assertIn("已提交 PPT Agent 请求", process_text)
+                self.assertIn("渲染失败", process_text)
+            finally:
+                card.deleteLater()
+                app.processEvents()
 
     def test_deliverable_conversion_running_state_is_local_to_action_bar(self):
         app = QApplication.instance() or QApplication([])

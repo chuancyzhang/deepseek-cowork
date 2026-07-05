@@ -750,6 +750,11 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             content = data.get("content") or ""
             workspace_dir = data.get("workspace_dir")
             run_context = normalize_run_context(data.get("run_context"))
+            _log_daemon(
+                "send_message_stream received "
+                f"session_id={session_id} turn_id={turn_id} content_len={len(content)} "
+                f"workspace={workspace_dir} run_context_keys={sorted(list(run_context.keys()))}"
+            )
             if not content and run_context.get("mode") != RUN_MODE_EXECUTION:
                 self._send({"type": "error", "error": "Empty content"})
                 return
@@ -763,6 +768,10 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             state.idle_timeout = max(int(idle_minutes), 1) * 60
             messages = state.request_messages(session_id, data.get("messages"))
             state.append_user_message_if_needed(messages, content)
+            _log_daemon(
+                f"send_message_stream prepared_messages session_id={session_id} "
+                f"turn_id={turn_id} message_count={len(messages)}"
+            )
             stream_lock = threading.Lock()
             stream_closed = threading.Event()
             worker_holder = {}
@@ -846,8 +855,13 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             interaction_service.interaction_requested.connect(handle_interaction_request, Qt.DirectConnection)
             state.set_active_worker(session_id, worker, turn_id=turn_id)
             try:
+                _log_daemon(f"send_message_stream worker_starting session_id={session_id} turn_id={turn_id}")
                 send_stream({"type": "turn_started", "turn_id": turn_id})
                 worker.start()
+                _log_daemon(
+                    f"send_message_stream worker_started session_id={session_id} "
+                    f"turn_id={turn_id} is_running={worker.isRunning()}"
+                )
                 if not done.wait(DAEMON_STREAM_RESPONSE_TIMEOUT_SEC):
                     message = (
                         f"Daemon stream timed out after {DAEMON_STREAM_RESPONSE_TIMEOUT_SEC} seconds "
@@ -874,6 +888,11 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 except Exception as e:
                     _log_daemon(f"disconnect interaction bridge failed session_id={session_id} error={e}")
             result = result_holder.get("result") or {"error": "No response"}
+            _log_daemon(
+                f"send_message_stream result session_id={session_id} turn_id={turn_id} "
+                f"keys={sorted(list(result.keys())) if isinstance(result, dict) else []} "
+                f"has_error={isinstance(result, dict) and 'error' in result}"
+            )
             if "error" not in result:
                 generated_messages = result.get("generated_messages", [])
                 if generated_messages:

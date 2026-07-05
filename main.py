@@ -352,6 +352,7 @@ BACKGROUND_AUTOMATION_START_DELAY_MS = 2400
 GATEWAY_START_SETTLE_DELAY_MS = 1200
 STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
+PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
 
@@ -404,6 +405,18 @@ def log_startup_stage(stage, **fields):
     for key, value in fields.items():
         parts.append(f"{key}={value}")
     append_background_process_log(STARTUP_LOG_FILENAME, " ".join(parts))
+
+
+def log_ppt_agent_debug(stage, **fields):
+    try:
+        payload = {"stage": stage}
+        payload.update(fields or {})
+        append_background_process_log(
+            PPT_AGENT_DEBUG_LOG_FILENAME,
+            json.dumps(payload, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        pass
 
 
 def log_ui_exception(receiver, event, exception_text):
@@ -1314,6 +1327,15 @@ def format_file_size(size):
 
 
 DELIVERABLE_EXTENSIONS = DELIVERABLE_TYPES
+
+
+def file_chip_icon_name(path):
+    ext = os.path.splitext(str(path or ""))[1].lower()
+    if ext in DELIVERABLE_EXTENSIONS:
+        return DELIVERABLE_EXTENSIONS[ext][2]
+    if ext in {".txt", ".log", ".json", ".csv", ".tsv", ".xml", ".yaml", ".yml"}:
+        return "fa5s.file-alt"
+    return "fa5s.file"
 
 DELIVERABLE_SKIP_DIRS = {
     ".git",
@@ -14855,11 +14877,26 @@ class MainWindow(QMainWindow):
 
     def _initialize_office_task_process(self, card, state, message=None, prompt_files=None, run_context=None, runtime_note=""):
         if card is None or getattr(card, "_process_initialized", False):
+            log_ppt_agent_debug(
+                "office_process_init_skipped",
+                session_id=getattr(state, "session_id", ""),
+                has_card=card is not None,
+                already_initialized=bool(getattr(card, "_process_initialized", False)) if card is not None else False,
+            )
             return
         setattr(card, "_process_initialized", True)
         meta = message.get("meta") if isinstance(message, dict) and isinstance(message.get("meta"), dict) else {}
         workflow_mode = normalize_workflow_mode(meta.get("workflow_mode") or (run_context or {}).get("workflow_mode"))
         ppt_agent_mode = bool(meta.get("ppt_agent_mode") or (run_context or {}).get("ppt_agent_mode"))
+        log_ppt_agent_debug(
+            "office_process_init_begin",
+            session_id=getattr(state, "session_id", ""),
+            workflow_mode=workflow_mode,
+            ppt_agent_mode=ppt_agent_mode,
+            prompt_file_count=len(prompt_files or []),
+            runtime_note=runtime_note,
+            message_role=message.get("role") if isinstance(message, dict) else "",
+        )
         if ppt_agent_mode:
             selected_strategy = normalize_ppt_agent_strategy(
                 meta.get("ppt_agent_selected_strategy")
@@ -14888,12 +14925,28 @@ class MainWindow(QMainWindow):
         if runtime_note:
             card.add_process_note(runtime_note, tone="muted")
         card._sync_process_placeholder()
+        log_ppt_agent_debug(
+            "office_process_init_done",
+            session_id=getattr(state, "session_id", ""),
+            process_widget_count=card.process_widget_count(),
+            placeholder_visible=not card.process_placeholder.isHidden(),
+        )
         self._schedule_office_task_process_bootstrap_check(state)
 
     def _schedule_office_task_process_bootstrap_check(self, state):
         if not state or getattr(state, "_office_process_bootstrap_check_pending", False):
+            log_ppt_agent_debug(
+                "office_process_bootstrap_check_skipped",
+                session_id=getattr(state, "session_id", "") if state else "",
+                pending=bool(getattr(state, "_office_process_bootstrap_check_pending", False)) if state else False,
+            )
             return
         state._office_process_bootstrap_check_pending = True
+        log_ppt_agent_debug(
+            "office_process_bootstrap_check_scheduled",
+            session_id=getattr(state, "session_id", ""),
+            delay_ms=OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS,
+        )
         QTimer.singleShot(
             OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS,
             lambda sid=getattr(state, "session_id", ""): self._ensure_office_task_process_visible(sid),
@@ -14902,15 +14955,32 @@ class MainWindow(QMainWindow):
     def _ensure_office_task_process_visible(self, session_id):
         state = self.get_session(session_id)
         if not state:
+            log_ppt_agent_debug("office_process_bootstrap_missing_session", session_id=session_id)
             return
         state._office_process_bootstrap_check_pending = False
         if not getattr(state, "office_draft_preview_pending", False):
+            log_ppt_agent_debug(
+                "office_process_bootstrap_not_pending",
+                session_id=session_id,
+                office_draft_preview_pending=False,
+            )
             return
         card = self._office_draft_card_for_state(state)
         if card is None or card.process_widget_count() > 0:
+            log_ppt_agent_debug(
+                "office_process_bootstrap_noop",
+                session_id=session_id,
+                has_card=card is not None,
+                process_widget_count=card.process_widget_count() if card is not None else -1,
+            )
             return
         card.add_process_note("任务已提交，正在等待模型运行接管。", tone="muted")
         card._sync_process_placeholder()
+        log_ppt_agent_debug(
+            "office_process_bootstrap_added_note",
+            session_id=session_id,
+            process_widget_count=card.process_widget_count(),
+        )
 
     def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True, target_format=None):
         if not state:
@@ -14929,6 +14999,14 @@ class MainWindow(QMainWindow):
         else:
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, card)
         state.office_draft_task_card = card
+        log_ppt_agent_debug(
+            "office_task_card_created",
+            session_id=getattr(state, "session_id", ""),
+            profile_label=profile_label or self._office_profile_label(OFFICE_OUTPUT_PROFILE_FREE),
+            target_format=target_format or getattr(state, "office_task_target_format", "html") or "html",
+            running=running,
+            insert_index=insert_index,
+        )
         if running:
             self._schedule_office_task_process_bootstrap_check(state)
         return card
@@ -20310,11 +20388,26 @@ class MainWindow(QMainWindow):
         session_id=None,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
+        log_ppt_agent_debug(
+            "ppt_agent_request_begin",
+            session_id=getattr(state, "session_id", "") if state else "",
+            has_state=bool(state),
+            request_len=len(str(request_text or "")),
+            source_file_count=len(source_files or []),
+            has_template=bool(template_file),
+            preference=preference,
+            strategy=strategy,
+        )
         if not state:
             return False
         try:
             self._ensure_session_workspace(state)
         except Exception as exc:
+            log_ppt_agent_debug(
+                "ppt_agent_request_workspace_error",
+                session_id=state.session_id,
+                error=str(exc),
+            )
             self.add_system_toast(
                 f"对话工作目录不可用：{exc}",
                 "error",
@@ -20331,10 +20424,17 @@ class MainWindow(QMainWindow):
                 source_names += f" 等 {len(source_files)} 个资料"
             request = f"请基于附加资料生成一份演示文稿 PPT 工作稿。资料包括：{source_names}。"
         if not request:
+            log_ppt_agent_debug("ppt_agent_request_empty", session_id=state.session_id)
             self.add_system_toast("请先描述要生成的 PPT，或先添加资料。", "warning", session_id=state.session_id, auto_close_ms=3200)
             return False
         missing_files = [path for path in source_files if not os.path.isfile(path)]
         if missing_files:
+            log_ppt_agent_debug(
+                "ppt_agent_request_missing_files",
+                session_id=state.session_id,
+                missing_count=len(missing_files),
+                missing_preview=[os.path.basename(path) for path in missing_files[:3]],
+            )
             self.add_system_toast(
                 "附加资料不存在：" + "、".join(os.path.basename(path) for path in missing_files[:3]),
                 "error",
@@ -20343,6 +20443,11 @@ class MainWindow(QMainWindow):
             )
             return False
         if template_file and (not os.path.isfile(template_file) or os.path.splitext(template_file)[1].lower() != ".pptx"):
+            log_ppt_agent_debug(
+                "ppt_agent_request_invalid_template",
+                session_id=state.session_id,
+                template_file=template_file,
+            )
             self.add_system_toast("请选择有效的 PPTX 模板文件。", "error", session_id=state.session_id, auto_close_ms=5200)
             return False
         prompt_result = build_ppt_agent_prompt(
@@ -20369,6 +20474,15 @@ class MainWindow(QMainWindow):
         normalized_strategy = normalize_ppt_agent_strategy(strategy)
         selected_strategy = normalize_ppt_agent_strategy(prompt_result.get("selected_strategy"))
         normalized_preference = normalize_ppt_agent_preference(preference)
+        log_ppt_agent_debug(
+            "ppt_agent_request_prompt_built",
+            session_id=state.session_id,
+            selected_strategy=selected_strategy,
+            normalized_strategy=normalized_strategy,
+            normalized_preference=normalized_preference,
+            prompt_len=len("\n".join(prompt_lines)),
+            prompt_file_count=len(prompt_files),
+        )
         submitted = self._submit_session_request(
             state,
             "\n".join(prompt_lines),
@@ -20382,6 +20496,14 @@ class MainWindow(QMainWindow):
             ppt_agent_selected_strategy=selected_strategy,
             ppt_agent_preference=normalized_preference,
             ppt_agent_template_file=template_file,
+        )
+        log_ppt_agent_debug(
+            "ppt_agent_request_submitted",
+            session_id=state.session_id,
+            submitted=bool(submitted),
+            selected_strategy=selected_strategy,
+            active_turn_id=getattr(state, "active_turn_id", None),
+            office_pending=bool(getattr(state, "office_draft_preview_pending", False)),
         )
         if submitted:
             self.add_system_toast(
@@ -21296,9 +21418,26 @@ class MainWindow(QMainWindow):
         ppt_agent_preference=PPT_AGENT_PREFERENCE_AUTO,
         ppt_agent_template_file="",
     ):
+        log_ppt_agent_debug(
+            "submit_session_request_begin",
+            session_id=getattr(state, "session_id", "") if state else "",
+            has_state=bool(state),
+            raw_len=len(str(raw_user_text or "")),
+            prompt_file_count=len(prompt_files or []),
+            workflow_mode=workflow_mode,
+            office_output_profile=office_output_profile,
+            ppt_agent_mode=bool(ppt_agent_mode),
+            check_duplicates=check_duplicates,
+        )
         if not state:
             return False
         if not session_history_ready(state):
+            log_ppt_agent_debug(
+                "submit_session_history_not_ready",
+                session_id=getattr(state, "session_id", ""),
+                history_loaded=getattr(state, "history_loaded", None),
+                history_loading=getattr(state, "history_loading", None),
+            )
             if state.session_id == self.current_session_id:
                 self.add_system_toast(
                     "历史会话仍在加载，加载完成后再发送。",
@@ -21310,6 +21449,13 @@ class MainWindow(QMainWindow):
             return False
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if self._session_is_busy(state):
+            log_ppt_agent_debug(
+                "submit_session_busy",
+                session_id=state.session_id,
+                turn_steerable=bool(getattr(state, "turn_steerable", False)),
+                has_llm_worker=bool(getattr(state, "llm_worker", None)),
+                daemon_running=bool(getattr(state, "daemon_running", False)),
+            )
             if getattr(state, "turn_steerable", False):
                 return self._submit_turn_guidance(
                     state,
@@ -21321,20 +21467,32 @@ class MainWindow(QMainWindow):
                 self.add_system_toast("当前运行阶段不支持中途引导。", "warning", session_id=state.session_id)
             return False
         if not raw_user_text and not prompt_files:
+            log_ppt_agent_debug("submit_session_empty_payload", session_id=state.session_id)
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
         supports_vision = self._selected_model_supports_vision()
         if mentioned_profiles and not delegated_text:
+            log_ppt_agent_debug(
+                "submit_session_agent_mention_without_task",
+                session_id=state.session_id,
+                mentioned_count=len(mentioned_profiles),
+            )
             if state.session_id == self.current_session_id:
                 QMessageBox.information(self, "智能体召唤", "请在 @智能体 后面补充要执行的任务。")
             return False
         payload = self._build_user_message_payload(raw_user_text, prompt_files, supports_vision=supports_vision)
         user_text = payload.get("content") or ""
         if not user_text:
+            log_ppt_agent_debug("submit_session_empty_user_text_after_payload", session_id=state.session_id)
             return False
         try:
             self._ensure_session_workspace(state)
         except Exception as exc:
+            log_ppt_agent_debug(
+                "submit_session_workspace_error",
+                session_id=state.session_id,
+                error=str(exc),
+            )
             if state.session_id == self.current_session_id:
                 self.add_system_toast(f"对话工作目录不可用：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
             return False
@@ -21352,6 +21510,7 @@ class MainWindow(QMainWindow):
                 sort_keys=True,
             )
             if submit_signature == self._last_submit_text and (now - self._last_submit_ts) < 0.8:
+                log_ppt_agent_debug("submit_session_duplicate_blocked", session_id=state.session_id)
                 return False
             self._last_submit_text = submit_signature
             self._last_submit_ts = now
@@ -21379,6 +21538,7 @@ class MainWindow(QMainWindow):
                 if os.path.splitext(path)[1].lower() in {".html", ".htm"}
             ]
             if not source_files:
+                log_ppt_agent_debug("submit_session_conversion_source_missing", session_id=state.session_id)
                 if state.session_id == self.current_session_id:
                     self.add_system_toast("没有找到本轮转换需要的源 HTML 文件。", "warning", session_id=state.session_id)
                 return False
@@ -21390,30 +21550,6 @@ class MainWindow(QMainWindow):
                 and os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(source_files[0]))
             ]
             state.office_conversion_template_file = template_candidates[0] if template_candidates else ""
-        office_card = None
-        if state.session_id == self.current_session_id and office_workflow:
-            state.office_task_target_format = office_conversion_target or "html"
-            office_card = self._create_office_draft_task_card(
-                state,
-                office_conversion_target.upper() if office_conversion_target else self._office_profile_label(office_output_profile),
-                running=True,
-                target_format=office_conversion_target or "html",
-            )
-        if state.session_id == self.current_session_id:
-            user_bubble = self.add_chat_bubble(
-                "User",
-                payload.get("display_content") or "",
-                animate=False,
-                force_scroll=True,
-                attachments=payload.get("attachments") or [],
-                source_message_id=user_message_id,
-                target_layout=office_card.process_layout if office_card is not None else None,
-            )
-            if office_card is not None:
-                office_card._sync_process_placeholder()
-            if clear_current_input:
-                self.input_field.clear()
-                self._clear_prompt_files()
         state.step_records = []
         state.changed_files = []
         state.has_file_changes = False
@@ -21426,13 +21562,6 @@ class MainWindow(QMainWindow):
         state.office_draft_preview_pending = office_workflow
         state.office_task_target_format = office_conversion_target or ("html" if office_workflow else "")
         state.office_task_result_paths = []
-        self.refresh_change_list(state.session_id)
-        self.refresh_step_list(state.session_id)
-        self.refresh_observability_view(state.session_id)
-        self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
-        self.set_session_phase("Preparing", state.session_id)
-        self.set_session_status("running", state.session_id)
-        state.active_turn_id += 1
         message_payload = {"id": user_message_id, "role": "user", "content": user_text}
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
@@ -21452,7 +21581,21 @@ class MainWindow(QMainWindow):
                         message_meta["ppt_agent_template_file"] = ppt_agent_template_file
         if message_meta:
             message_payload["meta"] = message_meta
-        state.messages.append(message_payload)
+        office_card = None
+        if state.session_id == self.current_session_id and office_workflow:
+            office_card = self._create_office_draft_task_card(
+                state,
+                office_conversion_target.upper() if office_conversion_target else self._office_profile_label(office_output_profile),
+                running=True,
+                target_format=office_conversion_target or "html",
+            )
+            log_ppt_agent_debug(
+                "submit_session_office_card_ready",
+                session_id=state.session_id,
+                has_card=office_card is not None,
+                process_widget_count=office_card.process_widget_count() if office_card is not None else -1,
+                office_pending=bool(getattr(state, "office_draft_preview_pending", False)),
+            )
         if office_card is not None:
             self._initialize_office_task_process(
                 office_card,
@@ -21461,6 +21604,49 @@ class MainWindow(QMainWindow):
                 prompt_files=prompt_files,
                 runtime_note="正在等待模型运行接管。",
             )
+            log_ppt_agent_debug(
+                "submit_session_office_process_initialized",
+                session_id=state.session_id,
+                process_widget_count=office_card.process_widget_count(),
+            )
+        if state.session_id == self.current_session_id:
+            try:
+                self.add_chat_bubble(
+                    "User",
+                    payload.get("display_content") or "",
+                    animate=False,
+                    force_scroll=True,
+                    attachments=payload.get("attachments") or [],
+                    source_message_id=user_message_id,
+                    target_layout=office_card.process_layout if office_card is not None else None,
+                )
+                log_ppt_agent_debug(
+                    "submit_session_user_bubble_added",
+                    session_id=state.session_id,
+                    target_layout="office_card" if office_card is not None else "chat",
+                    process_widget_count=office_card.process_widget_count() if office_card is not None else -1,
+                )
+            except Exception as exc:
+                log_ppt_agent_debug(
+                    "submit_session_user_bubble_error",
+                    session_id=state.session_id,
+                    error=str(exc),
+                )
+                if office_card is not None:
+                    office_card.add_process_note(f"用户请求已提交，但过程气泡渲染失败：{exc}", tone="error")
+            if office_card is not None:
+                office_card._sync_process_placeholder()
+            if clear_current_input:
+                self.input_field.clear()
+                self._clear_prompt_files()
+        self.refresh_change_list(state.session_id)
+        self.refresh_step_list(state.session_id)
+        self.refresh_observability_view(state.session_id)
+        self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
+        self.set_session_phase("Preparing", state.session_id)
+        self.set_session_status("running", state.session_id)
+        state.active_turn_id += 1
+        state.messages.append(message_payload)
         self._rebuild_session_render_spans(state)
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
@@ -21480,6 +21666,12 @@ class MainWindow(QMainWindow):
         if ppt_agent_mode:
             ok, _skill_name, status_message = self._ppt_agent_skill_status(ppt_agent_selected_strategy)
             if not ok:
+                log_ppt_agent_debug(
+                    "submit_session_ppt_skill_unavailable",
+                    session_id=state.session_id,
+                    selected_strategy=ppt_agent_selected_strategy,
+                    status_message=status_message,
+                )
                 self._fail_office_request_before_worker(
                     state,
                     status_message,
@@ -21500,11 +21692,22 @@ class MainWindow(QMainWindow):
             ppt_agent_preference=ppt_agent_preference,
             ppt_agent_template_file=ppt_agent_template_file,
         )
+        log_ppt_agent_debug(
+            "submit_session_run_context_built",
+            session_id=state.session_id,
+            run_context_keys=sorted(list((run_context or {}).keys())),
+            selected_skill_names=(run_context or {}).get("selected_skill_names"),
+            selected_model_id=(run_context or {}).get("selected_model_id"),
+            daemon_available=bool(self.daemon_available),
+            daemon_bootstrapping=bool(getattr(self, "daemon_bootstrapping", False)),
+        )
         if self.daemon_available:
             self._append_office_process_note(state, "正在启动后台模型流。", tone="muted")
+            log_ppt_agent_debug("submit_session_dispatch_daemon", session_id=state.session_id, turn_id=current_turn_id)
             self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
         else:
             self._append_office_process_note(state, "正在启动本地模型流。", tone="muted")
+            log_ppt_agent_debug("submit_session_dispatch_local", session_id=state.session_id, turn_id=current_turn_id)
             self.process_agent_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
         return True
 
@@ -22140,9 +22343,19 @@ class MainWindow(QMainWindow):
 
     def process_agent_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
         state = self.get_session(session_id)
-        if not state: return
+        if not state:
+            log_ppt_agent_debug("process_agent_missing_session", session_id=session_id)
+            return
         if turn_id is None:
             turn_id = state.active_turn_id
+        log_ppt_agent_debug(
+            "process_agent_begin",
+            session_id=state.session_id,
+            turn_id=turn_id,
+            user_text_len=len(str(user_text or "")),
+            run_context_keys=sorted(list((run_context or {}).keys())),
+            office_pending=bool(getattr(state, "office_draft_preview_pending", False)),
+        )
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
@@ -22161,6 +22374,11 @@ class MainWindow(QMainWindow):
         if office_card is not None:
             office_card.add_process_widget(state.temp_thinking_bubble)
             office_card.add_process_note("本地模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
+            log_ppt_agent_debug(
+                "process_agent_office_card_attached",
+                session_id=state.session_id,
+                process_widget_count=office_card.process_widget_count(),
+            )
         else:
             state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -22190,15 +22408,32 @@ class MainWindow(QMainWindow):
         state.llm_worker.output_signal.connect(lambda text, sid=session_id: self.handle_worker_output(text, sid), Qt.QueuedConnection)
         state.llm_worker.agent_state_signal.connect(lambda data, sid=session_id: self.handle_agent_state(data, sid), Qt.QueuedConnection)
         state.llm_worker.start()
+        log_ppt_agent_debug(
+            "process_agent_worker_started",
+            session_id=state.session_id,
+            turn_id=turn_id,
+            is_running=state.llm_worker.isRunning(),
+        )
         
         if state.session_id == self.current_session_id:
              self.normalize_session_ui(state)
 
     def process_daemon_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
         state = self.get_session(session_id)
-        if not state: return
+        if not state:
+            log_ppt_agent_debug("process_daemon_missing_session", session_id=session_id)
+            return
         if turn_id is None:
             turn_id = state.active_turn_id
+        log_ppt_agent_debug(
+            "process_daemon_begin",
+            session_id=state.session_id,
+            turn_id=turn_id,
+            user_text_len=len(str(user_text or "")),
+            daemon_available=bool(getattr(self, "daemon_available", False)),
+            run_context_keys=sorted(list((run_context or {}).keys())),
+            office_pending=bool(getattr(state, "office_draft_preview_pending", False)),
+        )
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
@@ -22215,6 +22450,11 @@ class MainWindow(QMainWindow):
         if office_card is not None:
             office_card.add_process_widget(state.temp_thinking_bubble)
             office_card.add_process_note("后台模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
+            log_ppt_agent_debug(
+                "process_daemon_office_card_attached",
+                session_id=state.session_id,
+                process_widget_count=office_card.process_widget_count(),
+            )
         else:
             state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
@@ -22247,24 +22487,65 @@ class MainWindow(QMainWindow):
             Qt.QueuedConnection,
         )
         state.daemon_worker.start()
+        log_ppt_agent_debug(
+            "process_daemon_worker_started",
+            session_id=state.session_id,
+            turn_id=turn_id,
+            is_running=state.daemon_worker.isRunning(),
+        )
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
     def handle_daemon_turn_started(self, daemon_turn_id, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state or turn_id != state.active_turn_id:
+            log_ppt_agent_debug(
+                "daemon_turn_started_ignored",
+                session_id=session_id,
+                daemon_turn_id=daemon_turn_id,
+                expected_turn_id=turn_id,
+                active_turn_id=getattr(state, "active_turn_id", None) if state else None,
+            )
             return
         if str(daemon_turn_id or "") != str(turn_id or ""):
+            log_ppt_agent_debug(
+                "daemon_turn_started_mismatch",
+                session_id=session_id,
+                daemon_turn_id=daemon_turn_id,
+                expected_turn_id=turn_id,
+            )
             return
         state.turn_steerable = not bool(getattr(state, "automation_task_id", ""))
+        log_ppt_agent_debug(
+            "daemon_turn_started",
+            session_id=session_id,
+            daemon_turn_id=daemon_turn_id,
+            turn_steerable=state.turn_steerable,
+        )
         if state.session_id == self.current_session_id:
             self.normalize_session_ui(state)
 
     def handle_daemon_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
-        if not state: return
-        if turn_id is not None and turn_id != state.active_turn_id:
+        if not state:
+            log_ppt_agent_debug("daemon_response_missing_session", session_id=session_id, turn_id=turn_id)
             return
+        if turn_id is not None and turn_id != state.active_turn_id:
+            log_ppt_agent_debug(
+                "daemon_response_ignored_turn",
+                session_id=session_id,
+                turn_id=turn_id,
+                active_turn_id=state.active_turn_id,
+            )
+            return
+        log_ppt_agent_debug(
+            "daemon_response_received",
+            session_id=session_id,
+            turn_id=turn_id,
+            result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+            has_error=isinstance(result, dict) and "error" in result,
+            streamed=isinstance(result, dict) and bool(result.get("_streamed")),
+        )
         state.daemon_running = False
         state.turn_steerable = False
         state.daemon_worker = None
@@ -22887,15 +23168,37 @@ class MainWindow(QMainWindow):
 
     def handle_llm_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
-        if not state: return
+        if not state:
+            log_ppt_agent_debug("llm_response_missing_session", session_id=session_id, turn_id=turn_id)
+            return
         state.turn_steerable = False
         previous_message_count = len(state.messages)
         if turn_id is not None:
             if turn_id != state.active_turn_id:
+                log_ppt_agent_debug(
+                    "llm_response_ignored_turn",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    active_turn_id=state.active_turn_id,
+                )
                 return
             if turn_id <= state.completed_turn_id:
+                log_ppt_agent_debug(
+                    "llm_response_ignored_completed",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    completed_turn_id=state.completed_turn_id,
+                )
                 return
             state.completed_turn_id = turn_id
+        log_ppt_agent_debug(
+            "llm_response_begin",
+            session_id=session_id,
+            turn_id=turn_id,
+            result_keys=sorted(list(result.keys())) if isinstance(result, dict) else [],
+            has_error=isinstance(result, dict) and "error" in result,
+            previous_message_count=previous_message_count,
+        )
         state.llm_worker = None
         if state.session_id == self.current_session_id:
             self.llm_worker = None

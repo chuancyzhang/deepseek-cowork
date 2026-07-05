@@ -156,6 +156,8 @@ from core.clarify_mode import (
     normalize_run_context,
     normalize_workflow_mode,
 )
+
+OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS = 1000
 from core.ppt_agent import (
     PPT_AGENT_PREFERENCE_AUTO,
     PPT_AGENT_PREFERENCE_BUSINESS,
@@ -14886,6 +14888,29 @@ class MainWindow(QMainWindow):
         if runtime_note:
             card.add_process_note(runtime_note, tone="muted")
         card._sync_process_placeholder()
+        self._schedule_office_task_process_bootstrap_check(state)
+
+    def _schedule_office_task_process_bootstrap_check(self, state):
+        if not state or getattr(state, "_office_process_bootstrap_check_pending", False):
+            return
+        state._office_process_bootstrap_check_pending = True
+        QTimer.singleShot(
+            OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS,
+            lambda sid=getattr(state, "session_id", ""): self._ensure_office_task_process_visible(sid),
+        )
+
+    def _ensure_office_task_process_visible(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        state._office_process_bootstrap_check_pending = False
+        if not getattr(state, "office_draft_preview_pending", False):
+            return
+        card = self._office_draft_card_for_state(state)
+        if card is None or card.process_widget_count() > 0:
+            return
+        card.add_process_note("任务已提交，正在等待模型运行接管。", tone="muted")
+        card._sync_process_placeholder()
 
     def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True, target_format=None):
         if not state:
@@ -14904,6 +14929,8 @@ class MainWindow(QMainWindow):
         else:
             state.chat_layout.insertWidget(state.chat_layout.count() - 1, card)
         state.office_draft_task_card = card
+        if running:
+            self._schedule_office_task_process_bootstrap_check(state)
         return card
 
     def _office_draft_card_for_state(self, state):

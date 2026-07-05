@@ -921,6 +921,37 @@ class TestDeliverableScanning(unittest.TestCase):
             card.deleteLater()
             app.processEvents()
 
+    def test_office_task_bootstrap_check_replaces_empty_process_placeholder(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        state = type("_Session", (), {})()
+        state.session_id = "session-1"
+        state.office_draft_preview_pending = True
+        state._office_process_bootstrap_check_pending = True
+        card = OfficeDraftTaskCard("PPT")
+        card.set_process_visible(True)
+        state.office_draft_task_card = card
+        window.get_session = MagicMock(return_value=state)
+
+        try:
+            self.assertEqual(card.process_widget_count(), 0)
+            self.assertFalse(card.process_placeholder.isHidden())
+
+            MainWindow._ensure_office_task_process_visible(window, "session-1")
+
+            self.assertEqual(card.process_widget_count(), 1)
+            self.assertTrue(card.process_placeholder.isHidden())
+            self.assertFalse(state._office_process_bootstrap_check_pending)
+            process_text = "\n".join(
+                card.process_layout.itemAt(index).widget().text()
+                for index in range(card.process_layout.count())
+                if isinstance(card.process_layout.itemAt(index).widget(), QLabel)
+            )
+            self.assertIn("正在等待模型运行接管", process_text)
+        finally:
+            card.deleteLater()
+            app.processEvents()
+
     def test_rendered_ppt_agent_task_card_initializes_process_from_user_meta(self):
         app = QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)

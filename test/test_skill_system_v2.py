@@ -978,6 +978,17 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("frontend-slides", sm.select_relevant_skills("PPT Agent Frontend Slides 技术分享", limit=5))
         self.assertIn("guizang-ppt-skill", sm.select_relevant_skills("PPT Agent 横向翻页 瑞士风", limit=5))
 
+    def test_huashu_builtin_skill_omits_large_media_assets(self):
+        skill_dir = self._copy_repo_ai_skill("huashu-design")
+
+        media_files = []
+        for root, _dirs, filenames in os.walk(skill_dir):
+            for filename in filenames:
+                if os.path.splitext(filename)[1].lower() in {".mp3", ".wav", ".mp4"}:
+                    media_files.append(os.path.join(root, filename))
+
+        self.assertEqual(media_files, [])
+
     def test_run_skill_script_uses_skill_dependency_flow_and_sandbox_runner(self):
         skill_dir = os.path.join(self.skills_dir, "scripted-skill")
         os.makedirs(os.path.join(skill_dir, "scripts"), exist_ok=True)

@@ -14823,6 +14823,70 @@ class MainWindow(QMainWindow):
             return target if target in {"pptx", "docx", "pdf"} else "file"
         return "html"
 
+    def _current_model_process_label(self):
+        try:
+            selected_model_id = self.config_manager.get_selected_model_id()
+            profile = self.config_manager.get_model_profile(selected_model_id)
+        except Exception:
+            selected_model_id = ""
+            profile = {}
+        if not isinstance(profile, dict):
+            profile = {}
+        model_name = profile.get("display_name") or profile.get("model_name") or selected_model_id or "当前模型"
+        channel_name = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
+        label = f"{channel_name} / {model_name}" if channel_name else model_name
+        return label, selected_model_id
+
+    def _office_message_attachment_count(self, message):
+        if not isinstance(message, dict):
+            return 0
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        attachments = meta.get("attachments") if isinstance(meta.get("attachments"), list) else []
+        if attachments:
+            return len(attachments)
+        content_parts = message.get("content_parts") if isinstance(message.get("content_parts"), list) else []
+        file_count = 0
+        for part in content_parts:
+            if isinstance(part, dict) and str(part.get("type") or "").lower() in {"file", "input_file", "document"}:
+                file_count += 1
+        return file_count
+
+    def _initialize_office_task_process(self, card, state, message=None, prompt_files=None, run_context=None, runtime_note=""):
+        if card is None or getattr(card, "_process_initialized", False):
+            return
+        setattr(card, "_process_initialized", True)
+        meta = message.get("meta") if isinstance(message, dict) and isinstance(message.get("meta"), dict) else {}
+        workflow_mode = normalize_workflow_mode(meta.get("workflow_mode") or (run_context or {}).get("workflow_mode"))
+        ppt_agent_mode = bool(meta.get("ppt_agent_mode") or (run_context or {}).get("ppt_agent_mode"))
+        if ppt_agent_mode:
+            selected_strategy = normalize_ppt_agent_strategy(
+                meta.get("ppt_agent_selected_strategy")
+                or (run_context or {}).get("ppt_agent_selected_strategy")
+                or PPT_AGENT_STRATEGY_DEFAULT
+            )
+            ok, skill_name, status_message = self._ppt_agent_skill_status(selected_strategy)
+            skill_label = skill_name or "默认 PPT Agent"
+            card.add_process_note("已提交 PPT Agent 请求，正在准备生成 PPT 文稿。")
+            card.add_process_note(f"已选择内置 Skill: {ppt_agent_strategy_label(selected_strategy)} ({skill_label})")
+            if not ok:
+                card.add_process_note(status_message, tone="error")
+        elif workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
+            target = str(meta.get("office_conversion_target") or (run_context or {}).get("office_conversion_target") or "").strip().upper()
+            card.add_process_note(f"已提交 {target or '办公文件'} 转换请求。")
+        else:
+            profile = meta.get("office_output_profile") or (run_context or {}).get("office_output_profile") or OFFICE_OUTPUT_PROFILE_FREE
+            card.add_process_note(f"已提交{self._office_profile_label(profile)}办公稿请求。")
+
+        attachment_count = len(prompt_files or []) or self._office_message_attachment_count(message)
+        if attachment_count:
+            card.add_process_note(f"已附加 {attachment_count} 个资料/模板文件。", tone="muted")
+        model_label, selected_model_id = self._current_model_process_label()
+        model_suffix = f"（{selected_model_id}）" if selected_model_id else ""
+        card.add_process_note(f"本轮模型: {model_label}{model_suffix}", tone="muted")
+        if runtime_note:
+            card.add_process_note(runtime_note, tone="muted")
+        card._sync_process_placeholder()
+
     def _create_office_draft_task_card(self, state, profile_label=None, insert_index=None, running=True, target_format=None):
         if not state:
             return None
@@ -18399,6 +18463,12 @@ class MainWindow(QMainWindow):
                 target_format=self._office_target_format_from_message(messages[0]),
             )
             target_layout = office_card.process_layout if office_card is not None else None
+            self._initialize_office_task_process(
+                office_card,
+                state,
+                messages[0],
+                runtime_note="已从会话记录恢复任务过程。",
+            )
             inserted_count += 1
             if current_idx is not None:
                 current_idx += 1
@@ -21314,19 +21384,6 @@ class MainWindow(QMainWindow):
             )
             if office_card is not None:
                 office_card._sync_process_placeholder()
-                if ppt_agent_mode:
-                    ok, skill_name, status_message = self._ppt_agent_skill_status(ppt_agent_selected_strategy)
-                    skill_label = skill_name or "默认 PPT Agent"
-                    office_card.add_process_note("已提交 PPT Agent 请求，正在准备生成 PPT 文稿。")
-                    office_card.add_process_note(f"已选择内置 Skill: {ppt_agent_strategy_label(ppt_agent_selected_strategy)} ({skill_label})")
-                    if prompt_files:
-                        office_card.add_process_note(f"已附加 {len(prompt_files)} 个资料/模板文件。", tone="muted")
-                    if not ok:
-                        office_card.add_process_note(status_message, tone="error")
-                else:
-                    office_card.add_process_note(f"已提交{self._office_profile_label(office_output_profile)}办公稿请求。")
-                    if prompt_files:
-                        office_card.add_process_note(f"已附加 {len(prompt_files)} 个文件。", tone="muted")
             if clear_current_input:
                 self.input_field.clear()
                 self._clear_prompt_files()
@@ -21369,6 +21426,14 @@ class MainWindow(QMainWindow):
         if message_meta:
             message_payload["meta"] = message_meta
         state.messages.append(message_payload)
+        if office_card is not None:
+            self._initialize_office_task_process(
+                office_card,
+                state,
+                message_payload,
+                prompt_files=prompt_files,
+                runtime_note="正在等待模型运行接管。",
+            )
         self._rebuild_session_render_spans(state)
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.

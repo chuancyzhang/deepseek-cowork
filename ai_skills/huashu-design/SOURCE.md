@@ -6,4 +6,4 @@
 - License file: `LICENSE`
 - Integration: bundled as a Cowork built-in AI Skill for PPT Agent HTML-first presentation workflows.
 
-This package preserves the upstream `SKILL.md`, relative `assets/`, `references/`, `scripts/`, and demos so internal references continue to resolve in Cowork.
+This package preserves the upstream `SKILL.md`, relative `references/`, `scripts/`, demos, and lightweight assets so internal references continue to resolve in Cowork. Large showcase images and audio media are intentionally omitted from the bundled runtime copy because PPT Agent only needs the instruction and reference materials during generation.

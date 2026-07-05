@@ -22,6 +22,7 @@ from main import (
     OFFICE_OUTPUT_PROFILE_PPT,
     PPT_AGENT_PREFERENCE_BUSINESS,
     PPT_AGENT_STRATEGY_AUTO,
+    PPT_AGENT_STRATEGY_GUIZANG,
     PPT_AGENT_STRATEGY_HUASHU,
     RUN_MODE_EXECUTION,
     WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
@@ -426,6 +427,34 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(submit_call.args[2], [source_path])
             self.assertEqual(submit_call.kwargs["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
             self.assertTrue(submit_call.kwargs["ppt_agent_mode"])
+
+    def test_ppt_agent_explicit_guizang_overrides_business_preference_with_source_only_request(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            source_path = os.path.join(workspace, "markDown1782479938990.md")
+            with open(source_path, "w", encoding="utf-8") as handle:
+                handle.write("# 会议资料")
+
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {"session_id": "session-1", "messages": []})()
+            window.get_session = MagicMock(return_value=state)
+            window.get_current_session = MagicMock(return_value=state)
+            window._ensure_session_workspace = MagicMock(return_value=workspace)
+            window._submit_session_request = MagicMock(return_value=True)
+            window.add_system_toast = MagicMock()
+
+            submitted = window.handle_ppt_agent_requested(
+                "",
+                preference=PPT_AGENT_PREFERENCE_BUSINESS,
+                strategy=PPT_AGENT_STRATEGY_GUIZANG,
+                source_files=[source_path],
+                session_id="session-1",
+            )
+
+            self.assertTrue(submitted)
+            submit_call = window._submit_session_request.call_args
+            self.assertIn("请基于附加资料生成一份演示文稿 PPT 工作稿", submit_call.args[1])
+            self.assertEqual(submit_call.kwargs["ppt_agent_selected_strategy"], PPT_AGENT_STRATEGY_GUIZANG)
+            self.assertEqual(submit_call.kwargs["ppt_agent_strategy"], PPT_AGENT_STRATEGY_GUIZANG)
 
     def test_ppt_agent_run_context_injects_builtin_skill_without_mutating_session_selection(self):
         state = type(
@@ -891,6 +920,97 @@ class TestDeliverableScanning(unittest.TestCase):
         finally:
             card.deleteLater()
             app.processEvents()
+
+    def test_rendered_ppt_agent_task_card_initializes_process_from_user_meta(self):
+        app = QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = "session-1"
+        state = type("_Session", (), {})()
+        state.session_id = "session-1"
+        window.sessions = {"session-1": state}
+        state.chat_layout = type(
+            "_Layout",
+            (),
+            {
+                "__init__": lambda self: setattr(self, "widgets", []),
+                "insertWidget": lambda self, index, widget: self.widgets.append(widget),
+                "count": lambda self: len(self.widgets) + 1,
+            },
+        )()
+        state.last_agent_bubble = None
+        state.empty_state = None
+        state.messages = [
+            {
+                "id": "user-1",
+                "role": "user",
+                "content": "请基于附加资料生成一份演示文稿 PPT 工作稿。",
+                "meta": {
+                    "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
+                    "office_output_profile": OFFICE_OUTPUT_PROFILE_PPT,
+                    "ppt_agent_mode": True,
+                    "ppt_agent_selected_strategy": PPT_AGENT_STRATEGY_GUIZANG,
+                },
+                "content_parts": [
+                    {"type": "text", "text": "请基于附加资料生成一份演示文稿 PPT 工作稿。"},
+                    {"type": "input_file", "path": r"D:\tmp\markDown1782479938990.md", "name": "markDown1782479938990.md"},
+                ],
+            }
+        ]
+        state.tool_cards = {}
+        state.office_draft_task_card = None
+        state.office_draft_preview_pending = False
+        window.get_session = MagicMock(return_value=state)
+        window._office_profile_label = MagicMock(return_value="PPT")
+        window._workspace_dir_for_state = MagicMock(return_value=r"D:\tmp")
+        window._message_display_content = lambda msg: msg.get("content") or ""
+        window._message_user_attachments = lambda msg: []
+        window._connect_chat_bubble_actions = MagicMock()
+        window.dynamic_message_width = 760
+        window.dynamic_user_bubble_width = 760
+        window.last_message_time = 0
+        window.process_ui_events = MagicMock()
+        window.request_session_scroll_to_bottom = MagicMock()
+        window.queue_session_bubble_virtualization = MagicMock()
+        window.open_deliverable_from_chat = MagicMock()
+        window.skill_manager = type(
+            "_SkillManager",
+            (),
+            {
+                "_find_skill_path": lambda _self, name: r"D:\code\cowork\ai_skills\guizang-ppt-skill"
+                if name == "guizang-ppt-skill"
+                else "",
+                "_is_skill_enabled_for_path": lambda _self, _name, _path: True,
+            },
+        )()
+        window.config_manager = type(
+            "_Config",
+            (),
+            {
+                "get_selected_model_id": lambda _self: "ds-flash",
+                "get_model_profile": lambda _self, _model_id=None: {
+                    "display_name": "deepseek-v4-flash",
+                    "channel_display_name": "ds官方",
+                },
+            },
+        )()
+
+        inserted = MainWindow.render_message_batch(window, state.messages, "session-1")
+
+        self.assertEqual(inserted, 1)
+        card = state.office_draft_task_card
+        self.assertIsNotNone(card)
+        self.assertGreater(card.process_widget_count(), 1)
+        self.assertTrue(card.process_placeholder.isHidden())
+        process_text = "\n".join(
+            card.process_layout.itemAt(index).widget().text()
+            for index in range(card.process_layout.count())
+            if isinstance(card.process_layout.itemAt(index).widget(), QLabel)
+        )
+        self.assertIn("已提交 PPT Agent 请求", process_text)
+        self.assertIn("Guizang PPT Skill", process_text)
+        self.assertIn("ds官方 / deepseek-v4-flash", process_text)
+        card.deleteLater()
+        app.processEvents()
 
     def test_deliverable_conversion_running_state_is_local_to_action_bar(self):
         app = QApplication.instance() or QApplication([])

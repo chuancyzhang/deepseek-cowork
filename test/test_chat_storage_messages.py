@@ -354,12 +354,20 @@ class TestChatStorageMessages(unittest.TestCase):
     def test_project_grouping_and_unassigned_conversations(self):
         storage = ChatStorage(self.db_path)
         workspace = os.path.join(self.temp_dir, "workspace")
+        chat_workspace = os.path.join(self.temp_dir, "conversation_workspaces", "chat-conv")
         os.makedirs(workspace)
+        os.makedirs(chat_workspace)
         storage.save_conversation(
             "project-conv",
             [{"role": "user", "content": "project task"}],
             title="Project task",
-            meta={"workspace_dir": workspace},
+            meta={"workspace_dir": workspace, "workspace_source": "project"},
+        )
+        storage.save_conversation(
+            "chat-conv",
+            [{"role": "user", "content": "direct chat"}],
+            title="Direct chat",
+            meta={"workspace_dir": chat_workspace, "workspace_source": "chat"},
         )
         storage.save_conversation(
             "plain-conv",
@@ -370,7 +378,11 @@ class TestChatStorageMessages(unittest.TestCase):
         grouped = storage.list_conversations_by_workspace()
         workspace_key = os.path.normcase(os.path.normpath(os.path.abspath(workspace)))
         self.assertEqual(grouped[workspace_key][0]["id"], "project-conv")
-        self.assertEqual([item["id"] for item in storage.list_unassigned_conversations()], ["plain-conv"])
+        self.assertNotIn(os.path.normcase(os.path.normpath(os.path.abspath(chat_workspace))), grouped)
+        self.assertCountEqual(
+            [item["id"] for item in storage.list_unassigned_conversations()],
+            ["chat-conv", "plain-conv"],
+        )
 
     def test_archive_conversations_for_workspace_only_archives_target(self):
         storage = ChatStorage(self.db_path)
@@ -378,12 +390,14 @@ class TestChatStorageMessages(unittest.TestCase):
         other_workspace = os.path.join(self.temp_dir, "other")
         os.makedirs(workspace)
         os.makedirs(other_workspace)
-        storage.save_conversation("target", [{"role": "user", "content": "a"}], meta={"workspace_dir": workspace})
-        storage.save_conversation("other", [{"role": "user", "content": "b"}], meta={"workspace_dir": other_workspace})
+        storage.save_conversation("target", [{"role": "user", "content": "a"}], meta={"workspace_dir": workspace, "workspace_source": "project"})
+        storage.save_conversation("other", [{"role": "user", "content": "b"}], meta={"workspace_dir": other_workspace, "workspace_source": "project"})
+        storage.save_conversation("chat", [{"role": "user", "content": "c"}], meta={"workspace_dir": workspace, "workspace_source": "chat"})
 
         self.assertEqual(storage.archive_conversations_for_workspace(workspace), 1)
         self.assertTrue(storage.get_conversation_meta("target").get("archived"))
         self.assertFalse(storage.get_conversation_meta("other").get("archived"))
+        self.assertFalse(storage.get_conversation_meta("chat").get("archived"))
 
     def test_list_and_restore_archived_conversations(self):
         storage = ChatStorage(self.db_path)

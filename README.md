@@ -21,7 +21,7 @@ Current app version: **4.9.6**
 
 ## Product Surface
 
-- **Conversation + project model**: direct chats get their own workspace under `conversation_workspaces/<session_id>/` next to the executable, or you can bind a conversation to a project workspace; newly submitted conversations appear in the sidebar immediately while the background save queue catches up, and the project controls use quiet Apple-style icon buttons.
+- **Conversation + project model**: direct chats get their own workspace under `conversation_workspaces/<session_id>/` next to the executable, or you can explicitly bind an empty conversation to a project workspace. Opening, adding, dragging, or browsing a project updates the file view without silently moving an existing conversation into that project; newly submitted conversations appear in the sidebar immediately while the background save queue catches up.
 - **Prompt attachments**: attached text files are inlined into the model request when small enough, images are sent as vision parts on vision-capable models, and large or non-text files are surfaced with explicit path/size guidance for tool-based reading.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **PPT Mode / PPT Agent**: a home card and built-in entry inside the Agent module for presentation workflows. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
@@ -77,7 +77,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 ## Basic Usage
 
 1. Open **Settings** and configure a model service.
-2. Start a direct chat with its auto-created conversation workspace, or attach the conversation to a project.
+2. Start a direct chat with its auto-created conversation workspace, or explicitly attach an empty conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
 4. For document, spreadsheet, or data-analysis tasks, use the home prompt to open **Settings → Components & dependencies** and install the document and data-analysis toolkits.
 5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.

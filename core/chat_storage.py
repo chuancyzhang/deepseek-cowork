@@ -989,6 +989,8 @@ class ChatStorage:
         grouped = {}
         for conversation in self.list_conversations():
             meta = conversation.get("meta") or {}
+            if str(meta.get("workspace_source") or "").strip().lower() == "chat":
+                continue
             workspace_dir = str(meta.get("workspace_dir") or "").strip()
             if not workspace_dir:
                 continue
@@ -1002,6 +1004,9 @@ class ChatStorage:
         result = []
         for conversation in self.list_conversations():
             meta = conversation.get("meta") or {}
+            if str(meta.get("workspace_source") or "").strip().lower() == "chat":
+                result.append(conversation)
+                continue
             if str(meta.get("workspace_dir") or "").strip():
                 continue
             result.append(conversation)
@@ -1030,6 +1035,8 @@ class ChatStorage:
             rows = conn.execute("SELECT id, title, status, meta FROM conversations").fetchall()
             for row in rows:
                 meta = self._parse_json_dict(row["meta"])
+                if str(meta.get("workspace_source") or "").strip().lower() == "chat":
+                    continue
                 row_workspace = str(meta.get("workspace_dir") or "").strip()
                 if not row_workspace:
                     continue

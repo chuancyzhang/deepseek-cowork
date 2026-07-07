@@ -14328,9 +14328,12 @@ class MainWindow(QMainWindow):
             return []
 
         if not self._workspace_dir_for_state():
-            parent_dir = os.path.dirname(file_paths[0])
-            if parent_dir:
-                self.load_workspace(parent_dir)
+            state = self.get_current_session()
+            if state:
+                self._ensure_session_workspace(state)
+                if state.session_id == self.current_session_id:
+                    self._sync_workspace_ui_for_session(state.session_id, refresh_sidebar=False)
+                    self.normalize_session_ui(state)
 
         existing = self._current_prompt_files()
         self._set_prompt_files(existing + file_paths)
@@ -14510,12 +14513,9 @@ class MainWindow(QMainWindow):
         state.pending_tool_results = {}
         state.last_agent_bubble = None
         state.temp_thinking_bubble = None
+        state.displayed_render_count = 0
         self._rebuild_session_render_spans(state)
-        state.displayed_render_count = len(state.render_items)
-        if state.render_items:
-            self._render_session_history_spans(state, state.render_items)
-        else:
-            self._render_initial_session_history(state)
+        self._render_initial_session_history(state)
 
     def edit_user_message_inline(self, session_id, message_id, edited_text):
         session_id = str(session_id or "").strip()
@@ -16470,9 +16470,7 @@ class MainWindow(QMainWindow):
         state.empty_state = empty_state
         state.history_loaded = is_fresh_session
         self.sessions[session_id] = state
-        requested_workspace = workspace_dir if workspace_dir is not None else (
-            self._active_workspace_dir() if self._session_workspace_source() == "project" else ""
-        )
+        requested_workspace = workspace_dir if workspace_dir is not None else ""
         if self._normalize_project_path(requested_workspace):
             self._set_session_workspace(state, requested_workspace, source="project")
         elif is_fresh_session or workspace_dir is not None:
@@ -16567,6 +16565,17 @@ class MainWindow(QMainWindow):
             max(int(getattr(state, "displayed_render_count", 0) or 0), 0),
             len(state.render_items),
         )
+
+    def _sync_displayed_render_count_after_live_append(self, state, previous_render_count, previous_render_total):
+        if not state:
+            return
+        total = len(getattr(state, "render_items", []) or [])
+        previous = min(max(int(previous_render_count or 0), 0), max(int(previous_render_total or 0), 0))
+        if previous >= int(previous_render_total or 0):
+            state.displayed_render_count = total
+            return
+        added = max(0, total - int(previous_render_total or 0))
+        state.displayed_render_count = min(total, previous + added)
 
     def _render_session_history_spans(self, state, spans, insert_index=None):
         if not state or not spans:
@@ -17277,6 +17286,30 @@ class MainWindow(QMainWindow):
         state.persisted_conversation_meta = meta
         return normalized
 
+    def _bind_session_to_project(self, state, directory, *, allow_existing_content=False):
+        normalized = self._normalize_project_path(directory)
+        if not state or not normalized:
+            return ""
+        if not os.path.isdir(normalized):
+            QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
+            return ""
+        if not allow_existing_content and not self._project_selector_switch_allowed(state):
+            return ""
+        return self._set_session_workspace(state, normalized, source="project")
+
+    def _open_workspace_in_ui(self, directory, refresh_sidebar=True, remember_workspace=True, persist_default=True):
+        normalized = self._normalize_project_path(directory)
+        if normalized and not os.path.isdir(normalized):
+            QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
+            return False
+        self._apply_workspace_to_ui(
+            normalized,
+            refresh_sidebar=refresh_sidebar,
+            remember_workspace=remember_workspace,
+            persist_default=persist_default,
+        )
+        return True
+
     def _apply_workspace_to_ui(self, directory, refresh_sidebar=True, remember_workspace=False, persist_default=False):
         directory = self._normalize_project_path(directory)
         self.workspace_dir = directory
@@ -17385,7 +17418,7 @@ class MainWindow(QMainWindow):
             optimistic_ids = self.optimistic_history_session_ids
         optimistic_ids.add(session_id)
         workspace_dir = self._workspace_dir_for_state(state)
-        if workspace_dir:
+        if workspace_dir and self._session_workspace_source(state) == "project":
             self.project_preview_paths.add(workspace_dir)
         self.refresh_history_list()
 
@@ -17610,15 +17643,15 @@ class MainWindow(QMainWindow):
         self.current_project_path = normalized
         self.config_manager.upsert_project(normalized)
         state = self.get_current_session()
-        if not query_active and self._project_selector_switch_allowed(state):
-            self._set_session_workspace(state, normalized)
-            self._apply_workspace_to_ui(
+        if not query_active:
+            self._open_workspace_in_ui(
                 normalized,
                 refresh_sidebar=False,
                 remember_workspace=True,
                 persist_default=True,
             )
-            self.normalize_session_ui(state)
+            if state:
+                self.normalize_session_ui(state)
         was_visible = (
             normalized in self.project_preview_paths
             or normalized in self.project_full_expanded_paths
@@ -17645,8 +17678,7 @@ class MainWindow(QMainWindow):
             return False
         self.current_project_path = normalized
         self.config_manager.upsert_project(normalized)
-        self.load_workspace(normalized, refresh_sidebar=refresh_sidebar)
-        return True
+        return self.load_workspace(normalized, refresh_sidebar=refresh_sidebar)
 
     def add_project_from_dialog(self):
         directory = QFileDialog.getExistingDirectory(self, "添加项目")
@@ -17739,7 +17771,10 @@ class MainWindow(QMainWindow):
             return False
         if normalized:
             self.config_manager.upsert_project(normalized)
-            workspace_dir = self._set_session_workspace(state, normalized, source="project")
+            workspace_dir = self._bind_session_to_project(state, normalized)
+            if not workspace_dir:
+                self.refresh_project_selector()
+                return False
         else:
             workspace_dir = self._ensure_session_workspace(state)
         self._apply_workspace_to_ui(
@@ -18793,8 +18828,12 @@ class MainWindow(QMainWindow):
             workspace_dir = self._workspace_dir_for_state(session_state)
             if workspace_dir:
                 merged_meta["workspace_dir"] = workspace_dir
+                merged_meta["workspace_source"] = self._session_workspace_source(session_state) or (
+                    "chat" if self._is_chat_workspace_path(workspace_dir, session_id) else "project"
+                )
             else:
                 merged_meta.pop("workspace_dir", None)
+                merged_meta.pop("workspace_source", None)
             merged_meta["history_migration_version"] = HISTORY_MIGRATION_VERSION
             if session_id in self.sessions:
                 merged_meta.update(self._session_clarify_meta(self.sessions.get(session_id)))
@@ -19129,28 +19168,31 @@ class MainWindow(QMainWindow):
         if directory:
             self.config_manager.upsert_project(directory)
             if self.load_workspace(directory, refresh_sidebar=False):
-                state = self.get_current_session()
-                if state and state.messages:
-                    self.save_chat_history(session_id=state.session_id, flush=True)
                 self.refresh_history_list()
 
-    def load_workspace(self, directory, refresh_sidebar=True, session_id=None, remember_workspace=True, persist_default=True):
+    def load_workspace(
+        self,
+        directory,
+        refresh_sidebar=True,
+        session_id=None,
+        remember_workspace=True,
+        persist_default=True,
+        bind_session=False,
+    ):
         directory = self._normalize_project_path(directory)
         if directory and not os.path.isdir(directory):
             QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
             return False
-        target_state = self.get_session(session_id)
-        if session_id is None:
-            target_state = self.get_current_session()
-        if target_state:
-            self._set_session_workspace(target_state, directory)
-        self._apply_workspace_to_ui(
+        if bind_session:
+            target_state = self.get_session(session_id) if session_id else self.get_current_session()
+            if not self._bind_session_to_project(target_state, directory):
+                return False
+        return self._open_workspace_in_ui(
             directory,
             refresh_sidebar=refresh_sidebar,
             remember_workspace=remember_workspace,
             persist_default=persist_default,
         )
-        return True
 
     def _set_deliverable_controls_enabled(self, path=""):
         path = path or ""
@@ -21646,12 +21688,18 @@ class MainWindow(QMainWindow):
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
         state.active_turn_id += 1
+        previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
+        previous_render_total = len(getattr(state, "render_items", []) or [])
         state.messages.append(message_payload)
         self._rebuild_session_render_spans(state)
         # Keep rendered-count in sync for live messages; otherwise load-more
         # may re-render freshly added items as if they were unseen history.
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
-        state.displayed_render_count = len(state.render_items)
+        self._sync_displayed_render_count_after_live_append(
+            state,
+            previous_render_count,
+            previous_render_total,
+        )
         self.save_chat_history(session_id=state.session_id)
         self.update_session_tab_title(state.session_id)
         run_mode = RUN_MODE_EXECUTION
@@ -23173,6 +23221,8 @@ class MainWindow(QMainWindow):
             return
         state.turn_steerable = False
         previous_message_count = len(state.messages)
+        previous_render_count = int(getattr(state, "displayed_render_count", 0) or 0)
+        previous_render_total = len(getattr(state, "render_items", []) or [])
         if turn_id is not None:
             if turn_id != state.active_turn_id:
                 log_ppt_agent_debug(
@@ -23365,7 +23415,11 @@ class MainWindow(QMainWindow):
         if len(state.messages) > previous_message_count:
             newly_rendered = len(state.messages) - previous_message_count
             state.displayed_count = min(len(state.messages), state.displayed_count + newly_rendered)
-        state.displayed_render_count = len(state.render_items)
+        self._sync_displayed_render_count_after_live_append(
+            state,
+            previous_render_count,
+            previous_render_total,
+        )
         self.save_chat_history(session_id=state.session_id)
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""

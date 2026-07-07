@@ -1,7 +1,7 @@
 import html
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 
 DELIVERABLE_TYPES = {
@@ -33,9 +33,9 @@ OFFICE_EXTENSIONS = {
     ".xlsx": "excel",
 }
 _PATH_PATTERN = re.compile(
-    r"(?P<path>(?:[A-Za-z]:[\\/]|\\\\)[^\r\n<>\"|?*]*?"
+    r"(?P<path>(?:file://|/?[A-Za-z]:[\\/]|\\\\)[^\r\n<>\"|?*]*?"
     r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.bmp|\.md))"
-    r"(?=$|[\s\]\[(){}，。；：、,;:!?！？'\"`])",
+    r"(?=$|[\s\]\[(){}<>，。；：、,;:!?！？'\"`])",
     re.IGNORECASE,
 )
 _MARKDOWN_CODE_PATTERN = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
@@ -46,8 +46,28 @@ def _mask_markdown_code(text):
     return _MARKDOWN_CODE_PATTERN.sub(lambda match: " " * len(match.group(0)), value)
 
 
+def _coerce_local_path(path):
+    raw = unquote(str(path or "").strip()).strip("<>\"'")
+    if not raw:
+        return ""
+    if raw.lower().startswith("cowork-file:"):
+        raw = unquote(raw[len("cowork-file:"):]).strip()
+    if raw.lower().startswith("file://"):
+        parsed = urlparse(raw)
+        if parsed.netloc:
+            if re.fullmatch(r"[A-Za-z]:", parsed.netloc):
+                raw = parsed.netloc + parsed.path
+            else:
+                raw = "\\\\" + parsed.netloc + parsed.path.replace("/", "\\")
+        else:
+            raw = parsed.path
+    if re.match(r"^/[A-Za-z]:[\\/]", raw):
+        raw = raw[1:]
+    return raw
+
+
 def normalize_workspace_file(path, workspace_dir):
-    candidate = os.path.abspath(os.path.normpath(str(path or "").strip()))
+    candidate = os.path.abspath(os.path.normpath(_coerce_local_path(path)))
     workspace = os.path.abspath(os.path.normpath(str(workspace_dir or "").strip()))
     if not candidate or not workspace or not os.path.isfile(candidate):
         return ""
@@ -74,10 +94,19 @@ def iter_workspace_file_paths(text, workspace_dir):
 
 
 def linkify_workspace_paths_in_html(html_text, workspace_dir):
-    """Link supported paths in text nodes while leaving code and existing anchors intact."""
+    """Link supported paths in text nodes and local-file anchors."""
     from bs4 import BeautifulSoup, NavigableString
 
     soup = BeautifulSoup(str(html_text or ""), "html.parser")
+    for anchor in soup.find_all("a"):
+        href = str(anchor.get("href") or "").strip()
+        if not href or re.match(r"^(?:https?|mailto|tel|cowork-file):", href, re.IGNORECASE):
+            continue
+        path = normalize_workspace_file(href, workspace_dir)
+        if not path:
+            continue
+        anchor["href"] = "cowork-file:" + quote(path, safe="")
+        anchor["data-cowork-path"] = path
     for node in list(soup.find_all(string=True)):
         if not isinstance(node, NavigableString):
             continue

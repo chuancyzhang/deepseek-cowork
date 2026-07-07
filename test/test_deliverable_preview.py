@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from urllib.parse import quote
 
 from core.deliverable_preview import (
     DELIVERABLE_TYPES,
@@ -14,6 +15,14 @@ from core.deliverable_preview import (
 
 
 class TestDeliverablePreviewHelpers(unittest.TestCase):
+    def _markdown_href(self, path, encode=False):
+        href = os.path.normpath(path).replace("\\", "/")
+        if len(href) >= 3 and href[1:3] == ":/":
+            href = "/" + href
+        if encode:
+            href = quote(href, safe="/:")
+        return href
+
     def test_supports_modern_and_legacy_office_formats(self):
         for extension in (".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"):
             self.assertIn(extension, DELIVERABLE_TYPES)
@@ -80,6 +89,66 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
 
             self.assertIn("cowork-file:", rendered)
             self.assertIn('data-cowork-path=', rendered)
+
+    def test_finds_markdown_link_target_with_leading_windows_slash(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "deck.pptx")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+
+            text = f"[deck](<{self._markdown_href(path)}>)"
+            matches = iter_workspace_file_paths(text, workspace)
+
+            self.assertEqual([item[2] for item in matches], [os.path.normpath(path)])
+
+    def test_rewrites_existing_markdown_file_anchor_to_preview_link(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "deck.pptx")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+
+            rendered = linkify_workspace_paths_in_html(
+                f'<p><a href="{self._markdown_href(path)}">deck</a></p>',
+                workspace,
+            )
+
+            self.assertIn('href="cowork-file:', rendered)
+            self.assertIn(">deck</a>", rendered)
+            self.assertIn('data-cowork-path=', rendered)
+
+    def test_rewrites_url_encoded_anchor_with_spaces_and_cjk(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            path = os.path.join(workspace, "交付 报告.pptx")
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+
+            rendered = linkify_workspace_paths_in_html(
+                f'<p><a href="{self._markdown_href(path, encode=True)}">交付报告</a></p>',
+                workspace,
+            )
+
+            self.assertIn("cowork-file:", rendered)
+            self.assertIn("交付报告", rendered)
+
+    def test_does_not_rewrite_external_missing_or_unsupported_anchors(self):
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
+            outside_path = os.path.join(outside, "outside.pptx")
+            unsupported_path = os.path.join(workspace, "notes.txt")
+            missing_path = os.path.join(workspace, "missing.pptx")
+            for path in (outside_path, unsupported_path):
+                with open(path, "wb") as handle:
+                    handle.write(b"x")
+            source = (
+                '<p><a href="https://example.com/report.pptx">web</a>'
+                f'<a href="{self._markdown_href(outside_path)}">outside</a>'
+                f'<a href="{self._markdown_href(unsupported_path)}">txt</a>'
+                f'<a href="{self._markdown_href(missing_path)}">missing</a></p>'
+            )
+
+            rendered = linkify_workspace_paths_in_html(source, workspace)
+
+            self.assertNotIn("cowork-file:", rendered)
+            self.assertIn("https://example.com/report.pptx", rendered)
 
     def test_renders_docx_preview_without_microsoft_office(self):
         from docx import Document

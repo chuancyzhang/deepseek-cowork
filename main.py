@@ -182,7 +182,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox)
+                               QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
 
@@ -1703,6 +1703,102 @@ def apple_checkable_list_style(radius=14, bg=None, padding=6):
         f"QListWidget::indicator:checked {{ background: {checked_bg}; border: 1px solid {checked_border}; border-radius: 6px; }}"
         f"QListWidget::indicator:checked:hover {{ background: {rgba_from_hex(DesignTokens.primary, 0.16)}; border-color: {DesignTokens.primary}; }}"
     )
+
+
+class AppleCheckableListDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None, row_height=44):
+        super().__init__(parent)
+        self.row_height = int(row_height or 44)
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), self.row_height))
+        return size
+
+    def _alpha_color(self, color, alpha):
+        result = QColor(color)
+        result.setAlpha(int(alpha))
+        return result
+
+    def paint(self, painter, option, index):
+        painter.save()
+        try:
+            rect = option.rect.adjusted(6, 3, -6, -3)
+            checked = index.data(Qt.CheckStateRole) == Qt.Checked
+            hovered = bool(option.state & QStyle.State_MouseOver)
+
+            if checked:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self._alpha_color(DesignTokens.primary, 22 if not hovered else 34))
+                painter.drawRoundedRect(rect, 10, 10)
+            elif hovered:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(self._alpha_color(DesignTokens.primary, 10))
+                painter.drawRoundedRect(rect, 10, 10)
+
+            box_size = 20
+            box_rect = QRect(
+                rect.left() + 12,
+                rect.top() + max((rect.height() - box_size) // 2, 0),
+                box_size,
+                box_size,
+            )
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            if checked:
+                painter.setPen(QPen(QColor(DesignTokens.primary), 1.2))
+                painter.setBrush(QColor(DesignTokens.primary))
+            else:
+                painter.setPen(QPen(self._alpha_color(DesignTokens.text_tertiary, 160), 1.2))
+                painter.setBrush(QColor(255, 255, 255, 245))
+            painter.drawRoundedRect(box_rect, 6, 6)
+
+            if checked:
+                check_pen = QPen(QColor("white"), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                painter.setPen(check_pen)
+                p1 = QPoint(box_rect.left() + 5, box_rect.center().y())
+                p2 = QPoint(box_rect.left() + 9, box_rect.bottom() - 6)
+                p3 = QPoint(box_rect.right() - 5, box_rect.top() + 6)
+                painter.drawLine(p1, p2)
+                painter.drawLine(p2, p3)
+
+            text_rect = rect.adjusted(44, 0, -12, 0)
+            text = str(index.data(Qt.DisplayRole) or "")
+            metrics = QFontMetrics(option.font)
+            elided = metrics.elidedText(text, Qt.ElideRight, max(text_rect.width(), 20))
+            painter.setPen(QColor(DesignTokens.text_primary))
+            painter.setFont(option.font)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
+        finally:
+            painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if not (index.flags() & Qt.ItemIsUserCheckable):
+            return super().editorEvent(event, model, option, index)
+        if event.type() == QEvent.MouseButtonRelease:
+            if hasattr(event, "button") and event.button() != Qt.LeftButton:
+                return False
+            self._toggle(model, index)
+            return True
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self._toggle(model, index)
+            return True
+        return super().editorEvent(event, model, option, index)
+
+    def _toggle(self, model, index):
+        current = index.data(Qt.CheckStateRole)
+        next_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+        model.setData(index, next_state, Qt.CheckStateRole)
+
+
+def apply_apple_checkable_list_behavior(list_widget, radius=14, bg=None, padding=6, row_height=44):
+    list_widget.setStyleSheet(apple_list_style(border=True, bg=bg or DesignTokens.bg_card, radius=radius, padding=padding))
+    list_widget.setItemDelegate(AppleCheckableListDelegate(list_widget, row_height=row_height))
+    list_widget.setSelectionMode(QAbstractItemView.NoSelection)
+    list_widget.setMouseTracking(True)
+    list_widget.viewport().setMouseTracking(True)
+    list_widget.setUniformItemSizes(False)
+    list_widget.setAlternatingRowColors(False)
+    return list_widget
 
 
 def skill_center_tab_key(skill):
@@ -3797,9 +3893,7 @@ class AgentProfileManager(QWidget):
         skills_label.setStyleSheet(apple_settings_section_title_style())
         editor_layout.addWidget(skills_label)
         self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(
-            apple_checkable_list_style(radius=14, bg=DesignTokens.bg_panel_strong, padding=4)
-        )
+        apply_apple_checkable_list_behavior(self.skill_list, radius=14, bg=DesignTokens.bg_panel_strong, padding=4)
         self.skill_list.itemChanged.connect(lambda _item: self._sync_current_profile_from_fields())
         editor_layout.addWidget(self.skill_list, 1)
 
@@ -4088,7 +4182,7 @@ class AutomationTaskDialog(QDialog):
         skills_layout.addWidget(skills_label)
         self.skill_list = QListWidget()
         self.skill_list.setFixedHeight(140)
-        self.skill_list.setStyleSheet(apple_list_style(border=True, bg=DesignTokens.bg_main, radius=14, padding=4))
+        apply_apple_checkable_list_behavior(self.skill_list, radius=14, bg=DesignTokens.bg_main, padding=4)
         for skill in self.skills:
             name = str(skill.get("name") or "").strip()
             if not name:
@@ -7441,7 +7535,7 @@ class SessionSkillPickerDialog(QDialog):
         layout.addWidget(subtitle)
 
         self.skill_list = QListWidget()
-        self.skill_list.setStyleSheet(apple_checkable_list_style(radius=14, bg=DesignTokens.bg_card, padding=6))
+        apply_apple_checkable_list_behavior(self.skill_list, radius=14, bg=DesignTokens.bg_card, padding=6)
         selected = set(self._selected_skill_names)
         for skill in self.skills:
             name = str(skill.get("name") or "").strip()
@@ -7638,7 +7732,7 @@ class ConversationSkillRangeDialog(QDialog):
         layout.addWidget(subtitle)
 
         self.message_list = QListWidget()
-        self.message_list.setStyleSheet(apple_checkable_list_style(radius=14, bg=DesignTokens.bg_card, padding=6))
+        apply_apple_checkable_list_behavior(self.message_list, radius=14, bg=DesignTokens.bg_card, padding=6)
         for index, message in enumerate(self.messages):
             role = str(message.get("role") or "unknown").strip()
             content = str(message.get("content") or "").strip()

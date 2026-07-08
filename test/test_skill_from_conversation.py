@@ -348,6 +348,68 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertTrue(dialog.strategy_label.isHidden())
         self.assertTrue(dialog.strategy_combo.isHidden())
 
+    def test_conversation_skill_range_uses_clear_checkable_selection(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+        dialog = main.ConversationSkillRangeDialog(
+            [
+                {"role": "user", "content": "沉淀这个流程"},
+                {
+                    "role": "assistant",
+                    "content": "自动技能上下文",
+                    "meta": {"kind": "skill_context", "source": "skill_prompt"},
+                },
+                {"role": "assistant", "content": "这是可复用经验"},
+            ]
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        self.assertIsInstance(dialog.message_list.itemDelegate(), main.AppleCheckableListDelegate)
+        self.assertEqual(dialog.message_list.selectionMode(), main.QAbstractItemView.NoSelection)
+        self.assertEqual(len(dialog.selected_messages()), 2)
+        self.assertIn("已选择 2 条消息", dialog.selection_hint.text())
+
+        dialog.message_list.item(0).setCheckState(main.Qt.Unchecked)
+        self.assertEqual(len(dialog.selected_messages()), 1)
+        self.assertIn("已选择 1 条消息", dialog.selection_hint.text())
+
+    def test_session_skill_picker_uses_clear_checkable_selection(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtTest import QTest
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+        dialog = main.SessionSkillPickerDialog(
+            [
+                {"name": "alpha-skill", "description": "Alpha"},
+                {"name": "beta-skill", "description": "Beta"},
+            ],
+            selected_skill_names=["alpha-skill"],
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        self.assertIsInstance(dialog.skill_list.itemDelegate(), main.AppleCheckableListDelegate)
+        self.assertEqual(dialog.skill_list.selectionMode(), main.QAbstractItemView.NoSelection)
+        self.assertEqual(dialog.selected_skill_names(), ["alpha-skill"])
+
+        dialog.skill_list.item(1).setCheckState(main.Qt.Checked)
+        self.assertEqual(dialog.selected_skill_names(), ["alpha-skill", "beta-skill"])
+        self.assertIn("当前已指定 2 个能力", dialog.selection_hint.text())
+
+        dialog.clear_selection()
+        dialog.show()
+        app.processEvents()
+        item_rect = dialog.skill_list.visualItemRect(dialog.skill_list.item(0))
+        QTest.mouseClick(dialog.skill_list.viewport(), main.Qt.LeftButton, pos=item_rect.center())
+        app.processEvents()
+        self.assertEqual(dialog.selected_skill_names(), ["alpha-skill"])
+
 
 if __name__ == "__main__":
     unittest.main()

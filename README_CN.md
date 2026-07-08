@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 5. 在 **技能中心** 启用需要的可选能力，或通过 `install_agent_skill` 安装符合标准的 Agent Skill；腾讯文档、飞书文档、钉钉文档已作为三套独立文档 skill 内置，工作台可查看凭据配置、只读文件、Tool 调试和脚本入口。
 6. 需要完整 PPT 工作流时，从首页卡片或侧栏 **智能体 → PPT Agent** 打开内置 PPT Agent，填写需求，选择自动或偏好策略，可附加资料和 PPTX 模板。
 7. 用右侧抽屉浏览文件、预览交付物、转换 HTML 工作稿并查看工具执行过程。
-8. 当某段流程有复用价值时，用 **记忆** 或 **沉淀为 Skill** 固化下来。
+8. 当某段流程有复用价值时，用 **记忆** 或 **沉淀为 Skill** 固化下来；Skill 沉淀流程会先选择会话片段、审阅草稿，再创建新用户 Skill 或追加到可编辑 Skill。
 
 ## 架构入口
 

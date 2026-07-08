@@ -142,7 +142,7 @@ There are two main update paths:
 - **Structured capture**: append reusable lessons into `experience/entries.jsonl`
 - **Manual consolidation**: sync high-value guidance back into `SKILL.md`
 
-For conversation-derived work, **沉淀为 Skill** is the review gate. It turns a selected conversation segment into a draft, lets the user edit it, and then writes the final skill files.
+For conversation-derived work, **沉淀为 Skill** is the review gate. It lets the user choose source messages, turns the selected segment into a draft, lets the user edit the draft, then creates a new user skill or appends structured lessons to an editable existing skill before hot-reloading discovery.
 
 ## 9. Compatibility
 

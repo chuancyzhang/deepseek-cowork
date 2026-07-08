@@ -59,7 +59,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 ### 3.5 记忆与沉淀
 
 - Memory Center 维护长期摘要
-- “沉淀为 Skill”把会话片段转成技能草稿
+- “沉淀为 Skill”把用户选择的会话片段转成可审阅草稿，并支持创建新用户 Skill 或追加到可编辑 Skill
 - 技能支持导入、安装标准 Agent Skill、导出、调试和热加载
 
 ## 4. 典型使用流程

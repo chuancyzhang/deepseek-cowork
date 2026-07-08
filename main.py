@@ -353,6 +353,7 @@ GATEWAY_START_SETTLE_DELAY_MS = 1200
 STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
 PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
+CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
 
@@ -413,6 +414,20 @@ def log_ppt_agent_debug(stage, **fields):
         payload.update(fields or {})
         append_background_process_log(
             PPT_AGENT_DEBUG_LOG_FILENAME,
+            json.dumps(payload, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        pass
+
+
+def log_conversation_skill_capture(stage, **fields):
+    if not runtime_debug_logging_enabled():
+        return
+    try:
+        payload = {"stage": stage}
+        payload.update(fields or {})
+        append_background_process_log(
+            CONVERSATION_SKILL_LOG_FILENAME,
             json.dumps(payload, ensure_ascii=False, default=str),
         )
     except Exception:
@@ -795,6 +810,75 @@ def apple_code_edit_style(bg=None, radius=12, subtle=False, padding=9):
             font-size: 11px;
             padding: {padding}px;
             line-height: 1.45;
+        }}
+    """
+
+
+def apple_input_style(radius=12, padding=8):
+    return f"""
+        QLineEdit {{
+            background: {DesignTokens.bg_card};
+            border: 1px solid {DesignTokens.border};
+            border-radius: {radius}px;
+            padding: {padding}px 10px;
+            color: {DesignTokens.text_primary};
+        }}
+        QLineEdit:focus {{
+            border-color: {DesignTokens.primary};
+            background: white;
+        }}
+        QLineEdit:disabled {{
+            color: {DesignTokens.text_tertiary};
+            background: {DesignTokens.bg_secondary};
+        }}
+    """
+
+
+def apple_combo_style(radius=12, padding=8):
+    return f"""
+        QComboBox {{
+            background: {DesignTokens.bg_card};
+            border: 1px solid {DesignTokens.border};
+            border-radius: {radius}px;
+            padding: {padding}px 10px;
+            color: {DesignTokens.text_primary};
+        }}
+        QComboBox:hover {{
+            border-color: {DesignTokens.border_strong};
+        }}
+        QComboBox:focus {{
+            border-color: {DesignTokens.primary};
+            background: white;
+        }}
+        QComboBox:disabled {{
+            color: {DesignTokens.text_tertiary};
+            background: {DesignTokens.bg_secondary};
+        }}
+    """
+
+
+def apple_tab_style():
+    return f"""
+        QTabWidget::pane {{
+            border: none;
+            background: transparent;
+        }}
+        QTabBar::tab {{
+            background: transparent;
+            border: none;
+            border-radius: 11px;
+            padding: 7px 14px;
+            margin-right: 4px;
+            color: {DesignTokens.text_secondary};
+            font-weight: 600;
+        }}
+        QTabBar::tab:hover {{
+            background: rgba(255, 255, 255, 0.72);
+            color: {DesignTokens.text_primary};
+        }}
+        QTabBar::tab:selected {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.primary};
         }}
     """
 
@@ -7421,6 +7505,360 @@ class SessionSkillPickerDialog(QDialog):
             self.selection_hint.setText("当前未指定额外能力，将继续使用默认自动匹配。")
 
 
+def _conversation_skill_text_list(text):
+    values = []
+    for line in str(text or "").replace(",", "\n").splitlines():
+        item = line.strip()
+        if item and item not in values:
+            values.append(item)
+    return values
+
+
+class ConversationSkillOptionsDialog(QDialog):
+    def __init__(self, skills, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("沉淀为 Skill")
+        self.resize(600, 420)
+        self.skills = [
+            skill for skill in (skills or [])
+            if isinstance(skill, dict) and str(skill.get("name") or "").strip()
+        ]
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("沉淀为 Skill")
+        title.setProperty("roleTitle", True)
+        subtitle = QLabel("把当前会话中可复用的经验保存为长期能力。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        mode_group, mode_layout = build_settings_surface("保存方式", "", radius=18, show_subtitle=False)
+        mode_form = QFormLayout()
+        configure_responsive_form_layout(mode_form)
+        mode_form.setSpacing(12)
+        mode_layout.addLayout(mode_form)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("创建新 Skill", "create")
+        self.mode_combo.addItem("更新已有 Skill", "update")
+        self.mode_combo.setStyleSheet(apple_combo_style())
+        mode_form.addRow(build_form_row_label("方式"), self.mode_combo)
+
+        self.target_combo = QComboBox()
+        self.target_combo.setStyleSheet(apple_combo_style())
+        editable_count = 0
+        for skill in self.skills:
+            name = str(skill.get("name") or "").strip()
+            manager = getattr(parent, "skill_manager", None)
+            if manager is not None and not manager.is_skill_editable(name):
+                continue
+            editable_count += 1
+            self.target_combo.addItem(readable_skill_name(skill) or name, name)
+        mode_form.addRow(build_form_row_label("目标 Skill"), self.target_combo)
+
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItem("追加结构化经验", "append")
+        self.strategy_combo.addItem("重写 Skill 说明", "rewrite")
+        self.strategy_combo.setStyleSheet(apple_combo_style())
+        mode_form.addRow(build_form_row_label("更新策略"), self.strategy_combo)
+        layout.addWidget(mode_group)
+
+        hint = QLabel("创建新 Skill 适合沉淀新流程；更新已有 Skill 适合把这次经验追加到同一能力包。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(apple_caption_style())
+        layout.addWidget(hint)
+        layout.addStretch()
+
+        actions = QHBoxLayout()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        next_btn = QPushButton("继续")
+        next_btn.setObjectName("PrimaryBtn")
+        next_btn.clicked.connect(self._accept_if_valid)
+        actions.addStretch()
+        actions.addWidget(cancel_btn)
+        actions.addWidget(next_btn)
+        layout.addLayout(actions)
+
+        self.mode_combo.currentIndexChanged.connect(self._sync_mode_controls)
+        if not editable_count:
+            self.mode_combo.model().item(1).setEnabled(False)
+        self._sync_mode_controls()
+
+    def _sync_mode_controls(self):
+        updating = self.mode_combo.currentData() == "update"
+        self.target_combo.setEnabled(updating)
+        self.strategy_combo.setEnabled(updating)
+
+    def _accept_if_valid(self):
+        if self.mode_combo.currentData() == "update" and not self.target_combo.currentData():
+            QMessageBox.warning(self, "无法更新", "当前没有可编辑的用户 Skill。")
+            return
+        self.accept()
+
+    def selected_options(self):
+        mode = self.mode_combo.currentData() or "create"
+        return {
+            "mode": mode,
+            "target_skill": self.target_combo.currentData() if mode == "update" else "",
+            "update_strategy": self.strategy_combo.currentData() if mode == "update" else "append",
+        }
+
+
+class ConversationSkillRangeDialog(QDialog):
+    def __init__(self, messages, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择会话片段")
+        self.resize(720, 560)
+        self.messages = [message for message in (messages or []) if isinstance(message, dict)]
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("选择要沉淀的内容")
+        title.setProperty("roleTitle", True)
+        subtitle = QLabel("只选择真正可复用的片段，自动注入的 Skill 上下文默认不会被选中。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.message_list = QListWidget()
+        self.message_list.setStyleSheet(apple_checkable_list_style(radius=14, bg=DesignTokens.bg_card, padding=6))
+        for index, message in enumerate(self.messages):
+            role = str(message.get("role") or "unknown").strip()
+            content = str(message.get("content") or "").strip()
+            if not content and message.get("tool_calls"):
+                content = "[tool_calls]"
+            first_line = re.sub(r"\s+", " ", content)[:160] or "无文本内容"
+            item = QListWidgetItem(f"{index + 1}. {role}  ·  {first_line}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            selected = role in {"user", "assistant", "tool"} and not is_auto_query_skill_context_message(message)
+            item.setCheckState(Qt.Checked if selected else Qt.Unchecked)
+            item.setData(Qt.UserRole, index)
+            item.setToolTip(content[:1000])
+            self.message_list.addItem(item)
+        layout.addWidget(self.message_list, 1)
+
+        self.selection_hint = QLabel("")
+        self.selection_hint.setStyleSheet(apple_caption_style())
+        layout.addWidget(self.selection_hint)
+
+        actions = QHBoxLayout()
+        all_btn = QPushButton("全选")
+        all_btn.setObjectName("SecondaryBtn")
+        all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
+        none_btn = QPushButton("清空")
+        none_btn.setObjectName("SecondaryBtn")
+        none_btn.clicked.connect(lambda: self._set_all(Qt.Unchecked))
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        next_btn = QPushButton("生成草稿")
+        next_btn.setObjectName("PrimaryBtn")
+        next_btn.clicked.connect(self._accept_if_valid)
+        actions.addWidget(all_btn)
+        actions.addWidget(none_btn)
+        actions.addStretch()
+        actions.addWidget(cancel_btn)
+        actions.addWidget(next_btn)
+        layout.addLayout(actions)
+
+        self.message_list.itemChanged.connect(lambda *_: self.refresh_selection_hint())
+        self.refresh_selection_hint()
+
+    def _set_all(self, state):
+        for index in range(self.message_list.count()):
+            self.message_list.item(index).setCheckState(state)
+        self.refresh_selection_hint()
+
+    def selected_messages(self):
+        selected = []
+        for index in range(self.message_list.count()):
+            item = self.message_list.item(index)
+            if item.checkState() == Qt.Checked:
+                message_index = item.data(Qt.UserRole)
+                if isinstance(message_index, int) and 0 <= message_index < len(self.messages):
+                    selected.append(self.messages[message_index])
+        return selected
+
+    def refresh_selection_hint(self):
+        count = len(self.selected_messages())
+        self.selection_hint.setText(f"已选择 {count} 条消息。")
+
+    def _accept_if_valid(self):
+        if not self.selected_messages():
+            QMessageBox.warning(self, "无法生成", "请至少选择一条会话消息。")
+            return
+        self.accept()
+
+
+class ConversationSkillPreviewDialog(QDialog):
+    def __init__(self, draft, mode="create", target_skill=None, update_strategy="append", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("确认 Skill 草稿")
+        self.resize(820, 680)
+        self._draft = dict(draft or {})
+        self.mode = mode or "create"
+        self.target_skill = target_skill or ""
+        self.update_strategy = update_strategy or "append"
+        self.script_asset_checks = []
+        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("确认 Skill 草稿")
+        title.setProperty("roleTitle", True)
+        subtitle_text = "保存前可以编辑模型提炼的内容。"
+        if self.mode == "update":
+            subtitle_text = f"即将更新 {self.target_skill}，策略：{'重写说明' if self.update_strategy == 'rewrite' else '追加经验'}。"
+        subtitle = QLabel(subtitle_text)
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(apple_tab_style())
+        self._build_basic_tab()
+        self._build_guidance_tab()
+        self._build_script_tab()
+        layout.addWidget(self.tabs, 1)
+
+        actions = QHBoxLayout()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("保存 Skill")
+        save_btn.setObjectName("PrimaryBtn")
+        save_btn.clicked.connect(self._accept_if_valid)
+        actions.addStretch()
+        actions.addWidget(cancel_btn)
+        actions.addWidget(save_btn)
+        layout.addLayout(actions)
+
+    def _build_basic_tab(self):
+        tab = QWidget()
+        layout = QFormLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+        self.name_input = QLineEdit(str(self._draft.get("skill_name") or ""))
+        self.name_input.setStyleSheet(apple_input_style())
+        self.name_input.setEnabled(self.mode == "create")
+        self.description_input = QLineEdit(str(self._draft.get("description") or ""))
+        self.description_input.setStyleSheet(apple_input_style())
+        self.description_cn_input = QLineEdit(str(self._draft.get("description_cn") or ""))
+        self.description_cn_input.setStyleSheet(apple_input_style())
+        self.tags_edit = QTextEdit("\n".join(_conversation_skill_text_list(self._draft.get("tags"))))
+        self.tags_edit.setFixedHeight(82)
+        self.tags_edit.setStyleSheet(apple_code_edit_style(subtle=True))
+        self.triggers_edit = QTextEdit("\n".join(_conversation_skill_text_list(self._draft.get("triggers"))))
+        self.triggers_edit.setFixedHeight(82)
+        self.triggers_edit.setStyleSheet(apple_code_edit_style(subtle=True))
+        layout.addRow(build_form_row_label("Skill 名称"), self.name_input)
+        layout.addRow(build_form_row_label("英文说明"), self.description_input)
+        layout.addRow(build_form_row_label("中文说明"), self.description_cn_input)
+        layout.addRow(build_form_row_label("标签"), self.tags_edit)
+        layout.addRow(build_form_row_label("触发词"), self.triggers_edit)
+        self.tabs.addTab(tab, "基础")
+
+    def _build_guidance_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+        self.usage_edit = QTextEdit(str(self._draft.get("usage_guidelines") or ""))
+        self.usage_edit.setStyleSheet(apple_code_edit_style(subtle=True))
+        self.experience_edit = QTextEdit("\n".join(_conversation_skill_text_list(self._draft.get("experience_items"))))
+        self.experience_edit.setStyleSheet(apple_code_edit_style(subtle=True))
+        self.workflow_edit = QTextEdit("\n".join(_conversation_skill_text_list(self._draft.get("workflow"))))
+        self.workflow_edit.setStyleSheet(apple_code_edit_style(subtle=True))
+        layout.addWidget(QLabel("使用指南"))
+        layout.addWidget(self.usage_edit, 1)
+        layout.addWidget(QLabel("经验条目（每行一条）"))
+        layout.addWidget(self.experience_edit, 1)
+        layout.addWidget(QLabel("推荐流程（每行一步）"))
+        layout.addWidget(self.workflow_edit, 1)
+        self.tabs.addTab(tab, "经验")
+
+    def _build_script_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        self.impl_edit = QTextEdit(str(self._draft.get("impl_py") or ""))
+        self.impl_edit.setStyleSheet(apple_code_edit_style(subtle=True))
+        layout.addWidget(QLabel("impl.py（可选）"))
+        layout.addWidget(self.impl_edit, 1)
+
+        assets = self._draft.get("script_assets") or []
+        asset_label = QLabel("脚本资产（勾选后保存到 scripts/）")
+        asset_label.setStyleSheet(apple_caption_style())
+        layout.addWidget(asset_label)
+        if assets:
+            for asset in assets:
+                if not isinstance(asset, dict):
+                    continue
+                check = QCheckBox(f"{asset.get('name') or asset.get('path') or 'script'}  ·  {asset.get('path') or ''}")
+                check.setChecked(bool(asset.get("selected", True)))
+                check.setToolTip(str(asset.get("result_excerpt") or asset.get("description") or ""))
+                check._conversation_skill_asset = asset
+                self.script_asset_checks.append(check)
+                layout.addWidget(check)
+        else:
+            empty = QLabel("当前片段没有捕获到可保存脚本。")
+            empty.setStyleSheet(apple_caption_style())
+            layout.addWidget(empty)
+        self.tabs.addTab(tab, "脚本")
+
+    def _accept_if_valid(self):
+        draft = self.draft()
+        if self.mode == "create" and not draft.get("skill_name"):
+            QMessageBox.warning(self, "无法保存", "Skill 名称不能为空。")
+            return
+        if self.mode == "create" and not re.match(r"^[A-Za-z0-9][A-Za-z0-9-]*$", draft.get("skill_name") or ""):
+            QMessageBox.warning(self, "无法保存", "Skill 名称只能包含英文字母、数字和连字符。")
+            return
+        ok, error = validate_impl_py(draft.get("impl_py") or "")
+        if not ok:
+            QMessageBox.warning(self, "无法保存", error)
+            return
+        if self.mode == "update" and self.update_strategy == "append" and not draft.get("experience_items"):
+            QMessageBox.warning(self, "无法保存", "追加经验时至少保留一条经验条目。")
+            return
+        self.accept()
+
+    def draft(self):
+        selected_assets = []
+        for check in self.script_asset_checks:
+            if check.isChecked():
+                selected_assets.append(dict(getattr(check, "_conversation_skill_asset", {}) or {}))
+        return {
+            **self._draft,
+            "mode": self.mode,
+            "skill_name": self.target_skill if self.mode == "update" else self.name_input.text().strip(),
+            "description": self.description_input.text().strip(),
+            "description_cn": self.description_cn_input.text().strip(),
+            "usage_guidelines": self.usage_edit.toPlainText().strip(),
+            "tags": _conversation_skill_text_list(self.tags_edit.toPlainText()),
+            "triggers": _conversation_skill_text_list(self.triggers_edit.toPlainText()),
+            "workflow": _conversation_skill_text_list(self.workflow_edit.toPlainText()),
+            "experience_items": _conversation_skill_text_list(self.experience_edit.toPlainText()),
+            "impl_py": self.impl_edit.toPlainText().strip(),
+            "script_assets": selected_assets,
+        }
+
+
 class DragOverlay(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -12113,11 +12551,25 @@ class ConversationSkillDraftWorker(QThread):
     def run(self):
         try:
             if not self.messages:
+                log_conversation_skill_capture(
+                    "draft_skipped_empty_messages",
+                    session_id=self.session_id,
+                    mode=self.mode,
+                    target_skill=self.target_skill,
+                )
                 self.finished_signal.emit({
                     "ok": False,
                     "error": "当前会话没有可沉淀的消息。",
                 })
                 return
+            log_conversation_skill_capture(
+                "draft_started",
+                session_id=self.session_id,
+                mode=self.mode,
+                target_skill=self.target_skill,
+                update_strategy=self.update_strategy,
+                message_count=len(self.messages),
+            )
             self.progress_signal.emit("正在整理当前会话记录")
             transcript = render_session_transcript(
                 self.session_id,
@@ -12136,6 +12588,14 @@ class ConversationSkillDraftWorker(QThread):
                 fallback_title=self.title,
             )
             draft["script_assets"] = extract_python_script_assets(self.messages)
+            log_conversation_skill_capture(
+                "draft_finished",
+                session_id=self.session_id,
+                mode=self.mode,
+                target_skill=self.target_skill,
+                skill_name=draft.get("skill_name"),
+                script_asset_count=len(draft.get("script_assets") or []),
+            )
             self.finished_signal.emit({
                 "ok": True,
                 "draft": draft,
@@ -12144,6 +12604,13 @@ class ConversationSkillDraftWorker(QThread):
                 "update_strategy": self.update_strategy,
             })
         except Exception as exc:
+            log_conversation_skill_capture(
+                "draft_failed",
+                session_id=self.session_id,
+                mode=self.mode,
+                target_skill=self.target_skill,
+                error=str(exc),
+            )
             self.finished_signal.emit({
                 "ok": False,
                 "error": str(exc),
@@ -20775,9 +21242,16 @@ class MainWindow(QMainWindow):
             self.sidebar_skill_capture_btn.setText(" 沉淀为 Skill")
 
     def start_conversation_skill_flow(self):
+        log_conversation_skill_capture("flow_clicked", session_id=self.current_session_id)
         if self.conversation_skill_worker and self.conversation_skill_worker.isRunning():
+            log_conversation_skill_capture("flow_ignored_worker_running", session_id=self.current_session_id)
             return
         if not self.skill_manager_ready:
+            log_conversation_skill_capture(
+                "flow_blocked_skill_manager_not_ready",
+                session_id=self.current_session_id,
+                error=self.skill_load_error,
+            )
             self.add_system_toast(
                 self.skill_load_error or "能力仍在加载中，请稍后再沉淀 Skill。",
                 "error" if self.skill_load_error else "info",
@@ -20786,6 +21260,7 @@ class MainWindow(QMainWindow):
             return
         state = self.get_current_session()
         if not state or not getattr(state, "messages", []):
+            log_conversation_skill_capture("flow_blocked_empty_session", session_id=self.current_session_id)
             self.add_system_toast("当前会话还没有可沉淀的内容", "info", auto_close_ms=4000)
             self.update_skill_capture_button_state()
             return
@@ -20794,22 +21269,39 @@ class MainWindow(QMainWindow):
         skills = self.skill_manager.get_all_skills()
         options_dialog = ConversationSkillOptionsDialog(skills, self)
         if options_dialog.exec() != QDialog.Accepted:
+            log_conversation_skill_capture("options_cancelled", session_id=state.session_id)
             return
         options = options_dialog.selected_options()
         if options["mode"] == "update" and not options.get("target_skill"):
+            log_conversation_skill_capture("options_invalid_missing_target", session_id=state.session_id)
             QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
             return
 
         range_dialog = ConversationSkillRangeDialog(state.messages, self)
         if range_dialog.exec() != QDialog.Accepted:
+            log_conversation_skill_capture(
+                "range_cancelled",
+                session_id=state.session_id,
+                mode=options.get("mode"),
+                target_skill=options.get("target_skill"),
+            )
             return
         selected_messages = range_dialog.selected_messages()
         if not selected_messages:
+            log_conversation_skill_capture("range_empty", session_id=state.session_id)
             self.add_system_toast("没有选择可沉淀的会话片段", "info", auto_close_ms=4000)
             return
 
         title = self._compute_session_title(selected_messages) if selected_messages else "新任务"
         meta = self._compose_session_meta(state)
+        log_conversation_skill_capture(
+            "draft_worker_starting",
+            session_id=state.session_id,
+            mode=options.get("mode"),
+            target_skill=options.get("target_skill"),
+            update_strategy=options.get("update_strategy"),
+            selected_message_count=len(selected_messages),
+        )
 
         self.add_system_toast("正在根据当前会话生成 Skill 草稿", "info", auto_close_ms=3500)
         self.conversation_skill_worker = ConversationSkillDraftWorker(
@@ -20843,6 +21335,11 @@ class MainWindow(QMainWindow):
         self.update_skill_capture_button_state()
 
         if not result.get("ok"):
+            log_conversation_skill_capture(
+                "draft_result_failed",
+                session_id=self.current_session_id,
+                error=result.get("error"),
+            )
             self.add_system_toast(f"生成 Skill 草稿失败：{result.get('error') or '未知错误'}", "error", auto_close_ms=8000)
             return
 
@@ -20857,23 +21354,58 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if preview.exec() != QDialog.Accepted:
+            log_conversation_skill_capture(
+                "preview_cancelled",
+                session_id=self.current_session_id,
+                mode=mode,
+                target_skill=target_skill,
+            )
             self.add_system_toast("已取消保存 Skill 草稿", "info", auto_close_ms=4000)
             return
 
         draft = preview.draft()
         try:
             if mode == "create":
+                log_conversation_skill_capture(
+                    "save_create_started",
+                    session_id=self.current_session_id,
+                    skill_name=draft.get("skill_name"),
+                )
                 save_result = save_new_skill(draft)
                 if save_result.ok:
                     try:
                         self.skill_manager.load_skills()
+                        log_conversation_skill_capture(
+                            "save_create_finished",
+                            session_id=self.current_session_id,
+                            skill_name=draft.get("skill_name"),
+                            path=save_result.path,
+                        )
                         self.add_system_toast(f"Skill 已创建：{save_result.path}", "success", auto_close_ms=8000)
                     except Exception as exc:
+                        log_conversation_skill_capture(
+                            "save_create_reload_failed",
+                            session_id=self.current_session_id,
+                            skill_name=draft.get("skill_name"),
+                            error=str(exc),
+                        )
                         QMessageBox.warning(self, "加载失败", f"Skill 已保存，但热加载失败：{exc}")
                 else:
+                    log_conversation_skill_capture(
+                        "save_create_failed",
+                        session_id=self.current_session_id,
+                        skill_name=draft.get("skill_name"),
+                        error=save_result.message,
+                    )
                     QMessageBox.warning(self, "保存失败", save_result.message)
                     return
             else:
+                log_conversation_skill_capture(
+                    "save_update_started",
+                    session_id=self.current_session_id,
+                    target_skill=target_skill,
+                    update_strategy=update_strategy,
+                )
                 save_result = update_existing_skill_from_draft(
                     self.skill_manager,
                     target_skill,
@@ -20881,11 +21413,29 @@ class MainWindow(QMainWindow):
                     strategy=update_strategy,
                 )
                 if save_result.ok:
+                    log_conversation_skill_capture(
+                        "save_update_finished",
+                        session_id=self.current_session_id,
+                        target_skill=target_skill,
+                    )
                     self.add_system_toast(f"Skill 已更新：{target_skill}", "success", auto_close_ms=8000)
                 else:
+                    log_conversation_skill_capture(
+                        "save_update_failed",
+                        session_id=self.current_session_id,
+                        target_skill=target_skill,
+                        error=save_result.message,
+                    )
                     QMessageBox.warning(self, "更新失败", save_result.message)
                     return
         except Exception as exc:
+            log_conversation_skill_capture(
+                "save_exception",
+                session_id=self.current_session_id,
+                mode=mode,
+                target_skill=target_skill,
+                error=str(exc),
+            )
             QMessageBox.warning(self, "保存失败", f"保存 Skill 时发生错误：{exc}")
             return
         self.update_skill_capture_button_state()

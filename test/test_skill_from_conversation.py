@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import shutil
@@ -304,6 +305,16 @@ class TestSkillFromConversation(unittest.TestCase):
             content = handle.read()
         self.assertIn("Rewritten operations guide", content)
         self.assertIn("New body guidance.", content)
+
+    def test_main_defines_conversation_skill_dialogs_used_by_flow(self):
+        main_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
+        with open(main_path, "r", encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        class_names = {node.name for node in tree.body if isinstance(node, ast.ClassDef)}
+
+        self.assertIn("ConversationSkillOptionsDialog", class_names)
+        self.assertIn("ConversationSkillRangeDialog", class_names)
+        self.assertIn("ConversationSkillPreviewDialog", class_names)
 
 
 if __name__ == "__main__":

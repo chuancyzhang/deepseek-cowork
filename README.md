@@ -84,7 +84,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, and DingTalk Docs are bundled as separate document skills, and their workbench pages expose configuration fields, read-only files, Tool debugging, and script entries.
 6. Use the home **PPT Agent** card or the built-in **PPT Agent** inside the Agent module when you want a focused presentation workflow; choose automatic strategy selection, a web/technical/business/template preference, optional source files, and an optional PPTX template.
 7. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
-8. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful.
+8. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful; the Skill flow lets you choose the source messages, review the draft, then create a new user skill or append lessons to an editable one.
 
 ## Architecture
 

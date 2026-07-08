@@ -1,6 +1,6 @@
 # Skill System
 
-Current implementation sync: app version **4.9.5**
+Current implementation sync: app version **4.9.8**
 
 ## 1. Core Idea
 

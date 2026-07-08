@@ -11394,6 +11394,7 @@ class SessionState:
         self.clarify_answers_context = []
         self.clarify_round_count = 0
         self.selected_skill_names = []
+        self.selected_model_id = ""
         self.workflow_mode = ""
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         self.office_draft_preview_pending = False
@@ -14164,8 +14165,8 @@ class MainWindow(QMainWindow):
             "image/gif",
         }
 
-    def _selected_model_supports_vision(self):
-        profile = self.config_manager.get_model_profile(self.config_manager.get_selected_model_id())
+    def _selected_model_supports_vision(self, state=None):
+        profile = self._model_profile_for_state(state or self.get_current_session())
         if not isinstance(profile, dict):
             return False
         return bool(profile.get("supports_vision", False))
@@ -14619,15 +14620,84 @@ class MainWindow(QMainWindow):
         menu.addAction(select_skills_action)
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
+    def _model_id_for_state(self, state=None):
+        state = state or self.get_current_session()
+        model_id = str(getattr(state, "selected_model_id", "") or "").strip() if state else ""
+        if model_id:
+            return model_id
+        meta = getattr(state, "persisted_conversation_meta", {}) if state else {}
+        if isinstance(meta, dict):
+            model_id = str(meta.get("selected_model_id") or "").strip()
+            if model_id:
+                return model_id
+        try:
+            return self.config_manager.get_selected_model_id()
+        except Exception:
+            return ""
+
+    def _model_profile_for_state(self, state=None, model_id=None):
+        selected_model_id = str(model_id or self._model_id_for_state(state) or "").strip()
+        try:
+            profiles = list(self.config_manager.iter_model_profiles() or [])
+        except Exception:
+            profiles = []
+        if selected_model_id:
+            profile = next((item for item in profiles if item.get("id") == selected_model_id), None)
+            if isinstance(profile, dict):
+                return profile
+            if not profiles:
+                try:
+                    profile = self.config_manager.get_model_profile(selected_model_id)
+                except Exception:
+                    profile = None
+                return profile if isinstance(profile, dict) else {}
+            return {}
+        try:
+            profile = self.config_manager.get_model_profile()
+        except Exception:
+            profile = None
+        return profile if isinstance(profile, dict) else {}
+
+    def _model_profile_snapshot_for_state(self, state=None):
+        profile = copy.deepcopy(self._model_profile_for_state(state))
+        if not isinstance(profile, dict):
+            profile = {}
+        effort = self._selected_reasoning_effort(state)
+        if effort:
+            profile["reasoning_effort"] = effort
+            profile["deepseek_reasoning_effort"] = effort
+        return profile
+
+    def _set_session_model_id(self, state, model_id):
+        model_id = str(model_id or "").strip()
+        if not state or not model_id:
+            return False
+        profile = self._model_profile_for_state(state, model_id=model_id)
+        if not profile:
+            return False
+        state.selected_model_id = str(profile.get("id") or model_id)
+        meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
+        meta["selected_model_id"] = state.selected_model_id
+        state.persisted_conversation_meta = meta
+        return True
+
+    def _default_model_id_for_new_session(self):
+        current = self.get_current_session()
+        model_id = self._model_id_for_state(current) if current else ""
+        if model_id:
+            return model_id
+        try:
+            return self.config_manager.get_selected_model_id()
+        except Exception:
+            return ""
+
     def refresh_model_selector(self):
         if not hasattr(self, "model_select_btn"):
             return
-        selected_id = self.config_manager.get_selected_model_id()
-        profiles = self.config_manager.iter_model_profiles()
+        state = self.get_current_session()
+        selected_id = self._model_id_for_state(state)
+        profiles = list(self.config_manager.iter_model_profiles() or [])
         selected = next((item for item in profiles if item.get("id") == selected_id), None)
-        if selected is None and profiles:
-            selected = profiles[0]
-            selected_id = selected.get("id")
         menu = QMenu(self.model_select_btn)
         effort_labels = {
             "low": "低",
@@ -14671,21 +14741,26 @@ class MainWindow(QMainWindow):
                 label += f" · {effort_labels.get(current_effort, current_effort)}"
             self.model_select_btn.setText(label)
             self.model_select_btn.setToolTip(" / ".join(filter(None, (selected.get("model_name", ""), selected.get("base_url", "")))))
+        elif selected_id:
+            self.model_select_btn.setText("模型不可用")
+            self.model_select_btn.setToolTip("当前对话选择的模型已不存在，请重新选择。")
         else:
             self.model_select_btn.setText("未配置模型")
 
     def on_model_selection_changed(self, model_id):
-        if model_id and self.config_manager.set_selected_model_id(model_id):
+        state = self.get_current_session()
+        if model_id and self._set_session_model_id(state, model_id):
+            self.save_chat_history(session_id=state.session_id)
             self.refresh_model_selector()
             self.refresh_context_badges()
 
     def on_reasoning_effort_selected(self, effort):
-        model_id = self.config_manager.get_selected_model_id()
+        model_id = self._model_id_for_state(self.get_current_session())
         if self.config_manager.set_model_reasoning_effort(model_id, effort):
             self.refresh_model_selector()
 
-    def _selected_reasoning_effort(self):
-        profile = self.config_manager.get_model_profile(self.config_manager.get_selected_model_id())
+    def _selected_reasoning_effort(self, state=None):
+        profile = self._model_profile_for_state(state)
         if not isinstance(profile, dict):
             return ""
         efforts = normalize_reasoning_efforts(profile.get("reasoning_efforts"))
@@ -14723,7 +14798,7 @@ class MainWindow(QMainWindow):
 
     def refresh_context_badges(self, session_id=None):
         state = self.get_session(session_id)
-        profile = self.config_manager.get_model_profile()
+        profile = self._model_profile_for_state(state)
         provider_text = profile.get("provider_display_name") if profile else self.config_manager.get("llm_provider", "openai")
         model_name = profile.get("display_name") or profile.get("model_name") if profile else self.config_manager.get("model_name", DEFAULT_DEEPSEEK_MODEL)
         if getattr(self, "daemon_available", False):
@@ -14847,13 +14922,17 @@ class MainWindow(QMainWindow):
             return target if target in {"pptx", "docx", "pdf"} else "file"
         return "html"
 
-    def _current_model_process_label(self):
-        try:
-            selected_model_id = self.config_manager.get_selected_model_id()
-            profile = self.config_manager.get_model_profile(selected_model_id)
-        except Exception:
-            selected_model_id = ""
-            profile = {}
+    def _current_model_process_label(self, state=None, run_context=None):
+        profile = {}
+        selected_model_id = ""
+        if isinstance(run_context, dict):
+            snapshot = run_context.get("selected_model_profile")
+            if isinstance(snapshot, dict):
+                profile = snapshot
+            selected_model_id = str(run_context.get("selected_model_id") or profile.get("id") or "").strip()
+        if not profile:
+            selected_model_id = self._model_id_for_state(state)
+            profile = self._model_profile_for_state(state, selected_model_id)
         if not isinstance(profile, dict):
             profile = {}
         model_name = profile.get("display_name") or profile.get("model_name") or selected_model_id or "当前模型"
@@ -14919,7 +14998,13 @@ class MainWindow(QMainWindow):
         attachment_count = len(prompt_files or []) or self._office_message_attachment_count(message)
         if attachment_count:
             card.add_process_note(f"已附加 {attachment_count} 个资料/模板文件。", tone="muted")
-        model_label, selected_model_id = self._current_model_process_label()
+        model_run_context = run_context
+        if not model_run_context and isinstance(meta, dict):
+            model_run_context = {
+                "selected_model_id": meta.get("selected_model_id"),
+                "selected_model_profile": meta.get("selected_model_profile"),
+            }
+        model_label, selected_model_id = self._current_model_process_label(state, model_run_context)
         model_suffix = f"（{selected_model_id}）" if selected_model_id else ""
         card.add_process_note(f"本轮模型: {model_label}{model_suffix}", tone="muted")
         if runtime_note:
@@ -16237,6 +16322,7 @@ class MainWindow(QMainWindow):
         self.refresh_observability_view(session_id)
         self.refresh_context_badges(session_id)
         self.refresh_selected_skill_controls(session_id)
+        self.refresh_model_selector()
         self.refresh_prompt_file_chips(session_id)
         self.refresh_token_usage_label(session_id)
         if (
@@ -16469,6 +16555,7 @@ class MainWindow(QMainWindow):
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
         state.empty_state = empty_state
         state.history_loaded = is_fresh_session
+        state.selected_model_id = self._default_model_id_for_new_session()
         self.sessions[session_id] = state
         requested_workspace = workspace_dir if workspace_dir is not None else ""
         if self._normalize_project_path(requested_workspace):
@@ -16517,6 +16604,7 @@ class MainWindow(QMainWindow):
         state.clarify_answers_context = []
         state.clarify_round_count = 0
         state.selected_skill_names = []
+        state.selected_model_id = ""
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
@@ -16725,6 +16813,9 @@ class MainWindow(QMainWindow):
         state.selected_skill_names = normalize_selected_skill_names(
             conversation_meta.get("selected_skill_names")
         )
+        state.selected_model_id = str(
+            conversation_meta.get("selected_model_id") or self.config_manager.get_selected_model_id() or ""
+        ).strip()
         state.workflow_mode = ""
         state.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         state.office_draft_preview_pending = False
@@ -18906,6 +18997,11 @@ class MainWindow(QMainWindow):
         meta["run_phase"] = getattr(state, "run_phase", "Idle")
         meta["session_status"] = getattr(state, "session_status", "draft")
         meta["has_file_changes"] = bool(getattr(state, "has_file_changes", False))
+        selected_model_id = self._model_id_for_state(state)
+        if selected_model_id:
+            meta["selected_model_id"] = selected_model_id
+        else:
+            meta.pop("selected_model_id", None)
         meta["token_usage_summary"] = normalize_token_usage_summary(
             getattr(state, "token_usage_summary", {})
         )
@@ -21052,8 +21148,9 @@ class MainWindow(QMainWindow):
                 ),
                 "clarify_round_count": max(0, int(getattr(state, "clarify_round_count", 0) or 0)),
                 "selected_skill_names": effective_skill_names,
-                "selected_model_id": self.config_manager.get_selected_model_id(),
-                "reasoning_effort": self._selected_reasoning_effort(),
+                "selected_model_id": self._model_id_for_state(state),
+                "selected_model_profile": self._model_profile_snapshot_for_state(state),
+                "reasoning_effort": self._selected_reasoning_effort(state),
                 "workspace_mode": "project" if effective_workspace_dir else "chat_only",
                 "workflow_mode": normalized_workflow_mode,
                 "office_output_profile": normalize_office_output_profile(
@@ -21110,8 +21207,9 @@ class MainWindow(QMainWindow):
         return normalize_run_context(
             {
                 "mode": RUN_MODE_EXECUTION,
-                "selected_model_id": self.config_manager.get_selected_model_id(),
-                "reasoning_effort": self._selected_reasoning_effort(),
+                "selected_model_id": self._model_id_for_state(state),
+                "selected_model_profile": self._model_profile_snapshot_for_state(state),
+                "reasoning_effort": self._selected_reasoning_effort(state),
                 "selected_skill_names": skill_names,
                 "allowed_skill_names": skill_names,
                 "agent_profile_id": profile.get("id"),
@@ -21376,7 +21474,7 @@ class MainWindow(QMainWindow):
         payload = self._build_user_message_payload(
             raw_user_text,
             prompt_files,
-            supports_vision=self._selected_model_supports_vision(),
+            supports_vision=self._selected_model_supports_vision(state),
         )
         if not payload.get("content"):
             return False
@@ -21512,7 +21610,17 @@ class MainWindow(QMainWindow):
             log_ppt_agent_debug("submit_session_empty_payload", session_id=state.session_id)
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
-        supports_vision = self._selected_model_supports_vision()
+        if not self._model_profile_for_state(state):
+            log_ppt_agent_debug(
+                "submit_session_model_missing",
+                session_id=state.session_id,
+                selected_model_id=self._model_id_for_state(state),
+            )
+            if state.session_id == self.current_session_id:
+                self.add_system_toast("当前对话选择的模型不可用，请先重新选择模型。", "error", session_id=state.session_id)
+                self.refresh_model_selector()
+            return False
+        supports_vision = self._selected_model_supports_vision(state)
         if mentioned_profiles and not delegated_text:
             log_ppt_agent_debug(
                 "submit_session_agent_mention_without_task",
@@ -21604,10 +21712,16 @@ class MainWindow(QMainWindow):
         state.office_draft_preview_pending = office_workflow
         state.office_task_target_format = office_conversion_target or ("html" if office_workflow else "")
         state.office_task_result_paths = []
+        turn_model_id = self._model_id_for_state(state)
+        turn_model_profile = self._model_profile_snapshot_for_state(state)
         message_payload = {"id": user_message_id, "role": "user", "content": user_text}
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
         message_meta = dict(payload.get("meta") or {})
+        if turn_model_id:
+            message_meta["selected_model_id"] = turn_model_id
+        if turn_model_profile:
+            message_meta["selected_model_profile"] = turn_model_profile
         if office_workflow:
             message_meta["workflow_mode"] = normalized_workflow_mode
             if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
@@ -21644,6 +21758,10 @@ class MainWindow(QMainWindow):
                 state,
                 message_payload,
                 prompt_files=prompt_files,
+                run_context={
+                    "selected_model_id": turn_model_id,
+                    "selected_model_profile": turn_model_profile,
+                },
                 runtime_note="正在等待模型运行接管。",
             )
             log_ppt_agent_debug(

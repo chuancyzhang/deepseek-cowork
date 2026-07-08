@@ -1081,6 +1081,17 @@ class TestDeliverableScanning(unittest.TestCase):
             window._normalize_prompt_file_paths = lambda paths: list(paths or [])
             window._session_is_busy = MagicMock(return_value=False)
             window._extract_agent_mentions = MagicMock(return_value=([], ""))
+            window._model_id_for_state = MagicMock(return_value="gpt-5.4")
+            window._model_profile_for_state = MagicMock(return_value={
+                "id": "gpt-5.4",
+                "provider_type": "openai",
+                "model_name": "gpt-5.4",
+            })
+            window._model_profile_snapshot_for_state = MagicMock(return_value={
+                "id": "gpt-5.4",
+                "provider_type": "openai",
+                "model_name": "gpt-5.4",
+            })
             window._selected_model_supports_vision = MagicMock(return_value=False)
             window._build_user_message_payload = MagicMock(
                 return_value={"content": "PPT Agent prompt", "display_content": "PPT Agent prompt", "attachments": []}

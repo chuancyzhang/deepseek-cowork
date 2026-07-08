@@ -29,6 +29,7 @@ class _State:
         self.temp_thinking_bubble = None
         self.persisted_conversation_meta = {}
         self.selected_skill_names = []
+        self.selected_model_id = ""
         self.clarify_mode_state = "exploring"
         self.pending_clarify_questions = []
         self.clarify_round_count = 0
@@ -42,7 +43,25 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
         window = MainWindow.__new__(MainWindow)
         window.config_manager = MagicMock()
         window.config_manager.get_selected_model_id.return_value = "model-a"
-        window._selected_reasoning_effort = MagicMock(return_value="")
+        window.config_manager.iter_model_profiles.return_value = [
+            {
+                "id": "model-a",
+                "provider_type": "openai",
+                "api_key": "key-a",
+                "base_url": "https://a.example/v1",
+                "model_name": "model-a-name",
+                "display_name": "Model A",
+                "reasoning_efforts": ["low", "high"],
+                "reasoning_effort": "high",
+            },
+            {
+                "id": "model-b",
+                "provider_type": "openai",
+                "api_key": "key-b",
+                "base_url": "https://b.example/v1",
+                "model_name": "model-b-name",
+            },
+        ]
         return window
 
     def _workspace_window(self):
@@ -103,6 +122,27 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             self.assertEqual(state.workspace_source, "chat")
             self.assertTrue(state.workspace_dir.endswith(os.path.join("conversation_workspaces", "history-session")))
             self.assertTrue(os.path.isdir(state.workspace_dir))
+
+    def test_run_context_freezes_session_model_profile(self):
+        with tempfile.TemporaryDirectory() as base_dir, patch("main.get_base_dir", return_value=base_dir):
+            window = self._window(base_dir)
+            state = _State("session-model")
+            state.selected_model_id = "model-b"
+
+            ctx = window._build_run_context(state, RUN_MODE_EXECUTION)
+
+            self.assertEqual(ctx["selected_model_id"], "model-b")
+            self.assertEqual(ctx["selected_model_profile"]["model_name"], "model-b-name")
+            self.assertEqual(ctx["selected_model_profile"]["api_key"], "key-b")
+
+    def test_new_session_defaults_to_current_conversation_model(self):
+        window = self._window(tempfile.gettempdir())
+        state = _State("current")
+        state.selected_model_id = "model-b"
+        window.sessions = {state.session_id: state}
+        window.current_session_id = state.session_id
+
+        self.assertEqual(window._default_model_id_for_new_session(), "model-b")
 
     def test_chat_workspace_is_not_grouped_as_project_history(self):
         with tempfile.TemporaryDirectory() as base_dir, patch("main.get_base_dir", return_value=base_dir):

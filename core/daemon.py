@@ -412,6 +412,9 @@ class DaemonState:
         return sum(self._estimate_message_token_count(msg) for msg in messages or [])
 
     def _selected_model_profile(self, run_context=None):
+        snapshot = (run_context or {}).get("selected_model_profile")
+        if isinstance(snapshot, dict) and snapshot:
+            return snapshot
         model_id = (run_context or {}).get("selected_model_id")
         if hasattr(self.config_manager, "get_model_profile"):
             try:

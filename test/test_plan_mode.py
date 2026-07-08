@@ -41,6 +41,11 @@ class TestClarifyModeHelpers(unittest.TestCase):
             {
                 "mode": "planning",
                 "selected_model_id": "openai-fast",
+                "selected_model_profile": {
+                    "id": "openai-fast",
+                    "provider_type": "openai",
+                    "model_name": "fast-model",
+                },
                 "im_provider": "feishu",
                 "channel": "feishu",
                 "workflow_mode": WORKFLOW_MODE_OFFICE_HTML_FIRST,
@@ -50,6 +55,7 @@ class TestClarifyModeHelpers(unittest.TestCase):
 
         self.assertEqual(ctx["mode"], RUN_MODE_EXECUTION)
         self.assertEqual(ctx["selected_model_id"], "openai-fast")
+        self.assertEqual(ctx["selected_model_profile"]["model_name"], "fast-model")
         self.assertEqual(ctx["im_provider"], "feishu")
         self.assertEqual(ctx["channel"], "feishu")
         self.assertEqual(ctx["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)

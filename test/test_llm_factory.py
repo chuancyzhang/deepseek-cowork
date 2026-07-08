@@ -118,6 +118,33 @@ class TestLLMFactory(unittest.TestCase):
 
         self.assertEqual(provider.reasoning_effort, "xhigh")
 
+    def test_create_provider_prefers_runtime_model_snapshot(self):
+        self.mock_config.get_model_profile.return_value = {
+            "provider_type": "openai",
+            "api_key": "current_key",
+            "base_url": "https://current.url",
+            "model_name": "current-model",
+        }
+
+        provider = LLMFactory.create_provider(
+            self.mock_config,
+            "current-profile",
+            model_profile={
+                "provider_type": "openai",
+                "api_key": "snapshot_key",
+                "base_url": "https://snapshot.url",
+                "model_name": "snapshot-model",
+                "reasoning_effort": "high",
+            },
+        )
+
+        self.assertEqual(provider.model_name, "snapshot-model")
+        self.assertEqual(provider.reasoning_effort, "high")
+        self.openai_module.OpenAI.assert_called_with(
+            api_key="snapshot_key",
+            base_url="https://snapshot.url",
+        )
+
     def test_create_provider_from_unsaved_profile(self):
         provider = LLMFactory.create_provider_from_profile({
             "provider_type": "openai",

@@ -7,9 +7,9 @@ from .deepseek import (
 
 class LLMFactory:
     @staticmethod
-    def create_provider(config_manager, model_id=None, reasoning_effort=None):
-        profile = None
-        if hasattr(config_manager, "get_model_profile"):
+    def create_provider(config_manager, model_id=None, reasoning_effort=None, model_profile=None):
+        profile = dict(model_profile) if isinstance(model_profile, dict) and model_profile else None
+        if profile is None and hasattr(config_manager, "get_model_profile"):
             profile = config_manager.get_model_profile(model_id)
             if not isinstance(profile, dict):
                 profile = None

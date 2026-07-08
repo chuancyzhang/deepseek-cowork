@@ -370,6 +370,8 @@ class TestSkillFromConversation(unittest.TestCase):
 
         self.assertIsInstance(dialog.message_list.itemDelegate(), main.AppleCheckableListDelegate)
         self.assertEqual(dialog.message_list.selectionMode(), main.QAbstractItemView.NoSelection)
+        first_index = dialog.message_list.model().index(0, 0)
+        self.assertTrue(dialog.message_list.itemDelegate()._is_checked(first_index.data(main.Qt.CheckStateRole)))
         self.assertEqual(len(dialog.selected_messages()), 2)
         self.assertIn("已选择 2 条消息", dialog.selection_hint.text())
 
@@ -409,6 +411,9 @@ class TestSkillFromConversation(unittest.TestCase):
         QTest.mouseClick(dialog.skill_list.viewport(), main.Qt.LeftButton, pos=item_rect.center())
         app.processEvents()
         self.assertEqual(dialog.selected_skill_names(), ["alpha-skill"])
+        QTest.mouseClick(dialog.skill_list.viewport(), main.Qt.LeftButton, pos=item_rect.center())
+        app.processEvents()
+        self.assertEqual(dialog.selected_skill_names(), [])
 
 
 if __name__ == "__main__":

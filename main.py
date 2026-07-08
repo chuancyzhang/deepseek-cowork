@@ -1720,11 +1720,17 @@ class AppleCheckableListDelegate(QStyledItemDelegate):
         result.setAlpha(int(alpha))
         return result
 
+    def _check_state_value(self, value):
+        return getattr(value, "value", value)
+
+    def _is_checked(self, value):
+        return self._check_state_value(value) == self._check_state_value(Qt.Checked)
+
     def paint(self, painter, option, index):
         painter.save()
         try:
             rect = option.rect.adjusted(6, 3, -6, -3)
-            checked = index.data(Qt.CheckStateRole) == Qt.Checked
+            checked = self._is_checked(index.data(Qt.CheckStateRole))
             hovered = bool(option.state & QStyle.State_MouseOver)
 
             if checked:
@@ -1786,7 +1792,7 @@ class AppleCheckableListDelegate(QStyledItemDelegate):
 
     def _toggle(self, model, index):
         current = index.data(Qt.CheckStateRole)
-        next_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+        next_state = Qt.Unchecked if self._is_checked(current) else Qt.Checked
         model.setData(index, next_state, Qt.CheckStateRole)
 
 

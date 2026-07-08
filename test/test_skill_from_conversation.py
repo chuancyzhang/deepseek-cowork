@@ -316,6 +316,38 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertIn("ConversationSkillRangeDialog", class_names)
         self.assertIn("ConversationSkillPreviewDialog", class_names)
 
+    def test_conversation_skill_options_hides_update_fields_when_creating(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+        dialog = main.ConversationSkillOptionsDialog(
+            [{"name": "PPTX-Template-Skills", "description": "Template skill"}]
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        self.assertEqual(dialog.mode_combo.currentData(), "create")
+        self.assertTrue(dialog.target_label.isHidden())
+        self.assertTrue(dialog.target_combo.isHidden())
+        self.assertTrue(dialog.strategy_label.isHidden())
+        self.assertTrue(dialog.strategy_combo.isHidden())
+        self.assertEqual(dialog.selected_options()["target_skill"], "")
+
+        dialog.mode_combo.setCurrentIndex(1)
+        self.assertFalse(dialog.target_label.isHidden())
+        self.assertFalse(dialog.target_combo.isHidden())
+        self.assertFalse(dialog.strategy_label.isHidden())
+        self.assertFalse(dialog.strategy_combo.isHidden())
+        self.assertEqual(dialog.selected_options()["target_skill"], "PPTX-Template-Skills")
+
+        dialog.mode_combo.setCurrentIndex(0)
+        self.assertTrue(dialog.target_label.isHidden())
+        self.assertTrue(dialog.target_combo.isHidden())
+        self.assertTrue(dialog.strategy_label.isHidden())
+        self.assertTrue(dialog.strategy_combo.isHidden())
+
 
 if __name__ == "__main__":
     unittest.main()

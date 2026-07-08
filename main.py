@@ -7548,6 +7548,7 @@ class ConversationSkillOptionsDialog(QDialog):
         self.mode_combo.setStyleSheet(apple_combo_style())
         mode_form.addRow(build_form_row_label("方式"), self.mode_combo)
 
+        self.target_label = build_form_row_label("目标 Skill")
         self.target_combo = QComboBox()
         self.target_combo.setStyleSheet(apple_combo_style())
         editable_count = 0
@@ -7558,19 +7559,20 @@ class ConversationSkillOptionsDialog(QDialog):
                 continue
             editable_count += 1
             self.target_combo.addItem(readable_skill_name(skill) or name, name)
-        mode_form.addRow(build_form_row_label("目标 Skill"), self.target_combo)
+        mode_form.addRow(self.target_label, self.target_combo)
 
+        self.strategy_label = build_form_row_label("更新策略")
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItem("追加结构化经验", "append")
         self.strategy_combo.addItem("重写 Skill 说明", "rewrite")
         self.strategy_combo.setStyleSheet(apple_combo_style())
-        mode_form.addRow(build_form_row_label("更新策略"), self.strategy_combo)
+        mode_form.addRow(self.strategy_label, self.strategy_combo)
         layout.addWidget(mode_group)
 
-        hint = QLabel("创建新 Skill 适合沉淀新流程；更新已有 Skill 适合把这次经验追加到同一能力包。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet(apple_caption_style())
-        layout.addWidget(hint)
+        self.hint_label = QLabel("")
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet(apple_caption_style())
+        layout.addWidget(self.hint_label)
         layout.addStretch()
 
         actions = QHBoxLayout()
@@ -7592,8 +7594,13 @@ class ConversationSkillOptionsDialog(QDialog):
 
     def _sync_mode_controls(self):
         updating = self.mode_combo.currentData() == "update"
-        self.target_combo.setEnabled(updating)
-        self.strategy_combo.setEnabled(updating)
+        for widget in (self.target_label, self.target_combo, self.strategy_label, self.strategy_combo):
+            widget.setVisible(updating)
+            widget.setEnabled(updating)
+        if updating:
+            self.hint_label.setText("更新已有 Skill 会把这次经验追加到同一能力包，或按策略重写 Skill 说明。")
+        else:
+            self.hint_label.setText("创建新 Skill 会根据所选会话片段生成一个新的用户 Skill。")
 
     def _accept_if_valid(self):
         if self.mode_combo.currentData() == "update" and not self.target_combo.currentData():

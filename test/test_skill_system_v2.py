@@ -205,6 +205,129 @@ class TestSkillSystemV2(unittest.TestCase):
                 self.assertEqual(skills[skill_name]["source_type"], "bundled_plugin")
                 self.assertEqual(skills[skill_name]["source_format"], "agent_skill")
 
+    def test_bundled_knowledge_mcp_skills_are_default_off(self):
+        for skill_name in ("weknora", "showdoc-mcp", "airflow", "superset-mcp"):
+            self._copy_repo_ai_skill(skill_name)
+
+        sm = self._build_manager()
+        skills = {item["name"]: item for item in sm.get_all_skills()}
+
+        for skill_name in ("weknora", "showdoc-mcp", "airflow", "superset-mcp"):
+            with self.subTest(skill_name=skill_name):
+                self.assertIn(skill_name, skills)
+                self.assertFalse(skills[skill_name]["enabled"])
+                self.assertEqual(skills[skill_name]["source_type"], "bundled_plugin")
+                self.assertEqual(skills[skill_name]["source_format"], "agent_skill")
+                self.assertTrue(skills[skill_name]["config_fields"])
+
+        superset_presets = sm.get_skill_mcp_server_presets("superset-mcp")
+        self.assertEqual(superset_presets[0]["transport"], "streamable_http")
+        self.assertEqual(superset_presets[0]["url"], "{{SUPERSET_MCP_URL}}")
+        self.assertEqual(superset_presets[0].get("command"), "")
+
+        airflow_info = skills["airflow"]
+        self.assertTrue(any(entry.get("name") == "run_af" for entry in airflow_info["script_entries"]))
+        self.assertTrue(any("af" in item.lower() for item in airflow_info["tags"]))
+        self.assertIn("AF_READ_ONLY", json.dumps(airflow_info, ensure_ascii=False))
+
+    def test_skill_mcp_presets_materialize_from_config(self):
+        for skill_name in ("showdoc-mcp", "airflow", "superset-mcp"):
+            self._copy_repo_ai_skill(skill_name)
+
+        class ConfigStub:
+            def __init__(self, values):
+                self.values = values
+
+            def is_skill_enabled(self, _skill_name, default_enabled=True):
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get(self, _key, default=None):
+                return default
+
+            def get_skill_config(self, skill_name):
+                return self.values.get(skill_name, {})
+
+        sm = SkillManager(
+            workspace_dir=self.temp_dir,
+            config_manager=ConfigStub(
+                {
+                    "showdoc-mcp": {
+                        "SHOWDOC_HOST": "https://showdoc.example",
+                        "SHOWDOC_LOGIN_SECRET_KEY": "secret",
+                        "SHOWDOC_PROJECT_NAME": "Backend",
+                    },
+                    "airflow": {
+                        "AIRFLOW_API_URL": "https://airflow.example",
+                        "AIRFLOW_AUTH_TOKEN": "token",
+                        "AF_READ_ONLY": "true",
+                    },
+                    "superset-mcp": {
+                        "SUPERSET_MCP_URL": "http://localhost:5008/mcp",
+                        "SUPERSET_MCP_BEARER_TOKEN": "jwt",
+                        "SUPERSET_MCP_TIMEOUT_SECONDS": "45",
+                    },
+                }
+            ),
+        )
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills()
+
+        showdoc = sm.build_skill_mcp_server_configs("showdoc-mcp")
+        self.assertTrue(showdoc["ok"], showdoc.get("error"))
+        self.assertEqual(showdoc["servers"][0]["id"], "showdoc")
+        self.assertEqual(showdoc["servers"][0]["command"], "npx")
+        self.assertIn("Backend", showdoc["servers"][0]["args"])
+
+        airflow = sm.build_skill_mcp_server_configs("airflow")
+        self.assertTrue(airflow["ok"], airflow.get("error"))
+        self.assertEqual(airflow["servers"][0]["command"], "uvx")
+        self.assertEqual(airflow["servers"][0]["env"]["AF_READ_ONLY"], "true")
+
+        superset = sm.build_skill_mcp_server_configs("superset-mcp")
+        self.assertTrue(superset["ok"], superset.get("error"))
+        self.assertEqual(superset["servers"][0]["transport"], "streamable_http")
+        self.assertEqual(superset["servers"][0]["url"], "http://localhost:5008/mcp")
+        self.assertEqual(superset["servers"][0]["headers"]["Authorization"], "Bearer jwt")
+        self.assertEqual(superset["servers"][0]["timeout_seconds"], 45)
+
+    def test_skill_mcp_presets_fail_on_missing_required_config(self):
+        for skill_name in ("showdoc-mcp", "airflow", "superset-mcp"):
+            self._copy_repo_ai_skill(skill_name)
+
+        class ConfigStub:
+            def is_skill_enabled(self, _skill_name, default_enabled=True):
+                return default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get(self, _key, default=None):
+                return default
+
+            def get_skill_config(self, skill_name):
+                if skill_name == "airflow":
+                    return {"AIRFLOW_API_URL": "https://airflow.example"}
+                if skill_name == "showdoc-mcp":
+                    return {"SHOWDOC_HOST": "https://showdoc.example"}
+                if skill_name == "superset-mcp":
+                    return {"SUPERSET_MCP_URL": "http://localhost:5008/mcp"}
+                return {}
+
+        sm = SkillManager(workspace_dir=self.temp_dir, config_manager=ConfigStub())
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills()
+
+        self.assertFalse(sm.build_skill_mcp_server_configs("showdoc-mcp")["ok"])
+        airflow = sm.build_skill_mcp_server_configs("airflow")
+        self.assertFalse(airflow["ok"])
+        self.assertIn("AIRFLOW_AUTH_TOKEN", airflow["error"])
+        superset = sm.build_skill_mcp_server_configs("superset-mcp")
+        self.assertFalse(superset["ok"])
+        self.assertIn("SUPERSET_MCP_BEARER_TOKEN", superset["error"])
+
     def test_frozen_internal_ai_skills_are_discovered_as_default_off_plugins(self):
         exe_dir = os.path.join(self.temp_dir, "dist", "deepseek-cowork")
         internal_skills = os.path.join(exe_dir, "_internal", "skills")

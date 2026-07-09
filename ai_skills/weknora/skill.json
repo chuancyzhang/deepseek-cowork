@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "name": "weknora",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "WeKnora knowledge-base import and retrieval skill using the WeKnora REST API.",
+  "description_cn": "WeKnora 知识库导入与检索能力，通过 WeKnora REST API 上传、导入、浏览和搜索知识内容。",
+  "tags": ["weknora", "knowledge base", "retrieval", "hybrid search", "知识库"],
+  "triggers": ["WeKnora", "知识库检索", "上传知识库", "导入网页到知识库", "hybrid search", "知识库搜索"],
+  "anti_triggers": ["Superset", "Airflow", "ShowDoc", "腾讯文档"],
+  "tool_refs": [],
+  "references": ["SOURCE.md"],
+  "config_fields": [
+    {
+      "name": "WEKNORA_BASE_URL",
+      "label": "WeKnora Base URL",
+      "kind": "text",
+      "required": true,
+      "env": "WEKNORA_BASE_URL",
+      "placeholder": "https://your-weknora.example.com/api/v1"
+    },
+    {
+      "name": "WEKNORA_API_KEY",
+      "label": "WeKnora API Key",
+      "kind": "secret",
+      "required": true,
+      "env": "WEKNORA_API_KEY",
+      "placeholder": "sk-..."
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use WeKnora only for knowledge-base import, browsing, and retrieval tasks.",
+    "Verify WEKNORA_BASE_URL and WEKNORA_API_KEY before any API call.",
+    "Require explicit confirmation before editing or deleting an existing knowledge entry."
+  ]
+}

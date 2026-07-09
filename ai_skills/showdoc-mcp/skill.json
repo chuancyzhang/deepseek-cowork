@@ -1,0 +1,78 @@
+{
+  "version": 2,
+  "name": "showdoc-mcp",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "ShowDoc MCP skill using the mcp-showdoc stdio server for scoped project documentation search and reading.",
+  "description_cn": "ShowDoc MCP 能力，通过 mcp-showdoc stdio server 在指定项目内搜索、列出和读取 API 文档。",
+  "tags": ["showdoc", "mcp", "documentation", "api docs", "接口文档"],
+  "triggers": ["ShowDoc", "showdoc", "接口文档", "搜索 API 文档", "读取 ShowDoc"],
+  "anti_triggers": ["Airflow", "Superset", "WeKnora", "腾讯文档"],
+  "tool_refs": [],
+  "references": ["SOURCE.md"],
+  "config_fields": [
+    {
+      "name": "SHOWDOC_HOST",
+      "label": "ShowDoc Host",
+      "kind": "text",
+      "required": true,
+      "env": "SHOWDOC_HOST",
+      "placeholder": "https://www.showdoc.com.cn"
+    },
+    {
+      "name": "SHOWDOC_LOGIN_SECRET_KEY",
+      "label": "Login Secret Key",
+      "kind": "secret",
+      "required": true,
+      "env": "SHOWDOC_LOGIN_SECRET_KEY",
+      "placeholder": "ShowDoc 用户设置中的登录密钥"
+    },
+    {
+      "name": "SHOWDOC_PROJECT_NAME",
+      "label": "Project Name",
+      "kind": "text",
+      "required": true,
+      "env": "SHOWDOC_PROJECT_NAME",
+      "placeholder": "要锁定的 ShowDoc 项目名称"
+    },
+    {
+      "name": "SHOWDOC_USERNAME",
+      "label": "Username",
+      "kind": "text",
+      "required": false,
+      "env": "SHOWDOC_USERNAME",
+      "placeholder": "可选：默认使用 mcp-showdoc 用户"
+    }
+  ],
+  "mcp_server_presets": [
+    {
+      "id": "showdoc",
+      "name": "ShowDoc MCP",
+      "description": "Scoped ShowDoc API documentation MCP server.",
+      "enabled": false,
+      "transport": "stdio",
+      "timeout_seconds": 30,
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-showdoc",
+        "--host",
+        "{{SHOWDOC_HOST}}",
+        "--login_secret_key",
+        "{{SHOWDOC_LOGIN_SECRET_KEY}}",
+        "--project_name",
+        "{{SHOWDOC_PROJECT_NAME}}"
+      ]
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use this skill for ShowDoc documentation tasks only.",
+    "Generate the MCP server after saving credentials.",
+    "Enable and test the generated MCP server from Settings > MCP."
+  ]
+}

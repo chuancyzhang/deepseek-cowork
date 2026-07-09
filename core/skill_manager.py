@@ -13,12 +13,15 @@ import ast
 
 from .env_utils import ensure_package_installed, get_app_data_dir
 from .mcp_client import (
+    DEFAULT_MCP_TIMEOUT_SECONDS,
+    TRANSPORT_STDIO,
     build_mcp_skill_name,
     build_mcp_tool_name,
     call_mcp_tool,
     list_mcp_server_tools,
     mcp_package_available,
     mcp_transport_label,
+    normalize_mcp_transport,
     summarize_mcp_server,
 )
 from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
@@ -353,6 +356,58 @@ class SkillManager:
             })
         return normalized
 
+    def _normalize_config_requirements(self, requirements):
+        normalized = []
+        for item in self._coerce_dict_list(requirements):
+            any_of = []
+            for group in item.get("any_of") or []:
+                names = self._coerce_string_list(group)
+                if names:
+                    any_of.append(names)
+            all_of = self._coerce_string_list(item.get("all_of"))
+            message = str(item.get("message") or "").strip()
+            if any_of or all_of:
+                normalized.append({
+                    "any_of": any_of,
+                    "all_of": all_of,
+                    "message": message,
+                })
+        return normalized
+
+    def _normalize_mcp_server_presets(self, presets):
+        normalized = []
+        seen = set()
+        for item in self._coerce_dict_list(presets):
+            preset_id = str(item.get("id") or item.get("name") or "").strip()
+            if not preset_id or preset_id in seen:
+                continue
+            seen.add(preset_id)
+            transport = normalize_mcp_transport(item.get("transport", item.get("type")))
+            normalized.append({
+                "id": preset_id,
+                "name": str(item.get("name") or preset_id).strip() or preset_id,
+                "enabled": self._coerce_bool(item.get("enabled"), default=False),
+                "transport": transport,
+                "type": transport,
+                "timeout_seconds": item.get("timeout_seconds") or item.get("startup_timeout_ms") or DEFAULT_MCP_TIMEOUT_SECONDS,
+                "command": str(item.get("command") or "").strip(),
+                "args": self._coerce_string_list(item.get("args")),
+                "cwd": str(item.get("cwd") or "").strip(),
+                "env": {
+                    str(key): str(value if value is not None else "")
+                    for key, value in (item.get("env") or {}).items()
+                    if str(key or "").strip()
+                } if isinstance(item.get("env"), dict) else {},
+                "url": str(item.get("url") or "").strip(),
+                "headers": {
+                    str(key): str(value if value is not None else "")
+                    for key, value in (item.get("headers") or {}).items()
+                    if str(key or "").strip()
+                } if isinstance(item.get("headers"), dict) else {},
+                "description": str(item.get("description") or "").strip(),
+            })
+        return normalized
+
     def _infer_capability_group(self, skill_name, meta, spec):
         group = (
             spec.get("capability_group")
@@ -450,6 +505,8 @@ class SkillManager:
         spec["asset_refs"] = self._coerce_string_list(spec.get("asset_refs"))
         spec["script_entries"] = self._normalize_script_entries(spec.get("script_entries"))
         spec["config_fields"] = self._normalize_config_fields(spec.get("config_fields"))
+        spec["config_requirements"] = self._normalize_config_requirements(spec.get("config_requirements"))
+        spec["mcp_server_presets"] = self._normalize_mcp_server_presets(spec.get("mcp_server_presets"))
         spec["python_dependencies"] = self._coerce_string_list(spec.get("python_dependencies"))
         spec["node_dependencies"] = self._coerce_string_list(spec.get("node_dependencies"))
         source_format = spec.get("source_format")
@@ -582,6 +639,18 @@ class SkillManager:
                 + "\nDo not use `glob`, `grep`, or `bash` just to locate this skill directory or script path when these entries are already listed."
             )
 
+        mcp_presets = spec.get("mcp_server_presets") or []
+        if mcp_presets:
+            sections.append(
+                "## MCP Server Presets\n"
+                + "\n".join(
+                    f"- `{item.get('id')}` ({mcp_transport_label(item.get('transport'))}): "
+                    f"{item.get('description') or item.get('name') or item.get('id')}"
+                    for item in mcp_presets[:8]
+                )
+                + "\nUse the Skill Center configuration tab to save credentials and generate/update these MCP server entries."
+            )
+
         dependency_lines = []
         if spec.get("python_dependencies"):
             dependency_lines.append("python: " + ", ".join(spec.get("python_dependencies")[:12]))
@@ -626,6 +695,16 @@ class SkillManager:
         script_execution_hint = self._script_execution_hint(spec)
         if script_execution_hint:
             lines.append(f"script-execution: {script_execution_hint}")
+        mcp_presets = spec.get("mcp_server_presets") or []
+        if mcp_presets:
+            lines.append(
+                "mcp-presets: "
+                + ", ".join(
+                    f"{item.get('id')} ({mcp_transport_label(item.get('transport'))})"
+                    for item in mcp_presets[:4]
+                    if item.get("id")
+                )
+            )
         frontmatter_exp = meta.get("experience")
         if isinstance(frontmatter_exp, list) and frontmatter_exp:
             lines.append(f"experience-highlights: {', '.join(frontmatter_exp[:3])}")
@@ -1063,14 +1142,47 @@ class SkillManager:
         }
 
     def get_skill_config_fields(self, skill_name):
-        record = self.skill_records.get(str(skill_name or "").strip()) or {}
+        record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
         return json.loads(json.dumps(spec.get("config_fields") or [], ensure_ascii=False))
+
+    def get_skill_mcp_server_presets(self, skill_name):
+        record = self._record_for_skill_name(skill_name) or {}
+        spec = record.get("spec") or {}
+        return json.loads(json.dumps(spec.get("mcp_server_presets") or [], ensure_ascii=False))
 
     def _skill_config_values(self, skill_name):
         if not self.config_manager or not hasattr(self.config_manager, "get_skill_config"):
             return {}
         return self.config_manager.get_skill_config(skill_name)
+
+    def _skill_config_requirement_errors(self, skill_name, values=None):
+        record = self._record_for_skill_name(skill_name) or {}
+        spec = record.get("spec") or {}
+        requirements = spec.get("config_requirements") or []
+        if not requirements:
+            return []
+        values = values if isinstance(values, dict) else self._skill_config_values(skill_name)
+
+        def configured(identifier):
+            key = str(identifier or "").strip()
+            return bool(key and str(values.get(key, "") or "").strip())
+
+        errors = []
+        for item in requirements:
+            all_of = item.get("all_of") or []
+            missing_all = [name for name in all_of if not configured(name)]
+            if missing_all:
+                errors.append(item.get("message") or "Missing required config: " + ", ".join(missing_all))
+                continue
+            any_of = item.get("any_of") or []
+            if any_of and not any(all(configured(name) for name in group) for group in any_of):
+                errors.append(
+                    item.get("message")
+                    or "Missing required config group: "
+                    + " or ".join(" + ".join(group) for group in any_of)
+                )
+        return errors
 
     def get_skill_config_status(self, skill_name):
         fields = self.get_skill_config_fields(skill_name)
@@ -1086,12 +1198,14 @@ class SkillManager:
                 configured.append(name)
             elif field.get("required"):
                 missing.append(name)
+        config_errors = self._skill_config_requirement_errors(skill_name, values=values)
         return {
             "has_config": bool(fields),
             "configured_count": len(configured),
             "required_count": len([field for field in fields if field.get("required")]),
             "missing_required": missing,
-            "complete": not missing,
+            "config_errors": config_errors,
+            "complete": not missing and not config_errors,
         }
 
     def build_skill_config_env(self, skill_name):
@@ -1111,7 +1225,76 @@ class SkillManager:
                 missing.append(name)
         if missing:
             raise ValueError(f"Skill '{skill_name}' is missing required config: {', '.join(missing)}")
+        config_errors = self._skill_config_requirement_errors(skill_name, values=values)
+        if config_errors:
+            raise ValueError(f"Skill '{skill_name}' config is incomplete: {'; '.join(config_errors)}")
         return env
+
+    def _render_mcp_preset_value(self, value, env_values):
+        if isinstance(value, str):
+            def replace(match):
+                key = match.group(1).strip()
+                return str(env_values.get(key, ""))
+
+            return re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", replace, value)
+        if isinstance(value, list):
+            return [self._render_mcp_preset_value(item, env_values) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self._render_mcp_preset_value(item, env_values) for key, item in value.items()}
+        return value
+
+    def build_skill_mcp_server_configs(self, skill_name):
+        record = self._record_for_skill_name(skill_name)
+        if not record:
+            return {"ok": False, "error": f"Skill '{skill_name}' not found.", "servers": []}
+        presets = list((record.get("spec") or {}).get("mcp_server_presets") or [])
+        if not presets:
+            return {"ok": False, "error": f"Skill '{skill_name}' does not declare MCP server presets.", "servers": []}
+        try:
+            env_values = self.build_skill_config_env(skill_name)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "servers": []}
+
+        servers = []
+        for preset in presets:
+            rendered = self._render_mcp_preset_value(preset, env_values)
+            try:
+                timeout_seconds = int(rendered.get("timeout_seconds") or DEFAULT_MCP_TIMEOUT_SECONDS)
+            except Exception:
+                timeout_seconds = DEFAULT_MCP_TIMEOUT_SECONDS
+            timeout_seconds = max(5, min(300, timeout_seconds))
+            transport = normalize_mcp_transport(rendered.get("transport", rendered.get("type")))
+            server = {
+                "id": str(rendered.get("id") or "").strip(),
+                "name": str(rendered.get("name") or rendered.get("id") or "MCP Server").strip(),
+                "enabled": bool(rendered.get("enabled", False)),
+                "transport": transport,
+                "type": transport,
+                "timeout_seconds": timeout_seconds,
+                "startup_timeout_ms": timeout_seconds * 1000,
+                "command": str(rendered.get("command") or "").strip(),
+                "args": [str(item) for item in rendered.get("args") or [] if str(item).strip()],
+                "cwd": str(rendered.get("cwd") or "").strip(),
+                "env": {
+                    str(key): str(item)
+                    for key, item in (rendered.get("env") or {}).items()
+                    if str(key or "").strip() and str(item or "").strip()
+                } if isinstance(rendered.get("env"), dict) else {},
+                "url": str(rendered.get("url") or "").strip(),
+                "headers": {
+                    str(key): str(item)
+                    for key, item in (rendered.get("headers") or {}).items()
+                    if str(key or "").strip() and str(item or "").strip()
+                } if isinstance(rendered.get("headers"), dict) else {},
+            }
+            if not server["id"]:
+                return {"ok": False, "error": "MCP preset is missing id.", "servers": []}
+            if transport == TRANSPORT_STDIO and not server["command"]:
+                return {"ok": False, "error": f"MCP preset '{server['id']}' is missing command.", "servers": []}
+            if transport != TRANSPORT_STDIO and not server["url"]:
+                return {"ok": False, "error": f"MCP preset '{server['id']}' is missing URL.", "servers": []}
+            servers.append(server)
+        return {"ok": True, "error": "", "servers": servers}
 
     def is_tool_allowed(self, name, run_mode):
         return self.tool_registry.is_allowed(name, run_mode)
@@ -1452,6 +1635,21 @@ class SkillManager:
             ]
         )
         return record
+
+    def _record_for_skill_name(self, skill_name):
+        name = str(skill_name or "").strip()
+        if not name:
+            return None
+        record = self.skill_records.get(name)
+        if record:
+            return record
+        skill_path = self._find_skill_path(name)
+        if not skill_path:
+            return None
+        try:
+            return self._load_skill_record(name, skill_path)
+        except Exception:
+            return None
 
     def _prepare_skill_dependencies(self, skill_name, skill_path):
         spec = self._load_skill_json(skill_path)
@@ -2217,6 +2415,8 @@ class SkillManager:
             self.workspace_dir = None
         if not hasattr(self, "config_manager"):
             self.config_manager = None
+        if not hasattr(self, "load_mcp_tools"):
+            self.load_mcp_tools = True
         self.tools = {}
         self.tool_definitions = []
         self.tool_registry.clear()

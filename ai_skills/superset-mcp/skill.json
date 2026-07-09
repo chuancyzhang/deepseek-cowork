@@ -1,0 +1,63 @@
+{
+  "version": 2,
+  "name": "superset-mcp",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "Official Apache Superset MCP Streamable HTTP skill for connecting to a running Superset /mcp endpoint.",
+  "description_cn": "官方 Apache Superset MCP 能力，通过 Streamable HTTP 连接已运行的 Superset /mcp endpoint。",
+  "tags": ["superset", "apache superset", "mcp", "streamable http", "dashboard", "charts"],
+  "triggers": ["Superset MCP", "Apache Superset", "Superset dashboard", "Superset chart", "Superset 数据集"],
+  "anti_triggers": ["Airflow", "ShowDoc", "WeKnora", "third-party superset-mcp npm"],
+  "tool_refs": [],
+  "references": ["SOURCE.md"],
+  "config_fields": [
+    {
+      "name": "SUPERSET_MCP_URL",
+      "label": "Superset MCP URL",
+      "kind": "text",
+      "required": true,
+      "env": "SUPERSET_MCP_URL",
+      "placeholder": "http://localhost:5008/mcp"
+    },
+    {
+      "name": "SUPERSET_MCP_BEARER_TOKEN",
+      "label": "Bearer Token",
+      "kind": "secret",
+      "required": true,
+      "env": "SUPERSET_MCP_BEARER_TOKEN",
+      "placeholder": "JWT or Bearer token"
+    },
+    {
+      "name": "SUPERSET_MCP_TIMEOUT_SECONDS",
+      "label": "Timeout Seconds",
+      "kind": "text",
+      "required": false,
+      "env": "SUPERSET_MCP_TIMEOUT_SECONDS",
+      "placeholder": "30"
+    }
+  ],
+  "mcp_server_presets": [
+    {
+      "id": "superset-mcp",
+      "name": "Superset MCP",
+      "description": "Official Apache Superset MCP Streamable HTTP endpoint.",
+      "enabled": false,
+      "transport": "streamable_http",
+      "timeout_seconds": "{{SUPERSET_MCP_TIMEOUT_SECONDS}}",
+      "url": "{{SUPERSET_MCP_URL}}",
+      "headers": {
+        "Authorization": "Bearer {{SUPERSET_MCP_BEARER_TOKEN}}"
+      }
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use this skill for official Apache Superset MCP connections only.",
+    "Confirm the Superset /mcp endpoint is running before generating the MCP server.",
+    "Rely on Superset RBAC/JWT permissions and confirm high-impact actions with the user."
+  ]
+}

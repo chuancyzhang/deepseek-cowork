@@ -452,6 +452,51 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(stored[0]["id"], "remote-docs")
         self.assertEqual(stored[0]["timeout_seconds"], 45)
 
+    def test_upsert_mcp_servers_replaces_by_id(self):
+        cm = self._create_config_manager(
+            {
+                "mcp_servers": [
+                    {
+                        "id": "showdoc",
+                        "name": "Old ShowDoc",
+                        "enabled": False,
+                        "transport": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "old"],
+                    }
+                ]
+            }
+        )
+
+        summary = cm.upsert_mcp_servers(
+            [
+                {
+                    "id": "showdoc",
+                    "name": "ShowDoc MCP",
+                    "enabled": False,
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "mcp-showdoc"],
+                },
+                {
+                    "id": "superset-mcp",
+                    "name": "Superset MCP",
+                    "enabled": False,
+                    "transport": "streamable_http",
+                    "url": "http://localhost:5008/mcp",
+                    "headers": {"Authorization": "Bearer token"},
+                },
+            ]
+        )
+
+        self.assertEqual(summary["added"], 1)
+        self.assertEqual(summary["replaced"], 1)
+        stored = cm.get_mcp_servers()
+        self.assertEqual(len(stored), 2)
+        self.assertEqual(stored[0]["name"], "ShowDoc MCP")
+        self.assertEqual(stored[0]["args"], ["-y", "mcp-showdoc"])
+        self.assertEqual(stored[1]["transport"], "streamable_http")
+
     def test_parse_mcp_servers_json_supports_named_mcpservers(self):
         payload = parse_mcp_servers_json(
             """

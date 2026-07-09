@@ -2551,6 +2551,14 @@ class CapabilityWorkbenchDialog(QDialog):
             return self.skill_manager.get_skill_config_fields(self.skill_name)
         return []
 
+    def _skill_mcp_server_presets(self):
+        presets = self.skill.get("mcp_server_presets") or []
+        if presets:
+            return presets
+        if hasattr(self.skill_manager, "get_skill_mcp_server_presets"):
+            return self.skill_manager.get_skill_mcp_server_presets(self.skill_name)
+        return []
+
     def _build_config_tab(self):
         fields = [field for field in self._skill_config_fields() if isinstance(field, dict)]
         if not fields:
@@ -2604,6 +2612,30 @@ class CapabilityWorkbenchDialog(QDialog):
         save_btn.clicked.connect(self.save_skill_config)
         row.addWidget(save_btn)
         layout.addLayout(row)
+
+        if self._skill_mcp_server_presets():
+            mcp_card, mcp_layout = build_settings_surface(
+                "MCP 配置",
+                "保存凭据后，可生成或更新对应的 MCP server。生成后仍默认关闭，可到设置中心 MCP 页启用。",
+                radius=18,
+            )
+            preset_names = [
+                str(item.get("name") or item.get("id") or "").strip()
+                for item in self._skill_mcp_server_presets()
+                if isinstance(item, dict)
+            ]
+            preset_label = QLabel("将生成：" + "、".join([name for name in preset_names if name]))
+            preset_label.setWordWrap(True)
+            preset_label.setStyleSheet(apple_settings_inline_note_style())
+            mcp_layout.addWidget(preset_label)
+            preset_row = QHBoxLayout()
+            preset_row.addStretch()
+            preset_btn = QPushButton("生成 / 更新 MCP 配置")
+            preset_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+            preset_btn.clicked.connect(self.generate_skill_mcp_servers)
+            preset_row.addWidget(preset_btn)
+            mcp_layout.addLayout(preset_row)
+            layout.addWidget(mcp_card)
         layout.addStretch()
         self.tabs.addTab(page, "配置")
         self._refresh_config_status()
@@ -2619,21 +2651,71 @@ class CapabilityWorkbenchDialog(QDialog):
         missing = status.get("missing_required") or []
         if missing:
             label.setText("还缺少必填配置：" + "、".join(missing))
+        elif status.get("config_errors"):
+            label.setText("配置还不完整：" + "；".join(status.get("config_errors") or []))
         else:
             label.setText("配置完整。")
 
-    def save_skill_config(self):
-        if not hasattr(self.config_manager, "set_skill_config"):
-            QMessageBox.warning(self, "能力配置", "当前配置管理器不支持能力配置。")
-            return
-        values = {
+    def _current_skill_config_values(self):
+        return {
             name: editor.text().strip()
             for name, editor in self.config_editors.items()
             if editor.text().strip()
         }
+
+    def _save_skill_config_values(self, show_message=True):
+        if not hasattr(self.config_manager, "set_skill_config"):
+            QMessageBox.warning(self, "能力配置", "当前配置管理器不支持能力配置。")
+            return False
+        values = self._current_skill_config_values()
         self.config_manager.set_skill_config(self.skill_name, values)
         self._refresh_config_status()
-        QMessageBox.information(self, "能力配置", "配置已保存。")
+        if show_message:
+            QMessageBox.information(self, "能力配置", "配置已保存。")
+        return True
+
+    def save_skill_config(self):
+        self._save_skill_config_values(show_message=True)
+
+    def generate_skill_mcp_servers(self):
+        if not self._save_skill_config_values(show_message=False):
+            return
+        if not hasattr(self.skill_manager, "build_skill_mcp_server_configs"):
+            QMessageBox.warning(self, "MCP 配置", "当前能力管理器不支持生成 MCP 配置。")
+            return
+        result = self.skill_manager.build_skill_mcp_server_configs(self.skill_name)
+        if not result.get("ok"):
+            QMessageBox.warning(self, "MCP 配置", result.get("error") or "无法生成 MCP 配置。")
+            self._refresh_config_status()
+            return
+        generated = result.get("servers") or []
+        if not generated:
+            QMessageBox.warning(self, "MCP 配置", "没有可生成的 MCP 配置。")
+            return
+        if hasattr(self.config_manager, "upsert_mcp_servers"):
+            summary = self.config_manager.upsert_mcp_servers(generated)
+            added = int(summary.get("added") or 0)
+            replaced = int(summary.get("replaced") or 0)
+        else:
+            servers = self.config_manager.get_mcp_servers() if hasattr(self.config_manager, "get_mcp_servers") else []
+            replaced = 0
+            added = 0
+            by_id = {str(server.get("id") or "").strip(): index for index, server in enumerate(servers)}
+            for server in generated:
+                server_id = str(server.get("id") or "").strip()
+                if server_id in by_id:
+                    servers[by_id[server_id]] = server
+                    replaced += 1
+                else:
+                    servers.append(server)
+                    added += 1
+            self.config_manager.set_mcp_servers(servers)
+        self.skill_manager.load_skills()
+        QMessageBox.information(
+            self,
+            "MCP 配置",
+            f"已生成 MCP 配置：新增 {added} 个，更新 {replaced} 个。请到设置中心 MCP 页启用并测试连接。",
+        )
 
     def _build_files_tab(self):
         page = QWidget()

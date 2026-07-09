@@ -56,7 +56,7 @@ Cowork 采用交错式推理流程：
 
 - 直接执行面只有 `tool`
 - `skill` 只负责经验和边界，不作为独立调用协议
-- `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量
+- `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量。需要生成 MCP server 的能力可声明 `mcp_server_presets`，由 `SkillManager` 使用已保存配置渲染 `stdio` 或 Streamable HTTP server，并通过配置管理器按 server ID upsert，避免重复生成。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
 - 生成办公稿使用本次请求级 `workflow_mode = office_html_first` 和 `office_output_profile` 注入提示；从 HTML 继续生成 PPTX、DOCX、PDF 使用 `workflow_mode = office_file_conversion` 和 `office_conversion_target` 标记；两者都不新增 `RUN_MODE`，因此不改变工具权限。
@@ -76,7 +76,7 @@ Cowork 采用交错式推理流程：
 - `skills/`：核心内置技能
 - `ai_skills/`：随包可选插件与用户技能
 - 标准 Agent Skill：通过 `install_agent_skill` 写入用户级 `ai_skills`，保留原始 `SKILL.md`
-- MCP servers：通过 `stdio` 或 Streamable HTTP 接入的外部工具
+- MCP servers：通过 `stdio` 或 Streamable HTTP 接入的外部工具；ShowDoc MCP、Airflow MCP 与官方 Superset MCP 可由对应内置 skill 的配置页生成默认关闭的 server 条目
 - 常驻执行工具：例如 `run_python_code`
 
 设计原则：

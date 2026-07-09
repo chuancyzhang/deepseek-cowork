@@ -90,7 +90,7 @@ If a matched skill exposes tools, those tools still execute through the normal t
 
 ### Runtime configuration
 
-`skill.json` may declare `config_fields` with `name`, `label`, `kind`, `required`, `env`, `help`, and `placeholder`. The workbench renders these fields in a configuration tab. Saved values are stored in local `skill_configs` and injected into script or tool execution through the declared environment variable names. Missing required values fail explicitly before execution.
+`skill.json` may declare `config_fields` with `name`, `label`, `kind`, `required`, `env`, `help`, and `placeholder`. The workbench renders these fields in a configuration tab. Saved values are stored in local `skill_configs` and injected into script or tool execution through the declared environment variable names. Missing required values fail explicitly before execution. `config_requirements` may express grouped requirements such as token-or-username/password. `mcp_server_presets` may reference those environment names with `{{ENV_NAME}}` placeholders and materialize default-off `stdio` or Streamable HTTP MCP server entries from saved skill configuration.
 
 ### `parallel_tools`
 
@@ -112,7 +112,7 @@ Cowork loads capabilities from:
 - `ai_skills/`: bundled optional plugins and user-created skills
 - MCP servers: exposed as synthetic tool providers
 
-Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, and DingTalk Docs ship as separate document-oriented skills with independent config fields and script entries. User-created skills remain editable, importable, exportable, and deletable.
+Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP ship as separate optional skills with independent config fields, script entries, and MCP presets where applicable. User-created skills remain editable, importable, exportable, and deletable.
 
 ## 7. Import, Export, and Editing
 

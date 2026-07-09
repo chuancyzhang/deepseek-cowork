@@ -1126,6 +1126,23 @@ class ConfigManager:
         self.config["mcp_servers"] = normalized
         self.save_config()
 
+    def upsert_mcp_servers(self, servers):
+        current = self.get_mcp_servers()
+        incoming = self._normalize_mcp_servers(servers)
+        by_id = {str(server.get("id") or "").strip(): index for index, server in enumerate(current)}
+        added = 0
+        replaced = 0
+        for server in incoming:
+            server_id = str(server.get("id") or "").strip()
+            if server_id and server_id in by_id:
+                current[by_id[server_id]] = server
+                replaced += 1
+            else:
+                current.append(server)
+                added += 1
+        self.set_mcp_servers(current)
+        return {"added": added, "replaced": replaced, "servers": self.get_mcp_servers()}
+
     def get_skill_configs(self):
         configs = self._normalize_skill_configs(self.config.get("skill_configs"))
         if configs != self.config.get("skill_configs"):

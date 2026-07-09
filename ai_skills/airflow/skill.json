@@ -1,0 +1,99 @@
+{
+  "version": 2,
+  "name": "airflow",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "Apache Airflow operations skill using Astronomer Agents, astro-airflow-mcp, and the af CLI.",
+  "description_cn": "Apache Airflow 运维能力，基于 Astronomer Agents、astro-airflow-mcp 与 af CLI 查询、诊断和管理 DAG。",
+  "tags": ["airflow", "astronomer", "astro-airflow-mcp", "af", "dag", "mcp"],
+  "triggers": ["Airflow", "DAG", "af dags", "airflow health", "DAG run", "task logs", "为什么 DAG 失败"],
+  "anti_triggers": ["Superset", "ShowDoc", "WeKnora", "warehouse SQL analytics"],
+  "tool_refs": ["run_skill_script"],
+  "references": ["SOURCE.md", "api-reference.md"],
+  "script_refs": ["scripts/run_af.py"],
+  "script_entries": [
+    {
+      "name": "run_af",
+      "path": "scripts/run_af.py",
+      "runtime": "python",
+      "description": "Run the Astronomer af CLI with skill-provided Airflow credentials. Blocks common write operations when AF_READ_ONLY is true."
+    }
+  ],
+  "config_fields": [
+    {
+      "name": "AIRFLOW_API_URL",
+      "label": "Airflow API URL",
+      "kind": "text",
+      "required": true,
+      "env": "AIRFLOW_API_URL",
+      "placeholder": "https://airflow.example.com"
+    },
+    {
+      "name": "AIRFLOW_AUTH_TOKEN",
+      "label": "Auth Token",
+      "kind": "secret",
+      "required": false,
+      "env": "AIRFLOW_AUTH_TOKEN",
+      "placeholder": "Preferred token auth"
+    },
+    {
+      "name": "AIRFLOW_USERNAME",
+      "label": "Username",
+      "kind": "text",
+      "required": false,
+      "env": "AIRFLOW_USERNAME",
+      "placeholder": "Alternative username auth"
+    },
+    {
+      "name": "AIRFLOW_PASSWORD",
+      "label": "Password",
+      "kind": "secret",
+      "required": false,
+      "env": "AIRFLOW_PASSWORD",
+      "placeholder": "Alternative password auth"
+    },
+    {
+      "name": "AF_READ_ONLY",
+      "label": "Read Only",
+      "kind": "text",
+      "required": false,
+      "env": "AF_READ_ONLY",
+      "placeholder": "true"
+    }
+  ],
+  "config_requirements": [
+    {
+      "any_of": [["AIRFLOW_AUTH_TOKEN"], ["AIRFLOW_USERNAME", "AIRFLOW_PASSWORD"]],
+      "message": "Airflow requires AIRFLOW_AUTH_TOKEN or AIRFLOW_USERNAME + AIRFLOW_PASSWORD."
+    }
+  ],
+  "mcp_server_presets": [
+    {
+      "id": "airflow",
+      "name": "Airflow MCP",
+      "description": "Astronomer astro-airflow-mcp stdio server.",
+      "enabled": false,
+      "transport": "stdio",
+      "timeout_seconds": 60,
+      "command": "uvx",
+      "args": ["astro-airflow-mcp"],
+      "env": {
+        "AIRFLOW_API_URL": "{{AIRFLOW_API_URL}}",
+        "AIRFLOW_AUTH_TOKEN": "{{AIRFLOW_AUTH_TOKEN}}",
+        "AIRFLOW_USERNAME": "{{AIRFLOW_USERNAME}}",
+        "AIRFLOW_PASSWORD": "{{AIRFLOW_PASSWORD}}",
+        "AF_READ_ONLY": "{{AF_READ_ONLY}}"
+      }
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use read-only af commands first: health, dags list, runs list, tasks logs, and diagnose.",
+    "Use the generated MCP server for tool-based Airflow access after enabling it in Settings > MCP.",
+    "Require explicit confirmation before write operations such as trigger, clear, delete, pause, unpause, POST, PATCH, or DELETE."
+  ]
+}

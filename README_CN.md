@@ -44,7 +44,7 @@ Cowork 只把 `tool` 当作直接执行面：
 - `tool`：模型可直接调用的执行能力
 - `skill`：指导工具选择与组合方式的经验包
 
-技能既可以只提供经验，也可以同时携带工具实现。内置技能位于 `skills/`，随包插件和用户技能位于 `ai_skills/`。Cowork 可以安装符合标准的 Agent Skill 包，保留原始根目录 `SKILL.md`，只生成本地检索、工作台和调试所需的 `skill.json`。PPT Agent 的 Guizang PPT Skill、Frontend Slides、Huashu Design 三个策略已经作为真实 `ai_skills` 包内置，选择后会把上游 `SKILL.md`、资源说明和来源元数据注入本轮运行上下文，并在任务观测页可见。技能可以在 `skill.json` 声明 `config_fields`，工作台会自动生成“配置”页，并把保存的值按字段声明注入到脚本或工具运行环境。
+技能既可以只提供经验，也可以同时携带工具实现。内置技能位于 `skills/`，随包插件和用户技能位于 `ai_skills/`。Cowork 可以安装符合标准的 Agent Skill 包，保留原始根目录 `SKILL.md`，只生成本地检索、工作台和调试所需的 `skill.json`。PPT Agent 的 Guizang PPT Skill、Frontend Slides、Huashu Design 三个策略已经作为真实 `ai_skills` 包内置，选择后会把上游 `SKILL.md`、资源说明和来源元数据注入本轮运行上下文，并在任务观测页可见。技能可以在 `skill.json` 声明 `config_fields`，工作台会自动生成“配置”页，并把保存的值按字段声明注入到脚本或工具运行环境；也可以声明 `mcp_server_presets`，用已保存的能力凭据生成或更新本地 MCP server 配置，避免把密钥写进内置文件。
 
 完整说明见 [SKILL_SYSTEM.md](SKILL_SYSTEM.md)。
 
@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 2. 新建使用自动对话工作目录的直接对话，或把空白对话显式连接到某个项目。
 3. 让 Agent 读取文件、修改代码、生成报告或执行自动化；需要办公交付物时，可在 AI 回复末尾点击 **生成办公稿** 并选择类型。
 4. 处理文档、表格或数据分析任务前，可根据首页提示进入 **设置 → 组件与依赖** 安装文档工具包和数据分析工具包。
-5. 在 **技能中心** 启用需要的可选能力，或通过 `install_agent_skill` 安装符合标准的 Agent Skill；腾讯文档、飞书文档、钉钉文档已作为三套独立文档 skill 内置，工作台可查看凭据配置、只读文件、Tool 调试和脚本入口。
+5. 在 **技能中心** 启用需要的可选能力，或通过 `install_agent_skill` 安装符合标准的 Agent Skill；腾讯文档、飞书文档、钉钉文档、WeKnora、ShowDoc MCP、Airflow 和官方 Superset MCP 已作为独立可选 skill 内置，工作台可查看凭据配置、只读文件、Tool 调试、脚本入口，并在适用时生成 MCP 配置。
 6. 需要完整 PPT 工作流时，从首页卡片或侧栏 **智能体 → PPT Agent** 打开内置 PPT Agent，填写需求，选择自动或偏好策略，可附加资料和 PPTX 模板。
 7. 用右侧抽屉浏览文件、预览交付物、转换 HTML 工作稿并查看工具执行过程。
 8. 当某段流程有复用价值时，用 **记忆** 或 **沉淀为 Skill** 固化下来；Skill 沉淀流程会先选择会话片段、审阅草稿，再创建新用户 Skill 或追加到可编辑 Skill。

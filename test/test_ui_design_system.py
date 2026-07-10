@@ -4,14 +4,25 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QRawFont
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from core.theme import DesignTokens
 from main import (
+    AgentModuleDialog,
+    MemoryUpdateDialog,
+    SkillsCenterDialog,
     apple_button_style,
     apple_section_surface_style,
     initialize_desktop_theme,
     linear_dialog_stylesheet,
+)
+from ui.primitives import (
+    ProductEmptyState,
+    ProductPageHeader,
+    ProductStatusBadge,
+    product_button_style,
+    product_code_style,
+    product_segmented_style,
 )
 
 
@@ -50,6 +61,12 @@ class UiDesignSystemTests(unittest.TestCase):
         ):
             self.assertTrue(getattr(DesignTokens, token_name))
 
+    def test_product_geometry_uses_shared_density(self):
+        self.assertEqual(DesignTokens.control_height, 32)
+        self.assertEqual(DesignTokens.row_height, 36)
+        self.assertLessEqual(DesignTokens.radius_md, 8)
+        self.assertEqual(DesignTokens.spacing_xs, 4)
+
     def test_surface_styles_are_scoped_to_opted_in_frames(self):
         stylesheet = apple_section_surface_style()
         self.assertIn('QFrame[uiSurface="true"]', stylesheet)
@@ -68,6 +85,32 @@ class UiDesignSystemTests(unittest.TestCase):
         raw_font = QRawFont.fromFont(self.app.font())
         self.assertTrue(raw_font.isValid())
         self.assertTrue(raw_font.supportsCharacter(ord("设")))
+
+    def test_shared_primitives_cover_product_states(self):
+        self.assertIn("QPushButton:pressed", product_button_style("primary"))
+        self.assertIn("QPushButton:focus", product_button_style("secondary"))
+        self.assertIn("QPushButton:checked", product_segmented_style())
+        self.assertIn("Cascadia Mono", product_code_style())
+        header = ProductPageHeader("能力中心", "搜索和配置能力")
+        empty = ProductEmptyState("暂无内容", "创建后会显示在这里", "创建")
+        badge = ProductStatusBadge("运行中", "primary")
+        self.assertEqual(header.findChildren(QLabel)[0].text(), "能力中心")
+        self.assertIsNotNone(empty.action_button)
+        self.assertEqual(badge.text(), "运行中")
+
+    def test_capability_master_detail_methods_belong_to_capability_center(self):
+        self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_master_detail"))
+        self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_detail"))
+        self.assertFalse(hasattr(AgentModuleDialog, "_build_skill_master_detail"))
+
+    def test_memory_update_dialog_uses_scoped_code_panels(self):
+        dialog = MemoryUpdateDialog("全部历史")
+        try:
+            self.assertIn("QTextEdit#memoryProcessLog", dialog.process_log.styleSheet())
+            self.assertIn("QTextEdit#memoryDraftEditor", dialog.editor.styleSheet())
+            self.assertEqual(dialog.save_btn.property("variant"), "primary")
+        finally:
+            dialog.deleteLater()
 
 
 if __name__ == "__main__":

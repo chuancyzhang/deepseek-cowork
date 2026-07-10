@@ -57,11 +57,37 @@ class DesignTokens:
     radius_lg = 10
     radius_xl = 14
 
+    # Product geometry. Keep these values on the 4 px grid so dialogs and the
+    # main workspace use the same density instead of accumulating local sizes.
+    control_height_sm = 28
+    control_height = 32
+    control_height_lg = 36
+    row_height = 36
+    row_height_comfortable = 44
+    icon_size_sm = 14
+    icon_size = 16
+    icon_size_lg = 20
+
+    font_size_caption = 11
+    font_size_meta = 12
+    font_size_body = 14
+    font_size_section = 16
+    font_size_page = 20
+    font_size_hero = 24
+    font_weight_medium = 500
+    font_weight_semibold = 600
+    font_weight_bold = 700
+
+    focus_ring_width = 2
+    content_max_width = 1080
+    settings_content_max_width = 1120
+
     spacing_xs = 4
     spacing_sm = 8
     spacing_md = 16
     spacing_lg = 24
     spacing_xl = 32
+    spacing_2xl = 40
 
     shadow_sidebar = "0 18px 38px rgba(15, 23, 42, 0.07)"
     shadow_card = "0 12px 28px rgba(15, 23, 42, 0.06)"

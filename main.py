@@ -45,6 +45,20 @@ from core.deliverable_preview import (
 )
 from core.html_render import extract_renderable_html_response
 from core.theme import apply_tooltip_theme, DesignTokens
+from ui.primitives import (
+    ProductActionBar,
+    ProductDataRow,
+    ProductEmptyState,
+    ProductPageHeader,
+    ProductSection,
+    ProductStatusBadge,
+    apply_product_dialog,
+    product_button_style,
+    product_code_style,
+    product_field_style,
+    product_segmented_style,
+    product_surface_style,
+)
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.app_version import APP_VERSION
@@ -184,7 +198,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -268,28 +282,32 @@ except ImportError:
     QDARKTHEME_AVAILABLE = False
 
 # Global Menu Stylesheet to ensure consistency and force light theme
-MENU_STYLESHEET = """
-QMenu {
-    background-color: #ffffff;
-    border: 1px solid #d2d2d7;
-    border-radius: 14px;
-    padding: 8px;
-}
-QMenu::item {
-    padding: 8px 26px 8px 12px;
-    border-radius: 10px;
-    color: #1d1d1f;
+MENU_STYLESHEET = f"""
+QMenu {{
+    background-color: {DesignTokens.bg_main};
+    border: 1px solid {DesignTokens.border};
+    border-radius: {DesignTokens.radius_md}px;
+    padding: 6px;
+}}
+QMenu::item {{
+    min-height: {DesignTokens.control_height_sm}px;
+    padding: 4px 24px 4px 10px;
+    border-radius: {DesignTokens.radius_sm}px;
+    color: {DesignTokens.text_primary};
     background-color: transparent;
-}
-QMenu::item:selected {
-    background-color: #e8f2ff;
-    color: #007aff;
-}
-QMenu::separator {
+}}
+QMenu::item:selected {{
+    background-color: {DesignTokens.primary_soft};
+    color: {DesignTokens.text_primary};
+}}
+QMenu::item:disabled {{
+    color: {DesignTokens.text_disabled};
+}}
+QMenu::separator {{
     height: 1px;
-    background: #d2d2d7;
-    margin: 6px 4px;
-}
+    background: {DesignTokens.separator};
+    margin: 5px 4px;
+}}
 """
 
 
@@ -578,38 +596,11 @@ def add_soft_shadow(widget, blur=28, y_offset=10, alpha=28):
 
 
 def apple_button_style(kind="secondary", radius=8, align="center"):
-    if kind == "primary":
-        return (
-            "QPushButton { "
-            f"background: {DesignTokens.primary}; color: white; border: 1px solid {DesignTokens.primary}; border-radius: {radius}px; "
-            "padding: 7px 12px; font-weight: 600; "
-            f"text-align: {align};"
-            " } "
-            f"QPushButton:hover {{ background: {DesignTokens.primary_hover}; border-color: {DesignTokens.primary_hover}; }} "
-            f"QPushButton:pressed {{ background: {DesignTokens.primary_pressed}; border-color: {DesignTokens.primary_pressed}; }} "
-            f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; border-color: {DesignTokens.border_subtle}; }}"
-        )
-    if kind == "ghost":
-        return (
-            "QPushButton { "
-            f"background: transparent; color: {DesignTokens.text_secondary}; border: 1px solid transparent; border-radius: {radius}px; "
-            "padding: 7px 9px; "
-            f"text-align: {align};"
-            " } "
-            f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }} "
-            f"QPushButton:pressed {{ background: {DesignTokens.bg_pressed}; }} "
-            f"QPushButton:disabled {{ color: {DesignTokens.text_disabled}; background: transparent; }}"
-        )
-    return (
-        "QPushButton { "
-        f"background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary}; "
-        f"border: 1px solid {DesignTokens.border}; border-radius: {radius}px; padding: 7px 12px; "
-        f"text-align: {align};"
-        " } "
-        f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; border-color: {DesignTokens.border_strong}; }} "
-        f"QPushButton:pressed {{ background: {DesignTokens.bg_pressed}; }} "
-        f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; border-color: {DesignTokens.border_subtle}; }}"
-    )
+    radius = min(int(radius), DesignTokens.radius_md)
+    style = product_button_style(kind, radius=radius)
+    if align != "center":
+        style += f" QPushButton {{ text-align: {align}; }}"
+    return style
 
 
 def log_sub_agent_runtime(event, **fields):
@@ -719,6 +710,7 @@ def apple_ghost_icon_button_style(radius=7):
 
 
 def apple_panel_style(radius=8, bg=None):
+    radius = min(int(radius), DesignTokens.radius_lg)
     bg = bg or DesignTokens.bg_card
     return (
         f"background: {bg}; border: 1px solid {DesignTokens.border}; "
@@ -727,36 +719,20 @@ def apple_panel_style(radius=8, bg=None):
 
 
 def apple_section_surface_style(radius=8, bg=None):
+    radius = min(int(radius), DesignTokens.radius_md)
     bg = bg or DesignTokens.bg_panel
     return f"QFrame[uiSurface=\"true\"] {{ background: {bg}; border: none; border-radius: {radius}px; }}"
 
 
 def apple_outline_surface_style(radius=8, bg=None, border=None):
+    radius = min(int(radius), DesignTokens.radius_md)
     bg = bg or DesignTokens.bg_panel
     border = border or rgba_from_hex(DesignTokens.border_strong, 0.72)
     return f"QFrame[uiOutlineSurface=\"true\"] {{ background: {bg}; border: 1px solid {border}; border-radius: {radius}px; }}"
 
 
 def apple_segmented_button_style():
-    return f"""
-        QPushButton {{
-            background: transparent;
-            border: none;
-            border-radius: 6px;
-            color: {DesignTokens.text_secondary};
-            padding: 6px 10px;
-            font-size: 12px;
-            font-weight: 600;
-        }}
-        QPushButton:hover {{
-            background: rgba(255, 255, 255, 0.72);
-            color: {DesignTokens.text_primary};
-        }}
-        QPushButton:checked {{
-            background: {DesignTokens.primary_soft};
-            color: {DesignTokens.primary};
-        }}
-    """
+    return product_segmented_style()
 
 
 def apple_section_kicker_style():
@@ -799,6 +775,7 @@ def apple_icon_action_button_style(kind="neutral"):
 
 
 def apple_code_edit_style(bg=None, radius=8, subtle=False, padding=9):
+    radius = min(int(radius), DesignTokens.radius_md)
     bg = bg or (DesignTokens.bg_secondary if subtle else DesignTokens.bg_code)
     border_rule = f"border: 1px solid {DesignTokens.border_subtle};" if subtle else f"border: 1px solid {DesignTokens.border};"
     return f"""
@@ -824,6 +801,7 @@ def apple_code_edit_style(bg=None, radius=8, subtle=False, padding=9):
 
 
 def apple_input_style(radius=8, padding=7):
+    radius = min(int(radius), DesignTokens.radius_md)
     return f"""
         QLineEdit {{
             background: {DesignTokens.bg_card};
@@ -844,6 +822,7 @@ def apple_input_style(radius=8, padding=7):
 
 
 def apple_combo_style(radius=8, padding=7):
+    radius = min(int(radius), DesignTokens.radius_md)
     return f"""
         QComboBox {{
             background: {DesignTokens.bg_card};
@@ -923,6 +902,7 @@ def apple_tree_style():
 
 
 def apple_list_style(border=True, bg=None, radius=8, padding=4):
+    radius = min(int(radius), DesignTokens.radius_md)
     bg = bg or (DesignTokens.bg_card if border else "transparent")
     border_rule = f"border: 1px solid {DesignTokens.border};" if border else "border: none;"
     return f"""
@@ -1296,6 +1276,7 @@ def apple_settings_nav_style():
 
 
 def apple_settings_surface_style(radius=8):
+    radius = min(int(radius), DesignTokens.radius_md)
     return (
         "QFrame[settingsSurface=\"true\"] { "
         f"background: transparent; border: none; border-bottom: 1px solid {DesignTokens.separator}; "
@@ -1712,6 +1693,7 @@ def deliverable_preview_settle_script():
 
 class DeliverableScanWorker(QThread):
     completed = Signal(object, int)
+    failed = Signal(str, int)
 
     def __init__(self, workspace_dir, generation, parent=None):
         super().__init__(parent)
@@ -1719,7 +1701,10 @@ class DeliverableScanWorker(QThread):
         self.generation = int(generation)
 
     def run(self):
-        self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
+        try:
+            self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
+        except Exception as exc:
+            self.failed.emit(str(exc), self.generation)
 
 
 class SkillManagerLoadWorker(QThread):
@@ -2573,7 +2558,7 @@ class CapabilityWorkbenchDialog(QDialog):
         self.config_editors = {}
         self.setWindowTitle("能力工作台")
         self.resize(980, 680)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        apply_product_dialog(self, "CapabilityWorkbenchDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
@@ -4270,7 +4255,7 @@ class AutomationTaskDialog(QDialog):
         self.skills = list(skills or [])
         self.agent_profiles = list(agent_profiles or [])
         self.task = dict(task or {})
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        apply_product_dialog(self, "AutomationTaskDialog")
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
@@ -4297,7 +4282,8 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
-        summary_row = QHBoxLayout()
+        self.summary_widget = QWidget()
+        summary_row = QHBoxLayout(self.summary_widget)
         summary_row.setContentsMargins(0, 0, 0, 0)
         summary_row.setSpacing(10)
         status_card = QFrame()
@@ -4313,10 +4299,16 @@ class AutomationTaskDialog(QDialog):
         self.status_summary_label.setStyleSheet(apple_caption_style())
         self.status_summary_label.setWordWrap(True)
         status_layout.addWidget(self.status_summary_label)
-        self.enabled_check = QCheckBox("启用该自动化任务")
+        enabled_row = QHBoxLayout()
+        enabled_label = QLabel("启用该自动化任务")
+        enabled_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary};")
+        self.enabled_check = AppleSwitch()
         self.enabled_check.setChecked(True)
         self.enabled_check.toggled.connect(self._refresh_status_summary)
-        status_layout.addWidget(self.enabled_check)
+        enabled_row.addWidget(enabled_label)
+        enabled_row.addStretch()
+        enabled_row.addWidget(self.enabled_check)
+        status_layout.addLayout(enabled_row)
         summary_row.addWidget(status_card, 1)
 
         guidance_card = QFrame()
@@ -4333,7 +4325,7 @@ class AutomationTaskDialog(QDialog):
         guidance_text.setWordWrap(True)
         guidance_layout.addWidget(guidance_text)
         summary_row.addWidget(guidance_card, 1)
-        layout.addLayout(summary_row)
+        layout.addWidget(self.summary_widget)
 
         basics_card = QFrame()
         basics_card.setProperty("uiSurface", True)
@@ -4367,8 +4359,14 @@ class AutomationTaskDialog(QDialog):
         skills_label = QLabel("引用能力")
         skills_label.setStyleSheet(apple_section_kicker_style())
         skills_layout.addWidget(skills_label)
+        self.skill_search_input = QLineEdit()
+        self.skill_search_input.setPlaceholderText("搜索能力")
+        self.skill_search_input.setClearButtonEnabled(True)
+        self.skill_search_input.textChanged.connect(self._filter_skill_list)
+        skills_layout.addWidget(self.skill_search_input)
         self.skill_list = QListWidget()
-        self.skill_list.setFixedHeight(140)
+        self.skill_list.setMinimumHeight(140)
+        self.skill_list.setMaximumHeight(220)
         apply_apple_checkable_list_behavior(self.skill_list, radius=14, bg=DesignTokens.bg_main, padding=4)
         for skill in self.skills:
             name = str(skill.get("name") or "").strip()
@@ -4636,6 +4634,13 @@ class AutomationTaskDialog(QDialog):
                 names.append(str(item.data(Qt.UserRole) or ""))
         return normalize_selected_skill_names(names)
 
+    def _filter_skill_list(self, text):
+        query = str(text or "").strip().casefold()
+        for index in range(self.skill_list.count()):
+            item = self.skill_list.item(index)
+            haystack = f"{item.text()} {item.toolTip()}".casefold()
+            item.setHidden(bool(query and query not in haystack))
+
     def _load_task(self):
         self.name_input.setText(str(self.task.get("name") or "").strip())
         self.prompt_edit.setPlainText(str(self.task.get("prompt") or "").strip())
@@ -4760,7 +4765,7 @@ class AutomationDialog(QDialog):
         self.setWindowTitle("自动化")
         self.resize(980, 720)
         self.setMinimumSize(860, 620)
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        apply_product_dialog(self, "AutomationDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -4784,14 +4789,15 @@ class AutomationDialog(QDialog):
         header.addWidget(self.create_task_btn)
         layout.addLayout(header)
 
-        summary_row = QHBoxLayout()
+        self.summary_widget = QWidget()
+        summary_row = QHBoxLayout(self.summary_widget)
         summary_row.setContentsMargins(0, 0, 0, 0)
         summary_row.setSpacing(10)
         self.configured_summary_card = self._build_overview_card("已配置任务", "0")
         self.active_summary_card = self._build_overview_card("正在启用", "0")
         summary_row.addWidget(self.configured_summary_card, 1)
         summary_row.addWidget(self.active_summary_card, 1)
-        layout.addLayout(summary_row)
+        layout.addWidget(self.summary_widget)
 
         tab_bar = QFrame()
         tab_bar.setProperty("uiSurface", True)
@@ -4872,17 +4878,16 @@ class AutomationDialog(QDialog):
         history_layout.addWidget(history_detail_card)
         self.tabs.addWidget(history_tab)
 
-        actions = QHBoxLayout()
+        action_bar = ProductActionBar()
         close_btn = QPushButton("关闭")
         close_btn.setObjectName("SecondaryBtn")
         close_btn.clicked.connect(self.reject)
         save_btn = QPushButton("保存")
         save_btn.setObjectName("PrimaryBtn")
         save_btn.clicked.connect(self.save_and_accept)
-        actions.addStretch()
-        actions.addWidget(close_btn)
-        actions.addWidget(save_btn)
-        layout.addLayout(actions)
+        action_bar.layout.addWidget(close_btn)
+        action_bar.layout.addWidget(save_btn)
+        layout.addWidget(action_bar)
 
         self.refresh_task_cards()
         self.refresh_history_list()
@@ -4935,6 +4940,8 @@ class AutomationDialog(QDialog):
     def _refresh_overview_cards(self):
         self._set_summary_card_value(self.configured_summary_card, len(self.tasks))
         self._set_summary_card_value(self.active_summary_card, len([task for task in self.tasks if task.get("enabled")]))
+        if hasattr(self, "summary_widget"):
+            self.summary_widget.setVisible(bool(self.tasks))
 
     def _set_tab_index(self, index):
         self.tabs.setCurrentIndex(index)
@@ -4976,23 +4983,12 @@ class AutomationDialog(QDialog):
             if widget:
                 widget.deleteLater()
         if not self.tasks:
-            empty_card = QFrame()
-            empty_card.setProperty("uiSurface", True)
-            empty_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
-            empty_layout = QVBoxLayout(empty_card)
-            empty_layout.setContentsMargins(18, 18, 18, 18)
-            empty_layout.setSpacing(8)
-            empty_title = QLabel("还没有任务")
-            empty_title.setStyleSheet(apple_section_title_style(size=15))
-            empty_desc = QLabel("先创建一个会按计划提交提示词的任务，比如日报、巡检、同步或清理。")
-            empty_desc.setStyleSheet(apple_caption_style())
-            empty_desc.setWordWrap(True)
-            empty_btn = QPushButton("新建定时任务")
-            empty_btn.setObjectName("PrimaryBtn")
-            empty_btn.clicked.connect(self.create_task)
-            empty_layout.addWidget(empty_title)
-            empty_layout.addWidget(empty_desc)
-            empty_layout.addWidget(empty_btn, 0, Qt.AlignLeft)
+            empty_card = ProductEmptyState(
+                "还没有自动化任务",
+                "创建日报、巡检、同步或清理任务，Cowork 会按计划提交提示词并记录结果。",
+                "新建定时任务",
+            )
+            empty_card.action_button.clicked.connect(self.create_task)
             self.tasks_layout.addWidget(empty_card)
             self.tasks_layout.addStretch()
             self._refresh_overview_cards()
@@ -5563,7 +5559,7 @@ class McpServerManager(QWidget):
         )
         layout.addWidget(self.detail_label)
 
-        self.status_label = QLabel("Test result will appear here.")
+        self.status_label = QLabel("连接测试结果会显示在这里。")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(self.status_label)
@@ -5593,16 +5589,16 @@ class McpServerManager(QWidget):
     def _refresh_detail(self):
         index = self._current_index()
         if index < 0:
-            self.detail_label.setText("No MCP server configured.")
+            self.detail_label.setText("尚未配置 MCP 服务器。")
             return
         server = self.servers[index]
-        state_text = "Enabled" if server.get("enabled", True) else "Disabled"
+        state_text = "已启用" if server.get("enabled", True) else "已停用"
         summary = summarize_mcp_server(server)
         summary_html = html.escape(summary)
         self.detail_label.setText(
             "<div>"
             f"<span style='font-weight:700;color:{DesignTokens.text_primary};'>{html.escape(str(server.get('name') or 'MCP Server'))}</span>"
-            f"<span style='color:{DesignTokens.text_tertiary};'> · {html.escape(mcp_transport_label(server.get('transport')))} · {state_text} · Timeout {server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS}s</span>"
+            f"<span style='color:{DesignTokens.text_tertiary};'> · {html.escape(mcp_transport_label(server.get('transport')))} · {state_text} · 超时 {server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS}s</span>"
             f"<div style='color:{DesignTokens.text_secondary};line-height:1.45;margin-top:4px;'>{summary_html}</div>"
             "</div>"
         )
@@ -5977,45 +5973,8 @@ class SettingsDialog(QDialog):
         self.config_manager = config_manager
         self._main = parent
         self.requires_skill_reload = False
-        self.setStyleSheet(
-            f"""
-            QDialog#SettingsDialog {{ background: {DesignTokens.bg_app}; }}
-            QDialog#SettingsDialog QLabel {{ background: transparent; border: none; }}
-            QDialog#SettingsDialog QLineEdit,
-            QDialog#SettingsDialog QPlainTextEdit,
-            QDialog#SettingsDialog QTextEdit,
-            QDialog#SettingsDialog QComboBox {{
-                background: {DesignTokens.bg_main};
-                color: {DesignTokens.text_primary};
-                border: 1px solid {DesignTokens.border};
-                border-radius: 8px;
-                padding: 6px 9px;
-                selection-background-color: {DesignTokens.primary_soft};
-                selection-color: {DesignTokens.text_primary};
-            }}
-            QDialog#SettingsDialog QLineEdit:focus,
-            QDialog#SettingsDialog QPlainTextEdit:focus,
-            QDialog#SettingsDialog QTextEdit:focus,
-            QDialog#SettingsDialog QComboBox:focus {{ border-color: {DesignTokens.primary_focus}; }}
-            QDialog#SettingsDialog QLineEdit:disabled,
-            QDialog#SettingsDialog QPlainTextEdit:disabled,
-            QDialog#SettingsDialog QTextEdit:disabled,
-            QDialog#SettingsDialog QComboBox:disabled {{
-                background: {DesignTokens.bg_disabled};
-                color: {DesignTokens.text_disabled};
-            }}
-            QDialog#SettingsDialog QPushButton#PrimaryBtn {{
-                background: {DesignTokens.primary}; color: white; border: 1px solid {DesignTokens.primary};
-                border-radius: 8px; padding: 7px 12px; font-weight: 600;
-            }}
-            QDialog#SettingsDialog QPushButton#PrimaryBtn:hover {{ background: {DesignTokens.primary_hover}; }}
-            QDialog#SettingsDialog QPushButton#SecondaryBtn {{
-                background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary};
-                border: 1px solid {DesignTokens.border}; border-radius: 8px; padding: 7px 12px;
-            }}
-            QDialog#SettingsDialog QPushButton#SecondaryBtn:hover {{ background: {DesignTokens.bg_hover}; }}
-            """
-        )
+        self._settings_dirty = False
+        apply_product_dialog(self, "SettingsDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
@@ -6613,17 +6572,86 @@ class SettingsDialog(QDialog):
         self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
         self.select_initial_page(initial_page_label)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        save_btn = QPushButton("保存设置")
-        save_btn.setObjectName("PrimaryBtn")
-        save_btn.clicked.connect(self.save_settings)
+        action_bar = ProductActionBar()
+        self.settings_dirty_label = QLabel("没有未保存的修改")
+        self.settings_dirty_label.setStyleSheet(apple_caption_style())
+        action_bar.layout.insertWidget(0, self.settings_dirty_label)
+        self.save_settings_btn = QPushButton("保存设置")
+        self.save_settings_btn.setObjectName("PrimaryBtn")
+        self.save_settings_btn.setEnabled(False)
+        self.save_settings_btn.clicked.connect(self.save_settings)
         cancel_btn = QPushButton("取消")
         cancel_btn.setObjectName("SecondaryBtn")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
-        btn_layout.addWidget(save_btn)
-        layout.addLayout(btn_layout)
+        cancel_btn.clicked.connect(self.request_reject)
+        action_bar.layout.addWidget(cancel_btn)
+        action_bar.layout.addWidget(self.save_settings_btn)
+        layout.addWidget(action_bar)
+        self._connect_settings_dirty_tracking()
+
+    def _connect_settings_dirty_tracking(self):
+        callback = lambda *_args: self._mark_settings_dirty()
+        for editor in self.findChildren(QLineEdit):
+            editor.textChanged.connect(callback)
+        for editor in self.findChildren(QTextEdit):
+            editor.textChanged.connect(callback)
+        for editor in self.findChildren(QPlainTextEdit):
+            editor.textChanged.connect(callback)
+        for combo in self.findChildren(QComboBox):
+            combo.currentIndexChanged.connect(callback)
+        for check in self.findChildren(QCheckBox):
+            check.toggled.connect(callback)
+        for spin in self.findChildren(QSpinBox):
+            spin.valueChanged.connect(callback)
+        for date_edit in self.findChildren(QDateTimeEdit):
+            date_edit.dateTimeChanged.connect(callback)
+        for manager in (self.model_channel_manager, self.agent_profile_manager, self.mcp_server_manager):
+            for button in manager.findChildren(QPushButton):
+                button.clicked.connect(callback)
+            for button in manager.findChildren(QToolButton):
+                button.clicked.connect(callback)
+
+    def _mark_settings_dirty(self):
+        self._settings_dirty = True
+        if hasattr(self, "save_settings_btn"):
+            self.save_settings_btn.setEnabled(True)
+        if hasattr(self, "settings_dirty_label"):
+            self.settings_dirty_label.setText("有未保存的修改")
+
+    def _clear_settings_dirty(self):
+        self._settings_dirty = False
+        if hasattr(self, "save_settings_btn"):
+            self.save_settings_btn.setEnabled(False)
+        if hasattr(self, "settings_dirty_label"):
+            self.settings_dirty_label.setText("没有未保存的修改")
+
+    def request_reject(self):
+        if self._settings_dirty:
+            reply = QMessageBox.question(
+                self,
+                "还有未保存的设置",
+                "关闭后将丢弃尚未保存的修改，确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self._clear_settings_dirty()
+        self.reject()
+
+    def closeEvent(self, event):
+        if self._settings_dirty:
+            reply = QMessageBox.question(
+                self,
+                "还有未保存的设置",
+                "关闭后将丢弃尚未保存的修改，确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            self._clear_settings_dirty()
+        event.accept()
 
     def select_initial_page(self, initial_page_label):
         if not initial_page_label:
@@ -7120,6 +7148,7 @@ class SettingsDialog(QDialog):
                 return
             self._save_im_gateway_config()
         self.requires_skill_reload = mcp_servers != current_mcp_servers
+        self._clear_settings_dirty()
         self.accept()
 
 
@@ -7137,8 +7166,9 @@ class SkillsCenterDialog(QDialog):
         self.current_tab_key = "builtin"
         self.selection_mode = False
         self.selected_skill_names = set()
+        self.selected_skill_by_tab = {}
         self._grid_columns = 2
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        apply_product_dialog(self, "SkillsCenterDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -7408,7 +7438,7 @@ class SkillsCenterDialog(QDialog):
         self._clear_layout(layout)
         tab_skills, filtered_skills = self._filtered_skills(tab_key)
         if filtered_skills:
-            layout.insertWidget(layout.count() - 1, self._build_skill_grid(filtered_skills))
+            layout.insertWidget(layout.count() - 1, self._build_skill_master_detail(filtered_skills, tab_key))
         else:
             layout.insertWidget(layout.count() - 1, self._build_empty_state(tab_key, bool(tab_skills)))
 
@@ -7420,7 +7450,7 @@ class SkillsCenterDialog(QDialog):
         self.count_label.setText(f"显示 {len(visible)} / {len(total)} 个能力{selected_text}{pending_text}")
 
     def _current_column_count(self):
-        return 2
+        return 1
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -7446,6 +7476,142 @@ class SkillsCenterDialog(QDialog):
         for col in range(columns):
             grid.setColumnStretch(col, 1)
         return container
+
+    def _build_skill_master_detail(self, skills, tab_key):
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setStyleSheet(
+            f"QSplitter::handle {{ background: {DesignTokens.separator}; width: 1px; margin: 0 8px; }}"
+        )
+        skill_list = QListWidget()
+        skill_list.setObjectName("CapabilityMasterList")
+        skill_list.setMinimumWidth(260)
+        skill_list.setMaximumWidth(360)
+        skill_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_main, radius=8, padding=4))
+        skill_list.setSpacing(1)
+        for skill in skills:
+            name = str(skill.get("name") or "").strip()
+            display_name = skill.get("display_name") or name
+            risk_text, _risk_color = readable_risk_level(skill.get("risk_level") or skill.get("security_level"))
+            enabled_label = "已启用" if skill.get("enabled") else "已关闭"
+            item = QListWidgetItem(f"{display_name}\n{risk_text}  ·  {enabled_label}")
+            item.setData(Qt.UserRole, name)
+            item.setToolTip(skill.get("user_description") or skill.get("description") or "")
+            item.setSizeHint(QSize(0, 52))
+            if self.selection_mode:
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if name in self.selected_skill_names else Qt.Unchecked)
+            skill_list.addItem(item)
+        splitter.addWidget(skill_list)
+
+        detail_host = QFrame()
+        detail_host.setProperty("productSurface", "panel")
+        detail_host.setStyleSheet(product_surface_style("panel"))
+        detail_layout = QVBoxLayout(detail_host)
+        detail_layout.setContentsMargins(18, 12, 8, 12)
+        detail_layout.setSpacing(10)
+        splitter.addWidget(detail_host)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 620])
+        by_name = {str(skill.get("name") or "").strip(): skill for skill in skills}
+
+        def show_detail(item):
+            if item is None:
+                return
+            name = str(item.data(Qt.UserRole) or "")
+            skill = by_name.get(name)
+            if not skill:
+                return
+            self.selected_skill_by_tab[tab_key] = name
+            while detail_layout.count():
+                child = detail_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            detail_layout.addWidget(self._build_skill_detail(skill), 1)
+
+        def update_bulk_selection(item):
+            if self.selection_mode and item is not None:
+                self.set_skill_selected(
+                    str(item.data(Qt.UserRole) or ""),
+                    item.checkState() == Qt.Checked,
+                )
+
+        skill_list.currentItemChanged.connect(lambda current, _previous: show_detail(current))
+        skill_list.itemChanged.connect(update_bulk_selection)
+        skill_list.itemDoubleClicked.connect(
+            lambda item: self.handle_skill_item_clicked(by_name.get(str(item.data(Qt.UserRole) or ""), {}))
+        )
+        selected_name = self.selected_skill_by_tab.get(tab_key)
+        selected_row = next(
+            (row for row in range(skill_list.count()) if skill_list.item(row).data(Qt.UserRole) == selected_name),
+            0,
+        )
+        if skill_list.count():
+            skill_list.setCurrentRow(selected_row)
+            show_detail(skill_list.currentItem())
+        return splitter
+
+    def _build_skill_detail(self, skill):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        title_row = QHBoxLayout()
+        title = QLabel(skill.get("display_name") or skill.get("name") or "未命名能力")
+        title.setWordWrap(True)
+        title.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_page}px; font-weight: 700; color: {DesignTokens.text_primary};"
+        )
+        title_row.addWidget(title, 1)
+        enabled = bool(skill.get("enabled"))
+        switch = AppleSwitch()
+        switch.setChecked(enabled)
+        if skill_center_is_builtin(skill):
+            switch.setEnabled(False)
+            switch.setToolTip("内置能力始终启用")
+        else:
+            switch.setToolTip("关闭" if enabled else "启用")
+            switch.clicked.connect(
+                lambda checked=False, name=skill.get("name"): self.toggle_skill(name, bool(checked))
+            )
+        title_row.addWidget(switch, 0, Qt.AlignTop)
+        layout.addLayout(title_row)
+        description = QLabel(skill.get("user_description") or skill.get("description") or "暂无说明。")
+        description.setWordWrap(True)
+        description.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 13px;")
+        layout.addWidget(description)
+        risk_text, _risk_color = readable_risk_level(skill.get("risk_level") or skill.get("security_level"))
+        risk_badge = ProductStatusBadge(risk_text, "error" if "高" in risk_text else "warning" if "中" in risk_text else "primary")
+        meta_row = QHBoxLayout()
+        meta_row.addWidget(risk_badge, 0, Qt.AlignLeft)
+        source_label = QLabel({
+            "builtin": "内置能力",
+            "optional": "可选插件",
+            "mcp": "MCP",
+            "custom": "自定义能力",
+        }.get(skill_center_tab_key(skill), "能力"))
+        source_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_tertiary};")
+        meta_row.addWidget(source_label)
+        meta_row.addStretch()
+        layout.addLayout(meta_row)
+        tools = skill.get("tools") or []
+        tools_section = ProductSection("可用工具", "", kind="subtle")
+        tools_text = QLabel("、".join([str(item) for item in tools]) if tools else "该能力不直接暴露工具。")
+        tools_text.setWordWrap(True)
+        tools_text.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        tools_section.layout.addWidget(tools_text)
+        layout.addWidget(tools_section)
+        layout.addStretch()
+        actions = QHBoxLayout()
+        actions.addStretch()
+        workbench_btn = QPushButton("配置与调试")
+        workbench_btn.setObjectName("PrimaryBtn")
+        workbench_btn.setStyleSheet(product_button_style("primary"))
+        workbench_btn.clicked.connect(lambda checked=False, value=dict(skill): self.handle_skill_item_clicked(value))
+        actions.addWidget(workbench_btn)
+        layout.addLayout(actions)
+        return panel
 
     def _build_empty_state(self, tab_key, has_items):
         frame = QFrame()
@@ -7851,7 +8017,7 @@ class ConversationSkillOptionsDialog(QDialog):
             skill for skill in (skills or [])
             if isinstance(skill, dict) and str(skill.get("name") or "").strip()
         ]
-        self.setStyleSheet(linear_dialog_stylesheet("AutomationTaskDialog"))
+        apply_product_dialog(self, "ConversationSkillOptionsDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -7903,17 +8069,17 @@ class ConversationSkillOptionsDialog(QDialog):
         layout.addWidget(self.hint_label)
         layout.addStretch()
 
-        actions = QHBoxLayout()
+        action_bar = ProductActionBar()
+        action_bar.layout.setContentsMargins(24, 10, 24, 16)
         cancel_btn = QPushButton("取消")
         cancel_btn.setObjectName("SecondaryBtn")
         cancel_btn.clicked.connect(self.reject)
         next_btn = QPushButton("继续")
         next_btn.setObjectName("PrimaryBtn")
         next_btn.clicked.connect(self._accept_if_valid)
-        actions.addStretch()
-        actions.addWidget(cancel_btn)
-        actions.addWidget(next_btn)
-        layout.addLayout(actions)
+        action_bar.layout.addWidget(cancel_btn)
+        action_bar.layout.addWidget(next_btn)
+        layout.addWidget(action_bar)
 
         self.mode_combo.currentIndexChanged.connect(self._sync_mode_controls)
         if not editable_count:
@@ -7951,7 +8117,7 @@ class ConversationSkillRangeDialog(QDialog):
         self.setWindowTitle("选择会话片段")
         self.resize(720, 560)
         self.messages = [message for message in (messages or []) if isinstance(message, dict)]
-        self.setStyleSheet(linear_dialog_stylesheet("AutomationDialog"))
+        apply_product_dialog(self, "ConversationSkillRangeDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -8045,7 +8211,7 @@ class ConversationSkillPreviewDialog(QDialog):
         self.target_skill = target_skill or ""
         self.update_strategy = update_strategy or "append"
         self.script_asset_checks = []
-        self.setStyleSheet(linear_dialog_stylesheet("SkillsCenterDialog"))
+        apply_product_dialog(self, "ConversationSkillPreviewDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -8076,10 +8242,9 @@ class ConversationSkillPreviewDialog(QDialog):
         save_btn = QPushButton("保存 Skill")
         save_btn.setObjectName("PrimaryBtn")
         save_btn.clicked.connect(self._accept_if_valid)
-        actions.addStretch()
-        actions.addWidget(cancel_btn)
-        actions.addWidget(save_btn)
-        layout.addLayout(actions)
+        action_bar.layout.addWidget(cancel_btn)
+        action_bar.layout.addWidget(save_btn)
+        root_layout.addWidget(action_bar)
 
     def _build_basic_tab(self):
         tab = QWidget()
@@ -9205,7 +9370,7 @@ class EmptyStateWidget(QWidget):
         
         # Icon
         icon = QLabel()
-        icon.setPixmap(qta.icon('fa5s.robot', color=DesignTokens.border).pixmap(64, 64))
+        icon.setPixmap(qta.icon('fa5s.robot', color=DesignTokens.border).pixmap(40, 40))
         icon.setAlignment(Qt.AlignCenter)
         
         # Title
@@ -9216,7 +9381,7 @@ class EmptyStateWidget(QWidget):
         # Grid
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(24) # Increase spacing
+        self.grid_layout.setSpacing(12)
         
         self.actions_data = [
             (
@@ -9244,11 +9409,11 @@ class EmptyStateWidget(QWidget):
             
         layout.addStretch()
         layout.addWidget(icon)
-        layout.addSpacing(24)
+        layout.addSpacing(12)
         layout.addWidget(title)
-        layout.addSpacing(40)
+        layout.addSpacing(20)
         layout.addWidget(self.grid_widget)
-        layout.addSpacing(18)
+        layout.addSpacing(12)
         layout.addWidget(self.create_toolkit_hint(), 0, Qt.AlignHCenter)
         layout.addStretch()
         
@@ -9261,7 +9426,7 @@ class EmptyStateWidget(QWidget):
         
     def reflow_cards(self):
         # Calculate columns based on width
-        # Card min width ~260, spacing 24
+        # Keep task suggestions compact while retaining readable wrapping.
         w = self.width()
         if w > 1100:
             cols = 4
@@ -9290,14 +9455,14 @@ class EmptyStateWidget(QWidget):
     def create_action_card(self, title, desc, prompt, icon_name=""):
         btn = QPushButton()
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setMinimumHeight(140) # Significantly increase card height
-        btn.setMinimumWidth(260) # Ensure sufficient width
+        btn.setMinimumHeight(92)
+        btn.setMinimumWidth(220)
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {DesignTokens.bg_main};
                 border: 1px solid {DesignTokens.border};
-                border-radius: 16px;
-                padding: 24px;
+                border-radius: {DesignTokens.radius_md}px;
+                padding: 14px;
                 text-align: left;
             }}
             QPushButton:hover {{
@@ -9307,7 +9472,7 @@ class EmptyStateWidget(QWidget):
         """)
         
         layout = QVBoxLayout(btn)
-        layout.setSpacing(10) 
+        layout.setSpacing(6)
         
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -9319,11 +9484,11 @@ class EmptyStateWidget(QWidget):
             title_row.addWidget(icon_label, 0, Qt.AlignVCenter)
 
         t_label = QLabel(title)
-        t_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary}; background: transparent; border: none;") 
+        t_label.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {DesignTokens.text_primary}; background: transparent; border: none;")
         title_row.addWidget(t_label, 1)
         
         d_label = QLabel(desc)
-        d_label.setStyleSheet(f"font-size: 14px; color: {DesignTokens.text_secondary}; background: transparent; border: none;") 
+        d_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
         d_label.setWordWrap(True) # Ensure text is fully visible
         
         layout.addLayout(title_row)
@@ -9402,18 +9567,7 @@ class PptAgentModeDialog(QDialog):
         self.setWindowTitle("PPT Mode")
         self.setModal(True)
         self.resize(720, 680)
-        self.setStyleSheet(
-            f"""
-            QDialog {{
-                background: {DesignTokens.bg_main};
-                color: {DesignTokens.text_primary};
-            }}
-            QLabel {{
-                color: {DesignTokens.text_primary};
-                background: transparent;
-            }}
-            """
-        )
+        apply_product_dialog(self, "PptAgentModeDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
@@ -9458,6 +9612,19 @@ class PptAgentModeDialog(QDialog):
         )
         layout.addWidget(self._field_block("需求", self.request_edit))
 
+        self.generation_options_toggle = QPushButton("生成选项")
+        self.generation_options_toggle.setCheckable(True)
+        self.generation_options_toggle.setStyleSheet(apple_button_style("ghost", align="left"))
+        self.generation_options_toggle.setIcon(qta.icon("fa5s.sliders-h", color=DesignTokens.text_secondary))
+        layout.addWidget(self.generation_options_toggle)
+
+        self.generation_options_panel = QFrame()
+        self.generation_options_panel.setProperty("productSurface", "subtle")
+        self.generation_options_panel.setStyleSheet(product_surface_style("subtle"))
+        generation_options_layout = QVBoxLayout(self.generation_options_panel)
+        generation_options_layout.setContentsMargins(12, 12, 12, 12)
+        generation_options_layout.setSpacing(12)
+
         option_row = QHBoxLayout()
         option_row.setContentsMargins(0, 0, 0, 0)
         option_row.setSpacing(12)
@@ -9479,7 +9646,7 @@ class PptAgentModeDialog(QDialog):
         self.strategy_combo.addItem("Huashu Design（已内置 Skill）", PPT_AGENT_STRATEGY_HUASHU)
         apply_settings_combo_style(self.strategy_combo)
         option_row.addWidget(self._field_block("内置 Skill", self.strategy_combo), 1)
-        layout.addLayout(option_row)
+        generation_options_layout.addLayout(option_row)
 
         files_bar = QFrame()
         files_bar.setObjectName("PptAgentFilesBar")
@@ -9514,24 +9681,10 @@ class PptAgentModeDialog(QDialog):
         self.files_label.setWordWrap(True)
         self.files_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         files_layout.addWidget(self.files_label)
-        layout.addWidget(files_bar)
-
-        capability_box = QFrame()
-        capability_box.setObjectName("PptAgentCapabilityBox")
-        capability_box.setStyleSheet("QFrame#PptAgentCapabilityBox { background: transparent; border: none; }")
-        capability_layout = QVBoxLayout(capability_box)
-        capability_layout.setContentsMargins(0, 0, 0, 0)
-        capability_layout.setSpacing(6)
-        for name, summary in (
-            ("Guizang PPT Skill", "HTML 横向翻页 PPT / PPT 配图 / 强视觉表达"),
-            ("Frontend Slides", "前端技术生成 HTML Slides / 产品和技术演示"),
-            ("Huashu Design", "高审美设计型 HTML PPT / 商业视觉表达"),
-        ):
-            label = QLabel(f"{name}  ·  已内置 Skill  ·  {summary}")
-            label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
-            label.setWordWrap(True)
-            capability_layout.addWidget(label)
-        layout.addWidget(capability_box)
+        generation_options_layout.addWidget(files_bar)
+        self.generation_options_panel.setVisible(False)
+        self.generation_options_toggle.toggled.connect(self.generation_options_panel.setVisible)
+        layout.addWidget(self.generation_options_panel)
 
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 4, 0, 0)
@@ -9618,7 +9771,7 @@ class AgentModuleDialog(QDialog):
         self.setWindowTitle("智能体")
         self.setModal(True)
         self.resize(640, 560)
-        self.setStyleSheet(linear_dialog_stylesheet("AgentModuleDialog"))
+        apply_product_dialog(self, "AgentModuleDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
@@ -9639,6 +9792,10 @@ class AgentModuleDialog(QDialog):
         title_box.addWidget(title)
         title_box.addWidget(desc)
         header.addLayout(title_box, 1)
+        manage_btn = QPushButton("管理智能体")
+        manage_btn.setObjectName("SecondaryBtn")
+        manage_btn.clicked.connect(self._open_agent_settings)
+        header.addWidget(manage_btn, 0, Qt.AlignTop)
         layout.addLayout(header)
 
         builtin_title = QLabel("内置智能体")
@@ -9669,8 +9826,8 @@ class AgentModuleDialog(QDialog):
                 background: {DesignTokens.bg_panel_strong};
                 color: {DesignTokens.text_primary};
                 border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 16px;
-                padding: 16px;
+                border-radius: {DesignTokens.radius_md}px;
+                padding: 12px;
                 text-align: left;
             }}
             QPushButton:hover {{
@@ -9725,6 +9882,12 @@ class AgentModuleDialog(QDialog):
             layout.addWidget(button)
         layout.addStretch()
         return container
+
+    def _open_agent_settings(self):
+        parent = self.parent()
+        self.reject()
+        if parent is not None and hasattr(parent, "open_settings"):
+            parent.open_settings("智能体")
 
     def _select_ppt_agent(self):
         self.selected_builtin = "ppt_agent"
@@ -12625,7 +12788,9 @@ class MemoryCenterDialog(QDialog):
         self.setMinimumSize(820, 560)
         self.store = MemoryStore(history_dir)
         self.workspace_dir = workspace_dir or ""
-        self.setStyleSheet(linear_dialog_stylesheet("MemoryCenterDialog"))
+        self._summary_dirty = False
+        self._soul_dirty = False
+        apply_product_dialog(self, "MemoryCenterDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
@@ -12661,10 +12826,18 @@ class MemoryCenterDialog(QDialog):
         self.summary_edit.setPlaceholderText("记录需要始终提供给 AI 的精简、稳定信息。")
         self.summary_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=12))
         summary_layout.addWidget(self.summary_edit, 1)
-        summary_save = QPushButton("保存摘要")
-        summary_save.setObjectName("PrimaryBtn")
-        summary_save.clicked.connect(self.save_summary)
-        summary_layout.addWidget(summary_save, 0, Qt.AlignRight)
+        summary_footer = QHBoxLayout()
+        self.summary_meta_label = QLabel("0 字 · 已保存")
+        self.summary_meta_label.setStyleSheet(apple_caption_style())
+        summary_footer.addWidget(self.summary_meta_label)
+        summary_footer.addStretch()
+        self.summary_save_btn = QPushButton("保存摘要")
+        self.summary_save_btn.setObjectName("PrimaryBtn")
+        self.summary_save_btn.setEnabled(False)
+        self.summary_save_btn.clicked.connect(self.save_summary)
+        summary_footer.addWidget(self.summary_save_btn)
+        summary_layout.addLayout(summary_footer)
+        self.summary_edit.textChanged.connect(self._mark_summary_dirty)
         self.tabs.addTab(summary_page, "长期摘要")
 
         soul_page = QWidget()
@@ -12678,25 +12851,39 @@ class MemoryCenterDialog(QDialog):
         self.soul_edit.setPlaceholderText("例如：你温和、好奇、坦率，喜欢先理解问题，再给出清晰而有主见的建议。")
         self.soul_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=16, subtle=True, padding=12))
         soul_layout.addWidget(self.soul_edit, 1)
-        soul_save = QPushButton("保存灵魂提示词")
-        soul_save.setObjectName("PrimaryBtn")
-        soul_save.clicked.connect(self.save_soul)
-        soul_layout.addWidget(soul_save, 0, Qt.AlignRight)
+        soul_footer = QHBoxLayout()
+        self.soul_meta_label = QLabel("0 字 · 已保存")
+        self.soul_meta_label.setStyleSheet(apple_caption_style())
+        soul_footer.addWidget(self.soul_meta_label)
+        soul_footer.addStretch()
+        self.soul_save_btn = QPushButton("保存灵魂提示词")
+        self.soul_save_btn.setObjectName("PrimaryBtn")
+        self.soul_save_btn.setEnabled(False)
+        self.soul_save_btn.clicked.connect(self.save_soul)
+        soul_footer.addWidget(self.soul_save_btn)
+        soul_layout.addLayout(soul_footer)
+        self.soul_edit.textChanged.connect(self._mark_soul_dirty)
         self.tabs.addTab(soul_page, "灵魂提示词")
 
         close_btn = QPushButton("完成")
         close_btn.setObjectName("SecondaryBtn")
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self.request_close)
         layout.addWidget(close_btn, 0, Qt.AlignRight)
         self.load_summary()
+        self.soul_edit.blockSignals(True)
         self.soul_edit.setPlainText(self.store.read_soul())
+        self.soul_edit.blockSignals(False)
+        self._set_soul_dirty(False)
 
     def _scope(self):
         return self.summary_scope.currentData() or "global"
 
     def load_summary(self):
         scope = self._scope()
+        self.summary_edit.blockSignals(True)
         self.summary_edit.setPlainText(self.store.read_summary(scope, self.workspace_dir))
+        self.summary_edit.blockSignals(False)
+        self._set_summary_dirty(False)
 
     def handle_summary_scope_changed(self):
         self.generate_btn.setText("从当前工作区生成" if self._scope() == "workspace" else "从历史生成")
@@ -12705,14 +12892,16 @@ class MemoryCenterDialog(QDialog):
     def save_summary(self):
         try:
             self.store.save_summary(self.summary_edit.toPlainText(), self._scope(), self.workspace_dir)
-            QMessageBox.information(self, "记忆", "长期摘要已保存，将从下一轮对话开始生效。")
+            self._set_summary_dirty(False)
+            self._notify_saved("长期摘要已保存，将从下一轮对话开始生效。")
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
 
     def save_soul(self):
         try:
             self.store.save_soul(self.soul_edit.toPlainText())
-            QMessageBox.information(self, "记忆", "灵魂提示词已保存，将从下一轮对话开始生效。")
+            self._set_soul_dirty(False)
+            self._notify_saved("灵魂提示词已保存，将从下一轮对话开始生效。")
         except Exception as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
 
@@ -12720,6 +12909,62 @@ class MemoryCenterDialog(QDialog):
         self.hide()
         if self.parent() and hasattr(self.parent(), "start_memory_update"):
             self.parent().start_memory_update(self._scope(), self.workspace_dir)
+
+    def _notify_saved(self, message):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "add_system_toast"):
+            parent.add_system_toast(message, "success", auto_close_ms=3600)
+
+    def _mark_summary_dirty(self):
+        self._set_summary_dirty(True)
+
+    def _mark_soul_dirty(self):
+        self._set_soul_dirty(True)
+
+    def _set_summary_dirty(self, dirty):
+        self._summary_dirty = bool(dirty)
+        if hasattr(self, "summary_save_btn"):
+            self.summary_save_btn.setEnabled(self._summary_dirty)
+        if hasattr(self, "summary_meta_label"):
+            count = len(self.summary_edit.toPlainText()) if hasattr(self, "summary_edit") else 0
+            self.summary_meta_label.setText(f"{count} 字 · {'未保存' if self._summary_dirty else '已保存'}")
+
+    def _set_soul_dirty(self, dirty):
+        self._soul_dirty = bool(dirty)
+        if hasattr(self, "soul_save_btn"):
+            self.soul_save_btn.setEnabled(self._soul_dirty)
+        if hasattr(self, "soul_meta_label"):
+            count = len(self.soul_edit.toPlainText()) if hasattr(self, "soul_edit") else 0
+            self.soul_meta_label.setText(f"{count} 字 · {'未保存' if self._soul_dirty else '已保存'}")
+
+    def request_close(self):
+        if self._summary_dirty or self._soul_dirty:
+            choice = QMessageBox.question(
+                self,
+                "还有未保存的记忆",
+                "关闭后将丢弃尚未保存的修改，确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if choice != QMessageBox.Yes:
+                return
+            self._set_summary_dirty(False)
+            self._set_soul_dirty(False)
+        self.accept()
+
+    def closeEvent(self, event):
+        if self._summary_dirty or self._soul_dirty:
+            choice = QMessageBox.question(
+                self,
+                "还有未保存的记忆",
+                "关闭后将丢弃尚未保存的修改，确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if choice != QMessageBox.Yes:
+                event.ignore()
+                return
+        event.accept()
 
 
 class MemoryUpdateDialog(QDialog):
@@ -12731,7 +12976,7 @@ class MemoryUpdateDialog(QDialog):
         self.setWindowTitle("生成长期记忆")
         self.resize(760, 620)
         self.running = True
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        apply_product_dialog(self, "MemoryUpdateDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -12751,13 +12996,10 @@ class MemoryUpdateDialog(QDialog):
         layout.addWidget(process_label)
 
         self.process_log = QTextEdit()
+        self.process_log.setObjectName("memoryProcessLog")
         self.process_log.setReadOnly(True)
         self.process_log.setFixedHeight(150)
-        self.process_log.setStyleSheet(
-            f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
-            f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; "
-            "font-family: 'Consolas', monospace; font-size: 12px; padding: 8px;"
-        )
+        self.process_log.setStyleSheet(product_code_style("QTextEdit#memoryProcessLog"))
         layout.addWidget(self.process_log)
 
         result_label = QLabel("更新结果")
@@ -12765,13 +13007,10 @@ class MemoryUpdateDialog(QDialog):
         layout.addWidget(result_label)
 
         self.editor = QTextEdit()
+        self.editor.setObjectName("memoryDraftEditor")
         self.editor.setReadOnly(True)
         self.editor.setPlaceholderText("生成完成后会在这里显示待确认的长期记忆草稿。")
-        self.editor.setStyleSheet(
-            f"border: 1px solid {DesignTokens.border}; border-radius: 8px; "
-            f"background: {DesignTokens.bg_card}; color: {DesignTokens.text_primary}; "
-            "font-family: 'Consolas', monospace; font-size: 12px; padding: 10px;"
-        )
+        self.editor.setStyleSheet(product_code_style("QTextEdit#memoryDraftEditor"))
         layout.addWidget(self.editor, 1)
 
         button_row = QHBoxLayout()
@@ -12787,10 +13026,7 @@ class MemoryUpdateDialog(QDialog):
         self.save_btn.setCursor(Qt.PointingHandCursor)
         self.save_btn.setEnabled(False)
         self.save_btn.setIcon(qta.icon('fa5s.save', color='#ffffff'))
-        self.save_btn.setStyleSheet(
-            f"background-color: {DesignTokens.primary}; color: white; border-radius: 12px; "
-            "padding: 8px 14px; font-weight: 700; border: none;"
-        )
+        self.save_btn.setProperty("variant", "primary")
         self.save_btn.clicked.connect(lambda: self.save_requested.emit(self.memory_text()))
         button_row.addWidget(self.background_btn)
         button_row.addWidget(self.close_btn)
@@ -13191,6 +13427,17 @@ class MainWindow(QMainWindow):
         self.file_workspace_view_mode = "browse"
         self.file_workspace_route_origin = "browse"
         self.file_workspace_return_section = self.FILE_SECTION_DELIVERABLES
+        self.file_workspace_navigation_state = {
+            "section": self.FILE_SECTION_ALL,
+            "origin": "browse",
+            "selected_path": "",
+            "tree_scroll": 0,
+            "deliverables_scroll": 0,
+            "expanded_paths": set(),
+        }
+        self.file_browser_search_text = ""
+        self.deliverable_type_filter = "all"
+        self.deliverable_sort_mode = "modified"
         self.deliverable_conversion_running_target = ""
         self.deliverable_items = []
         self.deliverable_render_fingerprint = None
@@ -13603,7 +13850,7 @@ class MainWindow(QMainWindow):
         file_segment_layout.setContentsMargins(4, 4, 4, 4)
         file_segment_layout.setSpacing(4)
         self.file_section_buttons = {}
-        for section, title in ((self.FILE_SECTION_ALL, "全部文件"), (self.FILE_SECTION_DELIVERABLES, "交付物")):
+        for section, title in ((self.FILE_SECTION_ALL, "工作区"), (self.FILE_SECTION_DELIVERABLES, "交付物")):
             btn = QPushButton(title)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -13621,10 +13868,16 @@ class MainWindow(QMainWindow):
         
         self.file_model = QFileSystemModel()
         self.file_model.setRootPath("") 
+
+        self.file_filter_model = QSortFilterProxyModel(self)
+        self.file_filter_model.setSourceModel(self.file_model)
+        self.file_filter_model.setFilterKeyColumn(0)
+        self.file_filter_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.file_filter_model.setRecursiveFilteringEnabled(True)
         
         self.file_tree = QTreeView()
-        self.file_tree.setModel(self.file_model)
-        self.file_tree.setRootIndex(self.file_model.index(""))
+        self.file_tree.setModel(self.file_filter_model)
+        self.file_tree.setRootIndex(self.file_filter_model.mapFromSource(self.file_model.index("")))
         self.file_tree.setHeaderHidden(True)
         for i in range(1, 4): self.file_tree.setColumnHidden(i, True)
         self.file_tree.setAlternatingRowColors(True)
@@ -13643,6 +13896,45 @@ class MainWindow(QMainWindow):
         self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
         self.file_source_stack.addWidget(self.deliverables_list)
 
+        browser_toolbar = QHBoxLayout()
+        browser_toolbar.setContentsMargins(0, 0, 0, 0)
+        browser_toolbar.setSpacing(8)
+        self.file_search_input = QLineEdit()
+        self.file_search_input.setPlaceholderText("搜索当前工作区")
+        self.file_search_input.setClearButtonEnabled(True)
+        self.file_search_input.setFixedHeight(DesignTokens.control_height)
+        self.file_search_input.textChanged.connect(self.apply_file_workspace_filters)
+        browser_toolbar.addWidget(self.file_search_input, 1)
+
+        self.deliverable_type_combo = QComboBox()
+        for label, value in (
+            ("全部类型", "all"),
+            ("网页", "html"),
+            ("演示文稿", "presentation"),
+            ("文档", "document"),
+            ("PDF", "pdf"),
+            ("表格", "spreadsheet"),
+            ("图片", "image"),
+        ):
+            self.deliverable_type_combo.addItem(label, value)
+        self.deliverable_type_combo.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_type_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
+        browser_toolbar.addWidget(self.deliverable_type_combo)
+
+        self.deliverable_sort_combo = QComboBox()
+        self.deliverable_sort_combo.addItem("最近更新", "modified")
+        self.deliverable_sort_combo.addItem("按名称", "name")
+        self.deliverable_sort_combo.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_sort_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
+        browser_toolbar.addWidget(self.deliverable_sort_combo)
+        file_browse_layout.addLayout(browser_toolbar)
+
+        self.file_browser_empty_state = ProductEmptyState(
+            "还没有可浏览的内容",
+            "选择工作区后，可以在这里查找文件并预览交付物。",
+        )
+        self.file_browser_empty_state.setVisible(False)
+        file_browse_layout.addWidget(self.file_browser_empty_state, 1)
         file_browse_layout.addWidget(self.file_source_stack, 1)
         
         # Unified Preview Area in Workspace Tab
@@ -13699,11 +13991,7 @@ class MainWindow(QMainWindow):
         self.preview_copy_btn.setStyleSheet(apple_tool_button_style(False))
         self.preview_copy_btn.clicked.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_preview_path", "")))
         self.deliverable_layout_btn = QToolButton()
-        self.deliverable_layout_btn.setToolTip("专注预览")
-        self.deliverable_layout_btn.setCursor(Qt.PointingHandCursor)
-        self.deliverable_layout_btn.setFixedSize(30, 30)
-        self.deliverable_layout_btn.setStyleSheet(apple_tool_button_style(False))
-        self.deliverable_layout_btn.clicked.connect(self.toggle_deliverable_layout_mode)
+        self.deliverable_layout_btn.setVisible(False)
         self.deliverable_render_btn = QToolButton()
         self.deliverable_render_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.primary))
         self.deliverable_render_btn.setToolTip("刷新预览")
@@ -13718,14 +14006,6 @@ class MainWindow(QMainWindow):
         self.deliverable_expand_btn.setFixedSize(30, 30)
         self.deliverable_expand_btn.setStyleSheet(apple_tool_button_style(False))
         self.deliverable_expand_btn.clicked.connect(self.toggle_deliverable_preview_expanded)
-        self.deliverable_source_btn = QToolButton()
-        self.deliverable_source_btn.setIcon(qta.icon("fa5s.code", color=DesignTokens.text_secondary))
-        self.deliverable_source_btn.setToolTip("源码视图")
-        self.deliverable_source_btn.setCursor(Qt.PointingHandCursor)
-        self.deliverable_source_btn.setFixedSize(30, 30)
-        self.deliverable_source_btn.setCheckable(True)
-        self.deliverable_source_btn.setStyleSheet(apple_tool_button_style(False))
-        self.deliverable_source_btn.clicked.connect(self.toggle_deliverable_source_view)
         self.deliverable_more_btn = QToolButton()
         self.deliverable_more_btn.setIcon(qta.icon("fa5s.ellipsis-h", color=DesignTokens.text_secondary))
         self.deliverable_more_btn.setToolTip("更多操作")
@@ -13763,13 +14043,36 @@ class MainWindow(QMainWindow):
             btn.setVisible(False)
         for btn in (
             self.deliverable_expand_btn,
-            self.deliverable_source_btn,
             self.deliverable_more_btn,
         ):
             r_preview_header_layout.addWidget(btn)
         for btn in (self.deliverable_layout_btn, self.deliverable_render_btn, self.deliverables_refresh_btn):
             btn.setVisible(False)
         preview_layout.addWidget(r_preview_header)
+
+        self.deliverable_preview_mode_bar = QFrame()
+        self.deliverable_preview_mode_bar.setProperty("productSurface", "subtle")
+        self.deliverable_preview_mode_bar.setStyleSheet(product_surface_style("subtle"))
+        preview_mode_layout = QHBoxLayout(self.deliverable_preview_mode_bar)
+        preview_mode_layout.setContentsMargins(4, 4, 4, 4)
+        preview_mode_layout.setSpacing(4)
+        self.deliverable_preview_btn = QPushButton("预览")
+        self.deliverable_preview_btn.setCheckable(True)
+        self.deliverable_preview_btn.setChecked(True)
+        self.deliverable_preview_btn.setStyleSheet(product_segmented_style())
+        self.deliverable_preview_btn.clicked.connect(
+            lambda checked=False: self.set_deliverable_preview_mode("preview")
+        )
+        preview_mode_layout.addWidget(self.deliverable_preview_btn, 1)
+        self.deliverable_source_btn = QPushButton("源码")
+        self.deliverable_source_btn.setCheckable(True)
+        self.deliverable_source_btn.setStyleSheet(product_segmented_style())
+        self.deliverable_source_btn.clicked.connect(
+            lambda checked=False: self.set_deliverable_preview_mode("source")
+        )
+        preview_mode_layout.addWidget(self.deliverable_source_btn, 1)
+        self.deliverable_preview_mode_bar.setVisible(False)
+        preview_layout.addWidget(self.deliverable_preview_mode_bar)
 
         conversion_row_widget = QWidget()
         conversion_row_widget.setObjectName("DeliverableConversionBar")
@@ -13783,28 +14086,27 @@ class MainWindow(QMainWindow):
         conversion_title = QLabel("继续创作")
         conversion_title.setStyleSheet(f"font-weight: 650; color: {DesignTokens.text_secondary}; font-size: 11px;")
         conversion_row.addWidget(conversion_title)
-        self.deliverable_convert_buttons = []
-        for fmt in ("PPTX", "DOCX", "PDF"):
-            btn = QPushButton(f"生成 {fmt}")
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(32)
-            btn.setProperty("conversionTarget", fmt.lower())
-            btn.setStyleSheet(apple_button_style("primary" if fmt == "PPTX" else "secondary", radius=16))
-            btn.clicked.connect(lambda checked=False, target=fmt.lower(): self.start_deliverable_conversion(target))
-            conversion_row.addWidget(btn)
-            self.deliverable_convert_buttons.append(btn)
-            if fmt == "PPTX":
-                template_btn = QToolButton()
-                template_btn.setIcon(qta.icon("fa5s.clone", color=DesignTokens.text_secondary))
-                template_btn.setToolTip("选择 PPT 模板生成")
-                template_btn.setCursor(Qt.PointingHandCursor)
-                template_btn.setFixedSize(28, 28)
-                template_btn.setStyleSheet(apple_tool_button_style(False))
-                template_btn.clicked.connect(
-                    lambda checked=False: self.start_deliverable_conversion("pptx", ask_template=True)
-                )
-                conversion_row.addWidget(template_btn)
-                self.deliverable_convert_buttons.append(template_btn)
+        self.deliverable_generate_btn = QPushButton("生成文件…")
+        self.deliverable_generate_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_generate_btn.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_generate_btn.setStyleSheet(product_button_style("primary"))
+        self.deliverable_generate_menu = create_styled_menu(self.deliverable_generate_btn)
+        generate_pptx_action = QAction("生成 PPTX", self.deliverable_generate_menu)
+        generate_pptx_action.triggered.connect(self.start_pptx_deliverable_conversion)
+        generate_docx_action = QAction("生成 DOCX", self.deliverable_generate_menu)
+        generate_docx_action.triggered.connect(lambda: self.start_deliverable_conversion("docx"))
+        generate_pdf_action = QAction("生成 PDF", self.deliverable_generate_menu)
+        generate_pdf_action.triggered.connect(lambda: self.start_deliverable_conversion("pdf"))
+        self.deliverable_generate_menu.addAction(generate_pptx_action)
+        self.deliverable_generate_menu.addAction(generate_docx_action)
+        self.deliverable_generate_menu.addAction(generate_pdf_action)
+        self.deliverable_generate_btn.clicked.connect(
+            lambda: self.deliverable_generate_menu.exec(
+                self.deliverable_generate_btn.mapToGlobal(self.deliverable_generate_btn.rect().bottomLeft())
+            )
+        )
+        conversion_row.addWidget(self.deliverable_generate_btn)
+        self.deliverable_convert_buttons = [self.deliverable_generate_btn]
         conversion_row.addStretch()
         self.deliverable_conversion_status_label = QLabel("")
         self.deliverable_conversion_status_label.setStyleSheet(apple_caption_style())
@@ -13893,7 +14195,7 @@ class MainWindow(QMainWindow):
         self.OBS_SECTION_PROMPT = 0
         self.OBS_SECTION_LOG = 1
         self.OBS_SECTION_DETAILS = 2
-        self.observability_section_index = self.OBS_SECTION_PROMPT
+        self.observability_section_index = self.OBS_SECTION_LOG
 
         observability_segment_bar = QFrame()
         observability_segment_bar.setProperty("uiSurface", True)
@@ -13902,7 +14204,7 @@ class MainWindow(QMainWindow):
         observability_segment_layout.setContentsMargins(4, 4, 4, 4)
         observability_segment_layout.setSpacing(4)
         self.observability_segment_buttons = []
-        for index, title in enumerate(("系统提示词", "工具调用与返回", "工具详情")):
+        for index, title in enumerate(("执行上下文", "调用记录", "技术详情")):
             btn = QPushButton(title)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
@@ -13938,7 +14240,7 @@ class MainWindow(QMainWindow):
         prompt_layout.addWidget(prompt_header)
 
         self.observability_prompt_edit = ReadOnlyTextEdit()
-        self.observability_prompt_edit.setPlaceholderText("等待本轮系统提示词...")
+        self.observability_prompt_edit.setPlaceholderText("运行后可在这里查看本轮执行上下文。")
         self.observability_prompt_edit.setStyleSheet(
             apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
         )
@@ -13951,7 +14253,7 @@ class MainWindow(QMainWindow):
         log_layout.setSpacing(0)
 
         self.observability_log_edit = ReadOnlyTextEdit()
-        self.observability_log_edit.setPlaceholderText("工具调用和返回内容会按时间顺序显示...")
+        self.observability_log_edit.setPlaceholderText("本轮阶段、工具调用和结果会按时间顺序显示。")
         self.observability_log_edit.setStyleSheet(
             apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
         )
@@ -14033,7 +14335,7 @@ class MainWindow(QMainWindow):
         details_layout.addWidget(self.td_detail_splitter, 1)
         self.observability_content_stack.addWidget(details_page)
         td_layout.addWidget(self.observability_content_stack, 1)
-        self.set_observability_section(self.OBS_SECTION_PROMPT)
+        self.set_observability_section(self.OBS_SECTION_LOG)
         
         self.right_stack.addWidget(self.tool_details_tab)
 
@@ -14076,14 +14378,12 @@ class MainWindow(QMainWindow):
         # Top Bar
         top_bar = QHBoxLayout()
         title_box = QVBoxLayout()
-        title_label = QLabel("你好，需要我为你做些什么？")
-        title_label.setText("在工作区里完成一个任务")
-        title_label.setProperty("roleTitle", True)
-        subtitle_label = QLabel("选择工作区，描述你的需求，我会帮你完成文件操作。")
-        subtitle_label.setText("从左侧选择项目，再描述你要处理的文件、报告或整理任务。")
-        subtitle_label.setProperty("roleSubtitle", True)
-        title_box.addWidget(title_label)
-        title_box.addWidget(subtitle_label)
+        self.workspace_title_label = QLabel("选择一个工作区开始")
+        self.workspace_title_label.setProperty("roleTitle", True)
+        self.workspace_subtitle_label = QLabel("选择项目后，描述你要处理的文件、报告或整理任务。")
+        self.workspace_subtitle_label.setProperty("roleSubtitle", True)
+        title_box.addWidget(self.workspace_title_label)
+        title_box.addWidget(self.workspace_subtitle_label)
         top_bar.addLayout(title_box)
         top_bar.addStretch()
         
@@ -14411,7 +14711,33 @@ class MainWindow(QMainWindow):
         log_startup_stage("startup_history_ready")
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape and getattr(self, "right_drawer_open", False):
+        drawer_open = getattr(self, "right_drawer_open", False)
+        files_open = drawer_open and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_FILES
+        if files_open and event.key() == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
+            self.show_file_workspace_browse_view()
+            self.file_search_input.setFocus()
+            self.file_search_input.selectAll()
+            event.accept()
+            return
+        if files_open and event.key() == Qt.Key_Left and event.modifiers() & Qt.AltModifier:
+            self.show_file_workspace_browse_view()
+            event.accept()
+            return
+        if files_open and event.key() == Qt.Key_F5:
+            if getattr(self, "file_workspace_view_mode", "browse") == "detail":
+                self.render_selected_deliverable(force=True)
+            else:
+                self.refresh_deliverables()
+            event.accept()
+            return
+        if files_open and event.key() in {Qt.Key_Return, Qt.Key_Enter} and getattr(self, "file_workspace_view_mode", "browse") == "browse":
+            if getattr(self, "file_workspace_section", self.FILE_SECTION_ALL) == self.FILE_SECTION_DELIVERABLES:
+                self.on_deliverable_item_clicked(self.deliverables_list.currentItem())
+            else:
+                self.on_file_clicked(self.file_tree.currentIndex())
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape and drawer_open:
             self.hide_context_drawer()
             event.accept()
             return
@@ -14444,12 +14770,20 @@ class MainWindow(QMainWindow):
     def set_file_workspace_section(self, section, refresh=True):
         section = section if section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables") else getattr(self, "FILE_SECTION_ALL", "all")
         self.file_workspace_section = section
+        self._file_navigation_state()["section"] = section
         stack = getattr(self, "file_source_stack", None)
         if stack is not None:
             stack.setCurrentIndex(1 if section == self.FILE_SECTION_DELIVERABLES else 0)
             stack.setVisible(True)
         for key, btn in getattr(self, "file_section_buttons", {}).items():
             btn.setChecked(key == section)
+        search = getattr(self, "file_search_input", None)
+        if search is not None:
+            search.setPlaceholderText("搜索交付物" if section == self.FILE_SECTION_DELIVERABLES else "搜索当前工作区")
+        for control_name in ("deliverable_type_combo", "deliverable_sort_combo"):
+            control = getattr(self, control_name, None)
+            if control is not None:
+                control.setVisible(section == self.FILE_SECTION_DELIVERABLES)
         deliverable_controls_visible = section == self.FILE_SECTION_DELIVERABLES
         expand_btn = getattr(self, "deliverable_expand_btn", None)
         if expand_btn is not None:
@@ -14457,6 +14791,7 @@ class MainWindow(QMainWindow):
         self._sync_deliverable_action_visibility()
         if deliverable_controls_visible and refresh:
             self.refresh_deliverables(render_current=True)
+        self.apply_file_workspace_filters()
         self.update_context_drawer_header(getattr(self, "right_drawer_tab", self.RIGHT_TAB_FILES))
         if getattr(self, "file_workspace_view_mode", "browse") == "browse":
             self.file_workspace_return_section = section
@@ -14476,6 +14811,149 @@ class MainWindow(QMainWindow):
         status = getattr(self, "deliverable_status_label", None)
         if status is not None:
             status.setVisible(True)
+        preview_mode_bar = getattr(self, "deliverable_preview_mode_bar", None)
+        if preview_mode_bar is not None:
+            preview_mode_bar.setVisible(
+                getattr(self, "file_workspace_view_mode", "browse") == "detail"
+                and ext in {".html", ".htm", ".md", ".markdown", ".txt", ".py", ".js", ".css", ".json"}
+                and os.path.isfile(path)
+            )
+
+    def _snapshot_file_browser_state(self):
+        state = self._file_navigation_state()
+        state["section"] = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+        state["origin"] = getattr(self, "file_workspace_route_origin", "browse")
+        state["selected_path"] = getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", "")
+        tree = getattr(self, "file_tree", None)
+        if tree is not None:
+            state["tree_scroll"] = tree.verticalScrollBar().value()
+            expanded = set()
+            root = tree.rootIndex()
+            pending = [root]
+            visited = 0
+            while pending and visited < 600:
+                parent_index = pending.pop()
+                for row in range(self.file_filter_model.rowCount(parent_index)):
+                    index = self.file_filter_model.index(row, 0, parent_index)
+                    if not index.isValid():
+                        continue
+                    visited += 1
+                    if tree.isExpanded(index):
+                        source_index = self.file_filter_model.mapToSource(index)
+                        path = self.file_model.filePath(source_index)
+                        if path:
+                            expanded.add(os.path.normcase(os.path.abspath(path)))
+                        pending.append(index)
+            state["expanded_paths"] = expanded
+        deliverables = getattr(self, "deliverables_list", None)
+        if deliverables is not None:
+            state["deliverables_scroll"] = deliverables.verticalScrollBar().value()
+
+    def _restore_file_browser_state(self):
+        state = self._file_navigation_state()
+        tree = getattr(self, "file_tree", None)
+        if tree is not None:
+            expanded = state.get("expanded_paths") or set()
+            for normalized_path in list(expanded)[:600]:
+                source_index = self.file_model.index(normalized_path)
+                proxy_index = self.file_filter_model.mapFromSource(source_index)
+                if proxy_index.isValid():
+                    tree.setExpanded(proxy_index, True)
+            tree.verticalScrollBar().setValue(int(state.get("tree_scroll") or 0))
+        deliverables = getattr(self, "deliverables_list", None)
+        if deliverables is not None:
+            deliverables.verticalScrollBar().setValue(int(state.get("deliverables_scroll") or 0))
+
+    def apply_file_workspace_filters(self, *_args):
+        search = getattr(self, "file_search_input", None)
+        query = str(search.text() if search is not None else "").strip()
+        self.file_browser_search_text = query
+        if hasattr(self, "file_filter_model"):
+            self.file_filter_model.setFilterFixedString(query)
+        type_combo = getattr(self, "deliverable_type_combo", None)
+        sort_combo = getattr(self, "deliverable_sort_combo", None)
+        self.deliverable_type_filter = str(type_combo.currentData() if type_combo is not None else "all")
+        self.deliverable_sort_mode = str(sort_combo.currentData() if sort_combo is not None else "modified")
+        if hasattr(self, "deliverables_list"):
+            self._render_deliverable_items()
+        self._sync_file_browser_empty_state()
+
+    def _file_navigation_state(self):
+        state = getattr(self, "file_workspace_navigation_state", None)
+        if not isinstance(state, dict):
+            state = {
+                "section": getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL),
+                "origin": getattr(self, "file_workspace_route_origin", "browse"),
+                "selected_path": "",
+                "tree_scroll": 0,
+                "deliverables_scroll": 0,
+                "expanded_paths": set(),
+            }
+            self.file_workspace_navigation_state = state
+        return state
+
+    def _deliverable_matches_type(self, item, filter_key):
+        ext = os.path.splitext(str(item.get("path") or ""))[1].lower()
+        groups = {
+            "html": {".html", ".htm"},
+            "presentation": {".ppt", ".pptx"},
+            "document": {".doc", ".docx", ".md", ".txt"},
+            "pdf": {".pdf"},
+            "spreadsheet": {".xls", ".xlsx", ".csv", ".tsv"},
+            "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
+        }
+        return filter_key == "all" or ext in groups.get(filter_key, set())
+
+    def _filtered_deliverable_items(self):
+        query = str(getattr(self, "file_browser_search_text", "") or "").casefold()
+        type_filter = str(getattr(self, "deliverable_type_filter", "all") or "all")
+        items = [
+            item for item in (getattr(self, "deliverable_items", []) or [])
+            if self._deliverable_matches_type(item, type_filter)
+            and (
+                not query
+                or query in str(item.get("name") or "").casefold()
+                or query in str(item.get("relative_path") or "").casefold()
+            )
+        ]
+        if getattr(self, "deliverable_sort_mode", "modified") == "name":
+            items.sort(key=lambda item: str(item.get("name") or "").casefold())
+        else:
+            items.sort(key=lambda item: float(item.get("mtime") or 0), reverse=True)
+        return items
+
+    def _sync_file_browser_empty_state(self, loading=False, error=""):
+        empty = getattr(self, "file_browser_empty_state", None)
+        stack = getattr(self, "file_source_stack", None)
+        if empty is None or stack is None:
+            return
+        workspace = getattr(self, "workspace_dir", "")
+        section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+        if loading:
+            title, description, visible = "正在扫描交付物", "正在读取当前工作区中的可预览文件。", True
+        elif error:
+            title, description, visible = "无法读取文件", str(error), True
+        elif not workspace or not os.path.isdir(workspace):
+            title, description, visible = "还没有选择工作区", "从左侧选择项目后，可以在这里查找和预览文件。", True
+        elif section == self.FILE_SECTION_DELIVERABLES and not self._filtered_deliverable_items():
+            title, description, visible = "还没有匹配的交付物", "生成 HTML、PDF、PPTX、DOCX 或图片后，它们会自动出现在这里。", True
+        elif section == self.FILE_SECTION_ALL:
+            try:
+                visible = not bool(os.listdir(workspace))
+            except OSError as exc:
+                title, description, visible = "无法读取工作区", str(exc), True
+            else:
+                title, description = "工作区是空的", "在对话中创建文件后，它们会自动出现在这里。"
+        else:
+            title, description, visible = "", "", False
+        if visible:
+            labels = empty.findChildren(QLabel)
+            if labels:
+                labels[0].setText(title)
+            if len(labels) > 1:
+                labels[1].setText(description)
+        empty.setVisible(visible)
+        stack.setVisible(not visible)
 
     def _sync_file_workspace_detail_header(self):
         back_btn = getattr(self, "file_detail_back_btn", None)
@@ -14494,6 +14972,8 @@ class MainWindow(QMainWindow):
 
     def _set_file_workspace_view_mode(self, mode, origin="browse", persist=True):
         mode = "detail" if mode == "detail" else "browse"
+        if mode == "detail" and getattr(self, "file_workspace_view_mode", "browse") == "browse":
+            self._snapshot_file_browser_state()
         self.file_workspace_view_mode = mode
         if origin:
             self.file_workspace_route_origin = origin
@@ -14503,6 +14983,8 @@ class MainWindow(QMainWindow):
         self.deliverable_layout_mode = "focus" if mode == "detail" else "list"
         self._sync_file_workspace_detail_header()
         self._sync_deliverable_action_visibility()
+        if mode == "browse":
+            QTimer.singleShot(0, self._restore_file_browser_state)
         if persist and getattr(self, "config_manager", None):
             self.config_manager.set("file_workspace_view_mode", mode)
             self.config_manager.set("deliverable_layout_mode", self.deliverable_layout_mode)
@@ -14513,10 +14995,12 @@ class MainWindow(QMainWindow):
             getattr(self, "file_workspace_return_section", self.FILE_SECTION_DELIVERABLES),
             refresh=False,
         )
+        self._file_navigation_state()["origin"] = "browse"
 
     def show_file_workspace_detail_view(self, origin="browse"):
         self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_DELIVERABLES)
         self._set_file_workspace_view_mode("detail", origin=origin)
+        self._file_navigation_state()["origin"] = origin
 
     def _apply_deliverable_layout_mode(self, mode, persist=True):
         mode = "focus" if mode == "focus" else "list"
@@ -14770,7 +15254,9 @@ class MainWindow(QMainWindow):
     def open_file_workspace_from_rail(self):
         self._set_file_workspace_view_mode("browse", origin="browse")
         self.set_file_workspace_section(
-            getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL),
+            self._file_navigation_state().get(
+                "section", getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL)
+            ),
             refresh=False,
         )
         self.show_context_drawer(self.RIGHT_TAB_FILES)
@@ -15088,6 +15574,7 @@ class MainWindow(QMainWindow):
         state.token_usage_summary = summary
         label.setText(format_token_usage_chip_text(summary))
         label.setDetailText(format_token_usage_tooltip(summary, getattr(state, "last_token_usage", {})))
+        label.setVisible(int(summary.get("total_tokens") or 0) > 0)
 
     def apply_token_usage_event(self, state, usage):
         if not state:
@@ -18219,6 +18706,15 @@ class MainWindow(QMainWindow):
             tooltip = directory
         self.ws_label.setText(f"当前项目：{display_path}")
         self.ws_label.setToolTip(tooltip)
+        if hasattr(self, "workspace_title_label"):
+            project_name = os.path.basename(directory) if directory else ""
+            self.workspace_title_label.setText(project_name or "选择一个工作区开始")
+            self.workspace_title_label.setToolTip(directory or "")
+        if hasattr(self, "workspace_subtitle_label"):
+            self.workspace_subtitle_label.setText(
+                "描述任务，Cowork 会在当前项目内读取、创建和整理文件。"
+                if directory else "选择项目后，描述你要处理的文件、报告或整理任务。"
+            )
         if directory and remember_workspace:
             self.update_recent_workspaces(directory)
         if directory and persist_default:
@@ -18227,10 +18723,18 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, 'file_model'):
             self.file_model.setRootPath(directory)
-            self.file_tree.setRootIndex(self.file_model.index(directory))
+            source_root = self.file_model.index(directory)
+            self.file_tree.setRootIndex(self.file_filter_model.mapFromSource(source_root))
+            self._file_navigation_state().update(
+                selected_path="",
+                tree_scroll=0,
+                deliverables_scroll=0,
+                expanded_paths=set(),
+            )
             self.set_context_tab_hint(self.RIGHT_TAB_FILES, bool(directory))
             self.set_context_tab_hint(self.RIGHT_TAB_DELIVERABLES, bool(directory))
             self.refresh_deliverables()
+            self._sync_file_browser_empty_state()
         if refresh_sidebar:
             self.refresh_history_list()
         return directory
@@ -18807,7 +19311,8 @@ class MainWindow(QMainWindow):
             self.ws_label.setToolTip("")
             if hasattr(self, "file_model"):
                 self.file_model.setRootPath("")
-                self.file_tree.setRootIndex(self.file_model.index(""))
+                self.file_tree.setRootIndex(self.file_filter_model.mapFromSource(self.file_model.index("")))
+                self._sync_file_browser_empty_state()
             self.current_deliverable_path = ""
             self.deliverable_items = []
             self.refresh_deliverables()
@@ -20118,8 +20623,15 @@ class MainWindow(QMainWindow):
                 action.setEnabled(is_file)
         source_btn = getattr(self, "deliverable_source_btn", None)
         if source_btn:
-            source_btn.setEnabled(is_file and ext in {".html", ".htm", ".md", ".markdown", ".txt", ".py", ".js", ".css", ".json"})
+            source_enabled = is_file and ext in {".html", ".htm", ".md", ".markdown", ".txt", ".py", ".js", ".css", ".json"}
+            source_btn.setEnabled(source_enabled)
             source_btn.setChecked(False)
+            preview_btn = getattr(self, "deliverable_preview_btn", None)
+            if preview_btn:
+                preview_btn.setChecked(True)
+            mode_bar = getattr(self, "deliverable_preview_mode_bar", None)
+            if mode_bar:
+                mode_bar.setVisible(source_enabled and getattr(self, "file_workspace_view_mode", "browse") == "detail")
         if hasattr(self, "deliverable_render_btn"):
             self.deliverable_render_btn.setEnabled(is_file and ext in DELIVERABLE_EXTENSIONS)
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
@@ -20147,6 +20659,24 @@ class MainWindow(QMainWindow):
         self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(f"源码视图 · {os.path.basename(path)}")
+
+    def set_deliverable_preview_mode(self, mode):
+        mode = "source" if mode == "source" else "preview"
+        preview_btn = getattr(self, "deliverable_preview_btn", None)
+        source_btn = getattr(self, "deliverable_source_btn", None)
+        if preview_btn:
+            preview_btn.setChecked(mode == "preview")
+        if source_btn:
+            source_btn.setChecked(mode == "source")
+        log_sub_agent_runtime(
+            "deliverable_preview_mode_changed",
+            mode=mode,
+            path=getattr(self, "current_deliverable_path", ""),
+        )
+        if mode == "source":
+            self.toggle_deliverable_source_view()
+        else:
+            self.render_selected_deliverable(force=False)
 
     def _ensure_deliverable_web_view(self):
         if getattr(self, "deliverable_web_view", None) is not None:
@@ -20257,6 +20787,7 @@ class MainWindow(QMainWindow):
         if not workspace_dir or not os.path.isdir(workspace_dir):
             self._apply_deliverable_items([], render_current=render_current)
             return
+        self._sync_file_browser_empty_state(loading=True)
         worker = DeliverableScanWorker(workspace_dir, generation, self)
         self.deliverable_scan_worker = worker
         worker.completed.connect(
@@ -20264,6 +20795,7 @@ class MainWindow(QMainWindow):
                 items, completed_generation, render_current
             )
         )
+        worker.failed.connect(self._handle_deliverable_scan_failed)
         worker.finished.connect(lambda: self._finish_deliverable_scan(worker))
         worker.start()
 
@@ -20271,6 +20803,17 @@ class MainWindow(QMainWindow):
         if int(generation) != int(getattr(self, "deliverable_scan_generation", 0)):
             return
         self._apply_deliverable_items(items, render_current=render_current)
+
+    def _handle_deliverable_scan_failed(self, error, generation):
+        if int(generation) != int(getattr(self, "deliverable_scan_generation", 0)):
+            return
+        log_sub_agent_runtime(
+            "deliverable_scan_failed",
+            workspace_dir=getattr(self, "workspace_dir", ""),
+            error=str(error),
+        )
+        self._sync_file_browser_empty_state(error=f"扫描交付物失败：{error}")
+        self.add_system_toast("扫描交付物失败，请检查工作区是否可访问。", "error", auto_close_ms=6000)
 
     def _finish_deliverable_scan(self, worker):
         if getattr(self, "deliverable_scan_worker", None) is worker:
@@ -20284,34 +20827,19 @@ class MainWindow(QMainWindow):
 
     def _apply_deliverable_items(self, items, render_current=False):
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
-        self.deliverables_list.clear()
         self.deliverable_items = list(items or [])
-        for item in self.deliverable_items:
-            modified = datetime.fromtimestamp(item.get("mtime") or 0).strftime("%Y-%m-%d %H:%M")
-            text = (
-                f"{item.get('name') or os.path.basename(item.get('path') or '')}\n"
-                f"{item.get('type_label') or '文件'} | {format_file_size(item.get('size') or 0)} | {modified}"
-            )
-            list_item = QListWidgetItem(qta.icon(item.get("icon") or "fa5s.file", color=DesignTokens.text_secondary), text)
-            list_item.setData(Qt.UserRole, item.get("path") or "")
-            list_item.setToolTip(item.get("relative_path") or item.get("path") or "")
-            self.deliverables_list.addItem(list_item)
-            if selected_key and os.path.normcase(os.path.normpath(item.get("path") or "")) == selected_key:
-                self.deliverables_list.setCurrentItem(list_item)
+        self._render_deliverable_items(selected_key=selected_key)
+        self._sync_file_browser_empty_state()
         if hasattr(self, "preview_meta_label") and getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
             count = len(self.deliverable_items)
-            if self.current_deliverable_path and getattr(self, "deliverable_layout_mode", "list") == "focus":
+            if self.current_deliverable_path and getattr(self, "file_workspace_view_mode", "browse") == "detail":
                 try:
                     relative = os.path.relpath(self.current_deliverable_path, self.workspace_dir)
                 except ValueError:
                     relative = self.current_deliverable_path
                 self.preview_meta_label.setText(relative)
             else:
-                self.preview_meta_label.setText(f"最近 {count} 个产物 · 选择文件预览" if count else "项目文件会自动出现在这里")
-        if not self.deliverable_items:
-            empty_item = QListWidgetItem(qta.icon("fa5s.magic", color=DesignTokens.primary), "从一份 HTML 开始\n让 AI 生成页面后，可在这里预览、刷新并继续生成办公文件")
-            empty_item.setFlags(Qt.NoItemFlags)
-            self.deliverables_list.addItem(empty_item)
+                self.preview_meta_label.setText(f"{count} 个交付物 · 选择文件预览" if count else "生成的文件会自动出现在这里")
         self._watch_deliverable_paths()
         if not self.current_deliverable_path or not os.path.isfile(self.current_deliverable_path):
             self.current_deliverable_path = ""
@@ -20319,7 +20847,7 @@ class MainWindow(QMainWindow):
             if getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
                 self._set_deliverable_controls_enabled("")
                 if hasattr(self, "deliverable_status_label"):
-                    self.deliverable_status_label.setText("还没有可预览的交付物 · 先回到对话中开始创作")
+                    self.deliverable_status_label.setText("选择交付物后会在这里预览")
                 if hasattr(self, "deliverable_preview_stack"):
                     self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             else:
@@ -20334,6 +20862,30 @@ class MainWindow(QMainWindow):
                 state.deliverable_preview_rendered = False
         elif render_current and getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
             self.select_deliverable(self.current_deliverable_path, render_html=True)
+
+    def _render_deliverable_items(self, selected_key=""):
+        deliverables = getattr(self, "deliverables_list", None)
+        if deliverables is None:
+            return
+        if not selected_key:
+            selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
+        deliverables.clear()
+        for item in self._filtered_deliverable_items():
+            modified = datetime.fromtimestamp(item.get("mtime") or 0).strftime("%Y-%m-%d %H:%M")
+            name = item.get("name") or os.path.basename(item.get("path") or "")
+            relative = str(item.get("relative_path") or "").strip()
+            directory = os.path.dirname(relative)
+            meta_parts = [item.get("type_label") or "文件", format_file_size(item.get("size") or 0), modified]
+            if directory and directory not in {".", ""}:
+                meta_parts.insert(0, directory)
+            text = f"{name}\n{'  ·  '.join([part for part in meta_parts if part])}"
+            list_item = QListWidgetItem(qta.icon(item.get("icon") or "fa5s.file", color=DesignTokens.text_secondary), text)
+            list_item.setData(Qt.UserRole, item.get("path") or "")
+            list_item.setToolTip(item.get("relative_path") or item.get("path") or "")
+            list_item.setSizeHint(QSize(0, 48))
+            deliverables.addItem(list_item)
+            if selected_key and os.path.normcase(os.path.normpath(item.get("path") or "")) == selected_key:
+                deliverables.setCurrentItem(list_item)
 
     def _watch_deliverable_paths(self):
         watcher = getattr(self, "deliverable_watcher", None)
@@ -20379,6 +20931,9 @@ class MainWindow(QMainWindow):
 
     def on_deliverable_item_clicked(self, item):
         path = item.data(Qt.UserRole) if item else ""
+        if not path or not os.path.isfile(path):
+            return
+        log_sub_agent_runtime("deliverable_list_item_selected", path=path)
         self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
         self.show_file_workspace_detail_view(origin="browse")
         self.select_deliverable(path)
@@ -20420,12 +20975,21 @@ class MainWindow(QMainWindow):
         if state and office_card is not None:
             self._sync_office_task_card_paths(state, valid_paths)
         if not office_enabled:
-            if not getattr(self, "right_drawer_open", False):
-                return
-            if getattr(self, "right_drawer_tab", None) != self.RIGHT_TAB_FILES:
-                return
-            if getattr(self, "file_workspace_section", "") != self.FILE_SECTION_DELIVERABLES:
-                return
+            self.refresh_deliverables()
+            self.set_context_tab_hint(self.RIGHT_TAB_FILES, True)
+            latest_name = os.path.basename(valid_paths[-1])
+            self.add_system_toast(
+                f"已生成 {latest_name}，可在文件与交付物中查看。",
+                "success",
+                session_id=session_id,
+                auto_close_ms=4200,
+            )
+            log_sub_agent_runtime(
+                "deliverable_generated_without_preview_hijack",
+                path=valid_paths[-1],
+                session_id=session_id or "",
+            )
+            return
         latest = valid_paths[-1]
         current = getattr(self, "current_deliverable_path", "") or ""
         if current and os.path.normcase(os.path.abspath(current)) == os.path.normcase(os.path.abspath(latest)):
@@ -20750,14 +21314,20 @@ class MainWindow(QMainWindow):
         cancel_btn = getattr(self, "deliverable_conversion_cancel_btn", None)
         if cancel_btn:
             cancel_btn.setVisible(running)
-        for btn in getattr(self, "deliverable_convert_buttons", []) or []:
-            button_target = str(btn.property("conversionTarget") or "").lower()
-            if running:
-                btn.setEnabled(button_target == target_format)
-                if isinstance(btn, QPushButton) and button_target == target_format:
-                    btn.setText(f"正在生成 {target_format.upper()}...")
-            else:
-                if isinstance(btn, QPushButton) and button_target:
+        generate_btn = getattr(self, "deliverable_generate_btn", None)
+        if generate_btn:
+            generate_btn.setEnabled(not running)
+            generate_btn.setText(f"正在生成 {target_format.upper()}…" if running else "生成文件…")
+        else:
+            # Preserve the lightweight compatibility surface used by tests and
+            # older embedded callers while the product UI exposes one menu.
+            for btn in getattr(self, "deliverable_convert_buttons", []) or []:
+                button_target = str(btn.property("conversionTarget") or "").lower()
+                if running:
+                    btn.setEnabled(button_target == target_format)
+                    if isinstance(btn, QPushButton) and button_target == target_format:
+                        btn.setText(f"正在生成 {target_format.upper()}...")
+                elif isinstance(btn, QPushButton) and button_target:
                     btn.setText(f"生成 {button_target.upper()}")
         if not running:
             self._set_deliverable_controls_enabled(getattr(self, "current_deliverable_path", ""))
@@ -20889,6 +21459,18 @@ class MainWindow(QMainWindow):
                 return
         self._submit_html_deliverable_conversion(state, path, target_format, template_path=template_path)
 
+    def start_pptx_deliverable_conversion(self, checked=False):
+        choice = QMessageBox.question(
+            self,
+            "生成 PPTX",
+            "是否使用现有 PPTX 模板？\n\n选择“是”后可选择模板；选择“否”将直接生成。",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.No,
+        )
+        if choice == QMessageBox.Cancel:
+            return
+        self.start_deliverable_conversion("pptx", ask_template=choice == QMessageBox.Yes)
+
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""
         if hasattr(self, "preview_title_label"):
@@ -20909,10 +21491,18 @@ class MainWindow(QMainWindow):
             modified = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
             if os.path.isdir(path):
                 count = len(os.listdir(path))
-                return f"文件夹 | {count} 项 | 修改于 {modified}"
+                return f"文件夹  ·  {count} 项  ·  修改于 {modified}"
             size = format_file_size(os.path.getsize(path))
             ext = os.path.splitext(path)[1].lower().lstrip(".") or "文件"
-            return f"{ext.upper()} | {size} | 修改于 {modified}"
+            relative = ""
+            workspace = getattr(self, "workspace_dir", "")
+            if workspace:
+                try:
+                    relative = os.path.relpath(path, workspace)
+                except ValueError:
+                    relative = ""
+            parts = [relative, ext.upper(), size, f"修改于 {modified}"]
+            return "  ·  ".join([part for part in parts if part])
         except Exception:
             return ""
 
@@ -20946,7 +21536,7 @@ class MainWindow(QMainWindow):
     def show_file_context_menu(self, position):
         index = self.file_tree.indexAt(position)
         if not index.isValid(): return
-        path = self.file_model.filePath(index)
+        path = self.file_model.filePath(self.file_filter_model.mapToSource(index))
         if not os.path.exists(path): return
         menu = create_styled_menu(self)
         
@@ -21031,9 +21621,18 @@ class MainWindow(QMainWindow):
         except Exception: pass
 
     def on_file_clicked(self, index):
-        path = self.file_model.filePath(index)
+        path = self.file_model.filePath(self.file_filter_model.mapToSource(index))
         if not path:
             return
+        if os.path.isdir(path):
+            self.file_tree.setExpanded(index, not self.file_tree.isExpanded(index))
+            self._file_navigation_state()["selected_path"] = path
+            return
+        log_sub_agent_runtime(
+            "file_workspace_item_selected",
+            path=path,
+            section=getattr(self, "file_workspace_section", self.FILE_SECTION_ALL),
+        )
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
             self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
             self.show_file_workspace_detail_view(origin="browse")
@@ -21051,19 +21650,6 @@ class MainWindow(QMainWindow):
         self.set_preview_header(path, title=title, meta=self.describe_path_for_preview(path), enabled=True)
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(self.describe_path_for_preview(path))
-        if os.path.isdir(path):
-            try:
-                names = sorted(os.listdir(path), key=lambda name: (not os.path.isdir(os.path.join(path, name)), name.lower()))
-                preview_names = names[:80]
-                extra = len(names) - len(preview_names)
-                body = "\n".join(preview_names)
-                if extra > 0:
-                    body += f"\n... 还有 {extra} 项"
-                self.preview_text.setPlainText(body or "空文件夹")
-            except Exception as exc:
-                self.preview_text.setPlainText(f"无法读取文件夹：{exc}")
-            self.preview_stack.setCurrentWidget(self.preview_text)
-            return
         if not os.path.isfile(path): return
         ext = os.path.splitext(path)[1].lower()
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}

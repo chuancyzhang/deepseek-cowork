@@ -26,7 +26,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 import main
 
 
-OUTPUT_DIR = ROOT / "images" / "user-guide"
+OUTPUT_DIR = Path(os.environ.get("COWORK_SCREENSHOT_OUTPUT_DIR") or (ROOT / "images" / "user-guide"))
 
 
 def process_events(delay_ms=120):
@@ -39,10 +39,7 @@ def save_widget(widget, filename, delay_ms=120):
     widget.show()
     widget.raise_()
     process_events(delay_ms)
-    screen = widget.screen()
-    if screen is None:
-        raise RuntimeError(f"No screen is available for {filename}")
-    pixmap = screen.grabWindow(widget.winId())
+    pixmap = widget.grab()
     if pixmap.isNull():
         raise RuntimeError(f"Unable to capture screenshot: {filename}")
     output_path = OUTPUT_DIR / filename
@@ -143,6 +140,32 @@ def main_run():
         save_widget(settings, "10-update-settings.png")
         settings.hide()
 
+        skills = main.SkillsCenterDialog(window.skill_manager, window.config_manager, parent=window)
+        save_widget(skills, "23-skills-center.png")
+        if skills._all_skills:
+            workbench = main.CapabilityWorkbenchDialog(
+                skills._all_skills[0], window.skill_manager, window.config_manager, parent=window
+            )
+            save_widget(workbench, "29-capability-workbench.png")
+            workbench.hide()
+        skills.hide()
+
+        automation = main.AutomationDialog(window.config_manager, parent=window)
+        save_widget(automation, "24-automation-center.png")
+        automation.hide()
+
+        memory = main.MemoryCenterDialog(str(APP_DATA_DIR), str(workspace), parent=window)
+        save_widget(memory, "25-memory-center.png")
+        memory.hide()
+
+        agents = main.AgentModuleDialog(agent_profiles=[], parent=window)
+        save_widget(agents, "26-agent-center.png")
+        agents.hide()
+
+        ppt_agent = main.PptAgentModeDialog(str(workspace), parent=window)
+        save_widget(ppt_agent, "27-ppt-agent.png")
+        ppt_agent.hide()
+
         window.add_chat_bubble("User", "请整理本周项目进展，并生成一份适合汇报的简报。", animate=False)
         window.add_chat_bubble(
             "Agent",
@@ -182,6 +205,9 @@ def main_run():
         process_events(1200)
         save_widget(window, "18-open-html-preview.png")
         save_widget(window, "20-generate-pptx.png")
+        window.show_context_drawer(window.RIGHT_TAB_OBSERVABILITY)
+        process_events(180)
+        save_widget(window, "28-task-observability.png")
         for width, height in ((1280, 720), (1440, 900), (1920, 1080)):
             verify_drawer_layout(window, width, height)
     finally:

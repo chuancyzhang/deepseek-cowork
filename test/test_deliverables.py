@@ -734,7 +734,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window.select_deliverable.assert_called_once_with(os.path.normpath(path), render_html=True)
             window.add_system_toast.assert_not_called()
 
-    def test_open_deliverables_view_follows_latest_new_chat_path(self):
+    def test_normal_generated_file_refreshes_without_hijacking_preview(self):
         with tempfile.TemporaryDirectory() as workspace:
             first = os.path.join(workspace, "first.html")
             latest = os.path.join(workspace, "latest.pdf")
@@ -750,14 +750,21 @@ class TestDeliverableScanning(unittest.TestCase):
             window.current_deliverable_path = first
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._office_draft_card_for_state = MagicMock(return_value=None)
+            window._is_office_workflow_enabled = MagicMock(return_value=False)
+            window.refresh_deliverables = MagicMock()
+            window.set_context_tab_hint = MagicMock()
+            window.add_system_toast = MagicMock()
             window.select_deliverable = MagicMock()
 
             window.handle_chat_deliverable_paths_changed([first, latest], "session-1")
 
-            self.assertEqual(state.selected_deliverable_path, os.path.normpath(latest))
-            self.assertEqual(window.file_workspace_view_mode, "detail")
-            self.assertEqual(window.file_workspace_route_origin, "chat")
-            window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
+            self.assertEqual(state.selected_deliverable_path, first)
+            self.assertEqual(window.current_deliverable_path, first)
+            window.refresh_deliverables.assert_called_once_with()
+            window.set_context_tab_hint.assert_called_once_with(window.RIGHT_TAB_FILES, True)
+            window.add_system_toast.assert_called_once()
+            window.select_deliverable.assert_not_called()
 
     def test_file_rail_entry_opens_browse_view(self):
         class Stack:
@@ -812,7 +819,7 @@ class TestDeliverableScanning(unittest.TestCase):
         window.deliverables_refresh_btn.setVisible.assert_not_called()
         window.deliverable_expand_btn.setVisible.assert_called_once_with(True)
 
-    def test_chat_path_does_not_follow_when_deliverables_view_is_closed(self):
+    def test_chat_path_refreshes_browse_state_when_drawer_is_closed(self):
         with tempfile.TemporaryDirectory() as workspace:
             latest = os.path.join(workspace, "latest.html")
             with open(latest, "wb") as handle:
@@ -822,11 +829,19 @@ class TestDeliverableScanning(unittest.TestCase):
             window.right_drawer_open = False
             state = type("_Session", (), {"office_draft_preview_pending": False})()
             window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._office_draft_card_for_state = MagicMock(return_value=None)
+            window._is_office_workflow_enabled = MagicMock(return_value=False)
+            window.refresh_deliverables = MagicMock()
+            window.set_context_tab_hint = MagicMock()
+            window.add_system_toast = MagicMock()
             window.select_deliverable = MagicMock()
 
             window.handle_chat_deliverable_paths_changed([latest], "session-1")
 
             window.get_session.assert_called_once_with("session-1")
+            window.refresh_deliverables.assert_called_once_with()
+            window.set_context_tab_hint.assert_called_once_with(window.RIGHT_TAB_FILES, True)
             window.select_deliverable.assert_not_called()
 
     def test_office_draft_opens_deliverables_view_for_new_chat_path(self):
@@ -1567,6 +1582,73 @@ class TestDeliverableScanning(unittest.TestCase):
         )
         QApplication.instance().removeEventFilter(preview)
         preview.close()
+
+    def test_file_navigation_state_is_available_to_lightweight_windows(self):
+        window = MainWindow.__new__(MainWindow)
+        window.file_workspace_return_section = window.FILE_SECTION_DELIVERABLES
+        window.file_workspace_route_origin = "chat"
+
+        state = window._file_navigation_state()
+
+        self.assertEqual(state["section"], window.FILE_SECTION_DELIVERABLES)
+        self.assertEqual(state["origin"], "chat")
+        self.assertEqual(state["expanded_paths"], set())
+
+    def test_deliverable_filter_supports_type_search_and_sort(self):
+        window = MainWindow.__new__(MainWindow)
+        window.file_browser_search_text = "report"
+        window.deliverable_type_filter = "html"
+        window.deliverable_sort_mode = "name"
+        window.deliverable_items = [
+            {"name": "z-report.html", "path": r"D:\w\z-report.html", "relative_path": "z-report.html", "mtime": 2},
+            {"name": "a-report.html", "path": r"D:\w\a-report.html", "relative_path": "a-report.html", "mtime": 1},
+            {"name": "report.pdf", "path": r"D:\w\report.pdf", "relative_path": "report.pdf", "mtime": 3},
+        ]
+
+        items = window._filtered_deliverable_items()
+
+        self.assertEqual([item["name"] for item in items], ["a-report.html", "z-report.html"])
+
+    def test_directory_click_only_toggles_tree_expansion(self):
+        window = MainWindow.__new__(MainWindow)
+        index = object()
+        source_index = object()
+        window.file_filter_model = MagicMock()
+        window.file_filter_model.mapToSource.return_value = source_index
+        window.file_model = MagicMock()
+        window.file_model.filePath.return_value = r"D:\workspace\folder"
+        window.file_tree = MagicMock()
+        window.file_tree.isExpanded.return_value = False
+        window.file_workspace_return_section = window.FILE_SECTION_ALL
+        window.file_workspace_route_origin = "browse"
+        window.show_file_workspace_detail_view = MagicMock()
+
+        with patch("main.os.path.isdir", return_value=True):
+            window.on_file_clicked(index)
+
+        window.file_tree.setExpanded.assert_called_once_with(index, True)
+        window.show_file_workspace_detail_view.assert_not_called()
+
+    def test_preview_and_source_are_explicit_modes(self):
+        QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        window.current_deliverable_path = r"D:\workspace\report.html"
+        window.deliverable_preview_btn = QPushButton("预览")
+        window.deliverable_preview_btn.setCheckable(True)
+        window.deliverable_source_btn = QPushButton("源码")
+        window.deliverable_source_btn.setCheckable(True)
+        window.toggle_deliverable_source_view = MagicMock()
+        window.render_selected_deliverable = MagicMock()
+
+        window.set_deliverable_preview_mode("source")
+        self.assertFalse(window.deliverable_preview_btn.isChecked())
+        self.assertTrue(window.deliverable_source_btn.isChecked())
+        window.toggle_deliverable_source_view.assert_called_once_with()
+
+        window.set_deliverable_preview_mode("preview")
+        self.assertTrue(window.deliverable_preview_btn.isChecked())
+        self.assertFalse(window.deliverable_source_btn.isChecked())
+        window.render_selected_deliverable.assert_called_once_with(force=False)
 
 
 if __name__ == "__main__":

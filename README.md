@@ -27,14 +27,14 @@ Current app version: **4.9.9**
 - **Prompt attachments**: attached text files are inlined into the model request when small enough, images are sent as vision parts on vision-capable models, and large or non-text files are surfaced with explicit path/size guidance for tool-based reading.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **PPT Mode / PPT Agent**: a home card and built-in entry inside the Agent module for presentation workflows. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
-- **Right-side context drawer**: open a flat edge-aligned task panel only when needed, browse files and deliverables, then drill into a focused preview/action view; chat deliverable cards, workspace file paths, and Markdown file links open directly in preview.
+- **Right-side context drawer**: open a flat edge-aligned task panel only when needed. The browse view separates **Workspace** and **Deliverables**, with search, type filtering, sorting, a real folder tree, and restored list position. The detail view keeps one file title, explicit Preview/Source modes where applicable, keyboard navigation, and a single **Generate file…** action for HTML conversion. Chat file cards open directly in preview; ordinary tool output refreshes the list without stealing the current preview, while office workflows may open their latest result.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
 - **Lightweight startup**: the main workspace becomes interactive before skill indexing, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.
-- **Settings center**: manage models, agents, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components.
+- **Settings center**: manage models, agents, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions stay disabled until something changes and unsaved exits require confirmation.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
-- **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings.
-- **Skill center**: enable, import, export, debug, and review skills without restarting the app.
+- **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and a searchable task form.
+- **Skill center**: search, filter, enable, configure, and debug skills in a master/detail layout without restarting the app.
 
 ## Skill Model
 

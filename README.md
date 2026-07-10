@@ -14,6 +14,7 @@ Current app version: **4.9.8**
 - Keep project work inside a selected workspace boundary.
 - Extend capabilities through built-in skills, bundled optional plugins, user skills, and MCP tools.
 - Manage reusable agents, prompt-based automation tasks, scheduled runs, and long-term memory from the UI.
+- Work in a light, compact Linear-inspired desktop surface with flat navigation, clear focus states, and an on-demand context drawer.
 - Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
 - Use **PPT Agent** from PPT Mode to turn topics, source files, templates, existing conversations, or visual-slide requests into presentation-shaped HTML drafts before exporting.
 - Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default while result files stay visible below the card.
@@ -26,7 +27,7 @@ Current app version: **4.9.8**
 - **Prompt attachments**: attached text files are inlined into the model request when small enough, images are sent as vision parts on vision-capable models, and large or non-text files are surfaced with explicit path/size guidance for tool-based reading.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **PPT Mode / PPT Agent**: a home card and built-in entry inside the Agent module for presentation workflows. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
-- **Right-side context drawer**: browse files and deliverables in a list view, then drill into a focused preview/action view; chat deliverable cards, workspace file paths, and Markdown file links open directly in preview.
+- **Right-side context drawer**: open a flat edge-aligned task panel only when needed, browse files and deliverables, then drill into a focused preview/action view; chat deliverable cards, workspace file paths, and Markdown file links open directly in preview.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
 - **Lightweight startup**: the main workspace becomes interactive before skill indexing, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.

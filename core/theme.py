@@ -2,58 +2,63 @@ import qdarktheme
 
 
 class DesignTokens:
-    primary = "#007aff"
-    primary_hover = "#0066d6"
-    primary_soft = "#eaf3ff"
-    primary_gradient_start = "#4aa3ff"
-    primary_gradient_end = "#007aff"
+    primary = "#5e6ad2"
+    primary_hover = "#4f5bc4"
+    primary_pressed = "#4651b7"
+    primary_soft = "#eef0ff"
+    primary_focus = "#c9cdf7"
+    primary_gradient_start = "#6975dc"
+    primary_gradient_end = "#5e6ad2"
 
-    accent_ai = "#007aff"
-    accent_user = "#3a3a3c"
-    accent_success = "#34c759"
-    accent_tool = "#ff9500"
+    accent_ai = "#5e6ad2"
+    accent_user = "#4f566b"
+    accent_success = "#2f9e64"
+    accent_tool = "#b7791f"
 
-    text_primary = "#1d1d1f"
-    text_secondary = "#636366"
-    text_tertiary = "#a1a1a6"
+    text_primary = "#202124"
+    text_secondary = "#5f6269"
+    text_tertiary = "#8b8e96"
     text_inverse = "#ffffff"
+    text_disabled = "#a7a9af"
 
-    bg_app = "#f3f5f8"
+    bg_app = "#f7f7f8"
     bg_main = "#ffffff"
-    bg_secondary = "#f5f6f8"
-    bg_tertiary = "#eceff3"
-    bg_sidebar = "#f4f8fc"
+    bg_secondary = "#f4f4f5"
+    bg_tertiary = "#ececee"
+    bg_sidebar = "#f2f2f3"
     bg_card = "#ffffff"
-    bg_card_subtle = "#fafbfd"
-    bg_glass = "rgba(255, 255, 255, 0.82)"
-    bg_hover = "#edf2f7"
-    bg_code = "#fafbfd"
-    bg_panel = "rgba(255, 255, 255, 0.72)"
-    bg_panel_strong = "rgba(255, 255, 255, 0.9)"
-    bg_sidebar_selected = "#e6f0ff"
-    bg_sidebar_hover = "#eef3f8"
+    bg_card_subtle = "#fafafa"
+    bg_glass = "#ffffff"
+    bg_hover = "#e9e9eb"
+    bg_pressed = "#e2e2e5"
+    bg_disabled = "#f0f0f1"
+    bg_code = "#f6f6f7"
+    bg_panel = "#ffffff"
+    bg_panel_strong = "#ffffff"
+    bg_sidebar_selected = "#e7e8f8"
+    bg_sidebar_hover = "#e8e8ea"
     bg_chat = "#ffffff"
-    bg_user_bubble = "#007aff"
+    bg_user_bubble = "#eef0ff"
     bg_assistant_stream = "#ffffff"
-    bg_settings_nav = "#eef2f6"
-    bg_settings_nav_selected = "#ffffff"
-    bg_settings_summary = "#f7fbff"
+    bg_settings_nav = "#f2f2f3"
+    bg_settings_nav_selected = "#e5e6f5"
+    bg_settings_summary = "#f4f4fb"
 
-    border = "#d8dbe2"
-    border_strong = "#c6cad4"
-    separator = "#e7e9ef"
-    border_subtle = "#eef0f4"
-    border_panel = "#d9e2ec"
-    border_settings_nav = "#d6dde7"
-    border_settings_summary = "#d7e7fb"
+    border = "#d8d8dc"
+    border_strong = "#c5c5cb"
+    separator = "#e6e6e9"
+    border_subtle = "#e8e8eb"
+    border_panel = "#dedee2"
+    border_settings_nav = "#dfdfe3"
+    border_settings_summary = "#d9dcf6"
 
-    radius_sm = 8
-    radius_md = 12
-    radius_lg = 16
-    radius_xl = 22
+    radius_sm = 6
+    radius_md = 8
+    radius_lg = 10
+    radius_xl = 14
 
-    spacing_xs = 6
-    spacing_sm = 10
+    spacing_xs = 4
+    spacing_sm = 8
     spacing_md = 16
     spacing_lg = 24
     spacing_xl = 32
@@ -62,10 +67,10 @@ class DesignTokens:
     shadow_card = "0 12px 28px rgba(15, 23, 42, 0.06)"
     shadow_soft = "0 6px 16px rgba(15, 23, 42, 0.06)"
 
-    sidebar_min_width = 216
-    sidebar_width = 232
-    sidebar_max_width = 280
-    drawer_min_width = 260
+    sidebar_min_width = 204
+    sidebar_width = 220
+    sidebar_max_width = 260
+    drawer_min_width = 272
     drawer_preferred_min_width = 360
     drawer_max_width = 500
     drawer_width_ratio = 0.28
@@ -99,11 +104,11 @@ class DesignTokens:
     toast_default_duration_ms = 4000
     toast_error_duration_ms = 8000
 
-    success_bg = "#f0fdf4"
-    success_text = "#166534"
-    success_border = "#bbf7d0"
-    success_icon = "#166534"
-    success_accent = "#10b981"
+    success_bg = "#edf8f2"
+    success_text = "#247a4d"
+    success_border = "#c9ead8"
+    success_icon = "#247a4d"
+    success_accent = "#2f9e64"
 
     error_bg = "#fef2f2"
     error_text = "#991b1b"
@@ -118,10 +123,10 @@ class DesignTokens:
     warning_panel_border = "#fdba74"
     warning_panel_text = "#9a3412"
 
-    info_bg = "#eff6ff"
-    info_text = "#1e40af"
-    info_border = "#bfdbfe"
-    info_icon = "#1e40af"
+    info_bg = "#f1f2fb"
+    info_text = "#4f5bc4"
+    info_border = "#d9dcf6"
+    info_icon = "#5e6ad2"
 
     toast_bg = "rgba(255, 255, 255, 0.94)"
     toast_border = "#dde3ec"
@@ -134,12 +139,12 @@ class DesignTokens:
     muted_chip_bg = "#f0f0f3"
     muted_chip_text = "#636366"
 
-    status_running = "#007aff"
-    status_thinking = "#5856d6"
-    status_tool = "#ff9500"
-    status_success = "#34c759"
-    status_error = "#ff3b30"
-    status_idle = "#8e8e93"
+    status_running = "#5e6ad2"
+    status_thinking = "#7957c8"
+    status_tool = "#a56a16"
+    status_success = "#2f9e64"
+    status_error = "#c83f49"
+    status_idle = "#7d8088"
 
     activity_indicator_size = 14
     activity_indicator_stroke = 1.6
@@ -172,11 +177,11 @@ def get_tech_stylesheet(theme="light"):
         c_accent = DesignTokens.primary
         c_accent_hover = DesignTokens.primary_hover
         c_border = DesignTokens.border
-        c_selection = "#cfe0ff"
+        c_selection = DesignTokens.primary_soft
 
     css = f"""
     QWidget {{
-        font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+        font-family: 'Microsoft YaHei UI', 'Segoe UI Variable', 'Segoe UI', sans-serif;
         font-size: 14px;
         color: {c_text_primary};
         selection-background-color: {c_selection};
@@ -200,8 +205,8 @@ def get_tech_stylesheet(theme="light"):
     QPushButton {{
         background-color: {c_bg_card};
         border: 1px solid {c_border};
-        border-radius: 17px;
-        padding: 8px 14px;
+        border-radius: {DesignTokens.radius_md}px;
+        padding: 7px 12px;
         color: {c_text_primary};
         text-align: center;
     }}
@@ -219,6 +224,15 @@ def get_tech_stylesheet(theme="light"):
     QPushButton#PrimaryBtn:hover {{
         background-color: {c_accent_hover};
         border-color: {c_accent_hover};
+    }}
+    QPushButton#PrimaryBtn:pressed {{
+        background-color: {DesignTokens.primary_pressed};
+        border-color: {DesignTokens.primary_pressed};
+    }}
+    QPushButton:disabled {{
+        background-color: {DesignTokens.bg_disabled};
+        color: {DesignTokens.text_disabled};
+        border-color: {DesignTokens.border_subtle};
     }}
 
     QPushButton#SecondaryBtn {{
@@ -240,8 +254,8 @@ def get_tech_stylesheet(theme="light"):
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox {{
         background-color: {c_bg_input};
         border: 1px solid {c_border};
-        border-radius: {DesignTokens.radius_lg}px;
-        padding: 8px 10px;
+        border-radius: {DesignTokens.radius_md}px;
+        padding: 7px 9px;
         color: {c_text_primary};
     }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{
@@ -251,7 +265,7 @@ def get_tech_stylesheet(theme="light"):
 
     QTextEdit#MainInput {{
         font-size: 15px;
-        border-radius: {DesignTokens.radius_xl}px;
+        border-radius: {DesignTokens.radius_lg}px;
         padding: 12px 16px;
         background-color: {c_bg_card};
     }}
@@ -282,7 +296,7 @@ def get_tech_stylesheet(theme="light"):
         margin-right: 4px;
         color: {c_text_secondary};
         font-weight: 500;
-        border-radius: 14px;
+        border-radius: {DesignTokens.radius_sm}px;
     }}
     QTabBar::tab:hover {{
         color: {c_text_primary};

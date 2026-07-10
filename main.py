@@ -577,40 +577,39 @@ def add_soft_shadow(widget, blur=28, y_offset=10, alpha=28):
     widget.setGraphicsEffect(shadow)
 
 
-def apple_button_style(kind="secondary", radius=17, align="center"):
+def apple_button_style(kind="secondary", radius=8, align="center"):
     if kind == "primary":
         return (
             "QPushButton { "
-            f"background: {DesignTokens.primary}; color: white; border: none; border-radius: {radius}px; "
-            "padding: 8px 14px; font-weight: 700; "
+            f"background: {DesignTokens.primary}; color: white; border: 1px solid {DesignTokens.primary}; border-radius: {radius}px; "
+            "padding: 7px 12px; font-weight: 600; "
             f"text-align: {align};"
             " } "
-            "QPushButton:hover { "
-            f"background: {DesignTokens.primary_hover};"
-            " } "
-            "QPushButton:disabled { background: #d1d1d6; color: #ffffff; }"
+            f"QPushButton:hover {{ background: {DesignTokens.primary_hover}; border-color: {DesignTokens.primary_hover}; }} "
+            f"QPushButton:pressed {{ background: {DesignTokens.primary_pressed}; border-color: {DesignTokens.primary_pressed}; }} "
+            f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; border-color: {DesignTokens.border_subtle}; }}"
         )
     if kind == "ghost":
         return (
             "QPushButton { "
-            f"background: transparent; color: {DesignTokens.text_secondary}; border: none; border-radius: {radius}px; "
-            "padding: 8px 10px; "
+            f"background: transparent; color: {DesignTokens.text_secondary}; border: 1px solid transparent; border-radius: {radius}px; "
+            "padding: 7px 9px; "
             f"text-align: {align};"
             " } "
-            "QPushButton:hover { "
-            f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary};"
-            " } "
+            f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }} "
+            f"QPushButton:pressed {{ background: {DesignTokens.bg_pressed}; }} "
+            f"QPushButton:disabled {{ color: {DesignTokens.text_disabled}; background: transparent; }}"
         )
     return (
         "QPushButton { "
         f"background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary}; "
-        f"border: 1px solid {DesignTokens.border}; border-radius: {radius}px; padding: 8px 14px; "
+        f"border: 1px solid {DesignTokens.border}; border-radius: {radius}px; padding: 7px 12px; "
         f"text-align: {align};"
         " } "
-        "QPushButton:hover { "
-        f"background: {DesignTokens.bg_secondary}; border-color: {DesignTokens.border_strong};"
-        " } "
-)
+        f"QPushButton:hover {{ background: {DesignTokens.bg_secondary}; border-color: {DesignTokens.border_strong}; }} "
+        f"QPushButton:pressed {{ background: {DesignTokens.bg_pressed}; }} "
+        f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; border-color: {DesignTokens.border_subtle}; }}"
+    )
 
 
 def log_sub_agent_runtime(event, **fields):
@@ -688,28 +687,30 @@ def _safe_text_tail_preview(text, limit=6000):
 
 
 def apple_tool_button_style(active=False):
-    bg = DesignTokens.primary_soft if active else "rgba(255, 255, 255, 0.72)"
+    bg = DesignTokens.primary_soft if active else DesignTokens.bg_main
     color = DesignTokens.primary if active else DesignTokens.text_secondary
     border = DesignTokens.primary if active else DesignTokens.border_subtle
     return (
         "QToolButton { "
-        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 18px; "
+        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 7px; "
         "padding: 0px; "
         "} "
         "QToolButton:hover { "
-        f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; border-color: {DesignTokens.primary};"
+        f"background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; border-color: {DesignTokens.border};"
         "} "
+        f"QToolButton:pressed {{ background: {DesignTokens.bg_pressed}; }} "
+        f"QToolButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; border-color: {DesignTokens.border_subtle}; }}"
     )
 
 
-def apple_ghost_icon_button_style(radius=17):
+def apple_ghost_icon_button_style(radius=7):
     return (
         "QToolButton { "
         "background: transparent; border: none; "
         f"border-radius: {radius}px; color: {DesignTokens.text_secondary};"
         "} "
         "QToolButton:hover { "
-        f"background: rgba(255, 255, 255, 0.68); color: {DesignTokens.text_primary};"
+        f"background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary};"
         "} "
         "QToolButton:pressed { "
         f"background: {DesignTokens.bg_hover};"
@@ -717,7 +718,7 @@ def apple_ghost_icon_button_style(radius=17):
     )
 
 
-def apple_panel_style(radius=14, bg=None):
+def apple_panel_style(radius=8, bg=None):
     bg = bg or DesignTokens.bg_card
     return (
         f"background: {bg}; border: 1px solid {DesignTokens.border}; "
@@ -725,15 +726,15 @@ def apple_panel_style(radius=14, bg=None):
     )
 
 
-def apple_section_surface_style(radius=16, bg=None):
-    bg = bg or "rgba(255, 255, 255, 0.62)"
-    return f"QFrame {{ background: {bg}; border: none; border-radius: {radius}px; }}"
+def apple_section_surface_style(radius=8, bg=None):
+    bg = bg or DesignTokens.bg_panel
+    return f"QFrame[uiSurface=\"true\"] {{ background: {bg}; border: none; border-radius: {radius}px; }}"
 
 
-def apple_outline_surface_style(radius=16, bg=None, border=None):
-    bg = bg or "rgba(255, 255, 255, 0.78)"
+def apple_outline_surface_style(radius=8, bg=None, border=None):
+    bg = bg or DesignTokens.bg_panel
     border = border or rgba_from_hex(DesignTokens.border_strong, 0.72)
-    return f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: {radius}px; }}"
+    return f"QFrame[uiOutlineSurface=\"true\"] {{ background: {bg}; border: 1px solid {border}; border-radius: {radius}px; }}"
 
 
 def apple_segmented_button_style():
@@ -741,11 +742,11 @@ def apple_segmented_button_style():
         QPushButton {{
             background: transparent;
             border: none;
-            border-radius: 12px;
+            border-radius: 6px;
             color: {DesignTokens.text_secondary};
-            padding: 7px 12px;
-            font-size: 11px;
-            font-weight: 700;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: 600;
         }}
         QPushButton:hover {{
             background: rgba(255, 255, 255, 0.72);
@@ -761,12 +762,12 @@ def apple_segmented_button_style():
 def apple_section_kicker_style():
     return (
         f"color: {DesignTokens.text_tertiary}; font-size: 11px; "
-        "font-weight: 700; letter-spacing: 0px; text-transform: uppercase;"
+        "font-weight: 600; letter-spacing: 0px; text-transform: uppercase;"
     )
 
 
 def apple_section_title_style(size=16):
-    return f"font-size: {size}px; font-weight: 700; color: {DesignTokens.text_primary};"
+    return f"font-size: {size}px; font-weight: 600; color: {DesignTokens.text_primary};"
 
 
 def apple_caption_style():
@@ -774,12 +775,12 @@ def apple_caption_style():
 
 
 def apple_metric_value_style():
-    return f"color: {DesignTokens.text_primary}; font-size: 20px; font-weight: 700;"
+    return f"color: {DesignTokens.text_primary}; font-size: 18px; font-weight: 600;"
 
 
 def apple_icon_action_button_style(kind="neutral"):
     color = DesignTokens.text_secondary
-    hover = "rgba(255, 255, 255, 0.92)"
+    hover = DesignTokens.bg_hover
     border = DesignTokens.border_subtle
     if kind == "primary":
         color = DesignTokens.primary
@@ -790,16 +791,16 @@ def apple_icon_action_button_style(kind="neutral"):
         border = rgba_from_hex(DesignTokens.error_text, 0.12)
         hover = rgba_from_hex(DesignTokens.error_text, 0.08)
     return (
-        f"QToolButton {{ background: rgba(255, 255, 255, 0.74); color: {color}; "
-        f"border: 1px solid {border}; border-radius: 14px; padding: 0px; }}"
+        f"QToolButton {{ background: {DesignTokens.bg_main}; color: {color}; "
+        f"border: 1px solid {border}; border-radius: 7px; padding: 0px; }}"
         f" QToolButton:hover {{ background: {hover}; border-color: {DesignTokens.border}; color: {color}; }}"
         f" QToolButton:pressed {{ background: {DesignTokens.bg_hover}; }}"
     )
 
 
-def apple_code_edit_style(bg=None, radius=12, subtle=False, padding=9):
+def apple_code_edit_style(bg=None, radius=8, subtle=False, padding=9):
     bg = bg or (DesignTokens.bg_secondary if subtle else DesignTokens.bg_code)
-    border_rule = "border: none;" if subtle else f"border: 1px solid {DesignTokens.border};"
+    border_rule = f"border: 1px solid {DesignTokens.border_subtle};" if subtle else f"border: 1px solid {DesignTokens.border};"
     return f"""
         QTextEdit {{
             {border_rule}
@@ -811,10 +812,18 @@ def apple_code_edit_style(bg=None, radius=12, subtle=False, padding=9):
             padding: {padding}px;
             line-height: 1.45;
         }}
+        QTextEdit:focus {{
+            border-color: {DesignTokens.primary_focus};
+            background: {DesignTokens.bg_main};
+        }}
+        QTextEdit:disabled {{
+            color: {DesignTokens.text_disabled};
+            background: {DesignTokens.bg_disabled};
+        }}
     """
 
 
-def apple_input_style(radius=12, padding=8):
+def apple_input_style(radius=8, padding=7):
     return f"""
         QLineEdit {{
             background: {DesignTokens.bg_card};
@@ -824,8 +833,8 @@ def apple_input_style(radius=12, padding=8):
             color: {DesignTokens.text_primary};
         }}
         QLineEdit:focus {{
-            border-color: {DesignTokens.primary};
-            background: white;
+            border-color: {DesignTokens.primary_focus};
+            background: {DesignTokens.bg_main};
         }}
         QLineEdit:disabled {{
             color: {DesignTokens.text_tertiary};
@@ -834,7 +843,7 @@ def apple_input_style(radius=12, padding=8):
     """
 
 
-def apple_combo_style(radius=12, padding=8):
+def apple_combo_style(radius=8, padding=7):
     return f"""
         QComboBox {{
             background: {DesignTokens.bg_card};
@@ -847,8 +856,8 @@ def apple_combo_style(radius=12, padding=8):
             border-color: {DesignTokens.border_strong};
         }}
         QComboBox:focus {{
-            border-color: {DesignTokens.primary};
-            background: white;
+            border-color: {DesignTokens.primary_focus};
+            background: {DesignTokens.bg_main};
         }}
         QComboBox:disabled {{
             color: {DesignTokens.text_tertiary};
@@ -866,14 +875,14 @@ def apple_tab_style():
         QTabBar::tab {{
             background: transparent;
             border: none;
-            border-radius: 11px;
-            padding: 7px 14px;
+            border-radius: 6px;
+            padding: 6px 12px;
             margin-right: 4px;
             color: {DesignTokens.text_secondary};
             font-weight: 600;
         }}
         QTabBar::tab:hover {{
-            background: rgba(255, 255, 255, 0.72);
+            background: {DesignTokens.bg_hover};
             color: {DesignTokens.text_primary};
         }}
         QTabBar::tab:selected {{
@@ -905,7 +914,7 @@ def apple_tree_style():
         QTreeView::item:selected {{
             background: {DesignTokens.primary_soft};
             color: {DesignTokens.text_primary};
-            border: 1px solid #c9def8;
+            border: none;
         }}
         QTreeView::branch {{
             background: transparent;
@@ -913,7 +922,7 @@ def apple_tree_style():
     """
 
 
-def apple_list_style(border=True, bg=None, radius=14, padding=6):
+def apple_list_style(border=True, bg=None, radius=8, padding=4):
     bg = bg or (DesignTokens.bg_card if border else "transparent")
     border_rule = f"border: 1px solid {DesignTokens.border};" if border else "border: none;"
     return f"""
@@ -925,9 +934,9 @@ def apple_list_style(border=True, bg=None, radius=14, padding=6):
             outline: none;
         }}
         QListWidget::item {{
-            padding: 8px 10px;
-            margin: 2px;
-            border-radius: 10px;
+            padding: 7px 9px;
+            margin: 1px;
+            border-radius: 6px;
             color: {DesignTokens.text_primary};
         }}
         QListWidget::item:hover {{
@@ -998,7 +1007,7 @@ def apple_status_chip_style(status, subtle=False):
     bg = DesignTokens.bg_secondary if subtle else rgba_from_hex(color, 0.10)
     return (
         f"background: {bg}; color: {color}; border: 1px solid {rgba_from_hex(color, 0.22)}; "
-        "border-radius: 10px; padding: 3px 8px; font-size: 11px; font-weight: 700;"
+        "border-radius: 6px; padding: 3px 7px; font-size: 11px; font-weight: 600;"
     )
 
 
@@ -1086,32 +1095,32 @@ def format_token_usage_tooltip(summary, last_usage=None):
 def apple_search_field_style():
     return f"""
         QLineEdit {{
-            background: rgba(255, 255, 255, 0.78);
+            background: {DesignTokens.bg_main};
             border: 1px solid {DesignTokens.border_subtle};
-            border-radius: 14px;
-            padding: 8px 12px;
+            border-radius: 7px;
+            padding: 6px 10px;
             color: {DesignTokens.text_primary};
             font-size: 12px;
         }}
         QLineEdit:focus {{
-            background: rgba(255, 255, 255, 0.92);
-            border-color: {rgba_from_hex(DesignTokens.primary, 0.22)};
+            background: {DesignTokens.bg_main};
+            border-color: {DesignTokens.primary_focus};
         }}
     """
 
 
 def apple_history_row_style(selected=False):
-    bg = "rgba(230, 240, 255, 0.90)" if selected else "rgba(255, 255, 255, 0.18)"
-    hover = "rgba(242, 247, 255, 0.98)" if selected else "rgba(255, 255, 255, 0.58)"
+    bg = DesignTokens.bg_sidebar_selected if selected else "transparent"
+    hover = DesignTokens.bg_sidebar_selected if selected else DesignTokens.bg_sidebar_hover
     return (
-        f"QFrame#HistoryRow {{ background: {bg}; border: 1px solid transparent; border-radius: 14px; }}"
-        f"QFrame#HistoryRow:hover {{ background: {hover}; border: 1px solid {DesignTokens.border_subtle}; }}"
+        f"QFrame#HistoryRow {{ background: {bg}; border: none; border-radius: 6px; }}"
+        f"QFrame#HistoryRow:hover {{ background: {hover}; border: none; }}"
     )
 
 
 def apple_history_title_style(selected=False):
     color = DesignTokens.primary if selected else DesignTokens.text_primary
-    weight = "700" if selected else "600"
+    weight = "600" if selected else "500"
     return (
         f"color: {color}; font-size: 13px; font-weight: {weight}; "
         "background: transparent; border: none; padding: 2px 0;"
@@ -1120,7 +1129,7 @@ def apple_history_title_style(selected=False):
 
 def apple_history_group_style():
     return (
-        f"color: {DesignTokens.text_tertiary}; font-size: 11px; font-weight: 700; "
+        f"color: {DesignTokens.text_tertiary}; font-size: 11px; font-weight: 600; "
         "letter-spacing: 0px; padding: 10px 8px 3px 8px; background: transparent;"
     )
 
@@ -1131,10 +1140,10 @@ def apple_sidebar_icon_button_style(active=False):
     border = rgba_from_hex(DesignTokens.primary, 0.18) if active else "transparent"
     return (
         "QToolButton { "
-        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 13px; padding: 0px;"
+        f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 6px; padding: 0px;"
         "} "
         "QToolButton:hover { "
-        f"background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_primary}; border-color: {DesignTokens.border_subtle};"
+        f"background: {DesignTokens.bg_sidebar_hover}; color: {DesignTokens.text_primary}; border-color: transparent;"
         "} "
         "QToolButton:pressed { "
         f"background: rgba(255, 255, 255, 0.82); color: {DesignTokens.primary};"
@@ -1229,19 +1238,19 @@ def initialize_desktop_theme(app):
     """Apply the production font and Windows-safe tooltip surface."""
     app.setStyle("Fusion")
     font = app.font()
-    font.setFamily("Segoe UI")
+    font.setFamily("Microsoft YaHei UI")
     font.setPointSize(10)
     app.setFont(font)
     apply_tooltip_theme(app)
 
 
 def apple_inline_project_chip_style(active=False):
-    bg = rgba_from_hex(DesignTokens.primary, 0.10) if active else "rgba(255, 255, 255, 0.72)"
-    color = DesignTokens.success_text if active else DesignTokens.text_secondary
-    border = rgba_from_hex(DesignTokens.primary, 0.16) if active else DesignTokens.border_subtle
+    bg = DesignTokens.primary_soft if active else DesignTokens.bg_secondary
+    color = DesignTokens.text_primary if active else DesignTokens.text_secondary
+    border = DesignTokens.border_settings_summary if active else DesignTokens.border_subtle
     return (
         f"background: {bg}; color: {color}; border: 1px solid {border}; "
-        "border-radius: 12px; padding: 7px 12px; font-size: 12px; font-weight: 600;"
+        "border-radius: 7px; padding: 5px 8px; font-size: 12px; font-weight: 500;"
     )
 
 
@@ -1261,41 +1270,42 @@ def apple_settings_nav_style():
     return f"""
         QListWidget {{
             background: {DesignTokens.bg_settings_nav};
-            border-radius: 18px;
-            padding: 10px;
+            border-radius: 8px;
+            padding: 6px;
             outline: none;
             border: none;
         }}
         QListWidget::item {{
             color: {DesignTokens.text_secondary};
-            border-radius: 12px;
-            padding: 12px 10px;
-            margin: 2px 0;
-            min-height: 26px;
+            border-radius: 6px;
+            padding: 8px 9px;
+            margin: 1px 0;
+            min-height: 24px;
         }}
         QListWidget::item:selected {{
             background: {DesignTokens.bg_settings_nav_selected};
             color: {DesignTokens.text_primary};
-            font-weight: 700;
+            font-weight: 600;
             border: none;
         }}
         QListWidget::item:hover {{
-            background: rgba(255, 255, 255, 0.72);
+            background: {DesignTokens.bg_settings_nav_selected};
             color: {DesignTokens.text_primary};
         }}
     """
 
 
-def apple_settings_surface_style(radius=20):
+def apple_settings_surface_style(radius=8):
     return (
-        f"background: {DesignTokens.bg_panel}; border: none; "
-        f"border-radius: {radius}px;"
+        "QFrame[settingsSurface=\"true\"] { "
+        f"background: transparent; border: none; border-bottom: 1px solid {DesignTokens.separator}; "
+        f"border-radius: {radius}px; }}"
     )
 
 
 def apple_settings_summary_card_style(accent=False):
     bg = DesignTokens.bg_settings_summary if accent else DesignTokens.bg_panel_strong
-    return f"background: {bg}; border: none; border-radius: 18px;"
+    return f"background: {bg}; border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px;"
 
 
 def apple_settings_inline_note_style():
@@ -1307,7 +1317,7 @@ def apple_settings_meta_style():
 
 
 def apple_settings_section_title_style():
-    return f"color: {DesignTokens.text_primary}; font-size: 15px; font-weight: 700;"
+    return f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 600;"
 
 
 def apple_settings_field_label_style():
@@ -1315,7 +1325,77 @@ def apple_settings_field_label_style():
 
 
 def apple_settings_value_style():
-    return f"color: {DesignTokens.text_primary}; font-size: 18px; font-weight: 700;"
+    return f"color: {DesignTokens.text_primary}; font-size: 17px; font-weight: 600;"
+
+
+def linear_dialog_stylesheet(object_name):
+    selector = f"QDialog#{object_name}"
+    return f"""
+        {selector} {{ background: {DesignTokens.bg_app}; }}
+        {selector} QLabel {{ background: transparent; border: none; }}
+        {selector} QLineEdit,
+        {selector} QTextEdit,
+        {selector} QPlainTextEdit,
+        {selector} QComboBox,
+        {selector} QSpinBox,
+        {selector} QDateTimeEdit {{
+            background: {DesignTokens.bg_main};
+            color: {DesignTokens.text_primary};
+            border: 1px solid {DesignTokens.border};
+            border-radius: 8px;
+            padding: 6px 9px;
+            selection-background-color: {DesignTokens.primary_soft};
+            selection-color: {DesignTokens.text_primary};
+        }}
+        {selector} QLineEdit:focus,
+        {selector} QTextEdit:focus,
+        {selector} QPlainTextEdit:focus,
+        {selector} QComboBox:focus,
+        {selector} QSpinBox:focus,
+        {selector} QDateTimeEdit:focus {{ border-color: {DesignTokens.primary_focus}; }}
+        {selector} QLineEdit:disabled,
+        {selector} QTextEdit:disabled,
+        {selector} QPlainTextEdit:disabled,
+        {selector} QComboBox:disabled,
+        {selector} QSpinBox:disabled,
+        {selector} QDateTimeEdit:disabled {{
+            background: {DesignTokens.bg_disabled};
+            color: {DesignTokens.text_disabled};
+        }}
+        {selector} QPushButton#PrimaryBtn {{
+            background: {DesignTokens.primary};
+            color: {DesignTokens.text_inverse};
+            border: 1px solid {DesignTokens.primary};
+            border-radius: 8px;
+            padding: 7px 12px;
+            font-weight: 600;
+        }}
+        {selector} QPushButton#PrimaryBtn:hover {{ background: {DesignTokens.primary_hover}; }}
+        {selector} QPushButton#PrimaryBtn:pressed {{ background: {DesignTokens.primary_pressed}; }}
+        {selector} QPushButton#SecondaryBtn {{
+            background: {DesignTokens.bg_main};
+            color: {DesignTokens.text_primary};
+            border: 1px solid {DesignTokens.border};
+            border-radius: 8px;
+            padding: 7px 12px;
+        }}
+        {selector} QPushButton#SecondaryBtn:hover {{ background: {DesignTokens.bg_hover}; }}
+        {selector} QPushButton:disabled {{ color: {DesignTokens.text_disabled}; }}
+        {selector} QTabWidget::pane {{ border: none; background: transparent; }}
+        {selector} QTabBar::tab {{
+            background: transparent;
+            color: {DesignTokens.text_secondary};
+            border: none;
+            border-radius: 6px;
+            padding: 7px 11px;
+        }}
+        {selector} QTabBar::tab:hover {{ background: {DesignTokens.bg_hover}; }}
+        {selector} QTabBar::tab:selected {{
+            background: {DesignTokens.primary_soft};
+            color: {DesignTokens.primary};
+            font-weight: 600;
+        }}
+    """
 
 
 def apply_settings_combo_style(combo):
@@ -1377,12 +1457,13 @@ def settings_status_chip(text, tone="neutral"):
     )
 
 
-def build_settings_surface(title="", subtitle="", radius=20, show_subtitle=True):
+def build_settings_surface(title="", subtitle="", radius=8, show_subtitle=True):
     frame = QFrame()
+    frame.setProperty("settingsSurface", True)
     frame.setStyleSheet(apple_settings_surface_style(radius=radius))
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(18, 18, 18, 18)
-    layout.setSpacing(14)
+    layout.setContentsMargins(4, 14, 4, 18)
+    layout.setSpacing(12)
     if title:
         title_label = QLabel(title)
         title_label.setStyleSheet(apple_settings_section_title_style())
@@ -1393,6 +1474,23 @@ def build_settings_surface(title="", subtitle="", radius=20, show_subtitle=True)
         subtitle_label.setStyleSheet(apple_settings_inline_note_style() + " background: transparent; border: none;")
         layout.addWidget(subtitle_label)
     return frame, layout
+
+
+def build_settings_page_header(title, intro=None):
+    header_widget = QWidget()
+    header_layout = QVBoxLayout(header_widget)
+    header_layout.setContentsMargins(0, 0, 0, 0)
+    header_layout.setSpacing(4)
+    header = QLabel(str(title or ""))
+    header.setProperty("roleTitle", True)
+    header_layout.addWidget(header)
+    if intro:
+        intro_label = QLabel(str(intro))
+        intro_label.setObjectName("SettingsPageIntro")
+        intro_label.setWordWrap(True)
+        intro_label.setStyleSheet(apple_settings_inline_note_style())
+        header_layout.addWidget(intro_label)
+    return header_widget
 
 
 def format_file_size(size):
@@ -2239,7 +2337,7 @@ class SafeApplication(QApplication):
                     pass
             return False
 
-class SettingsDialog(QDialog):
+class _LegacySettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
@@ -3051,7 +3149,7 @@ class CapabilityWorkbenchDialog(QDialog):
         QMessageBox.information(self, "MCP 调试", "MCP 配置已保存并重新加载。")
 
 
-class SkillsCenterDialog(QDialog):
+class _LegacySkillsCenterDialog(QDialog):
     def __init__(self, skill_manager, config_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("功能中心 (Skills Center)")
@@ -3294,17 +3392,13 @@ class SkillsCenterDialog(QDialog):
 class ModelEditDialog(QDialog):
     def __init__(self, provider_id, model=None, parent=None):
         super().__init__(parent)
+        self.setObjectName("ModelEditDialog")
         self.provider_id = provider_id
         model = dict(model or {})
         self._editing_existing = bool(model)
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
         self.resize(500, 430)
-        self.setStyleSheet(
-            f"""
-            QDialog {{ background: {DesignTokens.bg_app}; }}
-            QDialog QLabel {{ background: transparent; border: none; }}
-            """
-        )
+        self.setStyleSheet(linear_dialog_stylesheet("ModelEditDialog"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
@@ -4170,6 +4264,7 @@ class AgentProfileManager(QWidget):
 class AutomationTaskDialog(QDialog):
     def __init__(self, skills=None, agent_profiles=None, task=None, parent=None):
         super().__init__(parent)
+        self.setObjectName("AutomationTaskDialog")
         self.setWindowTitle("自动化任务")
         self.resize(760, 680)
         self.skills = list(skills or [])
@@ -4206,7 +4301,8 @@ class AutomationTaskDialog(QDialog):
         summary_row.setContentsMargins(0, 0, 0, 0)
         summary_row.setSpacing(10)
         status_card = QFrame()
-        status_card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.74)"))
+        status_card.setProperty("uiSurface", True)
+        status_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         status_layout = QVBoxLayout(status_card)
         status_layout.setContentsMargins(14, 12, 14, 12)
         status_layout.setSpacing(2)
@@ -4224,7 +4320,8 @@ class AutomationTaskDialog(QDialog):
         summary_row.addWidget(status_card, 1)
 
         guidance_card = QFrame()
-        guidance_card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(234, 243, 255, 0.92)"))
+        guidance_card.setProperty("uiSurface", True)
+        guidance_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.info_bg))
         guidance_layout = QVBoxLayout(guidance_card)
         guidance_layout.setContentsMargins(14, 12, 14, 12)
         guidance_layout.setSpacing(2)
@@ -4239,7 +4336,8 @@ class AutomationTaskDialog(QDialog):
         layout.addLayout(summary_row)
 
         basics_card = QFrame()
-        basics_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        basics_card.setProperty("uiSurface", True)
+        basics_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         basics_layout = QVBoxLayout(basics_card)
         basics_layout.setContentsMargins(16, 16, 16, 16)
         basics_layout.setSpacing(12)
@@ -4261,7 +4359,8 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(basics_card)
 
         skills_card = QFrame()
-        skills_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        skills_card.setProperty("uiSurface", True)
+        skills_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         skills_layout = QVBoxLayout(skills_card)
         skills_layout.setContentsMargins(16, 16, 16, 16)
         skills_layout.setSpacing(10)
@@ -4285,7 +4384,8 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(skills_card)
 
         prompt_card = QFrame()
-        prompt_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        prompt_card.setProperty("uiSurface", True)
+        prompt_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         prompt_layout = QVBoxLayout(prompt_card)
         prompt_layout.setContentsMargins(16, 16, 16, 16)
         prompt_layout.setSpacing(10)
@@ -4303,7 +4403,8 @@ class AutomationTaskDialog(QDialog):
         layout.addWidget(prompt_card, 1)
 
         schedule_card = QFrame()
-        schedule_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        schedule_card.setProperty("uiSurface", True)
+        schedule_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         schedule_card_layout = QVBoxLayout(schedule_card)
         schedule_card_layout.setContentsMargins(16, 16, 16, 16)
         schedule_card_layout.setSpacing(12)
@@ -4318,7 +4419,8 @@ class AutomationTaskDialog(QDialog):
         self.schedule_mode_combo.hide()
 
         mode_bar = QFrame()
-        mode_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.76)"))
+        mode_bar.setProperty("uiSurface", True)
+        mode_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         mode_layout = QHBoxLayout(mode_bar)
         mode_layout.setContentsMargins(4, 4, 4, 4)
         mode_layout.setSpacing(4)
@@ -4425,7 +4527,8 @@ class AutomationTaskDialog(QDialog):
         quick_layout.setContentsMargins(0, 0, 0, 0)
         quick_layout.setSpacing(10)
         type_bar = QFrame()
-        type_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.76)"))
+        type_bar.setProperty("uiSurface", True)
+        type_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         type_layout = QGridLayout(type_bar)
         type_layout.setContentsMargins(4, 4, 4, 4)
         type_layout.setHorizontalSpacing(4)
@@ -4462,7 +4565,8 @@ class AutomationTaskDialog(QDialog):
         schedule_card_layout.addWidget(self.schedule_mode_stack)
 
         self.schedule_preview_card = QFrame()
-        self.schedule_preview_card.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(247, 249, 252, 0.92)"))
+        self.schedule_preview_card.setProperty("uiSurface", True)
+        self.schedule_preview_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         preview_meta_layout = QVBoxLayout(self.schedule_preview_card)
         preview_meta_layout.setContentsMargins(14, 12, 14, 12)
         preview_meta_layout.setSpacing(4)
@@ -4648,6 +4752,7 @@ class AutomationTaskDialog(QDialog):
 class AutomationDialog(QDialog):
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
+        self.setObjectName("AutomationDialog")
         self.config_manager = config_manager
         self._main = parent
         self.tasks = list(self.config_manager.get_automation_tasks())
@@ -4689,7 +4794,8 @@ class AutomationDialog(QDialog):
         layout.addLayout(summary_row)
 
         tab_bar = QFrame()
-        tab_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.78)"))
+        tab_bar.setProperty("uiSurface", True)
+        tab_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         tab_bar_layout = QHBoxLayout(tab_bar)
         tab_bar_layout.setContentsMargins(4, 4, 4, 4)
         tab_bar_layout.setSpacing(4)
@@ -4739,7 +4845,8 @@ class AutomationDialog(QDialog):
         self.history_list.currentRowChanged.connect(self.refresh_history_details)
         history_layout.addWidget(self.history_list, 1)
         history_detail_card = QFrame()
-        history_detail_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.78)"))
+        history_detail_card.setProperty("uiSurface", True)
+        history_detail_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         history_detail_card.setMinimumWidth(280)
         history_detail_layout = QVBoxLayout(history_detail_card)
         history_detail_layout.setContentsMargins(16, 16, 16, 16)
@@ -4803,9 +4910,13 @@ class AutomationDialog(QDialog):
 
     def _build_overview_card(self, title, value):
         card = QFrame()
-        card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
+        card.setProperty("overviewMetric", True)
+        card.setStyleSheet(
+            f"QFrame[overviewMetric=\"true\"] {{ background: transparent; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
+        )
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setContentsMargins(4, 8, 4, 10)
         card_layout.setSpacing(2)
         kicker = QLabel(title)
         kicker.setStyleSheet(apple_section_kicker_style())
@@ -4866,7 +4977,8 @@ class AutomationDialog(QDialog):
                 widget.deleteLater()
         if not self.tasks:
             empty_card = QFrame()
-            empty_card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.76)"))
+            empty_card.setProperty("uiSurface", True)
+            empty_card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
             empty_layout = QVBoxLayout(empty_card)
             empty_layout.setContentsMargins(18, 18, 18, 18)
             empty_layout.setSpacing(8)
@@ -4887,7 +4999,8 @@ class AutomationDialog(QDialog):
             return
         for task in self.tasks:
             card = QFrame()
-            card.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.82)"))
+            card.setProperty("uiSurface", True)
+            card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(16, 14, 16, 14)
             card_layout.setSpacing(12)
@@ -5855,6 +5968,7 @@ class AppUpdateWorker(QThread):
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None, initial_page_label=None):
         super().__init__(parent)
+        self.setObjectName("SettingsDialog")
         self.setWindowTitle("设置")
         screen = self.screen() or QGuiApplication.primaryScreen()
         available_height = screen.availableGeometry().height() if screen else 720
@@ -5865,14 +5979,47 @@ class SettingsDialog(QDialog):
         self.requires_skill_reload = False
         self.setStyleSheet(
             f"""
-            QDialog {{ background: {DesignTokens.bg_app}; }}
-            QDialog QLabel {{ background: transparent; border: none; }}
+            QDialog#SettingsDialog {{ background: {DesignTokens.bg_app}; }}
+            QDialog#SettingsDialog QLabel {{ background: transparent; border: none; }}
+            QDialog#SettingsDialog QLineEdit,
+            QDialog#SettingsDialog QPlainTextEdit,
+            QDialog#SettingsDialog QTextEdit,
+            QDialog#SettingsDialog QComboBox {{
+                background: {DesignTokens.bg_main};
+                color: {DesignTokens.text_primary};
+                border: 1px solid {DesignTokens.border};
+                border-radius: 8px;
+                padding: 6px 9px;
+                selection-background-color: {DesignTokens.primary_soft};
+                selection-color: {DesignTokens.text_primary};
+            }}
+            QDialog#SettingsDialog QLineEdit:focus,
+            QDialog#SettingsDialog QPlainTextEdit:focus,
+            QDialog#SettingsDialog QTextEdit:focus,
+            QDialog#SettingsDialog QComboBox:focus {{ border-color: {DesignTokens.primary_focus}; }}
+            QDialog#SettingsDialog QLineEdit:disabled,
+            QDialog#SettingsDialog QPlainTextEdit:disabled,
+            QDialog#SettingsDialog QTextEdit:disabled,
+            QDialog#SettingsDialog QComboBox:disabled {{
+                background: {DesignTokens.bg_disabled};
+                color: {DesignTokens.text_disabled};
+            }}
+            QDialog#SettingsDialog QPushButton#PrimaryBtn {{
+                background: {DesignTokens.primary}; color: white; border: 1px solid {DesignTokens.primary};
+                border-radius: 8px; padding: 7px 12px; font-weight: 600;
+            }}
+            QDialog#SettingsDialog QPushButton#PrimaryBtn:hover {{ background: {DesignTokens.primary_hover}; }}
+            QDialog#SettingsDialog QPushButton#SecondaryBtn {{
+                background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary};
+                border: 1px solid {DesignTokens.border}; border-radius: 8px; padding: 7px 12px;
+            }}
+            QDialog#SettingsDialog QPushButton#SecondaryBtn:hover {{ background: {DesignTokens.bg_hover}; }}
             """
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 22)
-        layout.setSpacing(20)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(16)
 
         title_box = QVBoxLayout()
         title_box.setSpacing(6)
@@ -5883,12 +6030,12 @@ class SettingsDialog(QDialog):
 
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(20)
+        body_layout.setSpacing(16)
         layout.addLayout(body_layout, 1)
 
         self.nav_list = QListWidget()
-        self.nav_list.setFixedWidth(208)
-        self.nav_list.setSpacing(4)
+        self.nav_list.setFixedWidth(196)
+        self.nav_list.setSpacing(2)
         self.nav_list.setStyleSheet(apple_settings_nav_style())
         body_layout.addWidget(self.nav_list)
 
@@ -5905,12 +6052,7 @@ class SettingsDialog(QDialog):
             page_layout.setContentsMargins(6, 4, 6, 18)
             page_layout.setSpacing(16)
 
-            page_header = QVBoxLayout()
-            page_header.setSpacing(4)
-            header = QLabel(title)
-            header.setProperty("roleTitle", True)
-            page_header.addWidget(header)
-            page_layout.addLayout(page_header)
+            page_layout.addWidget(build_settings_page_header(title, intro))
 
             scroll_area.setWidget(content)
             return scroll_area, page_layout
@@ -6984,6 +7126,7 @@ class SettingsDialog(QDialog):
 class SkillsCenterDialog(QDialog):
     def __init__(self, skill_manager, config_manager, parent=None):
         super().__init__(parent)
+        self.setObjectName("SkillsCenterDialog")
         self.setWindowTitle("能力中心")
         self.resize(960, 680)
         self.skill_manager = skill_manager
@@ -7044,7 +7187,8 @@ class SkillsCenterDialog(QDialog):
         layout.addWidget(self.search_input)
 
         segmented_frame = QFrame()
-        segmented_frame.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.76)"))
+        segmented_frame.setProperty("uiSurface", True)
+        segmented_frame.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         segmented_layout = QHBoxLayout(segmented_frame)
         segmented_layout.setContentsMargins(4, 4, 4, 4)
         segmented_layout.setSpacing(4)
@@ -7076,7 +7220,8 @@ class SkillsCenterDialog(QDialog):
         layout.addLayout(filters_row)
 
         self.selection_bar = QFrame()
-        self.selection_bar.setStyleSheet(apple_section_surface_style(radius=14, bg="rgba(255, 255, 255, 0.76)"))
+        self.selection_bar.setProperty("uiSurface", True)
+        self.selection_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         selection_layout = QHBoxLayout(self.selection_bar)
         selection_layout.setContentsMargins(12, 8, 12, 8)
         selection_layout.setSpacing(10)
@@ -7304,7 +7449,8 @@ class SkillsCenterDialog(QDialog):
 
     def _build_empty_state(self, tab_key, has_items):
         frame = QFrame()
-        frame.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.62)"))
+        frame.setProperty("uiSurface", True)
+        frame.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(6)
@@ -7705,7 +7851,7 @@ class ConversationSkillOptionsDialog(QDialog):
             skill for skill in (skills or [])
             if isinstance(skill, dict) and str(skill.get("name") or "").strip()
         ]
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(linear_dialog_stylesheet("AutomationTaskDialog"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -7805,7 +7951,7 @@ class ConversationSkillRangeDialog(QDialog):
         self.setWindowTitle("选择会话片段")
         self.resize(720, 560)
         self.messages = [message for message in (messages or []) if isinstance(message, dict)]
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(linear_dialog_stylesheet("AutomationDialog"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -7899,7 +8045,7 @@ class ConversationSkillPreviewDialog(QDialog):
         self.target_skill = target_skill or ""
         self.update_strategy = update_strategy or "append"
         self.script_asset_checks = []
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(linear_dialog_stylesheet("SkillsCenterDialog"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -9337,7 +9483,8 @@ class PptAgentModeDialog(QDialog):
 
         files_bar = QFrame()
         files_bar.setObjectName("PptAgentFilesBar")
-        files_bar.setStyleSheet(apple_section_surface_style(radius=16, bg=DesignTokens.bg_panel_strong))
+        files_bar.setProperty("uiSurface", True)
+        files_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         files_layout = QVBoxLayout(files_bar)
         files_layout.setContentsMargins(14, 12, 14, 12)
         files_layout.setSpacing(10)
@@ -9464,24 +9611,14 @@ class PptAgentModeDialog(QDialog):
 class AgentModuleDialog(QDialog):
     def __init__(self, agent_profiles=None, parent=None):
         super().__init__(parent)
+        self.setObjectName("AgentModuleDialog")
         self.agent_profiles = list(agent_profiles or [])
         self.selected_builtin = ""
         self.selected_profile = None
         self.setWindowTitle("智能体")
         self.setModal(True)
         self.resize(640, 560)
-        self.setStyleSheet(
-            f"""
-            QDialog {{
-                background: {DesignTokens.bg_main};
-                color: {DesignTokens.text_primary};
-            }}
-            QLabel {{
-                color: {DesignTokens.text_primary};
-                background: transparent;
-            }}
-            """
-        )
+        self.setStyleSheet(linear_dialog_stylesheet("AgentModuleDialog"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
@@ -9495,7 +9632,7 @@ class AgentModuleDialog(QDialog):
         title_box = QVBoxLayout()
         title_box.setSpacing(4)
         title = QLabel("智能体")
-        title.setStyleSheet(f"font-size: 22px; font-weight: 700; color: {DesignTokens.text_primary};")
+        title.setStyleSheet(f"font-size: 20px; font-weight: 600; color: {DesignTokens.text_primary};")
         desc = QLabel("选择内置智能体或把自定义智能体加入当前输入。")
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 13px; color: {DesignTokens.text_secondary};")
@@ -9565,7 +9702,8 @@ class AgentModuleDialog(QDialog):
 
     def _create_custom_agent_list(self):
         container = QFrame()
-        container.setStyleSheet(apple_section_surface_style(radius=16, bg=DesignTokens.bg_panel_strong))
+        container.setProperty("uiSurface", True)
+        container.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
         layout = QVBoxLayout(container)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
@@ -9703,8 +9841,8 @@ class FileChip(QFrame):
         self.setObjectName("FileChip")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.setStyleSheet(
-            f"QFrame#FileChip {{ background: rgba(255, 255, 255, 0.96); border: 1px solid {DesignTokens.border}; "
-            f"border-radius: 16px; }}"
+            f"QFrame#FileChip {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; "
+            f"border-radius: 7px; }}"
         )
 
         layout = QHBoxLayout(self)
@@ -9826,8 +9964,8 @@ class ChatBubble(QFrame):
                 bubble_frame.setStyleSheet(f"""
                     QFrame#UserBubbleFrame {{
                         background: {DesignTokens.bg_user_bubble};
-                        border-radius: 19px;
-                        border-bottom-right-radius: 9px;
+                        border: 1px solid {DesignTokens.border_settings_summary};
+                        border-radius: 8px;
                     }}
                 """)
                 bubble_layout = QVBoxLayout(bubble_frame)
@@ -9839,10 +9977,10 @@ class ChatBubble(QFrame):
                 content_edit.setPlainText(text)
                 content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 content_edit.setStyleSheet(
-                    "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
-                    "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
+                    f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
+                    f"selection-background-color: {DesignTokens.primary_focus}; selection-color: {DesignTokens.text_primary};"
                 )
-                apply_selection_palette(content_edit, "#ffffff", "#0b57d0")
+                apply_selection_palette(content_edit, DesignTokens.primary_focus, DesignTokens.text_primary)
 
                 bubble_layout.addWidget(content_edit)
 
@@ -9921,15 +10059,15 @@ class ChatBubble(QFrame):
                     background-color: transparent;
                     color: {DesignTokens.text_secondary};
                     border: none;
-                    border-radius: 12px;
+                    border-radius: 6px;
                     padding: 6px 10px;
                     font-size: 12px;
                     font-weight: 600;
                     margin-bottom: 0px; /* Reduced to connect with container */
                 }}
-                QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.72); color: {DesignTokens.text_primary}; }}
+                QPushButton:hover {{ background-color: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}
                 QPushButton:checked {{ 
-                    background-color: rgba(255, 255, 255, 0.78); 
+                    background-color: {DesignTokens.bg_secondary};
                     color: {DesignTokens.text_primary}; 
                 }}
             """)
@@ -9938,14 +10076,15 @@ class ChatBubble(QFrame):
 
             # Container for Thinking Stream
             self.think_container = QWidget()
+            self.think_container.setObjectName("ThinkingContainer")
             self.think_container.setVisible(False)
             self.think_container.setStyleSheet(f"""
-                QWidget {{
-                    background: rgba(255, 255, 255, 0.72);
+                QWidget#ThinkingContainer {{
+                    background: {DesignTokens.bg_secondary};
                     border: 1px solid {DesignTokens.border_subtle};
                     margin-top: 2px;
                     margin-left: 0px;
-                    border-radius: 14px;
+                    border-radius: 8px;
                 }}
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
@@ -9989,13 +10128,13 @@ class ChatBubble(QFrame):
             self._main_content_render_timer.timeout.connect(self._flush_pending_main_content_render)
             self.copy_result_btn = QPushButton("复制结果")
             self.copy_result_btn.setCursor(Qt.PointingHandCursor)
-            self.copy_result_btn.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+            self.copy_result_btn.setIcon(qta.icon('fa5s.copy', color=DesignTokens.text_secondary))
             self.copy_result_btn.setVisible(False)
             self.copy_result_btn.setFixedHeight(26)
             self.copy_result_btn.setStyleSheet(f"""
                 QPushButton {{
                     border: none;
-                    border-radius: 12px;
+                    border-radius: 6px;
                     padding: 2px 9px;
                     background: transparent;
                     color: {DesignTokens.text_secondary};
@@ -10009,7 +10148,7 @@ class ChatBubble(QFrame):
             self.copy_result_btn.clicked.connect(self.copy_main_content)
             self.office_draft_btn = QPushButton("生成办公稿")
             self.office_draft_btn.setCursor(Qt.PointingHandCursor)
-            self.office_draft_btn.setIcon(qta.icon('fa5s.file-code', color='#4b5563'))
+            self.office_draft_btn.setIcon(qta.icon('fa5s.file-code', color=DesignTokens.text_secondary))
             self.office_draft_btn.setVisible(False)
             self.office_draft_btn.setFixedHeight(26)
             self.office_draft_btn.setStyleSheet(self.copy_result_btn.styleSheet())
@@ -10147,8 +10286,8 @@ class ChatBubble(QFrame):
             self.user_bubble_frame.setStyleSheet(f"""
                 QFrame#UserBubbleFrame {{
                     background: {DesignTokens.bg_secondary};
-                    border: 1px solid {DesignTokens.border_subtle};
-                    border-radius: 19px;
+                    border: 1px solid {DesignTokens.primary_focus};
+                    border-radius: 8px;
                 }}
             """)
         self.user_content_edit.setStyleSheet(
@@ -10178,15 +10317,15 @@ class ChatBubble(QFrame):
         if self.user_content_edit is not None:
             self.user_content_edit.setReadOnly(True)
             self.user_content_edit.setStyleSheet(
-                "color: #ffffff; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
-                "selection-background-color: rgba(255, 255, 255, 0.94); selection-color: #0b57d0;"
+                f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
+                f"selection-background-color: {DesignTokens.primary_focus}; selection-color: {DesignTokens.text_primary};"
             )
         if self.user_bubble_frame is not None:
             self.user_bubble_frame.setStyleSheet(f"""
                 QFrame#UserBubbleFrame {{
                     background: {DesignTokens.bg_user_bubble};
-                    border-radius: 19px;
-                    border-bottom-right-radius: 9px;
+                    border: 1px solid {DesignTokens.border_settings_summary};
+                    border-radius: 8px;
                 }}
             """)
         if self.edit_controls is not None:
@@ -11587,7 +11726,8 @@ class SubAgentTimelineCard(QFrame):
         self.agent_name = agent_name or agent_id
         self.event_count = 0
 
-        self.setStyleSheet(apple_section_surface_style(radius=18, bg="rgba(255, 255, 255, 0.74)"))
+        self.setProperty("uiSurface", True)
+        self.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -12479,18 +12619,19 @@ class MemoryUpdateWorker(QThread):
 class MemoryCenterDialog(QDialog):
     def __init__(self, history_dir, workspace_dir="", parent=None):
         super().__init__(parent)
+        self.setObjectName("MemoryCenterDialog")
         self.setWindowTitle("记忆")
         self.resize(980, 700)
         self.setMinimumSize(820, 560)
         self.store = MemoryStore(history_dir)
         self.workspace_dir = workspace_dir or ""
-        self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
+        self.setStyleSheet(linear_dialog_stylesheet("MemoryCenterDialog"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(14)
         title = QLabel("记忆")
-        title.setStyleSheet(apple_section_title_style(22))
+        title.setStyleSheet(apple_section_title_style(20))
         subtitle = QLabel("管理全局与当前工作区的长期摘要，以及所有智能体共享的性格底色。")
         subtitle.setStyleSheet(apple_caption_style())
         layout.addWidget(title)
@@ -12840,12 +12981,12 @@ class SessionContextChip(QWidget):
 
     def _apply_style(self):
         self.setStyleSheet(
-            f"QPushButton#ChipCloseButton {{ background: rgba(255, 255, 255, 0.7); "
+            f"QPushButton#ChipCloseButton {{ background: {DesignTokens.bg_main}; "
             f"color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 12px; padding: 0px; font-size: 12px; font-weight: 700; }}"
-            f"QPushButton#ChipMainButton {{ background: rgba(255, 255, 255, 0.78); "
+            "border-radius: 6px; padding: 0px; font-size: 12px; font-weight: 600; }}"
+            f"QPushButton#ChipMainButton {{ background: {DesignTokens.bg_main}; "
             f"color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 16px; padding: 4px 12px 4px 8px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            "border-radius: 7px; padding: 4px 10px 4px 8px; font-size: 12px; font-weight: 600; text-align: left; }}"
             f"QPushButton#ChipCloseButton:hover, QPushButton#ChipMainButton:hover {{ "
             f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
             f"border-color: {rgba_from_hex(DesignTokens.primary, 0.22)}; }}"
@@ -13081,24 +13222,25 @@ class MainWindow(QMainWindow):
         self._system_toast_timer.setSingleShot(True)
         self._system_toast_timer.timeout.connect(self._dismiss_active_system_toast)
         
-        # Apply Clean Light Theme manually for optimized components
+        # Product-local stylesheet: keep selectors scoped so dialog and content
+        # widgets can own their states without inherited chrome.
         self.setStyleSheet(f"""
             QMainWindow {{ background-color: {DesignTokens.bg_app}; }}
-            QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 700; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
+            QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
             QLabel[roleSubtitle="true"] {{ font-size: 13px; color: {DesignTokens.text_secondary}; }}
             QTextEdit#MainInput {{
-                padding: 14px 16px;
-                border-radius: 24px;
+                padding: 12px 14px;
+                border-radius: 10px;
                 border: 1px solid {DesignTokens.border_subtle};
-                background: rgba(255, 255, 255, 0.94);
-                font-size: 15px;
+                background: {DesignTokens.bg_main};
+                font-size: 14px;
                 color: {DesignTokens.text_primary};
-                selection-background-color: #cfe0ff;
+                selection-background-color: {DesignTokens.primary_soft};
                 selection-color: {DesignTokens.text_primary};
             }}
             QTextEdit#MainInput:focus {{
-                border: 1px solid rgba(0, 122, 255, 0.22);
-                background: rgba(255, 255, 255, 0.98);
+                border: 1px solid {DesignTokens.primary_focus};
+                background: {DesignTokens.bg_main};
             }}
             QScrollArea {{ border: none; background: transparent; }}
             QTabWidget::pane {{ border: none; }}
@@ -13106,13 +13248,13 @@ class MainWindow(QMainWindow):
                 background: transparent;
                 padding: 8px 14px;
                 margin-right: 4px;
-                border-radius: 14px;
+                border-radius: 6px;
                 color: {DesignTokens.text_secondary};
             }}
             QTabBar::tab:selected {{
                 background: {DesignTokens.primary_soft};
                 color: {DesignTokens.primary};
-                font-weight: 700;
+                font-weight: 600;
             }}
 
             /* Global Scrollbar Beautification */
@@ -13123,13 +13265,13 @@ class MainWindow(QMainWindow):
                 margin: 0px;
             }}
             QScrollBar::handle:vertical {{
-                background: #c7c7cc88;
+                background: {DesignTokens.border_strong};
                 min-height: 20px;
                 border-radius: 4px;
                 margin: 2px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: #a1a1a688;
+                background: {DesignTokens.text_tertiary};
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
@@ -13144,13 +13286,13 @@ class MainWindow(QMainWindow):
                 margin: 0px;
             }}
             QScrollBar::handle:horizontal {{
-                background: #c7c7cc88;
+                background: {DesignTokens.border_strong};
                 min-width: 20px;
                 border-radius: 4px;
                 margin: 2px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background: #a1a1a688;
+                background: {DesignTokens.text_tertiary};
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
@@ -13270,14 +13412,14 @@ class MainWindow(QMainWindow):
         )
 
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(12, 20, 12, 18)
-        sidebar_layout.setSpacing(12)
+        sidebar_layout.setContentsMargins(10, 14, 10, 12)
+        sidebar_layout.setSpacing(8)
 
         new_chat_btn = QPushButton(" 新建对话")
         new_chat_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_primary))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
-        new_chat_btn.setFixedHeight(36)
-        new_chat_btn.setStyleSheet(apple_button_style("ghost", radius=14, align="left"))
+        new_chat_btn.setFixedHeight(32)
+        new_chat_btn.setStyleSheet(apple_button_style("ghost", radius=7, align="left"))
         new_chat_btn.clicked.connect(self.new_conversation)
         sidebar_layout.addWidget(new_chat_btn)
 
@@ -13333,11 +13475,11 @@ class MainWindow(QMainWindow):
         self.history_scroll.setWidget(self.history_container)
         sidebar_layout.addWidget(self.history_scroll, 1)
         
-        sidebar_btn_style = apple_button_style("ghost", radius=14, align="left")
+        sidebar_btn_style = apple_button_style("ghost", radius=7, align="left")
 
         sidebar_skills_btn = QPushButton(" 功能中心")
         sidebar_skills_btn.setText(" 能力中心")
-        sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color='#4b5563'))
+        sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.text_secondary))
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
         sidebar_skills_btn.clicked.connect(self.open_skills_center)
@@ -13345,28 +13487,28 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(sidebar_skills_btn)
 
         self.sidebar_agent_module_btn = QPushButton(" 智能体")
-        self.sidebar_agent_module_btn.setIcon(qta.icon('fa5s.user-astronaut', color='#4b5563'))
+        self.sidebar_agent_module_btn.setIcon(qta.icon('fa5s.user-astronaut', color=DesignTokens.text_secondary))
         self.sidebar_agent_module_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_agent_module_btn.setStyleSheet(sidebar_btn_style)
         self.sidebar_agent_module_btn.clicked.connect(self.open_agent_module)
         sidebar_layout.addWidget(self.sidebar_agent_module_btn)
 
         sidebar_automation_btn = QPushButton(" 自动化")
-        sidebar_automation_btn.setIcon(qta.icon('fa5s.tasks', color='#4b5563'))
+        sidebar_automation_btn.setIcon(qta.icon('fa5s.tasks', color=DesignTokens.text_secondary))
         sidebar_automation_btn.setCursor(Qt.PointingHandCursor)
         sidebar_automation_btn.setStyleSheet(sidebar_btn_style)
         sidebar_automation_btn.clicked.connect(self.open_automation_center)
         sidebar_layout.addWidget(sidebar_automation_btn)
 
         self.sidebar_memory_btn = QPushButton(" 记忆")
-        self.sidebar_memory_btn.setIcon(qta.icon('fa5s.brain', color='#4b5563'))
+        self.sidebar_memory_btn.setIcon(qta.icon('fa5s.brain', color=DesignTokens.text_secondary))
         self.sidebar_memory_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_memory_btn.setStyleSheet(sidebar_btn_style)
         self.sidebar_memory_btn.clicked.connect(self.open_memory_center)
         sidebar_layout.addWidget(self.sidebar_memory_btn)
 
         self.sidebar_skill_capture_btn = QPushButton(" 沉淀为 Skill")
-        self.sidebar_skill_capture_btn.setIcon(qta.icon('fa5s.magic', color='#4b5563'))
+        self.sidebar_skill_capture_btn.setIcon(qta.icon('fa5s.magic', color=DesignTokens.text_secondary))
         self.sidebar_skill_capture_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_skill_capture_btn.setStyleSheet(sidebar_btn_style)
         self.sidebar_skill_capture_btn.clicked.connect(self.start_conversation_skill_flow)
@@ -13374,7 +13516,7 @@ class MainWindow(QMainWindow):
 
         sidebar_settings_btn = QPushButton(" 系统设置")
         sidebar_settings_btn.setText(" 设置")
-        sidebar_settings_btn.setIcon(qta.icon('fa5s.cog', color='#4b5563'))
+        sidebar_settings_btn.setIcon(qta.icon('fa5s.cog', color=DesignTokens.text_secondary))
         sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
         sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
         sidebar_settings_btn.clicked.connect(self.open_settings)
@@ -13393,10 +13535,9 @@ class MainWindow(QMainWindow):
         self.right_sidebar.setObjectName("RightSidebar")
         self.right_sidebar.setStyleSheet(
             f"QFrame#RightSidebar {{ background-color: {DesignTokens.bg_glass}; "
-            "border: none; border-radius: 22px; }}"
+            f"border: none; border-left: 1px solid {DesignTokens.separator}; border-radius: 0px; }}"
         )
         self.right_sidebar.setVisible(False)
-        add_soft_shadow(self.right_sidebar, blur=42, y_offset=12, alpha=34)
         self.right_resize_handle = DrawerResizeHandle(self.right_sidebar)
         self.right_resize_handle.widthRequested.connect(self.set_context_drawer_width)
         self.right_resize_handle.resizeFinished.connect(self.persist_context_drawer_width)
@@ -13406,14 +13547,15 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
 
         right_header = QFrame()
+        right_header.setObjectName("RightDrawerHeader")
         right_header.setStyleSheet(
-            "QFrame { background: rgba(255, 255, 255, 0.46); border: none; "
-            "border-top-left-radius: 22px; border-top-right-radius: 22px; }"
+            f"QFrame#RightDrawerHeader {{ background: {DesignTokens.bg_main}; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
         )
         right_header_layout = QHBoxLayout(right_header)
-        right_header_layout.setContentsMargins(18, 16, 14, 12)
+        right_header_layout.setContentsMargins(16, 14, 12, 12)
         self.right_title_label = QLabel("任务上下文")
-        self.right_title_label.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {DesignTokens.text_primary};")
+        self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {DesignTokens.text_primary};")
         self.right_desc_label = QLabel("查看文件与执行步骤")
         self.right_desc_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
         right_title_box = QVBoxLayout()
@@ -13426,7 +13568,7 @@ class MainWindow(QMainWindow):
         self.right_close_btn.setIcon(qta.icon('fa5s.times', color=DesignTokens.text_secondary))
         self.right_close_btn.setToolTip("收起上下文")
         self.right_close_btn.setCursor(Qt.PointingHandCursor)
-        self.right_close_btn.setFixedSize(34, 34)
+        self.right_close_btn.setFixedSize(30, 30)
         self.right_close_btn.setStyleSheet(apple_ghost_icon_button_style())
         self.right_close_btn.clicked.connect(self.hide_context_drawer)
         right_header_layout.addWidget(self.right_close_btn)
@@ -13455,7 +13597,8 @@ class MainWindow(QMainWindow):
         file_detail_layout.setSpacing(10)
 
         file_segment_bar = QFrame()
-        file_segment_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.55)"))
+        file_segment_bar.setProperty("uiSurface", True)
+        file_segment_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         file_segment_layout = QHBoxLayout(file_segment_bar)
         file_segment_layout.setContentsMargins(4, 4, 4, 4)
         file_segment_layout.setSpacing(4)
@@ -13509,23 +13652,27 @@ class MainWindow(QMainWindow):
         preview_layout.setSpacing(10)
 
         r_preview_header = QFrame()
-        r_preview_header.setStyleSheet(apple_section_surface_style(radius=16))
+        r_preview_header.setProperty("uiSurface", True)
+        r_preview_header.setStyleSheet(apple_section_surface_style(radius=8))
         r_preview_header_layout = QHBoxLayout(r_preview_header)
         r_preview_header_layout.setContentsMargins(12, 10, 10, 10)
         r_preview_header_layout.setSpacing(8)
-        self.file_detail_back_btn = QPushButton("返回列表")
+        self.file_detail_back_btn = QPushButton()
         self.file_detail_back_btn.setIcon(qta.icon("fa5s.chevron-left", color=DesignTokens.text_secondary))
+        self.file_detail_back_btn.setToolTip("返回文件列表")
         self.file_detail_back_btn.setCursor(Qt.PointingHandCursor)
-        self.file_detail_back_btn.setFixedHeight(30)
-        self.file_detail_back_btn.setStyleSheet(apple_button_style("ghost", radius=15))
+        self.file_detail_back_btn.setFixedSize(30, 30)
+        self.file_detail_back_btn.setStyleSheet(apple_button_style("ghost", radius=7))
         self.file_detail_back_btn.clicked.connect(self.show_file_workspace_browse_view)
         r_preview_header_layout.addWidget(self.file_detail_back_btn)
         preview_title_box = QVBoxLayout()
         preview_title_box.setContentsMargins(0, 0, 0, 0)
         preview_title_box.setSpacing(2)
         self.preview_title_label = QLabel("内容预览")
-        self.preview_title_label.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 12px;")
+        self.preview_title_label.setMinimumWidth(0)
+        self.preview_title_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 12px;")
         self.preview_meta_label = QLabel("选择文件查看内容")
+        self.preview_meta_label.setMinimumWidth(0)
         self.preview_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
         preview_title_box.addWidget(self.preview_title_label)
         preview_title_box.addWidget(self.preview_meta_label)
@@ -13627,8 +13774,8 @@ class MainWindow(QMainWindow):
         conversion_row_widget = QWidget()
         conversion_row_widget.setObjectName("DeliverableConversionBar")
         conversion_row_widget.setStyleSheet(
-            f"QWidget#DeliverableConversionBar {{ background: rgba(255, 255, 255, 0.82); "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 18px; }}"
+            f"QWidget#DeliverableConversionBar {{ background: {DesignTokens.bg_secondary}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
         )
         conversion_row = QHBoxLayout(conversion_row_widget)
         conversion_row.setContentsMargins(10, 8, 10, 8)
@@ -13726,7 +13873,8 @@ class MainWindow(QMainWindow):
         td_layout.setSpacing(10)
 
         step_section = QFrame()
-        step_section.setStyleSheet(apple_section_surface_style(radius=18))
+        step_section.setProperty("uiSurface", True)
+        step_section.setStyleSheet(apple_section_surface_style(radius=8))
         step_section_layout = QVBoxLayout(step_section)
         step_section_layout.setContentsMargins(12, 12, 12, 10)
         step_section_layout.setSpacing(8)
@@ -13748,7 +13896,8 @@ class MainWindow(QMainWindow):
         self.observability_section_index = self.OBS_SECTION_PROMPT
 
         observability_segment_bar = QFrame()
-        observability_segment_bar.setStyleSheet(apple_section_surface_style(radius=16, bg="rgba(255, 255, 255, 0.55)"))
+        observability_segment_bar.setProperty("uiSurface", True)
+        observability_segment_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
         observability_segment_layout = QHBoxLayout(observability_segment_bar)
         observability_segment_layout.setContentsMargins(4, 4, 4, 4)
         observability_segment_layout.setSpacing(4)
@@ -13815,7 +13964,8 @@ class MainWindow(QMainWindow):
         details_layout.setSpacing(10)
 
         details_info_bar = QFrame()
-        details_info_bar.setStyleSheet(apple_section_surface_style(radius=16))
+        details_info_bar.setProperty("uiSurface", True)
+        details_info_bar.setStyleSheet(apple_section_surface_style(radius=8))
         details_info_layout = QVBoxLayout(details_info_bar)
         details_info_layout.setContentsMargins(12, 10, 12, 10)
         details_info_layout.setSpacing(2)
@@ -13893,7 +14043,8 @@ class MainWindow(QMainWindow):
         sub_agent_layout.setContentsMargins(14, 12, 14, 14)
         sub_agent_layout.setSpacing(10)
         sub_agent_intro_card = QFrame()
-        sub_agent_intro_card.setStyleSheet(apple_section_surface_style(radius=16))
+        sub_agent_intro_card.setProperty("uiSurface", True)
+        sub_agent_intro_card.setStyleSheet(apple_section_surface_style(radius=8))
         sub_agent_intro_layout = QVBoxLayout(sub_agent_intro_card)
         sub_agent_intro_layout.setContentsMargins(12, 10, 12, 10)
         sub_agent_intro_layout.setSpacing(0)
@@ -13919,8 +14070,8 @@ class MainWindow(QMainWindow):
 
         # Main Layout Construction
         layout = QVBoxLayout(self.main_container)
-        layout.setContentsMargins(*self.main_layout_default_margins)
-        layout.setSpacing(20)
+        layout.setContentsMargins(16, 16, 16, 14)
+        layout.setSpacing(14)
 
         # Top Bar
         top_bar = QHBoxLayout()
@@ -13967,10 +14118,9 @@ class MainWindow(QMainWindow):
         self.context_rail = QFrame()
         self.context_rail.setObjectName("ContextRail")
         self.context_rail.setStyleSheet(
-            f"QFrame#ContextRail {{ background: rgba(255, 255, 255, 0.82); border: 1px solid {DesignTokens.border}; "
-            "border-radius: 20px; }"
+            f"QFrame#ContextRail {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; "
+            "border-radius: 8px; }"
         )
-        add_soft_shadow(self.context_rail, blur=18, y_offset=4, alpha=16)
         context_rail_layout = QHBoxLayout(self.context_rail)
         context_rail_layout.setContentsMargins(5, 5, 5, 5)
         context_rail_layout.setSpacing(4)
@@ -13984,7 +14134,7 @@ class MainWindow(QMainWindow):
             btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
             btn.setToolTip(tooltip)
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedSize(36, 36)
+            btn.setFixedSize(30, 30)
             btn.setCheckable(True)
             btn.setStyleSheet(apple_tool_button_style(False))
             if tab_index == self.RIGHT_TAB_FILES:
@@ -14011,7 +14161,7 @@ class MainWindow(QMainWindow):
         self.conversation_column.setStyleSheet("QWidget#ConversationColumn { background: transparent; border: none; }")
         self.main_content_layout = QVBoxLayout(self.conversation_column)
         self.main_content_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_content_layout.setSpacing(18)
+        self.main_content_layout.setSpacing(12)
 
         self.content_row = QWidget()
         self.content_row_layout = QHBoxLayout(self.content_row)
@@ -14050,9 +14200,9 @@ class MainWindow(QMainWindow):
         self.session_tabs.setStyleSheet(
             f"""
             QTabWidget#SessionTabs::pane {{
-                border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 28px;
-                background: rgba(255, 255, 255, 0.74);
+                border: none;
+                border-radius: 0px;
+                background: {DesignTokens.bg_chat};
             }}
             """
         )
@@ -14068,10 +14218,9 @@ class MainWindow(QMainWindow):
         self.input_card.setMinimumWidth(DesignTokens.conversation_min_width)
         self.input_card.setMaximumWidth(DesignTokens.conversation_max_width)
         self.input_card.setStyleSheet(
-            f"QFrame#ContentCard {{ background: rgba(255, 255, 255, 0.88); "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 28px; }}"
+            f"QFrame#ContentCard {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border}; border-radius: 10px; }}"
         )
-        add_soft_shadow(self.input_card, blur=24, y_offset=8, alpha=12)
 
         self.input_field = AutoResizingInputEdit()
         self.input_field.setObjectName("MainInput")
@@ -14081,13 +14230,13 @@ class MainWindow(QMainWindow):
         self.input_field.mentionRequested.connect(self.show_agent_mention_menu)
 
         self.tool_menu_btn = QPushButton()
-        self.tool_menu_btn.setIcon(sidebar_plus_icon("#6b7280", 16))
+        self.tool_menu_btn.setIcon(sidebar_plus_icon(DesignTokens.text_secondary, 16))
         self.tool_menu_btn.setToolTip("工具")
         self.tool_menu_btn.setCursor(Qt.PointingHandCursor)
-        self.tool_menu_btn.setFixedSize(36, 36)
+        self.tool_menu_btn.setFixedSize(32, 32)
         self.tool_menu_btn.setStyleSheet(
-            f"QPushButton {{ background: rgba(255, 255, 255, 0.74); border: 1px solid {DesignTokens.border_subtle}; border-radius: 18px; }}"
-            f"QPushButton:hover {{ background: rgba(255, 255, 255, 0.96); border-color: {DesignTokens.border}; }}"
+            f"QPushButton {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; border-color: {DesignTokens.border}; }}"
         )
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
@@ -14107,35 +14256,35 @@ class MainWindow(QMainWindow):
         self.model_select_btn.setPopupMode(QToolButton.InstantPopup)
         self.model_select_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.model_select_btn.setStyleSheet(
-            f"QToolButton {{ border: 1px solid transparent; background: rgba(255, 255, 255, 0.58); color: {DesignTokens.text_secondary}; "
-            "font-size: 12px; padding: 5px 10px; border-radius: 14px; }}"
-            f"QToolButton:hover {{ color: {DesignTokens.text_primary}; background: rgba(255, 255, 255, 0.88); border-color: {DesignTokens.border_subtle}; }}"
+            f"QToolButton {{ border: 1px solid transparent; background: transparent; color: {DesignTokens.text_secondary}; "
+            "font-size: 12px; padding: 5px 9px; border-radius: 6px; }}"
+            f"QToolButton:hover {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_hover}; border-color: transparent; }}"
             "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
 
         self.pause_btn = QPushButton()
-        self.pause_btn.setIcon(qta.icon('fa5s.pause', color='#4b5563'))
+        self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
         self.pause_btn.clicked.connect(self.toggle_pause)
         self.pause_btn.setVisible(False)
         self.pause_btn.setObjectName("SecondaryBtn")
-        self.pause_btn.setFixedHeight(38)
+        self.pause_btn.setFixedHeight(32)
         
         self.action_btn = QPushButton("发送")
         self.action_btn.setText("开始")
         self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
         self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setFixedSize(96, 40)
+        self.action_btn.setFixedSize(88, 34)
         self.action_btn.setAutoDefault(False)
         self.action_btn.setDefault(False)
-        self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
+        self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
         self.action_btn.clicked.connect(self.on_action_clicked)
 
         self.stop_btn = QPushButton()
-        self.stop_btn.setIcon(qta.icon('fa5s.stop', color='#ff3b30'))
+        self.stop_btn.setIcon(qta.icon('fa5s.stop', color=DesignTokens.status_error))
         self.stop_btn.setToolTip("停止当前任务")
         self.stop_btn.setCursor(Qt.PointingHandCursor)
-        self.stop_btn.setFixedSize(40, 40)
-        self.stop_btn.setStyleSheet(apple_button_style("secondary", radius=20))
+        self.stop_btn.setFixedSize(34, 34)
+        self.stop_btn.setStyleSheet(apple_button_style("secondary", radius=8))
         self.stop_btn.clicked.connect(self.stop_agent)
         self.stop_btn.setVisible(False)
         
@@ -14340,7 +14489,8 @@ class MainWindow(QMainWindow):
             label = "返回交付物"
         else:
             label = "返回文件"
-        back_btn.setText(label)
+        back_btn.setText("")
+        back_btn.setToolTip(label)
 
     def _set_file_workspace_view_mode(self, mode, origin="browse", persist=True):
         mode = "detail" if mode == "detail" else "browse"
@@ -17035,7 +17185,7 @@ class MainWindow(QMainWindow):
             steerable = bool(getattr(state, "turn_steerable", False) and not running_code)
             self.action_btn.setText("引导" if steerable else "运行中")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
+            self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
             self.action_btn.setEnabled(steerable)
             self.input_field.setEnabled(steerable)
             self.tool_menu_btn.setEnabled(steerable)
@@ -17056,7 +17206,7 @@ class MainWindow(QMainWindow):
         else:
             self.action_btn.setText("开始")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet(apple_button_style("primary", radius=20))
+            self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
             workspace_dir = self._workspace_dir_for_state(state)
             self.action_btn.setEnabled(history_ready)
             self.input_field.setEnabled(history_ready)
@@ -20743,8 +20893,10 @@ class MainWindow(QMainWindow):
         self.current_preview_path = path or ""
         if hasattr(self, "preview_title_label"):
             self.preview_title_label.setText(title or "内容预览")
+            self.preview_title_label.setToolTip(title or "内容预览")
         if hasattr(self, "preview_meta_label"):
             self.preview_meta_label.setText(meta or "选择文件查看内容")
+            self.preview_meta_label.setToolTip(meta or "选择文件查看内容")
         for name in ("preview_open_btn", "preview_reveal_btn", "preview_copy_btn"):
             btn = getattr(self, name, None)
             if btn:

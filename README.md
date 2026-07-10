@@ -6,7 +6,7 @@ DeepSeek Cowork is a Windows desktop agent workspace built around DeepSeek-style
 
 This project is a personal exploration and is not an official DeepSeek product.
 
-Current app version: **4.9.8**
+Current app version: **4.9.9**
 
 ## What It Does
 

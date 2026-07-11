@@ -49,9 +49,14 @@ from ui.primitives import (
     ProductActionBar,
     ProductDataRow,
     ProductEmptyState,
+    ProductInlineNotice,
+    ProductMasterDetail,
+    ProductNavigationRow,
     ProductPageHeader,
+    ProductSegmentedControl,
     ProductSection,
     ProductStatusBadge,
+    ProductToolbar,
     ProductTooltipController,
     ProductInputDialog,
     ProductMessageBox,
@@ -383,6 +388,8 @@ STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
 PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
 CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
+MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
+AUTOMATION_LOG_FILENAME = "automation_runtime.log"
 ATTACHMENT_LOG_FILENAME = "attachments.log"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
@@ -472,6 +479,34 @@ def log_conversation_skill_capture(stage, **fields):
         payload.update(fields or {})
         append_background_process_log(
             CONVERSATION_SKILL_LOG_FILENAME,
+            json.dumps(payload, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        pass
+
+
+def log_memory_update(stage, **fields):
+    if not runtime_debug_logging_enabled():
+        return
+    try:
+        payload = {"stage": stage}
+        payload.update(fields or {})
+        append_background_process_log(
+            MEMORY_UPDATE_LOG_FILENAME,
+            json.dumps(payload, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        pass
+
+
+def log_automation_runtime(stage, **fields):
+    if not runtime_debug_logging_enabled():
+        return
+    try:
+        payload = {"stage": stage}
+        payload.update(fields or {})
+        append_background_process_log(
+            AUTOMATION_LOG_FILENAME,
             json.dumps(payload, ensure_ascii=False, default=str),
         )
     except Exception:
@@ -3675,6 +3710,7 @@ class ModelChannelEditor(QFrame):
         layout.setSpacing(0)
 
         header = QWidget()
+        self.header = header
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(14, 12, 12, 12)
         header_layout.setSpacing(12)
@@ -3844,6 +3880,14 @@ class ModelChannelEditor(QFrame):
         icon_name = "fa5s.chevron-up" if self.expanded else "fa5s.chevron-down"
         self.expand_btn.setIcon(qta.icon(icon_name, color=DesignTokens.text_secondary))
 
+    def set_management_detail_mode(self):
+        self.header.hide()
+        self.expanded = True
+        self.body.show()
+        self.setStyleSheet(
+            "QFrame#ModelChannelEditor { background: transparent; border: none; border-radius: 0; }"
+        )
+
     def toggle_expanded(self):
         self.set_expanded(not self.expanded)
         if self.expanded and self.on_expand:
@@ -4004,6 +4048,23 @@ class ModelChannelManager(QWidget):
         toolbar.addWidget(add_channel_btn)
         self.layout.addLayout(toolbar)
 
+        self.channel_splitter = QSplitter(Qt.Horizontal)
+        self.channel_splitter.setChildrenCollapsible(False)
+        self.channel_splitter.setHandleWidth(1)
+        self.channel_list = QListWidget()
+        self.channel_list.setObjectName("ModelChannelNavigation")
+        self.channel_list.setFixedWidth(220)
+        self.channel_list.setSpacing(2)
+        self.channel_list.setStyleSheet(apple_settings_nav_style())
+        self.channel_detail_stack = QStackedWidget()
+        self.channel_detail_stack.setStyleSheet("QStackedWidget { background: transparent; border: none; }")
+        self.channel_splitter.addWidget(self.channel_list)
+        self.channel_splitter.addWidget(self.channel_detail_stack)
+        self.channel_splitter.setStretchFactor(0, 0)
+        self.channel_splitter.setStretchFactor(1, 1)
+        self.layout.addWidget(self.channel_splitter)
+        self.channel_list.currentRowChanged.connect(self.channel_detail_stack.setCurrentIndex)
+
         for index, channel in enumerate(channels or []):
             self._add_editor(channel, expanded=index == 0)
 
@@ -4016,13 +4077,21 @@ class ModelChannelManager(QWidget):
             on_delete=self.delete_channel,
         )
         self.editors.append(editor)
-        self.layout.addWidget(editor)
+        editor.set_management_detail_mode()
+        self.channel_detail_stack.addWidget(editor)
+        item = QListWidgetItem(str(channel.get("display_name") or "未命名服务"))
+        item.setToolTip(str(channel.get("base_url") or ""))
+        self.channel_list.addItem(item)
+        editor.display_name_input.textChanged.connect(
+            lambda text, target=item: target.setText(text.strip() or "未命名服务")
+        )
+        if self.channel_list.currentRow() < 0:
+            self.channel_list.setCurrentRow(0)
         return editor
 
     def _collapse_others(self, active_editor):
-        for editor in self.editors:
-            if editor is not active_editor:
-                editor.set_expanded(False)
+        if active_editor in self.editors:
+            self.channel_list.setCurrentRow(self.editors.index(active_editor))
 
     def add_channel(self):
         channel = {
@@ -4034,7 +4103,7 @@ class ModelChannelManager(QWidget):
             "models": [],
         }
         editor = self._add_editor(channel, expanded=True)
-        self._collapse_others(editor)
+        self.channel_list.setCurrentRow(self.editors.index(editor))
         self.changed.emit()
 
     def delete_channel(self, editor):
@@ -4048,11 +4117,14 @@ class ModelChannelManager(QWidget):
         if reply != QMessageBox.Yes:
             return
         if editor in self.editors:
+            index = self.editors.index(editor)
             self.editors.remove(editor)
+            self.channel_detail_stack.removeWidget(editor)
+            self.channel_list.takeItem(index)
             editor.setParent(None)
             editor.deleteLater()
-        if self.editors and not any(item.expanded for item in self.editors):
-            self.editors[0].set_expanded(True)
+        if self.editors:
+            self.channel_list.setCurrentRow(min(index, len(self.editors) - 1))
         self.changed.emit()
 
     def get_channels(self):
@@ -4677,20 +4749,49 @@ class AutomationTaskDialog(QDialog):
         schedule_card_layout.addWidget(self.schedule_preview_card)
         layout.addWidget(schedule_card)
 
-        actions = QHBoxLayout()
+        actions = ProductActionBar()
         cancel_btn = QPushButton("取消")
+        self.cancel_btn = cancel_btn
         cancel_btn.setObjectName("SecondaryBtn")
         cancel_btn.clicked.connect(self.reject)
         save_btn = QPushButton("保存")
+        self.save_btn = save_btn
         save_btn.setObjectName("PrimaryBtn")
         save_btn.clicked.connect(self._handle_accept)
-        actions.addStretch()
-        actions.addWidget(cancel_btn)
-        actions.addWidget(save_btn)
-        layout.addLayout(actions)
+        actions.layout.addWidget(cancel_btn)
+        actions.layout.addWidget(save_btn)
+        root_layout.addWidget(actions)
 
         self._load_task()
         self._on_schedule_type_changed()
+        self._task_baseline = self._task_state_signature()
+        self._connect_task_dirty_tracking()
+        self._refresh_task_dirty_state()
+
+    def _task_state_signature(self):
+        return json.dumps(self.task_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _connect_task_dirty_tracking(self):
+        callback = lambda *_args: self._refresh_task_dirty_state()
+        for editor in self.findChildren(QLineEdit):
+            editor.textChanged.connect(callback)
+        for editor in self.findChildren(QTextEdit):
+            editor.textChanged.connect(callback)
+        for combo in self.findChildren(QComboBox):
+            combo.currentIndexChanged.connect(callback)
+        for check in self.findChildren(QCheckBox):
+            check.toggled.connect(callback)
+        for spin in self.findChildren(QSpinBox):
+            spin.valueChanged.connect(callback)
+        for date_edit in self.findChildren(QDateTimeEdit):
+            date_edit.dateTimeChanged.connect(callback)
+
+    def _refresh_task_dirty_state(self):
+        self._task_dirty = self._task_state_signature() != self._task_baseline
+        self.save_btn.setEnabled(self._task_dirty)
+
+    def is_dirty(self):
+        return bool(getattr(self, "_task_dirty", False))
 
     def _set_schedule_mode(self, value):
         index = self.schedule_mode_combo.findData(value)
@@ -4837,6 +4938,9 @@ class AutomationTaskDialog(QDialog):
             if not validate_cron_expression(self.cron_expression_input.text().strip()):
                 QMessageBox.warning(self, "自动化任务", "请填写有效的 5 段 crontab 表达式。")
                 return
+        if self.property("embeddedProductPage") and callable(getattr(self, "submit_callback", None)):
+            self.submit_callback(self.task_payload())
+            return
         self.accept()
 
     def task_payload(self):
@@ -4891,6 +4995,13 @@ class AutomationDialog(QDialog):
         header.addWidget(self.create_task_btn)
         layout.addLayout(header)
 
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索自动化任务")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setStyleSheet(apple_search_field_style())
+        self.search_input.textChanged.connect(self.refresh_task_cards)
+        layout.addWidget(self.search_input)
+
         self.summary_widget = QWidget()
         summary_row = QHBoxLayout(self.summary_widget)
         summary_row.setContentsMargins(0, 0, 0, 0)
@@ -4932,7 +5043,9 @@ class AutomationDialog(QDialog):
         self.tasks_scroll.setFrameShape(QFrame.NoFrame)
         self.tasks_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tasks_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.tasks_scroll.viewport().setStyleSheet("background: transparent; border: none;")
         self.tasks_container = QWidget()
+        self.tasks_container.setStyleSheet("background: transparent; border: none;")
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setContentsMargins(0, 0, 0, 0)
         self.tasks_layout.setSpacing(10)
@@ -5044,6 +5157,8 @@ class AutomationDialog(QDialog):
         self._set_summary_card_value(self.active_summary_card, len([task for task in self.tasks if task.get("enabled")]))
         if hasattr(self, "summary_widget"):
             self.summary_widget.setVisible(bool(self.tasks))
+        if hasattr(self, "create_task_btn"):
+            self.create_task_btn.setVisible(bool(self.tasks))
 
     def _set_tab_index(self, index):
         self.tabs.setCurrentIndex(index)
@@ -5095,7 +5210,17 @@ class AutomationDialog(QDialog):
             self.tasks_layout.addStretch()
             self._refresh_overview_cards()
             return
-        for task in self.tasks:
+        query = self.search_input.text().strip().casefold() if hasattr(self, "search_input") else ""
+        visible_tasks = [
+            task for task in self.tasks
+            if not query or query in f"{task.get('name') or ''} {task.get('prompt') or ''} {describe_schedule(task)}".casefold()
+        ]
+        if self.tasks and not visible_tasks:
+            empty_card = ProductEmptyState("没有匹配的自动化任务", "调整关键词后再试。")
+            self.tasks_layout.addWidget(empty_card)
+            self.tasks_layout.addStretch()
+            return
+        for task in visible_tasks:
             card = QFrame()
             card.setProperty("uiSurface", True)
             card.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
@@ -5201,17 +5326,24 @@ class AutomationDialog(QDialog):
         return -1
 
     def create_task(self):
+        if self._main and hasattr(self._main, "show_automation_task_editor"):
+            self._main.show_automation_task_editor()
+            return
         dialog = AutomationTaskDialog(self._available_skills(), self._available_agent_profiles(), parent=self)
         if dialog.exec():
             payload = dialog.task_payload()
             payload["next_run_at"] = compute_next_run_at(payload)
             payload["schedule_summary"] = describe_schedule(payload)
             self.tasks.append(payload)
+            self.save_changes()
             self.refresh_task_cards()
 
     def edit_task(self, task_id):
         index = self._find_task_index(task_id)
         if index < 0:
+            return
+        if self._main and hasattr(self._main, "show_automation_task_editor"):
+            self._main.show_automation_task_editor(task_id)
             return
         dialog = AutomationTaskDialog(self._available_skills(), self._available_agent_profiles(), task=self.tasks[index], parent=self)
         if dialog.exec():
@@ -5221,6 +5353,7 @@ class AutomationDialog(QDialog):
             payload["next_run_at"] = compute_next_run_at(payload)
             payload["schedule_summary"] = describe_schedule(payload)
             self.tasks[index] = payload
+            self.save_changes()
             self.refresh_task_cards()
 
     def toggle_task(self, task_id):
@@ -5231,6 +5364,7 @@ class AutomationDialog(QDialog):
         if self.tasks[index]["enabled"]:
             self.tasks[index]["next_run_at"] = compute_next_run_at(self.tasks[index])
         self.tasks[index]["schedule_summary"] = describe_schedule(self.tasks[index])
+        self.save_changes()
         self.refresh_task_cards()
 
     def delete_task(self, task_id):
@@ -5241,6 +5375,7 @@ class AutomationDialog(QDialog):
         if reply != QMessageBox.Yes:
             return
         del self.tasks[index]
+        self.save_changes()
         self.refresh_task_cards()
 
     def run_task_now(self, task_id):
@@ -6097,6 +6232,12 @@ class SettingsDialog(QDialog):
         title_box.addWidget(title)
         layout.addLayout(title_box)
 
+        self.nav_combo = QComboBox()
+        self.nav_combo.setObjectName("SettingsCompactNavigation")
+        self.nav_combo.setStyleSheet(apple_combo_style())
+        self.nav_combo.hide()
+        layout.addWidget(self.nav_combo)
+
         body_layout = QHBoxLayout()
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(16)
@@ -6129,6 +6270,7 @@ class SettingsDialog(QDialog):
         def add_settings_page(label, icon_name, page):
             item = QListWidgetItem(qta.icon(icon_name, color=DesignTokens.text_secondary), label)
             self.nav_list.addItem(item)
+            self.nav_combo.addItem(label)
             self.content_stack.addWidget(page)
             return item
 
@@ -6162,6 +6304,78 @@ class SettingsDialog(QDialog):
             "归档",
             "从侧边栏收起不常用的项目与对话，需要时可以随时恢复。",
         )
+        memory_page, memory_layout = make_scroll_page(
+            "个性与记忆",
+            "管理回答个性、全局长期摘要与当前工作区摘要；修改从下一轮对话开始生效。",
+        )
+        self.memory_store = MemoryStore(self.config_manager.get_chat_history_dir())
+        self.memory_workspace_dir = (
+            self._main._active_workspace_dir()
+            if self._main and hasattr(self._main, "_active_workspace_dir")
+            else ""
+        )
+
+        personality_group, personality_layout = build_settings_surface(
+            "回答个性与偏好",
+            "描述 AI 如何与你相处、表达和做判断；具体智能体角色会叠加在这层偏好之上。",
+            radius=8,
+            show_subtitle=True,
+        )
+        self.memory_soul_edit = QTextEdit()
+        self.memory_soul_edit.setPlaceholderText("例如：温和、好奇、坦率；先理解问题，再给出清晰而有主见的建议。")
+        self.memory_soul_edit.setPlainText(self.memory_store.read_soul())
+        self.memory_soul_edit.setMinimumHeight(120)
+        self.memory_soul_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=8, subtle=True, padding=12))
+        personality_layout.addWidget(self.memory_soul_edit)
+        memory_layout.addWidget(personality_group)
+
+        global_group, global_layout = build_settings_surface(
+            "全局长期摘要",
+            "只记录需要长期提供给 AI 的稳定事实和偏好。",
+            radius=8,
+            show_subtitle=True,
+        )
+        self.memory_global_edit = QTextEdit()
+        self.memory_global_edit.setPlaceholderText("记录稳定、精简且可长期使用的信息。")
+        self.memory_global_edit.setPlainText(self.memory_store.read_summary("global", ""))
+        self.memory_global_edit.setMinimumHeight(160)
+        self.memory_global_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=8, subtle=True, padding=12))
+        global_layout.addWidget(self.memory_global_edit)
+        global_actions = QHBoxLayout()
+        global_actions.addStretch()
+        self.generate_global_memory_btn = QPushButton("从历史更新")
+        self.generate_global_memory_btn.setObjectName("SecondaryBtn")
+        self.generate_global_memory_btn.clicked.connect(lambda: self._start_memory_generation("global"))
+        global_actions.addWidget(self.generate_global_memory_btn)
+        global_layout.addLayout(global_actions)
+        memory_layout.addWidget(global_group)
+
+        workspace_group, workspace_memory_layout = build_settings_surface(
+            "当前工作区摘要",
+            "只在当前工作区会话中使用，切换项目不会污染其他任务。",
+            radius=8,
+            show_subtitle=True,
+        )
+        self.memory_workspace_edit = QTextEdit()
+        self.memory_workspace_edit.setPlaceholderText("连接项目后，可在这里维护该工作区的长期摘要。")
+        self.memory_workspace_edit.setPlainText(
+            self.memory_store.read_summary("workspace", self.memory_workspace_dir)
+            if self.memory_workspace_dir else ""
+        )
+        self.memory_workspace_edit.setMinimumHeight(160)
+        self.memory_workspace_edit.setEnabled(bool(self.memory_workspace_dir))
+        self.memory_workspace_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=8, subtle=True, padding=12))
+        workspace_memory_layout.addWidget(self.memory_workspace_edit)
+        workspace_actions = QHBoxLayout()
+        workspace_actions.addStretch()
+        self.generate_workspace_memory_btn = QPushButton("从当前工作区更新")
+        self.generate_workspace_memory_btn.setObjectName("SecondaryBtn")
+        self.generate_workspace_memory_btn.setEnabled(bool(self.memory_workspace_dir))
+        self.generate_workspace_memory_btn.clicked.connect(lambda: self._start_memory_generation("workspace"))
+        workspace_actions.addWidget(self.generate_workspace_memory_btn)
+        workspace_memory_layout.addLayout(workspace_actions)
+        memory_layout.addWidget(workspace_group)
+        memory_layout.addStretch()
         storage_group, storage_group_layout = build_settings_surface(
             "工作区与存储",
             "默认工作区决定首次进入的任务范围；聊天记录目录会同时承载历史和长期记忆。",
@@ -6672,6 +6886,7 @@ class SettingsDialog(QDialog):
 
         add_settings_page("模型与服务", "fa5s.brain", model_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
+        add_settings_page("个性与记忆", "fa5s.brain", memory_page)
         add_settings_page("工作区", "fa5s.folder-open", workspace_page)
         add_settings_page("归档", "fa5s.archive", archive_page)
         add_settings_page("MCP", "fa5s.plug", mcp_page)
@@ -6680,6 +6895,8 @@ class SettingsDialog(QDialog):
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
         self.update_nav_item = add_settings_page("更新", "fa5s.download", update_page)
         self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
+        self.nav_list.currentRowChanged.connect(self.nav_combo.setCurrentIndex)
+        self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
         self.select_initial_page(initial_page_label)
 
         action_bar = ProductActionBar()
@@ -6698,6 +6915,27 @@ class SettingsDialog(QDialog):
         layout.addWidget(action_bar)
         self._settings_baseline = self._settings_state_signature()
         self._connect_settings_dirty_tracking()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < DesignTokens.settings_compact_threshold
+        if hasattr(self, "nav_combo"):
+            self.nav_combo.setVisible(compact)
+        if hasattr(self, "nav_list"):
+            self.nav_list.setVisible(not compact)
+
+    def _start_memory_generation(self, scope):
+        if not self._main or not hasattr(self._main, "start_memory_update"):
+            QMessageBox.warning(self, "无法更新记忆", "当前窗口没有可用的记忆更新服务。")
+            return
+        workspace_dir = self.memory_workspace_dir if scope == "workspace" else ""
+        self._main.start_memory_update(scope, workspace_dir)
+        if hasattr(self._main, "add_system_toast"):
+            self._main.add_system_toast(
+                "长期记忆正在后台更新，完成后需要确认草稿",
+                "info",
+                auto_close_ms=5000,
+            )
 
     def _connect_settings_dirty_tracking(self):
         callback = lambda *_args: self._refresh_settings_dirty_state()
@@ -6764,6 +7002,12 @@ class SettingsDialog(QDialog):
             "god_mode": self.god_mode_check.isChecked(),
             "download_sources": source_state,
             "im_gateway": {"enabled_providers": im_enabled, "providers": im_providers},
+            "memory": {
+                "soul": self.memory_soul_edit.toPlainText(),
+                "global": self.memory_global_edit.toPlainText(),
+                "workspace": self.memory_workspace_edit.toPlainText() if self.memory_workspace_dir else "",
+                "workspace_dir": self.memory_workspace_dir,
+            },
         }
         state = self._strip_settings_state_metadata(state)
         return json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -6804,6 +7048,10 @@ class SettingsDialog(QDialog):
         if not self._confirm_discard_settings():
             return
         self._allow_close_without_prompt = True
+        self._settings_dirty = False
+        if self.property("embeddedProductPage") and self._main:
+            self._main.show_conversation_page()
+            return
         self._clear_settings_dirty()
         self.reject()
 
@@ -7292,29 +7540,100 @@ class SettingsDialog(QDialog):
             )
             if reply != QMessageBox.Yes:
                 self.god_mode_check.setChecked(False)
-        with self.config_manager.batch_save():
-            self.config_manager.set_model_channels(model_channels, selected_model_id)
-            self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
-            self.config_manager.set_mcp_servers(mcp_servers)
-            self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
-            self.config_manager.set_chat_history_dir(self.history_dir_input.text().strip())
-            self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-            try:
-                self.download_sources = self._source_config_from_editors()
+        try:
+            pending_download_sources = self._source_config_from_editors()
+        except ValueError as exc:
+            QMessageBox.warning(self, "下载源", str(exc))
+            return
+        target_history_dir = self.history_dir_input.text().strip()
+        target_memory_store = MemoryStore(target_history_dir)
+        previous_memory = {
+            "soul": target_memory_store.read_soul(),
+            "global": target_memory_store.read_summary("global", ""),
+            "workspace": (
+                target_memory_store.read_summary("workspace", self.memory_workspace_dir)
+                if self.memory_workspace_dir else ""
+            ),
+        }
+        previous_config = {
+            "model_channels": self.config_manager.get_model_channels(),
+            "selected_model_id": self.config_manager.get_selected_model_id(),
+            "agent_profiles": self.config_manager.get_agent_profiles(),
+            "mcp_servers": self.config_manager.get_mcp_servers(),
+            "default_workspace": self.config_manager.get("default_workspace", ""),
+            "history_dir": self.config_manager.get_chat_history_dir(),
+            "god_mode": self.config_manager.get_god_mode(),
+            "download_sources": self.config_manager.get("download_sources", {}),
+            "im_gateway": self.config_manager.get("im_gateway", {}),
+        }
+        try:
+            target_memory_store.save_soul(self.memory_soul_edit.toPlainText())
+            target_memory_store.save_summary(self.memory_global_edit.toPlainText(), "global", "")
+            if self.memory_workspace_dir:
+                target_memory_store.save_summary(
+                    self.memory_workspace_edit.toPlainText(),
+                    "workspace",
+                    self.memory_workspace_dir,
+                )
+            with self.config_manager.batch_save():
+                self.config_manager.set_model_channels(model_channels, selected_model_id)
+                self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
+                self.config_manager.set_mcp_servers(mcp_servers)
+                self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
+                self.config_manager.set_chat_history_dir(target_history_dir)
+                self.config_manager.set_god_mode(self.god_mode_check.isChecked())
+                self.download_sources = pending_download_sources
                 self.config_manager.set("download_sources", self.download_sources)
-            except ValueError as exc:
-                QMessageBox.warning(self, "下载源", str(exc))
+                self._save_im_gateway_config()
+        except Exception as exc:
+            try:
+                target_memory_store.save_soul(previous_memory["soul"])
+                target_memory_store.save_summary(previous_memory["global"], "global", "")
+                if self.memory_workspace_dir:
+                    target_memory_store.save_summary(
+                        previous_memory["workspace"],
+                        "workspace",
+                        self.memory_workspace_dir,
+                    )
+                with self.config_manager.batch_save():
+                    self.config_manager.set_model_channels(
+                        previous_config["model_channels"],
+                        previous_config["selected_model_id"],
+                    )
+                    self.config_manager.set_agent_profiles(previous_config["agent_profiles"])
+                    self.config_manager.set_mcp_servers(previous_config["mcp_servers"])
+                    self.config_manager.set("default_workspace", previous_config["default_workspace"])
+                    self.config_manager.set_chat_history_dir(previous_config["history_dir"])
+                    self.config_manager.set_god_mode(previous_config["god_mode"])
+                    self.config_manager.set("download_sources", previous_config["download_sources"])
+                    self.config_manager.set("im_gateway", previous_config["im_gateway"])
+            except Exception as rollback_exc:
+                QMessageBox.critical(
+                    self,
+                    "保存设置失败",
+                    f"保存失败：{exc}\n回滚也未完成：{rollback_exc}",
+                )
                 return
-            self._save_im_gateway_config()
+            QMessageBox.critical(self, "保存设置失败", f"所有修改已回滚：{exc}")
+            return
+        self.memory_store = target_memory_store
         self.requires_skill_reload = mcp_servers != current_mcp_servers
         self._clear_settings_dirty()
         self._allow_close_without_prompt = True
+        if self.property("embeddedProductPage"):
+            if self._main and hasattr(self._main, "add_system_toast"):
+                self._main.add_system_toast("设置已保存", "success", auto_close_ms=3200)
+            if self.requires_skill_reload and self._main:
+                self._main.skill_manager_ready = False
+                self._main.start_background_skill_load(force=True)
+            return
         self.accept()
 
 
 class SkillsCenterDialog(QDialog):
     def __init__(self, skill_manager, config_manager, parent=None):
         super().__init__(parent)
+        self._main = parent
         self.setObjectName("SkillsCenterDialog")
         self.setWindowTitle("能力中心")
         self.resize(960, 680)
@@ -7401,8 +7720,17 @@ class SkillsCenterDialog(QDialog):
         self.count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.count_label.setWordWrap(True)
 
+        self.category_combo = QComboBox()
+        self.category_combo.addItem("内置能力", "builtin")
+        self.category_combo.addItem("可选插件", "optional")
+        self.category_combo.addItem("MCP", "mcp")
+        self.category_combo.addItem("自定义能力", "custom")
+        self.category_combo.setStyleSheet(apple_combo_style())
+        self.category_combo.setFixedWidth(132)
+
         filters_row = QHBoxLayout()
         filters_row.setSpacing(12)
+        filters_row.addWidget(self.category_combo, 0)
         filters_row.addWidget(segmented_frame, 0)
         filters_row.addWidget(self.selection_toggle_btn, 0)
         filters_row.addStretch()
@@ -7436,6 +7764,8 @@ class SkillsCenterDialog(QDialog):
 
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._handle_tab_changed)
+        self.category_combo.currentIndexChanged.connect(self.tabs.setCurrentIndex)
+        self.tabs.currentChanged.connect(self.category_combo.setCurrentIndex)
         layout.addWidget(self.tabs)
 
         self.tab_standard = QWidget()
@@ -7493,6 +7823,7 @@ class SkillsCenterDialog(QDialog):
         self.scroll_ai.setWidget(self.content_ai)
         self.layout_ai.addWidget(self.scroll_ai)
         self.tabs.addTab(self.tab_ai, "自定义能力")
+        self.tabs.tabBar().hide()
 
         self._tab_layouts = {
             "builtin": self.layout_content_standard,
@@ -7962,9 +8293,8 @@ class SkillsCenterDialog(QDialog):
             )
             if refreshed_skill:
                 skill = refreshed_skill
-        dialog = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
-        dialog.exec()
-        self.refresh_list()
+        if self._main is not None and hasattr(self._main, "show_capability_detail"):
+            self._main.show_capability_detail(skill)
 
     def import_skill(self):
         clicked = ProductMessageDialog(
@@ -8203,7 +8533,24 @@ class ConversationSkillOptionsDialog(QDialog):
         self.mode_combo.addItem("创建新 Skill", "create")
         self.mode_combo.addItem("更新已有 Skill", "update")
         self.mode_combo.setStyleSheet(apple_combo_style())
-        mode_form.addRow(build_form_row_label("方式"), self.mode_combo)
+        self.mode_label = build_form_row_label("方式")
+        self.mode_label.hide()
+        self.mode_combo.hide()
+        mode_form.addRow(self.mode_label, self.mode_combo)
+        mode_choices = QWidget()
+        mode_choices_layout = QVBoxLayout(mode_choices)
+        mode_choices_layout.setContentsMargins(0, 0, 0, 0)
+        mode_choices_layout.setSpacing(6)
+        self.mode_buttons = {}
+        for key, choice_title, choice_subtitle in (
+            ("create", "创建新 Skill", "生成一个新的用户能力，不影响已有 Skill。"),
+            ("update", "更新已有 Skill", "把这次经验追加到一个可编辑的用户 Skill。"),
+        ):
+            button = ProductNavigationRow(choice_title, choice_subtitle)
+            button.clicked.connect(lambda checked=False, value=key: self._set_mode(value))
+            self.mode_buttons[key] = button
+            mode_choices_layout.addWidget(button)
+        mode_form.addRow("", mode_choices)
 
         self.target_label = build_form_row_label("目标 Skill")
         self.target_combo = QComboBox()
@@ -8247,10 +8594,13 @@ class ConversationSkillOptionsDialog(QDialog):
         self.mode_combo.currentIndexChanged.connect(self._sync_mode_controls)
         if not editable_count:
             self.mode_combo.model().item(1).setEnabled(False)
+            self.mode_buttons["update"].setEnabled(False)
         self._sync_mode_controls()
 
     def _sync_mode_controls(self):
         updating = self.mode_combo.currentData() == "update"
+        for key, button in getattr(self, "mode_buttons", {}).items():
+            button.setChecked((key == "update") == updating)
         for widget in (self.target_label, self.target_combo, self.strategy_label, self.strategy_combo):
             widget.setVisible(updating)
             widget.setEnabled(updating)
@@ -8258,6 +8608,11 @@ class ConversationSkillOptionsDialog(QDialog):
             self.hint_label.setText("更新已有 Skill 会把这次经验追加到同一能力包，或按策略重写 Skill 说明。")
         else:
             self.hint_label.setText("创建新 Skill 会根据所选会话片段生成一个新的用户 Skill。")
+
+    def _set_mode(self, mode):
+        index = self.mode_combo.findData(str(mode or "create"))
+        if index >= 0:
+            self.mode_combo.setCurrentIndex(index)
 
     def _accept_if_valid(self):
         if self.mode_combo.currentData() == "update" and not self.target_combo.currentData():
@@ -8275,11 +8630,12 @@ class ConversationSkillOptionsDialog(QDialog):
 
 
 class ConversationSkillRangeDialog(QDialog):
-    def __init__(self, messages, parent=None):
+    def __init__(self, messages, parent=None, selected_message_ids=None):
         super().__init__(parent)
         self.setWindowTitle("选择会话片段")
         self.resize(720, 560)
         self.messages = [message for message in (messages or []) if isinstance(message, dict)]
+        selected_message_ids = {str(value) for value in (selected_message_ids or []) if str(value)}
         apply_product_dialog(self, "ConversationSkillRangeDialog")
 
         layout = QVBoxLayout(self)
@@ -8304,7 +8660,10 @@ class ConversationSkillRangeDialog(QDialog):
             first_line = re.sub(r"\s+", " ", content)[:160] or "无文本内容"
             item = QListWidgetItem(f"{index + 1}. {role}  ·  {first_line}")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            selected = role in {"user", "assistant", "tool"} and not is_auto_query_skill_context_message(message)
+            if selected_message_ids:
+                selected = str(message.get("id") or "") in selected_message_ids
+            else:
+                selected = role in {"user", "assistant", "tool"} and not is_auto_query_skill_context_message(message)
             item.setCheckState(Qt.Checked if selected else Qt.Unchecked)
             item.setData(Qt.UserRole, index)
             item.setToolTip(content[:1000])
@@ -8362,6 +8721,102 @@ class ConversationSkillRangeDialog(QDialog):
             QMessageBox.warning(self, "无法生成", "请至少选择一条会话消息。")
             return
         self.accept()
+
+
+class ConversationSkillWizardDialog(QDialog):
+    """Compact two-step transaction for choosing mode and conversation evidence."""
+
+    def __init__(self, skills, messages, parent=None, selected_message_ids=None):
+        super().__init__(parent)
+        self.skill_manager = getattr(parent, "skill_manager", None)
+        self.setObjectName("ConversationSkillWizardDialog")
+        self.setWindowTitle("沉淀为 Skill")
+        self.resize(560, 420)
+        self.setMinimumSize(520, 400)
+        apply_product_dialog(self, "ConversationSkillWizardDialog")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        title = QLabel("沉淀为 Skill")
+        title.setProperty("roleTitle", True)
+        self.step_label = QLabel("1 / 2 · 选择保存方式")
+        self.step_label.setStyleSheet(apple_caption_style())
+        title_box.addWidget(title)
+        title_box.addWidget(self.step_label)
+        header.addLayout(title_box)
+        header.addStretch()
+        layout.addLayout(header)
+
+        self.stack = QStackedWidget()
+        self.options_page = ConversationSkillOptionsDialog(skills, self)
+        self.range_page = ConversationSkillRangeDialog(
+            messages,
+            self,
+            selected_message_ids=selected_message_ids,
+        )
+        for page in (self.options_page, self.range_page):
+            page.setParent(self.stack)
+            page.setWindowFlags(Qt.Widget)
+            page.setModal(False)
+            for label in page.findChildren(QLabel):
+                if label.property("roleTitle") or label.property("roleSubtitle"):
+                    label.hide()
+            for button in page.findChildren(QPushButton):
+                if button.text().strip() in {"取消", "继续", "生成草稿"}:
+                    button.hide()
+            for action_bar in page.findChildren(ProductActionBar):
+                action_bar.hide()
+            self.stack.addWidget(page)
+        layout.addWidget(self.stack, 1)
+
+        actions = ProductActionBar()
+        self.back_btn = QPushButton("上一步")
+        self.back_btn.setObjectName("SecondaryBtn")
+        self.back_btn.clicked.connect(self._go_back)
+        self.back_btn.hide()
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        self.next_btn = QPushButton("继续")
+        self.next_btn.setObjectName("PrimaryBtn")
+        self.next_btn.clicked.connect(self._go_next)
+        actions.layout.addWidget(self.back_btn)
+        actions.layout.addWidget(cancel_btn)
+        actions.layout.addWidget(self.next_btn)
+        layout.addWidget(actions)
+
+    def _go_back(self):
+        self.stack.setCurrentWidget(self.options_page)
+        self.step_label.setText("1 / 2 · 选择保存方式")
+        self.back_btn.hide()
+        self.next_btn.setText("继续")
+        self.resize(560, 420)
+
+    def _go_next(self):
+        if self.stack.currentWidget() is self.options_page:
+            options = self.options_page.selected_options()
+            if options["mode"] == "update" and not options.get("target_skill"):
+                QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
+                return
+            self.stack.setCurrentWidget(self.range_page)
+            self.step_label.setText("2 / 2 · 选择会话片段")
+            self.back_btn.show()
+            self.next_btn.setText("生成草稿")
+            self.resize(720, 600)
+            return
+        if not self.range_page.selected_messages():
+            QMessageBox.warning(self, "无法生成", "请至少选择一条会话消息。")
+            return
+        self.accept()
+
+    def selected_options(self):
+        return self.options_page.selected_options()
+
+    def selected_messages(self):
+        return self.range_page.selected_messages()
 
 
 class ConversationSkillPreviewDialog(QDialog):
@@ -10272,6 +10727,7 @@ class ChatBubble(QFrame):
     deliverablePathActivated = Signal(str)
     deliverablePathsChanged = Signal(object)
     officeDraftRequested = Signal(str, str, str)
+    skillCaptureRequested = Signal(str)
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(
@@ -10555,10 +11011,20 @@ class ChatBubble(QFrame):
                 action.triggered.connect(lambda _checked=False, value=profile: self._emit_office_draft_request(value))
                 self.office_draft_menu.addAction(action)
             self.office_draft_btn.clicked.connect(self.show_office_draft_menu)
+            self.skill_capture_btn = QPushButton("沉淀为 Skill")
+            self.skill_capture_btn.setCursor(Qt.PointingHandCursor)
+            self.skill_capture_btn.setIcon(qta.icon('fa5s.magic', color=DesignTokens.text_secondary))
+            self.skill_capture_btn.setVisible(False)
+            self.skill_capture_btn.setFixedHeight(26)
+            self.skill_capture_btn.setStyleSheet(self.copy_result_btn.styleSheet())
+            self.skill_capture_btn.clicked.connect(
+                lambda: self.skillCaptureRequested.emit(self.source_message_id)
+            )
             copy_row = QHBoxLayout()
             copy_row.setContentsMargins(0, 0, 0, 0)
             copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
             copy_row.addWidget(self.office_draft_btn, 0, Qt.AlignLeft)
+            copy_row.addWidget(self.skill_capture_btn, 0, Qt.AlignLeft)
             copy_row.addStretch()
             col_layout.addLayout(copy_row)
 
@@ -11108,6 +11574,8 @@ class ChatBubble(QFrame):
         self.copy_result_btn.setVisible(bool(text.strip()))
         if getattr(self, "office_draft_btn", None) is not None:
             self.office_draft_btn.setVisible(bool(final and text.strip()))
+        if getattr(self, "skill_capture_btn", None) is not None:
+            self.skill_capture_btn.setVisible(bool(final and text.strip() and self.source_message_id))
 
         already_rendered = (
             self._rendered_main_content_text == text
@@ -13617,6 +14085,10 @@ class MainWindow(QMainWindow):
     RIGHT_TAB_SUB_AGENTS = 2
     FILE_SECTION_ALL = "all"
     FILE_SECTION_DELIVERABLES = "deliverables"
+    PAGE_CONVERSATION = "conversation"
+    PAGE_CAPABILITIES = "capabilities"
+    PAGE_AUTOMATION = "automation"
+    PAGE_SETTINGS = "settings"
 
     def __init__(self):
         super().__init__()
@@ -13671,6 +14143,11 @@ class MainWindow(QMainWindow):
         self.deliverable_sort_mode = "modified_desc"
         self.deliverable_conversion_running_target = ""
         self.deliverable_items = []
+        self.current_product_route = self.PAGE_CONVERSATION
+        self.current_product_subroute = ""
+        self.product_pages = {}
+        self.product_page_state = {}
+        self._conversation_navigation_snapshot = {}
         self.deliverable_render_fingerprint = None
         self.deliverable_render_path = ""
         self.deliverable_render_loading = False
@@ -13951,51 +14428,44 @@ class MainWindow(QMainWindow):
         self.history_scroll.setWidget(self.history_container)
         sidebar_layout.addWidget(self.history_scroll, 1)
         
-        sidebar_btn_style = apple_button_style("ghost", radius=7, align="left")
+        sidebar_btn_style = (
+            f"QPushButton {{ background: transparent; color: {DesignTokens.text_secondary}; border: none; "
+            "border-radius: 7px; min-height: 32px; padding: 0 10px; text-align: left; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_sidebar_hover}; color: {DesignTokens.text_primary}; }}"
+            f"QPushButton:checked {{ background: {DesignTokens.bg_sidebar_selected}; color: {DesignTokens.primary}; font-weight: 600; }}"
+            f"QPushButton:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
+            f"QPushButton:disabled {{ color: {DesignTokens.text_disabled}; background: transparent; }}"
+        )
+        self.product_nav_buttons = {}
 
         sidebar_skills_btn = QPushButton(" 功能中心")
         sidebar_skills_btn.setText(" 能力中心")
         sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.text_secondary))
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_skills_btn.setCheckable(True)
         sidebar_skills_btn.clicked.connect(self.open_skills_center)
         self.sidebar_skills_btn = sidebar_skills_btn
+        self.product_nav_buttons[self.PAGE_CAPABILITIES] = sidebar_skills_btn
         sidebar_layout.addWidget(sidebar_skills_btn)
-
-        self.sidebar_agent_module_btn = QPushButton(" 智能体")
-        self.sidebar_agent_module_btn.setIcon(qta.icon('fa5s.user-astronaut', color=DesignTokens.text_secondary))
-        self.sidebar_agent_module_btn.setCursor(Qt.PointingHandCursor)
-        self.sidebar_agent_module_btn.setStyleSheet(sidebar_btn_style)
-        self.sidebar_agent_module_btn.clicked.connect(self.open_agent_module)
-        sidebar_layout.addWidget(self.sidebar_agent_module_btn)
 
         sidebar_automation_btn = QPushButton(" 自动化")
         sidebar_automation_btn.setIcon(qta.icon('fa5s.tasks', color=DesignTokens.text_secondary))
         sidebar_automation_btn.setCursor(Qt.PointingHandCursor)
         sidebar_automation_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_automation_btn.setCheckable(True)
         sidebar_automation_btn.clicked.connect(self.open_automation_center)
+        self.product_nav_buttons[self.PAGE_AUTOMATION] = sidebar_automation_btn
         sidebar_layout.addWidget(sidebar_automation_btn)
-
-        self.sidebar_memory_btn = QPushButton(" 记忆")
-        self.sidebar_memory_btn.setIcon(qta.icon('fa5s.brain', color=DesignTokens.text_secondary))
-        self.sidebar_memory_btn.setCursor(Qt.PointingHandCursor)
-        self.sidebar_memory_btn.setStyleSheet(sidebar_btn_style)
-        self.sidebar_memory_btn.clicked.connect(self.open_memory_center)
-        sidebar_layout.addWidget(self.sidebar_memory_btn)
-
-        self.sidebar_skill_capture_btn = QPushButton(" 沉淀为 Skill")
-        self.sidebar_skill_capture_btn.setIcon(qta.icon('fa5s.magic', color=DesignTokens.text_secondary))
-        self.sidebar_skill_capture_btn.setCursor(Qt.PointingHandCursor)
-        self.sidebar_skill_capture_btn.setStyleSheet(sidebar_btn_style)
-        self.sidebar_skill_capture_btn.clicked.connect(self.start_conversation_skill_flow)
-        sidebar_layout.addWidget(self.sidebar_skill_capture_btn)
 
         sidebar_settings_btn = QPushButton(" 系统设置")
         sidebar_settings_btn.setText(" 设置")
         sidebar_settings_btn.setIcon(qta.icon('fa5s.cog', color=DesignTokens.text_secondary))
         sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
         sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
+        sidebar_settings_btn.setCheckable(True)
         sidebar_settings_btn.clicked.connect(self.open_settings)
+        self.product_nav_buttons[self.PAGE_SETTINGS] = sidebar_settings_btn
         sidebar_layout.addWidget(sidebar_settings_btn)
 
         self.main_splitter.addWidget(sidebar)
@@ -14615,6 +15085,15 @@ class MainWindow(QMainWindow):
 
         # Top Bar
         top_bar = QHBoxLayout()
+        self.product_back_btn = QPushButton("返回")
+        self.product_back_btn.setIcon(qta.icon("fa5s.arrow-left", color=DesignTokens.text_secondary))
+        self.product_back_btn.setToolTip("返回会话 (Alt+Left)")
+        self.product_back_btn.setCursor(Qt.PointingHandCursor)
+        self.product_back_btn.setFixedHeight(32)
+        self.product_back_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        self.product_back_btn.clicked.connect(self.handle_product_back)
+        self.product_back_btn.hide()
+        top_bar.addWidget(self.product_back_btn, 0, Qt.AlignTop)
         title_box = QVBoxLayout()
         self.workspace_title_label = QLabel("选择一个工作区开始")
         self.workspace_title_label.setProperty("roleTitle", True)
@@ -14625,9 +15104,9 @@ class MainWindow(QMainWindow):
         top_bar.addLayout(title_box)
         top_bar.addStretch()
         
-        ws_container = QFrame()
-        ws_container.setStyleSheet("QFrame { background: transparent; border: none; }")
-        ws_layout = QHBoxLayout(ws_container)
+        self.ws_container = QFrame()
+        self.ws_container.setStyleSheet("QFrame { background: transparent; border: none; }")
+        ws_layout = QHBoxLayout(self.ws_container)
         ws_layout.setContentsMargins(0, 0, 0, 0)
         ws_layout.setSpacing(0)
         
@@ -14651,7 +15130,7 @@ class MainWindow(QMainWindow):
         
         ws_layout.setSpacing(8)
         ws_layout.addWidget(self.ws_label)
-        top_bar.addWidget(ws_container)
+        top_bar.addWidget(self.ws_container)
 
         self.context_rail = QFrame()
         self.context_rail.setObjectName("ContextRail")
@@ -14691,6 +15170,18 @@ class MainWindow(QMainWindow):
         self.content_area_layout.setSpacing(0)
         layout.addWidget(self.content_area, 1)
 
+        self.main_page_stack = QStackedWidget()
+        self.main_page_stack.setObjectName("MainProductPageStack")
+        self.main_page_stack.setStyleSheet("QStackedWidget#MainProductPageStack { background: transparent; border: none; }")
+        self.content_area_layout.addWidget(self.main_page_stack)
+        self.conversation_page = QWidget()
+        self.conversation_page.setObjectName("ConversationPage")
+        self.conversation_page_layout = QVBoxLayout(self.conversation_page)
+        self.conversation_page_layout.setContentsMargins(0, 0, 0, 0)
+        self.conversation_page_layout.setSpacing(0)
+        self.main_page_stack.addWidget(self.conversation_page)
+        self.product_pages[self.PAGE_CONVERSATION] = self.conversation_page
+
         self.conversation_column = QWidget()
         self.conversation_column.setObjectName("ConversationColumn")
         self.conversation_column.setMinimumWidth(DesignTokens.conversation_min_width)
@@ -14714,7 +15205,7 @@ class MainWindow(QMainWindow):
         self.content_row_layout.addWidget(self.conversation_left_spacer)
         self.content_row_layout.addWidget(self.conversation_column)
         self.content_row_layout.addWidget(self.conversation_right_spacer)
-        self.content_area_layout.addWidget(self.content_row, 1)
+        self.conversation_page_layout.addWidget(self.content_row, 1)
         
         self.recent_workspaces = self.config_manager.get("recent_workspaces", [])
 
@@ -14786,6 +15277,14 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setVisible(False)
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
         self.selected_skills_badge.closeClicked.connect(self.clear_session_selected_skills)
+
+        self.agent_picker_btn = QPushButton(" Agent")
+        self.agent_picker_btn.setIcon(qta.icon('fa5s.user-astronaut', color=DesignTokens.text_secondary))
+        self.agent_picker_btn.setToolTip("为当前输入添加智能体")
+        self.agent_picker_btn.setCursor(Qt.PointingHandCursor)
+        self.agent_picker_btn.setFixedHeight(30)
+        self.agent_picker_btn.setStyleSheet(apple_button_style("ghost", radius=7))
+        self.agent_picker_btn.clicked.connect(self.show_agent_picker)
 
         self.model_select_btn = QToolButton()
         self.model_select_btn.setCursor(Qt.PointingHandCursor)
@@ -14862,6 +15361,7 @@ class MainWindow(QMainWindow):
         prompt_toolbar.setContentsMargins(0, 0, 0, 0)
         prompt_toolbar.setSpacing(8)
         prompt_toolbar.addWidget(self.tool_menu_btn)
+        prompt_toolbar.addWidget(self.agent_picker_btn)
         prompt_toolbar.addWidget(self.selected_skills_badge)
         prompt_toolbar.addWidget(self.pause_btn)
         prompt_toolbar.addWidget(self.loop_hint, 1)
@@ -14950,6 +15450,32 @@ class MainWindow(QMainWindow):
         log_startup_stage("startup_history_ready")
 
     def keyPressEvent(self, event):
+        if getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION:
+            if event.key() == Qt.Key_Left and event.modifiers() & Qt.AltModifier:
+                self.handle_product_back()
+                event.accept()
+                return
+            if event.key() == Qt.Key_Escape:
+                self.handle_product_back()
+                event.accept()
+                return
+            page = self.product_pages.get(self.current_product_route)
+            if event.key() == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
+                search = getattr(page, "search_input", None)
+                if search is not None:
+                    search.setFocus()
+                    search.selectAll()
+                    event.accept()
+                    return
+            if event.key() == Qt.Key_F5:
+                if self.current_product_route == self.PAGE_CAPABILITIES and page is not None:
+                    page.manual_refresh()
+                    event.accept()
+                    return
+                if self.current_product_route == self.PAGE_AUTOMATION and page is not None:
+                    page.refresh_history_list()
+                    event.accept()
+                    return
         drawer_open = getattr(self, "right_drawer_open", False)
         files_open = drawer_open and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_FILES
         if files_open and event.key() == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
@@ -16332,6 +16858,30 @@ class MainWindow(QMainWindow):
             select_skills_action.setEnabled(False)
             select_skills_action.setToolTip(self.skill_load_error or "能力加载中")
         menu.addAction(select_skills_action)
+        menu.addSeparator()
+        capture_action = QAction(
+            qta.icon('fa5s.magic', color=DesignTokens.text_secondary),
+            "沉淀本次对话为 Skill",
+            self,
+        )
+        capture_action.triggered.connect(lambda checked=False: self.start_conversation_skill_flow())
+        state = self.get_current_session()
+        capture_action.setEnabled(bool(
+            getattr(self, "skill_manager_ready", False)
+            and state
+            and getattr(state, "messages", [])
+            and not (self.conversation_skill_worker and self.conversation_skill_worker.isRunning())
+        ))
+        menu.addAction(capture_action)
+        pending_draft = getattr(self, "pending_conversation_skill_result", None)
+        if pending_draft:
+            review_action = QAction(
+                qta.icon('fa5s.file-alt', color=DesignTokens.primary),
+                "查看待确认的 Skill 草稿",
+                self,
+            )
+            review_action.triggered.connect(lambda checked=False: self.review_pending_conversation_skill_draft())
+            menu.addAction(review_action)
         menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
 
     def _model_id_for_state(self, state=None):
@@ -17515,6 +18065,13 @@ class MainWindow(QMainWindow):
         if not mapped_status:
             return
         self._finalize_automation_history_record(state.automation_run_id, mapped_status, summary=summary, error=error)
+        log_automation_runtime(
+            "finish" if mapped_status == AUTOMATION_HISTORY_STATUS_COMPLETED else "error",
+            task_id=str(state.automation_task_id or ""),
+            run_id=str(state.automation_run_id or ""),
+            status=mapped_status,
+            error=error,
+        )
         task_id = str(state.automation_task_id or "").strip()
         if task_id:
             task = self.config_manager.get_automation_task(task_id)
@@ -17531,8 +18088,10 @@ class MainWindow(QMainWindow):
         self._trigger_automation_task(task_id, trigger_source="manual", scheduled_at=0)
 
     def _trigger_automation_task(self, task_id, trigger_source="scheduler", scheduled_at=0):
+        log_automation_runtime("submit", task_id=task_id, trigger_source=trigger_source, scheduled_at=scheduled_at)
         task = self.config_manager.get_automation_task(task_id)
         if not task:
+            log_automation_runtime("error", task_id=task_id, error="task_not_found")
             return False
         agent_profile = self.config_manager.get_agent_profile(task.get("agent_profile_id"))
         workspace_dir = self._workspace_for_automation()
@@ -17546,11 +18105,13 @@ class MainWindow(QMainWindow):
                 error="未找到可用工作区，请先配置默认工作区。",
             )
             self._append_automation_history(record)
+            log_automation_runtime("error", task_id=task_id, error="workspace_unavailable")
             return False
         session_title = task.get("name") or "自动化任务"
         session_id = self.create_new_session(title=session_title, make_current=False, workspace_dir=workspace_dir)
         state = self.get_session(session_id)
         if not state:
+            log_automation_runtime("error", task_id=task_id, error="session_creation_failed")
             return False
         state.selected_skill_names = normalize_selected_skill_names(task.get("skill_names"))
         prompt = build_automation_execution_prompt(task)
@@ -17588,7 +18149,14 @@ class MainWindow(QMainWindow):
             state.automation_run_id = ""
             state.automation_task_id = ""
             state.automation_trigger_source = ""
+            log_automation_runtime("error", task_id=task_id, error="submission_failed")
             return False
+        log_automation_runtime(
+            "start",
+            task_id=task_id,
+            run_id=state.automation_run_id,
+            session_id=session_id,
+        )
         if trigger_source == "manual":
             self.add_system_toast("自动化任务已启动", "success", session_id=session_id, auto_close_ms=3200)
         return True
@@ -18415,6 +18983,9 @@ class MainWindow(QMainWindow):
         self.queue_session_bubble_virtualization(state.session_id)
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
+        if getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION:
+            if not self.show_conversation_page():
+                return
         session_id = str(session_id or "").strip()
         if not session_id:
             return
@@ -19504,6 +20075,9 @@ class MainWindow(QMainWindow):
         return True
 
     def select_project(self, path, refresh_sidebar=True):
+        if getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION:
+            if not self.show_conversation_page():
+                return False
         normalized = self._normalize_project_path(path)
         if not normalized:
             return False
@@ -20846,28 +21420,21 @@ class MainWindow(QMainWindow):
         return True
 
     def open_memory_center(self):
-        try:
-            dialog = MemoryCenterDialog(self.chat_history_dir, self._active_workspace_dir(), self)
-            dialog.exec()
-        except Exception as exc:
-            QMessageBox.critical(self, "记忆不可用", str(exc))
+        return self.open_settings("个性与记忆")
 
     def start_memory_update(self, scope="global", workspace_dir=""):
         scope = "workspace" if scope == "workspace" else "global"
         workspace_dir = self._normalize_project_path(workspace_dir) if scope == "workspace" else ""
+        log_memory_update("submit", scope=scope, workspace_dir=workspace_dir)
         if scope == "workspace" and not workspace_dir:
             QMessageBox.warning(self, "无法生成", "当前没有可用于生成摘要的工作区。")
             return
         if self.memory_update_worker and self.memory_update_worker.isRunning():
             if self.memory_update_dialog:
-                self.memory_update_dialog.show()
-                self.memory_update_dialog.raise_()
-                self.memory_update_dialog.activateWindow()
+                self._show_memory_update_surface()
             return
         if self.memory_update_dialog and not getattr(self.memory_update_dialog, "running", False):
-            self.memory_update_dialog.show()
-            self.memory_update_dialog.raise_()
-            self.memory_update_dialog.activateWindow()
+            self._show_memory_update_surface()
             return
         self.save_chat_history(session_id=self.current_session_id, flush=True)
         self._last_memory_update_cutoff_at = None
@@ -20883,9 +21450,23 @@ class MainWindow(QMainWindow):
         self.memory_update_dialog.background_requested.connect(self.handle_memory_update_backgrounded)
         self.memory_update_dialog.finished.connect(self.handle_memory_update_dialog_finished)
         self.memory_update_dialog.append_progress(f"开始扫描{scope_label}并生成长期摘要预览")
-        self.memory_update_dialog.show()
-        self.memory_update_dialog.raise_()
-        self.memory_update_dialog.activateWindow()
+        if self.current_product_route == self.PAGE_SETTINGS:
+            self.memory_update_dialog.setParent(self.main_page_stack)
+            self.memory_update_dialog.setWindowFlags(Qt.Widget)
+            self.memory_update_dialog.setModal(False)
+            self.memory_update_dialog.setProperty("embeddedProductPage", True)
+            self.memory_update_dialog.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.memory_update_dialog.setMinimumSize(0, 0)
+            try:
+                self.memory_update_dialog.background_btn.clicked.disconnect()
+                self.memory_update_dialog.close_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.memory_update_dialog.background_btn.clicked.connect(self.handle_memory_update_backgrounded)
+            self.memory_update_dialog.close_btn.clicked.connect(self._show_settings_from_memory_update)
+            self.main_page_stack.addWidget(self.memory_update_dialog)
+            self.product_pages["memory_update"] = self.memory_update_dialog
+        self._show_memory_update_surface()
         self.memory_update_worker = MemoryUpdateWorker(
             self.config_manager,
             self.chat_storage,
@@ -20899,8 +21480,10 @@ class MainWindow(QMainWindow):
         self.memory_update_worker.finished_signal.connect(self.handle_memory_update_finished)
         self.memory_update_worker.finished.connect(self.memory_update_worker.deleteLater)
         self.memory_update_worker.start()
+        log_memory_update("start", scope=scope, workspace_dir=workspace_dir)
 
     def handle_memory_update_progress(self, text):
+        log_memory_update("run", message=str(text or ""))
         if self.memory_update_dialog:
             self.memory_update_dialog.append_progress(text)
 
@@ -20915,10 +21498,18 @@ class MainWindow(QMainWindow):
 
     def handle_memory_update_backgrounded(self):
         self.add_system_toast("长期记忆正在后台更新，可在“正在更新记忆”查看进度", "info", auto_close_ms=5000)
+        if self.memory_update_dialog and self.memory_update_dialog.property("embeddedProductPage"):
+            self._show_settings_from_memory_update()
 
     def handle_memory_update_dialog_finished(self, _result):
         if self.memory_update_worker and self.memory_update_worker.isRunning():
             return
+        dialog = self.memory_update_dialog
+        if dialog and dialog.property("embeddedProductPage"):
+            self.product_pages.pop("memory_update", None)
+            self.main_page_stack.removeWidget(dialog)
+            if self.current_product_subroute == "memory_update":
+                self._show_settings_from_memory_update()
         self.memory_update_dialog = None
         if hasattr(self, "sidebar_memory_btn"):
             self.sidebar_memory_btn.setText(" 记忆")
@@ -20937,27 +21528,25 @@ class MainWindow(QMainWindow):
 
         if not result.get("ok"):
             message = result.get("error") or "长期记忆更新失败。"
+            log_memory_update("error", error=message, empty=bool(result.get("empty")))
             if result.get("empty"):
                 if self.memory_update_dialog:
                     self.memory_update_dialog.show_error(message)
-                    self.memory_update_dialog.show()
-                    self.memory_update_dialog.raise_()
-                    self.memory_update_dialog.activateWindow()
+                    self._show_memory_update_surface()
                 if hasattr(self, "sidebar_memory_btn"):
                     self.sidebar_memory_btn.setText(" 记忆 · 查看状态")
                 self.add_system_toast(message, "info", auto_close_ms=5000)
             else:
                 if self.memory_update_dialog:
                     self.memory_update_dialog.show_error(f"长期记忆更新失败：{message}")
-                    self.memory_update_dialog.show()
-                    self.memory_update_dialog.raise_()
-                    self.memory_update_dialog.activateWindow()
+                    self._show_memory_update_surface()
                 if hasattr(self, "sidebar_memory_btn"):
                     self.sidebar_memory_btn.setText(" 记忆 · 查看状态")
                 self.add_system_toast(f"长期记忆更新失败：{message}", "error", auto_close_ms=8000)
             return
 
         memory_text = result.get("content") or ""
+        log_memory_update("finish", chars=len(memory_text), stats=result.get("stats") or {})
         self._last_memory_update_cutoff_at = result.get("cutoff_at")
         self._last_memory_update_transcripts = result.get("processed_transcripts") or []
         self._last_memory_update_scope = result.get("scope") or "global"
@@ -20972,14 +21561,13 @@ class MainWindow(QMainWindow):
         )
         if self.memory_update_dialog:
             self.memory_update_dialog.show_result(memory_text, stats)
-            self.memory_update_dialog.show()
-            self.memory_update_dialog.raise_()
-            self.memory_update_dialog.activateWindow()
+            self._show_memory_update_surface()
         if hasattr(self, "sidebar_memory_btn"):
             self.sidebar_memory_btn.setText(" 记忆 · 查看结果")
 
     def save_memory_update_from_dialog(self, memory_text):
         final_text = (memory_text or "").strip()
+        log_memory_update("save_submit", chars=len(final_text))
         if not final_text:
             QMessageBox.warning(self, "无法保存", "长期记忆内容为空，已取消保存。")
             return
@@ -20999,8 +21587,10 @@ class MainWindow(QMainWindow):
             suffix = f" 已备份旧文件：{backup_path}" if backup_path else ""
             if self.memory_update_dialog:
                 self.memory_update_dialog.mark_saved(f"长期摘要已保存。{suffix}")
+            log_memory_update("save_finish", scope=scope, workspace_dir=workspace_dir)
             self.add_system_toast(f"长期摘要已保存。{suffix}", "success", auto_close_ms=8000)
         except Exception as exc:
+            log_memory_update("save_error", error=str(exc))
             if self.memory_update_dialog:
                 self.memory_update_dialog.show_error(f"保存长期记忆失败：{exc}")
             self.add_system_toast(f"保存长期记忆失败：{exc}", "error", auto_close_ms=8000)
@@ -22219,17 +22809,306 @@ class MainWindow(QMainWindow):
                 self.preview_stack.setCurrentWidget(self.preview_text)
         except Exception: pass
 
-    def open_settings(self, initial_page_label=None):
-        dialog = SettingsDialog(self.config_manager, self, initial_page_label=initial_page_label)
-        result = dialog.exec()
-        if result == QDialog.Accepted and getattr(dialog, "requires_skill_reload", False):
-            self.skill_manager_ready = False
-            self.start_background_skill_load(force=True)
+    def _prepare_embedded_product_page(self, page, route):
+        page.setParent(self.main_page_stack)
+        page.setWindowFlags(Qt.Widget)
+        page.setModal(False)
+        page.setProperty("embeddedProductPage", True)
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        page.setMinimumSize(0, 0)
+        for label in page.findChildren(QLabel):
+            if label.property("roleTitle") or label.property("roleSubtitle"):
+                label.hide()
+        hidden_texts = {"关闭", "完成"}
+        if route == self.PAGE_AUTOMATION:
+            hidden_texts.add("保存")
+            if hasattr(page, "summary_widget"):
+                page.summary_widget.hide()
+            for action_bar in page.findChildren(ProductActionBar):
+                action_bar.hide()
+        for button in page.findChildren(QPushButton):
+            if button.text().strip() in hidden_texts:
+                button.hide()
+        self.main_page_stack.addWidget(page)
+        self.product_pages[route] = page
+        return page
+
+    def _ensure_product_page(self, route):
+        page = self.product_pages.get(route)
+        if page is not None and _qt_object_alive(page):
+            return page
+        if route == self.PAGE_CAPABILITIES:
+            if not self.skill_manager_ready:
+                message = self.skill_load_error or "能力仍在加载中，请稍后再打开能力中心。"
+                self.add_system_toast(message, "error" if self.skill_load_error else "info", auto_close_ms=5000)
+                return None
+            page = SkillsCenterDialog(self.skill_manager, self.config_manager, self)
+        elif route == self.PAGE_AUTOMATION:
+            page = AutomationDialog(self.config_manager, self)
+        elif route == self.PAGE_SETTINGS:
+            page = SettingsDialog(self.config_manager, self)
+        else:
+            return self.conversation_page
+        return self._prepare_embedded_product_page(page, route)
+
+    def _confirm_leave_product_page(self):
+        if self.current_product_route == self.PAGE_AUTOMATION and self.current_product_subroute == "task_editor":
+            editor = self.product_pages.get("automation_task_editor")
+            if editor is not None and editor.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "还有未保存的自动化任务",
+                    "离开后将丢弃尚未保存的修改，确定继续吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return False
+            self._close_automation_task_editor()
+            return True
+        if self.current_product_route != self.PAGE_SETTINGS:
+            return True
+        page = self.product_pages.get(self.PAGE_SETTINGS)
+        if page is None or not getattr(page, "_settings_dirty", False):
+            return True
+        return bool(page._confirm_discard_settings())
+
+    def _discard_product_page(self, route):
+        page = self.product_pages.pop(route, None)
+        if page is None or page is self.conversation_page:
+            return
+        self.main_page_stack.removeWidget(page)
+        page.deleteLater()
+
+    def handle_product_back(self):
+        if self.current_product_route == self.PAGE_CAPABILITIES and self.current_product_subroute == "detail":
+            detail = self.product_pages.pop("capability_detail", None)
+            if detail is not None:
+                self.main_page_stack.removeWidget(detail)
+                detail.deleteLater()
+            self.current_product_subroute = ""
+            page = self.product_pages.get(self.PAGE_CAPABILITIES)
+            if page is not None:
+                page.refresh_list()
+                self.main_page_stack.setCurrentWidget(page)
+            self.workspace_title_label.setText("能力")
+            self.workspace_subtitle_label.setText("查看、启用并配置 Cowork 可使用的能力。")
+            return True
+        if self.current_product_route == self.PAGE_AUTOMATION and self.current_product_subroute == "task_editor":
+            editor = self.product_pages.get("automation_task_editor")
+            if editor is not None and editor.is_dirty():
+                reply = QMessageBox.question(
+                    self,
+                    "还有未保存的自动化任务",
+                    "返回后将丢弃尚未保存的修改，确定继续吗？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return False
+            self._close_automation_task_editor()
+            return True
+        if self.current_product_route == self.PAGE_SETTINGS and self.current_product_subroute == "memory_update":
+            self._show_settings_from_memory_update()
+            return True
+        return self.show_conversation_page()
+
+    def _show_settings_from_memory_update(self):
+        self.current_product_subroute = ""
+        settings_page = self.product_pages.get(self.PAGE_SETTINGS)
+        if settings_page is not None:
+            settings_page.select_initial_page("个性与记忆")
+            self.main_page_stack.setCurrentWidget(settings_page)
+        self.workspace_title_label.setText("设置")
+        self.workspace_subtitle_label.setText("管理模型、工作区、智能体、记忆与系统偏好。")
+
+    def _show_memory_update_surface(self):
+        dialog = getattr(self, "memory_update_dialog", None)
+        if dialog is None:
+            return
+        if dialog.property("embeddedProductPage"):
+            dialog.show()
+            self.current_product_route = self.PAGE_SETTINGS
+            self.current_product_subroute = "memory_update"
+            self.workspace_title_label.setText("更新长期记忆")
+            self.workspace_subtitle_label.setText("扫描历史、检查生成过程，并确认是否应用草稿。")
+            self.main_page_stack.setCurrentWidget(dialog)
+            return
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _close_automation_task_editor(self):
+        editor = self.product_pages.pop("automation_task_editor", None)
+        if editor is not None:
+            self.main_page_stack.removeWidget(editor)
+            editor.deleteLater()
+        self.current_product_subroute = ""
+        page = self.product_pages.get(self.PAGE_AUTOMATION)
+        if page is not None:
+            page.tasks = list(self.config_manager.get_automation_tasks())
+            page.refresh_task_cards()
+            page.refresh_history_list()
+            self.main_page_stack.setCurrentWidget(page)
+        self.workspace_title_label.setText("自动化")
+        self.workspace_subtitle_label.setText("管理计划任务、运行状态和执行历史。")
+
+    def show_automation_task_editor(self, task_id=None):
+        page = self.product_pages.get(self.PAGE_AUTOMATION)
+        if page is None:
+            return False
+        task_index = page._find_task_index(task_id) if task_id else -1
+        task = page.tasks[task_index] if task_index >= 0 else None
+        editor = AutomationTaskDialog(
+            page._available_skills(),
+            page._available_agent_profiles(),
+            task=task,
+            parent=self,
+        )
+        editor.setParent(self.main_page_stack)
+        editor.setWindowFlags(Qt.Widget)
+        editor.setModal(False)
+        editor.setProperty("embeddedProductPage", True)
+        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        editor.setMinimumSize(0, 0)
+        for label in editor.findChildren(QLabel):
+            if label.property("roleTitle") or label.property("roleSubtitle"):
+                label.hide()
+        try:
+            editor.cancel_btn.clicked.disconnect()
+        except Exception:
+            pass
+        editor.cancel_btn.clicked.connect(self.handle_product_back)
+
+        def submit(payload):
+            payload["next_run_at"] = compute_next_run_at(payload)
+            payload["schedule_summary"] = describe_schedule(payload)
+            if task_index >= 0:
+                payload["id"] = page.tasks[task_index].get("id")
+                payload["created_at"] = page.tasks[task_index].get("created_at")
+                page.tasks[task_index] = payload
+            else:
+                page.tasks.append(payload)
+            page.save_changes()
+            self.add_system_toast("自动化任务已保存", "success", auto_close_ms=3200)
+            self._close_automation_task_editor()
+
+        editor.submit_callback = submit
+        self.main_page_stack.addWidget(editor)
+        self.product_pages["automation_task_editor"] = editor
+        self.current_product_subroute = "task_editor"
+        self.workspace_title_label.setText("编辑自动化" if task else "新建自动化")
+        self.workspace_subtitle_label.setText("设置任务目标、执行上下文和触发计划。")
+        self.main_page_stack.setCurrentWidget(editor)
+        return True
+
+    def show_capability_detail(self, skill):
+        if self.current_product_route != self.PAGE_CAPABILITIES:
+            return False
+        previous = self.product_pages.pop("capability_detail", None)
+        if previous is not None:
+            self.main_page_stack.removeWidget(previous)
+            previous.deleteLater()
+        detail = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
+        detail.setParent(self.main_page_stack)
+        detail.setWindowFlags(Qt.Widget)
+        detail.setModal(False)
+        detail.setProperty("embeddedProductPage", True)
+        detail.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        detail.setMinimumSize(0, 0)
+        for label in detail.findChildren(QLabel):
+            if label.property("roleTitle") or label.property("roleSubtitle"):
+                label.hide()
+        for button in detail.findChildren(QPushButton):
+            if button.text().strip() == "关闭":
+                button.hide()
+        self.main_page_stack.addWidget(detail)
+        self.product_pages["capability_detail"] = detail
+        self.current_product_subroute = "detail"
+        self.workspace_title_label.setText(readable_skill_name(skill) or str(skill.get("name") or "能力详情"))
+        self.workspace_subtitle_label.setText("查看能力边界、可用工具和运行配置。")
+        self.main_page_stack.setCurrentWidget(detail)
+        return True
+
+    def show_product_page(self, route, section=None):
+        route = str(route or self.PAGE_CONVERSATION)
+        if route == self.PAGE_CONVERSATION:
+            return self.show_conversation_page()
+        if route not in {self.PAGE_CAPABILITIES, self.PAGE_AUTOMATION, self.PAGE_SETTINGS}:
+            raise ValueError(f"未知产品页面：{route}")
+        if self.current_product_route != route and not self._confirm_leave_product_page():
+            return False
+        if self.current_product_route == self.PAGE_SETTINGS and route != self.PAGE_SETTINGS:
+            self._discard_product_page(self.PAGE_SETTINGS)
+        if self.current_product_route == self.PAGE_CONVERSATION:
+            self._conversation_navigation_snapshot = {
+                "drawer_open": bool(getattr(self, "right_drawer_open", False)),
+                "drawer_tab": getattr(self, "right_drawer_tab", self.RIGHT_TAB_FILES),
+                "input_had_focus": bool(getattr(self, "input_field", None) and self.input_field.hasFocus()),
+            }
+        page = self._ensure_product_page(route)
+        if page is None:
+            return False
+        if getattr(self, "right_drawer_open", False):
+            self.hide_context_drawer(reason="product_page")
+        titles = {
+            self.PAGE_CAPABILITIES: ("能力", "查看、启用并配置 Cowork 可使用的能力。"),
+            self.PAGE_AUTOMATION: ("自动化", "管理计划任务、运行状态和执行历史。"),
+            self.PAGE_SETTINGS: ("设置", "管理模型、工作区、智能体、记忆与系统偏好。"),
+        }
+        title, subtitle = titles[route]
+        self.workspace_title_label.setText(title)
+        self.workspace_subtitle_label.setText(subtitle)
+        self.product_back_btn.show()
+        self.ws_container.hide()
+        self.context_rail.hide()
+        self.main_page_stack.setCurrentWidget(page)
+        self.current_product_route = route
+        self.current_product_subroute = ""
+        for key, button in self.product_nav_buttons.items():
+            button.setChecked(key == route)
+        if route == self.PAGE_SETTINGS and section:
+            page.select_initial_page(section)
+        elif route == self.PAGE_CAPABILITIES:
+            page.refresh_list()
+        elif route == self.PAGE_AUTOMATION:
+            page.tasks = list(self.config_manager.get_automation_tasks())
+            page.refresh_task_cards()
+            page.refresh_history_list()
+        return True
+
+    def show_conversation_page(self):
+        if self.current_product_route == self.PAGE_CONVERSATION:
+            return True
+        previous_route = self.current_product_route
+        if not self._confirm_leave_product_page():
+            return False
+        if previous_route == self.PAGE_SETTINGS:
+            settings_page = self.product_pages.get(self.PAGE_SETTINGS)
+            if settings_page and getattr(settings_page, "requires_skill_reload", False):
+                self.skill_manager_ready = False
+                self.start_background_skill_load(force=True)
+            self._discard_product_page(self.PAGE_SETTINGS)
+        self.current_product_route = self.PAGE_CONVERSATION
+        self.current_product_subroute = ""
+        self.main_page_stack.setCurrentWidget(self.conversation_page)
+        self.product_back_btn.hide()
+        self.ws_container.show()
+        self.context_rail.show()
+        for button in self.product_nav_buttons.values():
+            button.setChecked(False)
         self.refresh_model_selector()
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()
-        if result == QDialog.Accepted and hasattr(self, "input_field") and self.input_field and self.input_field.isEnabled():
-            self.input_field.setFocus()
+        snapshot = dict(self._conversation_navigation_snapshot or {})
+        if snapshot.get("drawer_open"):
+            QTimer.singleShot(0, lambda: self.show_context_drawer(snapshot.get("drawer_tab", self.RIGHT_TAB_FILES)))
+        elif snapshot.get("input_had_focus") and self.input_field.isEnabled():
+            QTimer.singleShot(0, self.input_field.setFocus)
+        return True
+
+    def open_settings(self, initial_page_label=None):
+        return self.show_product_page(self.PAGE_SETTINGS, section=initial_page_label)
 
     def notify_component_task(self, title, message):
         if getattr(self, "tray_icon", None):
@@ -22238,15 +23117,10 @@ class MainWindow(QMainWindow):
             self.add_system_toast(message, "info")
 
     def open_automation_center(self):
-        AutomationDialog(self.config_manager, self).exec()
-        self.refresh_context_badges()
+        return self.show_product_page(self.PAGE_AUTOMATION)
 
     def open_skills_center(self):
-        if not self.skill_manager_ready:
-            message = self.skill_load_error or "能力仍在加载中，请稍后再打开能力中心。"
-            self.add_system_toast(message, "error" if self.skill_load_error else "info", auto_close_ms=5000)
-            return
-        SkillsCenterDialog(self.skill_manager, self.config_manager, self).exec()
+        return self.show_product_page(self.PAGE_CAPABILITIES)
 
     def _flush_pending_skill_runtime_reload(self):
         if not self.skill_manager_ready:
@@ -22319,6 +23193,36 @@ class MainWindow(QMainWindow):
         global_pos = self.input_field.mapToGlobal(rect.bottomLeft())
         menu.exec(global_pos)
 
+    def show_agent_picker(self):
+        menu = create_styled_menu(self)
+        ppt_action = QAction(
+            qta.icon("fa5s.file-powerpoint", color=DesignTokens.primary),
+            "PPT Agent",
+            self,
+        )
+        ppt_action.setToolTip("从主题、资料或模板生成演示文稿")
+        ppt_action.triggered.connect(self.open_ppt_agent_mode)
+        menu.addAction(ppt_action)
+        profiles = self._available_agent_profiles()
+        if profiles:
+            menu.addSeparator()
+            for profile in profiles:
+                action = QAction(
+                    qta.icon("fa5s.user-astronaut", color=DesignTokens.text_secondary),
+                    str(profile.get("name") or "智能体"),
+                    self,
+                )
+                action.setToolTip(str(profile.get("description") or ""))
+                action.triggered.connect(lambda checked=False, item=profile: self._insert_agent_mention(item))
+                menu.addAction(action)
+        menu.addSeparator()
+        manage = QAction("管理智能体…", self)
+        manage.triggered.connect(lambda: self.open_settings("智能体"))
+        menu.addAction(manage)
+        menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
+        anchor = getattr(self, "agent_picker_btn", self.input_field)
+        menu.exec(anchor.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
+
     def _populate_agent_menu(self, menu):
         profiles = self._available_agent_profiles()
         if not profiles:
@@ -22326,7 +23230,7 @@ class MainWindow(QMainWindow):
             empty_action.setEnabled(False)
             menu.addAction(empty_action)
             settings_action = QAction("打开设置", self)
-            settings_action.triggered.connect(self.open_settings)
+            settings_action.triggered.connect(lambda: self.open_settings("智能体"))
             menu.addAction(settings_action)
             return
         for profile in profiles:
@@ -22440,15 +23344,8 @@ class MainWindow(QMainWindow):
         )
 
     def open_agent_module(self):
-        dialog = AgentModuleDialog(agent_profiles=self._available_agent_profiles(), parent=self)
-        if dialog.exec() != QDialog.Accepted:
-            return False
-        if dialog.selected_builtin == "ppt_agent":
-            return self.open_ppt_agent_mode()
-        if dialog.selected_profile:
-            self._insert_agent_mention(dialog.selected_profile)
-            return True
-        return False
+        self.show_agent_picker()
+        return True
 
     def handle_ppt_agent_requested(
         self,
@@ -22708,8 +23605,9 @@ class MainWindow(QMainWindow):
         else:
             self.sidebar_skill_capture_btn.setText(" 沉淀为 Skill")
 
-    def start_conversation_skill_flow(self):
-        log_conversation_skill_capture("flow_clicked", session_id=self.current_session_id)
+    def start_conversation_skill_flow(self, source_message_id="", session_id=None):
+        target_session_id = str(session_id or self.current_session_id or "")
+        log_conversation_skill_capture("flow_clicked", session_id=target_session_id, source_message_id=source_message_id)
         if self.conversation_skill_worker and self.conversation_skill_worker.isRunning():
             log_conversation_skill_capture("flow_ignored_worker_running", session_id=self.current_session_id)
             return
@@ -22725,7 +23623,7 @@ class MainWindow(QMainWindow):
                 auto_close_ms=5000,
             )
             return
-        state = self.get_current_session()
+        state = self.get_session(target_session_id) if target_session_id else self.get_current_session()
         if not state or not getattr(state, "messages", []):
             log_conversation_skill_capture("flow_blocked_empty_session", session_id=self.current_session_id)
             self.add_system_toast("当前会话还没有可沉淀的内容", "info", auto_close_ms=4000)
@@ -22734,26 +23632,41 @@ class MainWindow(QMainWindow):
 
         self.save_chat_history(session_id=state.session_id)
         skills = self.skill_manager.get_all_skills()
-        options_dialog = ConversationSkillOptionsDialog(skills, self)
-        if options_dialog.exec() != QDialog.Accepted:
+        selected_message_ids = []
+        source_message_id = str(source_message_id or "").strip()
+        if source_message_id:
+            source_index = next(
+                (
+                    index for index, message in enumerate(state.messages)
+                    if str(message.get("id") or "").strip() == source_message_id
+                ),
+                -1,
+            )
+            if source_index >= 0:
+                selected_message_ids.append(source_message_id)
+                for index in range(source_index - 1, -1, -1):
+                    message = state.messages[index]
+                    if str(message.get("role") or "").strip() == "user":
+                        message_id = str(message.get("id") or "").strip()
+                        if message_id:
+                            selected_message_ids.insert(0, message_id)
+                        break
+        wizard = ConversationSkillWizardDialog(
+            skills,
+            state.messages,
+            self,
+            selected_message_ids=selected_message_ids,
+        )
+        if wizard.exec() != QDialog.Accepted:
             log_conversation_skill_capture("options_cancelled", session_id=state.session_id)
             return
-        options = options_dialog.selected_options()
+        options = wizard.selected_options()
         if options["mode"] == "update" and not options.get("target_skill"):
             log_conversation_skill_capture("options_invalid_missing_target", session_id=state.session_id)
             QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
             return
 
-        range_dialog = ConversationSkillRangeDialog(state.messages, self)
-        if range_dialog.exec() != QDialog.Accepted:
-            log_conversation_skill_capture(
-                "range_cancelled",
-                session_id=state.session_id,
-                mode=options.get("mode"),
-                target_skill=options.get("target_skill"),
-            )
-            return
-        selected_messages = range_dialog.selected_messages()
+        selected_messages = wizard.selected_messages()
         if not selected_messages:
             log_conversation_skill_capture("range_empty", session_id=state.session_id)
             self.add_system_toast("没有选择可沉淀的会话片段", "info", auto_close_ms=4000)
@@ -22809,6 +23722,16 @@ class MainWindow(QMainWindow):
             )
             self.add_system_toast(f"生成 Skill 草稿失败：{result.get('error') or '未知错误'}", "error", auto_close_ms=8000)
             return
+
+        if QApplication.activeWindow() is not self or QApplication.activeModalWidget() is not None:
+            self.pending_conversation_skill_result = dict(result)
+            self.add_system_toast(
+                "Skill 草稿已生成，待你确认后保存",
+                "info",
+                auto_close_ms=0,
+            )
+            return
+        self.pending_conversation_skill_result = None
 
         mode = result.get("mode") or "create"
         target_skill = result.get("target_skill")
@@ -22906,6 +23829,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "保存失败", f"保存 Skill 时发生错误：{exc}")
             return
         self.update_skill_capture_button_state()
+
+    def review_pending_conversation_skill_draft(self):
+        result = getattr(self, "pending_conversation_skill_result", None)
+        if not result:
+            return False
+        self.pending_conversation_skill_result = None
+        self.handle_conversation_skill_finished(dict(result))
+        return True
 
     def handle_skill_used(self, skill_name, session_id=None):
         state = self.get_session(session_id)
@@ -24345,6 +25276,9 @@ class MainWindow(QMainWindow):
         )
         bubble.officeDraftRequested.connect(
             lambda profile, msg_id, text, sid=state.session_id: self.handle_office_draft_requested(profile, msg_id, text, sid)
+        )
+        bubble.skillCaptureRequested.connect(
+            lambda msg_id, sid=state.session_id: self.start_conversation_skill_flow(msg_id, sid)
         )
 
     def _system_toast_duration(self, type="info", auto_close_ms=None):

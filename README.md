@@ -27,14 +27,15 @@ Current app version: **4.9.9**
 - **Conversation-scoped model choice**: the model selector is saved per conversation and applies to the next turn. A completed conversation can continue with a different model, while an in-flight turn keeps the model profile snapshot captured at submit time.
 - **Prompt attachments**: paste clipboard images directly into the composer, review or remove their thumbnails, and send them as vision parts on vision-capable models. Text-only models block submission and guide model switching instead of silently dropping images. Small text files are inlined; large or non-text files retain explicit path/size guidance.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
-- **PPT Mode / PPT Agent**: a home card and built-in entry inside the Agent module for presentation workflows. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
+- **PPT Mode / PPT Agent**: a home card and the composer Agent picker provide the presentation workflow. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
 - **Right-side context drawer**: when explicit outputs exist, the drawer opens on a compact Deliverables view with an on-demand **Browse workspace** route; otherwise it opens directly on the real folder tree. Deliverables come from generated, converted, published, or user-marked results rather than extension-wide scanning. Search/filter state and navigation position are restored, while detail mode keeps Preview/Source and **Generate file…** actions.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
 - **Lightweight startup**: the main workspace becomes interactive before skill indexing, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.
-- **Settings center**: manage models, agents, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions respond only to semantic configuration changes, not background logs or connection tests.
+- **Main-content management pages**: the sidebar keeps only Capabilities, Automation, and Settings as stable destinations. They switch inside the main content area and restore the prior conversation instead of opening large blocking dialogs.
+- **Settings center**: manage models, agents, personality and memory, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions respond only to semantic configuration changes, not background logs or connection tests.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
-- **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and a searchable task form.
+- **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
 - **Skill center**: search, filter, enable, configure, and debug skills in a master/detail layout without restarting the app.
 
 ## Skill Model
@@ -86,7 +87,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP are bundled as separate optional skills. Their workbench pages expose configuration fields, read-only files, Tool debugging, script entries, and MCP preset generation where applicable.
 6. Use the home **PPT Agent** card or the built-in **PPT Agent** inside the Agent module when you want a focused presentation workflow; choose automatic strategy selection, a web/technical/business/template preference, optional source files, and an optional PPTX template.
 7. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
-8. Save reusable knowledge through **Memory** or **沉淀为 Skill** when a workflow proves useful; the Skill flow lets you choose the source messages, review the draft, then create a new user skill or append lessons to an editable one.
+8. Maintain long-term context under **Settings → Personality & Memory**, or choose **沉淀为 Skill** from the conversation tools or an assistant response. The two-step flow selects the save mode and source messages before generating a reviewable draft.
 
 ## Architecture
 

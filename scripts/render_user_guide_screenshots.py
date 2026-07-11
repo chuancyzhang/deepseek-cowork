@@ -119,11 +119,11 @@ def main_run():
         save_widget(window, "12-add-project.png")
         window.sidebar_add_project_btn.setStyleSheet(project_add_style)
 
-        settings = main.SettingsDialog(window.config_manager, parent=window, initial_page_label="模型与服务")
+        window.open_settings("模型与服务")
+        settings = window.product_pages[window.PAGE_SETTINGS]
         settings._automatic_update_check_started = True
-        settings.resize(1040, 700)
-        save_widget(settings, "05-open-settings.png")
-        save_widget(settings, "06-model-service-settings.png")
+        save_widget(window, "05-open-settings.png")
+        save_widget(window, "06-model-service-settings.png")
 
         model_empty = main.ModelEditDialog("openai", parent=settings)
         save_widget(model_empty, "07-add-model.png")
@@ -142,30 +142,44 @@ def main_run():
         save_widget(model_filled, "08-model-configuration.png")
         model_filled.hide()
         select_settings_page(settings, "更新")
-        save_widget(settings, "10-update-settings.png")
-        settings.hide()
+        save_widget(window, "10-update-settings.png")
+        select_settings_page(settings, "个性与记忆")
+        save_widget(window, "25-memory-center.png")
+        window.show_conversation_page()
 
-        skills = main.SkillsCenterDialog(window.skill_manager, window.config_manager, parent=window)
-        save_widget(skills, "23-skills-center.png")
+        window.skill_manager.load_skills()
+        window.skill_manager_ready = True
+        window.open_skills_center()
+        skills = window.product_pages[window.PAGE_CAPABILITIES]
+        save_widget(window, "23-skills-center.png")
         if skills._all_skills:
-            workbench = main.CapabilityWorkbenchDialog(
-                skills._all_skills[0], window.skill_manager, window.config_manager, parent=window
-            )
-            save_widget(workbench, "29-capability-workbench.png")
-            workbench.hide()
-        skills.hide()
+            window.show_capability_detail(skills._all_skills[0])
+            save_widget(window, "29-capability-workbench.png")
+        window.show_conversation_page()
 
-        automation = main.AutomationDialog(window.config_manager, parent=window)
-        save_widget(automation, "24-automation-center.png")
-        automation.hide()
+        window.open_automation_center()
+        save_widget(window, "24-automation-center.png")
+        window.show_automation_task_editor()
+        save_widget(window, "32-automation-task-editor.png")
+        window.handle_product_back()
+        window.show_conversation_page()
 
-        memory = main.MemoryCenterDialog(str(APP_DATA_DIR), str(workspace), parent=window)
-        save_widget(memory, "25-memory-center.png")
-        memory.hide()
+        agent_style = window.agent_picker_btn.styleSheet()
+        window.agent_picker_btn.setStyleSheet(main.apple_button_style("selected", radius=7))
+        save_widget(window, "26-agent-center.png")
+        window.agent_picker_btn.setStyleSheet(agent_style)
 
-        agents = main.AgentModuleDialog(agent_profiles=[], parent=window)
-        save_widget(agents, "26-agent-center.png")
-        agents.hide()
+        skill_wizard = main.ConversationSkillWizardDialog(
+            [],
+            [
+                {"id": "demo-user", "role": "user", "content": "把这次整理周报的流程沉淀下来。"},
+                {"id": "demo-agent", "role": "assistant", "content": "已完成数据收集、结构整理和结果校验。"},
+            ],
+            parent=window,
+            selected_message_ids=["demo-user", "demo-agent"],
+        )
+        save_widget(skill_wizard, "31-skill-capture-wizard.png")
+        skill_wizard.hide()
 
         ppt_agent = main.PptAgentModeDialog(str(workspace), parent=window)
         save_widget(ppt_agent, "27-ppt-agent.png")

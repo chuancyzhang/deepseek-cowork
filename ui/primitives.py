@@ -5,7 +5,7 @@ surface opts into a role through an object name or a dynamic property, which
 prevents parent styling from leaking into labels and nested controls.
 """
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox as QtMessageBox,
     QPushButton,
+    QButtonGroup,
     QScrollArea,
+    QSplitter,
+    QStackedWidget,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -546,17 +549,34 @@ def apply_product_dialog(dialog, object_name):
 
 
 class ProductPageHeader(QWidget):
-    def __init__(self, title, subtitle="", parent=None):
+    backRequested = Signal()
+    primaryRequested = Signal()
+
+    def __init__(self, title, subtitle="", parent=None, back_text="", primary_text=""):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(12)
+        if back_text:
+            self.back_button = QPushButton(back_text)
+            self.back_button.setObjectName("ProductBackButton")
+            self.back_button.setToolTip("返回会话 (Alt+Left)")
+            self.back_button.setFixedHeight(DesignTokens.control_height)
+            self.back_button.setStyleSheet(product_button_style("ghost"))
+            self.back_button.clicked.connect(self.backRequested)
+            layout.addWidget(self.back_button, 0, Qt.AlignTop)
+        else:
+            self.back_button = None
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(4)
         title_label = QLabel(str(title or ""))
+        self.title_label = title_label
         title_label.setProperty("roleTitle", True)
         title_label.setStyleSheet(
             f"font-size: {DesignTokens.font_size_page}px; font-weight: 700; color: {DesignTokens.text_primary};"
         )
-        layout.addWidget(title_label)
+        text_layout.addWidget(title_label)
         self.subtitle_label = None
         if subtitle:
             self.subtitle_label = QLabel(str(subtitle))
@@ -564,7 +584,219 @@ class ProductPageHeader(QWidget):
             self.subtitle_label.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
             )
-            layout.addWidget(self.subtitle_label)
+            text_layout.addWidget(self.subtitle_label)
+        layout.addLayout(text_layout, 1)
+        self.primary_button = None
+        if primary_text:
+            self.primary_button = QPushButton(primary_text)
+            self.primary_button.setObjectName("PrimaryBtn")
+            self.primary_button.setFixedHeight(DesignTokens.control_height)
+            self.primary_button.setStyleSheet(product_button_style("primary"))
+            self.primary_button.clicked.connect(self.primaryRequested)
+            layout.addWidget(self.primary_button, 0, Qt.AlignTop)
+
+    def set_title(self, title, subtitle=None):
+        self.title_label.setText(str(title or ""))
+        if subtitle is not None and self.subtitle_label is not None:
+            self.subtitle_label.setText(str(subtitle or ""))
+
+
+class ProductToolbar(QFrame):
+    """One quiet row for search, filters and result metadata."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ProductToolbar")
+        self.setStyleSheet(
+            f"QFrame#ProductToolbar {{ background: transparent; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; }}"
+        )
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 8)
+        self.layout.setSpacing(8)
+        self.search_input = None
+        self.result_label = QLabel("")
+        self.result_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; font-size: {DesignTokens.font_size_meta}px;"
+        )
+
+    def add_search(self, placeholder="搜索"):
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText(placeholder)
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumWidth(220)
+        self.search_input.setStyleSheet(product_field_style())
+        self.layout.addWidget(self.search_input, 1)
+        return self.search_input
+
+    def add_widget(self, widget):
+        self.layout.addWidget(widget)
+        return widget
+
+    def finish(self):
+        self.layout.addStretch()
+        self.layout.addWidget(self.result_label)
+
+    def set_result_text(self, text):
+        self.result_label.setText(str(text or ""))
+
+
+class ProductSegmentedControl(QFrame):
+    currentChanged = Signal(str)
+
+    def __init__(self, items, current=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ProductSegmentedControl")
+        self.setStyleSheet(product_segmented_style())
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(2)
+        self.group = QButtonGroup(self)
+        self.group.setExclusive(True)
+        self.buttons = {}
+        for index, item in enumerate(items or []):
+            key, label = item
+            button = QPushButton(str(label))
+            button.setCheckable(True)
+            button.setProperty("segment", True)
+            button.setMinimumHeight(DesignTokens.control_height_sm)
+            button.clicked.connect(lambda checked=False, value=str(key): self.currentChanged.emit(value))
+            self.group.addButton(button, index)
+            self.buttons[str(key)] = button
+            layout.addWidget(button)
+        selected = str(current or (items[0][0] if items else ""))
+        if selected in self.buttons:
+            self.buttons[selected].setChecked(True)
+
+    def set_current(self, key):
+        key = str(key or "")
+        if key in self.buttons:
+            self.buttons[key].setChecked(True)
+
+
+class ProductNavigationRow(QPushButton):
+    """Flat selectable management row with complete interaction states."""
+
+    def __init__(self, title="", subtitle="", parent=None):
+        text = str(title or "")
+        if subtitle:
+            text += "\n" + str(subtitle)
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(DesignTokens.row_height_comfortable)
+        self.setStyleSheet(
+            f"QPushButton {{ text-align:left; padding:7px 10px; border:none; border-radius:{DesignTokens.radius_sm}px; "
+            f"background:transparent; color:{DesignTokens.text_primary}; }}"
+            f"QPushButton:hover {{ background:{DesignTokens.bg_hover}; }}"
+            f"QPushButton:checked {{ background:{DesignTokens.primary_soft}; color:{DesignTokens.primary}; }}"
+            f"QPushButton:focus {{ border:1px solid {DesignTokens.primary_focus}; }}"
+            f"QPushButton:disabled {{ color:{DesignTokens.text_disabled}; background:transparent; }}"
+        )
+
+
+class ProductMasterDetail(QFrame):
+    """Responsive browse/detail host used by management centers."""
+
+    detailVisibilityChanged = Signal(bool)
+
+    def __init__(self, browse, detail, threshold=DesignTokens.management_split_threshold, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ProductMasterDetail")
+        self.setStyleSheet("QFrame#ProductMasterDetail { background: transparent; border: none; }")
+        self.threshold = int(threshold)
+        self.browse = browse
+        self.detail = detail
+        self.detail_visible = False
+        self._compact = False
+        self.stack = QStackedWidget()
+        self.stack.addWidget(browse)
+        self.stack.addWidget(detail)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(1)
+        self.splitter.addWidget(browse)
+        self.splitter.addWidget(detail)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([320, 640])
+        self.host = QStackedWidget()
+        self.host.addWidget(self.splitter)
+        compact = QWidget()
+        compact_layout = QVBoxLayout(compact)
+        compact_layout.setContentsMargins(0, 0, 0, 0)
+        compact_layout.addWidget(self.stack)
+        self.host.addWidget(compact)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.host)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.width() < self.threshold
+        if compact == self._compact:
+            return
+        self._compact = compact
+        if compact:
+            self.browse.setParent(self.stack)
+            self.detail.setParent(self.stack)
+            if self.stack.indexOf(self.browse) < 0:
+                self.stack.addWidget(self.browse)
+            if self.stack.indexOf(self.detail) < 0:
+                self.stack.addWidget(self.detail)
+            self.host.setCurrentIndex(1)
+            self.stack.setCurrentWidget(self.detail if self.detail_visible else self.browse)
+        else:
+            self.browse.setParent(self.splitter)
+            self.detail.setParent(self.splitter)
+            if self.splitter.indexOf(self.browse) < 0:
+                self.splitter.insertWidget(0, self.browse)
+            if self.splitter.indexOf(self.detail) < 0:
+                self.splitter.addWidget(self.detail)
+            self.host.setCurrentIndex(0)
+
+    def show_detail(self):
+        self.detail_visible = True
+        if self._compact:
+            self.stack.setCurrentWidget(self.detail)
+        self.detailVisibilityChanged.emit(True)
+
+    def show_browse(self):
+        self.detail_visible = False
+        if self._compact:
+            self.stack.setCurrentWidget(self.browse)
+        self.detailVisibilityChanged.emit(False)
+
+
+class ProductInlineNotice(QFrame):
+    def __init__(self, text="", tone="neutral", parent=None):
+        super().__init__(parent)
+        self.setObjectName("ProductInlineNotice")
+        self.label = QLabel(str(text or ""))
+        self.label.setWordWrap(True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.addWidget(self.label)
+        self.set_tone(tone)
+
+    def set_tone(self, tone):
+        tones = {
+            "neutral": (DesignTokens.bg_secondary, DesignTokens.text_secondary),
+            "info": (DesignTokens.info_bg, DesignTokens.info_text),
+            "success": (DesignTokens.success_bg, DesignTokens.success_text),
+            "warning": (DesignTokens.warning_bg, DesignTokens.warning_text),
+            "error": (DesignTokens.error_bg, DesignTokens.error_text),
+        }
+        bg, fg = tones.get(str(tone), tones["neutral"])
+        self.setStyleSheet(
+            f"QFrame#ProductInlineNotice {{ background:{bg}; border:none; border-radius:{DesignTokens.radius_sm}px; }}"
+            f"QFrame#ProductInlineNotice QLabel {{ color:{fg}; background:transparent; border:none; }}"
+        )
+
+    def set_text(self, text, tone=None):
+        self.label.setText(str(text or ""))
+        if tone is not None:
+            self.set_tone(tone)
 
 
 class ProductSection(QFrame):
@@ -617,6 +849,8 @@ class ProductEmptyState(QFrame):
         super().__init__(parent)
         self.setProperty("productSurface", "subtle")
         self.setStyleSheet(product_surface_style("subtle"))
+        self.setMaximumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 24, 20, 24)
         layout.setSpacing(8)
@@ -639,6 +873,7 @@ class ProductEmptyState(QFrame):
         if action_text:
             self.action_button = QPushButton(action_text)
             self.action_button.setObjectName("PrimaryBtn")
+            self.action_button.setStyleSheet(product_button_style("primary"))
             layout.addWidget(self.action_button, 0, Qt.AlignCenter)
 
 

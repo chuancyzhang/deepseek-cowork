@@ -81,6 +81,8 @@ class DesignTokens:
     focus_ring_width = 2
     content_max_width = 1080
     settings_content_max_width = 1120
+    management_split_threshold = 860
+    settings_compact_threshold = 760
 
     spacing_xs = 4
     spacing_sm = 8

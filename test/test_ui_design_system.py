@@ -5,7 +5,7 @@ import main as main_module
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QRawFont
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from core.theme import DesignTokens
 from main import (
@@ -23,7 +23,12 @@ from ui.primitives import (
     ProductMessageBox,
     ProductMessageDialog,
     ProductPageHeader,
+    ProductInlineNotice,
+    ProductMasterDetail,
+    ProductNavigationRow,
+    ProductSegmentedControl,
     ProductStatusBadge,
+    ProductToolbar,
     product_button_style,
     product_code_style,
     product_segmented_style,
@@ -98,9 +103,21 @@ class UiDesignSystemTests(unittest.TestCase):
         header = ProductPageHeader("能力中心", "搜索和配置能力")
         empty = ProductEmptyState("暂无内容", "创建后会显示在这里", "创建")
         badge = ProductStatusBadge("运行中", "primary")
+        toolbar = ProductToolbar()
+        toolbar.add_search("搜索能力")
+        toolbar.finish()
+        segmented = ProductSegmentedControl((("all", "全部"), ("enabled", "已启用")))
+        row = ProductNavigationRow("能力", "已启用")
+        notice = ProductInlineNotice("运行中", "info")
+        master_detail = ProductMasterDetail(QWidget(), QWidget())
         self.assertEqual(header.findChildren(QLabel)[0].text(), "能力中心")
         self.assertIsNotNone(empty.action_button)
         self.assertEqual(badge.text(), "运行中")
+        self.assertIsNotNone(toolbar.search_input)
+        self.assertTrue(segmented.buttons["all"].isChecked())
+        self.assertTrue(row.isCheckable())
+        self.assertEqual(notice.label.text(), "运行中")
+        self.assertFalse(master_detail.detail_visible)
 
     def test_business_message_and_input_calls_use_product_facades(self):
         self.assertIs(main_module.QMessageBox, ProductMessageBox)

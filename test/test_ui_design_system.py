@@ -1,5 +1,6 @@
 import os
 import unittest
+import main as main_module
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -18,6 +19,9 @@ from main import (
 )
 from ui.primitives import (
     ProductEmptyState,
+    ProductInputDialog,
+    ProductMessageBox,
+    ProductMessageDialog,
     ProductPageHeader,
     ProductStatusBadge,
     product_button_style,
@@ -97,6 +101,16 @@ class UiDesignSystemTests(unittest.TestCase):
         self.assertEqual(header.findChildren(QLabel)[0].text(), "能力中心")
         self.assertIsNotNone(empty.action_button)
         self.assertEqual(badge.text(), "运行中")
+
+    def test_business_message_and_input_calls_use_product_facades(self):
+        self.assertIs(main_module.QMessageBox, ProductMessageBox)
+        self.assertIs(main_module.QInputDialog, ProductInputDialog)
+        dialog = ProductMessageDialog("删除文件", "此操作无法撤销。", "destructive")
+        try:
+            self.assertEqual(dialog.objectName(), "ProductMessageDialog")
+            self.assertLessEqual(DesignTokens.radius_md, 8)
+        finally:
+            dialog.deleteLater()
 
     def test_capability_master_detail_methods_belong_to_capability_center(self):
         self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_master_detail"))

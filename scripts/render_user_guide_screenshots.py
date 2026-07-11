@@ -96,6 +96,10 @@ def main_run():
         "# 项目会议记录\n\n- 完成本周报告\n- 整理交付物\n- 确认下周计划\n",
         encoding="utf-8",
     )
+    pptx_path = workspace / "quarterly-review.pptx"
+    pptx_path.write_bytes(b"demo-pptx")
+    pdf_path = workspace / "project-summary.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n% demo")
 
     app = QApplication.instance() or QApplication([])
     main.initialize_desktop_theme(app)
@@ -203,6 +207,12 @@ def main_run():
             conversation_id=window.current_session_id,
             source="generated",
         )
+        window.chat_storage.register_deliverable(
+            str(workspace), str(pptx_path), conversation_id=window.current_session_id, source="converted"
+        )
+        window.chat_storage.register_deliverable(
+            str(workspace), str(pdf_path), conversation_id=window.current_session_id, source="converted"
+        )
         process_events(200)
         save_widget(window, "15-generate-html-example.png")
 
@@ -213,6 +223,12 @@ def main_run():
         window.set_file_workspace_section(window.FILE_SECTION_DELIVERABLES, refresh=True, user_initiated=True)
         process_events(250)
         save_widget(window, "17-deliverables-panel.png")
+        window.add_system_toast("PPTX 已生成，可在交付物中打开。", "success", auto_close_ms=0)
+        window.add_system_toast("资源管理器已打开并定位到文件。", "info", auto_close_ms=0)
+        process_events(120)
+        save_widget(window, "30-system-feedback.png")
+        for toast in list(window._visible_system_toasts):
+            window._dismiss_system_toast(toast)
 
         window.show_file_workspace_detail_view(origin="browse")
         window.select_deliverable(str(html_path), render_html=True)

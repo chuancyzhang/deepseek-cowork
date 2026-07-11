@@ -9,16 +9,270 @@ from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox as QtMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from core.theme import DesignTokens
+
+
+def display_run_phase(value):
+    """Return concise product copy for an internal execution phase."""
+    raw = str(value or "").strip()
+    key = raw.casefold().replace("_", " ").replace("-", " ")
+    labels = {
+        "preparing": "准备中",
+        "awaiting input": "等待输入",
+        "waiting input": "等待输入",
+        "running": "运行中",
+        "thinking": "思考中",
+        "paused": "已暂停",
+        "stopped": "已停止",
+        "completed": "已完成",
+        "complete": "已完成",
+        "failed": "失败",
+        "error": "失败",
+        "idle": "待开始",
+    }
+    return labels.get(key, raw or "待开始")
+
+
+class ProductMessageDialog(QDialog):
+    """Small Linear-style message/confirmation surface with explicit results."""
+
+    TONES = {
+        "information": ("提示", DesignTokens.info_icon, DesignTokens.toast_tint_info),
+        "success": ("完成", DesignTokens.success_icon, DesignTokens.toast_tint_success),
+        "warning": ("请注意", DesignTokens.warning_icon, DesignTokens.toast_tint_warning),
+        "error": ("发生错误", DesignTokens.error_icon, DesignTokens.toast_tint_error),
+        "confirm": ("请确认", DesignTokens.info_icon, DesignTokens.toast_tint_info),
+        "destructive": ("请确认", DesignTokens.error_icon, DesignTokens.toast_tint_error),
+    }
+
+    def __init__(self, title, message, tone="information", buttons=None, details="", parent=None):
+        super().__init__(parent)
+        self.result_value = None
+        self.setObjectName("ProductMessageDialog")
+        self.setWindowTitle(str(title or "提示"))
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(620)
+        self.setStyleSheet(
+            f"""
+            QDialog#ProductMessageDialog {{ background: {DesignTokens.bg_app}; }}
+            QDialog#ProductMessageDialog QLabel {{ background: transparent; border: none; }}
+            QFrame#MessageIcon {{ border: none; border-radius: 8px; }}
+            QFrame#MessageActions {{ border: none; border-top: 1px solid {DesignTokens.separator}; }}
+            """
+            + product_field_style()
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(14)
+
+        tone_title, icon_color, icon_bg = self.TONES.get(tone, self.TONES["information"])
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        icon = QLabel("!")
+        icon.setObjectName("MessageIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setFixedSize(28, 28)
+        icon.setStyleSheet(
+            f"background:{icon_bg};color:{icon_color};border:none;border-radius:8px;"
+            "font-size:14px;font-weight:700;"
+        )
+        header.addWidget(icon, 0, Qt.AlignTop)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(4)
+        title_label = QLabel(str(title or tone_title))
+        title_label.setStyleSheet(
+            f"color:{DesignTokens.text_primary};font-size:15px;font-weight:650;"
+        )
+        body = QLabel(str(message or ""))
+        body.setWordWrap(True)
+        body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        body.setStyleSheet(f"color:{DesignTokens.text_secondary};font-size:13px;")
+        text_col.addWidget(title_label)
+        text_col.addWidget(body)
+        header.addLayout(text_col, 1)
+        layout.addLayout(header)
+
+        if details:
+            detail = QLabel(str(details))
+            detail.setWordWrap(True)
+            detail.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            detail.setStyleSheet(
+                f"background:{DesignTokens.bg_code};color:{DesignTokens.text_secondary};"
+                f"border:1px solid {DesignTokens.border_subtle};border-radius:6px;padding:8px;font-size:12px;"
+            )
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setMaximumHeight(180)
+            scroll.setWidget(detail)
+            layout.addWidget(scroll)
+
+        action_frame = QFrame()
+        action_frame.setObjectName("MessageActions")
+        actions = QHBoxLayout(action_frame)
+        actions.setContentsMargins(0, 12, 0, 0)
+        actions.setSpacing(8)
+        actions.addStretch()
+        specs = list(buttons or [("知道了", QtMessageBox.Ok, "primary", True)])
+        for label, result, kind, is_default in specs:
+            button = QPushButton(str(label))
+            button.setStyleSheet(product_button_style("danger" if kind == "danger" else kind))
+            button.clicked.connect(lambda _checked=False, value=result: self._finish(value))
+            if is_default:
+                button.setDefault(True)
+                button.setFocus()
+            actions.addWidget(button)
+        layout.addWidget(action_frame)
+
+    def _finish(self, value):
+        self.result_value = value
+        self.accept()
+
+    def exec_result(self, fallback=None):
+        self.exec()
+        return self.result_value if self.result_value is not None else fallback
+
+
+def _standard_button_specs(buttons, default_button, destructive=False):
+    labels = {
+        QtMessageBox.Yes: "继续",
+        QtMessageBox.No: "取消",
+        QtMessageBox.Ok: "知道了",
+        QtMessageBox.Cancel: "取消",
+        QtMessageBox.Save: "保存",
+        QtMessageBox.Discard: "不保存",
+        QtMessageBox.Retry: "重试",
+        QtMessageBox.Close: "关闭",
+    }
+    order = [
+        QtMessageBox.Save,
+        QtMessageBox.Yes,
+        QtMessageBox.Retry,
+        QtMessageBox.Ok,
+        QtMessageBox.Discard,
+        QtMessageBox.No,
+        QtMessageBox.Cancel,
+        QtMessageBox.Close,
+    ]
+    specs = []
+    for value in order:
+        if buttons & value:
+            primary = value in {QtMessageBox.Yes, QtMessageBox.Save, QtMessageBox.Retry, QtMessageBox.Ok}
+            kind = "danger" if destructive and primary else ("primary" if primary else "secondary")
+            specs.append((labels[value], value, kind, value == default_button))
+    return specs or [("知道了", QtMessageBox.Ok, "primary", True)]
+
+
+def _show_parent_toast(parent, text, tone="info"):
+    current = parent
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if hasattr(current, "add_system_toast"):
+            current.add_system_toast(str(text or ""), tone)
+            return True
+        linked_main = getattr(current, "_main", None)
+        if linked_main is not None and hasattr(linked_main, "add_system_toast"):
+            linked_main.add_system_toast(str(text or ""), tone)
+            return True
+        current = current.parentWidget() if hasattr(current, "parentWidget") else None
+    return False
+
+
+class ProductMessageBox:
+    """Compatibility facade used while business call sites migrate from QMessageBox."""
+
+    for _name in (
+        "Ok", "Yes", "No", "Cancel", "Save", "Discard", "Retry", "Close",
+        "YesRole", "NoRole", "AcceptRole", "RejectRole", "DestructiveRole",
+        "Information", "Warning", "Critical", "Question",
+    ):
+        locals()[_name] = getattr(QtMessageBox, _name)
+
+    @staticmethod
+    def information(parent, title, text, buttons=QtMessageBox.Ok, defaultButton=QtMessageBox.Ok):
+        if buttons == QtMessageBox.Ok:
+            tone = "success" if any(token in str(title or "") for token in ("成功", "完成", "已保存", "通过")) else "info"
+            if _show_parent_toast(parent, text, tone):
+                return QtMessageBox.Ok
+        specs = _standard_button_specs(buttons, defaultButton)
+        return ProductMessageDialog(title, text, "information", specs, parent=parent).exec_result(QtMessageBox.Ok)
+
+    @staticmethod
+    def warning(parent, title, text, buttons=QtMessageBox.Ok, defaultButton=QtMessageBox.Ok):
+        specs = _standard_button_specs(buttons, defaultButton)
+        return ProductMessageDialog(title, text, "warning", specs, parent=parent).exec_result(QtMessageBox.Ok)
+
+    @staticmethod
+    def critical(parent, title, text, buttons=QtMessageBox.Ok, defaultButton=QtMessageBox.Ok):
+        specs = _standard_button_specs(buttons, defaultButton)
+        return ProductMessageDialog(title, text, "error", specs, parent=parent).exec_result(QtMessageBox.Ok)
+
+    @staticmethod
+    def question(parent, title, text, buttons=QtMessageBox.Yes | QtMessageBox.No, defaultButton=QtMessageBox.No):
+        destructive = any(token in str(title or "") for token in ("删除", "卸载", "清空", "放弃"))
+        specs = _standard_button_specs(buttons, defaultButton, destructive=destructive)
+        return ProductMessageDialog(
+            title, text, "destructive" if destructive else "confirm", specs, parent=parent
+        ).exec_result(defaultButton)
+
+
+class ProductInputDialog:
+    @staticmethod
+    def getText(parent, title, label, mode=QLineEdit.Normal, text="", *args, **kwargs):
+        dialog = QDialog(parent)
+        dialog.setObjectName("ProductInputDialog")
+        dialog.setWindowTitle(str(title or "输入"))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(420)
+        dialog.setStyleSheet(
+            f"QDialog#ProductInputDialog{{background:{DesignTokens.bg_app};}}"
+            + product_field_style()
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+        heading = QLabel(str(title or "输入"))
+        heading.setStyleSheet(f"color:{DesignTokens.text_primary};font-size:15px;font-weight:650;")
+        prompt = QLabel(str(label or ""))
+        prompt.setWordWrap(True)
+        prompt.setStyleSheet(f"color:{DesignTokens.text_secondary};font-size:13px;")
+        field = QLineEdit(str(text or ""))
+        field.setEchoMode(mode)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        cancel.setStyleSheet(product_button_style("secondary"))
+        submit = QPushButton("确定")
+        submit.setStyleSheet(product_button_style("primary"))
+        submit.setDefault(True)
+        cancel.clicked.connect(dialog.reject)
+        submit.clicked.connect(dialog.accept)
+        field.returnPressed.connect(dialog.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(submit)
+        layout.addWidget(heading)
+        layout.addWidget(prompt)
+        layout.addWidget(field)
+        layout.addLayout(actions)
+        field.selectAll()
+        field.setFocus()
+        accepted = dialog.exec() == QDialog.Accepted
+        return field.text(), accepted
 
 
 class ProductTooltipController(QObject):

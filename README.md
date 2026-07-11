@@ -19,6 +19,7 @@ Current app version: **4.9.9**
 - Use **PPT Agent** from PPT Mode to turn topics, source files, templates, existing conversations, or visual-slide requests into presentation-shaped HTML drafts before exporting.
 - Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default while result files stay visible below the card.
 - Generate PPTX, DOCX, or PDF from an HTML draft in a folded task card with local action feedback; the drawer stays usable or closable while completion returns through toast and refreshed deliverable shortcuts.
+- Filter deliverables by registered file category and sort them by modified time, name, or size from two explicit controls. In-app notices and confirmations use Linear-style surfaces, while closable notifications stack at the bottom right and pause on hover.
 
 ## Product Surface
 

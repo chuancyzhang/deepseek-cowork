@@ -1,6 +1,8 @@
 import hashlib
 import os
+import platform
 import subprocess
+from dataclasses import dataclass
 
 try:
     import fcntl
@@ -11,6 +13,49 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
+
+
+@dataclass(frozen=True)
+class FileManagerOpenResult:
+    ok: bool
+    path: str
+    action: str
+    error: str = ""
+
+
+def reveal_path_in_file_manager(path, system_name=None, shell_execute=None, popen=None):
+    """Open a directory or reveal a file without hiding the file-manager window."""
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return FileManagerOpenResult(False, "", "reveal", "路径为空。")
+    normalized = os.path.abspath(os.path.expanduser(raw_path))
+    if not os.path.exists(normalized):
+        return FileManagerOpenResult(False, normalized, "reveal", f"路径不存在：{normalized}")
+
+    system = str(system_name or platform.system())
+    action = "open_directory" if os.path.isdir(normalized) else "select_file"
+    try:
+        if system == "Windows":
+            if shell_execute is None:
+                import ctypes
+                shell_execute = ctypes.windll.shell32.ShellExecuteW
+            if os.path.isdir(normalized):
+                result = shell_execute(None, "open", normalized, None, None, 1)
+            else:
+                parameters = f'/select,"{normalized}"'
+                result = shell_execute(None, "open", "explorer.exe", parameters, None, 1)
+            if int(result) <= 32:
+                return FileManagerOpenResult(
+                    False, normalized, action, f"系统文件管理器返回错误码 {int(result)}。"
+                )
+        else:
+            target = normalized if os.path.isdir(normalized) else os.path.dirname(normalized)
+            command = ["open", target] if system == "Darwin" else ["xdg-open", target]
+            launcher = popen or subprocess.Popen
+            launcher(command)
+        return FileManagerOpenResult(True, normalized, action)
+    except Exception as exc:
+        return FileManagerOpenResult(False, normalized, action, str(exc))
 
 
 def subprocess_kwargs_no_window(**kwargs):

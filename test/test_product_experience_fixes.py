@@ -168,6 +168,43 @@ class ProductExperienceFixTests(unittest.TestCase):
         self.assertFalse(result)
         stub.add_system_toast.assert_called_once()
 
+    def test_system_toasts_stack_queue_and_deduplicate_without_session(self):
+        class Stub:
+            _system_toast_duration = MainWindow._system_toast_duration
+            _system_toast_target_position = MainWindow._system_toast_target_position
+            _position_active_system_toast = MainWindow._position_active_system_toast
+            _show_next_system_toast = MainWindow._show_next_system_toast
+            _dismiss_system_toast = MainWindow._dismiss_system_toast
+            add_system_toast = MainWindow.add_system_toast
+
+        stub = Stub()
+        stub.main_container = QWidget()
+        stub.main_container.resize(900, 600)
+        stub._system_toast_queue = []
+        stub._visible_system_toasts = []
+        stub._active_system_toast = None
+
+        stub.add_system_toast("已保存", "success", auto_close_ms=0)
+        stub.add_system_toast("已保存", "success", auto_close_ms=0)
+        stub.add_system_toast("第二条", "info", auto_close_ms=0)
+        stub.add_system_toast("第三条", "warning", auto_close_ms=0)
+        stub.add_system_toast("第四条", "error", auto_close_ms=0)
+        self.app.processEvents()
+
+        self.assertEqual(len(stub._visible_system_toasts), 3)
+        self.assertEqual(len(stub._system_toast_queue), 1)
+        self.assertEqual(stub._visible_system_toasts[0].repeat_count, 2)
+        positions = [toast.pos().y() for toast in stub._visible_system_toasts]
+        self.assertLess(positions[0], positions[1])
+        self.assertLess(positions[1], positions[2])
+
+        stub._dismiss_system_toast(stub._visible_system_toasts[-1])
+        self.app.processEvents()
+        self.assertEqual(len(stub._visible_system_toasts), 3)
+        self.assertEqual(len(stub._system_toast_queue), 0)
+        for toast in list(stub._visible_system_toasts):
+            stub._dismiss_system_toast(toast)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,7 +53,11 @@ from ui.primitives import (
     ProductSection,
     ProductStatusBadge,
     ProductTooltipController,
+    ProductInputDialog,
+    ProductMessageBox,
+    ProductMessageDialog,
     apply_product_dialog,
+    display_run_phase,
     product_button_style,
     product_code_style,
     product_field_style,
@@ -66,6 +70,7 @@ from core.app_version import APP_VERSION
 from core.process_utils import (
     acquire_process_singleton,
     build_process_singleton_lock_path,
+    reveal_path_in_file_manager,
     runtime_debug_logging_enabled,
     subprocess_kwargs_no_window,
 )
@@ -197,7 +202,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QMessageBox, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QInputDialog, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
+                               QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
@@ -209,6 +214,11 @@ QPdfDocument = None
 QPdfView = None
 QPDF_AVAILABLE = None
 QPDF_IMPORT_ERROR = None
+
+# Business surfaces use the shared Linear-style compatibility facades. Native
+# QFileDialog remains intentionally untouched for Windows shell integration.
+QMessageBox = ProductMessageBox
+QInputDialog = ProductInputDialog
 
 
 def load_qwebengine_view():
@@ -1515,6 +1525,29 @@ def format_file_size(size):
 
 
 DELIVERABLE_EXTENSIONS = DELIVERABLE_TYPES
+
+DELIVERABLE_FILTER_CATEGORIES = (
+    ("全部类型", "all"),
+    ("网页", "html"),
+    ("演示文稿", "presentation"),
+    ("文档", "document"),
+    ("PDF", "pdf"),
+    ("表格", "spreadsheet"),
+    ("图片", "image"),
+)
+
+DELIVERABLE_KIND_CATEGORIES = {
+    "html": "html",
+    "markdown": "document",
+    "doc": "document",
+    "docx": "document",
+    "pdf": "pdf",
+    "ppt": "presentation",
+    "pptx": "presentation",
+    "xls": "spreadsheet",
+    "xlsx": "spreadsheet",
+    "image": "image",
+}
 
 
 def file_chip_icon_name(path):
@@ -7053,25 +7086,22 @@ class SettingsDialog(QDialog):
 
     def choose_app_update_install_mode(self, latest_version, zip_path):
         package_line = f"\n安装包位置：{zip_path}" if zip_path else ""
-        dialog = QMessageBox(self)
-        dialog.setIcon(QMessageBox.Question)
-        dialog.setWindowTitle("安装更新")
-        dialog.setText(
+        result = ProductMessageDialog(
+            "安装更新",
             f"新版本 {latest_version} 已准备好。{package_line}\n"
-            "主程序将关闭，独立更新器会安装更新并自动重启。"
-        )
-        foreground_btn = dialog.addButton("前台安装并重启", QMessageBox.AcceptRole)
-        background_btn = dialog.addButton("后台安装并重启", QMessageBox.AcceptRole)
-        cancel_btn = dialog.addButton("取消", QMessageBox.RejectRole)
-        dialog.setDefaultButton(foreground_btn)
-        dialog.exec()
-        clicked = dialog.clickedButton()
-        if clicked == foreground_btn:
+            "主程序将关闭，独立更新器会安装更新并自动重启。",
+            "confirm",
+            [
+                ("前台安装并重启", "foreground", "primary", True),
+                ("后台安装并重启", "background", "secondary", False),
+                ("取消", "cancel", "secondary", False),
+            ],
+            parent=self,
+        ).exec_result("cancel")
+        if result == "foreground":
             return "foreground"
-        if clicked == background_btn:
+        if result == "background":
             return "background"
-        if clicked == cancel_btn:
-            return "cancel"
         return "cancel"
 
     def handle_app_update_finished(self, result):
@@ -7937,23 +7967,26 @@ class SkillsCenterDialog(QDialog):
         self.refresh_list()
 
     def import_skill(self):
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("导入自定义能力")
-        dialog.setText("选择要导入的来源类型。")
-        zip_btn = dialog.addButton("ZIP 文件", QMessageBox.AcceptRole)
-        dir_btn = dialog.addButton("文件夹", QMessageBox.AcceptRole)
-        dialog.addButton(QMessageBox.Cancel)
-        dialog.exec()
-        clicked = dialog.clickedButton()
+        clicked = ProductMessageDialog(
+            "导入自定义能力",
+            "选择要导入的来源类型。",
+            "confirm",
+            [
+                ("ZIP 文件", "zip", "primary", True),
+                ("文件夹", "directory", "secondary", False),
+                ("取消", "cancel", "secondary", False),
+            ],
+            parent=self,
+        ).exec_result("cancel")
         path = ""
-        if clicked == zip_btn:
+        if clicked == "zip":
             path, _selected_filter = QFileDialog.getOpenFileName(
                 self,
                 "选择能力 ZIP 文件",
                 "",
                 "ZIP 文件 (*.zip)",
             )
-        elif clicked == dir_btn:
+        elif clicked == "directory":
             path = QFileDialog.getExistingDirectory(self, "选择 Skill 目录或 Skill 集合目录")
         if path:
             success, msg = self.skill_manager.import_skill(path)
@@ -9463,16 +9496,16 @@ class ElidedToolLabel(QLabel):
 
 
 class StatusPill(QFrame):
-    def __init__(self, text="", icon_name="fa5s.exclamation-circle", icon_color=None, parent=None):
+    def __init__(self, text="", icon_name="fa5s.circle", icon_color=None, parent=None):
         super().__init__(parent)
-        icon_color = icon_color or DesignTokens.warning_icon
+        icon_color = icon_color or DesignTokens.primary
         self.setObjectName("StatusPill")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
         self.setMaximumWidth(300)
         self.setStyleSheet(
-            f"QFrame#StatusPill {{ background: {DesignTokens.warning_bg}; border: 1px solid {DesignTokens.warning_border}; "
-            f"border-radius: 14px; }}"
+            f"QFrame#StatusPill {{ background: {DesignTokens.bg_secondary}; border: none; "
+            f"border-radius: 6px; }}"
         )
 
         layout = QHBoxLayout(self)
@@ -9485,7 +9518,7 @@ class StatusPill(QFrame):
 
         self.text_label = ElidedToolLabel(text)
         self.text_label.setStyleSheet(
-            f"color: {DesignTokens.warning_text}; font-size: 11px; font-weight: 600;"
+            f"color: {DesignTokens.text_secondary}; font-size: 11px; font-weight: 600;"
         )
         layout.addWidget(self.text_label, 1)
 
@@ -9731,10 +9764,10 @@ class PptAgentModeDialog(QDialog):
         self.request_edit.setStyleSheet(
             f"""
             QPlainTextEdit {{
-                background: {DesignTokens.bg_panel_strong};
+                background: {DesignTokens.bg_main};
                 color: {DesignTokens.text_primary};
-                border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 14px;
+                border: 1px solid {DesignTokens.border};
+                border-radius: 8px;
                 padding: 10px 12px;
                 font-size: 13px;
             }}
@@ -9785,7 +9818,7 @@ class PptAgentModeDialog(QDialog):
         files_bar = QFrame()
         files_bar.setObjectName("PptAgentFilesBar")
         files_bar.setProperty("uiSurface", True)
-        files_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
+        files_bar.setStyleSheet(product_surface_style("subtle", radius=8))
         files_layout = QVBoxLayout(files_bar)
         files_layout.setContentsMargins(14, 12, 14, 12)
         files_layout.setSpacing(10)
@@ -9794,18 +9827,18 @@ class PptAgentModeDialog(QDialog):
         file_actions.setContentsMargins(0, 0, 0, 0)
         add_source_btn = QPushButton("添加资料")
         add_source_btn.setIcon(qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary))
-        add_source_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        add_source_btn.setStyleSheet(product_button_style("secondary", radius=8))
         add_source_btn.clicked.connect(self.add_source_files)
         file_actions.addWidget(add_source_btn)
 
         choose_template_btn = QPushButton("选择 PPTX 模板")
         choose_template_btn.setIcon(qta.icon("fa5s.file-powerpoint", color=DesignTokens.text_secondary))
-        choose_template_btn.setStyleSheet(apple_button_style("secondary", radius=14))
+        choose_template_btn.setStyleSheet(product_button_style("secondary", radius=8))
         choose_template_btn.clicked.connect(self.choose_template_file)
         file_actions.addWidget(choose_template_btn)
 
         clear_files_btn = QPushButton("清空")
-        clear_files_btn.setStyleSheet(apple_button_style("ghost", radius=14))
+        clear_files_btn.setStyleSheet(product_button_style("ghost", radius=8))
         clear_files_btn.clicked.connect(self.clear_files)
         file_actions.addWidget(clear_files_btn)
         file_actions.addStretch()
@@ -9824,12 +9857,12 @@ class PptAgentModeDialog(QDialog):
         action_row.setContentsMargins(0, 4, 0, 0)
         action_row.addStretch()
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(apple_button_style("secondary", radius=15))
+        cancel_btn.setStyleSheet(product_button_style("secondary", radius=8))
         cancel_btn.clicked.connect(self.reject)
         action_row.addWidget(cancel_btn)
         submit_btn = QPushButton("交给 PPT Agent")
         submit_btn.setIcon(qta.icon("fa5s.magic", color="white"))
-        submit_btn.setStyleSheet(apple_button_style("primary", radius=15))
+        submit_btn.setStyleSheet(product_button_style("primary", radius=8))
         submit_btn.clicked.connect(self.accept)
         action_row.addWidget(submit_btn)
         layout.addLayout(action_row)
@@ -10034,9 +10067,19 @@ class AgentModuleDialog(QDialog):
         self.accept()
 
 class SystemToast(QFrame):
-    """Compact floating system notification."""
+    """Compact, closable notification that pauses while hovered."""
+    closeRequested = Signal(object)
+
     def __init__(self, text, type="info", parent=None):
         super().__init__(parent)
+        self.base_text = str(text or "")
+        self.toast_type = str(type or "info")
+        self.repeat_count = 1
+        self._remaining_ms = 0
+        self._deadline = 0.0
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(lambda: self.closeRequested.emit(self))
         self.setObjectName("SystemToast")
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -10062,14 +10105,14 @@ class SystemToast(QFrame):
             tint_color = DesignTokens.toast_tint_warning
 
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(7, 3, 7, 9)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
         surface = QFrame(self)
         surface.setObjectName("SystemToastSurface")
         outer_layout.addWidget(surface)
 
         layout = QHBoxLayout(surface)
-        layout.setContentsMargins(10, 8, 12, 8)
+        layout.setContentsMargins(10, 9, 8, 9)
         layout.setSpacing(8)
 
         icon_badge = QLabel()
@@ -10088,6 +10131,15 @@ class SystemToast(QFrame):
         msg_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         layout.addWidget(msg_label, 1)
 
+        close_btn = QToolButton()
+        close_btn.setObjectName("SystemToastClose")
+        close_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_tertiary))
+        close_btn.setToolTip("关闭提示")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFixedSize(24, 24)
+        close_btn.clicked.connect(lambda: self.closeRequested.emit(self))
+        layout.addWidget(close_btn, 0, Qt.AlignVCenter)
+
         self.setStyleSheet(
             f"""
             QFrame#SystemToast {{
@@ -10097,7 +10149,7 @@ class SystemToast(QFrame):
             QFrame#SystemToastSurface {{
                 background-color: {DesignTokens.toast_bg};
                 border: 1px solid {DesignTokens.toast_border};
-                border-radius: 16px;
+                border-radius: 8px;
             }}
             QLabel#SystemToastIconBadge {{
                 background-color: {tint_color};
@@ -10110,14 +10162,19 @@ class SystemToast(QFrame):
                 font-weight: 500;
                 background: transparent;
             }}
+            QToolButton#SystemToastClose {{
+                background: transparent; border: none; border-radius: 6px;
+            }}
+            QToolButton#SystemToastClose:hover {{ background: {DesignTokens.bg_hover}; }}
+            QToolButton#SystemToastClose:pressed {{ background: {DesignTokens.bg_pressed}; }}
             """
         )
-        add_soft_shadow(surface, blur=18, y_offset=6, alpha=DesignTokens.toast_shadow_alpha)
 
         self.surface = surface
         self.message_label = msg_label
         self.icon_badge = icon_badge
         self.icon_label = icon_badge
+        self.close_button = close_btn
 
     def apply_dynamic_width(self, message_width):
         target = max(1, min(int(message_width or 0), DesignTokens.toast_max_width))
@@ -10127,6 +10184,31 @@ class SystemToast(QFrame):
         self.setMinimumWidth(min_width)
         self.setMaximumWidth(target)
         self.updateGeometry()
+
+    def set_repeat_count(self, count):
+        self.repeat_count = max(1, int(count or 1))
+        suffix = f"  ×{self.repeat_count}" if self.repeat_count > 1 else ""
+        self.message_label.setText(self.base_text + suffix)
+        self.adjustSize()
+
+    def start_auto_close(self, duration_ms):
+        self._remaining_ms = max(0, int(duration_ms or 0))
+        if self._remaining_ms <= 0:
+            return
+        self._deadline = time.monotonic() + self._remaining_ms / 1000.0
+        self._timer.start(self._remaining_ms)
+
+    def enterEvent(self, event):
+        if self._timer.isActive():
+            self._remaining_ms = max(1, int((self._deadline - time.monotonic()) * 1000))
+            self._timer.stop()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if self._remaining_ms > 0 and not self._timer.isActive():
+            self._deadline = time.monotonic() + self._remaining_ms / 1000.0
+            self._timer.start(self._remaining_ms)
+        super().leaveEvent(event)
 
 
 class FileChip(QFrame):
@@ -11209,13 +11291,12 @@ class OfficeDraftTaskCard(QFrame):
         self.setStyleSheet(
             f"""
             QFrame#OfficeDraftTaskCard {{
-                background: rgba(255, 255, 255, 0.78);
+                background: {DesignTokens.bg_main};
                 border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 20px;
+                border-radius: 8px;
             }}
             """
         )
-        add_soft_shadow(self, blur=18, y_offset=5, alpha=12)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -11263,7 +11344,7 @@ class OfficeDraftTaskCard(QFrame):
         self.toggle_btn.setCheckable(True)
         self.toggle_btn.setFixedHeight(30)
         self.toggle_btn.setStyleSheet(
-            f"QToolButton {{ border: none; border-radius: 15px; padding: 4px 10px; "
+            f"QToolButton {{ border: none; border-radius: 6px; padding: 4px 8px; "
             f"color: {DesignTokens.text_secondary}; font-size: 12px; font-weight: 600; }}"
             f"QToolButton:hover {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}"
             f"QToolButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; }}"
@@ -11335,8 +11416,9 @@ class OfficeDraftTaskCard(QFrame):
         label = QLabel(message)
         label.setWordWrap(True)
         label.setStyleSheet(
-            f"color: {fg}; background: {bg}; border: none; border-radius: 10px; "
-            "font-size: 12px; padding: 7px 12px; margin-left: 40px;"
+            f"color: {fg}; background: transparent; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.separator}; "
+            "font-size: 12px; padding: 7px 8px; margin-left: 40px;"
         )
         self.add_process_widget(label)
         return label
@@ -13586,7 +13668,7 @@ class MainWindow(QMainWindow):
         }
         self.file_browser_search_text = ""
         self.deliverable_type_filter = "all"
-        self.deliverable_sort_mode = "modified"
+        self.deliverable_sort_mode = "modified_desc"
         self.deliverable_conversion_running_target = ""
         self.deliverable_items = []
         self.deliverable_render_fingerprint = None
@@ -13610,13 +13692,11 @@ class MainWindow(QMainWindow):
         self.dynamic_user_bubble_width = DesignTokens.user_bubble_min_width
         self.dynamic_layout_metrics = {}
         self._system_toast_queue = []
+        self._visible_system_toasts = []
         self._active_system_toast = None
         self._system_toast_animation = None
         self._system_toast_position_animation = None
         self._system_toast_animation_phase = None
-        self._system_toast_timer = QTimer(self)
-        self._system_toast_timer.setSingleShot(True)
-        self._system_toast_timer.timeout.connect(self._dismiss_active_system_toast)
         
         # Product-local stylesheet: keep selectors scoped so dialog and content
         # widgets can own their states without inherited chrome.
@@ -14045,69 +14125,52 @@ class MainWindow(QMainWindow):
         self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
         self.file_source_stack.addWidget(self.deliverables_list)
 
-        browser_toolbar = QHBoxLayout()
+        browser_toolbar = QVBoxLayout()
         browser_toolbar.setContentsMargins(0, 0, 0, 0)
-        browser_toolbar.setSpacing(8)
+        browser_toolbar.setSpacing(6)
         self.file_search_input = QLineEdit()
         self.file_search_input.setPlaceholderText("搜索当前工作区")
         self.file_search_input.setClearButtonEnabled(True)
         self.file_search_input.setFixedHeight(DesignTokens.control_height)
         self.file_search_input.textChanged.connect(self.apply_file_workspace_filters)
-        browser_toolbar.addWidget(self.file_search_input, 1)
+        browser_toolbar.addWidget(self.file_search_input)
+
+        filter_sort_row = QHBoxLayout()
+        filter_sort_row.setContentsMargins(0, 0, 0, 0)
+        filter_sort_row.setSpacing(6)
 
         self.deliverable_type_combo = QComboBox()
-        for label, value in (
-            ("全部类型", "all"),
-            ("网页", "html"),
-            ("演示文稿", "presentation"),
-            ("文档", "document"),
-            ("PDF", "pdf"),
-            ("表格", "spreadsheet"),
-            ("图片", "image"),
-        ):
+        self.deliverable_type_combo.setAccessibleName("交付物文件类型")
+        for label, value in DELIVERABLE_FILTER_CATEGORIES:
             self.deliverable_type_combo.addItem(label, value)
         self.deliverable_type_combo.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_type_combo.setMinimumWidth(0)
+        apply_settings_combo_style(self.deliverable_type_combo)
         self.deliverable_type_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
-        browser_toolbar.addWidget(self.deliverable_type_combo)
+        filter_sort_row.addWidget(self.deliverable_type_combo, 1)
 
         self.deliverable_sort_combo = QComboBox()
-        self.deliverable_sort_combo.addItem("最近更新", "modified")
-        self.deliverable_sort_combo.addItem("按名称", "name")
+        self.deliverable_sort_combo.setAccessibleName("交付物排序")
+        self.deliverable_sort_combo.addItem("最近更新", "modified_desc")
+        self.deliverable_sort_combo.addItem("最早更新", "modified_asc")
+        self.deliverable_sort_combo.addItem("名称 A–Z", "name_asc")
+        self.deliverable_sort_combo.addItem("名称 Z–A", "name_desc")
+        self.deliverable_sort_combo.addItem("文件从大到小", "size_desc")
+        self.deliverable_sort_combo.addItem("文件从小到大", "size_asc")
         self.deliverable_sort_combo.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_sort_combo.setMinimumWidth(0)
+        apply_settings_combo_style(self.deliverable_sort_combo)
         self.deliverable_sort_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
-        self.deliverable_type_combo.setVisible(False)
-        self.deliverable_sort_combo.setVisible(False)
-
-        self.deliverable_filter_btn = QToolButton()
-        self.deliverable_filter_btn.setText("筛选")
-        self.deliverable_filter_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.deliverable_filter_btn.setIcon(qta.icon("fa5s.filter", color=DesignTokens.text_secondary))
-        self.deliverable_filter_btn.setPopupMode(QToolButton.InstantPopup)
-        self.deliverable_filter_btn.setFixedHeight(DesignTokens.control_height)
-        self.deliverable_filter_btn.setStyleSheet(
-            product_button_style("secondary").replace("QPushButton", "QToolButton")
-        )
-        self.deliverable_filter_menu = create_styled_menu(self.deliverable_filter_btn)
-        type_menu = self.deliverable_filter_menu.addMenu("文件类型")
-        for index in range(self.deliverable_type_combo.count()):
-            action = type_menu.addAction(self.deliverable_type_combo.itemText(index))
-            action.setCheckable(True)
-            action.setChecked(index == self.deliverable_type_combo.currentIndex())
-            action.triggered.connect(lambda _checked=False, i=index: self._set_deliverable_filter_index("type", i))
-        sort_menu = self.deliverable_filter_menu.addMenu("排序")
-        for index in range(self.deliverable_sort_combo.count()):
-            action = sort_menu.addAction(self.deliverable_sort_combo.itemText(index))
-            action.setCheckable(True)
-            action.setChecked(index == self.deliverable_sort_combo.currentIndex())
-            action.triggered.connect(lambda _checked=False, i=index: self._set_deliverable_filter_index("sort", i))
-        self.deliverable_filter_btn.setMenu(self.deliverable_filter_menu)
-        browser_toolbar.addWidget(self.deliverable_filter_btn)
+        filter_sort_row.addWidget(self.deliverable_sort_combo, 1)
+        browser_toolbar.addLayout(filter_sort_row)
         file_browse_layout.addLayout(browser_toolbar)
 
         self.file_browser_empty_state = ProductEmptyState(
             "还没有可浏览的内容",
             "选择工作区后，可以在这里查找文件并预览交付物。",
+            "清除筛选",
         )
+        self.file_browser_empty_state.action_button.clicked.connect(self.clear_deliverable_filters)
         self.file_browser_empty_state.setVisible(False)
         file_browse_layout.addWidget(self.file_browser_empty_state, 1)
         file_browse_layout.addWidget(self.file_source_stack, 1)
@@ -14948,13 +15011,6 @@ class MainWindow(QMainWindow):
         target = self.FILE_SECTION_DELIVERABLES if current == self.FILE_SECTION_ALL else self.FILE_SECTION_ALL
         self.set_file_workspace_section(target, user_initiated=True)
 
-    def _set_deliverable_filter_index(self, kind, index):
-        combo = self.deliverable_type_combo if kind == "type" else self.deliverable_sort_combo
-        combo.setCurrentIndex(max(0, min(int(index), combo.count() - 1)))
-        menu = self.deliverable_filter_menu.actions()[0].menu() if kind == "type" else self.deliverable_filter_menu.actions()[1].menu()
-        for action_index, action in enumerate(menu.actions()):
-            action.setChecked(action_index == combo.currentIndex())
-
     def set_file_workspace_section(self, section, refresh=True, user_initiated=False):
         section = section if section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables") else getattr(self, "FILE_SECTION_ALL", "all")
         if user_initiated:
@@ -14975,9 +15031,10 @@ class MainWindow(QMainWindow):
         search = getattr(self, "file_search_input", None)
         if search is not None:
             search.setPlaceholderText("搜索交付物" if section == self.FILE_SECTION_DELIVERABLES else "搜索当前工作区")
-        filter_btn = getattr(self, "deliverable_filter_btn", None)
-        if filter_btn is not None:
-            filter_btn.setVisible(section == self.FILE_SECTION_DELIVERABLES)
+        for control_name in ("deliverable_type_combo", "deliverable_sort_combo"):
+            control = getattr(self, control_name, None)
+            if control is not None:
+                control.setVisible(section == self.FILE_SECTION_DELIVERABLES)
         deliverable_controls_visible = section == self.FILE_SECTION_DELIVERABLES
         expand_btn = getattr(self, "deliverable_expand_btn", None)
         if expand_btn is not None:
@@ -15067,10 +15124,19 @@ class MainWindow(QMainWindow):
         type_combo = getattr(self, "deliverable_type_combo", None)
         sort_combo = getattr(self, "deliverable_sort_combo", None)
         self.deliverable_type_filter = str(type_combo.currentData() if type_combo is not None else "all")
-        self.deliverable_sort_mode = str(sort_combo.currentData() if sort_combo is not None else "modified")
+        self.deliverable_sort_mode = str(sort_combo.currentData() if sort_combo is not None else "modified_desc")
         if hasattr(self, "deliverables_list"):
             self._render_deliverable_items()
         self._sync_file_browser_empty_state()
+
+    def clear_deliverable_filters(self):
+        search = getattr(self, "file_search_input", None)
+        type_combo = getattr(self, "deliverable_type_combo", None)
+        if search is not None:
+            search.clear()
+        if type_combo is not None:
+            type_combo.setCurrentIndex(0)
+        self.apply_file_workspace_filters()
 
     def _file_navigation_state(self):
         state = getattr(self, "file_workspace_navigation_state", None)
@@ -15087,16 +15153,39 @@ class MainWindow(QMainWindow):
         return state
 
     def _deliverable_matches_type(self, item, filter_key):
-        ext = os.path.splitext(str(item.get("path") or ""))[1].lower()
-        groups = {
-            "html": {".html", ".htm"},
-            "presentation": {".ppt", ".pptx"},
-            "document": {".doc", ".docx", ".md", ".txt"},
-            "pdf": {".pdf"},
-            "spreadsheet": {".xls", ".xlsx", ".csv", ".tsv"},
-            "image": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"},
-        }
-        return filter_key == "all" or ext in groups.get(filter_key, set())
+        kind = str(item.get("kind") or "").strip().lower()
+        if not kind:
+            ext = os.path.splitext(str(item.get("path") or ""))[1].lower()
+            kind = str(DELIVERABLE_TYPES.get(ext, ("", "", ""))[0])
+        return filter_key == "all" or DELIVERABLE_KIND_CATEGORIES.get(kind) == filter_key
+
+    def _sync_deliverable_filter_options(self):
+        combo = getattr(self, "deliverable_type_combo", None)
+        if combo is None:
+            return
+        current = str(combo.currentData() or "all")
+        counts = {value: 0 for _label, value in DELIVERABLE_FILTER_CATEGORIES}
+        items = list(getattr(self, "deliverable_items", []) or [])
+        counts["all"] = len(items)
+        for item in items:
+            kind = str(item.get("kind") or "").strip().lower()
+            category = DELIVERABLE_KIND_CATEGORIES.get(kind)
+            if category:
+                counts[category] += 1
+        combo.blockSignals(True)
+        try:
+            for index, (label, value) in enumerate(DELIVERABLE_FILTER_CATEGORIES):
+                combo.setItemText(index, f"{label} ({counts[value]})")
+                model_item = combo.model().item(index)
+                if model_item is not None:
+                    model_item.setEnabled(value == "all" or counts[value] > 0)
+            selected_index = combo.findData(current)
+            if selected_index < 0 or (current != "all" and counts.get(current, 0) == 0):
+                selected_index = 0
+            combo.setCurrentIndex(selected_index)
+        finally:
+            combo.blockSignals(False)
+        self.deliverable_type_filter = str(combo.currentData() or "all")
 
     def _filtered_deliverable_items(self):
         query = str(getattr(self, "file_browser_search_text", "") or "").casefold()
@@ -15110,10 +15199,21 @@ class MainWindow(QMainWindow):
                 or query in str(item.get("relative_path") or "").casefold()
             )
         ]
-        if getattr(self, "deliverable_sort_mode", "modified") == "name":
-            items.sort(key=lambda item: str(item.get("name") or "").casefold())
+        mode = str(getattr(self, "deliverable_sort_mode", "modified_desc") or "modified_desc")
+        def path_key(item):
+            return os.path.normcase(os.path.normpath(str(item.get("relative_path") or item.get("path") or ""))).casefold()
+        if mode in {"name", "name_asc"}:
+            items.sort(key=lambda item: (str(item.get("name") or "").casefold(), path_key(item)))
+        elif mode == "name_desc":
+            items.sort(key=lambda item: (str(item.get("name") or "").casefold(), path_key(item)), reverse=True)
+        elif mode == "modified_asc":
+            items.sort(key=lambda item: (float(item.get("mtime") or 0), path_key(item)))
+        elif mode == "size_asc":
+            items.sort(key=lambda item: (float(item.get("size") or 0), path_key(item)))
+        elif mode == "size_desc":
+            items.sort(key=lambda item: (float(item.get("size") or 0), path_key(item)), reverse=True)
         else:
-            items.sort(key=lambda item: float(item.get("mtime") or 0), reverse=True)
+            items.sort(key=lambda item: (float(item.get("mtime") or 0), path_key(item)), reverse=True)
         return items
 
     def _sync_file_browser_empty_state(self, loading=False, error=""):
@@ -15130,7 +15230,16 @@ class MainWindow(QMainWindow):
         elif not workspace or not os.path.isdir(workspace):
             title, description, visible = "还没有选择工作区", "从左侧选择项目后，可以在这里查找和预览文件。", True
         elif section == self.FILE_SECTION_DELIVERABLES and not self._filtered_deliverable_items():
-            title, description, visible = "还没有匹配的交付物", "生成 HTML、PDF、PPTX、DOCX 或图片后，它们会自动出现在这里。", True
+            has_filters = bool(str(getattr(self, "file_browser_search_text", "") or "").strip()) or str(
+                getattr(self, "deliverable_type_filter", "all") or "all"
+            ) != "all"
+            title = "没有匹配的交付物" if has_filters else "还没有交付物"
+            description = (
+                "调整搜索词或清除文件类型筛选。"
+                if has_filters
+                else "生成 HTML、PDF、PPTX、DOCX 或图片后，它们会自动出现在这里。"
+            )
+            visible = True
         elif section == self.FILE_SECTION_ALL:
             try:
                 visible = not bool(os.listdir(workspace))
@@ -15146,6 +15255,16 @@ class MainWindow(QMainWindow):
                 labels[0].setText(title)
             if len(labels) > 1:
                 labels[1].setText(description)
+        action_button = getattr(empty, "action_button", None)
+        if action_button is not None:
+            action_button.setVisible(
+                visible
+                and section == self.FILE_SECTION_DELIVERABLES
+                and (
+                    bool(str(getattr(self, "file_browser_search_text", "") or "").strip())
+                    or str(getattr(self, "deliverable_type_filter", "all") or "all") != "all"
+                )
+            )
         empty.setVisible(visible)
         stack.setVisible(not visible)
 
@@ -16420,7 +16539,7 @@ class MainWindow(QMainWindow):
         phase = "Idle"
         if state:
             phase = getattr(state, "run_phase", "Idle") or "Idle"
-        self.phase_badge.setText(f"Phase: {phase}")
+        self.phase_badge.setText(f"状态：{display_run_phase(phase)}")
 
         has_workspace = bool(self._workspace_dir_for_state(state))
         has_clarify_context = bool(
@@ -16805,7 +16924,7 @@ class MainWindow(QMainWindow):
         state.run_phase = phase
         if state.session_id == self.current_session_id:
             if hasattr(self, "loop_hint"):
-                self.loop_hint.setText(phase or "处理中")
+                self.loop_hint.setText(display_run_phase(phase or "运行中"))
             self.refresh_context_badges(state.session_id)
 
     def _session_has_live_activity(self, session_id):
@@ -17982,7 +18101,9 @@ class MainWindow(QMainWindow):
             if steerable:
                 self.input_field.setPlaceholderText("输入补充说明，将在当前任务的下一个安全节点生效")
             self.pause_btn.setVisible(bool(running))
-            loop_text = getattr(state, "run_phase", "") or ("处理中" if (running_daemon or running_code) else "")
+            loop_text = display_run_phase(
+                getattr(state, "run_phase", "") or ("Running" if (running_daemon or running_code) else "")
+            )
             self.loop_hint.setText(loop_text or "处理中")
             self.loop_hint.setToolTip(loop_text or "处理中")
             self.loop_hint.setVisible(bool(running_daemon or running_code or loop_text))
@@ -18478,9 +18599,12 @@ class MainWindow(QMainWindow):
         allow_free_text = bool(request.get("allow_free_text"))
 
         dialog = QDialog(self)
+        apply_product_dialog(dialog, "InteractionDialog")
         dialog.setWindowTitle(title or "需要你的输入")
         dialog.resize(520, 420)
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -18522,6 +18646,15 @@ class MainWindow(QMainWindow):
         hint_label = QLabel(hint_text)
         hint_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 13px;")
         layout.addWidget(hint_label)
+
+        def show_validation(text, widget=None):
+            hint_label.setText(str(text or "请检查输入。"))
+            hint_label.setStyleSheet(
+                f"color: {DesignTokens.error_text}; background: {DesignTokens.error_bg}; "
+                f"border: none; border-radius: 6px; padding: 7px 9px; font-size: 12px;"
+            )
+            if widget is not None:
+                widget.setFocus()
 
         input_field = QLineEdit()
         input_field.setPlaceholderText("输入补充内容…")
@@ -18602,9 +18735,9 @@ class MainWindow(QMainWindow):
         submit_btn = QPushButton("提交")
         yes_btn = QPushButton("继续")
         no_btn = QPushButton("取消")
-        submit_btn.setStyleSheet(f"background: {DesignTokens.primary}; color: white; border: none; border-radius: 6px; padding: 6px 14px;")
-        yes_btn.setStyleSheet(f"background: {DesignTokens.bg_secondary}; color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; padding: 6px 14px;")
-        no_btn.setStyleSheet(f"background: transparent; color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border}; border-radius: 6px; padding: 6px 14px;")
+        submit_btn.setStyleSheet(product_button_style("primary", radius=8))
+        yes_btn.setStyleSheet(product_button_style("primary", radius=8))
+        no_btn.setStyleSheet(product_button_style("secondary", radius=8))
         if kind == "approval":
             button_layout.addWidget(yes_btn)
             button_layout.addWidget(no_btn)
@@ -18632,8 +18765,7 @@ class MainWindow(QMainWindow):
             picked = selected_values()
             if kind == "text":
                 if not text:
-                    QMessageBox.information(dialog, "提示", "请先输入内容。")
-                    input_field.setFocus()
+                    show_validation("请先输入内容。", input_field)
                     return
                 decision["value"] = text
                 dialog.accept()
@@ -18647,7 +18779,7 @@ class MainWindow(QMainWindow):
                     decision["value"] = text
                     dialog.accept()
                     return
-                QMessageBox.information(dialog, "提示", "请先选择一个选项或输入内容。")
+                show_validation("请先选择一个选项或输入内容。", option_combo or input_field)
                 return
             if kind == "multi_choice":
                 if picked:
@@ -18660,7 +18792,7 @@ class MainWindow(QMainWindow):
                     decision["value"] = [text]
                     dialog.accept()
                     return
-                QMessageBox.information(dialog, "提示", "请先选择至少一个选项或输入内容。")
+                show_validation("请先选择至少一个选项或输入内容。", input_field)
                 return
             if kind == "questionnaire":
                 answers = {}
@@ -18676,8 +18808,7 @@ class MainWindow(QMainWindow):
                         text_value = input_widget.text().strip()
                     if selected == "__custom__":
                         if not text_value:
-                            QMessageBox.information(dialog, "提示", "选择“自定义”后请填写内容。")
-                            input_widget.setFocus()
+                            show_validation("选择“自定义”后请填写内容。", input_widget)
                             return
                         selected = ""
                     else:
@@ -18690,7 +18821,7 @@ class MainWindow(QMainWindow):
                         "raw_value": selected or text_value,
                     }
                 if not answers:
-                    QMessageBox.information(dialog, "提示", "请至少回答一个问题。")
+                    show_validation("请至少回答一个问题。")
                     return
                 decision["value"] = answers
                 dialog.accept()
@@ -21142,6 +21273,19 @@ class MainWindow(QMainWindow):
         if workspace_key != getattr(self, "file_section_workspace_key", ""):
             self.file_section_workspace_key = workspace_key
             self.file_section_user_selected = False
+            search = getattr(self, "file_search_input", None)
+            type_combo = getattr(self, "deliverable_type_combo", None)
+            if search is not None:
+                search.blockSignals(True)
+                search.clear()
+                search.blockSignals(False)
+            if type_combo is not None:
+                type_combo.blockSignals(True)
+                type_combo.setCurrentIndex(0)
+                type_combo.blockSignals(False)
+            self.file_browser_search_text = ""
+            self.deliverable_type_filter = "all"
+        self._sync_deliverable_filter_options()
         if (
             getattr(self, "file_workspace_view_mode", "browse") == "browse"
             and not getattr(self, "file_section_user_selected", False)
@@ -21967,19 +22111,21 @@ class MainWindow(QMainWindow):
     def reveal_in_explorer(self, path):
         if not path:
             return
-        normalized = os.path.abspath(path)
-        if not os.path.exists(normalized):
-            QMessageBox.warning(self, "无法打开资源管理器", f"路径不存在：\n{normalized}")
-            return
-        if platform.system() == "Windows":
-            if os.path.isdir(normalized):
-                subprocess.Popen(["explorer.exe", normalized], **subprocess_kwargs_no_window())
-            else:
-                subprocess.Popen(["explorer.exe", f"/select,{normalized}"], **subprocess_kwargs_no_window())
-        else:
-            target_dir = normalized if os.path.isdir(normalized) else os.path.dirname(normalized)
-            if not QDesktopServices.openUrl(QUrl.fromLocalFile(target_dir)):
-                QMessageBox.warning(self, "无法打开资源管理器", f"无法打开路径：\n{target_dir}")
+        result = reveal_path_in_file_manager(path)
+        log_sub_agent_runtime(
+            "file_manager_reveal",
+            ok=bool(result.ok),
+            action=result.action,
+            path=result.path,
+            error=result.error,
+        )
+        if not result.ok:
+            self.add_system_toast(
+                f"无法在资源管理器中打开：{result.error}\n{result.path}",
+                "error",
+                auto_close_ms=10000,
+            )
+        return result.ok
 
     def copy_path_to_clipboard(self, path):
         if not path:
@@ -24202,151 +24348,95 @@ class MainWindow(QMainWindow):
         )
 
     def _system_toast_duration(self, type="info", auto_close_ms=None):
-        if auto_close_ms is not None and int(auto_close_ms) > 0:
-            return int(auto_close_ms)
+        if auto_close_ms is not None:
+            return max(0, int(auto_close_ms))
         if type == "error":
             return DesignTokens.toast_error_duration_ms
+        if type == "warning":
+            return DesignTokens.toast_warning_duration_ms
         return DesignTokens.toast_default_duration_ms
 
-    def _system_toast_target_position(self, toast):
+    def _system_toast_target_position(self, toast, stack_index=0):
         parent = getattr(self, "main_container", None)
         if parent is None:
             raise RuntimeError("SystemToast requires an initialized main container.")
-        anchor = getattr(self, "conversation_column", None)
-        if anchor is not None and _qt_object_alive(anchor):
-            anchor_top_left = anchor.mapTo(parent, QPoint(0, 0))
-            anchor_x = anchor_top_left.x()
-            anchor_width = anchor.width()
-        else:
-            anchor_x = 0
-            anchor_width = parent.width()
-        available_width = max(1, min(anchor_width - 32, DesignTokens.toast_max_width))
+        available_width = max(1, min(parent.width() - 32, DesignTokens.toast_max_width))
         toast.apply_dynamic_width(available_width)
         toast.adjustSize()
         toast_width = min(toast.width(), available_width)
         toast.resize(toast_width, toast.sizeHint().height())
-        x = anchor_x + max(0, (anchor_width - toast.width()) // 2)
-        return QPoint(x, DesignTokens.toast_top_margin)
+        margin = DesignTokens.toast_edge_margin
+        gap = DesignTokens.toast_stack_gap
+        x = max(margin, parent.width() - toast.width() - margin)
+        visible = [item for item in getattr(self, "_visible_system_toasts", []) if _qt_object_alive(item)]
+        below = visible[-stack_index:] if stack_index > 0 else []
+        occupied = sum(item.height() for item in below) + gap * len(below)
+        y = max(margin, parent.height() - toast.height() - margin - occupied)
+        return QPoint(x, y)
 
     def _position_active_system_toast(self):
-        toast = getattr(self, "_active_system_toast", None)
-        if toast is None or not _qt_object_alive(toast):
-            return
-        target = self._system_toast_target_position(toast)
-        position_animation = getattr(self, "_system_toast_position_animation", None)
-        if position_animation is not None and position_animation.state() == QAbstractAnimation.Running:
-            if getattr(self, "_system_toast_animation_phase", None) == "exit":
-                target -= QPoint(0, DesignTokens.toast_slide_distance)
-            position_animation.setEndValue(target)
-            return
-        toast.move(target)
-        toast.raise_()
+        visible = [item for item in getattr(self, "_visible_system_toasts", []) if _qt_object_alive(item)]
+        self._visible_system_toasts = visible
+        for stack_index, toast in enumerate(reversed(visible)):
+            toast.move(self._system_toast_target_position(toast, stack_index))
+            toast.raise_()
+        self._active_system_toast = visible[-1] if visible else None
 
     def _show_next_system_toast(self):
-        active = getattr(self, "_active_system_toast", None)
-        if active is not None and _qt_object_alive(active):
-            return
-        if not self._system_toast_queue:
-            return
-        payload = self._system_toast_queue.pop(0)
-        toast = SystemToast(payload["text"], payload["type"], self.main_container)
-        toast._display_duration_ms = payload["duration_ms"]
-        opacity_effect = QGraphicsOpacityEffect(toast)
-        opacity_effect.setOpacity(0.0)
-        toast.setGraphicsEffect(opacity_effect)
-        toast._opacity_effect = opacity_effect
-        self._active_system_toast = toast
-
-        target = self._system_toast_target_position(toast)
-        start = target - QPoint(0, DesignTokens.toast_slide_distance)
-        toast.move(start)
-        toast.show()
-        toast.raise_()
-
-        position_animation = QPropertyAnimation(toast, b"pos", toast)
-        position_animation.setDuration(DesignTokens.toast_enter_duration_ms)
-        position_animation.setStartValue(start)
-        position_animation.setEndValue(target)
-        position_animation.setEasingCurve(QEasingCurve.OutCubic)
-        opacity_animation = QPropertyAnimation(opacity_effect, b"opacity", toast)
-        opacity_animation.setDuration(DesignTokens.toast_enter_duration_ms)
-        opacity_animation.setStartValue(0.0)
-        opacity_animation.setEndValue(1.0)
-        opacity_animation.setEasingCurve(QEasingCurve.OutCubic)
-        animation = QParallelAnimationGroup(toast)
-        animation.addAnimation(position_animation)
-        animation.addAnimation(opacity_animation)
-        animation.finished.connect(lambda current=toast: self._complete_system_toast_entry(current))
-        self._system_toast_position_animation = position_animation
-        self._system_toast_animation = animation
-        self._system_toast_animation_phase = "enter"
-        animation.start()
+        while self._system_toast_queue and len(self._visible_system_toasts) < DesignTokens.toast_max_visible:
+            payload = self._system_toast_queue.pop(0)
+            toast = SystemToast(payload["text"], payload["type"], self.main_container)
+            toast.set_repeat_count(payload.get("count", 1))
+            toast.closeRequested.connect(self._dismiss_system_toast)
+            self._visible_system_toasts.append(toast)
+            toast.show()
+            toast.start_auto_close(payload["duration_ms"])
+        self._position_active_system_toast()
 
     def _complete_system_toast_entry(self, toast):
-        if toast is not getattr(self, "_active_system_toast", None) or not _qt_object_alive(toast):
-            return
-        self._system_toast_animation = None
-        self._system_toast_position_animation = None
-        self._system_toast_animation_phase = None
-        toast.move(self._system_toast_target_position(toast))
-        self._system_toast_timer.start(toast._display_duration_ms)
+        self._position_active_system_toast()
 
     def _dismiss_active_system_toast(self):
         toast = getattr(self, "_active_system_toast", None)
-        if toast is None or not _qt_object_alive(toast):
-            return
-        self._system_toast_timer.stop()
-        running_animation = getattr(self, "_system_toast_animation", None)
-        if running_animation is not None:
-            running_animation.stop()
+        if toast is not None:
+            self._dismiss_system_toast(toast)
 
-        start = toast.pos()
-        target = start - QPoint(0, DesignTokens.toast_slide_distance)
-        opacity_effect = toast._opacity_effect
-        position_animation = QPropertyAnimation(toast, b"pos", toast)
-        position_animation.setDuration(DesignTokens.toast_exit_duration_ms)
-        position_animation.setStartValue(start)
-        position_animation.setEndValue(target)
-        position_animation.setEasingCurve(QEasingCurve.InCubic)
-        opacity_animation = QPropertyAnimation(opacity_effect, b"opacity", toast)
-        opacity_animation.setDuration(DesignTokens.toast_exit_duration_ms)
-        opacity_animation.setStartValue(opacity_effect.opacity())
-        opacity_animation.setEndValue(0.0)
-        opacity_animation.setEasingCurve(QEasingCurve.InCubic)
-        animation = QParallelAnimationGroup(toast)
-        animation.addAnimation(position_animation)
-        animation.addAnimation(opacity_animation)
-        animation.finished.connect(lambda current=toast: self._complete_system_toast_exit(current))
-        self._system_toast_position_animation = position_animation
-        self._system_toast_animation = animation
-        self._system_toast_animation_phase = "exit"
-        animation.start()
-
-    def _complete_system_toast_exit(self, toast):
-        if toast is not getattr(self, "_active_system_toast", None):
-            return
-        animation = getattr(self, "_system_toast_animation", None)
-        if animation is not None:
-            animation.stop()
-        self._system_toast_animation = None
-        self._system_toast_position_animation = None
-        self._system_toast_animation_phase = None
-        self._active_system_toast = None
-        toast.hide()
-        toast.deleteLater()
+    def _dismiss_system_toast(self, toast):
+        if toast in getattr(self, "_visible_system_toasts", []):
+            self._visible_system_toasts.remove(toast)
+        if _qt_object_alive(toast):
+            toast.hide()
+            toast.deleteLater()
+        self._position_active_system_toast()
         self._show_next_system_toast()
 
+    def _complete_system_toast_exit(self, toast):
+        self._dismiss_system_toast(toast)
+
     def add_system_toast(self, text, type="info", session_id=None, auto_close_ms=None):
-        state = self.get_session(session_id)
-        if not state:
+        message = str(text or "").strip()
+        if not message:
             return
-        self._system_toast_queue.append(
-            {
-                "text": str(text),
-                "type": type,
-                "duration_ms": self._system_toast_duration(type, auto_close_ms),
-            }
-        )
+        visible = getattr(self, "_visible_system_toasts", [])
+        if visible:
+            latest = visible[-1]
+            if latest.base_text == message and latest.toast_type == type:
+                latest.set_repeat_count(latest.repeat_count + 1)
+                latest.start_auto_close(self._system_toast_duration(type, auto_close_ms))
+                self._position_active_system_toast()
+                return
+        if self._system_toast_queue:
+            latest_payload = self._system_toast_queue[-1]
+            if latest_payload["text"] == message and latest_payload["type"] == type:
+                latest_payload["count"] = int(latest_payload.get("count", 1)) + 1
+                return
+        self._system_toast_queue.append({
+            "text": message,
+            "type": type,
+            "duration_ms": self._system_toast_duration(type, auto_close_ms),
+            "count": 1,
+            "session_id": session_id,
+        })
         self._show_next_system_toast()
 
     def append_log(self, text):

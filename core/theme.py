@@ -127,8 +127,12 @@ class DesignTokens:
     toast_slide_distance = 8
     toast_enter_duration_ms = 180
     toast_exit_duration_ms = 140
-    toast_default_duration_ms = 4000
-    toast_error_duration_ms = 8000
+    toast_default_duration_ms = 6000
+    toast_warning_duration_ms = 8000
+    toast_error_duration_ms = 10000
+    toast_edge_margin = 16
+    toast_stack_gap = 8
+    toast_max_visible = 3
 
     success_bg = "#edf8f2"
     success_text = "#247a4d"

@@ -6,12 +6,60 @@ from unittest.mock import patch
 from core.process_utils import (
     ProcessSingletonLock,
     build_process_singleton_lock_path,
+    reveal_path_in_file_manager,
     runtime_debug_logging_enabled,
     subprocess_kwargs_no_window,
 )
 
 
 class TestProcessUtils(unittest.TestCase):
+    def test_reveal_path_uses_windows_shell_for_directory_and_file(self):
+        calls = []
+
+        def shell_execute(*args):
+            calls.append(args)
+            return 33
+
+        with tempfile.TemporaryDirectory(prefix="中文 路径,") as temp_dir:
+            file_path = os.path.join(temp_dir, "报告, final.pptx")
+            with open(file_path, "wb") as handle:
+                handle.write(b"pptx")
+            directory_result = reveal_path_in_file_manager(
+                temp_dir, system_name="Windows", shell_execute=shell_execute
+            )
+            file_result = reveal_path_in_file_manager(
+                file_path, system_name="Windows", shell_execute=shell_execute
+            )
+
+        self.assertTrue(directory_result.ok)
+        self.assertEqual(directory_result.action, "open_directory")
+        self.assertEqual(calls[0][2], os.path.abspath(temp_dir))
+        self.assertTrue(file_result.ok)
+        self.assertEqual(file_result.action, "select_file")
+        self.assertEqual(calls[1][2], "explorer.exe")
+        self.assertIn('/select,"', calls[1][3])
+        self.assertIn("报告, final.pptx", calls[1][3])
+
+    def test_reveal_path_reports_missing_and_shell_errors(self):
+        empty = reveal_path_in_file_manager("", system_name="Windows", shell_execute=lambda *_args: 33)
+        self.assertFalse(empty.ok)
+        self.assertEqual(empty.error, "路径为空。")
+
+        missing = reveal_path_in_file_manager(
+            os.path.join(tempfile.gettempdir(), "definitely-missing-cowork-file"),
+            system_name="Windows",
+            shell_execute=lambda *_args: 33,
+        )
+        self.assertFalse(missing.ok)
+        self.assertIn("路径不存在", missing.error)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            failed = reveal_path_in_file_manager(
+                temp_dir, system_name="Windows", shell_execute=lambda *_args: 5
+            )
+        self.assertFalse(failed.ok)
+        self.assertIn("错误码 5", failed.error)
+
     def test_subprocess_kwargs_no_window_preserves_non_windows_kwargs(self):
         kwargs = subprocess_kwargs_no_window(stdout="demo")
         self.assertEqual(kwargs["stdout"], "demo")

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QPixmap, QWheelEvent
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QWidget
 
 from main import (
     AgentModuleDialog,
@@ -1598,6 +1598,64 @@ class TestDeliverableScanning(unittest.TestCase):
         items = window._filtered_deliverable_items()
 
         self.assertEqual([item["name"] for item in items], ["a-report.html", "z-report.html"])
+
+    def test_deliverable_filter_categories_follow_registered_kinds(self):
+        window = MainWindow.__new__(MainWindow)
+        cases = {
+            "html": "html",
+            "markdown": "document",
+            "docx": "document",
+            "pdf": "pdf",
+            "pptx": "presentation",
+            "xlsx": "spreadsheet",
+            "image": "image",
+        }
+        for kind, category in cases.items():
+            with self.subTest(kind=kind):
+                self.assertTrue(window._deliverable_matches_type({"kind": kind}, category))
+                self.assertFalse(window._deliverable_matches_type({"kind": kind}, "unknown"))
+
+    def test_deliverable_sort_modes_are_stable_and_complete(self):
+        window = MainWindow.__new__(MainWindow)
+        window.file_browser_search_text = ""
+        window.deliverable_type_filter = "all"
+        window.deliverable_items = [
+            {"name": "b.pptx", "relative_path": "z/b.pptx", "kind": "pptx", "mtime": 20, "size": 5},
+            {"name": "a.pptx", "relative_path": "b/a.pptx", "kind": "pptx", "mtime": 10, "size": 30},
+            {"name": "a.pptx", "relative_path": "a/a.pptx", "kind": "pptx", "mtime": 10, "size": 10},
+        ]
+        expected = {
+            "modified_desc": ["z/b.pptx", "b/a.pptx", "a/a.pptx"],
+            "modified_asc": ["a/a.pptx", "b/a.pptx", "z/b.pptx"],
+            "name_asc": ["a/a.pptx", "b/a.pptx", "z/b.pptx"],
+            "name_desc": ["z/b.pptx", "b/a.pptx", "a/a.pptx"],
+            "size_desc": ["b/a.pptx", "a/a.pptx", "z/b.pptx"],
+            "size_asc": ["z/b.pptx", "a/a.pptx", "b/a.pptx"],
+        }
+        for mode, paths in expected.items():
+            with self.subTest(mode=mode):
+                window.deliverable_sort_mode = mode
+                self.assertEqual(
+                    [item["relative_path"] for item in window._filtered_deliverable_items()], paths
+                )
+
+    def test_deliverable_type_counts_disable_empty_categories(self):
+        QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        window.deliverable_type_combo = QComboBox()
+        for label, value in (
+            ("全部类型", "all"), ("网页", "html"), ("演示文稿", "presentation"),
+            ("文档", "document"), ("PDF", "pdf"), ("表格", "spreadsheet"), ("图片", "image"),
+        ):
+            window.deliverable_type_combo.addItem(label, value)
+        window.deliverable_items = [
+            {"kind": "pptx"}, {"kind": "pptx"}, {"kind": "pdf"},
+        ]
+        window._sync_deliverable_filter_options()
+        self.assertEqual(window.deliverable_type_combo.itemText(0), "全部类型 (3)")
+        self.assertEqual(window.deliverable_type_combo.itemText(2), "演示文稿 (2)")
+        self.assertTrue(window.deliverable_type_combo.model().item(2).isEnabled())
+        self.assertFalse(window.deliverable_type_combo.model().item(1).isEnabled())
 
     def test_directory_click_only_toggles_tree_expansion(self):
         window = MainWindow.__new__(MainWindow)

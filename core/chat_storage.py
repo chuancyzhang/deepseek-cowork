@@ -106,6 +106,29 @@ class ChatStorage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS deliverables (
+                    id TEXT PRIMARY KEY,
+                    workspace_path TEXT NOT NULL,
+                    workspace_key TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    path_key TEXT NOT NULL,
+                    conversation_id TEXT,
+                    source TEXT NOT NULL,
+                    created_at INTEGER,
+                    updated_at INTEGER,
+                    UNIQUE(workspace_key, path_key),
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_deliverables_workspace_updated
+                ON deliverables(workspace_key, updated_at DESC)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS agents (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT NOT NULL,
@@ -1363,6 +1386,110 @@ class ChatStorage:
         with self._connect() as conn:
             conn.execute("DELETE FROM im_sessions WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+
+    @staticmethod
+    def _normalize_deliverable_location(path):
+        text = str(path or "").strip()
+        if not text:
+            return "", ""
+        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(text)))
+        return normalized, os.path.normcase(normalized)
+
+    def register_deliverable(self, workspace_path, path, conversation_id=None, source="generated"):
+        workspace, workspace_key = self._normalize_deliverable_location(workspace_path)
+        deliverable_path, path_key = self._normalize_deliverable_location(path)
+        if not workspace or not deliverable_path:
+            raise ValueError("workspace_path and path are required")
+        try:
+            if os.path.commonpath([workspace, deliverable_path]) != workspace:
+                raise ValueError("deliverable path must stay inside the workspace")
+        except ValueError as exc:
+            raise ValueError("deliverable path must stay inside the workspace") from exc
+        now = int(time.time())
+        deliverable_id = uuid.uuid4().hex
+        normalized_source = str(source or "generated").strip() or "generated"
+        normalized_conversation_id = str(conversation_id or "").strip() or None
+        with self._connect() as conn:
+            if normalized_conversation_id:
+                conversation_exists = conn.execute(
+                    "SELECT 1 FROM conversations WHERE id = ?",
+                    (normalized_conversation_id,),
+                ).fetchone()
+                if not conversation_exists:
+                    normalized_conversation_id = None
+            existing = conn.execute(
+                "SELECT id, created_at FROM deliverables WHERE workspace_key = ? AND path_key = ?",
+                (workspace_key, path_key),
+            ).fetchone()
+            if existing:
+                deliverable_id = existing["id"]
+                conn.execute(
+                    """
+                    UPDATE deliverables
+                    SET workspace_path = ?, path = ?, conversation_id = COALESCE(?, conversation_id),
+                        source = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (workspace, deliverable_path, normalized_conversation_id, normalized_source, now, deliverable_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO deliverables (
+                        id, workspace_path, workspace_key, path, path_key,
+                        conversation_id, source, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        deliverable_id, workspace, workspace_key, deliverable_path, path_key,
+                        normalized_conversation_id, normalized_source, now, now,
+                    ),
+                )
+        return deliverable_id
+
+    def list_deliverables(self, workspace_path, prune_missing=True):
+        _workspace, workspace_key = self._normalize_deliverable_location(workspace_path)
+        if not workspace_key:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, workspace_path, path, conversation_id, source, created_at, updated_at
+                FROM deliverables
+                WHERE workspace_key = ?
+                ORDER BY updated_at DESC, path COLLATE NOCASE ASC
+                """,
+                (workspace_key,),
+            ).fetchall()
+            missing_ids = [row["id"] for row in rows if not os.path.isfile(row["path"])]
+            if prune_missing and missing_ids:
+                conn.executemany("DELETE FROM deliverables WHERE id = ?", [(item,) for item in missing_ids])
+                rows = [row for row in rows if row["id"] not in set(missing_ids)]
+        return [dict(row) for row in rows]
+
+    def unregister_deliverable(self, workspace_path, path):
+        _workspace, workspace_key = self._normalize_deliverable_location(workspace_path)
+        _path, path_key = self._normalize_deliverable_location(path)
+        if not workspace_key or not path_key:
+            return False
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM deliverables WHERE workspace_key = ? AND path_key = ?",
+                (workspace_key, path_key),
+            )
+        return bool(cursor.rowcount)
+
+    def is_deliverable(self, workspace_path, path):
+        _workspace, workspace_key = self._normalize_deliverable_location(workspace_path)
+        _path, path_key = self._normalize_deliverable_location(path)
+        if not workspace_key or not path_key:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM deliverables WHERE workspace_key = ? AND path_key = ?",
+                (workspace_key, path_key),
+            ).fetchone()
+        return row is not None
 
     def has_conversation(self, conversation_id):
         with self._connect() as conn:

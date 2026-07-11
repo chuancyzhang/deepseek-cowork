@@ -52,6 +52,7 @@ from ui.primitives import (
     ProductPageHeader,
     ProductSection,
     ProductStatusBadge,
+    ProductTooltipController,
     apply_product_dialog,
     product_button_style,
     product_code_style,
@@ -372,6 +373,7 @@ STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
 PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
 CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
+ATTACHMENT_LOG_FILENAME = "attachments.log"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
 
@@ -432,6 +434,20 @@ def log_ppt_agent_debug(stage, **fields):
         payload.update(fields or {})
         append_background_process_log(
             PPT_AGENT_DEBUG_LOG_FILENAME,
+            json.dumps(payload, ensure_ascii=False, default=str),
+        )
+    except Exception:
+        pass
+
+
+def log_attachment_event(stage, **fields):
+    if not runtime_debug_logging_enabled():
+        return
+    try:
+        payload = {"stage": stage}
+        payload.update(fields or {})
+        append_background_process_log(
+            ATTACHMENT_LOG_FILENAME,
             json.dumps(payload, ensure_ascii=False, default=str),
         )
     except Exception:
@@ -1222,6 +1238,10 @@ def initialize_desktop_theme(app):
     font.setPointSize(10)
     app.setFont(font)
     apply_tooltip_theme(app)
+    controller = getattr(app, "product_tooltip_controller", None)
+    if controller is None:
+        controller = ProductTooltipController(app)
+        app.product_tooltip_controller = controller
 
 
 def apple_inline_project_chip_style(active=False):
@@ -1353,6 +1373,11 @@ def linear_dialog_stylesheet(object_name):
         }}
         {selector} QPushButton#PrimaryBtn:hover {{ background: {DesignTokens.primary_hover}; }}
         {selector} QPushButton#PrimaryBtn:pressed {{ background: {DesignTokens.primary_pressed}; }}
+        {selector} QPushButton#PrimaryBtn:disabled {{
+            background: {DesignTokens.bg_disabled};
+            color: {DesignTokens.text_disabled};
+            border-color: {DesignTokens.border_subtle};
+        }}
         {selector} QPushButton#SecondaryBtn {{
             background: {DesignTokens.bg_main};
             color: {DesignTokens.text_primary};
@@ -1695,14 +1720,43 @@ class DeliverableScanWorker(QThread):
     completed = Signal(object, int)
     failed = Signal(str, int)
 
-    def __init__(self, workspace_dir, generation, parent=None):
+    def __init__(self, workspace_dir, records, generation, parent=None):
         super().__init__(parent)
         self.workspace_dir = workspace_dir
+        self.records = list(records or [])
         self.generation = int(generation)
 
     def run(self):
         try:
-            self.completed.emit(scan_workspace_deliverables(self.workspace_dir), self.generation)
+            items = []
+            root = os.path.abspath(self.workspace_dir)
+            for record in self.records:
+                path = os.path.normpath(str(record.get("path") or ""))
+                if not path or not os.path.isfile(path):
+                    continue
+                ext = os.path.splitext(path)[1].lower()
+                if ext not in DELIVERABLE_EXTENSIONS:
+                    continue
+                stat = os.stat(path)
+                kind, label, icon = DELIVERABLE_EXTENSIONS[ext]
+                try:
+                    relative_path = os.path.relpath(path, root)
+                except ValueError:
+                    relative_path = path
+                items.append({
+                    "path": path,
+                    "relative_path": os.path.normpath(relative_path),
+                    "name": os.path.basename(path),
+                    "kind": kind,
+                    "type_label": label,
+                    "icon": icon,
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                    "source": record.get("source") or "generated",
+                    "conversation_id": record.get("conversation_id"),
+                })
+            items.sort(key=lambda item: (item.get("mtime") or 0, item.get("relative_path") or ""), reverse=True)
+            self.completed.emit(items, self.generation)
         except Exception as exc:
             self.failed.emit(str(exc), self.generation)
 
@@ -3891,6 +3945,8 @@ class ModelChannelEditor(QFrame):
 
 
 class ModelChannelManager(QWidget):
+    changed = Signal()
+
     def __init__(self, channels, parent=None):
         super().__init__(parent)
         self.editors = []
@@ -3946,6 +4002,7 @@ class ModelChannelManager(QWidget):
         }
         editor = self._add_editor(channel, expanded=True)
         self._collapse_others(editor)
+        self.changed.emit()
 
     def delete_channel(self, editor):
         reply = QMessageBox.question(
@@ -3963,12 +4020,15 @@ class ModelChannelManager(QWidget):
             editor.deleteLater()
         if self.editors and not any(item.expanded for item in self.editors):
             self.editors[0].set_expanded(True)
+        self.changed.emit()
 
     def get_channels(self):
         return [editor.get_channel_config() for editor in self.editors]
 
 
 class AgentProfileManager(QWidget):
+    changed = Signal()
+
     def __init__(self, profiles, skill_provider, parent=None):
         super().__init__(parent)
         self.skill_provider = skill_provider
@@ -4146,16 +4206,22 @@ class AgentProfileManager(QWidget):
         if index < 0 or index >= len(self.profiles):
             return
         profile = self.profiles[index]
-        profile["enabled"] = self.enabled_check.isChecked()
-        profile["name"] = self.name_input.text().strip() or "未命名智能体"
-        profile["description"] = self.description_input.text().strip()
-        profile["system_prompt"] = self.system_prompt_edit.toPlainText().strip()
-        profile["skill_names"] = self._selected_skill_names_from_widgets()
+        updated = {
+            "enabled": self.enabled_check.isChecked(),
+            "name": self.name_input.text().strip() or "未命名智能体",
+            "description": self.description_input.text().strip(),
+            "system_prompt": self.system_prompt_edit.toPlainText().strip(),
+            "skill_names": self._selected_skill_names_from_widgets(),
+        }
+        if all(profile.get(key) == value for key, value in updated.items()):
+            return
+        profile.update(updated)
         profile["updated_at"] = int(time.time())
         self._refresh_profile_list()
         self.profile_list.blockSignals(True)
         self.profile_list.setCurrentRow(index)
         self.profile_list.blockSignals(False)
+        self.changed.emit()
 
     def _on_profile_changed(self, index):
         if self._current_index >= 0:
@@ -4181,6 +4247,7 @@ class AgentProfileManager(QWidget):
         self.profiles.append(profile)
         self._refresh_profile_list()
         self.profile_list.setCurrentRow(len(self.profiles) - 1)
+        self.changed.emit()
 
     def copy_profile(self):
         index = self.profile_list.currentRow()
@@ -4195,6 +4262,7 @@ class AgentProfileManager(QWidget):
         self.profiles.insert(index + 1, source)
         self._refresh_profile_list()
         self.profile_list.setCurrentRow(index + 1)
+        self.changed.emit()
 
     def delete_profile(self):
         index = self.profile_list.currentRow()
@@ -4215,6 +4283,7 @@ class AgentProfileManager(QWidget):
             self.profile_list.setCurrentRow(min(index, len(self.profiles) - 1))
         else:
             self.add_profile()
+        self.changed.emit()
 
     def get_profiles(self):
         self._sync_current_profile_from_fields()
@@ -5512,6 +5581,8 @@ class McpServerEditDialog(QDialog):
 
 
 class McpServerManager(QWidget):
+    changed = Signal()
+
     def __init__(self, servers, parent=None):
         super().__init__(parent)
         self.servers = json.loads(json.dumps(servers or [], ensure_ascii=False))
@@ -5610,6 +5681,7 @@ class McpServerManager(QWidget):
         self.servers.append(dialog.get_server_config())
         self._refresh_list()
         self.server_list.setCurrentRow(self.server_list.count() - 1)
+        self.changed.emit()
 
     def _find_duplicate_server_index(self, server):
         target_id = str(server.get("id") or "").strip().lower()
@@ -5694,6 +5766,7 @@ class McpServerManager(QWidget):
         if skipped_count:
             message += f" 已跳过 {skipped_count} 个重复配置。"
         self.status_label.setText(message)
+        self.changed.emit()
         QMessageBox.information(self, "导入 MCP JSON", message)
 
     def edit_server(self):
@@ -5706,6 +5779,7 @@ class McpServerManager(QWidget):
         self.servers[index] = dialog.get_server_config()
         self._refresh_list()
         self.server_list.setCurrentRow(index)
+        self.changed.emit()
 
     def delete_server(self):
         index = self._current_index()
@@ -5722,6 +5796,7 @@ class McpServerManager(QWidget):
             return
         del self.servers[index]
         self._refresh_list()
+        self.changed.emit()
 
     def test_server(self):
         index = self._current_index()
@@ -5974,6 +6049,8 @@ class SettingsDialog(QDialog):
         self._main = parent
         self.requires_skill_reload = False
         self._settings_dirty = False
+        self._allow_close_without_prompt = False
+        self._settings_baseline = ""
         apply_product_dialog(self, "SettingsDialog")
 
         layout = QVBoxLayout(self)
@@ -6586,10 +6663,11 @@ class SettingsDialog(QDialog):
         action_bar.layout.addWidget(cancel_btn)
         action_bar.layout.addWidget(self.save_settings_btn)
         layout.addWidget(action_bar)
+        self._settings_baseline = self._settings_state_signature()
         self._connect_settings_dirty_tracking()
 
     def _connect_settings_dirty_tracking(self):
-        callback = lambda *_args: self._mark_settings_dirty()
+        callback = lambda *_args: self._refresh_settings_dirty_state()
         for editor in self.findChildren(QLineEdit):
             editor.textChanged.connect(callback)
         for editor in self.findChildren(QTextEdit):
@@ -6605,26 +6683,78 @@ class SettingsDialog(QDialog):
         for date_edit in self.findChildren(QDateTimeEdit):
             date_edit.dateTimeChanged.connect(callback)
         for manager in (self.model_channel_manager, self.agent_profile_manager, self.mcp_server_manager):
-            for button in manager.findChildren(QPushButton):
-                button.clicked.connect(callback)
-            for button in manager.findChildren(QToolButton):
-                button.clicked.connect(callback)
+            manager.changed.connect(callback)
+
+    @staticmethod
+    def _strip_settings_state_metadata(value):
+        if isinstance(value, dict):
+            return {
+                key: SettingsDialog._strip_settings_state_metadata(item)
+                for key, item in value.items()
+                if key not in {"created_at", "updated_at"}
+            }
+        if isinstance(value, list):
+            return [SettingsDialog._strip_settings_state_metadata(item) for item in value]
+        return value
+
+    def _settings_state_signature(self):
+        provider_fields = {
+            "feishu": self.feishu_fields,
+            "dingtalk": self.dingtalk_fields,
+            "wecom": self.wecom_fields,
+        }
+        im_providers = {}
+        im_enabled = []
+        for name, fields in provider_fields.items():
+            values = {key: editor.text().strip() for key, editor in fields.items()}
+            enabled = bool(self.im_provider_checks.get(name) and self.im_provider_checks[name].isChecked())
+            values["enabled"] = enabled
+            if name == "feishu":
+                values["long_connection"] = True
+            if enabled:
+                im_enabled.append(name)
+            im_providers[name] = values
+        source_state = {}
+        for kind in ("python", "node"):
+            combo = getattr(self, f"{kind}_source_combo")
+            editor = getattr(self, f"{kind}_source_url")
+            source_state[kind] = {
+                "selected": str(combo.currentData() or ""),
+                "url": editor.text().strip(),
+            }
+        state = {
+            "model_channels": self.model_channel_manager.get_channels(),
+            "agent_profiles": self.agent_profile_manager.get_profiles(),
+            "mcp_servers": normalize_mcp_servers(self.mcp_server_manager.get_servers()),
+            "default_workspace": self.default_ws_input.text().strip(),
+            "history_dir": self.history_dir_input.text().strip(),
+            "god_mode": self.god_mode_check.isChecked(),
+            "download_sources": source_state,
+            "im_gateway": {"enabled_providers": im_enabled, "providers": im_providers},
+        }
+        state = self._strip_settings_state_metadata(state)
+        return json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _refresh_settings_dirty_state(self):
+        dirty = self._settings_state_signature() != self._settings_baseline
+        self._settings_dirty = dirty
+        if hasattr(self, "save_settings_btn"):
+            self.save_settings_btn.setEnabled(dirty)
+        if hasattr(self, "settings_dirty_label"):
+            self.settings_dirty_label.setText("有未保存的修改" if dirty else "没有未保存的修改")
 
     def _mark_settings_dirty(self):
-        self._settings_dirty = True
-        if hasattr(self, "save_settings_btn"):
-            self.save_settings_btn.setEnabled(True)
-        if hasattr(self, "settings_dirty_label"):
-            self.settings_dirty_label.setText("有未保存的修改")
+        self._refresh_settings_dirty_state()
 
     def _clear_settings_dirty(self):
         self._settings_dirty = False
+        self._settings_baseline = self._settings_state_signature()
         if hasattr(self, "save_settings_btn"):
             self.save_settings_btn.setEnabled(False)
         if hasattr(self, "settings_dirty_label"):
             self.settings_dirty_label.setText("没有未保存的修改")
 
-    def request_reject(self):
+    def _confirm_discard_settings(self):
         if self._settings_dirty:
             reply = QMessageBox.question(
                 self,
@@ -6634,22 +6764,21 @@ class SettingsDialog(QDialog):
                 QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
-                return
-            self._clear_settings_dirty()
+                return False
+        return True
+
+    def request_reject(self):
+        if not self._confirm_discard_settings():
+            return
+        self._allow_close_without_prompt = True
+        self._clear_settings_dirty()
         self.reject()
 
     def closeEvent(self, event):
+        if not self._allow_close_without_prompt and not self._confirm_discard_settings():
+            event.ignore()
+            return
         if self._settings_dirty:
-            reply = QMessageBox.question(
-                self,
-                "还有未保存的设置",
-                "关闭后将丢弃尚未保存的修改，确定继续吗？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                event.ignore()
-                return
             self._clear_settings_dirty()
         event.accept()
 
@@ -7149,6 +7278,7 @@ class SettingsDialog(QDialog):
             self._save_im_gateway_config()
         self.requires_skill_reload = mcp_servers != current_mcp_servers
         self._clear_settings_dirty()
+        self._allow_close_without_prompt = True
         self.accept()
 
 
@@ -8669,11 +8799,16 @@ class AutoResizingInputEdit(QTextEdit):
         QTimer.singleShot(0, self.adjustHeight)
 
     def canInsertFromMimeData(self, source):
-        if source and source.hasText():
+        if source and (source.hasText() or source.hasImage()):
             return True
         return super().canInsertFromMimeData(source)
 
     def insertFromMimeData(self, source):
+        if source and source.hasImage():
+            window = self.window()
+            if window and hasattr(window, "_add_clipboard_image"):
+                window._add_clipboard_image(source.imageData())
+                return
         if source and source.hasText():
             self.insertPlainText(source.text())
             return
@@ -9234,9 +9369,8 @@ class SidebarHoverTipController(QObject):
         if not text:
             raise ValueError("侧边栏按钮提示文案不能为空。")
         self._texts[widget] = text
-        widget.setToolTip("")
+        widget.setToolTip(text)
         widget.setAccessibleName(text)
-        widget.installEventFilter(self)
         return widget
 
     def eventFilter(self, obj, event):
@@ -10009,11 +10143,24 @@ class FileChip(QFrame):
         )
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
+        is_image = self.path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+        layout.setContentsMargins(6 if is_image else 10, 6, 8 if is_image else 10, 6)
         layout.setSpacing(6)
 
         icon_label = QLabel()
-        icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
+        if is_image:
+            pixmap = QPixmap(self.path)
+            if not pixmap.isNull():
+                icon_label.setFixedSize(40, 40)
+                icon_label.setAlignment(Qt.AlignCenter)
+                icon_label.setPixmap(pixmap.scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                icon_label.setStyleSheet(
+                    f"background: {DesignTokens.bg_secondary}; border: none; border-radius: 5px;"
+                )
+            else:
+                icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
+        else:
+            icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
         layout.addWidget(icon_label)
 
         name = os.path.basename(self.path) or self.path
@@ -13427,6 +13574,8 @@ class MainWindow(QMainWindow):
         self.file_workspace_view_mode = "browse"
         self.file_workspace_route_origin = "browse"
         self.file_workspace_return_section = self.FILE_SECTION_DELIVERABLES
+        self.file_section_user_selected = False
+        self.file_section_workspace_key = ""
         self.file_workspace_navigation_state = {
             "section": self.FILE_SECTION_ALL,
             "origin": "browse",
@@ -13843,23 +13992,23 @@ class MainWindow(QMainWindow):
         file_detail_layout.setContentsMargins(0, 0, 0, 0)
         file_detail_layout.setSpacing(10)
 
-        file_segment_bar = QFrame()
-        file_segment_bar.setProperty("uiSurface", True)
-        file_segment_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
-        file_segment_layout = QHBoxLayout(file_segment_bar)
-        file_segment_layout.setContentsMargins(4, 4, 4, 4)
-        file_segment_layout.setSpacing(4)
+        file_mode_row = QHBoxLayout()
+        file_mode_row.setContentsMargins(0, 0, 0, 0)
+        file_mode_row.setSpacing(8)
+        self.file_mode_title = QLabel("工作区")
+        self.file_mode_title.setStyleSheet(apple_settings_section_title_style())
+        file_mode_row.addWidget(self.file_mode_title)
+        file_mode_row.addStretch()
+        self.file_workspace_toggle_btn = QPushButton("浏览工作区")
+        self.file_workspace_toggle_btn.setObjectName("SecondaryBtn")
+        self.file_workspace_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.file_workspace_toggle_btn.setFixedHeight(DesignTokens.control_height)
+        self.file_workspace_toggle_btn.setStyleSheet(product_button_style("secondary"))
+        self.file_workspace_toggle_btn.clicked.connect(self.toggle_file_workspace_section)
+        self.file_workspace_toggle_btn.setVisible(False)
+        file_mode_row.addWidget(self.file_workspace_toggle_btn)
+        file_browse_layout.addLayout(file_mode_row)
         self.file_section_buttons = {}
-        for section, title in ((self.FILE_SECTION_ALL, "工作区"), (self.FILE_SECTION_DELIVERABLES, "交付物")):
-            btn = QPushButton(title)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(30)
-            btn.setStyleSheet(apple_segmented_button_style())
-            btn.clicked.connect(lambda checked=False, value=section: self.set_file_workspace_section(value))
-            file_segment_layout.addWidget(btn)
-            self.file_section_buttons[section] = btn
-        file_browse_layout.addWidget(file_segment_bar)
         
         self.right_inner_splitter = SmartSplitter(Qt.Vertical)
         self.right_inner_splitter.setChildrenCollapsible(False)
@@ -13926,7 +14075,33 @@ class MainWindow(QMainWindow):
         self.deliverable_sort_combo.addItem("按名称", "name")
         self.deliverable_sort_combo.setFixedHeight(DesignTokens.control_height)
         self.deliverable_sort_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
-        browser_toolbar.addWidget(self.deliverable_sort_combo)
+        self.deliverable_type_combo.setVisible(False)
+        self.deliverable_sort_combo.setVisible(False)
+
+        self.deliverable_filter_btn = QToolButton()
+        self.deliverable_filter_btn.setText("筛选")
+        self.deliverable_filter_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.deliverable_filter_btn.setIcon(qta.icon("fa5s.filter", color=DesignTokens.text_secondary))
+        self.deliverable_filter_btn.setPopupMode(QToolButton.InstantPopup)
+        self.deliverable_filter_btn.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_filter_btn.setStyleSheet(
+            product_button_style("secondary").replace("QPushButton", "QToolButton")
+        )
+        self.deliverable_filter_menu = create_styled_menu(self.deliverable_filter_btn)
+        type_menu = self.deliverable_filter_menu.addMenu("文件类型")
+        for index in range(self.deliverable_type_combo.count()):
+            action = type_menu.addAction(self.deliverable_type_combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.deliverable_type_combo.currentIndex())
+            action.triggered.connect(lambda _checked=False, i=index: self._set_deliverable_filter_index("type", i))
+        sort_menu = self.deliverable_filter_menu.addMenu("排序")
+        for index in range(self.deliverable_sort_combo.count()):
+            action = sort_menu.addAction(self.deliverable_sort_combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.deliverable_sort_combo.currentIndex())
+            action.triggered.connect(lambda _checked=False, i=index: self._set_deliverable_filter_index("sort", i))
+        self.deliverable_filter_btn.setMenu(self.deliverable_filter_menu)
+        browser_toolbar.addWidget(self.deliverable_filter_btn)
         file_browse_layout.addLayout(browser_toolbar)
 
         self.file_browser_empty_state = ProductEmptyState(
@@ -14667,6 +14842,7 @@ class MainWindow(QMainWindow):
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
         self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
+        self._cleanup_orphan_attachment_dirs()
         self.chat_save_worker = ChatSaveWorker(self.chat_storage.db_path, parent=self)
         self.chat_save_worker.save_failed.connect(self.handle_chat_save_failed)
         self.chat_save_worker.save_completed.connect(self.handle_chat_save_completed)
@@ -14767,23 +14943,41 @@ class MainWindow(QMainWindow):
         if len(sizes) == 2 and all(value > 0 for value in sizes):
             self.config_manager.set("deliverables_splitter_sizes", sizes)
 
-    def set_file_workspace_section(self, section, refresh=True):
+    def toggle_file_workspace_section(self):
+        current = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+        target = self.FILE_SECTION_DELIVERABLES if current == self.FILE_SECTION_ALL else self.FILE_SECTION_ALL
+        self.set_file_workspace_section(target, user_initiated=True)
+
+    def _set_deliverable_filter_index(self, kind, index):
+        combo = self.deliverable_type_combo if kind == "type" else self.deliverable_sort_combo
+        combo.setCurrentIndex(max(0, min(int(index), combo.count() - 1)))
+        menu = self.deliverable_filter_menu.actions()[0].menu() if kind == "type" else self.deliverable_filter_menu.actions()[1].menu()
+        for action_index, action in enumerate(menu.actions()):
+            action.setChecked(action_index == combo.currentIndex())
+
+    def set_file_workspace_section(self, section, refresh=True, user_initiated=False):
         section = section if section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables") else getattr(self, "FILE_SECTION_ALL", "all")
+        if user_initiated:
+            self.file_section_user_selected = True
         self.file_workspace_section = section
         self._file_navigation_state()["section"] = section
         stack = getattr(self, "file_source_stack", None)
         if stack is not None:
             stack.setCurrentIndex(1 if section == self.FILE_SECTION_DELIVERABLES else 0)
             stack.setVisible(True)
-        for key, btn in getattr(self, "file_section_buttons", {}).items():
-            btn.setChecked(key == section)
+        if hasattr(self, "file_mode_title"):
+            self.file_mode_title.setText("交付物" if section == self.FILE_SECTION_DELIVERABLES else "工作区")
+        has_deliverables = bool(getattr(self, "deliverable_items", []) or [])
+        toggle = getattr(self, "file_workspace_toggle_btn", None)
+        if toggle is not None:
+            toggle.setVisible(has_deliverables)
+            toggle.setText("浏览工作区" if section == self.FILE_SECTION_DELIVERABLES else "返回交付物")
         search = getattr(self, "file_search_input", None)
         if search is not None:
             search.setPlaceholderText("搜索交付物" if section == self.FILE_SECTION_DELIVERABLES else "搜索当前工作区")
-        for control_name in ("deliverable_type_combo", "deliverable_sort_combo"):
-            control = getattr(self, control_name, None)
-            if control is not None:
-                control.setVisible(section == self.FILE_SECTION_DELIVERABLES)
+        filter_btn = getattr(self, "deliverable_filter_btn", None)
+        if filter_btn is not None:
+            filter_btn.setVisible(section == self.FILE_SECTION_DELIVERABLES)
         deliverable_controls_visible = section == self.FILE_SECTION_DELIVERABLES
         expand_btn = getattr(self, "deliverable_expand_btn", None)
         if expand_btn is not None:
@@ -15463,6 +15657,27 @@ class MainWindow(QMainWindow):
             return False
         return bool(profile.get("supports_vision", False))
 
+    def _ensure_vision_attachment_support(self, state, file_paths):
+        image_paths = [path for path in self._normalize_prompt_file_paths(file_paths) if self._is_supported_image_attachment(path)]
+        if not image_paths or self._selected_model_supports_vision(state):
+            return True
+        log_attachment_event(
+            "vision_preflight_blocked",
+            session_id=getattr(state, "session_id", ""),
+            image_count=len(image_paths),
+            model_id=self._model_id_for_state(state),
+        )
+        if state and state.session_id == self.current_session_id:
+            self.add_system_toast(
+                "当前模型未配置图片理解。图片已保留，请切换到支持图片的模型后再发送。",
+                "warning",
+                session_id=state.session_id,
+                auto_close_ms=6000,
+            )
+            self.model_select_btn.setFocus(Qt.OtherFocusReason)
+            QTimer.singleShot(0, self.model_select_btn.showMenu)
+        return False
+
     def _resolve_text_image_references(self, user_text, existing_paths=None):
         if not getattr(self, "workspace_dir", None):
             return []
@@ -15533,6 +15748,79 @@ class MainWindow(QMainWindow):
     def _current_prompt_files(self, session_id=None):
         state = self.get_session(session_id)
         return list(getattr(state, "prompt_files", []) or []) if state else []
+
+    def _managed_attachment_root(self):
+        return os.path.join(self.chat_history_dir, "attachments")
+
+    def _session_attachment_dir(self, session_id):
+        safe_session_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(session_id or "").strip())
+        if not safe_session_id:
+            raise ValueError("当前会话不可用，无法保存图片附件。")
+        return os.path.join(self._managed_attachment_root(), safe_session_id)
+
+    def _is_managed_attachment(self, path):
+        try:
+            root = os.path.normcase(os.path.abspath(self._managed_attachment_root()))
+            target = os.path.normcase(os.path.abspath(path))
+            return os.path.commonpath([root, target]) == root
+        except (OSError, ValueError, TypeError):
+            return False
+
+    def _attachment_is_referenced(self, path, state=None):
+        target = os.path.normcase(os.path.normpath(str(path or "")))
+        state = state or self.get_current_session()
+        for message in list(getattr(state, "messages", []) or []):
+            for attachment in self._message_user_attachments(message):
+                if os.path.normcase(os.path.normpath(attachment.get("path") or "")) == target:
+                    return True
+        return False
+
+    def _add_clipboard_image(self, image):
+        state = self.get_current_session()
+        if not state:
+            self.add_system_toast("当前没有可接收图片的会话。", "error")
+            return ""
+        if hasattr(image, "toImage"):
+            image = image.toImage()
+        if image is None or not hasattr(image, "isNull") or image.isNull():
+            log_attachment_event("clipboard_decode_failed", session_id=state.session_id)
+            self.add_system_toast("剪贴板中的图片无法读取。", "error")
+            return ""
+        target_dir = self._session_attachment_dir(state.session_id)
+        os.makedirs(target_dir, exist_ok=True)
+        filename = f"clipboard-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.png"
+        target_path = os.path.join(target_dir, filename)
+        temp_path = target_path + ".tmp"
+        log_attachment_event(
+            "clipboard_capture_begin",
+            session_id=state.session_id,
+            width=image.width(),
+            height=image.height(),
+        )
+        try:
+            if not image.save(temp_path, "PNG"):
+                raise OSError("Qt image encoder rejected clipboard image")
+            os.replace(temp_path, target_path)
+        except Exception as exc:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            log_attachment_event("clipboard_save_failed", session_id=state.session_id, error=str(exc))
+            self.add_system_toast(f"图片附件保存失败：{exc}", "error", auto_close_ms=6000)
+            return ""
+        self._add_prompt_files([target_path])
+        log_attachment_event("clipboard_capture_completed", session_id=state.session_id, path=target_path)
+        return target_path
+
+    def _cleanup_orphan_attachment_dirs(self):
+        root = self._managed_attachment_root()
+        if not os.path.isdir(root):
+            return
+        known_ids = {str(item.get("id") or "") for item in self.chat_storage.list_conversations()}
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if not os.path.isdir(path) or name in known_ids:
+                continue
+            shutil.rmtree(path)
 
     def _set_prompt_files(self, paths, session_id=None, refresh=True):
         state = self.get_session(session_id)
@@ -15612,6 +15900,14 @@ class MainWindow(QMainWindow):
             if os.path.normcase(item) != os.path.normcase(os.path.normpath(path))
         ]
         self._set_prompt_files(remaining)
+        if self._is_managed_attachment(path) and not self._attachment_is_referenced(path):
+            try:
+                os.remove(path)
+                log_attachment_event("pending_attachment_removed", path=path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log_attachment_event("pending_attachment_remove_failed", path=path, error=str(exc))
 
     def _clear_prompt_files(self, session_id=None):
         self._set_prompt_files([], session_id=session_id, refresh=True)
@@ -15710,6 +16006,12 @@ class MainWindow(QMainWindow):
             meta["vision_requested"] = bool(supports_vision)
         if referenced_images:
             meta["workspace_referenced_images"] = referenced_images
+        if image_paths:
+            log_attachment_event(
+                "vision_payload_built",
+                image_count=len(image_paths),
+                supports_vision=bool(supports_vision),
+            )
         return {
             "content": content,
             "display_content": display_text,
@@ -19983,6 +20285,13 @@ class MainWindow(QMainWindow):
                 os.remove(history_path)
         except Exception:
             pass
+        try:
+            attachment_dir = self._session_attachment_dir(session_id)
+            if os.path.isdir(attachment_dir):
+                shutil.rmtree(attachment_dir)
+                log_attachment_event("conversation_attachments_deleted", session_id=session_id)
+        except Exception as exc:
+            log_attachment_event("conversation_attachment_cleanup_failed", session_id=session_id, error=str(exc))
         self.refresh_history_list()
 
     def render_message_batch(self, messages, session_id, insert_index=None, animate=True):
@@ -20788,7 +21097,8 @@ class MainWindow(QMainWindow):
             self._apply_deliverable_items([], render_current=render_current)
             return
         self._sync_file_browser_empty_state(loading=True)
-        worker = DeliverableScanWorker(workspace_dir, generation, self)
+        records = self.chat_storage.list_deliverables(workspace_dir, prune_missing=True)
+        worker = DeliverableScanWorker(workspace_dir, records, generation, self)
         self.deliverable_scan_worker = worker
         worker.completed.connect(
             lambda items, completed_generation: self._handle_deliverable_scan_completed(
@@ -20828,6 +21138,27 @@ class MainWindow(QMainWindow):
     def _apply_deliverable_items(self, items, render_current=False):
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
         self.deliverable_items = list(items or [])
+        workspace_key = os.path.normcase(os.path.abspath(getattr(self, "workspace_dir", "") or ""))
+        if workspace_key != getattr(self, "file_section_workspace_key", ""):
+            self.file_section_workspace_key = workspace_key
+            self.file_section_user_selected = False
+        if (
+            getattr(self, "file_workspace_view_mode", "browse") == "browse"
+            and not getattr(self, "file_section_user_selected", False)
+        ):
+            self.set_file_workspace_section(
+                self.FILE_SECTION_DELIVERABLES if self.deliverable_items else self.FILE_SECTION_ALL,
+                refresh=False,
+            )
+        else:
+            toggle = getattr(self, "file_workspace_toggle_btn", None)
+            if toggle is not None:
+                toggle.setVisible(bool(self.deliverable_items))
+                toggle.setText(
+                    "浏览工作区"
+                    if getattr(self, "file_workspace_section", self.FILE_SECTION_ALL) == self.FILE_SECTION_DELIVERABLES
+                    else "返回交付物"
+                )
         self._render_deliverable_items(selected_key=selected_key)
         self._sync_file_browser_empty_state()
         if hasattr(self, "preview_meta_label") and getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
@@ -20952,6 +21283,9 @@ class MainWindow(QMainWindow):
             return
         if state:
             state.selected_deliverable_path = normalized
+        self.register_deliverable_paths(
+            [normalized], session_id=session_id, source="history", workspace_dir=workspace_dir
+        )
         self.current_deliverable_path = normalized
         self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
         self.show_file_workspace_detail_view(origin="chat")
@@ -20972,6 +21306,9 @@ class MainWindow(QMainWindow):
         ]
         if not valid_paths:
             return
+        self.register_deliverable_paths(
+            valid_paths, session_id=session_id, source="generated", workspace_dir=workspace_dir
+        )
         if state and office_card is not None:
             self._sync_office_task_card_paths(state, valid_paths)
         if not office_enabled:
@@ -21006,6 +21343,52 @@ class MainWindow(QMainWindow):
         else:
             self.show_file_workspace_detail_view(origin="chat")
         self.select_deliverable(latest, render_html=True)
+
+    def register_deliverable_paths(self, paths, session_id=None, source="generated", workspace_dir=None):
+        if not workspace_dir:
+            workspace_dir = self._workspace_dir_for_state(self.get_session(session_id)) if session_id else self.workspace_dir
+        if not workspace_dir:
+            return []
+        storage = getattr(self, "chat_storage", None)
+        if storage is None:
+            return [
+                normalized
+                for path in (paths or [])
+                if (normalized := normalize_workspace_file(path, workspace_dir))
+            ]
+        registered = []
+        for path in paths or []:
+            normalized = normalize_workspace_file(path, workspace_dir)
+            if not normalized:
+                continue
+            storage.register_deliverable(
+                workspace_dir,
+                normalized,
+                conversation_id=session_id,
+                source=source,
+            )
+            registered.append(normalized)
+        return registered
+
+    def set_workspace_file_deliverable(self, path, marked):
+        workspace_dir = getattr(self, "workspace_dir", "")
+        normalized = normalize_workspace_file(path, workspace_dir)
+        if not normalized:
+            self.add_system_toast("该文件不在当前工作区或暂不支持预览。", "warning")
+            return
+        if marked:
+            self.chat_storage.register_deliverable(
+                workspace_dir,
+                normalized,
+                conversation_id=self.current_session_id,
+                source="user_marked",
+            )
+            message = "已标记为交付物"
+        else:
+            self.chat_storage.unregister_deliverable(workspace_dir, normalized)
+            message = "已从交付物中移除"
+        self.refresh_deliverables()
+        self.add_system_toast(message, "success", auto_close_ms=2400)
 
     def select_deliverable(self, path, render_html=True):
         path = os.path.normpath(str(path or ""))
@@ -21548,6 +21931,15 @@ class MainWindow(QMainWindow):
         
         copy_path_action = QAction("复制路径", self)
         copy_path_action.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+
+        deliverable_action = None
+        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
+            marked = self.chat_storage.is_deliverable(self.workspace_dir, path)
+            deliverable_action = QAction("取消标记为交付物" if marked else "标记为交付物", self)
+            deliverable_action.setIcon(qta.icon('fa5s.star', color=DesignTokens.primary))
+            deliverable_action.triggered.connect(
+                lambda _checked=False, value=path, target=not marked: self.set_workspace_file_deliverable(value, target)
+            )
         
         delete_action = QAction("删除", self)
         delete_action.setIcon(qta.icon('fa5s.trash-alt', color='#ef4444'))
@@ -21561,6 +21953,8 @@ class MainWindow(QMainWindow):
         menu.addAction(reveal_action)
         menu.addSeparator()
         menu.addAction(copy_path_action)
+        if deliverable_action is not None:
+            menu.addAction(deliverable_action)
         menu.addSeparator()
         menu.addAction(delete_action)
         menu.exec(self.file_tree.viewport().mapToGlobal(position))
@@ -22948,6 +23342,8 @@ class MainWindow(QMainWindow):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if not state or not getattr(state, "turn_steerable", False):
             return False
+        if not self._ensure_vision_attachment_support(state, prompt_files):
+            return False
         payload = self._build_user_message_payload(
             raw_user_text,
             prompt_files,
@@ -23098,6 +23494,8 @@ class MainWindow(QMainWindow):
                 self.refresh_model_selector()
             return False
         supports_vision = self._selected_model_supports_vision(state)
+        if not self._ensure_vision_attachment_support(state, prompt_files):
+            return False
         if mentioned_profiles and not delegated_text:
             log_ppt_agent_debug(
                 "submit_session_agent_mention_without_task",
@@ -23654,6 +24052,13 @@ class MainWindow(QMainWindow):
             workspace_dir=self._workspace_dir_for_state(state),
         )
         self._connect_chat_bubble_actions(bubble, state)
+        if str(role or "").strip().lower() in {"agent", "assistant"} and getattr(bubble, "_deliverable_paths", None):
+            self.register_deliverable_paths(
+                bubble._deliverable_paths,
+                session_id=state.session_id,
+                source="history",
+                workspace_dir=self._workspace_dir_for_state(state),
+            )
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         
         layout = target_layout or state.chat_layout

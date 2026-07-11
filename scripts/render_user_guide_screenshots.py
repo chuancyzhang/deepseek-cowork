@@ -19,7 +19,8 @@ APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 (APP_DATA_DIR / "config.json").write_text("{}", encoding="utf-8")
 
 from PySide6.QtTest import QTest
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
@@ -175,6 +176,13 @@ def main_run():
         process_events(200)
         save_widget(window, "11-direct-chat.png")
 
+        clipboard_image = QImage(240, 140, QImage.Format_ARGB32)
+        clipboard_image.fill(Qt.GlobalColor.lightGray)
+        window._add_clipboard_image(clipboard_image)
+        process_events(120)
+        save_widget(window, "13-paste-image.png")
+        window._clear_prompt_files(window.current_session_id)
+
         window.load_workspace(
             str(workspace),
             refresh_sidebar=False,
@@ -189,14 +197,20 @@ def main_run():
             f"HTML 工作稿已生成：{html_path.name}\n\n已按 16:9 汇报节奏整理，可以在右侧预览并继续转换。",
             animate=False,
         )
+        window.chat_storage.register_deliverable(
+            str(workspace),
+            str(html_path),
+            conversation_id=window.current_session_id,
+            source="generated",
+        )
         process_events(200)
         save_widget(window, "15-generate-html-example.png")
 
         window.show_context_drawer(window.RIGHT_TAB_FILES)
-        window.set_file_workspace_section(window.FILE_SECTION_ALL, refresh=True)
+        window.set_file_workspace_section(window.FILE_SECTION_ALL, refresh=True, user_initiated=True)
         process_events(500)
         save_widget(window, "16-open-deliverables.png")
-        window.set_file_workspace_section(window.FILE_SECTION_DELIVERABLES, refresh=True)
+        window.set_file_workspace_section(window.FILE_SECTION_DELIVERABLES, refresh=True, user_initiated=True)
         process_events(250)
         save_widget(window, "17-deliverables-panel.png")
 

@@ -5,8 +5,10 @@ surface opts into a role through an object name or a dynamic property, which
 prevents parent styling from leaking into labels and nested controls.
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -17,6 +19,124 @@ from PySide6.QtWidgets import (
 )
 
 from core.theme import DesignTokens
+
+
+class ProductTooltipController(QObject):
+    """Render tooltip text as a child surface instead of a native Windows popup."""
+
+    MAX_WIDTH = 360
+    OFFSET = 10
+    MARGIN = 8
+
+    def __init__(self, app=None):
+        app = app or QApplication.instance()
+        if app is None:
+            raise RuntimeError("ProductTooltipController requires a QApplication")
+        super().__init__(app)
+        self.app = app
+        self.bubble = None
+        self._hiding = False
+        app.installEventFilter(self)
+
+    def _item_view_for(self, widget):
+        current = widget
+        while current is not None:
+            if isinstance(current, QAbstractItemView):
+                return current
+            current = current.parentWidget() if hasattr(current, "parentWidget") else None
+        return None
+
+    def _tooltip_text(self, widget, event):
+        text = str(widget.toolTip() or "").strip() if hasattr(widget, "toolTip") else ""
+        if text:
+            return text
+        view = self._item_view_for(widget)
+        if view is None or not hasattr(event, "pos"):
+            return ""
+        position = event.pos()
+        if widget is not view.viewport():
+            position = view.viewport().mapFrom(widget, position)
+        index = view.indexAt(position)
+        if not index.isValid():
+            return ""
+        return str(index.data(Qt.ToolTipRole) or "").strip()
+
+    def _ensure_bubble(self, window):
+        if self.bubble is not None:
+            try:
+                if self.bubble.parentWidget() is window:
+                    return self.bubble
+            except RuntimeError:
+                self.bubble = None
+        if self.bubble is not None:
+            self.bubble.deleteLater()
+        self.bubble = QLabel(window)
+        self.bubble.setObjectName("ProductTooltip")
+        self.bubble.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.bubble.setTextFormat(Qt.PlainText)
+        self.bubble.setWordWrap(True)
+        self.bubble.setMaximumWidth(self.MAX_WIDTH)
+        self.bubble.setStyleSheet(
+            f"QLabel#ProductTooltip {{ background: {DesignTokens.bg_main}; "
+            f"color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border_subtle}; "
+            f"border-radius: {DesignTokens.radius_sm}px; padding: 6px 8px; "
+            f"font-size: {DesignTokens.font_size_meta}px; }}"
+        )
+        self.bubble.hide()
+        return self.bubble
+
+    def show_for_event(self, widget, event, text):
+        window = widget.window()
+        if window is None or not window.isVisible():
+            return
+        bubble = self._ensure_bubble(window)
+        bubble.setText(text)
+        bubble.adjustSize()
+        global_pos = event.globalPos() if hasattr(event, "globalPos") else widget.mapToGlobal(widget.rect().bottomLeft())
+        position = window.mapFromGlobal(global_pos)
+        x = position.x() + self.OFFSET
+        y = position.y() + self.OFFSET
+        x = max(self.MARGIN, min(x, window.width() - bubble.width() - self.MARGIN))
+        y = max(self.MARGIN, min(y, window.height() - bubble.height() - self.MARGIN))
+        bubble.move(x, y)
+        bubble.raise_()
+        bubble.show()
+
+    def hide(self):
+        if self.bubble is None or self._hiding:
+            return
+        self._hiding = True
+        try:
+            if self.bubble.isVisible():
+                self.bubble.hide()
+        except RuntimeError:
+            self.bubble = None
+        finally:
+            self._hiding = False
+
+    def dispose(self):
+        self.app.removeEventFilter(self)
+        self.hide()
+        self.bubble = None
+
+    def eventFilter(self, obj, event):
+        event_type = event.type()
+        if event_type == QEvent.ToolTip and isinstance(obj, QWidget):
+            text = self._tooltip_text(obj, event)
+            if text:
+                self.show_for_event(obj, event, text)
+                event.accept()
+                return True
+        elif event_type in {
+            QEvent.Leave,
+            QEvent.MouseButtonPress,
+            QEvent.Wheel,
+            QEvent.KeyPress,
+            QEvent.Hide,
+            QEvent.FocusOut,
+        }:
+            self.hide()
+        return super().eventFilter(obj, event)
 
 
 def product_button_style(kind="secondary", radius=None):
@@ -154,6 +274,10 @@ def apply_product_dialog(dialog, object_name):
         }}
         QDialog#{object_name} QPushButton#PrimaryBtn:hover {{ background: {DesignTokens.primary_hover}; }}
         QDialog#{object_name} QPushButton#PrimaryBtn:pressed {{ background: {DesignTokens.primary_pressed}; }}
+        QDialog#{object_name} QPushButton#PrimaryBtn:disabled {{
+            background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled};
+            border-color: {DesignTokens.border_subtle};
+        }}
         QDialog#{object_name} QPushButton#SecondaryBtn {{
             background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary};
             border: 1px solid {DesignTokens.border}; border-radius: {DesignTokens.radius_md}px;

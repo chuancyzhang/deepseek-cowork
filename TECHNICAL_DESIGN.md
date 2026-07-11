@@ -32,11 +32,11 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 - **首页工具包提示**：新会话空态提示用户可在设置的“组件与依赖”中安装文档工具包和数据分析工具包，帮助用户在文档、表格和数据分析任务前发现可选依赖。
 - **生成办公稿**：AI 回复末尾的消息级动作，按自由、PPT、设计稿、DOCX 注入办公交付策略，并把该生成轮次默认折叠为任务卡；结果文件入口保持外显。
 - **PPT Mode / PPT Agent**：新会话空态提供 PPT Agent 卡片，侧栏“智能体”模块提供内置 PPT Agent 入口；`main.py` 的 `AgentModuleDialog` 承载内置/自定义智能体入口，`PptAgentModeDialog` 收集需求、生成偏好、内置 html-ppt 策略、资料附件和 PPTX 模板，提交后仍进入 `office_html_first` 工作流。
-- **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 状态默认隐藏，按需展开为无阴影贴边面板；文件区域在浏览态和详情态之间切换。内部导航状态只记录分类、来源、选中路径、目录展开项和滚动位置，不写入会话数据。聊天交付物入口直接进入详情态；普通工具文件变更只刷新列表和入口提示，办公工作流才自动打开最新结果。
-- **设置中心**：以紧凑左侧导航和无卡片分组集中配置模型、智能体、工作区、MCP、企业消息、更新和运行组件，每页标题下显示用途说明。
+- **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 状态默认隐藏。文件浏览首页由 SQLite 交付物索引驱动：有明确产物时先显示交付物并按需切到工作区，无产物时直接显示目录树；聊天结果、办公转换和用户标记负责注册索引，普通扩展名扫描不再决定交付物。浏览态和详情态之间保留选中路径、筛选、目录展开项和滚动位置。
+- **设置中心**：以紧凑左侧导航集中配置模型、智能体、工作区、MCP、企业消息、更新和运行组件；脏状态比较规范化后的可保存配置快照，只读日志、后台检查和测试操作不参与比较。
 - **自动化中心**：以摘要行、分段控制、任务列表和执行详情承载提示词任务、引用能力、Agent 绑定、计划任务和执行历史。
 
-UI 采用三层表面模型：应用画布、功能面板、控件或数据行。共享 QSS 必须通过明确控件类型、`objectName` 或动态属性限定作用域，避免父级边框和背景继承到子控件；普通控件保持 `30-32px` 高度和 `6-8px` 圆角，只有输入面板与独立浮层可以使用更大圆角。所有交互控件必须提供 hover、pressed、focus、disabled 等状态，运行状态不能只依赖颜色表达。
+UI 采用三层表面模型：应用画布、功能面板、控件或数据行。共享 QSS 必须通过明确控件类型、`objectName` 或动态属性限定作用域，避免父级边框和背景继承到子控件；普通控件保持 `30-32px` 高度和 `6-8px` 圆角。`ProductTooltipController` 拦截 QWidget 与 item view 的提示事件，在当前顶层窗口内绘制提示，避免 Windows 原生 Tooltip 黑窗。所有交互控件必须提供 hover、pressed、focus、disabled 等状态。
 
 `scripts/render_user_guide_screenshots.py` 使用隔离临时配置生成用户指南中的真实 PySide6 截图，并在 `1280x720`、`1440x900`、`1920x1080` 下检查输入区与右侧抽屉不重叠；HTML 截图依赖 `requirements.txt` 中声明的 `PySide6-Addons`，缺失时直接报错。
 
@@ -67,7 +67,7 @@ Cowork 采用交错式推理流程：
 - PPT Agent 是 `office_html_first + office_output_profile = ppt` 上的一层产品工作流；`core/ppt_agent.py` 注册默认 PPT Agent、Guizang PPT Skill、Frontend Slides、Huashu Design 等 html-ppt 策略，并根据显式选择、偏好、模板和关键词自动选择策略。后三者作为真实 `ai_skills` 包内置，PPT Agent 提交时会把选中的策略映射为临时 `selected_skill_names`，让上游 `SKILL.md`、引用和资源说明进入本轮系统上下文与任务观测页，但不会写回用户会话的手动技能选择。`core/agent.py` 通过 `ppt_agent_mode`、`ppt_agent_strategy`、`ppt_agent_selected_strategy`、`ppt_agent_preference` 和 `ppt_agent_template_file` 注入 PPT Agent 运行提示，但仍要求最终输出 HTML deliverable。
 - UI 通过用户消息 `meta.workflow_mode` 将该轮用户消息、工具调用和助手结果渲染成可展开的办公任务卡；消息本体仍按原结构持久化，交付物文件卡渲染在折叠过程外。任务卡会合并最终回复、隐藏气泡识别到的文件卡路径和本轮工具变更中的有效工作区文件，避免最终回复未写完整路径时结果区为空；消息渲染会把当前工作区内的裸完整路径和 Markdown 文件链接统一重写为 `cowork-file:`，再交给右侧文件预览链路处理。任务刚提交时会写入用户请求、附件、选中 Skill 和启动阶段节点；收到系统提示词、Skill 上下文、thinking、工具调用和工具结果后继续追加到过程区，避免展开过程只显示占位。若 live 提交后短时间内过程区仍为空，UI 会补充“等待模型运行接管”的可见状态；daemon 流与普通对话保持一致，不设置单独的模型响应超时，只在 worker 完成、显式失败、用户停止或客户端断开时结束。PPT Agent/办公任务提交链路会写入 `ppt_agent_debug.log`，daemon 流会写入 `daemon.log`，用于定位卡在 UI 提交、任务卡创建、run context 构建、daemon 分发还是后台 worker 启动阶段。历史消息按 render span 独立渲染，避免普通消息和办公任务混排时丢失折叠状态。
 - 运行中引导使用用户消息 `meta.same_turn_guidance` 标记，通过 steer 注入当前 in-flight turn；UI 将其渲染为当前任务流里的内联“补充引导”片段，而不是新的用户气泡或新的对话轮次。
-- 用户添加的文件同时保留 UI 附件元数据和模型可见内容：小体积文本附件内联到用户消息，图片在支持视觉的模型中转为图片 part，大文件或非文本文件只提供明确路径、大小和工具读取提示。
+- 用户添加的文件同时保留 UI 附件元数据和模型可见内容：剪贴板图片写入 `chat_history_dir/attachments/<session_id>/` 并以缩略图展示，在支持视觉的模型中转为图片 part；不支持视觉时提交预检会阻止发送并保留输入。小体积文本附件内联，大文件或非文本文件只提供明确路径、大小和工具读取提示。
 - 从 HTML 生成 PPTX 时可附加 PPTX 模板文件，提示要求以 HTML 为内容源、模板为视觉结构源，并保留模板主题、母版、字号、色彩、版式节奏和顶部/底部图片；UI 以“生成文件…”菜单选择 PPTX、DOCX 或 PDF，选择 PPTX 后再按需询问模板。转换提交后只更新交付物详情页底部的局部运行态，并用隔离运行上下文只传入源 HTML、目标格式和模板文件，不把上一轮办公稿生成过程带给模型；完成后仍通过任务卡、Toast 和交付物扫描回填结果。`main.py` 的 `_submit_html_deliverable_conversion` 是可复用提交入口，右侧交付物预览和后续 PPT Mode 都应复用它，不另建转换器。
 - `tool_search` 负责延迟发现工具与匹配技能
 - `parallel_tools` 只允许并行只读调用

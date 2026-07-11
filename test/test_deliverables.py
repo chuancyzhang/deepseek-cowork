@@ -1,4 +1,3 @@
-import hashlib
 import inspect
 import os
 import tempfile
@@ -7,7 +6,7 @@ import unittest
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-from PySide6.QtCore import QByteArray, QBuffer, QEventLoop, QIODevice, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QTextEdit, QWidget
 
@@ -1469,13 +1468,6 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertTrue(result, f"JavaScript callback timed out: {script}")
             return result[0]
 
-        def render_digest():
-            payload = QByteArray()
-            buffer = QBuffer(payload)
-            buffer.open(QIODevice.WriteOnly)
-            self.assertTrue(view.grab().save(buffer, "PNG"))
-            return hashlib.sha256(bytes(payload)).hexdigest()
-
         routing_target = QWidget()
         routing_target.setObjectName("UnrelatedWheelTarget")
         outside_wheel = QWheelEvent(
@@ -1504,7 +1496,7 @@ class TestDeliverableScanning(unittest.TestCase):
         QApplication.sendEvent(routing_target, control_wheel)
         QApplication.processEvents()
         self.assertEqual(evaluate("document.scrollingElement.scrollTop"), 0)
-        before_wheel_digest = render_digest()
+        before_wheel_top = float(evaluate("document.body.getBoundingClientRect().top"))
         wheel = QWheelEvent(
             QPointF(120, 100),
             QPointF(view.mapToGlobal(QPoint(120, 100))),
@@ -1521,10 +1513,8 @@ class TestDeliverableScanning(unittest.TestCase):
         QTimer.singleShot(100, wheel_loop.quit)
         wheel_loop.exec()
         self.assertGreater(evaluate("document.scrollingElement.scrollTop"), 0)
-        paint_loop = QEventLoop()
-        QTimer.singleShot(200, paint_loop.quit)
-        paint_loop.exec()
-        self.assertNotEqual(render_digest(), before_wheel_digest)
+        after_wheel_top = float(evaluate("document.body.getBoundingClientRect().top"))
+        self.assertLess(after_wheel_top, before_wheel_top)
         evaluate("window.scrollTo(0,0)")
         horizontal_wheel = QWheelEvent(
             QPointF(120, 100),

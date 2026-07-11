@@ -249,7 +249,32 @@ def main_run():
         process_events(1200)
         save_widget(window, "18-open-html-preview.png")
         save_widget(window, "20-generate-pptx.png")
+        tool_id = "guide-python-tool"
+        window.add_tool_card(
+            {
+                "id": tool_id,
+                "name": "run_python_code",
+                "args": {
+                    "code": "from pathlib import Path\n\nfiles = list(Path('.').glob('*.md'))\nprint({'files': len(files)})",
+                    "timeout": 30,
+                },
+                "meta": {"start_time": 1783783680, "duration": 0.24},
+            },
+            session_id=window.current_session_id,
+            animate=False,
+        )
+        window.update_tool_card(
+            {
+                "id": tool_id,
+                "result": '{"files": 1, "status": "ok"}',
+                "result_obj": {"files": 1, "status": "ok"},
+                "meta": {"duration": 0.24},
+            },
+            session_id=window.current_session_id,
+        )
         window.show_context_drawer(window.RIGHT_TAB_OBSERVABILITY)
+        card = window.get_current_session().tool_cards[tool_id]
+        window.show_tool_details(tool_id, card.args, card.result, meta=card.meta, switch_tab=True)
         process_events(180)
         save_widget(window, "28-task-observability.png")
         for width, height in ((1280, 720), (1440, 900), (1920, 1080)):

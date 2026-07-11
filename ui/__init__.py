@@ -2,6 +2,7 @@
 
 from .primitives import (
     ProductActionBar,
+    ProductCodeViewer,
     ProductDataRow,
     ProductEmptyState,
     ProductInlineNotice,
@@ -11,6 +12,8 @@ from .primitives import (
     ProductSegmentedControl,
     ProductSection,
     ProductStatusBadge,
+    ProductResultViewer,
+    SidebarInlineNameEditor,
     ProductToolbar,
     apply_product_dialog,
     product_button_style,
@@ -22,6 +25,7 @@ from .primitives import (
 
 __all__ = [
     "ProductActionBar",
+    "ProductCodeViewer",
     "ProductDataRow",
     "ProductEmptyState",
     "ProductInlineNotice",
@@ -31,6 +35,8 @@ __all__ = [
     "ProductSegmentedControl",
     "ProductSection",
     "ProductStatusBadge",
+    "ProductResultViewer",
+    "SidebarInlineNameEditor",
     "ProductToolbar",
     "apply_product_dialog",
     "product_button_style",

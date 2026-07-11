@@ -5,7 +5,11 @@ surface opts into a role through an object name or a dynamic property, which
 prevents parent styling from leaking into labels and nested controls.
 """
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+import json
+import re
+
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QMessageBox as QtMessageBox,
     QPushButton,
     QButtonGroup,
@@ -26,6 +31,167 @@ from PySide6.QtWidgets import (
 )
 
 from core.theme import DesignTokens
+
+
+class _ProductCodeHighlighter(QSyntaxHighlighter):
+    """Small dependency-free highlighter for diagnostic code surfaces."""
+
+    def __init__(self, document, language="text"):
+        super().__init__(document)
+        self.language = str(language or "text").lower()
+        self.rules = []
+        keyword = QTextCharFormat()
+        keyword.setForeground(QColor(DesignTokens.primary))
+        keyword.setFontWeight(QFont.DemiBold)
+        string = QTextCharFormat()
+        string.setForeground(QColor(DesignTokens.success_text))
+        number = QTextCharFormat()
+        number.setForeground(QColor(DesignTokens.warning_text))
+        comment = QTextCharFormat()
+        comment.setForeground(QColor(DesignTokens.text_tertiary))
+        if self.language == "python":
+            words = (
+                "and as assert async await break class continue def del elif else except False "
+                "finally for from global if import in is lambda None nonlocal not or pass raise "
+                "return True try while with yield"
+            ).split()
+            self.rules.append((re.compile(r"\b(?:" + "|".join(words) + r")\b"), keyword))
+            self.rules.extend([(re.compile(r"(['\"]).*?\1"), string), (re.compile(r"\b\d+(?:\.\d+)?\b"), number), (re.compile(r"#.*$"), comment)])
+        elif self.language in {"shell", "bash"}:
+            self.rules.extend([(re.compile(r"\b(?:if|then|else|fi|for|do|done|case|esac|function|while|in)\b"), keyword), (re.compile(r"(['\"]).*?\1"), string), (re.compile(r"#.*$"), comment)])
+        elif self.language == "json":
+            self.rules.extend([(re.compile(r'"(?:\\.|[^"\\])*"(?=\s*:)'), keyword), (re.compile(r'"(?:\\.|[^"\\])*"'), string), (re.compile(r"\b(?:true|false|null|-?\d+(?:\.\d+)?)\b"), number)])
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(), fmt)
+
+
+class ProductCodeViewer(QPlainTextEdit):
+    """Read-only code viewer with line numbers and lightweight highlighting."""
+
+    def __init__(self, language="text", parent=None):
+        super().__init__(parent)
+        self._line_number_area = QWidget(self)
+        self._line_number_area.paintEvent = self._paint_line_numbers
+        self._language = "text"
+        self.setReadOnly(True)
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.setFont(QFont("Cascadia Mono", 10))
+        self.setStyleSheet(product_code_style("QPlainTextEdit"))
+        self.blockCountChanged.connect(self._update_line_number_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self._highlighter = None
+        self.set_language(language)
+        self._update_line_number_width()
+
+    def set_language(self, language):
+        self._language = str(language or "text").lower()
+        if self._highlighter is not None:
+            self._highlighter.setDocument(None)
+        self._highlighter = _ProductCodeHighlighter(self.document(), self._language)
+
+    def set_code(self, text, language=None):
+        if language is not None:
+            self.set_language(language)
+        self.setPlainText(str(text or ""))
+
+    def _line_number_width(self):
+        digits = max(2, len(str(max(1, self.blockCount()))))
+        return 12 + self.fontMetrics().horizontalAdvance("9") * digits
+
+    def _update_line_number_width(self, *_):
+        self.setViewportMargins(self._line_number_width(), 0, 0, 0)
+
+    def _update_line_number_area(self, rect, dy):
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(0, rect.y(), self._line_number_area.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        rect = self.contentsRect()
+        self._line_number_area.setGeometry(QRect(rect.left(), rect.top(), self._line_number_width(), rect.height()))
+
+    def _paint_line_numbers(self, event):
+        painter = QPainter(self._line_number_area)
+        painter.fillRect(event.rect(), QColor(DesignTokens.bg_secondary))
+        block = self.firstVisibleBlock()
+        number = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+        painter.setPen(QColor(DesignTokens.text_tertiary))
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                painter.drawText(0, top, self._line_number_area.width() - 6, self.fontMetrics().height(), Qt.AlignRight, str(number + 1))
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            number += 1
+
+
+class ProductResultViewer(ProductCodeViewer):
+    """Structured diagnostic result surface with explicit format handling."""
+
+    def set_result(self, value):
+        if isinstance(value, (dict, list)):
+            self.set_code(json.dumps(value, ensure_ascii=False, indent=2), "json")
+            return "json"
+        text = str(value or "")
+        stripped = text.strip()
+        if stripped.startswith(("{", "[")):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                self.set_code(f"无法解析为 JSON：{exc}\n\n{text}", "text")
+                return "invalid_json"
+            self.set_code(json.dumps(parsed, ensure_ascii=False, indent=2), "json")
+            return "json"
+        language = "python" if "Traceback (most recent call last)" in text else "text"
+        self.set_code(text, language)
+        return language
+
+
+class SidebarInlineNameEditor(QLineEdit):
+    """Inline rename field with deterministic commit/cancel behavior."""
+
+    commitRequested = Signal(str)
+    cancelRequested = Signal()
+
+    def __init__(self, text="", parent=None):
+        super().__init__(str(text or ""), parent)
+        self._resolved = False
+        self.setMaxLength(80)
+        self.setFixedHeight(28)
+        self.setStyleSheet(product_field_style())
+        self.selectAll()
+
+    def keyPressEvent(self, event):
+        if event.key() in {Qt.Key_Return, Qt.Key_Enter}:
+            self._commit()
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape:
+            self._resolved = True
+            self.cancelRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if not self._resolved:
+            self._commit()
+
+    def _commit(self):
+        if self._resolved:
+            return
+        self._resolved = True
+        self.commitRequested.emit(self.text().strip())
 
 
 def display_run_phase(value):

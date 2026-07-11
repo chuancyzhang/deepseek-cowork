@@ -47,6 +47,7 @@ from core.html_render import extract_renderable_html_response
 from core.theme import apply_tooltip_theme, DesignTokens
 from ui.primitives import (
     ProductActionBar,
+    ProductCodeViewer,
     ProductDataRow,
     ProductEmptyState,
     ProductInlineNotice,
@@ -56,6 +57,8 @@ from ui.primitives import (
     ProductSegmentedControl,
     ProductSection,
     ProductStatusBadge,
+    ProductResultViewer,
+    SidebarInlineNameEditor,
     ProductToolbar,
     ProductTooltipController,
     ProductInputDialog,
@@ -9918,6 +9921,16 @@ class ConversationHistoryRow(QFrame):
         self._set_actions_visible(False)
         super().leaveEvent(event)
 
+    def focusInEvent(self, event):
+        self._set_actions_visible(True)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        focused = QApplication.focusWidget()
+        if not (focused and self.isAncestorOf(focused)):
+            self._set_actions_visible(False)
+        super().focusOutEvent(event)
+
 
 class ElidedToolLabel(QLabel):
     def __init__(self, text="", parent=None):
@@ -12537,10 +12550,10 @@ class SubAgentEventSummaryRow(QFrame):
         super().__init__(parent)
         self.event_payload = dict(event or {})
         self.setFocusPolicy(Qt.NoFocus)
+        self.setObjectName("SubAgentEventSummaryRow")
 
         self.setStyleSheet(
-            f"QFrame {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 12px; }}"
+            f"QFrame#SubAgentEventSummaryRow {{ background: transparent; border: none; border-bottom: 1px solid {DesignTokens.separator}; }}"
         )
 
         layout = QVBoxLayout(self)
@@ -12585,9 +12598,11 @@ class SubAgentTimelineCard(QFrame):
         self.agent_id = agent_id
         self.agent_name = agent_name or agent_id
         self.event_count = 0
+        self.setObjectName("SubAgentTimelineCard")
 
-        self.setProperty("uiSurface", True)
-        self.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_panel))
+        self.setStyleSheet(
+            f"QFrame#SubAgentTimelineCard {{ background: {DesignTokens.bg_main}; border: none; border-bottom: 1px solid {DesignTokens.separator}; }}"
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
@@ -14262,6 +14277,8 @@ class MainWindow(QMainWindow):
         self.history_buttons = {}
         self.project_rows = {}
         self.project_buttons = {}
+        self.history_inline_hosts = {}
+        self.project_inline_hosts = {}
         self.project_preview_paths = set()
         self.project_full_expanded_paths = set()
         self.optimistic_history_session_ids = set()
@@ -14377,7 +14394,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(new_chat_btn)
 
         self.history_search_input = QLineEdit()
-        self.history_search_input.setPlaceholderText("搜索")
+        self.history_search_input.setPlaceholderText("搜索项目和对话")
         self.history_search_input.setClearButtonEnabled(True)
         self.history_search_input.setFixedHeight(30)
         self.history_search_input.setStyleSheet(apple_search_field_style())
@@ -14595,15 +14612,15 @@ class MainWindow(QMainWindow):
         self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
         self.file_source_stack.addWidget(self.deliverables_list)
 
-        browser_toolbar = QVBoxLayout()
-        browser_toolbar.setContentsMargins(0, 0, 0, 0)
-        browser_toolbar.setSpacing(6)
+        self.file_product_toolbar = ProductToolbar()
         self.file_search_input = QLineEdit()
         self.file_search_input.setPlaceholderText("搜索当前工作区")
         self.file_search_input.setClearButtonEnabled(True)
         self.file_search_input.setFixedHeight(DesignTokens.control_height)
         self.file_search_input.textChanged.connect(self.apply_file_workspace_filters)
-        browser_toolbar.addWidget(self.file_search_input)
+        self.file_product_toolbar.add_widget(self.file_search_input)
+        self.file_product_toolbar.finish()
+        file_browse_layout.addWidget(self.file_product_toolbar)
 
         filter_sort_row = QHBoxLayout()
         filter_sort_row.setContentsMargins(0, 0, 0, 0)
@@ -14632,8 +14649,7 @@ class MainWindow(QMainWindow):
         apply_settings_combo_style(self.deliverable_sort_combo)
         self.deliverable_sort_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
         filter_sort_row.addWidget(self.deliverable_sort_combo, 1)
-        browser_toolbar.addLayout(filter_sort_row)
-        file_browse_layout.addLayout(browser_toolbar)
+        file_browse_layout.addLayout(filter_sort_row)
 
         self.file_browser_empty_state = ProductEmptyState(
             "还没有可浏览的内容",
@@ -14882,46 +14898,24 @@ class MainWindow(QMainWindow):
         td_layout.setContentsMargins(14, 12, 14, 14)
         td_layout.setSpacing(10)
 
-        step_section = QFrame()
-        step_section.setProperty("uiSurface", True)
-        step_section.setStyleSheet(apple_section_surface_style(radius=8))
-        step_section_layout = QVBoxLayout(step_section)
-        step_section_layout.setContentsMargins(12, 12, 12, 10)
-        step_section_layout.setSpacing(8)
-        self.step_intro_label = QLabel("本轮步骤")
-        self.step_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        step_section_layout.addWidget(self.step_intro_label)
-
-        self.step_list = QListWidget()
-        self.step_list.setStyleSheet(apple_list_style(border=False, bg="transparent", radius=12, padding=2))
-        self.step_list.itemClicked.connect(self.on_step_item_clicked)
-        self.step_list.setMinimumHeight(96)
-        self.step_list.setMaximumHeight(144)
-        step_section_layout.addWidget(self.step_list)
-        td_layout.addWidget(step_section)
-
         self.OBS_SECTION_PROMPT = 0
         self.OBS_SECTION_LOG = 1
         self.OBS_SECTION_DETAILS = 2
         self.observability_section_index = self.OBS_SECTION_LOG
 
-        observability_segment_bar = QFrame()
-        observability_segment_bar.setProperty("uiSurface", True)
-        observability_segment_bar.setStyleSheet(apple_section_surface_style(radius=8, bg=DesignTokens.bg_secondary))
-        observability_segment_layout = QHBoxLayout(observability_segment_bar)
-        observability_segment_layout.setContentsMargins(4, 4, 4, 4)
-        observability_segment_layout.setSpacing(4)
-        self.observability_segment_buttons = []
-        for index, title in enumerate(("执行上下文", "调用记录", "技术详情")):
-            btn = QPushButton(title)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setMinimumHeight(30)
-            btn.setStyleSheet(apple_segmented_button_style())
-            btn.clicked.connect(lambda checked=False, i=index: self.set_observability_section(i))
-            observability_segment_layout.addWidget(btn)
-            self.observability_segment_buttons.append(btn)
-        td_layout.addWidget(observability_segment_bar)
+        self.observability_segment_control = ProductSegmentedControl(
+            (("prompt", "执行上下文"), ("log", "调用记录"), ("details", "技术详情")),
+            current="log",
+        )
+        section_indexes = {"prompt": 0, "log": 1, "details": 2}
+        self.observability_segment_control.currentChanged.connect(
+            lambda key: self.set_observability_section(section_indexes.get(key, 1))
+        )
+        self.observability_segment_buttons = [
+            self.observability_segment_control.buttons[key]
+            for key in ("prompt", "log", "details")
+        ]
+        td_layout.addWidget(self.observability_segment_control)
 
         self.observability_content_stack = QStackedWidget()
         self.observability_content_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
@@ -14958,14 +14952,22 @@ class MainWindow(QMainWindow):
         log_page = QWidget()
         log_layout = QVBoxLayout(log_page)
         log_layout.setContentsMargins(0, 0, 0, 0)
-        log_layout.setSpacing(0)
+        log_layout.setSpacing(8)
+
+        self.step_list = QListWidget()
+        self.step_list.setAccessibleName("调用记录")
+        self.step_list.setStyleSheet(apple_list_style(border=False, bg="transparent", radius=8, padding=2))
+        self.step_list.itemClicked.connect(self.select_step_item)
+        self.step_list.itemActivated.connect(self.on_step_item_clicked)
+        self.step_list.setMinimumHeight(120)
+        log_layout.addWidget(self.step_list, 1)
 
         self.observability_log_edit = ReadOnlyTextEdit()
         self.observability_log_edit.setPlaceholderText("本轮阶段、工具调用和结果会按时间顺序显示。")
         self.observability_log_edit.setStyleSheet(
             apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
         )
-        log_layout.addWidget(self.observability_log_edit)
+        self.observability_log_edit.hide()
         self.observability_content_stack.addWidget(log_page)
 
         details_page = QWidget()
@@ -14979,7 +14981,7 @@ class MainWindow(QMainWindow):
         details_info_layout = QVBoxLayout(details_info_bar)
         details_info_layout.setContentsMargins(12, 10, 12, 10)
         details_info_layout.setSpacing(2)
-        self.td_info_label = QLabel("选择左侧工具卡片查看详情")
+        self.td_info_label = QLabel("在调用记录中选择工具后查看详情")
         self.td_info_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         self.td_info_label.setWordWrap(True)
         details_info_layout.addWidget(self.td_info_label)
@@ -15001,10 +15003,7 @@ class MainWindow(QMainWindow):
         td_args_label = QLabel("参数")
         td_args_label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {DesignTokens.text_primary};")
         td_args_layout.addWidget(td_args_label)
-        self.td_args_edit = ReadOnlyTextEdit()
-        self.td_args_edit.setStyleSheet(
-            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
-        )
+        self.td_args_edit = ProductCodeViewer("json")
         td_args_layout.addWidget(self.td_args_edit)
 
         td_result_section = QWidget()
@@ -15029,10 +15028,7 @@ class MainWindow(QMainWindow):
         td_result_header_layout.addWidget(self.td_copy_result_btn)
         td_result_layout.addWidget(td_result_header)
 
-        self.td_result_edit = ReadOnlyTextEdit()
-        self.td_result_edit.setStyleSheet(
-            apple_code_edit_style(bg=DesignTokens.bg_secondary, radius=16, subtle=True, padding=12)
-        )
+        self.td_result_edit = ProductResultViewer()
         td_result_layout.addWidget(self.td_result_edit)
 
         self.td_detail_splitter.addWidget(td_args_section)
@@ -15051,17 +15047,7 @@ class MainWindow(QMainWindow):
         self.sub_agent_tab = QWidget()
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
         sub_agent_layout.setContentsMargins(14, 12, 14, 14)
-        sub_agent_layout.setSpacing(10)
-        sub_agent_intro_card = QFrame()
-        sub_agent_intro_card.setProperty("uiSurface", True)
-        sub_agent_intro_card.setStyleSheet(apple_section_surface_style(radius=8))
-        sub_agent_intro_layout = QVBoxLayout(sub_agent_intro_card)
-        sub_agent_intro_layout.setContentsMargins(12, 10, 12, 10)
-        sub_agent_intro_layout.setSpacing(0)
-        self.sub_agent_intro_label = QLabel("按子 Agent 展示输入、工具调用、结果与最终输出")
-        self.sub_agent_intro_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        sub_agent_intro_layout.addWidget(self.sub_agent_intro_label)
-        sub_agent_layout.addWidget(sub_agent_intro_card)
+        sub_agent_layout.setSpacing(8)
         self.sub_agent_monitor = SubAgentMonitor()
         sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
         self.right_stack.addWidget(self.sub_agent_tab)
@@ -15131,6 +15117,7 @@ class MainWindow(QMainWindow):
         ws_layout.setSpacing(8)
         ws_layout.addWidget(self.ws_label)
         top_bar.addWidget(self.ws_container)
+        self.ws_container.hide()
 
         self.context_rail = QFrame()
         self.context_rail.setObjectName("ContextRail")
@@ -15508,6 +15495,24 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def eventFilter(self, obj, event):
+        actions = obj.property("sidebarProjectActions") if isinstance(obj, QWidget) else None
+        if actions is not None:
+            event_type = event.type()
+            if event_type in {QEvent.Enter, QEvent.FocusIn}:
+                actions.show()
+            elif event_type in {QEvent.Leave, QEvent.FocusOut}:
+                def hide_if_inactive(target=actions):
+                    if not _qt_object_alive(target):
+                        return
+                    header = target.parentWidget()
+                    focused = QApplication.focusWidget()
+                    focus_inside = bool(focused and header and (focused is header or header.isAncestorOf(focused)))
+                    if not focus_inside and not (header and header.underMouse()):
+                        target.hide()
+                QTimer.singleShot(0, hide_if_inactive)
+        return super().eventFilter(obj, event)
+
     def set_context_drawer_width(self, requested_width):
         parent = getattr(self, "main_container", None)
         if not parent:
@@ -15653,6 +15658,10 @@ class MainWindow(QMainWindow):
         self.deliverable_sort_mode = str(sort_combo.currentData() if sort_combo is not None else "modified_desc")
         if hasattr(self, "deliverables_list"):
             self._render_deliverable_items()
+        toolbar = getattr(self, "file_product_toolbar", None)
+        if toolbar is not None:
+            count = len(self._filtered_deliverable_items()) if getattr(self, "file_workspace_section", "") == self.FILE_SECTION_DELIVERABLES else 0
+            toolbar.set_result_text(f"{count} 项" if count else "")
         self._sync_file_browser_empty_state()
 
     def clear_deliverable_filters(self):
@@ -17525,10 +17534,9 @@ class MainWindow(QMainWindow):
         if session_id is None or state.session_id == self.current_session_id:
             self.step_list.clear()
             if not state.step_records:
-                item = QListWidgetItem(qta.icon('fa5s.stream', color=DesignTokens.text_tertiary), "本轮工具步骤会显示在这里")
+                item = QListWidgetItem(qta.icon('fa5s.stream', color=DesignTokens.text_tertiary), "本轮还没有工具调用")
                 item.setFlags(Qt.NoItemFlags)
                 self.step_list.addItem(item)
-                self.step_intro_label.setText("本轮步骤")
             else:
                 for record in state.step_records:
                     status = record.get("status") or "running"
@@ -17540,17 +17548,16 @@ class MainWindow(QMainWindow):
                     line2 = summary
                     if step_title:
                         line2 = f"[步骤] {step_title} | {summary}"
-                    icon_name = "fa5s.check-circle" if status == "done" else "fa5s.play-circle"
-                    icon_color = DesignTokens.status_success if status == "done" else DesignTokens.status_running
+                    failed = status in {"failed", "error", "killed"}
+                    icon_name = "fa5s.exclamation-circle" if failed else ("fa5s.check-circle" if status == "done" else "fa5s.play-circle")
+                    icon_color = DesignTokens.status_error if failed else (DesignTokens.status_success if status == "done" else DesignTokens.status_running)
                     item = QListWidgetItem(
                         qta.icon(icon_name, color=icon_color),
                         f"{title} · {status_label_text(status)}{duration_text}\n{line2}",
                     )
                     item.setData(Qt.UserRole, record.get("tool_id"))
+                    item.setToolTip("选择后按 Enter 或点击查看技术详情")
                     self.step_list.addItem(item)
-                self.step_intro_label.setText(
-                    f"本轮已记录 {len(state.step_records)} 个工具步骤"
-                )
             self.refresh_context_badges(state.session_id)
 
     def _observability_pretty_json(self, value):
@@ -17844,6 +17851,16 @@ class MainWindow(QMainWindow):
             return
         card = state.tool_cards[tool_id]
         self.show_tool_details(tool_id, card.args, card.result, meta=card.meta, switch_tab=True)
+
+    def select_step_item(self, item):
+        tool_id = item.data(Qt.UserRole)
+        if not tool_id:
+            return
+        state = self.get_current_session()
+        if not state or tool_id not in state.tool_cards:
+            return
+        card = state.tool_cards[tool_id]
+        self.show_tool_details(tool_id, card.args, card.result, meta=card.meta, switch_tab=False)
 
     def start_background_services(self):
         if self._background_services_started:
@@ -18766,12 +18783,25 @@ class MainWindow(QMainWindow):
                 break
         return title
 
+    def _resolved_session_title(self, state, messages=None):
+        """Return the persisted manual title or the normal generated title."""
+        messages = list(messages if messages is not None else getattr(state, "messages", []) or [])
+        meta = self._session_base_meta(state) if state else {}
+        if meta.get("manual_title") and state:
+            record = self.chat_storage.get_conversation_record(state.session_id) or {}
+            manual = str(record.get("title") or "").strip()
+            if manual:
+                return manual
+        return self._compute_session_title(messages)
+
     def update_session_tab_title(self, session_id):
         state = self.sessions.get(session_id)
         if not state: return
-        title = self._compute_session_title(state.messages)
+        title = self._resolved_session_title(state)
         index = self.session_tabs.indexOf(state.session_widget)
         if index >= 0: self.session_tabs.setTabText(index, title)
+        if session_id == self.current_session_id:
+            self.update_conversation_header()
 
     def create_new_session(self, session_id=None, title=None, make_current=True, workspace_dir=None):
         is_fresh_session = session_id is None
@@ -19710,15 +19740,7 @@ class MainWindow(QMainWindow):
             tooltip = directory
         self.ws_label.setText(f"当前项目：{display_path}")
         self.ws_label.setToolTip(tooltip)
-        if hasattr(self, "workspace_title_label"):
-            project_name = os.path.basename(directory) if directory else ""
-            self.workspace_title_label.setText(project_name or "选择一个工作区开始")
-            self.workspace_title_label.setToolTip(directory or "")
-        if hasattr(self, "workspace_subtitle_label"):
-            self.workspace_subtitle_label.setText(
-                "描述任务，Cowork 会在当前项目内读取、创建和整理文件。"
-                if directory else "选择项目后，描述你要处理的文件、报告或整理任务。"
-            )
+        self.update_conversation_header()
         if directory and remember_workspace:
             self.update_recent_workspaces(directory)
         if directory and persist_default:
@@ -19742,6 +19764,40 @@ class MainWindow(QMainWindow):
         if refresh_sidebar:
             self.refresh_history_list()
         return directory
+
+    def update_conversation_header(self):
+        """Keep the conversation header product-facing and free of workspace UUIDs."""
+        if not hasattr(self, "workspace_title_label") or not hasattr(self, "workspace_subtitle_label"):
+            return
+        if getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION:
+            return
+        state = self.get_current_session()
+        workspace_dir = self._workspace_dir_for_state(state)
+        source = self._session_workspace_source(state)
+        if source == "project" and workspace_dir:
+            project_meta = next(
+                (
+                    item for item in self.config_manager.get_projects(include_hidden=True)
+                    if self._project_key(item.get("path")) == self._project_key(workspace_dir)
+                ),
+                None,
+            )
+            title = self._project_display_name(workspace_dir, project_meta)
+        elif state:
+            title = self._resolved_session_title(state)
+        else:
+            title = "选择一个工作区开始"
+        self.workspace_title_label.setText(title or "新对话")
+        self.workspace_title_label.setToolTip(workspace_dir or "")
+        has_content = bool(state and getattr(state, "messages", None))
+        if has_content:
+            self.workspace_subtitle_label.hide()
+        else:
+            self.workspace_subtitle_label.setText(
+                "描述任务，Cowork 会在当前项目内读取、创建和整理文件。"
+                if source == "project" else "直接开始对话；需要处理文件时再连接项目。"
+            )
+            self.workspace_subtitle_label.show()
 
     def _sync_workspace_ui_for_session(self, session_id=None, refresh_sidebar=True):
         state = self.get_session(session_id)
@@ -19789,7 +19845,7 @@ class MainWindow(QMainWindow):
         meta = self._compose_session_meta(state)
         return {
             "id": session_id,
-            "title": self._compute_session_title(getattr(state, "messages", []) or []),
+            "title": self._resolved_session_title(state),
             "updated_at": int(time.time()),
             "status": getattr(state, "session_status", "draft") or "draft",
             "meta": meta,
@@ -19909,6 +19965,7 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet(apple_history_title_style(selected))
         btn.clicked.connect(lambda sid=session_id: self.activate_session(sid))
         row_layout.addWidget(btn, 1)
+        self.history_inline_hosts[session_id] = (row_layout, btn)
 
         age = self._format_project_session_age(entry.get("updated_at"))
         age_label = QLabel(age or "")
@@ -19921,7 +19978,8 @@ class MainWindow(QMainWindow):
         row_layout.addWidget(activity_indicator, 0, Qt.AlignVCenter)
 
         actions = QWidget(row)
-        actions.setFixedWidth(54)
+        actions.setObjectName("ConversationActions")
+        actions.setFixedWidth(82)
         actions_layout = QHBoxLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(2)
@@ -19942,10 +20000,30 @@ class MainWindow(QMainWindow):
         archive_btn.setFixedSize(26, 26)
         archive_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
         archive_btn.clicked.connect(lambda checked=False, sid=session_id: self.archive_session(sid))
+        more_btn = QToolButton(actions)
+        more_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_tertiary, 16))
+        self.sidebar_hover_tips.register(more_btn, "对话操作")
+        more_btn.setCursor(Qt.PointingHandCursor)
+        more_btn.setFixedSize(26, 26)
+        more_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
+        more_btn.clicked.connect(
+            lambda checked=False, sid=session_id, btn_ref=more_btn: self.show_session_menu(sid, btn_ref)
+        )
         actions_layout.addWidget(pin_btn)
         actions_layout.addWidget(archive_btn)
+        actions_layout.addWidget(more_btn)
         row_layout.addWidget(actions, 0, Qt.AlignVCenter)
-        row.set_hover_actions([pin_btn, archive_btn])
+        row.set_hover_actions([pin_btn, archive_btn, more_btn])
+        row.setFocusPolicy(Qt.StrongFocus)
+        row.setContextMenuPolicy(Qt.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            lambda pos, sid=session_id, host=row: self.show_session_menu(sid, host)
+        )
+        rename_shortcut = QAction(row)
+        rename_shortcut.setShortcut("F2")
+        rename_shortcut.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        rename_shortcut.triggered.connect(lambda sid=session_id: self.begin_session_inline_rename(sid))
+        row.addAction(rename_shortcut)
 
         self.history_rows[session_id] = row
         self.history_buttons[session_id] = btn
@@ -19983,9 +20061,11 @@ class MainWindow(QMainWindow):
         project_btn.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
         project_btn.clicked.connect(lambda checked=False, p=path, q=query_active: self.handle_project_click(p, query_active=q))
         header_layout.addWidget(project_btn, 1)
+        self.project_inline_hosts[path] = (header_layout, project_btn)
 
         action_icon_size = QSize(12, 12)
         actions = QWidget()
+        actions.setObjectName("ProjectActions")
         actions.setFixedWidth(56)
         actions_layout = QHBoxLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
@@ -20011,23 +20091,39 @@ class MainWindow(QMainWindow):
         menu_btn.clicked.connect(lambda checked=False, p=path, btn_ref=menu_btn: self.show_project_menu(p, btn_ref))
         actions_layout.addWidget(menu_btn)
         header_layout.addWidget(actions, 0, Qt.AlignVCenter)
+        actions.setVisible(False)
+        header.setFocusPolicy(Qt.StrongFocus)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(
+            lambda pos, p=path, host=header: self.show_project_menu(p, host)
+        )
+        header.installEventFilter(self)
+        header.setProperty("sidebarProjectPath", path)
+        rename_shortcut = QAction(header)
+        rename_shortcut.setShortcut("F2")
+        rename_shortcut.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        rename_shortcut.triggered.connect(lambda p=path: self.begin_project_inline_rename(p))
+        header.addAction(rename_shortcut)
+        for widget in (header, project_btn, new_btn, menu_btn):
+            widget.installEventFilter(self)
+            widget.setProperty("sidebarProjectActions", actions)
         outer.addWidget(header)
 
         if fully_expanded:
             visible_sessions = sessions
         elif previewed:
-            visible_sessions = sessions[:3]
+            visible_sessions = sessions[:5]
         else:
             visible_sessions = []
         for session in visible_sessions:
             outer.addWidget(self._make_project_session_row(session))
-        if not query_active and len(sessions) > 3 and previewed and not fully_expanded:
+        if not query_active and len(sessions) > 5 and previewed and not fully_expanded:
             expand_btn = QPushButton(" 展开显示")
             expand_btn.setCursor(Qt.PointingHandCursor)
             expand_btn.setStyleSheet(apple_disclosure_button_style())
             expand_btn.clicked.connect(lambda checked=False, p=path: self.set_project_full_expanded(p, True))
             outer.addWidget(expand_btn)
-        elif not query_active and len(sessions) > 3 and fully_expanded:
+        elif not query_active and len(sessions) > 5 and fully_expanded:
             expand_btn = QPushButton(" 收起全部")
             expand_btn.setCursor(Qt.PointingHandCursor)
             expand_btn.setStyleSheet(apple_disclosure_button_style())
@@ -20298,13 +20394,45 @@ class MainWindow(QMainWindow):
         self.refresh_history_list()
 
     def rename_project(self, path):
-        current = self._project_display_name(path)
-        text, ok = QInputDialog.getText(self, "重命名项目", "项目显示名称", text=current)
-        name = str(text or "").strip()
-        if not ok or not name:
-            return
-        self.config_manager.upsert_project(path, name=name)
-        self.refresh_history_list()
+        return self.begin_project_inline_rename(path)
+
+    def _restore_inline_editor(self, layout, original, editor):
+        if _qt_object_alive(editor):
+            layout.replaceWidget(editor, original)
+            editor.deleteLater()
+        original.show()
+
+    def begin_project_inline_rename(self, path):
+        host = getattr(self, "project_inline_hosts", {}).get(path)
+        if not host:
+            return False
+        layout, original = host
+        editor = SidebarInlineNameEditor(self._project_display_name(path), original.parentWidget())
+        original.hide()
+        layout.replaceWidget(original, editor)
+
+        def commit(value):
+            name = str(value or "").strip()
+            if not name:
+                self._restore_inline_editor(layout, original, editor)
+                self.add_system_toast("名称不能为空，已保留原名称。", "warning", auto_close_ms=3200)
+                return
+            try:
+                self.config_manager.upsert_project(path, name=name)
+                self.update_conversation_header()
+            except Exception as exc:
+                self._restore_inline_editor(layout, original, editor)
+                self.add_system_toast(f"项目名称保存失败：{exc}", "error", auto_close_ms=6000)
+                return
+            self.refresh_history_list()
+            self.add_system_toast("名称已更新", "success", auto_close_ms=2200)
+
+        editor.commitRequested.connect(commit)
+        editor.cancelRequested.connect(lambda: self._restore_inline_editor(layout, original, editor))
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+        return True
 
     def archive_project(self, path):
         confirm = QMessageBox.question(self, "归档项目", "归档后该项目会从左侧栏和项目选择器中隐藏，可在设置的归档页恢复。")
@@ -20667,7 +20795,7 @@ class MainWindow(QMainWindow):
         delete_action = QAction("删除", self)
         delete_action.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_text))
 
-        rename_action.triggered.connect(lambda: self.rename_session(session_id))
+        rename_action.triggered.connect(lambda: self.begin_session_inline_rename(session_id))
         archive_action.triggered.connect(lambda: self.archive_session(session_id))
         delete_action.triggered.connect(lambda: self.delete_session(session_id))
 
@@ -20678,23 +20806,52 @@ class MainWindow(QMainWindow):
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def rename_session(self, session_id):
+        return self.begin_session_inline_rename(session_id)
+
+    def begin_session_inline_rename(self, session_id):
         self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
         record = self.chat_storage.get_conversation_record(session_id) or {}
         current_title = record.get("title") or "新任务"
-        new_title, ok = QInputDialog.getText(self, "重命名任务", "新的任务标题", text=current_title)
-        new_title = (new_title or "").strip()
-        if not ok or not new_title:
-            return
-        meta = record.get("meta") or {}
-        status = record.get("status") or "draft"
-        self.chat_storage.upsert_conversation(session_id, title=new_title, status=status, meta=meta)
-        state = self.sessions.get(session_id)
-        if state:
-            state.persisted_conversation_meta = copy.deepcopy(meta)
-            index = self.session_tabs.indexOf(state.session_widget)
-            if index >= 0:
-                self.session_tabs.setTabText(index, new_title)
-        self.refresh_history_list()
+        host = getattr(self, "history_inline_hosts", {}).get(session_id)
+        if not host:
+            return False
+        layout, original = host
+        editor = SidebarInlineNameEditor(current_title, original.parentWidget())
+        original.hide()
+        layout.replaceWidget(original, editor)
+
+        def commit(value):
+            new_title = str(value or "").strip()
+            if not new_title:
+                self._restore_inline_editor(layout, original, editor)
+                self.add_system_toast("名称不能为空，已保留原名称。", "warning", auto_close_ms=3200)
+                return
+            try:
+                meta = dict(record.get("meta") or {})
+                meta["manual_title"] = True
+                status = record.get("status") or "draft"
+                self.chat_storage.upsert_conversation(session_id, title=new_title, status=status, meta=meta)
+                state = self.sessions.get(session_id)
+                if state:
+                    state.persisted_conversation_meta = copy.deepcopy(meta)
+                    index = self.session_tabs.indexOf(state.session_widget)
+                    if index >= 0:
+                        self.session_tabs.setTabText(index, new_title)
+                if session_id == self.current_session_id:
+                    self.update_conversation_header()
+            except Exception as exc:
+                self._restore_inline_editor(layout, original, editor)
+                self.add_system_toast(f"对话名称保存失败：{exc}", "error", auto_close_ms=6000)
+                return
+            self.refresh_history_list()
+            self.add_system_toast("名称已更新", "success", auto_close_ms=2200)
+
+        editor.commitRequested.connect(commit)
+        editor.cancelRequested.connect(lambda: self._restore_inline_editor(layout, original, editor))
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+        return True
 
     def archive_session(self, session_id):
         self.flush_pending_chat_saves(session_id=session_id, timeout_ms=3000)
@@ -21238,9 +21395,13 @@ class MainWindow(QMainWindow):
             changed = normalized_messages != source_messages
 
         if force_persist or changed or current_version < HISTORY_MIGRATION_VERSION:
-            title = self._compute_session_title(normalized_messages)
             merged_meta = dict(meta)
             session_state = self.sessions.get(session_id)
+            if merged_meta.get("manual_title"):
+                existing_record = self.chat_storage.get_conversation_record(session_id) or {}
+                title = str(existing_record.get("title") or "").strip() or self._compute_session_title(normalized_messages)
+            else:
+                title = self._compute_session_title(normalized_messages)
             workspace_dir = self._workspace_dir_for_state(session_state)
             if workspace_dir:
                 merged_meta["workspace_dir"] = workspace_dir
@@ -21350,7 +21511,9 @@ class MainWindow(QMainWindow):
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
         if not state.messages and not has_clarify_state and not has_selected_skills:
             return None
-        title = self._compute_session_title(state.messages) if state.messages else "新任务"
+        title = self._resolved_session_title(state) if state.messages else (
+            self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
+        )
         meta = self._compose_session_meta(state)
         state.persisted_conversation_meta = copy.deepcopy(meta)
         return ChatSaveRequest(
@@ -23093,13 +23256,14 @@ class MainWindow(QMainWindow):
         self.current_product_subroute = ""
         self.main_page_stack.setCurrentWidget(self.conversation_page)
         self.product_back_btn.hide()
-        self.ws_container.show()
+        self.ws_container.hide()
         self.context_rail.show()
         for button in self.product_nav_buttons.values():
             button.setChecked(False)
         self.refresh_model_selector()
         self.refresh_context_badges()
         self.update_ui_state_for_workspace()
+        self.update_conversation_header()
         snapshot = dict(self._conversation_navigation_snapshot or {})
         if snapshot.get("drawer_open"):
             QTimer.singleShot(0, lambda: self.show_context_drawer(snapshot.get("drawer_tab", self.RIGHT_TAB_FILES)))
@@ -24891,22 +25055,30 @@ class MainWindow(QMainWindow):
         self.td_meta_label.setText(meta_text)
         self.td_meta_label.setVisible(bool(meta_text))
         
-        # Format JSON if possible
+        # Format arguments by intent so executable code is readable first.
+        args_obj = None
         try:
             if isinstance(args, str):
                 args_obj = json.loads(args)
-                args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
             else:
-                args_text = json.dumps(args, indent=2, ensure_ascii=False)
-        except:
+                args_obj = args
+        except Exception:
+            args_obj = None
+        tool_name = str(getattr(selected_card, "tool_name", "") or "").lower()
+        if isinstance(args_obj, dict) and isinstance(args_obj.get("code"), str):
+            language = "python" if "python" in tool_name else ("shell" if any(key in tool_name for key in ("bash", "shell", "command")) else "text")
+            code_text = args_obj.get("code") or ""
+            remaining = {key: value for key, value in args_obj.items() if key != "code"}
+            args_text = code_text
+            if remaining:
+                args_text += "\n\n# 其他参数\n" + json.dumps(remaining, indent=2, ensure_ascii=False)
+            self.td_args_edit.set_code(detail_text(args_text, 12000), language)
+        elif args_obj is not None:
+            args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
+            self.td_args_edit.set_code(detail_text(args_text, 12000), "json")
+        else:
             args_text = str(args)
-            
-        self._set_observability_text(
-            self.td_args_edit,
-            args_text,
-            "tool_args",
-            limit=8000,
-        )
+            self.td_args_edit.set_code(detail_text(args_text, 12000), "text")
         
         try:
             if selected_card and getattr(selected_card, "result_obj", None) is not None:
@@ -24926,12 +25098,7 @@ class MainWindow(QMainWindow):
         if not (res_text or "").strip() and selected_card and not getattr(selected_card, "is_finished", False):
             res_text = "(Running...)"
              
-        self._set_observability_text(
-            self.td_result_edit,
-            res_text,
-            "tool_result",
-            limit=12000,
-        )
+        self.td_result_edit.set_result(detail_text(res_text, 16000))
         log_sub_agent_runtime(
             "ui_tool_details_done",
             tool_id=str(tool_id or ""),

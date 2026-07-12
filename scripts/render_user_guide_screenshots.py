@@ -48,6 +48,16 @@ def save_widget(widget, filename, delay_ms=120):
         raise RuntimeError(f"Unable to save screenshot: {output_path}")
 
 
+def save_window_with_popups(window, filename, delay_ms=120):
+    process_events(delay_ms)
+    screen = window.screen() or QApplication.primaryScreen()
+    geometry = window.frameGeometry()
+    pixmap = screen.grabWindow(0, geometry.x(), geometry.y(), geometry.width(), geometry.height())
+    output_path = OUTPUT_DIR / filename
+    if pixmap.isNull() or not pixmap.save(str(output_path), "PNG"):
+        raise RuntimeError(f"Unable to capture screenshot with popups: {output_path}")
+
+
 def select_settings_page(dialog, label):
     for row in range(dialog.nav_list.count()):
         if dialog.nav_list.item(row).text() == label:
@@ -114,6 +124,14 @@ def main_run():
         window.model_select_btn.setStyleSheet(main.apple_tool_button_style(True))
         save_widget(window, "09-switch-model.png")
         window.model_select_btn.setStyleSheet(model_style)
+        window.show_model_selector_popover()
+        if getattr(window, "model_selector_popover", None) is not None:
+            save_window_with_popups(window, "33-model-popover.png")
+            window.model_selector_popover.close()
+            process_events(80)
+        window.show_prompt_tool_menu()
+        save_widget(window.composer_action_popover, "34-composer-add-popover.png", 200)
+        window.composer_action_popover.close()
         project_add_style = window.sidebar_add_project_btn.styleSheet()
         window.sidebar_add_project_btn.setStyleSheet(main.apple_sidebar_icon_button_style(True))
         save_widget(window, "12-add-project.png")
@@ -149,6 +167,10 @@ def main_run():
 
         window.skill_manager.load_skills()
         window.skill_manager_ready = True
+        window.open_session_skill_picker()
+        if getattr(window, "session_skill_popover", None) is not None:
+            save_window_with_popups(window, "35-ability-popover.png")
+            window.session_skill_popover.close()
         window.open_skills_center()
         skills = window.product_pages[window.PAGE_CAPABILITIES]
         save_widget(window, "23-skills-center.png")
@@ -185,7 +207,12 @@ def main_run():
         save_widget(ppt_agent, "27-ppt-agent.png")
         ppt_agent.hide()
 
-        window.add_chat_bubble("User", "请整理本周项目进展，并生成一份适合汇报的简报。", animate=False)
+        user_bubble = window.add_chat_bubble(
+            "User",
+            "请整理本周项目进展，并生成一份适合汇报的简报。",
+            animate=False,
+            source_message_id="guide-user-message",
+        )
         window.add_chat_bubble(
             "Agent",
             "已整理任务进度、关键结果和下周行动。你可以继续让我生成 HTML 工作稿，或直接调整内容结构。",
@@ -193,6 +220,15 @@ def main_run():
         )
         process_events(200)
         save_widget(window, "11-direct-chat.png")
+        if user_bubble is not None:
+            user_bubble.begin_inline_edit()
+            save_widget(user_bubble, "36-history-message-edit.png", 200)
+            user_bubble.cancel_inline_edit()
+        thinking_bubble = window.add_chat_bubble("Agent", "", animate=False)
+        if thinking_bubble is not None:
+            thinking_bubble.update_thinking("先分析任务目标，再检查工作区文件，随后调用工具生成结果。", duration=5.7, is_final=True)
+            thinking_bubble.think_toggle_btn.setChecked(True)
+            save_widget(window, "37-thinking-expanded.png")
 
         clipboard_image = QImage(240, 140, QImage.Format_ARGB32)
         clipboard_image.fill(Qt.GlobalColor.lightGray)
@@ -279,6 +315,7 @@ def main_run():
         save_widget(window, "28-task-observability.png")
         for width, height in ((1280, 720), (1440, 900), (1920, 1080)):
             verify_drawer_layout(window, width, height)
+            save_widget(window, f"38-responsive-{width}x{height}.png", 80)
     finally:
         main.MainWindow.showEvent = original_show_event
         if window is not None:

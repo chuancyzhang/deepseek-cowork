@@ -8,8 +8,8 @@ prevents parent styling from leaking into labels and nested controls.
 import json
 import re
 
-from PySide6.QtCore import QEvent, QObject, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -156,6 +156,135 @@ class ProductResultViewer(ProductCodeViewer):
         return language
 
 
+class ProductPopover(QFrame):
+    """App-owned anchored popover with deterministic focus and edge clamping."""
+
+    closed = Signal()
+
+    def __init__(self, parent=None, width=360):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.setObjectName("ProductPopover")
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumWidth(int(width))
+        self.setMaximumWidth(int(width))
+        self.setStyleSheet(
+            f"QFrame#ProductPopover {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
+        )
+
+    def show_for(self, anchor, *, align_right=False, prefer_above=True, gap=6):
+        if anchor is None or not anchor.isVisible():
+            return False
+        self.adjustSize()
+        screen = QApplication.screenAt(anchor.mapToGlobal(anchor.rect().center())) or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
+        anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
+        anchor_bottom_left = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        x = anchor_top_left.x()
+        if align_right:
+            x = anchor_top_left.x() + anchor.width() - self.width()
+        above_y = anchor_top_left.y() - self.height() - int(gap)
+        below_y = anchor_bottom_left.y() + int(gap)
+        if prefer_above and above_y >= available.top() + 8:
+            y = above_y
+        elif below_y + self.height() <= available.bottom() - 8:
+            y = below_y
+        else:
+            y = max(available.top() + 8, min(above_y, available.bottom() - self.height() - 8))
+        x = max(available.left() + 8, min(x, available.right() - self.width() - 8))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.setFocus(Qt.PopupFocusReason)
+        return True
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.closed.emit()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class ProductActionRow(QFrame):
+    """Compact Linear-style action row with an icon, title, and optional detail."""
+
+    clicked = Signal()
+
+    def __init__(self, title, detail="", icon=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ProductActionRow")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumHeight(40 if not detail else 52)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(10)
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(18, 18)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.icon_label)
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(1)
+        self.title_label = QLabel(str(title or ""))
+        self.title_label.setObjectName("ProductActionRowTitle")
+        self.detail_label = QLabel(str(detail or ""))
+        self.detail_label.setObjectName("ProductActionRowDetail")
+        self.detail_label.setVisible(bool(detail))
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.detail_label)
+        layout.addLayout(text_layout, 1)
+        self._icon = QIcon()
+        self.setIcon(icon)
+        self._apply_style()
+
+    def _apply_style(self):
+        self.setStyleSheet(
+            f"QFrame#ProductActionRow {{ background: transparent; border: none; border-radius: 6px; }}"
+            f"QFrame#ProductActionRow:hover, QFrame#ProductActionRow:focus {{ background: {DesignTokens.bg_hover}; }}"
+            f"QLabel#ProductActionRowTitle {{ color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600; }}"
+            f"QLabel#ProductActionRowDetail {{ color: {DesignTokens.text_tertiary}; font-size: 11px; }}"
+        )
+
+    def setIcon(self, icon):
+        self._icon = icon if isinstance(icon, QIcon) else QIcon()
+        self.icon_label.setPixmap(self._icon.pixmap(16, 16) if not self._icon.isNull() else QIcon().pixmap(16, 16))
+
+    def setTitle(self, title):
+        self.title_label.setText(str(title or ""))
+
+    def setDetail(self, detail):
+        self.detail_label.setText(str(detail or ""))
+        self.detail_label.setVisible(bool(detail))
+        self.setMinimumHeight(40 if not detail else 52)
+
+    def setEnabled(self, enabled):
+        super().setEnabled(enabled)
+        opacity_color = DesignTokens.text_primary if enabled else DesignTokens.text_disabled
+        self.title_label.setStyleSheet(f"color: {opacity_color};")
+        self.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+
+    def mouseReleaseEvent(self, event):
+        if self.isEnabled() and event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.isEnabled() and event.key() in {Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space}:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class SidebarInlineNameEditor(QLineEdit):
     """Inline rename field with deterministic commit/cancel behavior."""
 
@@ -200,6 +329,13 @@ def display_run_phase(value):
     key = raw.casefold().replace("_", " ").replace("-", " ")
     labels = {
         "preparing": "准备中",
+        "analyzing": "思考中",
+        "clarifying": "等待输入",
+        "executing": "运行中",
+        "delegating": "运行中",
+        "wrapping up": "运行中",
+        "interrupted": "已停止",
+        "clarified": "运行中",
         "awaiting input": "等待输入",
         "waiting input": "等待输入",
         "running": "运行中",

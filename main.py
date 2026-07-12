@@ -55,6 +55,8 @@ from ui.primitives import (
     ProductMasterDetail,
     ProductNavigationRow,
     ProductPageHeader,
+    ProductPopover,
+    ProductActionRow,
     ProductSegmentedControl,
     ProductSection,
     ProductStatusBadge,
@@ -8525,6 +8527,640 @@ class SessionSkillPickerDialog(QDialog):
             self.selection_hint.setText("当前未指定额外能力，将继续使用默认自动匹配。")
 
 
+class SessionSkillPickerPopover(ProductPopover):
+    """Searchable, transactional ability picker anchored to the composer."""
+
+    applied = Signal(object)
+
+    def __init__(self, skills, selected_skill_names=None, parent=None):
+        super().__init__(parent, width=500)
+        self.skills = [item for item in (skills or []) if str(item.get("name") or "").strip()]
+        self.initial_names = normalize_selected_skill_names(selected_skill_names)
+        self.selected_names = set(self.initial_names)
+        self._items = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+        title = QLabel("指定能力")
+        title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
+        subtitle = QLabel("所选能力会在当前会话后续轮次中优先使用")
+        subtitle.setStyleSheet(apple_caption_style())
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索名称、说明或关联工具")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setFixedHeight(32)
+        self.search_input.setStyleSheet(product_field_style())
+        self.search_input.textChanged.connect(self._filter_items)
+        layout.addWidget(self.search_input)
+
+        summary_frame = QFrame()
+        summary_frame.setObjectName("AbilitySelectionSummary")
+        summary_frame.setStyleSheet(
+            f"QFrame#AbilitySelectionSummary {{ background: {DesignTokens.bg_secondary}; "
+            "border: none; border-radius: 6px; }}"
+        )
+        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(8, 4, 6, 4)
+        summary_layout.setSpacing(6)
+        self.selection_summary = QLabel()
+        self.selection_summary.setWordWrap(False)
+        self.selection_summary.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
+        summary_layout.addWidget(self.selection_summary)
+        self.selection_chip_scroll = QScrollArea()
+        self.selection_chip_scroll.setWidgetResizable(True)
+        self.selection_chip_scroll.setFrameShape(QFrame.NoFrame)
+        self.selection_chip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.selection_chip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.selection_chip_scroll.setFixedHeight(28)
+        self.selection_chip_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.selection_chip_widget = QWidget()
+        self.selection_chip_layout = QHBoxLayout(self.selection_chip_widget)
+        self.selection_chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.selection_chip_layout.setSpacing(4)
+        self.selection_chip_layout.addStretch()
+        self.selection_chip_scroll.setWidget(self.selection_chip_widget)
+        summary_layout.addWidget(self.selection_chip_scroll, 1)
+        layout.addWidget(summary_frame)
+
+        self.skill_list = QListWidget()
+        self.skill_list.setMinimumHeight(260)
+        self.skill_list.setMaximumHeight(360)
+        self.skill_list.setSelectionMode(QAbstractItemView.NoSelection)
+        self.skill_list.setStyleSheet(
+            f"QListWidget {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; "
+            "border-radius: 7px; padding: 4px; outline: none; }}"
+            f"QListWidget::item {{ color: {DesignTokens.text_primary}; border: none; border-radius: 6px; "
+            "padding: 7px 8px; margin: 1px 0; }}"
+            f"QListWidget::item:hover {{ background: {DesignTokens.bg_hover}; }}"
+        )
+        for skill in sorted(self.skills, key=lambda item: (readable_skill_name(item) or item.get("name") or "").casefold()):
+            name = str(skill.get("name") or "").strip()
+            display = readable_skill_name(skill) or name
+            description = str(skill.get("user_description") or skill.get("description") or "").strip()
+            tools = skill.get("tools") or []
+            detail_parts = []
+            if description:
+                detail_parts.append(re.sub(r"\s+", " ", description)[:72])
+            if tools:
+                detail_parts.append(f"{len(tools)} 个关联工具")
+            item = QListWidgetItem(display + (f"\n{' · '.join(detail_parts)}" if detail_parts else ""))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            item.setCheckState(Qt.Checked if name in self.selected_names else Qt.Unchecked)
+            item.setData(Qt.UserRole, name)
+            search_text = " ".join(
+                [display, name, description]
+                + [str(tool.get("name") if isinstance(tool, dict) else tool) for tool in tools]
+            ).casefold()
+            item.setData(Qt.UserRole + 1, search_text)
+            item.setToolTip(f"{display}\n{name}" + (f"\n{description}" if description else ""))
+            self.skill_list.addItem(item)
+            self._items.append(item)
+        self.skill_list.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self.skill_list, 1)
+
+        self.empty_label = QLabel("没有匹配的能力")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setStyleSheet(apple_caption_style())
+        self.empty_label.hide()
+        layout.addWidget(self.empty_label)
+
+        actions = QHBoxLayout()
+        clear_btn = QPushButton("清除")
+        clear_btn.setStyleSheet(product_button_style("ghost", radius=7))
+        clear_btn.clicked.connect(self.clear_selection)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet(product_button_style("secondary", radius=7))
+        cancel_btn.clicked.connect(self.close)
+        self.apply_btn = QPushButton("应用")
+        self.apply_btn.setStyleSheet(product_button_style("primary", radius=7))
+        self.apply_btn.clicked.connect(self._apply)
+        actions.addWidget(clear_btn)
+        actions.addStretch()
+        actions.addWidget(cancel_btn)
+        actions.addWidget(self.apply_btn)
+        layout.addLayout(actions)
+        self._refresh_summary()
+
+    def _on_item_changed(self, item):
+        name = str(item.data(Qt.UserRole) or "").strip()
+        if item.checkState() == Qt.Checked:
+            self.selected_names.add(name)
+        else:
+            self.selected_names.discard(name)
+        self._refresh_summary()
+
+    def _refresh_summary(self):
+        ordered = [
+            (
+                str(skill.get("name") or "").strip(),
+                readable_skill_name(skill) or str(skill.get("name") or ""),
+            )
+            for skill in self.skills
+            if str(skill.get("name") or "").strip() in self.selected_names
+        ]
+        while self.selection_chip_layout.count() > 1:
+            item = self.selection_chip_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        if ordered:
+            self.selection_summary.setText(f"已选 {len(ordered)} 个能力")
+            self.selection_chip_scroll.show()
+            for name, display in ordered:
+                chip = QPushButton(f"{display}  ×")
+                chip.setCursor(Qt.PointingHandCursor)
+                chip.setToolTip(f"移除 {display}")
+                chip.setStyleSheet(
+                    f"QPushButton {{ background: {DesignTokens.bg_main}; color: {DesignTokens.text_secondary}; "
+                    f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; padding: 2px 7px; font-size: 10px; }}"
+                    f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}"
+                )
+                chip.clicked.connect(lambda _checked=False, value=name: self._remove_selected_name(value))
+                self.selection_chip_layout.insertWidget(self.selection_chip_layout.count() - 1, chip)
+        else:
+            self.selection_summary.setText("未指定额外能力，将继续使用默认自动匹配")
+            self.selection_chip_scroll.hide()
+        self.apply_btn.setEnabled(set(self.selected_values()) != set(self.initial_names))
+
+    def _remove_selected_name(self, name):
+        for item in self._items:
+            if str(item.data(Qt.UserRole) or "") == str(name or ""):
+                item.setCheckState(Qt.Unchecked)
+                return
+
+    def selected_values(self):
+        return [
+            str(skill.get("name") or "").strip()
+            for skill in sorted(self.skills, key=lambda item: (readable_skill_name(item) or item.get("name") or "").casefold())
+            if str(skill.get("name") or "").strip() in self.selected_names
+        ]
+
+    def _filter_items(self, text):
+        query = str(text or "").strip().casefold()
+        visible = 0
+        for item in self._items:
+            matched = not query or query in str(item.data(Qt.UserRole + 1) or "")
+            item.setHidden(not matched)
+            visible += int(matched)
+        self.skill_list.setVisible(visible > 0)
+        self.empty_label.setVisible(visible == 0)
+
+    def clear_selection(self):
+        for item in self._items:
+            item.setCheckState(Qt.Unchecked)
+        self._refresh_summary()
+
+    def _apply(self):
+        self.applied.emit(self.selected_values())
+        self.close()
+
+
+class ComposerActionPopover(ProductPopover):
+    """Linear action surface for the composer's plus button."""
+
+    def __init__(self, window, parent=None):
+        super().__init__(parent or window, width=320)
+        self.window = window
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(2)
+        pending = getattr(window, "pending_conversation_skill_result", None)
+        if pending:
+            draft = pending.get("draft") if isinstance(pending, dict) else {}
+            self._add_row(layout, "Skill 草稿待确认", str((draft or {}).get("skill_name") or "草稿已生成"),
+                          qta.icon("fa5s.file-alt", color=DesignTokens.primary), window.review_pending_conversation_skill_draft)
+            layout.addWidget(self._divider())
+        self._add_row(layout, "添加文件", "图片、文档或其他工作资料",
+                      qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary), window.select_files_for_prompt)
+        state = window.get_current_session()
+        selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []) if state else [])
+        ready = bool(getattr(window, "skill_manager_ready", False))
+        busy = bool(state and window._session_is_busy(state))
+        ability_detail = f"当前已选 {len(selected)} 个" if selected else "为当前会话指定优先能力"
+        self._add_row(layout, "指定能力", ability_detail,
+                      qta.icon("fa5s.puzzle-piece", color=DesignTokens.text_secondary), window.open_session_skill_picker,
+                      enabled=ready and not busy,
+                      tooltip="当前任务结束后可调整" if busy else (window.skill_load_error or "能力加载中"))
+        layout.addWidget(self._divider())
+        has_messages = bool(state and getattr(state, "messages", []))
+        worker_running = bool(window.conversation_skill_worker and window.conversation_skill_worker.isRunning())
+        self._add_row(layout, "沉淀为 Skill", "把会话经验保存为可复用能力",
+                      qta.icon("fa5s.magic", color=DesignTokens.text_secondary), window.start_conversation_skill_flow,
+                      enabled=ready and has_messages and not worker_running,
+                      tooltip="正在生成 Skill 草稿" if worker_running else "当前会话还没有可沉淀的内容")
+
+    def _divider(self):
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background: {DesignTokens.separator}; border: none; margin: 4px 6px;")
+        return divider
+
+    def _add_row(self, layout, title, detail, icon, callback, enabled=True, tooltip=""):
+        row = ProductActionRow(title, detail, icon, self)
+        row.setEnabled(enabled)
+        if tooltip and not enabled:
+            row.setToolTip(tooltip)
+        row.clicked.connect(lambda: self._trigger(callback))
+        layout.addWidget(row)
+
+    def _trigger(self, callback):
+        self.close()
+        QTimer.singleShot(0, callback)
+
+
+class ModelSelectorPopover(ProductPopover):
+    """Searchable conversation model and reasoning-effort picker."""
+
+    modelSelected = Signal(str)
+    effortSelected = Signal(str)
+
+    EFFORT_LABELS = {
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "超高",
+        "max": "极限",
+    }
+
+    def __init__(self, profiles, selected_id="", parent=None):
+        super().__init__(parent, width=440)
+        self.profiles = list(profiles or [])
+        self.selected_id = str(selected_id or "")
+        self._items = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        title = QLabel("选择模型")
+        title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
+        layout.addWidget(title)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索渠道或 Model")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setFixedHeight(32)
+        self.search_input.setStyleSheet(product_field_style())
+        self.search_input.textChanged.connect(self._filter)
+        layout.addWidget(self.search_input)
+        self.model_list = QListWidget()
+        self.model_list.setMinimumHeight(200)
+        self.model_list.setMaximumHeight(320)
+        self.model_list.setStyleSheet(
+            f"QListWidget {{ background: transparent; border: none; outline: none; }}"
+            f"QListWidget::item {{ color: {DesignTokens.text_primary}; border: none; border-radius: 6px; padding: 7px 9px; }}"
+            f"QListWidget::item:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
+        )
+        for profile in self.profiles:
+            model_id = str(profile.get("id") or "")
+            display = profile.get("display_name") or profile.get("model_name") or "模型"
+            channel = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
+            label = f"{channel} / {display}" if channel else display
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, model_id)
+            item.setData(Qt.UserRole + 1, f"{channel} {display} {profile.get('model_name') or ''}".casefold())
+            item.setToolTip(" / ".join(filter(None, (channel, profile.get("model_name") or display))))
+            self.model_list.addItem(item)
+            self._items.append(item)
+            if model_id == self.selected_id:
+                self.model_list.setCurrentItem(item)
+        self.model_list.itemActivated.connect(self._activate_item)
+        self.model_list.itemClicked.connect(self._activate_item)
+        layout.addWidget(self.model_list, 1)
+
+        divider = QFrame()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background: {DesignTokens.separator}; border: none;")
+        layout.addWidget(divider)
+        self.effort_title = QLabel("思考强度")
+        self.effort_title.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; font-weight: 600;")
+        layout.addWidget(self.effort_title)
+        self.effort_row = QHBoxLayout()
+        self.effort_row.setContentsMargins(0, 0, 0, 0)
+        self.effort_row.setSpacing(4)
+        layout.addLayout(self.effort_row)
+        self.refresh_efforts()
+
+    def _selected_profile(self):
+        return next((item for item in self.profiles if str(item.get("id") or "") == self.selected_id), None)
+
+    def refresh_efforts(self):
+        while self.effort_row.count():
+            item = self.effort_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        profile = self._selected_profile() or {}
+        efforts = normalize_reasoning_efforts(profile.get("reasoning_efforts"))
+        current = normalize_reasoning_effort(profile.get("reasoning_effort"), efforts)
+        self.effort_title.setVisible(bool(efforts))
+        for effort in efforts:
+            button = QPushButton(self.EFFORT_LABELS.get(effort, effort))
+            button.setCheckable(True)
+            button.setChecked(effort == current)
+            button.setFixedHeight(30)
+            button.setStyleSheet(product_segmented_style())
+            button.clicked.connect(lambda checked=False, value=effort: self.effortSelected.emit(value))
+            self.effort_row.addWidget(button)
+        self.effort_row.addStretch()
+
+    def set_selected_model(self, model_id):
+        self.selected_id = str(model_id or "")
+        for item in self._items:
+            if str(item.data(Qt.UserRole) or "") == self.selected_id:
+                self.model_list.setCurrentItem(item)
+                break
+        self.refresh_efforts()
+
+    def _activate_item(self, item):
+        model_id = str(item.data(Qt.UserRole) or "")
+        if model_id:
+            self.selected_id = model_id
+            self.modelSelected.emit(model_id)
+            self.refresh_efforts()
+
+    def _filter(self, text):
+        query = str(text or "").strip().casefold()
+        for item in self._items:
+            item.setHidden(bool(query and query not in str(item.data(Qt.UserRole + 1) or "")))
+
+
+class SearchableSkillPickerButton(QPushButton):
+    """Compact searchable single-skill selector used by the capture wizard."""
+
+    selectionChanged = Signal(str)
+
+    def __init__(self, skills, parent=None):
+        super().__init__(parent)
+        self.skills = list(skills or [])
+        self._current_name = ""
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(36)
+        self.setStyleSheet(product_button_style("secondary", radius=7))
+        self.clicked.connect(self._show_picker)
+        self._sync_text()
+
+    def currentData(self):
+        return self._current_name
+
+    def setCurrentData(self, name):
+        self._current_name = str(name or "")
+        self._sync_text()
+
+    def _sync_text(self):
+        selected = next((item for item in self.skills if str(item.get("name") or "") == self._current_name), None)
+        self.setText((readable_skill_name(selected) or self._current_name) if selected else "选择目标 Skill…")
+
+    def _show_picker(self):
+        popover = ProductPopover(self.window(), width=440)
+        layout = QVBoxLayout(popover)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        title = QLabel("选择目标 Skill")
+        title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
+        layout.addWidget(title)
+        search = QLineEdit()
+        search.setPlaceholderText("搜索名称、内部名称或说明")
+        search.setClearButtonEnabled(True)
+        search.setFixedHeight(32)
+        search.setStyleSheet(product_field_style())
+        layout.addWidget(search)
+        results = QListWidget()
+        results.setMinimumHeight(220)
+        results.setMaximumHeight(310)
+        results.setStyleSheet(
+            f"QListWidget {{ background: transparent; border: none; outline: none; }}"
+            f"QListWidget::item {{ color: {DesignTokens.text_primary}; border: none; border-radius: 6px; padding: 7px 8px; }}"
+            f"QListWidget::item:hover, QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; }}"
+        )
+        items = []
+        for skill in sorted(self.skills, key=lambda item: (readable_skill_name(item) or item.get("name") or "").casefold()):
+            name = str(skill.get("name") or "")
+            display = readable_skill_name(skill) or name
+            desc = re.sub(r"\s+", " ", str(skill.get("user_description") or skill.get("description") or "")).strip()
+            row = QListWidgetItem(display + (f"\n{name} · {desc[:64]}" if desc else f"\n{name}"))
+            row.setData(Qt.UserRole, name)
+            row.setData(Qt.UserRole + 1, f"{display} {name} {desc}".casefold())
+            results.addItem(row)
+            items.append(row)
+            if name == self._current_name:
+                results.setCurrentItem(row)
+        layout.addWidget(results)
+
+        def filter_rows(text):
+            query = str(text or "").strip().casefold()
+            for row in items:
+                row.setHidden(bool(query and query not in str(row.data(Qt.UserRole + 1) or "")))
+
+        def choose(row):
+            self.setCurrentData(row.data(Qt.UserRole))
+            self.selectionChanged.emit(self._current_name)
+            popover.close()
+
+        search.textChanged.connect(filter_rows)
+        results.itemActivated.connect(choose)
+        results.itemClicked.connect(choose)
+        self._picker = popover
+        popover.show_for(self, prefer_above=False)
+        QTimer.singleShot(0, search.setFocus)
+
+
+class InlineInteractionCard(QFrame):
+    """Conversation-owned response card for approval and input tool requests."""
+
+    resolved = Signal(object)
+
+    def __init__(self, request, parent=None):
+        super().__init__(parent)
+        self.request = dict(request or {})
+        self.kind = str(self.request.get("kind") or "approval").strip().lower()
+        self._resolved = False
+        self.option_checks = []
+        self.question_controls = []
+        self.setObjectName("InlineInteractionCard")
+        self.setStyleSheet(
+            f"QFrame#InlineInteractionCard {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+        title = QLabel(str(self.request.get("title") or "需要你的输入"))
+        title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
+        message = QLabel(str(self.request.get("message") or ""))
+        message.setWordWrap(True)
+        message.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        message.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(title)
+        layout.addWidget(message)
+
+        self.text_input = QLineEdit()
+        self.text_input.setPlaceholderText("补充说明…")
+        self.text_input.setStyleSheet(product_field_style())
+        self.text_input.setVisible(
+            self.kind == "text"
+            or (self.kind in {"choice", "multi_choice"} and bool(self.request.get("allow_free_text")))
+        )
+        if self.text_input.isVisible():
+            layout.addWidget(self.text_input)
+
+        options = self.request.get("options") if isinstance(self.request.get("options"), list) else []
+        if self.kind in {"choice", "multi_choice"}:
+            for option in options:
+                label = str(option.get("label") or option.get("value") or "选项")
+                description = str(option.get("description") or "")
+                checkbox = QCheckBox(label + (f"  ·  {description}" if description else ""))
+                checkbox.setProperty("option_value", str(option.get("value") or label))
+                checkbox.setStyleSheet(
+                    f"QCheckBox {{ color: {DesignTokens.text_primary}; spacing: 8px; padding: 5px 2px; }}"
+                )
+                if self.kind == "choice":
+                    checkbox.clicked.connect(lambda checked=False, current=checkbox: self._select_only(current, checked))
+                self.option_checks.append(checkbox)
+                layout.addWidget(checkbox)
+        elif self.kind == "questionnaire":
+            for question in normalize_pending_clarify_questions(self.request.get("questions") or []):
+                question_label = QLabel(str(question.get("question") or question.get("header") or "问题"))
+                question_label.setWordWrap(True)
+                question_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600;")
+                combo = QComboBox()
+                combo.addItem("请选择…", "")
+                for option in question.get("options") or []:
+                    label = str(option.get("label") or "")
+                    combo.addItem(label, str(option.get("value") or label))
+                apply_settings_combo_style(combo)
+                custom = QLineEdit()
+                custom.setPlaceholderText("选择“自定义”后填写…")
+                custom.setStyleSheet(product_field_style())
+                custom.setEnabled(False)
+                combo.currentIndexChanged.connect(
+                    lambda _index, source=combo, field=custom: field.setEnabled(str(source.currentData() or "") == "__custom__")
+                )
+                layout.addWidget(question_label)
+                layout.addWidget(combo)
+                layout.addWidget(custom)
+                self.question_controls.append({"id": question.get("id"), "combo": combo, "input": custom})
+
+        self.validation_label = QLabel("")
+        self.validation_label.setWordWrap(True)
+        self.validation_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 11px;")
+        self.validation_label.hide()
+        layout.addWidget(self.validation_label)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setStyleSheet(product_button_style("secondary", radius=7))
+        self.cancel_btn.clicked.connect(lambda: self._finish(False))
+        self.submit_btn = QPushButton("继续" if self.kind == "approval" else "提交")
+        self.submit_btn.setStyleSheet(product_button_style("primary", radius=7))
+        self.submit_btn.clicked.connect(self._submit)
+        actions.addWidget(self.cancel_btn)
+        actions.addWidget(self.submit_btn)
+        layout.addLayout(actions)
+
+        timeout_seconds = max(1.0, float(self.request.get("timeout_seconds") or 120.0))
+        self.timeout_timer = QTimer(self)
+        self.timeout_timer.setSingleShot(True)
+        self.timeout_timer.timeout.connect(self._expire)
+        self.timeout_timer.start(int(timeout_seconds * 1000))
+
+    def _select_only(self, current, checked):
+        if not checked:
+            return
+        for checkbox in self.option_checks:
+            if checkbox is not current:
+                checkbox.setChecked(False)
+
+    def _selected_values(self):
+        return [
+            str(checkbox.property("option_value") or "")
+            for checkbox in self.option_checks
+            if checkbox.isChecked() and str(checkbox.property("option_value") or "")
+        ]
+
+    def _show_validation(self, text):
+        self.validation_label.setText(str(text or "请检查输入"))
+        self.validation_label.show()
+
+    def _submit(self):
+        if self.kind == "approval":
+            self._finish(True)
+            return
+        text = self.text_input.text().strip()
+        picked = self._selected_values()
+        if self.kind == "text":
+            if not text:
+                self._show_validation("请先输入内容。")
+                return
+            self._finish(text)
+            return
+        if self.kind == "choice":
+            if picked:
+                self._finish(picked[0])
+                return
+            if text:
+                self._finish(text)
+                return
+            self._show_validation("请选择一个选项或输入补充内容。")
+            return
+        if self.kind == "multi_choice":
+            values = list(picked)
+            if text:
+                values.append(text)
+            if not values:
+                self._show_validation("请至少选择一个选项或输入补充内容。")
+                return
+            self._finish(values)
+            return
+        if self.kind == "questionnaire":
+            answers = {}
+            for control in self.question_controls:
+                value = str(control["combo"].currentData() or "")
+                custom_text = control["input"].text().strip()
+                if value == "__custom__":
+                    if not custom_text:
+                        self._show_validation("选择“自定义”后请填写内容。")
+                        return
+                    value = ""
+                if value or custom_text:
+                    answers[str(control.get("id") or "")] = {
+                        "selected_options": [value] if value else [],
+                        "text": custom_text if not value else "",
+                        "raw_value": value or custom_text,
+                    }
+            if not answers:
+                self._show_validation("请至少回答一个问题。")
+                return
+            self._finish(answers)
+
+    def _set_controls_enabled(self, enabled):
+        for widget in [self.text_input, self.cancel_btn, self.submit_btn, *self.option_checks]:
+            widget.setEnabled(enabled)
+        for control in self.question_controls:
+            control["combo"].setEnabled(enabled)
+            control["input"].setEnabled(enabled and str(control["combo"].currentData() or "") == "__custom__")
+
+    def _finish(self, value):
+        if self._resolved:
+            return
+        self._resolved = True
+        self.timeout_timer.stop()
+        self._set_controls_enabled(False)
+        self.validation_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-size: 11px;")
+        self.validation_label.setText("已提交")
+        self.validation_label.show()
+        self.resolved.emit(value)
+
+    def _expire(self):
+        if self._resolved:
+            return
+        self._resolved = True
+        self._set_controls_enabled(False)
+        self.validation_label.setText("请求已超时")
+        self.validation_label.show()
+        self.resolved.emit(False)
+
+
 def _conversation_skill_text_list(text):
     values = []
     for line in str(text or "").replace(",", "\n").splitlines():
@@ -8586,16 +9222,17 @@ class ConversationSkillOptionsDialog(QDialog):
         mode_form.addRow("", mode_choices)
 
         self.target_label = build_form_row_label("目标 Skill")
-        self.target_combo = QComboBox()
-        self.target_combo.setStyleSheet(apple_combo_style())
-        editable_count = 0
+        editable_skills = []
         for skill in self.skills:
             name = str(skill.get("name") or "").strip()
             manager = getattr(parent, "skill_manager", None)
             if manager is not None and not manager.is_skill_editable(name):
                 continue
-            editable_count += 1
-            self.target_combo.addItem(readable_skill_name(skill) or name, name)
+            editable_skills.append(skill)
+        editable_count = len(editable_skills)
+        self.target_combo = SearchableSkillPickerButton(editable_skills, self)
+        if editable_skills:
+            self.target_combo.setCurrentData(str(editable_skills[0].get("name") or ""))
         mode_form.addRow(self.target_label, self.target_combo)
 
         self.strategy_label = build_form_row_label("更新策略")
@@ -8683,15 +9320,27 @@ class ConversationSkillRangeDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
+        self.range_control = ProductSegmentedControl(
+            [("current", "当前问答"), ("recent", "最近 3 轮"), ("all", "全部会话"), ("custom", "自定义")],
+            current="custom" if selected_message_ids else "all",
+        )
+        self.range_control.currentChanged.connect(self._apply_quick_range)
+        layout.addWidget(self.range_control)
+
         self.message_list = QListWidget()
         apply_apple_checkable_list_behavior(self.message_list, radius=14, bg=DesignTokens.bg_card, padding=6)
         for index, message in enumerate(self.messages):
+            if is_auto_query_skill_context_message(message):
+                continue
             role = str(message.get("role") or "unknown").strip()
             content = str(message.get("content") or "").strip()
             if not content and message.get("tool_calls"):
-                content = "[tool_calls]"
+                content = f"调用了 {len(message.get('tool_calls') or [])} 个工具"
             first_line = re.sub(r"\s+", " ", content)[:160] or "无文本内容"
-            item = QListWidgetItem(f"{index + 1}. {role}  ·  {first_line}")
+            role_label = {"user": "用户", "assistant": "AI", "tool": "工具"}.get(role, role)
+            attachment_count = len(message.get("attachments") or [])
+            suffix = f" · {attachment_count} 个附件" if attachment_count else ""
+            item = QListWidgetItem(f"{role_label}  ·  {first_line}{suffix}")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             if selected_message_ids:
                 selected = str(message.get("id") or "") in selected_message_ids
@@ -8730,6 +9379,24 @@ class ConversationSkillRangeDialog(QDialog):
         self.message_list.itemChanged.connect(lambda *_: self.refresh_selection_hint())
         self.refresh_selection_hint()
 
+    def _apply_quick_range(self, key):
+        key = str(key or "custom")
+        if key == "custom":
+            return
+        visible_items = [self.message_list.item(index) for index in range(self.message_list.count())]
+        selected_indexes = set()
+        if key == "all":
+            selected_indexes = set(range(len(visible_items)))
+        elif key == "current":
+            selected_indexes = set(range(max(0, len(visible_items) - 2), len(visible_items)))
+        elif key == "recent":
+            selected_indexes = set(range(max(0, len(visible_items) - 6), len(visible_items)))
+        self.message_list.blockSignals(True)
+        for index, item in enumerate(visible_items):
+            item.setCheckState(Qt.Checked if index in selected_indexes else Qt.Unchecked)
+        self.message_list.blockSignals(False)
+        self.refresh_selection_hint()
+
     def _set_all(self, state):
         for index in range(self.message_list.count()):
             self.message_list.item(index).setCheckState(state)
@@ -8748,6 +9415,11 @@ class ConversationSkillRangeDialog(QDialog):
     def refresh_selection_hint(self):
         count = len(self.selected_messages())
         self.selection_hint.setText(f"已选择 {count} 条消息。")
+        parent = self.parentWidget()
+        while parent is not None and not isinstance(parent, ConversationSkillWizardDialog):
+            parent = parent.parentWidget()
+        if parent is not None and hasattr(parent, "next_btn") and parent.stack.currentWidget() is self:
+            parent.next_btn.setEnabled(count > 0)
 
     def _accept_if_valid(self):
         if not self.selected_messages():
@@ -9838,7 +10510,7 @@ class HistoryTitleButton(QLabel):
 
     def _apply_elide(self):
         metrics = QFontMetrics(self.font())
-        available = max(24, self.width() - 28)
+        available = max(24, self.width())
         display = metrics.elidedText(self._full_title, Qt.ElideRight, available)
         if display != self._display_title:
             self._display_title = display
@@ -9934,14 +10606,18 @@ class ConversationHistoryRow(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._hover_actions = []
+        self._hover_hidden = []
 
-    def set_hover_actions(self, widgets):
+    def set_hover_actions(self, widgets, hide_widgets=None):
         self._hover_actions = list(widgets or [])
+        self._hover_hidden = list(hide_widgets or [])
         self._set_actions_visible(False)
 
     def _set_actions_visible(self, visible):
         for widget in self._hover_actions:
             widget.setVisible(bool(visible))
+        for widget in self._hover_hidden:
+            widget.setVisible(not bool(visible))
 
     def enterEvent(self, event):
         self._set_actions_visible(True)
@@ -10044,14 +10720,9 @@ class EmptyStateWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignCenter)
         
-        # Icon
-        icon = QLabel()
-        icon.setPixmap(qta.icon('fa5s.robot', color=DesignTokens.border).pixmap(40, 40))
-        icon.setAlignment(Qt.AlignCenter)
-        
         # Title
-        title = QLabel("今天想处理什么文件？")
-        title.setStyleSheet(f"font-size: 20px; font-weight: 600; color: {DesignTokens.text_primary};")
+        title = QLabel("从一个任务开始")
+        title.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary};")
         title.setAlignment(Qt.AlignCenter)
         
         # Grid
@@ -10084,10 +10755,8 @@ class EmptyStateWidget(QWidget):
             self.action_cards.append(btn)
             
         layout.addStretch()
-        layout.addWidget(icon)
-        layout.addSpacing(12)
         layout.addWidget(title)
-        layout.addSpacing(20)
+        layout.addSpacing(12)
         layout.addWidget(self.grid_widget)
         layout.addSpacing(12)
         layout.addWidget(self.create_toolkit_hint(), 0, Qt.AlignHCenter)
@@ -10104,9 +10773,7 @@ class EmptyStateWidget(QWidget):
         # Calculate columns based on width
         # Keep task suggestions compact while retaining readable wrapping.
         w = self.width()
-        if w > 1100:
-            cols = 4
-        elif w > 600:
+        if w > 600:
             cols = 2
         else:
             cols = 1
@@ -10131,19 +10798,19 @@ class EmptyStateWidget(QWidget):
     def create_action_card(self, title, desc, prompt, icon_name=""):
         btn = QPushButton()
         btn.setCursor(Qt.PointingHandCursor)
-        btn.setMinimumHeight(92)
+        btn.setMinimumHeight(58)
         btn.setMinimumWidth(220)
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {DesignTokens.bg_main};
-                border: 1px solid {DesignTokens.border};
+                border: none;
                 border-radius: {DesignTokens.radius_md}px;
-                padding: 14px;
+                padding: 10px 12px;
                 text-align: left;
             }}
             QPushButton:hover {{
-                border: 1px solid {DesignTokens.primary};
-                background-color: {DesignTokens.bg_secondary};
+                border: none;
+                background-color: {DesignTokens.bg_hover};
             }}
         """)
         
@@ -10794,12 +11461,15 @@ class ChatBubble(QFrame):
         attachment_hint="用户添加的文件",
         source_message_id="",
         workspace_dir="",
+        edited=False,
     ):
         super().__init__()
         self.role = role
         self.content_wrapper = None
         self.user_bubble_frame = None
         self.user_content_edit = None
+        self.user_wrapper_layout = None
+        self.edited_label = None
         self.content_edit = None
         self.content_col = None
         self.avatar_container = None
@@ -10831,6 +11501,7 @@ class ChatBubble(QFrame):
             self.content_wrapper = content_wrapper
             content_wrapper.setMaximumWidth(DesignTokens.message_max_width)
             cw_layout = QVBoxLayout(content_wrapper)
+            self.user_wrapper_layout = cw_layout
             cw_layout.setContentsMargins(0, 0, 0, 0)
             cw_layout.setSpacing(8 if attachments and text else 5)
 
@@ -10876,6 +11547,7 @@ class ChatBubble(QFrame):
 
                 content_edit = AutoResizingTextEdit()
                 self.user_content_edit = content_edit
+                content_edit.installEventFilter(self)
                 content_edit.setPlainText(text)
                 content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 content_edit.setStyleSheet(
@@ -10896,7 +11568,7 @@ class ChatBubble(QFrame):
                 cancel_btn.setCursor(Qt.PointingHandCursor)
                 cancel_btn.setStyleSheet(apple_button_style("secondary", radius=14))
                 cancel_btn.clicked.connect(self.cancel_inline_edit)
-                submit_btn = QPushButton("发送")
+                submit_btn = QPushButton("保存并重新生成")
                 submit_btn.setCursor(Qt.PointingHandCursor)
                 submit_btn.setStyleSheet(apple_button_style("primary", radius=14))
                 submit_btn.clicked.connect(self.submit_inline_edit)
@@ -10905,6 +11577,9 @@ class ChatBubble(QFrame):
                 bubble_layout.addWidget(edit_controls)
                 self.edit_controls = edit_controls
                 cw_layout.addWidget(bubble_frame, 0, Qt.AlignRight)
+
+            if edited:
+                self.mark_edited()
 
             if self.source_message_id:
                 action_row = QHBoxLayout()
@@ -10950,7 +11625,7 @@ class ChatBubble(QFrame):
             think_layout.setSpacing(0)
             
             # Toggle Header
-            self.think_toggle_btn = QPushButton(" 思考过程")
+            self.think_toggle_btn = QPushButton(" 深度思考  ▾")
             self.think_toggle_btn.setIcon(qta.icon('fa5s.lightbulb', color=DesignTokens.accent_tool))
             self.think_toggle_btn.setCursor(Qt.PointingHandCursor)
             self.think_toggle_btn.setCheckable(True)
@@ -10958,18 +11633,19 @@ class ChatBubble(QFrame):
             self.think_toggle_btn.setStyleSheet(f"""
                 QPushButton {{
                     text-align: left;
+                    min-height: 32px;
+                    max-height: 32px;
                     background-color: transparent;
                     color: {DesignTokens.text_secondary};
                     border: none;
                     border-radius: 6px;
-                    padding: 6px 10px;
+                    padding: 0 6px;
                     font-size: 12px;
                     font-weight: 600;
-                    margin-bottom: 0px; /* Reduced to connect with container */
                 }}
                 QPushButton:hover {{ background-color: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}
                 QPushButton:checked {{ 
-                    background-color: {DesignTokens.bg_secondary};
+                    background-color: transparent;
                     color: {DesignTokens.text_primary}; 
                 }}
             """)
@@ -10982,15 +11658,15 @@ class ChatBubble(QFrame):
             self.think_container.setVisible(False)
             self.think_container.setStyleSheet(f"""
                 QWidget#ThinkingContainer {{
-                    background: {DesignTokens.bg_secondary};
-                    border: 1px solid {DesignTokens.border_subtle};
+                    background: transparent;
+                    border: none;
+                    border-left: 2px solid {DesignTokens.border_strong};
                     margin-top: 2px;
-                    margin-left: 0px;
-                    border-radius: 8px;
+                    margin-left: 8px;
                 }}
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
-            self.think_container_layout.setContentsMargins(12, 10, 12, 10)
+            self.think_container_layout.setContentsMargins(14, 6, 4, 8)
             self.think_container_layout.setSpacing(8)
             self.think_duration = 0.0 # Store duration
             self.think_start_time = None
@@ -11167,6 +11843,15 @@ class ChatBubble(QFrame):
         self.edit_btn = btn
         return btn
 
+    def mark_edited(self):
+        if self.role != "User" or self.user_wrapper_layout is None or self.edited_label is not None:
+            return
+        label = QLabel("已编辑")
+        label.setAlignment(Qt.AlignRight)
+        label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 10px; padding-right: 2px;")
+        self.user_wrapper_layout.addWidget(label)
+        self.edited_label = label
+
     def _create_delete_button(self):
         if self.delete_btn is not None:
             return self.delete_btn
@@ -11210,6 +11895,20 @@ class ChatBubble(QFrame):
             self.edit_controls.setVisible(True)
         for button in self.message_action_buttons:
             button.setVisible(False)
+
+    def eventFilter(self, obj, event):
+        if obj is self.user_content_edit and self.edit_controls is not None and self.edit_controls.isVisible():
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self.cancel_inline_edit()
+                return True
+            if (
+                event.type() == QEvent.KeyPress
+                and event.key() in {Qt.Key_Return, Qt.Key_Enter}
+                and event.modifiers() & Qt.ControlModifier
+            ):
+                self.submit_inline_edit()
+                return True
+        return super().eventFilter(obj, event)
 
     def cancel_inline_edit(self):
         if self.user_content_edit is None:
@@ -11281,7 +11980,10 @@ class ChatBubble(QFrame):
         if self.user_bubble_frame is not None:
             self.user_bubble_frame.setMaximumWidth(max(0, int(user_bubble_width)))
         if self.user_content_edit is not None:
-            content_width = max(0, int(user_bubble_width) - 30)
+            max_content_width = max(80, int(user_bubble_width) - 30)
+            lines = self.user_content_edit.toPlainText().splitlines() or [""]
+            natural_width = max(self.user_content_edit.fontMetrics().horizontalAdvance(line) for line in lines) + 12
+            content_width = max(80, min(max_content_width, natural_width))
             self.user_content_edit.setFixedWidth(content_width)
             self.user_content_edit.scheduleAdjustHeight()
         if self.content_col is not None:
@@ -11293,7 +11995,8 @@ class ChatBubble(QFrame):
         elapsed = time.time() - self.think_start_time
         current_total = self.think_duration + elapsed
         
-        self.think_toggle_btn.setText(f" 深度思考 ({current_total:.1f}s)")
+        arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
+        self.think_toggle_btn.setText(f" 深度思考中 · {current_total:.1f} 秒  {arrow}")
 
     def toggle_thinking(self, checked):
         # Animation for Folding
@@ -11301,6 +12004,15 @@ class ChatBubble(QFrame):
              self.think_animation = QPropertyAnimation(self.think_container, b"maximumHeight")
              self.think_animation.setEasingCurve(QEasingCurve.OutCubic)
              self.think_animation.setDuration(200)
+             self._think_animation_finished_slot = None
+
+        previous_slot = getattr(self, "_think_animation_finished_slot", None)
+        if previous_slot is not None:
+            try:
+                self.think_animation.finished.disconnect(previous_slot)
+            except (RuntimeError, TypeError):
+                pass
+            self._think_animation_finished_slot = None
 
         # Calculate target height
         # Since we can't easily get exact height if it's dynamic and hidden,
@@ -11311,10 +12023,6 @@ class ChatBubble(QFrame):
         if checked:
             self.think_container.setVisible(True)
             self.think_container.setMaximumHeight(0) # Start from 0
-            
-            # Disconnect previous connections to avoid conflict (e.g. setVisible(False) from closing)
-            try: self.think_animation.finished.disconnect() 
-            except: pass
             
             # We need to force layout to calculate size
             self.think_container.adjustSize() 
@@ -11330,7 +12038,8 @@ class ChatBubble(QFrame):
             
             self.think_animation.setStartValue(0)
             self.think_animation.setEndValue(total_height)
-            self.think_animation.finished.connect(lambda: self.think_container.setMaximumHeight(16777215)) # Reset to QWIDGETSIZE_MAX
+            self._think_animation_finished_slot = lambda: self.think_container.setMaximumHeight(16777215)
+            self.think_animation.finished.connect(self._think_animation_finished_slot)
             self.think_animation.start()
             
         else:
@@ -11338,31 +12047,12 @@ class ChatBubble(QFrame):
             current_h = self.think_container.height()
             self.think_animation.setStartValue(current_h)
             self.think_animation.setEndValue(0)
-            # Disconnect previous connections to avoid stacking
-            try: self.think_animation.finished.disconnect() 
-            except: pass
-            self.think_animation.finished.connect(lambda: self.think_container.setVisible(False))
+            self._think_animation_finished_slot = lambda: self.think_container.setVisible(False)
+            self.think_animation.finished.connect(self._think_animation_finished_slot)
             self.think_animation.start()
             
-        # Use Chevron or similar, but keep the Lightbulb fixed
-        text = self.think_toggle_btn.text()
-        base_text = " 深度思考"
-        
-        # Use stored duration if available
-        if hasattr(self, 'think_duration') and self.think_duration > 0:
-             base_text = f" 深度思考 ({self.think_duration:.1f}s)"
-        elif "(" in text:
-             # Fallback to parsing if duration not stored yet (legacy bubbles)
-             try:
-                 parts = text.split("(")
-                 duration_part = "(" + parts[1]
-                 base_text = f" 深度思考 {duration_part}"
-             except: pass
-             
-        if checked:
-             self.think_toggle_btn.setText(base_text) # Maybe add arrow if needed, but styling shows state
-        else:
-             self.think_toggle_btn.setText(base_text)
+        text = re.sub(r"\s+[▴▾]\s*$", "", self.think_toggle_btn.text())
+        self.think_toggle_btn.setText(f"{text}  {'▴' if checked else '▾'}")
 
     # --- Sub-Agent PiP Methods ---
     def add_sub_agent_indicator(self, agent_id, status="pending"):
@@ -11523,8 +12213,8 @@ class ChatBubble(QFrame):
                 self.think_start_time = time.time()
                 self.think_timer.start()
                 
-            self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
-            self.think_toggle_btn.setChecked(True)
+            arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
+            self.think_toggle_btn.setText(f" 深度思考中 · {self.think_duration:.1f} 秒  {arrow}")
             self.thinking_widget.setVisible(True)
         else:
             if self.think_timer.isActive():
@@ -11564,8 +12254,8 @@ class ChatBubble(QFrame):
                 self.think_timer.stop()
                 self.think_start_time = None
                 
-            self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
-            self.think_toggle_btn.setChecked(False) # Collapse by default when done
+            arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
+            self.think_toggle_btn.setText(f" 深度思考 · {self.think_duration:.1f} 秒  {arrow}")
 
     def stop_thinking_timers(self):
         if self.think_timer.isActive():
@@ -11576,8 +12266,8 @@ class ChatBubble(QFrame):
         timer = getattr(self, "_thinking_replay_timer", None)
         if timer and timer.isActive():
             timer.stop()
-        self.think_toggle_btn.setText(f" 深度思考 ({self.think_duration:.1f}s)")
-        self.think_toggle_btn.setChecked(False)
+        arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
+        self.think_toggle_btn.setText(f" 深度思考已停止 · {self.think_duration:.1f} 秒  {arrow}")
 
     def _set_main_content_view_mode(self, mode):
         target_mode = "plain" if mode == "plain" else "rich"
@@ -11795,9 +12485,6 @@ class ChatBubble(QFrame):
         
         # Ensure thinking is accessible
         self.thinking_widget.setVisible(True)
-        # If we are streaming and a tool is called, expand to show it
-        if not self.think_toggle_btn.isChecked():
-            self.think_toggle_btn.setChecked(True)
 
 
 class OfficeDraftTaskCard(QFrame):
@@ -12100,22 +12787,20 @@ class ToolCallCard(QFrame):
         self.main_row.setCursor(Qt.PointingHandCursor)
         self.main_row.setStyleSheet(f"""
             QFrame {{
-                background-color: rgba(255, 255, 255, 0.64);
-                border: 1px solid {DesignTokens.border_subtle};
-                border-radius: 14px;
-                padding: 6px 8px;
+                background-color: transparent;
+                border: none;
+                border-radius: 6px;
             }}
             QFrame:hover {{
-                background-color: rgba(255, 255, 255, 0.9);
-                border-color: {DesignTokens.border};
+                background-color: {DesignTokens.bg_hover};
             }}
         """)
         # Make the whole card clickable
         self.main_row.mousePressEvent = self.on_card_clicked
         
         row_layout = QHBoxLayout(self.main_row)
-        row_layout.setContentsMargins(4, 4, 4, 4)
-        row_layout.setSpacing(12)
+        row_layout.setContentsMargins(4, 3, 4, 3)
+        row_layout.setSpacing(8)
         
         # 1. Icon Area (Timeline Dot)
         tool_icons = {
@@ -12133,9 +12818,8 @@ class ToolCallCard(QFrame):
         self.icon_label.setFixedSize(24, 24)
         self.icon_label.setAlignment(Qt.AlignCenter)
         self.icon_label.setStyleSheet(f"""
-            background-color: rgba(255, 255, 255, 0.94);
-            border: 1px solid {DesignTokens.border_subtle};
-            border-radius: 12px; 
+            background-color: transparent;
+            border: none;
         """)
         
         # 2. Text Content
@@ -12146,15 +12830,14 @@ class ToolCallCard(QFrame):
         text_layout.setSpacing(2)
         
         # Title
-        name_label = QLabel(f"{tool_name}")
-        name_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 13px; border: none;")
+        args_obj = args if isinstance(args, dict) else {}
+        display_title, display_summary = summarize_tool_action(tool_name, args_obj)
+        name_label = QLabel(display_title or f"{tool_name}")
+        name_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 12px; border: none;")
         
         # Subtitle (Short Args Summary)
-        short_args = str(args)
-        if len(short_args) > 80:
-            short_args = short_args[:80] + "..."
-        args_preview = QLabel(short_args)
-        args_preview.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px; border: none; font-family: 'Consolas', monospace;")
+        args_preview = QLabel(display_summary or "查看调用详情")
+        args_preview.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px; border: none;")
         
         text_layout.addWidget(name_label)
         text_layout.addWidget(args_preview)
@@ -12364,10 +13047,9 @@ class ToolCallCard(QFrame):
         if not self.is_selected:
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: rgba(255, 255, 255, 0.96);
-                    border: 1px solid {DesignTokens.primary};
-                    border-left: 3px solid {DesignTokens.primary};
-                    border-radius: 14px;
+                    background-color: {DesignTokens.primary_soft};
+                    border: 1px solid {DesignTokens.primary_focus};
+                    border-radius: 6px;
                 }}
             """)
         super().focusInEvent(event)
@@ -12388,29 +13070,22 @@ class ToolCallCard(QFrame):
     def set_selected(self, selected):
         self.is_selected = selected
         if selected:
-            # Selected: Blue Border + Light Blue BG
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: rgba(234, 243, 255, 0.96);
-                    border: 1px solid {DesignTokens.primary};
-                    border-left: 3px solid {DesignTokens.primary};
-                    border-radius: 14px;
+                    background-color: {DesignTokens.primary_soft};
+                    border: none;
+                    border-radius: 6px;
                 }}
             """)
         else:
-            # Normal: Border Color based on Status
-            left_color = DesignTokens.success_accent if self.result else DesignTokens.text_tertiary
             set_stylesheet_if_changed(self.main_row, f"""
                 QFrame {{
-                    background-color: rgba(255, 255, 255, 0.72);
-                    border: 1px solid {DesignTokens.border_subtle};
-                    border-left: 3px solid {left_color};
-                    border-radius: 14px;
+                    background-color: transparent;
+                    border: none;
+                    border-radius: 6px;
                 }}
                 QFrame:hover {{
-                    background-color: rgba(255, 255, 255, 0.92);
-                    border-color: {DesignTokens.border};
-                    border-left-color: {DesignTokens.text_secondary};
+                    background-color: {DesignTokens.bg_hover};
                 }}
             """)
 
@@ -12420,21 +13095,8 @@ class ToolCallCard(QFrame):
         self.result_obj = result_obj
         self.is_finished = True
         
-        # Update style to show success (Green left border)
         if not self.is_selected:
-            set_stylesheet_if_changed(self.main_row, f"""
-                QFrame {{
-                    background-color: rgba(255, 255, 255, 0.78);
-                    border: 1px solid {DesignTokens.border_subtle};
-                    border-left: 3px solid {DesignTokens.success_accent};
-                    border-radius: 14px;
-                }}
-                QFrame:hover {{
-                    background-color: rgba(255, 255, 255, 0.92);
-                    border-color: {DesignTokens.border};
-                    border-left-color: {DesignTokens.success_accent};
-                }}
-            """)
+            self.set_selected(False)
 
 class SubAgentEventTile(QFrame):
     def __init__(self, event, parent=None):
@@ -12845,6 +13507,7 @@ class SessionActivityIndicator(QWidget):
         super().__init__(parent)
         self._angle = 90
         self._running = False
+        self._state = "idle"
         self._timer = QTimer(self)
         self._timer.setInterval(DesignTokens.activity_indicator_interval_ms)
         self._timer.timeout.connect(self._advance)
@@ -12855,11 +13518,20 @@ class SessionActivityIndicator(QWidget):
         self.setVisible(False)
 
     def setRunning(self, running):
-        running = bool(running)
-        if self._running == running:
+        self.setState("running" if running else "idle")
+
+    def setState(self, state):
+        state = str(state or "idle")
+        running = state == "running"
+        if self._state == state and self._running == running:
             return
+        self._state = state
         self._running = running
-        self.setVisible(running)
+        self.setVisible(state != "idle")
+        labels = {"running": "运行中", "waiting": "等待输入", "error": "失败"}
+        label = labels.get(state, "")
+        self.setToolTip(label)
+        self.setAccessibleName(label)
         if running and self.isVisible():
             self._timer.start()
         else:
@@ -12880,11 +13552,18 @@ class SessionActivityIndicator(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        if not self._running:
+        if self._state == "idle":
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect().adjusted(2, 2, -2, -2)
+
+        if self._state in {"waiting", "error"}:
+            color = DesignTokens.warning_text if self._state == "waiting" else DesignTokens.error_text
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(color))
+            painter.drawEllipse(rect.adjusted(2, 2, -2, -2))
+            return
 
         track = QColor(DesignTokens.border_strong)
         track.setAlpha(110)
@@ -13073,6 +13752,7 @@ class SessionState:
         self.clarify_phase = CLARIFY_MODE_DISABLED
         self.clarify_mode_state = CLARIFY_MODE_EXPLORING
         self.pending_clarify_questions = []
+        self.pending_interactions = {}
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
         self.clarify_round_count = 0
@@ -13082,6 +13762,7 @@ class SessionState:
         self.office_output_profile = OFFICE_OUTPUT_PROFILE_FREE
         self.office_draft_preview_pending = False
         self.office_draft_task_card = None
+        self.skill_capture_status_card = None
         self.office_task_result_paths = []
         self.ppt_agent_mode = False
         self.ppt_agent_strategy = PPT_AGENT_STRATEGY_AUTO
@@ -13097,6 +13778,10 @@ class SessionState:
         self.deliverable_preview_rendered = False
         self.token_usage_summary = normalize_token_usage_summary({})
         self.last_token_usage = {}
+        self.composer_draft = ""
+        self.saved_scroll_position = None
+        self.drawer_open = False
+        self.drawer_tab = None
 
 
 def session_history_ready(state):
@@ -13955,9 +14640,10 @@ class SessionContextChip(QWidget):
         self.close_btn.setFixedSize(24, 24)
         self.close_btn.setToolTip("移除")
         self.close_btn.clicked.connect(self.closeClicked.emit)
-        layout.addWidget(self.close_btn)
+        self.close_btn.hide()
 
-        self.main_btn = QPushButton(text)
+        self._text = str(text or "").strip()
+        self.main_btn = QPushButton(f" {self._text}  ▾")
         self.main_btn.setObjectName("ChipMainButton")
         self.main_btn.setCursor(Qt.PointingHandCursor)
         self.main_btn.setFixedHeight(32)
@@ -13983,10 +14669,11 @@ class SessionContextChip(QWidget):
         )
 
     def setText(self, text):
-        self.main_btn.setText(str(text or ""))
+        self._text = str(text or "").strip()
+        self.main_btn.setText(f" {self._text}  ▾")
 
     def text(self):
-        return self.main_btn.text()
+        return self._text
 
     def setIcon(self, icon):
         self.main_btn.setIcon(icon)
@@ -15137,9 +15824,10 @@ class MainWindow(QMainWindow):
         ws_layout.setContentsMargins(0, 0, 0, 0)
         ws_layout.setSpacing(0)
         
-        self.ws_label = QLabel("当前文件夹: 未选择")
-        self.ws_label.setText("当前项目：未选择")
+        self.ws_label = QPushButton("独立聊天")
         self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
+        self.ws_label.setCursor(Qt.PointingHandCursor)
+        self.ws_label.clicked.connect(self.open_file_workspace_from_rail)
         self.security_badge = QLabel("安全范围：仅工作区")
         self.security_badge.setStyleSheet(f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
         self.security_badge.hide()
@@ -15163,7 +15851,7 @@ class MainWindow(QMainWindow):
         self.context_rail = QFrame()
         self.context_rail.setObjectName("ContextRail")
         self.context_rail.setStyleSheet(
-            f"QFrame#ContextRail {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; "
+            f"QFrame#ContextRail {{ background: transparent; border: none; "
             "border-radius: 8px; }"
         )
         context_rail_layout = QHBoxLayout(self.context_rail)
@@ -15189,6 +15877,15 @@ class MainWindow(QMainWindow):
             context_rail_layout.addWidget(btn)
             self.context_rail_buttons[tab_index] = btn
         top_bar.addWidget(self.context_rail)
+
+        self.conversation_more_btn = QToolButton()
+        self.conversation_more_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_secondary, 16))
+        self.conversation_more_btn.setToolTip("对话操作")
+        self.conversation_more_btn.setCursor(Qt.PointingHandCursor)
+        self.conversation_more_btn.setFixedSize(30, 30)
+        self.conversation_more_btn.setStyleSheet(apple_tool_button_style(False))
+        self.conversation_more_btn.clicked.connect(self.show_current_session_header_menu)
+        top_bar.addWidget(self.conversation_more_btn)
         
         layout.addLayout(top_bar)
 
@@ -15212,7 +15909,7 @@ class MainWindow(QMainWindow):
 
         self.conversation_column = QWidget()
         self.conversation_column.setObjectName("ConversationColumn")
-        self.conversation_column.setMinimumWidth(DesignTokens.conversation_min_width)
+        self.conversation_column.setMinimumWidth(DesignTokens.conversation_compact_min_width)
         self.conversation_column.setMaximumWidth(DesignTokens.conversation_max_width)
         self.conversation_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.conversation_column.setStyleSheet("QWidget#ConversationColumn { background: transparent; border: none; }")
@@ -15251,7 +15948,7 @@ class MainWindow(QMainWindow):
         self.session_tabs.setTabsClosable(False)
         self.session_tabs.setTabBarAutoHide(False)
         self.session_tabs.tabBar().hide()
-        self.session_tabs.setMinimumWidth(DesignTokens.conversation_min_width)
+        self.session_tabs.setMinimumWidth(DesignTokens.conversation_compact_min_width)
         self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
         self.session_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.session_tabs.setStyleSheet(
@@ -15272,11 +15969,11 @@ class MainWindow(QMainWindow):
         # Input Area
         self.input_card = QFrame()
         self.input_card.setObjectName("ContentCard")
-        self.input_card.setMinimumWidth(DesignTokens.conversation_min_width)
+        self.input_card.setMinimumWidth(DesignTokens.conversation_compact_min_width)
         self.input_card.setMaximumWidth(DesignTokens.conversation_max_width)
         self.input_card.setStyleSheet(
             f"QFrame#ContentCard {{ background: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border}; border-radius: 10px; }}"
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
         )
 
         self.input_field = AutoResizingInputEdit()
@@ -15285,16 +15982,24 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
         self.input_field.returnPressed.connect(self.handle_send)
         self.input_field.mentionRequested.connect(self.show_agent_mention_menu)
+        self.input_field.textChanged.connect(self.refresh_composer_action_state)
+        self.input_field.setStyleSheet(
+            f"QTextEdit#MainInput {{ background: transparent; border: none; color: {DesignTokens.text_primary}; "
+            "padding: 4px 2px; font-size: 14px; }}"
+        )
 
         self.tool_menu_btn = QPushButton()
         self.tool_menu_btn.setIcon(sidebar_plus_icon(DesignTokens.text_secondary, 16))
-        self.tool_menu_btn.setToolTip("工具")
+        self.tool_menu_btn.setToolTip("添加上下文")
+        self.tool_menu_btn.setAccessibleName("添加上下文")
         self.tool_menu_btn.setCursor(Qt.PointingHandCursor)
         self.tool_menu_btn.setFixedSize(32, 32)
         self.tool_menu_btn.setStyleSheet(
-            f"QPushButton {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_subtle}; border-radius: 7px; }}"
-            f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; border-color: {DesignTokens.border}; }}"
+            f"QPushButton {{ background: transparent; border: 1px solid transparent; border-radius: 7px; }}"
+            f"QPushButton:hover, QPushButton:checked {{ background: {DesignTokens.bg_hover}; border-color: transparent; }}"
+            f"QPushButton:focus {{ border-color: {DesignTokens.primary_focus}; }}"
         )
+        self.tool_menu_btn.setCheckable(True)
         self.tool_menu_btn.clicked.connect(self.show_prompt_tool_menu)
 
         self.selected_skills_badge = SessionContextChip(" 已选能力", qta.icon('fa5s.puzzle-piece', color=DesignTokens.primary))
@@ -15304,7 +16009,6 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setFixedHeight(30)
         self.selected_skills_badge.setVisible(False)
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
-        self.selected_skills_badge.closeClicked.connect(self.clear_session_selected_skills)
 
         self.agent_picker_btn = QPushButton(" Agent")
         self.agent_picker_btn.setIcon(qta.icon('fa5s.user-astronaut', color=DesignTokens.text_secondary))
@@ -15317,8 +16021,8 @@ class MainWindow(QMainWindow):
         self.model_select_btn = QToolButton()
         self.model_select_btn.setCursor(Qt.PointingHandCursor)
         self.model_select_btn.setMinimumWidth(170)
-        self.model_select_btn.setMaximumWidth(300)
-        self.model_select_btn.setPopupMode(QToolButton.InstantPopup)
+        self.model_select_btn.setMaximumWidth(320)
+        self.model_select_btn.setPopupMode(QToolButton.DelayedPopup)
         self.model_select_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.model_select_btn.setStyleSheet(
             f"QToolButton {{ border: 1px solid transparent; background: transparent; color: {DesignTokens.text_secondary}; "
@@ -15326,6 +16030,7 @@ class MainWindow(QMainWindow):
             f"QToolButton:hover {{ color: {DesignTokens.text_primary}; background: {DesignTokens.bg_hover}; border-color: transparent; }}"
             "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
+        self.model_select_btn.clicked.connect(self.show_model_selector_popover)
 
         self.pause_btn = QPushButton()
         self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
@@ -15413,12 +16118,7 @@ class MainWindow(QMainWindow):
             f"QToolButton:disabled {{ color: {DesignTokens.text_tertiary}; background: transparent; }}"
         )
         self.project_selector_btn.clicked.connect(self.show_project_selector_menu)
-        project_selector_row = QHBoxLayout()
-        project_selector_row.setContentsMargins(0, 0, 0, 0)
-        project_selector_row.setSpacing(0)
-        project_selector_row.addWidget(self.project_selector_btn)
-        project_selector_row.addStretch()
-        input_card_layout.addLayout(project_selector_row)
+        prompt_toolbar.insertWidget(3, self.project_selector_btn)
 
         self.input_row = QWidget()
         self.input_row_layout = QHBoxLayout(self.input_row)
@@ -16076,7 +16776,7 @@ class MainWindow(QMainWindow):
             min(DesignTokens.message_max_width, conversation_width),
         )
         user_bubble_width = self._clamp_int(
-            int(message_width * DesignTokens.user_bubble_ratio),
+            int(message_width * min(0.72, DesignTokens.user_bubble_ratio)),
             min(DesignTokens.user_bubble_compact_min_width, message_width),
             min(DesignTokens.user_bubble_max_width, message_width),
         )
@@ -16820,6 +17520,27 @@ class MainWindow(QMainWindow):
         if target_index < 0:
             self.add_system_toast("找不到要编辑的消息。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
+        downstream_count = max(0, len(messages) - target_index - 1)
+        log_ui_navigation(
+            "history_edit_begin",
+            session_id=session_id,
+            downstream_count=downstream_count,
+            attachment_count=len(prompt_files),
+        )
+        if downstream_count:
+            dialog = ProductMessageDialog(
+                "从这里重新生成？",
+                f"这会替换此消息之后的 {downstream_count} 条消息；已经生成的工作区文件不会删除。",
+                tone="destructive",
+                buttons=[
+                    ("取消", QMessageBox.No, "secondary", False),
+                    ("替换并重新生成", QMessageBox.Yes, "danger", True),
+                ],
+                parent=self,
+            )
+            if dialog.exec_result(QMessageBox.No) != QMessageBox.Yes:
+                return False
+        old_scroll = state.chat_scroll.verticalScrollBar().value() if state.chat_scroll else 0
         self._render_rewritten_session(state, messages[:target_index])
         submitted = self._submit_session_request(
             state,
@@ -16830,11 +17551,24 @@ class MainWindow(QMainWindow):
         )
         if not submitted:
             self._render_rewritten_session(state, messages)
+            if state.chat_scroll:
+                QTimer.singleShot(0, lambda value=old_scroll, bar=state.chat_scroll.verticalScrollBar(): bar.setValue(value))
             self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=session_id, auto_close_ms=3200)
+            log_ui_navigation("history_edit_failed", session_id=session_id, downstream_count=downstream_count)
             return False
+        if state.messages and (state.messages[-1].get("role") or "") == "user":
+            state.messages[-1].setdefault("meta", {})["edited"] = True
+        for layout_index in range(state.chat_layout.count() - 1, -1, -1):
+            widget = state.chat_layout.itemAt(layout_index).widget()
+            if isinstance(widget, ChatBubble) and widget.role == "User":
+                widget.mark_edited()
+                break
+        if state.chat_scroll:
+            QTimer.singleShot(0, lambda value=old_scroll, bar=state.chat_scroll.verticalScrollBar(): bar.setValue(value))
         self.save_chat_history(session_id=session_id)
         self.refresh_history_list()
-        self.add_system_toast("已更新消息并重新生成", "success", session_id=session_id, auto_close_ms=3200)
+        self.add_system_toast("已从此处重新生成", "success", session_id=session_id, auto_close_ms=3200)
+        log_ui_navigation("history_edit_done", session_id=session_id, downstream_count=downstream_count)
         return True
 
     def delete_user_message_in_place(self, session_id, message_id):
@@ -16878,43 +17612,21 @@ class MainWindow(QMainWindow):
         return True
 
     def show_prompt_tool_menu(self):
-        menu = create_styled_menu(self)
-        add_files = QAction(qta.icon('fa5s.paperclip', color='#4b5563'), "添加文件", self)
-        add_files.triggered.connect(self.select_files_for_prompt)
-        menu.addAction(add_files)
-        add_agent_menu = menu.addMenu(qta.icon('fa5s.user-astronaut', color='#4b5563'), "添加智能体")
-        self._populate_agent_menu(add_agent_menu)
-        select_skills_action = QAction(qta.icon('fa5s.puzzle-piece', color='#4b5563'), "指定能力", self)
-        select_skills_action.triggered.connect(self.open_session_skill_picker)
-        if not getattr(self, "skill_manager_ready", False):
-            select_skills_action.setEnabled(False)
-            select_skills_action.setToolTip(self.skill_load_error or "能力加载中")
-        menu.addAction(select_skills_action)
-        menu.addSeparator()
-        capture_action = QAction(
-            qta.icon('fa5s.magic', color=DesignTokens.text_secondary),
-            "沉淀本次对话为 Skill",
-            self,
-        )
-        capture_action.triggered.connect(lambda checked=False: self.start_conversation_skill_flow())
-        state = self.get_current_session()
-        capture_action.setEnabled(bool(
-            getattr(self, "skill_manager_ready", False)
-            and state
-            and getattr(state, "messages", [])
-            and not (self.conversation_skill_worker and self.conversation_skill_worker.isRunning())
-        ))
-        menu.addAction(capture_action)
-        pending_draft = getattr(self, "pending_conversation_skill_result", None)
-        if pending_draft:
-            review_action = QAction(
-                qta.icon('fa5s.file-alt', color=DesignTokens.primary),
-                "查看待确认的 Skill 草稿",
-                self,
-            )
-            review_action.triggered.connect(lambda checked=False: self.review_pending_conversation_skill_draft())
-            menu.addAction(review_action)
-        menu.exec(self.tool_menu_btn.mapToGlobal(self.tool_menu_btn.rect().bottomLeft()))
+        existing = getattr(self, "composer_action_popover", None)
+        if existing and _qt_object_alive(existing) and existing.isVisible():
+            existing.close()
+            return
+        popover = ComposerActionPopover(self, self)
+        self.composer_action_popover = popover
+        self.tool_menu_btn.setChecked(True)
+
+        def restore():
+            self.tool_menu_btn.setChecked(False)
+            if self.input_field.isEnabled():
+                QTimer.singleShot(0, self.input_field.setFocus)
+
+        popover.closed.connect(restore)
+        popover.show_for(self.tool_menu_btn, prefer_above=True)
 
     def _model_id_for_state(self, state=None):
         state = state or self.get_current_session()
@@ -16994,7 +17706,6 @@ class MainWindow(QMainWindow):
         selected_id = self._model_id_for_state(state)
         profiles = list(self.config_manager.iter_model_profiles() or [])
         selected = next((item for item in profiles if item.get("id") == selected_id), None)
-        menu = QMenu(self.model_select_btn)
         effort_labels = {
             "low": "低",
             "medium": "中",
@@ -17004,44 +17715,47 @@ class MainWindow(QMainWindow):
         }
         efforts = normalize_reasoning_efforts((selected or {}).get("reasoning_efforts"))
         current_effort = normalize_reasoning_effort((selected or {}).get("reasoning_effort"), efforts)
-        if efforts:
-            menu.addSection("推理")
-            for effort in efforts:
-                action = menu.addAction(effort_labels.get(effort, effort))
-                action.setCheckable(True)
-                action.setChecked(effort == current_effort)
-                action.triggered.connect(
-                    lambda _checked=False, value=effort: self.on_reasoning_effort_selected(value)
-                )
-            menu.addSeparator()
-        model_menu = menu.addMenu("模型") if efforts else menu
-        if not efforts:
-            model_menu.addSection("模型")
-        for profile in profiles:
-            display_name = profile.get("display_name") or profile.get("model_name") or "模型"
-            channel_name = profile.get("channel_display_name") or profile.get("provider_display_name") or profile.get("provider") or ""
-            label = f"{channel_name} / {display_name}" if channel_name else display_name
-            action = model_menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(profile.get("id") == selected_id)
-            action.setToolTip(" / ".join(filter(None, (profile.get("model_name", ""), profile.get("base_url", "")))))
-            action.triggered.connect(
-                lambda _checked=False, model_id=profile.get("id"): self.on_model_selection_changed(model_id)
-            )
-        self.model_select_btn.setMenu(menu)
+        self.model_select_btn.setMenu(None)
         if selected:
             display_name = selected.get("display_name") or selected.get("model_name") or "模型"
             channel_name = selected.get("channel_display_name") or selected.get("provider_display_name") or selected.get("provider") or ""
             label = f"{channel_name} / {display_name}" if channel_name else display_name
-            if current_effort:
-                label += f" · {effort_labels.get(current_effort, current_effort)}"
+            label += f" · {effort_labels.get(current_effort, current_effort) if current_effort else '标准'}"
             self.model_select_btn.setText(label)
-            self.model_select_btn.setToolTip(" / ".join(filter(None, (selected.get("model_name", ""), selected.get("base_url", "")))))
+            self.model_select_btn.setToolTip(label)
         elif selected_id:
             self.model_select_btn.setText("模型不可用")
             self.model_select_btn.setToolTip("当前对话选择的模型已不存在，请重新选择。")
         else:
             self.model_select_btn.setText("未配置模型")
+
+    def show_model_selector_popover(self):
+        profiles = list(self.config_manager.iter_model_profiles() or [])
+        if not profiles:
+            self.add_system_toast("还没有可用模型，请先在设置中添加。", "warning", auto_close_ms=4000)
+            return
+        existing = getattr(self, "model_selector_popover", None)
+        if existing and _qt_object_alive(existing) and existing.isVisible():
+            existing.close()
+            return
+        popover = ModelSelectorPopover(profiles, self._model_id_for_state(self.get_current_session()), self)
+        self.model_selector_popover = popover
+
+        def select_model(model_id):
+            self.on_model_selection_changed(model_id)
+            popover.profiles = list(self.config_manager.iter_model_profiles() or [])
+            popover.set_selected_model(self._model_id_for_state(self.get_current_session()))
+
+        def select_effort(effort):
+            self.on_reasoning_effort_selected(effort)
+            popover.profiles = list(self.config_manager.iter_model_profiles() or [])
+            popover.set_selected_model(self._model_id_for_state(self.get_current_session()))
+
+        popover.modelSelected.connect(select_model)
+        popover.effortSelected.connect(select_effort)
+        popover.closed.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
+        popover.show_for(self.model_select_btn, align_right=True, prefer_above=True)
+        QTimer.singleShot(0, popover.search_input.setFocus)
 
     def on_model_selection_changed(self, model_id):
         state = self.get_current_session()
@@ -17049,11 +17763,19 @@ class MainWindow(QMainWindow):
             self.save_chat_history(session_id=state.session_id)
             self.refresh_model_selector()
             self.refresh_context_badges()
+            return True
+        self.add_system_toast("模型切换失败，已保留原选择。", "error", auto_close_ms=5000)
+        self.refresh_model_selector()
+        return False
 
     def on_reasoning_effort_selected(self, effort):
         model_id = self._model_id_for_state(self.get_current_session())
         if self.config_manager.set_model_reasoning_effort(model_id, effort):
             self.refresh_model_selector()
+            return True
+        self.add_system_toast("思考强度更新失败，已保留原选择。", "error", auto_close_ms=5000)
+        self.refresh_model_selector()
+        return False
 
     def _selected_reasoning_effort(self, state=None):
         profile = self._model_profile_for_state(state)
@@ -17520,11 +18242,14 @@ class MainWindow(QMainWindow):
         indicator = indicators.get(session_id)
         if not indicator:
             return
+        state = self.get_session(session_id)
+        waiting = bool(state and getattr(state, "pending_interactions", {}))
+        failed = bool(state and getattr(state, "session_status", "") == "error")
         running = self._session_has_live_activity(session_id)
-        indicator.setRunning(running)
+        indicator.setState("waiting" if waiting else ("error" if failed else ("running" if running else "idle")))
         age_label = getattr(self, "history_age_labels", {}).get(session_id)
         if age_label:
-            age_label.setVisible(not running and bool(age_label.text()))
+            age_label.setVisible(not (running or waiting or failed) and bool(age_label.text()))
 
     def set_session_status(self, status, session_id=None, save=False):
         state = self.get_session(session_id)
@@ -18621,6 +19346,12 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = self.current_content_buffer
         state.current_thinking_buffer = self.current_thinking_buffer
         state.last_flushed_content_buffer = getattr(self, "last_flushed_content_buffer", "")
+        if hasattr(self, "input_field"):
+            state.composer_draft = self.input_field.toPlainText()
+        if getattr(state, "chat_scroll", None):
+            state.saved_scroll_position = state.chat_scroll.verticalScrollBar().value()
+        state.drawer_open = bool(getattr(self, "right_drawer_open", False))
+        state.drawer_tab = getattr(self, "right_drawer_tab", None)
 
     def set_current_session(self, session_id):
         state = self.sessions.get(session_id)
@@ -18647,6 +19378,13 @@ class MainWindow(QMainWindow):
         self.refresh_model_selector()
         self.refresh_prompt_file_chips(session_id)
         self.refresh_token_usage_label(session_id)
+        if hasattr(self, "input_field") and self.input_field.toPlainText() != state.composer_draft:
+            self.input_field.setPlainText(state.composer_draft or "")
+        if getattr(state, "chat_scroll", None) and state.saved_scroll_position is not None:
+            QTimer.singleShot(
+                0,
+                lambda bar=state.chat_scroll.verticalScrollBar(), value=state.saved_scroll_position: bar.setValue(int(value)),
+            )
         if (
             getattr(state, "history_loaded", True)
             and getattr(self, "right_drawer_open", False)
@@ -18699,10 +19437,10 @@ class MainWindow(QMainWindow):
 
         if running or running_code or running_daemon:
             steerable = bool(getattr(state, "turn_steerable", False) and not running_code)
-            self.action_btn.setText("引导" if steerable else "运行中")
+            self.action_btn.setText("发送引导" if steerable else "运行中")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
-            self.action_btn.setEnabled(steerable)
+            self.action_btn.setEnabled(steerable and bool(self.input_field.toPlainText().strip()))
             self.input_field.setEnabled(steerable)
             self.tool_menu_btn.setEnabled(steerable)
             self.stop_btn.setVisible(True)
@@ -18725,11 +19463,10 @@ class MainWindow(QMainWindow):
             self.action_btn.setText("开始")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
-            workspace_dir = self._workspace_dir_for_state(state)
             self.action_btn.setEnabled(history_ready)
             self.input_field.setEnabled(history_ready)
-            self.tool_menu_btn.setEnabled(bool(workspace_dir) and history_ready)
-            self.tool_menu_btn.setToolTip("" if workspace_dir else "连接项目后可添加文件、自动化和本地能力")
+            self.tool_menu_btn.setEnabled(history_ready)
+            self.tool_menu_btn.setToolTip("添加上下文" if history_ready else "历史会话仍在加载")
             self.stop_btn.setVisible(False)
             if not history_ready:
                 self.input_field.setPlaceholderText("正在加载历史会话，请稍候…")
@@ -18794,7 +19531,8 @@ class MainWindow(QMainWindow):
         chat_layout.addStretch()
 
     def _compute_session_title(self, messages):
-        title = "新对话"
+        fallback = ""
+        generic = re.compile(r"^(你好|您好|hi|hello|测试(?:下|一下)?|试试|在吗|向我提问|问我问题)[!！。,.，\s]*$", re.I)
         for msg in messages:
             if msg.get("role") == "user":
                 content = self._message_display_content(msg).strip()
@@ -18802,9 +19540,16 @@ class MainWindow(QMainWindow):
                     attachments = self._message_user_attachments(msg)
                     if attachments:
                         content = attachments[0].get("name") or attachments[0].get("path") or ""
-                if content: title = content[:15] + "..." if len(content) > 15 else content
-                break
-        return title
+                content = re.sub(r"\s+", " ", content).strip()
+                if not content:
+                    continue
+                fallback = fallback or content
+                if generic.match(content):
+                    continue
+                return content[:18] + "…" if len(content) > 18 else content
+        if fallback:
+            return fallback[:18] + "…" if len(fallback) > 18 else fallback
+        return "新对话"
 
     def _resolved_session_title(self, state, messages=None):
         """Return the persisted manual title or the normal generated title."""
@@ -18965,23 +19710,31 @@ class MainWindow(QMainWindow):
     def _show_session_loading_state(self, state, text="正在加载历史会话…"):
         self.clear_chat_layout(state.chat_layout)
         state.empty_state = None
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(24, 28, 24, 28)
+        layout.setSpacing(12)
         placeholder = QLabel(text)
-        placeholder.setAlignment(Qt.AlignCenter)
-        placeholder.setStyleSheet(
-            f"color: {DesignTokens.text_secondary}; font-size: 13px; padding: 32px 0;"
-        )
-        state.chat_layout.insertWidget(0, placeholder)
+        placeholder.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(placeholder)
+        for width in (72, 56, 64):
+            bar = QFrame()
+            bar.setFixedHeight(12)
+            bar.setMaximumWidth(int(DesignTokens.message_max_width * width / 100))
+            bar.setStyleSheet(f"background: {DesignTokens.bg_secondary}; border: none; border-radius: 6px;")
+            layout.addWidget(bar)
+        layout.addStretch()
+        state.chat_layout.insertWidget(0, wrapper)
 
     def _show_session_load_error_state(self, state, text):
         self.clear_chat_layout(state.chat_layout)
         state.empty_state = None
-        placeholder = QLabel(str(text or "历史会话加载失败。"))
-        placeholder.setAlignment(Qt.AlignCenter)
-        placeholder.setWordWrap(True)
-        placeholder.setStyleSheet(
-            f"color: {DesignTokens.error_text}; font-size: 13px; padding: 32px 0;"
-        )
-        state.chat_layout.insertWidget(0, placeholder)
+        notice = ProductInlineNotice(f"历史会话加载失败：{str(text or '未知错误')}", "error")
+        retry = QPushButton("重试")
+        retry.setStyleSheet(product_button_style("secondary", radius=7))
+        retry.clicked.connect(lambda: self.queue_session_history_load(state.session_id))
+        notice.layout().addWidget(retry)
+        state.chat_layout.insertWidget(0, notice)
 
     def _rebuild_session_render_spans(self, state):
         state.render_items = build_conversation_render_spans(state.messages)
@@ -19065,6 +19818,10 @@ class MainWindow(QMainWindow):
             self.session_tabs.setCurrentIndex(index)
 
         self.set_current_session(session_id)
+        if getattr(state, "drawer_open", False) and getattr(state, "drawer_tab", None) is not None:
+            QTimer.singleShot(0, lambda tab=state.drawer_tab: self.show_context_drawer(tab))
+        elif getattr(self, "right_drawer_open", False):
+            self.hide_context_drawer(reason="session_switch")
         self.update_history_selection()
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
@@ -19469,17 +20226,64 @@ class MainWindow(QMainWindow):
         return decision["value"]
 
     def handle_interaction_request(self, request):
-        state = self.get_current_session()
-        if state:
-            self.set_session_phase("Awaiting input", state.session_id)
-        result = self.show_interaction_dialog(request)
-        bridge.resolve_request((request or {}).get("request_id"), result)
+        request = dict(request or {})
+        session_id = str(request.get("session_id") or self.current_session_id or "")
+        self._show_inline_interaction_request(
+            request,
+            session_id,
+            lambda value: bridge.resolve_request(request.get("request_id"), value),
+        )
     
     def handle_daemon_interaction_request(self, request, session_id=None):
-        self.set_session_phase("Awaiting input", session_id)
-        result = self.show_interaction_dialog(request)
-        if self.daemon_client:
-            self.daemon_client.respond_interaction((request or {}).get("request_id"), result)
+        request = dict(request or {})
+        target_session_id = str(session_id or request.get("session_id") or self.current_session_id or "")
+
+        def resolve(value):
+            if self.daemon_client:
+                self.daemon_client.respond_interaction(request.get("request_id"), value)
+
+        self._show_inline_interaction_request(request, target_session_id, resolve)
+
+    def _show_inline_interaction_request(self, request, session_id, resolver):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state:
+            raise RuntimeError("无法显示交互请求：目标会话不存在。")
+        request_id = str((request or {}).get("request_id") or uuid.uuid4().hex)
+        if request_id in state.pending_interactions:
+            raise RuntimeError(f"交互请求重复：{request_id}")
+        self.set_session_phase("Awaiting input", state.session_id)
+        log_ui_navigation(
+            "interaction_inline_show",
+            session_id=state.session_id,
+            request_id=request_id,
+            interaction_type=str((request or {}).get("type") or "input"),
+            background=state.session_id != self.current_session_id,
+        )
+        card = InlineInteractionCard(request, self)
+        state.pending_interactions[request_id] = card
+        state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
+
+        def finish(value):
+            state.pending_interactions.pop(request_id, None)
+            resolver(value)
+            self.refresh_session_activity_indicator(state.session_id)
+            log_ui_navigation(
+                "interaction_inline_resolved",
+                session_id=state.session_id,
+                request_id=request_id,
+                cancelled=value is False or value is None,
+            )
+
+        card.resolved.connect(finish)
+        self.refresh_session_activity_indicator(state.session_id)
+        if state.session_id == self.current_session_id:
+            self.request_session_scroll_to_bottom(state.session_id, force=True)
+            first_input = card.findChild(QLineEdit)
+            if first_input is not None and first_input.isVisible():
+                QTimer.singleShot(0, first_input.setFocus)
+        else:
+            self.add_system_toast("后台对话正在等待你的输入", "info", session_id=state.session_id, auto_close_ms=0)
+        return card
 
     def refresh_history_list(self):
         self.history_container.setUpdatesEnabled(False)
@@ -19653,15 +20457,20 @@ class MainWindow(QMainWindow):
             return ""
         now = datetime.now()
         if dt.date() == now.date():
-            minutes = max(1, int((now - dt).total_seconds() // 60))
+            seconds = max(0, int((now - dt).total_seconds()))
+            if seconds < 60:
+                return "刚刚"
+            minutes = max(1, seconds // 60)
             if minutes < 60:
-                return f"{minutes} 分"
-            return f"{max(1, minutes // 60)} 时"
+                return f"{minutes}分钟前"
+            return f"{max(1, minutes // 60)}小时前"
         days = max(1, (now.date() - dt.date()).days)
+        if days == 1:
+            return "昨天"
         if days < 7:
-            return f"{days} 天"
+            return f"{days}天前"
         weeks = max(1, days // 7)
-        return f"{weeks} 周"
+        return f"{weeks}周前"
 
     def _conversation_workspace_path(self, conversation):
         meta = (conversation or {}).get("meta") or {}
@@ -19797,6 +20606,7 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         workspace_dir = self._workspace_dir_for_state(state)
         source = self._session_workspace_source(state)
+        title = self._resolved_session_title(state) if state else "新对话"
         if source == "project" and workspace_dir:
             project_meta = next(
                 (
@@ -19805,22 +20615,18 @@ class MainWindow(QMainWindow):
                 ),
                 None,
             )
-            title = self._project_display_name(workspace_dir, project_meta)
-        elif state:
-            title = self._resolved_session_title(state)
+            project_name = self._project_display_name(workspace_dir, project_meta)
+            self.ws_label.setText(f"  {project_name}")
+            self.ws_label.setIcon(sidebar_symbol_icon("folder", DesignTokens.text_secondary, 16))
+            self.ws_label.setToolTip(workspace_dir)
         else:
-            title = "选择一个工作区开始"
+            self.ws_label.setText("独立聊天")
+            self.ws_label.setIcon(qta.icon("fa5s.comment-alt", color=DesignTokens.text_secondary))
+            self.ws_label.setToolTip("当前对话使用独立聊天工作目录")
         self.workspace_title_label.setText(title or "新对话")
-        self.workspace_title_label.setToolTip(workspace_dir or "")
-        has_content = bool(state and getattr(state, "messages", None))
-        if has_content:
-            self.workspace_subtitle_label.hide()
-        else:
-            self.workspace_subtitle_label.setText(
-                "描述任务，Cowork 会在当前项目内读取、创建和整理文件。"
-                if source == "project" else "直接开始聊天；需要处理文件时再连接项目。"
-            )
-            self.workspace_subtitle_label.show()
+        self.workspace_title_label.setToolTip(title or "新对话")
+        self.workspace_subtitle_label.hide()
+        self.ws_container.show()
 
     def _sync_workspace_ui_for_session(self, session_id=None, refresh_sidebar=True):
         state = self.get_session(session_id)
@@ -20002,27 +20808,16 @@ class MainWindow(QMainWindow):
 
         actions = QWidget(row)
         actions.setObjectName("ConversationActions")
-        actions.setFixedWidth(82)
+        actions.setFixedWidth(26)
         actions_layout = QHBoxLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(2)
         pinned = bool(entry.get("pinned"))
-        pin_btn = QToolButton(actions)
-        pin_btn.setIcon(qta.icon('fa5s.thumbtack', color=DesignTokens.primary if pinned else DesignTokens.text_tertiary))
-        self.sidebar_hover_tips.register(pin_btn, "取消置顶对话" if pinned else "置顶对话")
-        pin_btn.setCursor(Qt.PointingHandCursor)
-        pin_btn.setFixedSize(26, 26)
-        pin_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
-        pin_btn.clicked.connect(
-            lambda checked=False, sid=session_id, value=not pinned: self.set_conversation_pinned(sid, value)
-        )
-        archive_btn = QToolButton(actions)
-        archive_btn.setIcon(qta.icon('fa5s.archive', color=DesignTokens.text_tertiary))
-        self.sidebar_hover_tips.register(archive_btn, "归档对话")
-        archive_btn.setCursor(Qt.PointingHandCursor)
-        archive_btn.setFixedSize(26, 26)
-        archive_btn.setStyleSheet(apple_ghost_icon_button_style(radius=13))
-        archive_btn.clicked.connect(lambda checked=False, sid=session_id: self.archive_session(sid))
+        if pinned:
+            pin_indicator = QLabel()
+            pin_indicator.setPixmap(qta.icon('fa5s.thumbtack', color=DesignTokens.primary).pixmap(11, 11))
+            pin_indicator.setToolTip("已置顶")
+            row_layout.insertWidget(row_layout.indexOf(age_label), pin_indicator, 0, Qt.AlignVCenter)
         more_btn = QToolButton(actions)
         more_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_tertiary, 16))
         self.sidebar_hover_tips.register(more_btn, "对话操作")
@@ -20032,11 +20827,9 @@ class MainWindow(QMainWindow):
         more_btn.clicked.connect(
             lambda checked=False, sid=session_id, btn_ref=more_btn: self.show_session_menu(sid, btn_ref)
         )
-        actions_layout.addWidget(pin_btn)
-        actions_layout.addWidget(archive_btn)
         actions_layout.addWidget(more_btn)
         row_layout.addWidget(actions, 0, Qt.AlignVCenter)
-        row.set_hover_actions([pin_btn, archive_btn, more_btn])
+        row.set_hover_actions([more_btn], hide_widgets=[age_label])
         row.setFocusPolicy(Qt.StrongFocus)
         row.setContextMenuPolicy(Qt.CustomContextMenu)
         row.customContextMenuRequested.connect(
@@ -20071,7 +20864,7 @@ class MainWindow(QMainWindow):
 
         header = ProjectHistoryRow()
         header.setObjectName("HistoryRow")
-        set_stylesheet_if_changed(header, apple_history_row_style(selected))
+        set_stylesheet_if_changed(header, apple_history_row_style(False))
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(6, 3, 4, 3)
         header_layout.setSpacing(6)
@@ -20831,20 +21624,30 @@ class MainWindow(QMainWindow):
 
     def show_session_menu(self, session_id, anchor):
         menu = create_styled_menu(self)
+        record = self.chat_storage.get_conversation_record(session_id) or {}
+        pinned = bool((record.get("meta") or {}).get("pinned") or record.get("pinned"))
         rename_action = QAction("重命名", self)
+        pin_action = QAction("取消置顶" if pinned else "置顶", self)
         archive_action = QAction("归档", self)
         delete_action = QAction("删除", self)
         delete_action.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_text))
 
         rename_action.triggered.connect(lambda: self.begin_session_inline_rename(session_id))
+        pin_action.triggered.connect(lambda: self.set_conversation_pinned(session_id, not pinned))
         archive_action.triggered.connect(lambda: self.archive_session(session_id))
         delete_action.triggered.connect(lambda: self.delete_session(session_id))
 
         menu.addAction(rename_action)
+        menu.addAction(pin_action)
         menu.addAction(archive_action)
         menu.addSeparator()
         menu.addAction(delete_action)
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def show_current_session_header_menu(self):
+        state = self.get_current_session()
+        if state:
+            self.show_session_menu(state.session_id, self.conversation_more_btn)
 
     def rename_session(self, session_id):
         return self.begin_session_inline_rename(session_id)
@@ -21089,6 +21892,7 @@ class MainWindow(QMainWindow):
                     attachments=self._message_user_attachments(message),
                     source_message_id=str(message.get("id") or "").strip(),
                     session_id=session_id,
+                    edited=bool((message.get("meta") or {}).get("edited")),
                 )
                 if current_idx is not None:
                     current_idx += 1
@@ -21314,6 +22118,7 @@ class MainWindow(QMainWindow):
                     attachments=self._message_user_attachments(msg),
                     source_message_id=str(msg.get("id") or "").strip(),
                     target_layout=target_layout,
+                    edited=bool((msg.get("meta") or {}).get("edited")),
                 )
                 if current_idx is not None and target_layout is None: current_idx += 1
                 if target_layout is None:
@@ -23280,6 +24085,7 @@ class MainWindow(QMainWindow):
         self.product_back_btn.show()
         self.ws_container.hide()
         self.context_rail.hide()
+        self.conversation_more_btn.hide()
         self.main_page_stack.setCurrentWidget(page)
         self.current_product_route = route
         self.current_product_subroute = ""
@@ -23312,8 +24118,9 @@ class MainWindow(QMainWindow):
         self.current_product_subroute = ""
         self.main_page_stack.setCurrentWidget(self.conversation_page)
         self.product_back_btn.hide()
-        self.ws_container.hide()
+        self.ws_container.show()
         self.context_rail.show()
+        self.conversation_more_btn.show()
         for button in self.product_nav_buttons.values():
             button.setChecked(False)
         self.refresh_model_selector()
@@ -23796,19 +24603,31 @@ class MainWindow(QMainWindow):
         state = self.get_current_session()
         if not state:
             return
+        if self._session_is_busy(state):
+            self.add_system_toast("当前任务结束后可调整指定能力", "info", session_id=state.session_id, auto_close_ms=3200)
+            return
         if not self.skill_manager_ready:
             message = self.skill_load_error or "能力仍在加载中，请稍后再指定能力。"
             self.add_system_toast(message, "error" if self.skill_load_error else "info", session_id=state.session_id, auto_close_ms=5000)
             return
         skills = self._available_session_skills()
-        dialog = SessionSkillPickerDialog(
+        popover = SessionSkillPickerPopover(
             skills,
             selected_skill_names=getattr(state, "selected_skill_names", []),
             parent=self,
         )
-        if dialog.exec():
-            self.set_session_selected_skills(dialog.selected_skill_names(), session_id=state.session_id)
+        self.session_skill_popover = popover
+
+        def apply(names, sid=state.session_id):
+            self.set_session_selected_skills(names, session_id=sid)
             self.add_system_toast("指定能力已更新", "success", session_id=state.session_id, auto_close_ms=3200)
+            log_ui_navigation("session_skills_apply", session_id=sid, selected_count=len(names or []))
+
+        popover.applied.connect(apply)
+        popover.closed.connect(lambda: QTimer.singleShot(0, self.input_field.setFocus))
+        anchor = self.selected_skills_badge if self.selected_skills_badge.isVisible() else self.tool_menu_btn
+        popover.show_for(anchor, prefer_above=True)
+        QTimer.singleShot(0, popover.search_input.setFocus)
 
     def update_skill_capture_button_state(self):
         if not hasattr(self, "sidebar_skill_capture_btn"):
@@ -23824,6 +24643,47 @@ class MainWindow(QMainWindow):
             self.sidebar_skill_capture_btn.setText(" 能力加载中")
         else:
             self.sidebar_skill_capture_btn.setText(" 沉淀为 Skill")
+
+    def _update_skill_capture_status_card(self, state, text, *, pending=False, failed=False):
+        if not state:
+            return None
+        card = getattr(state, "skill_capture_status_card", None)
+        if card is None or not _qt_object_alive(card):
+            card = QFrame()
+            card.setObjectName("SkillCaptureStatusCard")
+            card.setStyleSheet(
+                f"QFrame#SkillCaptureStatusCard {{ background: {DesignTokens.bg_main}; "
+                f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
+            )
+            layout = QHBoxLayout(card)
+            layout.setContentsMargins(12, 9, 10, 9)
+            layout.setSpacing(9)
+            icon = QLabel()
+            icon.setObjectName("SkillCaptureStatusIcon")
+            icon.setFixedSize(20, 20)
+            layout.addWidget(icon)
+            label = QLabel()
+            label.setObjectName("SkillCaptureStatusText")
+            label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600;")
+            layout.addWidget(label, 1)
+            button = QPushButton("查看并保存")
+            button.setObjectName("SkillCaptureReviewButton")
+            button.setStyleSheet(product_button_style("ghost", radius=6))
+            button.clicked.connect(self.review_pending_conversation_skill_draft)
+            button.hide()
+            layout.addWidget(button)
+            state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
+            state.skill_capture_status_card = card
+        icon = card.findChild(QLabel, "SkillCaptureStatusIcon")
+        label = card.findChild(QLabel, "SkillCaptureStatusText")
+        button = card.findChild(QPushButton, "SkillCaptureReviewButton")
+        color = DesignTokens.error_text if failed else (DesignTokens.primary if pending else DesignTokens.text_secondary)
+        icon_name = "fa5s.exclamation-circle" if failed else ("fa5s.file-alt" if pending else "fa5s.magic")
+        icon.setPixmap(qta.icon(icon_name, color=color).pixmap(16, 16))
+        label.setText(str(text or ""))
+        button.setVisible(bool(pending))
+        card.show()
+        return card
 
     def start_conversation_skill_flow(self, source_message_id="", session_id=None):
         target_session_id = str(session_id or self.current_session_id or "")
@@ -23904,6 +24764,7 @@ class MainWindow(QMainWindow):
         )
 
         self.add_system_toast("正在根据当前会话生成 Skill 草稿", "info", auto_close_ms=3500)
+        self._update_skill_capture_status_card(state, "正在生成 Skill 草稿")
         self.conversation_skill_worker = ConversationSkillDraftWorker(
             self.config_manager,
             state.session_id,
@@ -23926,6 +24787,8 @@ class MainWindow(QMainWindow):
 
     def handle_conversation_skill_finished(self, result):
         worker = self.conversation_skill_worker
+        target_session_id = str(getattr(worker, "session_id", "") or self.current_session_id or "")
+        target_state = self.get_session(target_session_id) if target_session_id else self.get_current_session()
         self.conversation_skill_worker = None
         if worker:
             try:
@@ -23940,11 +24803,17 @@ class MainWindow(QMainWindow):
                 session_id=self.current_session_id,
                 error=result.get("error"),
             )
+            self._update_skill_capture_status_card(
+                target_state,
+                f"Skill 草稿生成失败：{result.get('error') or '未知错误'}",
+                failed=True,
+            )
             self.add_system_toast(f"生成 Skill 草稿失败：{result.get('error') or '未知错误'}", "error", auto_close_ms=8000)
             return
 
-        if QApplication.activeWindow() is not self or QApplication.activeModalWidget() is not None:
+        if not bool(getattr(self, "_reviewing_pending_skill_draft", False)):
             self.pending_conversation_skill_result = dict(result)
+            self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             self.add_system_toast(
                 "Skill 草稿已生成，待你确认后保存",
                 "info",
@@ -23970,10 +24839,14 @@ class MainWindow(QMainWindow):
                 mode=mode,
                 target_skill=target_skill,
             )
-            self.add_system_toast("已取消保存 Skill 草稿", "info", auto_close_ms=4000)
+            self.pending_conversation_skill_result = dict(result)
+            self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
+            self.add_system_toast("Skill 草稿已保留，可稍后继续确认", "info", auto_close_ms=4000)
             return
 
         draft = preview.draft()
+        pending_payload = dict(result)
+        pending_payload["draft"] = copy.deepcopy(draft)
         try:
             if mode == "create":
                 log_conversation_skill_capture(
@@ -24008,6 +24881,8 @@ class MainWindow(QMainWindow):
                         error=save_result.message,
                     )
                     QMessageBox.warning(self, "保存失败", save_result.message)
+                    self.pending_conversation_skill_result = pending_payload
+                    self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
                     return
             else:
                 log_conversation_skill_capture(
@@ -24037,6 +24912,8 @@ class MainWindow(QMainWindow):
                         error=save_result.message,
                     )
                     QMessageBox.warning(self, "更新失败", save_result.message)
+                    self.pending_conversation_skill_result = pending_payload
+                    self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
                     return
         except Exception as exc:
             log_conversation_skill_capture(
@@ -24047,15 +24924,41 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
             QMessageBox.warning(self, "保存失败", f"保存 Skill 时发生错误：{exc}")
+            self.pending_conversation_skill_result = pending_payload
+            self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             return
+        status_card = getattr(target_state, "skill_capture_status_card", None) if target_state else None
+        if status_card is not None and _qt_object_alive(status_card):
+            status_card.hide()
         self.update_skill_capture_button_state()
+
+    def refresh_composer_action_state(self):
+        state = self.get_current_session()
+        if not state or not hasattr(self, "action_btn"):
+            return
+        running = bool(
+            (state.llm_worker and state.llm_worker.isRunning())
+            or (state.code_worker and state.code_worker.isRunning())
+            or getattr(state, "daemon_running", False)
+        )
+        if running:
+            steerable = bool(getattr(state, "turn_steerable", False) and not (state.code_worker and state.code_worker.isRunning()))
+            self.action_btn.setText("发送引导" if steerable else "运行中")
+            self.action_btn.setEnabled(steerable and bool(self.input_field.toPlainText().strip()))
+            return
+        self.action_btn.setText("开始")
+        self.action_btn.setEnabled(session_history_ready(state))
 
     def review_pending_conversation_skill_draft(self):
         result = getattr(self, "pending_conversation_skill_result", None)
         if not result:
             return False
         self.pending_conversation_skill_result = None
-        self.handle_conversation_skill_finished(dict(result))
+        self._reviewing_pending_skill_draft = True
+        try:
+            self.handle_conversation_skill_finished(dict(result))
+        finally:
+            self._reviewing_pending_skill_draft = False
         return True
 
     def handle_skill_used(self, skill_name, session_id=None):
@@ -25325,6 +26228,7 @@ class MainWindow(QMainWindow):
         source_message_id="",
         session_id=None,
         target_layout=None,
+        edited=False,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state: return
@@ -25350,6 +26254,7 @@ class MainWindow(QMainWindow):
             attachments=attachments,
             source_message_id=source_message_id,
             workspace_dir=self._workspace_dir_for_state(state),
+            edited=edited,
         )
         self._connect_chat_bubble_actions(bubble, state)
         if str(role or "").strip().lower() in {"agent", "assistant"} and getattr(bubble, "_deliverable_paths", None):

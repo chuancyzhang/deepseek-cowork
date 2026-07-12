@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QToolButton, QWidget
 
 from main import ConversationHistoryRow, MainWindow, ProjectHistoryRow
 from ui.primitives import ProductCodeViewer, ProductResultViewer, ProductSegmentedControl, SidebarInlineNameEditor
@@ -58,7 +58,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.assertEqual(len(conversation_rows), 5)
             actions = row.findChild(QWidget, "ProjectActions")
             self.assertIsNotNone(actions)
-            self.assertTrue(actions.isHidden())
+            self.assertTrue(all(button.isHidden() for button in actions.findChildren(QToolButton)))
             disclosure = [button.text().strip() for button in row.findChildren(type(self.window.action_btn))]
             self.assertIn("展开显示", disclosure)
             row.deleteLater()

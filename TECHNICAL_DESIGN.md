@@ -134,6 +134,7 @@ Cowork 采用交错式推理流程：
 - **优先可演进性**：用户技能、MCP 工具、提示词自动化和长期记忆都可以持续扩展。
 - **会话显示标题**：自动标题继续由首条用户消息生成；用户在侧栏就地重命名后，conversation `meta.manual_title` 标记标题来源，后续异步保存、历史迁移和重新加载必须保留该标题，且不修改数据库表结构。
 - **任务观测展示**：`ProductSegmentedControl` 承载执行上下文、调用记录和技术详情；调用记录是工具选择源，技术详情使用共享代码与结果查看器按 Python、Shell、JSON、stdout、stderr 和 Traceback 呈现。
+- **UI 导航诊断**：侧栏新建聊天、项目点击、输入栏项目切换和主内容路由向 `ui_navigation.log` 写入 begin/done 阶段；正式 UI 进程通过 `faulthandler` 把原生崩溃线程栈写入 `native_crash.log`。
 
 ## 10. 代码入口
 

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from core.theme import DesignTokens
 from main import (
     AgentModuleDialog,
+    AgentProfileManager,
     MemoryUpdateDialog,
     SkillsCenterDialog,
     apple_button_style,
@@ -133,6 +134,18 @@ class UiDesignSystemTests(unittest.TestCase):
         self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_master_detail"))
         self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_detail"))
         self.assertFalse(hasattr(AgentModuleDialog, "_build_skill_master_detail"))
+
+    def test_empty_agent_settings_create_a_disabled_template(self):
+        manager = AgentProfileManager([], lambda: [])
+        try:
+            profiles = manager.get_profiles()
+            self.assertEqual(len(profiles), 1)
+            self.assertEqual(profiles[0]["name"], "新智能体")
+            self.assertFalse(profiles[0]["enabled"])
+            self.assertFalse(manager.enabled_check.isChecked())
+            self.assertIn("已停用", manager.profile_list.item(0).text())
+        finally:
+            manager.deleteLater()
 
     def test_memory_update_dialog_uses_scoped_code_panels(self):
         dialog = MemoryUpdateDialog("全部历史")

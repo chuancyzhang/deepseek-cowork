@@ -1240,7 +1240,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window._set_prompt_files.assert_not_called()
             window._submit_session_request.assert_not_called()
             window.add_system_toast.assert_called_once_with(
-                "当前没有可继续的对话，请先新建对话。",
+                "当前没有可继续的聊天，请先新建聊天。",
                 "warning",
                 auto_close_ms=3200,
             )

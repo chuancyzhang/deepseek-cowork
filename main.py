@@ -13,6 +13,7 @@ import mimetypes
 import platform
 import uuid
 import glob
+import faulthandler
 import markdown
 import socket
 import threading
@@ -389,6 +390,8 @@ BACKGROUND_AUTOMATION_START_DELAY_MS = 2400
 GATEWAY_START_SETTLE_DELAY_MS = 1200
 STARTUP_LOG_FILENAME = "startup.log"
 UI_ERROR_LOG_FILENAME = "ui_error.log"
+UI_NAVIGATION_LOG_FILENAME = "ui_navigation.log"
+NATIVE_CRASH_LOG_FILENAME = "native_crash.log"
 PPT_AGENT_DEBUG_LOG_FILENAME = "ppt_agent_debug.log"
 CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
 MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
@@ -756,6 +759,33 @@ def apple_tool_button_style(active=False):
         f"QToolButton:pressed {{ background: {DesignTokens.bg_pressed}; }} "
         f"QToolButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; border-color: {DesignTokens.border_subtle}; }}"
     )
+
+
+def log_ui_navigation(stage, **fields):
+    payload = {"stage": str(stage or "")}
+    payload.update(fields or {})
+    append_background_process_log(
+        UI_NAVIGATION_LOG_FILENAME,
+        json.dumps(payload, ensure_ascii=False, default=str),
+    )
+
+
+_NATIVE_CRASH_LOG_HANDLE = None
+
+
+def install_native_crash_logging():
+    global _NATIVE_CRASH_LOG_HANDLE
+    if _NATIVE_CRASH_LOG_HANDLE is not None:
+        return
+    try:
+        path = os.path.join(get_app_data_dir(), NATIVE_CRASH_LOG_FILENAME)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        _NATIVE_CRASH_LOG_HANDLE = open(path, "a", encoding="utf-8", buffering=1)
+        _NATIVE_CRASH_LOG_HANDLE.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] process_start pid={os.getpid()}\n")
+        faulthandler.enable(file=_NATIVE_CRASH_LOG_HANDLE, all_threads=True)
+    except Exception as exc:
+        _NATIVE_CRASH_LOG_HANDLE = None
+        append_background_process_log(UI_ERROR_LOG_FILENAME, f"native_crash_logging_failed={exc}")
 
 
 def apple_ghost_icon_button_style(radius=7):
@@ -4348,7 +4378,7 @@ class AgentProfileManager(QWidget):
             "description": "",
             "system_prompt": "",
             "skill_names": [],
-            "enabled": True,
+            "enabled": False,
             "created_at": now,
             "updated_at": now,
         }
@@ -9932,6 +9962,17 @@ class ConversationHistoryRow(QFrame):
         super().focusOutEvent(event)
 
 
+class ProjectHistoryRow(ConversationHistoryRow):
+    activated = Signal()
+
+    def keyPressEvent(self, event):
+        if event.key() in {Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space}:
+            self.activated.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class ElidedToolLabel(QLabel):
     def __init__(self, text="", parent=None):
         super().__init__(parent)
@@ -14385,12 +14426,12 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(10, 14, 10, 12)
         sidebar_layout.setSpacing(8)
 
-        new_chat_btn = QPushButton(" 新建对话")
+        new_chat_btn = QPushButton(" 新建聊天")
         new_chat_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_primary))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
         new_chat_btn.setFixedHeight(32)
         new_chat_btn.setStyleSheet(apple_button_style("ghost", radius=7, align="left"))
-        new_chat_btn.clicked.connect(self.new_conversation)
+        new_chat_btn.clicked.connect(lambda checked=False: self.new_conversation())
         sidebar_layout.addWidget(new_chat_btn)
 
         self.history_search_input = QLineEdit()
@@ -14419,14 +14460,14 @@ class MainWindow(QMainWindow):
         self.sidebar_projects_menu_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_projects_menu_btn.setFixedSize(28, 28)
         self.sidebar_projects_menu_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
-        self.sidebar_projects_menu_btn.clicked.connect(self.show_sidebar_projects_menu)
+        self.sidebar_projects_menu_btn.clicked.connect(lambda checked=False: self.show_sidebar_projects_menu())
         self.sidebar_add_project_btn = QToolButton()
         self.sidebar_add_project_btn.setIcon(sidebar_symbol_icon("folder-plus", DesignTokens.text_secondary, 16))
         self.sidebar_hover_tips.register(self.sidebar_add_project_btn, "添加项目")
         self.sidebar_add_project_btn.setCursor(Qt.PointingHandCursor)
         self.sidebar_add_project_btn.setFixedSize(28, 28)
         self.sidebar_add_project_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
-        self.sidebar_add_project_btn.clicked.connect(self.add_project_from_dialog)
+        self.sidebar_add_project_btn.clicked.connect(lambda checked=False: self.add_project_from_dialog())
         project_header_layout.addWidget(self.sidebar_projects_menu_btn)
         project_header_layout.addWidget(self.sidebar_add_project_btn)
         sidebar_layout.addWidget(project_header)
@@ -14461,7 +14502,7 @@ class MainWindow(QMainWindow):
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
         sidebar_skills_btn.setCheckable(True)
-        sidebar_skills_btn.clicked.connect(self.open_skills_center)
+        sidebar_skills_btn.clicked.connect(lambda checked=False: self.open_skills_center())
         self.sidebar_skills_btn = sidebar_skills_btn
         self.product_nav_buttons[self.PAGE_CAPABILITIES] = sidebar_skills_btn
         sidebar_layout.addWidget(sidebar_skills_btn)
@@ -14471,7 +14512,7 @@ class MainWindow(QMainWindow):
         sidebar_automation_btn.setCursor(Qt.PointingHandCursor)
         sidebar_automation_btn.setStyleSheet(sidebar_btn_style)
         sidebar_automation_btn.setCheckable(True)
-        sidebar_automation_btn.clicked.connect(self.open_automation_center)
+        sidebar_automation_btn.clicked.connect(lambda checked=False: self.open_automation_center())
         self.product_nav_buttons[self.PAGE_AUTOMATION] = sidebar_automation_btn
         sidebar_layout.addWidget(sidebar_automation_btn)
 
@@ -14481,7 +14522,7 @@ class MainWindow(QMainWindow):
         sidebar_settings_btn.setCursor(Qt.PointingHandCursor)
         sidebar_settings_btn.setStyleSheet(sidebar_btn_style)
         sidebar_settings_btn.setCheckable(True)
-        sidebar_settings_btn.clicked.connect(self.open_settings)
+        sidebar_settings_btn.clicked.connect(lambda checked=False: self.open_settings())
         self.product_nav_buttons[self.PAGE_SETTINGS] = sidebar_settings_btn
         sidebar_layout.addWidget(sidebar_settings_btn)
 
@@ -15494,24 +15535,6 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         super().keyPressEvent(event)
-
-    def eventFilter(self, obj, event):
-        actions = obj.property("sidebarProjectActions") if isinstance(obj, QWidget) else None
-        if actions is not None:
-            event_type = event.type()
-            if event_type in {QEvent.Enter, QEvent.FocusIn}:
-                actions.show()
-            elif event_type in {QEvent.Leave, QEvent.FocusOut}:
-                def hide_if_inactive(target=actions):
-                    if not _qt_object_alive(target):
-                        return
-                    header = target.parentWidget()
-                    focused = QApplication.focusWidget()
-                    focus_inside = bool(focused and header and (focused is header or header.isAncestorOf(focused)))
-                    if not focus_inside and not (header and header.underMouse()):
-                        target.hide()
-                QTimer.singleShot(0, hide_if_inactive)
-        return super().eventFilter(obj, event)
 
     def set_context_drawer_width(self, requested_width):
         parent = getattr(self, "main_container", None)
@@ -17062,10 +17085,10 @@ class MainWindow(QMainWindow):
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(True))
         else:
             self.input_field.setEnabled(True)
-            self.input_field.setPlaceholderText("直接开始对话；需要处理文件时再连接项目")
+            self.input_field.setPlaceholderText("直接开始聊天；需要处理文件时再连接项目")
             self.action_btn.setEnabled(True)
             self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
-            self.ws_label.setText("未连接项目 · 纯对话")
+            self.ws_label.setText("未连接项目 · 聊天")
         self.refresh_project_selector()
         self.refresh_context_badges()
 
@@ -18713,7 +18736,7 @@ class MainWindow(QMainWindow):
                 self.action_btn.setText("加载中")
                 self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
             else:
-                self.input_field.setPlaceholderText("直接开始对话；需要处理文件时再连接项目")
+                self.input_field.setPlaceholderText("直接开始聊天；需要处理文件时再连接项目")
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
@@ -19795,7 +19818,7 @@ class MainWindow(QMainWindow):
         else:
             self.workspace_subtitle_label.setText(
                 "描述任务，Cowork 会在当前项目内读取、创建和整理文件。"
-                if source == "project" else "直接开始对话；需要处理文件时再连接项目。"
+                if source == "project" else "直接开始聊天；需要处理文件时再连接项目。"
             )
             self.workspace_subtitle_label.show()
 
@@ -20046,7 +20069,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(2)
 
-        header = QFrame()
+        header = ProjectHistoryRow()
         header.setObjectName("HistoryRow")
         set_stylesheet_if_changed(header, apple_history_row_style(selected))
         header_layout = QHBoxLayout(header)
@@ -20056,6 +20079,7 @@ class MainWindow(QMainWindow):
         project_btn = QPushButton(f" {name}")
         project_btn.setIcon(sidebar_symbol_icon("folder-open" if selected else "folder", DesignTokens.text_secondary, 16))
         project_btn.setCursor(Qt.PointingHandCursor)
+        project_btn.setFocusPolicy(Qt.NoFocus)
         project_btn.setMinimumWidth(0)
         project_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         project_btn.setStyleSheet(apple_button_style("ghost", radius=12, align="left"))
@@ -20073,7 +20097,7 @@ class MainWindow(QMainWindow):
 
         new_btn = QToolButton()
         new_btn.setIcon(sidebar_plus_icon(DesignTokens.primary if selected else DesignTokens.text_secondary, 16))
-        self.sidebar_hover_tips.register(new_btn, "在此项目中新建对话")
+        self.sidebar_hover_tips.register(new_btn, "在此项目中新建聊天")
         new_btn.setCursor(Qt.PointingHandCursor)
         new_btn.setFixedSize(26, 26)
         new_btn.setIconSize(action_icon_size)
@@ -20091,22 +20115,20 @@ class MainWindow(QMainWindow):
         menu_btn.clicked.connect(lambda checked=False, p=path, btn_ref=menu_btn: self.show_project_menu(p, btn_ref))
         actions_layout.addWidget(menu_btn)
         header_layout.addWidget(actions, 0, Qt.AlignVCenter)
-        actions.setVisible(False)
         header.setFocusPolicy(Qt.StrongFocus)
+        header.set_hover_actions([new_btn, menu_btn])
+        header.activated.connect(
+            lambda p=path, q=query_active: self.handle_project_click(p, query_active=q)
+        )
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         header.customContextMenuRequested.connect(
             lambda pos, p=path, host=header: self.show_project_menu(p, host)
         )
-        header.installEventFilter(self)
-        header.setProperty("sidebarProjectPath", path)
         rename_shortcut = QAction(header)
         rename_shortcut.setShortcut("F2")
         rename_shortcut.setShortcutContext(Qt.WidgetWithChildrenShortcut)
         rename_shortcut.triggered.connect(lambda p=path: self.begin_project_inline_rename(p))
         header.addAction(rename_shortcut)
-        for widget in (header, project_btn, new_btn, menu_btn):
-            widget.installEventFilter(self)
-            widget.setProperty("sidebarProjectActions", actions)
         outer.addWidget(header)
 
         if fully_expanded:
@@ -20135,6 +20157,12 @@ class MainWindow(QMainWindow):
         return row
 
     def handle_project_click(self, path, query_active=False):
+        log_ui_navigation(
+            "sidebar_project_click_begin",
+            session_id=str(getattr(self, "current_session_id", "") or ""),
+            path=str(path or ""),
+            query_active=bool(query_active),
+        )
         normalized = self._normalize_project_path(path)
         if not normalized:
             return False
@@ -20159,15 +20187,18 @@ class MainWindow(QMainWindow):
         )
         if query_active:
             self.refresh_history_list()
+            log_ui_navigation("sidebar_project_click_done", path=normalized, expanded=True, query_active=True)
             return True
         if was_visible:
             self.project_preview_paths.discard(normalized)
             self.project_full_expanded_paths.discard(normalized)
             self.refresh_history_list()
+            log_ui_navigation("sidebar_project_click_done", path=normalized, expanded=False)
             return True
         self.project_preview_paths.add(normalized)
         self.project_full_expanded_paths.discard(normalized)
         self.refresh_history_list()
+        log_ui_navigation("sidebar_project_click_done", path=normalized, expanded=True)
         return True
 
     def select_project(self, path, refresh_sidebar=True):
@@ -20249,8 +20280,8 @@ class MainWindow(QMainWindow):
                 project_meta = item
                 break
         workspace_source = self._session_workspace_source(state)
-        label = "对话工作目录" if workspace_source == "chat" else (
-            self._project_display_name(workspace_dir, project_meta) if workspace_dir else "对话工作目录"
+        label = "聊天工作目录" if workspace_source == "chat" else (
+            self._project_display_name(workspace_dir, project_meta) if workspace_dir else "聊天工作目录"
         )
         metrics = QFontMetrics(button.font())
         button.setText(metrics.elidedText(label, Qt.ElideRight, 210))
@@ -20265,6 +20296,11 @@ class MainWindow(QMainWindow):
             button.setToolTip("当前任务运行中或会话尚未加载，暂时不能切换项目")
 
     def select_project_for_current_conversation(self, path):
+        log_ui_navigation(
+            "conversation_project_switch_begin",
+            session_id=str(getattr(self, "current_session_id", "") or ""),
+            path=str(path or ""),
+        )
         state = self.get_current_session()
         if not self._project_selector_switch_allowed(state):
             self.refresh_project_selector()
@@ -20289,6 +20325,11 @@ class MainWindow(QMainWindow):
         )
         self.normalize_session_ui(state)
         self.refresh_project_selector(state.session_id)
+        log_ui_navigation(
+            "conversation_project_switch_done",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            workspace_dir=str(workspace_dir or ""),
+        )
         return True
 
     def add_project_from_selector(self):
@@ -20339,7 +20380,7 @@ class MainWindow(QMainWindow):
         add_action = QAction("添加新项目", menu)
         add_action.triggered.connect(self.add_project_from_selector)
         menu.addAction(add_action)
-        none_action = QAction("使用对话工作目录", menu)
+        none_action = QAction("使用聊天工作目录", menu)
         none_action.setCheckable(True)
         none_action.setChecked(current_source != "project")
         none_action.triggered.connect(lambda: self.select_project_for_current_conversation(""))
@@ -20726,7 +20767,7 @@ class MainWindow(QMainWindow):
             key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0))
         )
         if unassigned_entries:
-            self._add_history_group_label("对话")
+            self._add_history_group_label("聊天")
             if query_active or self.unassigned_history_full_expanded or len(unassigned_entries) <= 3:
                 visible_unassigned_entries = unassigned_entries
             else:
@@ -21458,8 +21499,16 @@ class MainWindow(QMainWindow):
         event.acceptProposedAction()
 
     def new_conversation(self):
+        log_ui_navigation(
+            "new_conversation_begin",
+            previous_session_id=str(getattr(self, "current_session_id", "") or ""),
+        )
         self.create_new_session(workspace_dir="")
         self.refresh_history_list()
+        log_ui_navigation(
+            "new_conversation_done",
+            session_id=str(getattr(self, "current_session_id", "") or ""),
+        )
 
     def _session_base_meta(self, state):
         cached_meta = {}
@@ -22632,12 +22681,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "生成办公文件", "请先选择一个 HTML 文件。")
             return False
         if not state:
-            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
+            self.add_system_toast("当前没有可继续的聊天，请先新建聊天。", "warning", auto_close_ms=3200)
             return False
         try:
             workspace_dir = self._ensure_session_workspace(state)
         except Exception as exc:
-            QMessageBox.information(self, "生成办公文件", f"对话工作目录不可用：{exc}")
+            QMessageBox.information(self, "生成办公文件", f"聊天工作目录不可用：{exc}")
             return False
         template_path = str(template_path or "").strip()
         if template_path:
@@ -22718,12 +22767,12 @@ class MainWindow(QMainWindow):
             return
         state = self.get_current_session()
         if not state:
-            self.add_system_toast("当前没有可继续的对话，请先新建对话。", "warning", auto_close_ms=3200)
+            self.add_system_toast("当前没有可继续的聊天，请先新建聊天。", "warning", auto_close_ms=3200)
             return
         try:
             workspace_dir = self._ensure_session_workspace(state)
         except Exception as exc:
-            QMessageBox.information(self, "生成办公文件", f"对话工作目录不可用：{exc}")
+            QMessageBox.information(self, "生成办公文件", f"聊天工作目录不可用：{exc}")
             return
         template_path = str(template_path or "").strip()
         if target_format == "pptx" and ask_template and not template_path:
@@ -23195,6 +23244,12 @@ class MainWindow(QMainWindow):
 
     def show_product_page(self, route, section=None):
         route = str(route or self.PAGE_CONVERSATION)
+        log_ui_navigation(
+            "product_page_open_begin",
+            route=route,
+            section=str(section or ""),
+            current_route=str(getattr(self, "current_product_route", "") or ""),
+        )
         if route == self.PAGE_CONVERSATION:
             return self.show_conversation_page()
         if route not in {self.PAGE_CAPABILITIES, self.PAGE_AUTOMATION, self.PAGE_SETTINGS}:
@@ -23238,6 +23293,7 @@ class MainWindow(QMainWindow):
             page.tasks = list(self.config_manager.get_automation_tasks())
             page.refresh_task_cards()
             page.refresh_history_list()
+        log_ui_navigation("product_page_open_done", route=route, section=str(section or ""))
         return True
 
     def show_conversation_page(self):
@@ -23542,7 +23598,7 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
             self.add_system_toast(
-                f"对话工作目录不可用：{exc}",
+                f"聊天工作目录不可用：{exc}",
                 "error",
                 session_id=state.session_id,
                 auto_close_ms=6000,
@@ -23655,7 +23711,7 @@ class MainWindow(QMainWindow):
             self._ensure_session_workspace(state)
         except Exception as exc:
             self.add_system_toast(
-                f"对话工作目录不可用：{exc}",
+                f"聊天工作目录不可用：{exc}",
                 "error",
                 session_id=state.session_id,
                 auto_close_ms=6000,
@@ -24760,7 +24816,7 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
             if state.session_id == self.current_session_id:
-                self.add_system_toast(f"对话工作目录不可用：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
+                self.add_system_toast(f"聊天工作目录不可用：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
             return False
         user_message_id = self._new_message_id()
         delegated_payload = self._build_user_message_payload(
@@ -26711,6 +26767,7 @@ class MainWindow(QMainWindow):
         self.code_worker.provide_input(response)
 
 if __name__ == "__main__":
+    install_native_crash_logging()
     log_startup_stage("entry")
     if "--daemon" in sys.argv:
         port = DEFAULT_PORT

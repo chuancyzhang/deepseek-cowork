@@ -7,9 +7,10 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
-from main import ConversationHistoryRow, MainWindow
+from main import ConversationHistoryRow, MainWindow, ProjectHistoryRow
 from ui.primitives import ProductCodeViewer, ProductResultViewer, ProductSegmentedControl, SidebarInlineNameEditor
 
 
@@ -50,7 +51,11 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             row = self.window._make_project_row(
                 {"path": project_dir, "name": "项目", "pinned": False}, sessions
             )
-            self.assertEqual(len(row.findChildren(ConversationHistoryRow)), 5)
+            conversation_rows = [
+                item for item in row.findChildren(ConversationHistoryRow)
+                if not isinstance(item, ProjectHistoryRow)
+            ]
+            self.assertEqual(len(conversation_rows), 5)
             actions = row.findChild(QWidget, "ProjectActions")
             self.assertIsNotNone(actions)
             self.assertTrue(actions.isHidden())
@@ -94,6 +99,69 @@ class MainWorkspaceLinearTests(unittest.TestCase):
 
         editor.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
         self.assertEqual(cancelled, [True])
+
+    def test_sidebar_navigation_does_not_use_qt_dynamic_widget_properties(self):
+        self.assertNotIn("eventFilter", MainWindow.__dict__)
+        with tempfile.TemporaryDirectory() as project_dir:
+            self.window.project_preview_paths.add(project_dir)
+            self.window.history_rows = {}
+            self.window.history_buttons = {}
+            self.window.history_age_labels = {}
+            self.window.history_activity_indicators = {}
+            self.window.project_rows = {}
+            self.window.project_buttons = {}
+            self.window.history_inline_hosts = {}
+            self.window.project_inline_hosts = {}
+            row = self.window._make_project_row(
+                {"path": project_dir, "name": "项目", "pinned": False}, []
+            )
+            header = row.findChild(ProjectHistoryRow, "HistoryRow")
+            self.assertIsNotNone(header)
+            self.assertIsNone(header.property("sidebarProjectActions"))
+
+    def test_settings_button_drops_clicked_boolean_argument(self):
+        button = next(
+            item for item in self.window.findChildren(QPushButton)
+            if item.text().strip() == "设置"
+        )
+        QTest.mouseClick(button, Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(self.window.current_product_route, self.window.PAGE_SETTINGS)
+
+    def test_project_and_chat_rows_accept_real_mouse_clicks(self):
+        self.window.history_rows = {}
+        self.window.history_buttons = {}
+        self.window.history_age_labels = {}
+        self.window.history_activity_indicators = {}
+        self.window.project_rows = {}
+        self.window.project_buttons = {}
+        self.window.history_inline_hosts = {}
+        self.window.project_inline_hosts = {}
+        session_id = self.window.current_session_id
+        entry = {"id": session_id, "title": "聊天", "updated_at": 1, "pinned": False}
+        project_row = self.window._make_project_session_row(entry, compact=True)
+        standalone_row = self.window._make_project_session_row(entry, compact=False)
+        with patch.object(self.window, "activate_session") as activate:
+            QTest.mouseClick(self.window.history_buttons[session_id], Qt.LeftButton)
+            self.app.processEvents()
+            activate.assert_called_with(session_id)
+        with tempfile.TemporaryDirectory() as project_dir, patch.object(
+            self.window, "handle_project_click", return_value=True
+        ) as project_click:
+            row = self.window._make_project_row(
+                {"path": project_dir, "name": "项目", "pinned": False}, []
+            )
+            QTest.mouseClick(self.window.project_buttons[project_dir], Qt.LeftButton)
+            self.app.processEvents()
+            project_click.assert_called_with(project_dir, query_active=False)
+            row.deleteLater()
+        project_row.deleteLater()
+        standalone_row.deleteLater()
+
+    def test_sidebar_uses_chat_product_copy(self):
+        labels = [button.text().strip() for button in self.window.findChildren(QPushButton)]
+        self.assertIn("新建聊天", labels)
+        self.assertNotIn("新建对话", labels)
 
 
 if __name__ == "__main__":

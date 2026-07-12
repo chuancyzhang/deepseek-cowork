@@ -18,6 +18,7 @@ from main import (
     OfficeDraftTaskCard,
     DeliverableWebPreview,
     MainWindow,
+    QMessageBox,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
     PPT_AGENT_PREFERENCE_BUSINESS,
@@ -1197,6 +1198,18 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(window.deliverable_conversion_running_target, "")
             self.assertEqual(pptx_btn.text(), "生成 PPTX")
             self.assertEqual(docx_btn.text(), "生成 DOCX")
+
+    def test_pptx_template_prompt_has_three_distinct_actions(self):
+        window = MainWindow.__new__(MainWindow)
+        window.start_deliverable_conversion = MagicMock()
+        with patch("main.ProductMessageDialog") as dialog_type:
+            dialog_type.return_value.exec_result.return_value = QMessageBox.No
+            window.start_pptx_deliverable_conversion()
+
+        labels = [spec[0] for spec in dialog_type.call_args.kwargs["buttons"]]
+        self.assertEqual(labels, ["选择模板", "直接生成", "取消"])
+        self.assertEqual(len(labels), len(set(labels)))
+        window.start_deliverable_conversion.assert_called_once_with("pptx", ask_template=False)
 
     def test_conversion_keeps_html_in_current_conversation_when_submission_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

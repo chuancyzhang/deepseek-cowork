@@ -766,7 +766,7 @@ class ConfigManager:
         return channels
 
     def _normalize_model_channels(self, value, legacy_provider_configs=None):
-        if isinstance(value, list) and value:
+        if isinstance(value, list):
             raw_channels = value
         elif isinstance(legacy_provider_configs, dict) and legacy_provider_configs:
             raw_channels = self._channels_from_provider_configs(legacy_provider_configs)
@@ -814,16 +814,6 @@ class ConfigManager:
                     used_model_ids=used_model_ids,
                 )
             )
-        if not normalized_channels:
-            return self._normalize_model_channels(self._default_model_channels())
-        if not any(channel.get("models") for channel in normalized_channels):
-            default_channel = self._normalize_channel_config(
-                self._default_model_channels()[0],
-                0,
-                used_channel_ids=used_channel_ids,
-                used_model_ids=used_model_ids,
-            )
-            normalized_channels[0]["models"] = default_channel.get("models", [])
         return normalized_channels
 
     def _provider_configs_from_channels(self, channels):
@@ -864,7 +854,7 @@ class ConfigManager:
             for model in channel.get("models") or []:
                 if model.get("id"):
                     return model.get("id")
-        return "openai-default"
+        return ""
 
     def _get_profile_from_configs(self, configs, model_id=None):
         selected_id = str(model_id or "").strip()
@@ -948,7 +938,7 @@ class ConfigManager:
 
     def get_selected_model_id(self):
         profile = self.get_model_profile(self.config.get("selected_model_id"))
-        return profile.get("id") if profile else self._first_model_id()
+        return profile.get("id") if profile else ""
 
     def set_selected_model_id(self, model_id):
         profile = self.get_model_profile(model_id)
@@ -1182,15 +1172,32 @@ class ConfigManager:
         for project in projects:
             if self._project_key(project.get("path")) != key:
                 continue
+            changed = False
             if name is not None:
-                project["name"] = str(name or "").strip() or os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path
+                next_name = str(name or "").strip() or os.path.basename(normalized_path.rstrip(os.sep)) or normalized_path
+                if project.get("name") != next_name:
+                    project["name"] = next_name
+                    changed = True
             if pinned is not None:
-                project["pinned"] = bool(pinned)
-            project["archived"] = False
-            project["archived_at"] = 0
-            project["hidden"] = False
-            project["path"] = normalized_path
-            project["updated_at"] = now
+                next_pinned = bool(pinned)
+                if bool(project.get("pinned")) != next_pinned:
+                    project["pinned"] = next_pinned
+                    changed = True
+            if bool(project.get("archived")):
+                project["archived"] = False
+                changed = True
+            if int(project.get("archived_at") or 0):
+                project["archived_at"] = 0
+                changed = True
+            if bool(project.get("hidden")):
+                project["hidden"] = False
+                changed = True
+            if self._normalize_project_path(project.get("path")) != normalized_path:
+                project["path"] = normalized_path
+                changed = True
+            if changed:
+                project["updated_at"] = now
+                self.set_projects(projects)
             updated = project
             break
         if updated is None:
@@ -1205,7 +1212,7 @@ class ConfigManager:
                 "updated_at": now,
             }
             projects.append(updated)
-        self.set_projects(projects)
+            self.set_projects(projects)
         return json.loads(json.dumps(updated, ensure_ascii=False))
 
     def archive_project(self, path):

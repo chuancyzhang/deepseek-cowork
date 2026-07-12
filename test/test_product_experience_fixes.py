@@ -2,17 +2,17 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QMimeData, QPoint, Qt
 from PySide6.QtGui import QHelpEvent, QImage
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QToolButton, QWidget
 
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
-from main import AutoResizingInputEdit, FileChip, MainWindow, SettingsDialog
+from main import AutoResizingInputEdit, FileChip, MainWindow, QMessageBox, SettingsDialog
 from ui.primitives import ProductTooltipController
 
 
@@ -42,6 +42,47 @@ class ProductExperienceFixTests(unittest.TestCase):
         finally:
             dialog._allow_close_without_prompt = True
             dialog.close()
+
+    def test_model_edit_delete_channel_and_empty_save_are_semantic_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            dialog = SettingsDialog(config)
+            try:
+                editor = dialog.model_channel_manager.editors[0]
+                current = dict(editor._models()[0])
+                edited = dict(current)
+                edited["display_name"] = "Edited Model"
+                with patch("main.ModelEditDialog") as dialog_type:
+                    model_dialog = dialog_type.return_value
+                    model_dialog.exec.return_value = QDialog.Accepted
+                    model_dialog.get_model.return_value = edited
+                    editor.edit_model()
+                self.app.processEvents()
+                self.assertTrue(dialog._settings_dirty)
+                self.assertTrue(dialog.save_settings_btn.isEnabled())
+
+                dialog._clear_settings_dirty()
+                editor.test_status_label.setText("测试通过 · 0.2 秒")
+                self.app.processEvents()
+                self.assertFalse(dialog._settings_dirty)
+
+                with patch("main.QMessageBox.question", return_value=QMessageBox.Yes):
+                    while dialog.model_channel_manager.editors:
+                        dialog.model_channel_manager.delete_selected_channel()
+                self.app.processEvents()
+                self.assertEqual(dialog.model_channel_manager.get_channels(), [])
+                self.assertTrue(dialog._settings_dirty)
+                self.assertFalse(dialog.model_channel_manager.delete_selected_channel_btn.isEnabled())
+
+                dialog.save_settings()
+                self.assertEqual(config.get_model_channels(), [])
+                self.assertEqual(config.get_selected_model_id(), "")
+                self.assertFalse(dialog._settings_dirty)
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
 
     def test_deliverable_registry_only_returns_registered_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:

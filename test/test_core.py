@@ -146,6 +146,29 @@ class TestConfigManager(unittest.TestCase):
         self.assertFalse(restored[0]["archived"])
         self.assertEqual(restored[0]["archived_at"], 0)
 
+    def test_project_noop_upsert_keeps_activity_time(self):
+        project_dir = os.path.join(self.temp_dir, "stable-project")
+        os.makedirs(project_dir)
+        cm = self._create_config_manager()
+        cm.upsert_project(project_dir, name="Stable")
+        projects = cm.get_projects(include_hidden=True)
+        projects[0]["updated_at"] = 123
+        cm.set_projects(projects)
+
+        cm.upsert_project(project_dir)
+
+        self.assertEqual(cm.get_projects(include_hidden=True)[0]["updated_at"], 123)
+
+    def test_explicit_empty_model_channels_survive_reload(self):
+        cm = self._create_config_manager()
+        cm.set_model_channels([], "")
+        self.assertEqual(cm.get_model_channels(), [])
+        self.assertEqual(cm.get_selected_model_id(), "")
+
+        reloaded = self._create_config_manager()
+        self.assertEqual(reloaded.get_model_channels(), [])
+        self.assertEqual(reloaded.get_selected_model_id(), "")
+
     def test_project_config_migrates_hidden_to_archived(self):
         project_dir = os.path.join(self.temp_dir, "legacy-hidden")
         os.makedirs(project_dir)

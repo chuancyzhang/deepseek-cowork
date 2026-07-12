@@ -58,7 +58,12 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.assertEqual(len(conversation_rows), 5)
             actions = row.findChild(QWidget, "ProjectActions")
             self.assertIsNotNone(actions)
-            self.assertTrue(all(button.isHidden() for button in actions.findChildren(QToolButton)))
+            self.assertTrue(actions.isHidden())
+            header = row.findChild(ProjectHistoryRow, "HistoryRow")
+            header._set_actions_visible(True)
+            self.assertFalse(actions.isHidden())
+            header._set_actions_visible(False)
+            self.assertTrue(actions.isHidden())
             disclosure = [button.text().strip() for button in row.findChildren(type(self.window.action_btn))]
             self.assertIn("展开显示", disclosure)
             row.deleteLater()
@@ -162,6 +167,9 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         labels = [button.text().strip() for button in self.window.findChildren(QPushButton)]
         self.assertIn("新建聊天", labels)
         self.assertNotIn("新建对话", labels)
+
+    def test_conversation_header_has_no_more_menu_button(self):
+        self.assertFalse(hasattr(self.window, "conversation_more_btn"))
 
 
 if __name__ == "__main__":

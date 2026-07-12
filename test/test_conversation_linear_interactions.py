@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QComboBox, QWidget
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from main import (
     ChatBubble,
@@ -19,6 +20,7 @@ from main import (
     SearchableSkillPickerButton,
     SessionSkillPickerPopover,
 )
+from ui.primitives import ProductPopover
 
 
 class ConversationLinearInteractionTests(unittest.TestCase):
@@ -86,6 +88,75 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(values, ["runtime"])
         self.assertFalse(card.submit_btn.isEnabled())
         card.deleteLater()
+
+    def test_resolved_inline_request_is_removed_from_conversation(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            values = []
+            card = window._show_inline_interaction_request(
+                {
+                    "request_id": "remove-after-submit",
+                    "kind": "choice",
+                    "options": [{"label": "继续", "value": "continue"}],
+                },
+                state.session_id,
+                values.append,
+            )
+            card.option_checks[0].setChecked(True)
+            card._submit()
+            self.app.processEvents()
+            self.assertEqual(values, ["continue"])
+            self.assertNotIn("remove-after-submit", state.pending_interactions)
+            self.assertEqual(state.chat_layout.indexOf(card), -1)
+            self.assertTrue(card.isHidden())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_inline_request_resolution_failure_preserves_input_for_retry(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+
+            def fail(_value):
+                raise RuntimeError("bridge unavailable")
+
+            card = window._show_inline_interaction_request(
+                {"request_id": "retry-submit", "kind": "text"},
+                state.session_id,
+                fail,
+            )
+            card.text_input.setText("保留这段输入")
+            card._submit()
+            self.app.processEvents()
+            self.assertIn("retry-submit", state.pending_interactions)
+            self.assertEqual(card.text_input.text(), "保留这段输入")
+            self.assertTrue(card.submit_btn.isEnabled())
+            self.assertIn("提交失败", card.validation_label.text())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_product_popover_is_single_in_window_overlay(self):
+        host = QWidget()
+        host.resize(640, 480)
+        anchor = QPushButton("+​", host)
+        anchor.setGeometry(300, 420, 32, 32)
+        popover = ProductPopover(host, width=260)
+        layout = QVBoxLayout(popover)
+        layout.addWidget(QLabel("单一操作列表"))
+        host.show()
+        self.app.processEvents()
+
+        self.assertTrue(popover.show_for(anchor, prefer_above=True))
+        self.assertFalse(popover.isWindow())
+        self.assertIs(popover.parentWidget(), host)
+        self.assertTrue(host.rect().contains(popover.geometry()))
+        QTest.mouseClick(host, Qt.LeftButton, pos=QPoint(8, 8))
+        self.app.processEvents()
+        self.assertTrue(popover.isHidden())
+        host.deleteLater()
 
     def test_thinking_stays_expanded_when_finalized(self):
         bubble = ChatBubble("Agent", "")

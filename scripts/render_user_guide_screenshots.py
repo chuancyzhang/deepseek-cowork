@@ -130,7 +130,7 @@ def main_run():
             window.model_selector_popover.close()
             process_events(80)
         window.show_prompt_tool_menu()
-        save_widget(window.composer_action_popover, "34-composer-add-popover.png", 200)
+        save_window_with_popups(window, "34-composer-add-popover.png", 200)
         window.composer_action_popover.close()
         project_add_style = window.sidebar_add_project_btn.styleSheet()
         window.sidebar_add_project_btn.setStyleSheet(main.apple_sidebar_icon_button_style(True))

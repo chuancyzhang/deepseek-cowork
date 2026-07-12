@@ -3712,6 +3712,8 @@ class ModelConnectionTestWorker(QThread):
 
 
 class ModelChannelEditor(QFrame):
+    changed = Signal()
+
     def __init__(self, channel_config, parent=None, expanded=False, on_expand=None, on_delete=None):
         super().__init__(parent)
         self.channel_config = json.loads(json.dumps(channel_config or {}, ensure_ascii=False))
@@ -3870,6 +3872,10 @@ class ModelChannelEditor(QFrame):
         self.api_key_input.textChanged.connect(self.clear_test_result)
         self.base_url_input.textChanged.connect(self.clear_test_result)
         self.provider_combo.currentIndexChanged.connect(self.clear_test_result)
+        self.display_name_input.textChanged.connect(lambda *_args: self.changed.emit())
+        self.api_key_input.textChanged.connect(lambda *_args: self.changed.emit())
+        self.base_url_input.textChanged.connect(lambda *_args: self.changed.emit())
+        self.provider_combo.currentIndexChanged.connect(lambda *_args: self.changed.emit())
 
     def _provider_type(self):
         return str(self.provider_combo.currentData() or "openai")
@@ -3958,6 +3964,7 @@ class ModelChannelEditor(QFrame):
             self._models().append(model)
             self.refresh_model_list()
             self.clear_test_result()
+            self.changed.emit()
 
     def _current_model_index(self):
         row = self.model_list.currentRow()
@@ -3976,6 +3983,7 @@ class ModelChannelEditor(QFrame):
             self.refresh_model_list()
             self.model_list.setCurrentRow(index)
             self.clear_test_result()
+            self.changed.emit()
 
     def delete_model(self):
         index = self._current_model_index()
@@ -3986,6 +3994,7 @@ class ModelChannelEditor(QFrame):
         if self.model_list.count():
             self.model_list.setCurrentRow(min(index, self.model_list.count() - 1))
         self.clear_test_result()
+        self.changed.emit()
 
     def test_current_model(self):
         if self.test_worker and self.test_worker.isRunning():
@@ -4081,6 +4090,12 @@ class ModelChannelManager(QWidget):
         add_channel_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_secondary))
         add_channel_btn.clicked.connect(self.add_channel)
         toolbar.addWidget(add_channel_btn)
+        self.delete_selected_channel_btn = QPushButton("删除渠道")
+        self.delete_selected_channel_btn.setObjectName("SecondaryBtn")
+        self.delete_selected_channel_btn.setIcon(qta.icon("fa5s.trash-alt", color=DesignTokens.error_text))
+        self.delete_selected_channel_btn.setEnabled(False)
+        self.delete_selected_channel_btn.clicked.connect(self.delete_selected_channel)
+        toolbar.addWidget(self.delete_selected_channel_btn)
         self.layout.addLayout(toolbar)
 
         self.channel_splitter = QSplitter(Qt.Horizontal)
@@ -4098,7 +4113,7 @@ class ModelChannelManager(QWidget):
         self.channel_splitter.setStretchFactor(0, 0)
         self.channel_splitter.setStretchFactor(1, 1)
         self.layout.addWidget(self.channel_splitter)
-        self.channel_list.currentRowChanged.connect(self.channel_detail_stack.setCurrentIndex)
+        self.channel_list.currentRowChanged.connect(self._on_channel_selection_changed)
 
         for index, channel in enumerate(channels or []):
             self._add_editor(channel, expanded=index == 0)
@@ -4120,9 +4135,19 @@ class ModelChannelManager(QWidget):
         editor.display_name_input.textChanged.connect(
             lambda text, target=item: target.setText(text.strip() or "未命名服务")
         )
+        editor.changed.connect(self.changed.emit)
         if self.channel_list.currentRow() < 0:
             self.channel_list.setCurrentRow(0)
         return editor
+
+    def _on_channel_selection_changed(self, index):
+        self.channel_detail_stack.setCurrentIndex(index)
+        self.delete_selected_channel_btn.setEnabled(0 <= index < len(self.editors))
+
+    def delete_selected_channel(self):
+        index = self.channel_list.currentRow()
+        if 0 <= index < len(self.editors):
+            self.delete_channel(self.editors[index])
 
     def _collapse_others(self, active_editor):
         if active_editor in self.editors:
@@ -4160,6 +4185,9 @@ class ModelChannelManager(QWidget):
             editor.deleteLater()
         if self.editors:
             self.channel_list.setCurrentRow(min(index, len(self.editors) - 1))
+        else:
+            self.channel_list.setCurrentRow(-1)
+            self.delete_selected_channel_btn.setEnabled(False)
         self.changed.emit()
 
     def get_channels(self):
@@ -7560,9 +7588,6 @@ class SettingsDialog(QDialog):
             for model in (channel.get("models") or [])
             if model.get("id")
         ]
-        if not all_model_ids:
-            QMessageBox.warning(self, "模型配置", "请至少保留一个可用模型。")
-            return
         if selected_model_id not in all_model_ids:
             selected_model_id = all_model_ids[0] if all_model_ids else ""
         if self.god_mode_check.isChecked() and not self.config_manager.get_god_mode():
@@ -9150,6 +9175,15 @@ class InlineInteractionCard(QFrame):
         self.validation_label.setText("已提交")
         self.validation_label.show()
         self.resolved.emit(value)
+
+    def restore_after_resolution_error(self, message):
+        self._resolved = False
+        self._set_controls_enabled(True)
+        self.validation_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 11px;")
+        self.validation_label.setText(f"提交失败：{str(message or '未知错误')}。请重试。")
+        self.validation_label.show()
+        timeout_seconds = max(1.0, float(self.request.get("timeout_seconds") or 120.0))
+        self.timeout_timer.start(int(timeout_seconds * 1000))
 
     def _expire(self):
         if self._resolved:
@@ -15133,7 +15167,8 @@ class MainWindow(QMainWindow):
         self.history_search_input.textChanged.connect(lambda *_: self.history_search_timer.start())
         sidebar_layout.addWidget(self.history_search_input)
 
-        project_header = QWidget()
+        project_header = ConversationHistoryRow()
+        project_header.setFocusPolicy(Qt.StrongFocus)
         project_header_layout = QHBoxLayout(project_header)
         project_header_layout.setContentsMargins(0, 8, 0, 0)
         project_header_layout.setSpacing(6)
@@ -15155,8 +15190,18 @@ class MainWindow(QMainWindow):
         self.sidebar_add_project_btn.setFixedSize(28, 28)
         self.sidebar_add_project_btn.setStyleSheet(apple_sidebar_icon_button_style(False))
         self.sidebar_add_project_btn.clicked.connect(lambda checked=False: self.add_project_from_dialog())
-        project_header_layout.addWidget(self.sidebar_projects_menu_btn)
-        project_header_layout.addWidget(self.sidebar_add_project_btn)
+        project_header_actions = QWidget(project_header)
+        project_header_actions_layout = QHBoxLayout(project_header_actions)
+        project_header_actions_layout.setContentsMargins(0, 0, 0, 0)
+        project_header_actions_layout.setSpacing(2)
+        project_header_actions_layout.addWidget(self.sidebar_projects_menu_btn)
+        project_header_actions_layout.addWidget(self.sidebar_add_project_btn)
+        project_header_layout.addWidget(project_header_actions)
+        project_header.set_hover_actions([project_header_actions])
+        project_header.setContextMenuPolicy(Qt.CustomContextMenu)
+        project_header.customContextMenuRequested.connect(
+            lambda _pos, host=project_header: self.show_sidebar_projects_menu(host)
+        )
         sidebar_layout.addWidget(project_header)
 
         self.history_scroll = QScrollArea()
@@ -15878,15 +15923,6 @@ class MainWindow(QMainWindow):
             self.context_rail_buttons[tab_index] = btn
         top_bar.addWidget(self.context_rail)
 
-        self.conversation_more_btn = QToolButton()
-        self.conversation_more_btn.setIcon(sidebar_symbol_icon("ellipsis", DesignTokens.text_secondary, 16))
-        self.conversation_more_btn.setToolTip("对话操作")
-        self.conversation_more_btn.setCursor(Qt.PointingHandCursor)
-        self.conversation_more_btn.setFixedSize(30, 30)
-        self.conversation_more_btn.setStyleSheet(apple_tool_button_style(False))
-        self.conversation_more_btn.clicked.connect(self.show_current_session_header_menu)
-        top_bar.addWidget(self.conversation_more_btn)
-        
         layout.addLayout(top_bar)
 
         self.content_area = QWidget()
@@ -20264,8 +20300,22 @@ class MainWindow(QMainWindow):
         state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
 
         def finish(value):
+            try:
+                resolver(value)
+            except Exception as exc:
+                card.restore_after_resolution_error(exc)
+                log_ui_navigation(
+                    "interaction_inline_resolve_failed",
+                    session_id=state.session_id,
+                    request_id=request_id,
+                    error_type=type(exc).__name__,
+                )
+                self.refresh_session_activity_indicator(state.session_id)
+                return
             state.pending_interactions.pop(request_id, None)
-            resolver(value)
+            state.chat_layout.removeWidget(card)
+            card.hide()
+            card.deleteLater()
             self.refresh_session_activity_indicator(state.session_id)
             log_ui_navigation(
                 "interaction_inline_resolved",
@@ -20829,7 +20879,7 @@ class MainWindow(QMainWindow):
         )
         actions_layout.addWidget(more_btn)
         row_layout.addWidget(actions, 0, Qt.AlignVCenter)
-        row.set_hover_actions([more_btn], hide_widgets=[age_label])
+        row.set_hover_actions([actions], hide_widgets=[age_label])
         row.setFocusPolicy(Qt.StrongFocus)
         row.setContextMenuPolicy(Qt.CustomContextMenu)
         row.customContextMenuRequested.connect(
@@ -20909,7 +20959,7 @@ class MainWindow(QMainWindow):
         actions_layout.addWidget(menu_btn)
         header_layout.addWidget(actions, 0, Qt.AlignVCenter)
         header.setFocusPolicy(Qt.StrongFocus)
-        header.set_hover_actions([new_btn, menu_btn])
+        header.set_hover_actions([actions])
         header.activated.connect(
             lambda p=path, q=query_active: self.handle_project_click(p, query_active=q)
         )
@@ -21328,7 +21378,7 @@ class MainWindow(QMainWindow):
         self.refresh_history_list()
         self.add_system_toast("永久工作树已创建并加入项目", "success", auto_close_ms=3200)
 
-    def show_sidebar_projects_menu(self):
+    def show_sidebar_projects_menu(self, anchor=None):
         menu = create_styled_menu(self)
         archive_action = QAction("归档所有聊天", self)
         archive_action.triggered.connect(self.archive_visible_project_conversations)
@@ -21347,7 +21397,8 @@ class MainWindow(QMainWindow):
         name_action.setChecked(self.sidebar_sort_mode == "name")
         name_action.triggered.connect(lambda: self.set_sidebar_sort_mode("name"))
         menu.addAction(name_action)
-        menu.exec(self.sidebar_projects_menu_btn.mapToGlobal(self.sidebar_projects_menu_btn.rect().bottomLeft()))
+        anchor = anchor or self.sidebar_projects_menu_btn
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def set_sidebar_sort_mode(self, mode):
         self.sidebar_sort_mode = "name" if mode == "name" else "recent"
@@ -21536,7 +21587,10 @@ class MainWindow(QMainWindow):
                 payload.get("sessions") or [],
                 key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0)),
             )
-            latest = latest_by_project.get(key) or max([int(item.get("updated_at") or 0) for item in sessions] or [int(meta.get("updated_at") or 0)])
+            if sessions:
+                latest = max(int(item.get("updated_at") or 0) for item in sessions)
+            else:
+                latest = int(meta.get("created_at") or meta.get("updated_at") or 0)
             project_entries.append({
                 "path": path,
                 "name": self._project_display_name(path, meta),
@@ -21643,11 +21697,6 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(delete_action)
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
-
-    def show_current_session_header_menu(self):
-        state = self.get_current_session()
-        if state:
-            self.show_session_menu(state.session_id, self.conversation_more_btn)
 
     def rename_session(self, session_id):
         return self.begin_session_inline_rename(session_id)
@@ -23594,13 +23643,17 @@ class MainWindow(QMainWindow):
         self._submit_html_deliverable_conversion(state, path, target_format, template_path=template_path)
 
     def start_pptx_deliverable_conversion(self, checked=False):
-        choice = QMessageBox.question(
-            self,
+        choice = ProductMessageDialog(
             "生成 PPTX",
-            "是否使用现有 PPTX 模板？\n\n选择“是”后可选择模板；选择“否”将直接生成。",
-            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-            QMessageBox.No,
-        )
+            "是否使用现有 PPTX 模板？\n\n选择模板后将打开文件选择器；直接生成则使用当前工作稿。",
+            tone="confirm",
+            buttons=[
+                ("选择模板", QMessageBox.Yes, "secondary", False),
+                ("直接生成", QMessageBox.No, "primary", True),
+                ("取消", QMessageBox.Cancel, "secondary", False),
+            ],
+            parent=self,
+        ).exec_result(QMessageBox.Cancel)
         if choice == QMessageBox.Cancel:
             return
         self.start_deliverable_conversion("pptx", ask_template=choice == QMessageBox.Yes)
@@ -24085,7 +24138,6 @@ class MainWindow(QMainWindow):
         self.product_back_btn.show()
         self.ws_container.hide()
         self.context_rail.hide()
-        self.conversation_more_btn.hide()
         self.main_page_stack.setCurrentWidget(page)
         self.current_product_route = route
         self.current_product_subroute = ""
@@ -24120,7 +24172,6 @@ class MainWindow(QMainWindow):
         self.product_back_btn.hide()
         self.ws_container.show()
         self.context_rail.show()
-        self.conversation_more_btn.show()
         for button in self.product_nav_buttons.values():
             button.setChecked(False)
         self.refresh_model_selector()
@@ -25684,14 +25735,25 @@ class MainWindow(QMainWindow):
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
         if not self._model_profile_for_state(state):
+            has_configured_models = bool(self.config_manager.iter_model_profiles())
             log_ppt_agent_debug(
                 "submit_session_model_missing",
                 session_id=state.session_id,
                 selected_model_id=self._model_id_for_state(state),
+                has_configured_models=has_configured_models,
             )
             if state.session_id == self.current_session_id:
-                self.add_system_toast("当前对话选择的模型不可用，请先重新选择模型。", "error", session_id=state.session_id)
-                self.refresh_model_selector()
+                if has_configured_models:
+                    self.add_system_toast("当前对话选择的模型不可用，请重新选择模型。", "error", session_id=state.session_id)
+                    self.refresh_model_selector()
+                else:
+                    self.add_system_toast(
+                        "尚未配置模型，请先在“设置 → 模型与服务”添加渠道和模型。",
+                        "warning",
+                        session_id=state.session_id,
+                        auto_close_ms=5000,
+                    )
+                    QTimer.singleShot(0, lambda: self.open_settings("模型与服务"))
             return False
         supports_vision = self._selected_model_supports_vision(state)
         if not self._ensure_vision_attachment_support(state, prompt_files):

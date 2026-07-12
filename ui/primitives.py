@@ -157,49 +157,72 @@ class ProductResultViewer(ProductCodeViewer):
 
 
 class ProductPopover(QFrame):
-    """App-owned anchored popover with deterministic focus and edge clamping."""
+    """App-owned in-window popover with deterministic focus and edge clamping."""
 
     closed = Signal()
 
     def __init__(self, parent=None, width=360):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        super().__init__(parent)
         self.setObjectName("ProductPopover")
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumWidth(int(width))
         self.setMaximumWidth(int(width))
+        self._anchor = None
+        self._outside_filter_installed = False
         self.setStyleSheet(
             f"QFrame#ProductPopover {{ background: {DesignTokens.bg_main}; "
             f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
         )
+        self.hide()
 
     def show_for(self, anchor, *, align_right=False, prefer_above=True, gap=6):
         if anchor is None or not anchor.isVisible():
             return False
+        host = self.parentWidget()
+        if host is None:
+            raise RuntimeError("ProductPopover requires an in-window parent widget.")
+        self._anchor = anchor
         self.adjustSize()
-        screen = QApplication.screenAt(anchor.mapToGlobal(anchor.rect().center())) or QApplication.primaryScreen()
-        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1920, 1080)
-        anchor_top_left = anchor.mapToGlobal(QPoint(0, 0))
-        anchor_bottom_left = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        available = host.rect().adjusted(8, 8, -8, -8)
+        anchor_top_left = anchor.mapTo(host, QPoint(0, 0))
+        anchor_bottom_left = anchor.mapTo(host, QPoint(0, anchor.height()))
         x = anchor_top_left.x()
         if align_right:
             x = anchor_top_left.x() + anchor.width() - self.width()
         above_y = anchor_top_left.y() - self.height() - int(gap)
         below_y = anchor_bottom_left.y() + int(gap)
-        if prefer_above and above_y >= available.top() + 8:
+        if prefer_above and above_y >= available.top():
             y = above_y
-        elif below_y + self.height() <= available.bottom() - 8:
+        elif below_y + self.height() <= available.bottom():
             y = below_y
         else:
-            y = max(available.top() + 8, min(above_y, available.bottom() - self.height() - 8))
-        x = max(available.left() + 8, min(x, available.right() - self.width() - 8))
+            y = max(available.top(), min(above_y, available.bottom() - self.height()))
+        x = max(available.left(), min(x, available.right() - self.width()))
         self.move(x, y)
         self.show()
         self.raise_()
-        self.setFocus(Qt.PopupFocusReason)
+        if not self._outside_filter_installed:
+            QApplication.instance().installEventFilter(self)
+            self._outside_filter_installed = True
+        self.setFocus(Qt.OtherFocusReason)
         return True
 
+    def eventFilter(self, obj, event):
+        if self.isVisible() and event.type() == QEvent.MouseButtonPress:
+            widget = obj if isinstance(obj, QWidget) else None
+            inside_popover = widget is self or bool(widget and self.isAncestorOf(widget))
+            anchor = self._anchor
+            inside_anchor = widget is anchor or bool(widget and anchor and anchor.isAncestorOf(widget))
+            if not inside_popover and not inside_anchor:
+                self.close()
+        return super().eventFilter(obj, event)
+
     def hideEvent(self, event):
+        if self._outside_filter_installed and QApplication.instance() is not None:
+            QApplication.instance().removeEventFilter(self)
+            self._outside_filter_installed = False
+        self._anchor = None
         super().hideEvent(event)
         self.closed.emit()
 

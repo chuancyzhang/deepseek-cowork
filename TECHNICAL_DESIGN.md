@@ -65,13 +65,13 @@ Cowork 采用交错式推理流程：
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量。需要生成 MCP server 的能力可声明 `mcp_server_presets`，由 `SkillManager` 使用已保存配置渲染 `stdio` 或 Streamable HTTP server，并通过配置管理器按 server ID upsert，避免重复生成。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
-- Composer 使用 `ProductPopover` 作为局部选择面的统一容器：`+` 动作、指定能力和模型选择都锚定到触发控件，支持键盘关闭与焦点恢复，不再依赖原生 `QMenu` 或大型阻塞选择弹窗。指定能力以会话态 `selected_skill_names` 为唯一数据源；Popover 内的清除、取消和应用保持事务性 dirty state。
+- Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。指定能力以会话态 `selected_skill_names` 为唯一数据源。
 - Thinking 继续持久化原始 reasoning 和工具消息结构，只把折叠态压缩为过程行。展开态按同一工具调用 ID 串联 reasoning、工具摘要和右侧任务观测；历史恢复不重放流式动画，当前进程内记录用户主动展开状态。
 - 生成办公稿使用本次请求级 `workflow_mode = office_html_first` 和 `office_output_profile` 注入提示；从 HTML 继续生成 PPTX、DOCX、PDF 使用 `workflow_mode = office_file_conversion` 和 `office_conversion_target` 标记；两者都不新增 `RUN_MODE`，因此不改变工具权限。
 - PPT Agent 是 `office_html_first + office_output_profile = ppt` 上的一层产品工作流；`core/ppt_agent.py` 注册默认 PPT Agent、Guizang PPT Skill、Frontend Slides、Huashu Design 等 html-ppt 策略，并根据显式选择、偏好、模板和关键词自动选择策略。后三者作为真实 `ai_skills` 包内置，PPT Agent 提交时会把选中的策略映射为临时 `selected_skill_names`，让上游 `SKILL.md`、引用和资源说明进入本轮系统上下文与任务观测页，但不会写回用户会话的手动技能选择。`core/agent.py` 通过 `ppt_agent_mode`、`ppt_agent_strategy`、`ppt_agent_selected_strategy`、`ppt_agent_preference` 和 `ppt_agent_template_file` 注入 PPT Agent 运行提示，但仍要求最终输出 HTML deliverable。
 - UI 通过用户消息 `meta.workflow_mode` 将该轮用户消息、工具调用和助手结果渲染成可展开的办公任务卡；消息本体仍按原结构持久化，交付物文件卡渲染在折叠过程外。任务卡会合并最终回复、隐藏气泡识别到的文件卡路径和本轮工具变更中的有效工作区文件，避免最终回复未写完整路径时结果区为空；消息渲染会把当前工作区内的裸完整路径和 Markdown 文件链接统一重写为 `cowork-file:`，再交给右侧文件预览链路处理。任务刚提交时会写入用户请求、附件、选中 Skill 和启动阶段节点；收到系统提示词、Skill 上下文、thinking、工具调用和工具结果后继续追加到过程区，避免展开过程只显示占位。若 live 提交后短时间内过程区仍为空，UI 会补充“等待模型运行接管”的可见状态；daemon 流与普通对话保持一致，不设置单独的模型响应超时，只在 worker 完成、显式失败、用户停止或客户端断开时结束。PPT Agent/办公任务提交链路会写入 `ppt_agent_debug.log`，daemon 流会写入 `daemon.log`，用于定位卡在 UI 提交、任务卡创建、run context 构建、daemon 分发还是后台 worker 启动阶段。历史消息按 render span 独立渲染，避免普通消息和办公任务混排时丢失折叠状态。
 - 运行中引导使用用户消息 `meta.same_turn_guidance` 标记，通过 steer 注入当前 in-flight turn；UI 将其渲染为当前任务流里的内联“补充引导”片段，而不是新的用户气泡或新的对话轮次。
-- `request_user_input` 与审批请求由 `InlineInteractionCard` 渲染在发起会话内，并通过原有 resolver/daemon response 通道返回；后台会话只更新侧栏状态和 Toast。日志仅记录 request ID、类型、会话和完成状态，不记录问题正文或用户回答。
+- `request_user_input` 与审批请求由 `InlineInteractionCard` 渲染在发起会话内，并通过原有 resolver/daemon response 通道返回；resolver 成功后卡片从布局移除，失败时恢复可操作状态并保留输入。日志不记录问题正文或用户回答。
 - 用户添加的文件同时保留 UI 附件元数据和模型可见内容：剪贴板图片写入 `chat_history_dir/attachments/<session_id>/` 并以缩略图展示，在支持视觉的模型中转为图片 part；不支持视觉时提交预检会阻止发送并保留输入。小体积文本附件内联，大文件或非文本文件只提供明确路径、大小和工具读取提示。
 - 从 HTML 生成 PPTX 时可附加 PPTX 模板文件，提示要求以 HTML 为内容源、模板为视觉结构源，并保留模板主题、母版、字号、色彩、版式节奏和顶部/底部图片；UI 以“生成文件…”菜单选择 PPTX、DOCX 或 PDF，选择 PPTX 后再按需询问模板。转换提交后只更新交付物详情页底部的局部运行态，并用隔离运行上下文只传入源 HTML、目标格式和模板文件，不把上一轮办公稿生成过程带给模型；完成后仍通过任务卡、Toast 和交付物扫描回填结果。`main.py` 的 `_submit_html_deliverable_conversion` 是可复用提交入口，右侧交付物预览和后续 PPT Mode 都应复用它，不另建转换器。
 - `tool_search` 负责延迟发现工具与匹配技能
@@ -115,7 +115,8 @@ Cowork 采用交错式推理流程：
 
 ## 7. 数据与持久化
 
-- **会话**：`core/chat_storage.py` 负责当前格式本地消息历史、归档、置顶和项目归属；项目分组只信任会话自身 meta 中的 `workspace_dir/workspace_source`，`workspace_source="chat"` 的独立对话工作目录始终作为普通对话展示，也不会被项目批量归档命中。左侧历史导航会合并当前内存态中已提交的会话，让新对话在后台保存队列落库前立即可见，保存完成后再与 SQLite 记录校准。UI 激活历史会话前会 flush 同会话保存队列，读取失败保持 `history_loaded=False` 并显示错误占位，避免把失败状态写成空历史；编辑或删除历史消息后仍按历史分页窗口渲染，避免把整段历史一次性重放。早期文本文件历史不再进入当前加载兼容链路。
+- **会话**：`core/chat_storage.py` 负责本地消息历史、归档、置顶和项目归属；项目活动排序只使用真实会话 `updated_at`，空项目使用稳定创建时间，浏览和展开项目不更新时间。历史读取失败保持错误占位。
+- **模型配置**：显式 `model_channels=[]` 是合法持久化状态，只有缺少该字段的旧配置才迁移默认渠道；空配置使用空 `selected_model_id`，提交预检负责引导用户重新配置。
 - **配置**：`core/config_manager.py` 统一管理模型、MCP、Skill 运行配置、工作区、智能体和 UI 偏好；项目归档保存在项目元数据中，左侧栏和项目选择器默认过滤已归档项目，设置中心负责恢复入口
 - **记忆**：`core/memory_store.py` 与 `core/memory_update.py` 管理灵魂提示词、全局摘要和工作区摘要
 - **技能**：文件系统中的 `SKILL.md`、`skill.json`、`impl.py`、`experience/entries.jsonl`；自动工具发现披露的技能全文是本轮运行时上下文，历史迁移和响应合并会过滤这些隐藏 system 消息，避免把临时技能材料带入后续请求的 prompt cache 前缀

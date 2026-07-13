@@ -41,6 +41,11 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(palette.color(QPalette.ToolTipBase).name(), DesignTokens.bg_main)
         self.assertEqual(palette.color(QPalette.ToolTipText).name(), DesignTokens.text_primary)
 
+    def test_selection_and_sidebar_geometry_use_updated_product_tokens(self):
+        self.assertNotEqual(DesignTokens.selection_bg, DesignTokens.primary_soft)
+        self.assertEqual(DesignTokens.sidebar_width, 240)
+        self.assertEqual(DesignTokens.sidebar_max_width, 320)
+
 
 if __name__ == "__main__":
     unittest.main()

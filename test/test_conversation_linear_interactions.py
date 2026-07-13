@@ -14,8 +14,10 @@ from main import (
     ChatBubble,
     ComposerActionPopover,
     ConversationSkillOptionsDialog,
+    ConversationSkillPreviewDialog,
     ConversationSkillRangeDialog,
     InlineInteractionCard,
+    InteractionChoiceButton,
     MainWindow,
     ModelSelectorPopover,
     SearchableSkillPickerButton,
@@ -155,6 +157,36 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(values, ["runtime"])
         self.assertFalse(card.submit_btn.isEnabled())
         card.deleteLater()
+
+    def test_inline_questionnaire_uses_theme_owned_choice_rows(self):
+        card = InlineInteractionCard(
+            {
+                "kind": "questionnaire",
+                "questions": [{
+                    "id": "priority",
+                    "question": "优先处理什么？",
+                    "options": [
+                        {"label": "质量", "value": "quality", "description": "先保证正确"},
+                        {"label": "自定义", "value": "__custom__"},
+                    ],
+                }],
+            }
+        )
+        self.assertFalse(card.findChildren(QComboBox))
+        choices = card.findChildren(InteractionChoiceButton)
+        self.assertEqual(len(choices), 2)
+        choices[1].click()
+        self.assertTrue(card.question_controls[0]["input"].isEnabled())
+        card.deleteLater()
+
+    def test_skill_preview_constructs_with_product_action_bar(self):
+        dialog = ConversationSkillPreviewDialog(
+            {"skill_name": "demo-skill", "experience_items": ["lesson"]},
+            mode="create",
+        )
+        labels = [button.text() for button in dialog.findChildren(QPushButton)]
+        self.assertIn("保存 Skill", labels)
+        dialog.deleteLater()
 
     def test_resolved_inline_request_is_removed_from_conversation(self):
         window = MainWindow()

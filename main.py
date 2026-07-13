@@ -214,7 +214,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
                           QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
-from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect
+from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
 from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
 QWebEngineView = None
@@ -344,9 +344,49 @@ def create_styled_menu(parent=None):
 
 def apply_selection_palette(widget, highlight=None, highlighted_text=None):
     palette = widget.palette()
-    palette.setColor(QPalette.Highlight, QColor(highlight or DesignTokens.primary_soft))
-    palette.setColor(QPalette.HighlightedText, QColor(highlighted_text or DesignTokens.text_primary))
+    palette.setColor(QPalette.Highlight, QColor(highlight or DesignTokens.selection_bg))
+    palette.setColor(QPalette.HighlightedText, QColor(highlighted_text or DesignTokens.selection_text))
     widget.setPalette(palette)
+
+
+def populate_text_context_menu(menu, widget, *, editable=False, plain_text=None):
+    """Populate the shared clipboard menu for selectable product text."""
+    cursor = widget.textCursor() if hasattr(widget, "textCursor") else None
+    selected = cursor.selectedText() if cursor is not None else (widget.selectedText() if hasattr(widget, "selectedText") else "")
+    selected = str(selected or "").replace("\u2029", "\n")
+    if editable:
+        undo = menu.addAction(qta.icon('fa5s.undo', color=DesignTokens.text_secondary), "撤销")
+        undo.setShortcut("Ctrl+Z")
+        undo.setEnabled(bool(getattr(widget.document(), "isUndoAvailable", lambda: False)()))
+        undo.triggered.connect(widget.undo)
+        redo = menu.addAction(qta.icon('fa5s.redo', color=DesignTokens.text_secondary), "重做")
+        redo.setShortcut("Ctrl+Y")
+        redo.setEnabled(bool(getattr(widget.document(), "isRedoAvailable", lambda: False)()))
+        redo.triggered.connect(widget.redo)
+        menu.addSeparator()
+        cut = menu.addAction(qta.icon('fa5s.cut', color=DesignTokens.text_secondary), "剪切")
+        cut.setShortcut("Ctrl+X")
+        cut.setEnabled(bool(selected))
+        cut.triggered.connect(widget.cut)
+    copy_action = menu.addAction(qta.icon('fa5s.copy', color=DesignTokens.text_secondary), "复制")
+    copy_action.setShortcut("Ctrl+C")
+    copy_action.setEnabled(bool(selected))
+    copy_action.triggered.connect(widget.copy if hasattr(widget, "copy") else lambda: QApplication.clipboard().setText(selected))
+    if editable:
+        paste = menu.addAction(qta.icon('fa5s.paste', color=DesignTokens.text_secondary), "粘贴")
+        paste.setShortcut("Ctrl+V")
+        paste.setEnabled(bool(getattr(widget, "canPaste", lambda: False)()))
+        paste.triggered.connect(widget.paste)
+    else:
+        all_text = plain_text() if callable(plain_text) else (widget.toPlainText() if hasattr(widget, "toPlainText") else widget.text())
+        copy_all = menu.addAction(qta.icon('fa5s.clone', color=DesignTokens.text_secondary), "复制全部")
+        copy_all.setEnabled(bool(str(all_text or "").strip()))
+        copy_all.triggered.connect(lambda: QApplication.clipboard().setText(str(all_text or "")))
+    menu.addSeparator()
+    select_all = menu.addAction(qta.icon('fa5s.mouse-pointer', color=DesignTokens.text_secondary), "全选")
+    select_all.setShortcut("Ctrl+A")
+    select_all.triggered.connect(widget.selectAll if hasattr(widget, "selectAll") else lambda: widget.setSelection(0, len(widget.text())))
+    return menu
 
 
 def configure_responsive_form_layout(form_layout):
@@ -1425,8 +1465,8 @@ def linear_dialog_stylesheet(object_name):
             border: 1px solid {DesignTokens.border};
             border-radius: 8px;
             padding: 6px 9px;
-            selection-background-color: {DesignTokens.primary_soft};
-            selection-color: {DesignTokens.text_primary};
+            selection-background-color: {DesignTokens.selection_bg};
+            selection-color: {DesignTokens.selection_text};
         }}
         {selector} QLineEdit:focus,
         {selector} QTextEdit:focus,
@@ -1495,8 +1535,8 @@ def apply_settings_combo_style(combo):
             border: 1px solid {DesignTokens.border_subtle};
             outline: none;
             padding: 4px;
-            selection-background-color: {DesignTokens.primary_soft};
-            selection-color: {DesignTokens.text_primary};
+            selection-background-color: {DesignTokens.selection_bg};
+            selection-color: {DesignTokens.selection_text};
         }}
         QAbstractItemView::item {{
             color: {DesignTokens.text_primary};
@@ -2178,6 +2218,39 @@ def detail_text(value, limit=8000):
     if len(text) <= limit:
         return text
     return text[:limit] + "\n\n...内容过长，已截断显示。"
+
+
+def parse_tool_arguments(value):
+    """Parse diagnostic arguments without hiding malformed payloads."""
+    if not isinstance(value, str):
+        return value, ""
+    source = value.strip()
+    if not source:
+        return {}, ""
+    json_error = ""
+    try:
+        parsed = json.loads(source)
+        if isinstance(parsed, str) and parsed.strip() != source:
+            return parse_tool_arguments(parsed)
+        return parsed, ""
+    except (TypeError, json.JSONDecodeError) as exc:
+        json_error = str(exc)
+    try:
+        parsed = ast.literal_eval(source)
+    except (ValueError, SyntaxError) as exc:
+        return None, f"参数无法解析为 JSON 或 Python 字面量：JSON {json_error}；Python {exc}"
+    if not isinstance(parsed, (dict, list, tuple)):
+        return None, f"参数字面量类型不受支持：{type(parsed).__name__}"
+    return parsed, ""
+
+
+def tool_code_language(tool_name):
+    name = str(tool_name or "").casefold()
+    if "python" in name:
+        return "python"
+    if any(key in name for key in ("bash", "shell", "command", "terminal")):
+        return "shell"
+    return "text"
 
 
 def normalize_tool_arguments(value):
@@ -7734,15 +7807,13 @@ class SkillsCenterDialog(QDialog):
         self.import_btn.setIcon(qta.icon('fa5s.box-open', color=DesignTokens.text_secondary))
         self.import_btn.setMinimumWidth(168)
         self.import_btn.clicked.connect(self.import_skill)
-        self.more_btn = QPushButton("更多")
+        self.more_btn = QPushButton("刷新")
+        self.more_btn.setAccessibleName("刷新能力列表")
+        self.more_btn.setToolTip("重新扫描并加载全部能力")
         self.more_btn.setStyleSheet(apple_button_style("secondary", radius=15))
-        self.more_btn.setIcon(qta.icon('fa5s.ellipsis-h', color=DesignTokens.text_secondary))
+        self.more_btn.setIcon(qta.icon('fa5s.sync-alt', color=DesignTokens.text_secondary))
         self.more_btn.setMinimumWidth(104)
-        more_menu = QMenu(self)
-        refresh_action = QAction("刷新", self)
-        refresh_action.triggered.connect(self.manual_refresh)
-        more_menu.addAction(refresh_action)
-        self.more_btn.setMenu(more_menu)
+        self.more_btn.clicked.connect(self.manual_refresh)
         header_actions.addWidget(self.import_btn, 0, Qt.AlignRight)
         header_actions.addWidget(self.more_btn, 0, Qt.AlignRight)
         header.addLayout(header_actions)
@@ -8751,15 +8822,16 @@ class ComposerActionPopover(ProductPopover):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(2)
-        pending = getattr(window, "pending_conversation_skill_result", None)
+        state = window.get_current_session()
+        pending = getattr(state, "pending_conversation_skill_result", None) if state else None
         if pending:
             draft = pending.get("draft") if isinstance(pending, dict) else {}
             self._add_row(layout, "Skill 草稿待确认", str((draft or {}).get("skill_name") or "草稿已生成"),
-                          qta.icon("fa5s.file-alt", color=DesignTokens.primary), window.review_pending_conversation_skill_draft)
+                          qta.icon("fa5s.file-alt", color=DesignTokens.primary),
+                          lambda sid=state.session_id: window.review_pending_conversation_skill_draft(sid))
             layout.addWidget(self._divider())
         self._add_row(layout, "添加文件", "图片、文档或其他工作资料",
                       qta.icon("fa5s.paperclip", color=DesignTokens.text_secondary), window.select_files_for_prompt)
-        state = window.get_current_session()
         selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []) if state else [])
         ready = bool(getattr(window, "skill_manager_ready", False))
         busy = bool(state and window._session_is_busy(state))
@@ -8989,6 +9061,30 @@ class SearchableSkillPickerButton(QPushButton):
         QTimer.singleShot(0, search.setFocus)
 
 
+class InteractionChoiceButton(QPushButton):
+    """Theme-owned choice row that never falls back to native checkbox chrome."""
+
+    def __init__(self, label, description="", value="", parent=None):
+        text = str(label or "选项")
+        if description:
+            text += "\n" + str(description)
+        super().__init__(text, parent)
+        self.setCheckable(True)
+        self.setProperty("option_value", str(value or label or ""))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(42 if description else 34)
+        self.setStyleSheet(
+            f"QPushButton {{ text-align: left; padding: 7px 10px; color: {DesignTokens.text_primary}; "
+            f"background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 7px; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; border-color: {DesignTokens.border_strong}; }}"
+            f"QPushButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+            f"border: 2px solid {DesignTokens.primary}; padding: 6px 9px; }}"
+            f"QPushButton:focus {{ border: 2px solid {DesignTokens.primary_focus}; padding: 6px 9px; }}"
+            f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; "
+            f"border-color: {DesignTokens.border_subtle}; }}"
+        )
+
+
 class InlineInteractionCard(QFrame):
     """Conversation-owned response card for approval and input tool requests."""
 
@@ -9001,6 +9097,7 @@ class InlineInteractionCard(QFrame):
         self._resolved = False
         self.option_checks = []
         self.question_controls = []
+        self.option_group = None
         self.setObjectName("InlineInteractionCard")
         self.setStyleSheet(
             f"QFrame#InlineInteractionCard {{ background: {DesignTokens.bg_main}; "
@@ -9030,40 +9127,45 @@ class InlineInteractionCard(QFrame):
 
         options = self.request.get("options") if isinstance(self.request.get("options"), list) else []
         if self.kind in {"choice", "multi_choice"}:
+            if self.kind == "choice":
+                self.option_group = QButtonGroup(self)
+                self.option_group.setExclusive(True)
             for option in options:
                 label = str(option.get("label") or option.get("value") or "选项")
                 description = str(option.get("description") or "")
-                checkbox = QCheckBox(label + (f"  ·  {description}" if description else ""))
-                checkbox.setProperty("option_value", str(option.get("value") or label))
-                checkbox.setStyleSheet(
-                    f"QCheckBox {{ color: {DesignTokens.text_primary}; spacing: 8px; padding: 5px 2px; }}"
-                )
-                if self.kind == "choice":
-                    checkbox.clicked.connect(lambda checked=False, current=checkbox: self._select_only(current, checked))
-                self.option_checks.append(checkbox)
-                layout.addWidget(checkbox)
+                choice = InteractionChoiceButton(label, description, str(option.get("value") or label), self)
+                if self.option_group is not None:
+                    self.option_group.addButton(choice)
+                self.option_checks.append(choice)
+                layout.addWidget(choice)
         elif self.kind == "questionnaire":
             for question in normalize_pending_clarify_questions(self.request.get("questions") or []):
                 question_label = QLabel(str(question.get("question") or question.get("header") or "问题"))
                 question_label.setWordWrap(True)
                 question_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600;")
-                combo = QComboBox()
-                combo.addItem("请选择…", "")
+                group = QButtonGroup(self)
+                group.setExclusive(True)
+                buttons = []
                 for option in question.get("options") or []:
                     label = str(option.get("label") or "")
-                    combo.addItem(label, str(option.get("value") or label))
-                apply_settings_combo_style(combo)
+                    value = str(option.get("value") or label)
+                    choice = InteractionChoiceButton(label, str(option.get("description") or ""), value, self)
+                    group.addButton(choice)
+                    buttons.append(choice)
                 custom = QLineEdit()
                 custom.setPlaceholderText("选择“自定义”后填写…")
                 custom.setStyleSheet(product_field_style())
                 custom.setEnabled(False)
-                combo.currentIndexChanged.connect(
-                    lambda _index, source=combo, field=custom: field.setEnabled(str(source.currentData() or "") == "__custom__")
-                )
                 layout.addWidget(question_label)
-                layout.addWidget(combo)
+                for choice in buttons:
+                    layout.addWidget(choice)
+                    choice.toggled.connect(
+                        lambda checked=False, source=choice, field=custom: field.setEnabled(
+                            bool(checked and str(source.property("option_value") or "") == "__custom__")
+                        )
+                    )
                 layout.addWidget(custom)
-                self.question_controls.append({"id": question.get("id"), "combo": combo, "input": custom})
+                self.question_controls.append({"id": question.get("id"), "group": group, "buttons": buttons, "input": custom})
 
         self.validation_label = QLabel("")
         self.validation_label.setWordWrap(True)
@@ -9140,7 +9242,8 @@ class InlineInteractionCard(QFrame):
         if self.kind == "questionnaire":
             answers = {}
             for control in self.question_controls:
-                value = str(control["combo"].currentData() or "")
+                checked = control["group"].checkedButton()
+                value = str(checked.property("option_value") or "") if checked is not None else ""
                 custom_text = control["input"].text().strip()
                 if value == "__custom__":
                     if not custom_text:
@@ -9162,8 +9265,12 @@ class InlineInteractionCard(QFrame):
         for widget in [self.text_input, self.cancel_btn, self.submit_btn, *self.option_checks]:
             widget.setEnabled(enabled)
         for control in self.question_controls:
-            control["combo"].setEnabled(enabled)
-            control["input"].setEnabled(enabled and str(control["combo"].currentData() or "") == "__custom__")
+            for button in control["buttons"]:
+                button.setEnabled(enabled)
+            checked = control["group"].checkedButton()
+            control["input"].setEnabled(
+                enabled and checked is not None and str(checked.property("option_value") or "") == "__custom__"
+            )
 
     def _finish(self, value):
         if self._resolved:
@@ -9314,9 +9421,15 @@ class ConversationSkillOptionsDialog(QDialog):
             self.hint_label.setText("创建新 Skill 会根据所选会话片段生成一个新的用户 Skill。")
 
     def _set_mode(self, mode):
+        log_conversation_skill_capture("options_mode_change_begin", mode=str(mode or "create"))
         index = self.mode_combo.findData(str(mode or "create"))
         if index >= 0:
             self.mode_combo.setCurrentIndex(index)
+        log_conversation_skill_capture(
+            "options_mode_change_done",
+            mode=str(self.mode_combo.currentData() or "create"),
+            target_visible=bool(self.target_combo.isVisible()),
+        )
 
     def _accept_if_valid(self):
         if self.mode_combo.currentData() == "update" and not self.target_combo.currentData():
@@ -9526,6 +9639,13 @@ class ConversationSkillWizardDialog(QDialog):
         actions.layout.addWidget(cancel_btn)
         actions.layout.addWidget(self.next_btn)
         layout.addWidget(actions)
+        self.finished.connect(
+            lambda result: log_conversation_skill_capture(
+                "wizard_finished",
+                result=int(result),
+                mode=str(self.options_page.mode_combo.currentData() or "create"),
+            )
+        )
 
     def _go_back(self):
         self.stack.setCurrentWidget(self.options_page)
@@ -9535,6 +9655,22 @@ class ConversationSkillWizardDialog(QDialog):
         self.resize(560, 420)
 
     def _go_next(self):
+        log_conversation_skill_capture(
+            "wizard_next_begin",
+            step=1 if self.stack.currentWidget() is self.options_page else 2,
+            mode=str(self.options_page.mode_combo.currentData() or "create"),
+        )
+        try:
+            self._go_next_impl()
+        except Exception as exc:
+            log_conversation_skill_capture(
+                "wizard_next_error",
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            QMessageBox.warning(self, "无法继续", f"Skill 向导发生错误：{exc}")
+
+    def _go_next_impl(self):
         if self.stack.currentWidget() is self.options_page:
             options = self.options_page.selected_options()
             if options["mode"] == "update" and not options.get("target_skill"):
@@ -9545,6 +9681,7 @@ class ConversationSkillWizardDialog(QDialog):
             self.back_btn.show()
             self.next_btn.setText("生成草稿")
             self.resize(720, 600)
+            log_conversation_skill_capture("wizard_next_done", step=2, mode=options.get("mode"))
             return
         if not self.range_page.selected_messages():
             QMessageBox.warning(self, "无法生成", "请至少选择一条会话消息。")
@@ -9592,7 +9729,7 @@ class ConversationSkillPreviewDialog(QDialog):
         self._build_script_tab()
         layout.addWidget(self.tabs, 1)
 
-        actions = QHBoxLayout()
+        action_bar = ProductActionBar()
         cancel_btn = QPushButton("取消")
         cancel_btn.setObjectName("SecondaryBtn")
         cancel_btn.clicked.connect(self.reject)
@@ -9601,7 +9738,7 @@ class ConversationSkillPreviewDialog(QDialog):
         save_btn.clicked.connect(self._accept_if_valid)
         action_bar.layout.addWidget(cancel_btn)
         action_bar.layout.addWidget(save_btn)
-        root_layout.addWidget(action_bar)
+        layout.addWidget(action_bar)
 
     def _build_basic_tab(self):
         tab = QWidget()
@@ -9783,33 +9920,7 @@ class AutoResizingLabel(QLabel):
 
     def contextMenuEvent(self, event):
         menu = create_styled_menu(self)
-
-        selected = self.selectedText() or ""
-        selected_len = len(selected)
-        status = QAction(f"已选中 {selected_len} 字符", self)
-        status.setEnabled(False)
-        menu.addAction(status)
-        menu.addSeparator()
-
-        action_copy = QAction("复制选中内容", self)
-        action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
-        action_copy.setShortcut("Ctrl+C")
-        action_copy.setShortcutVisibleInContextMenu(True)
-        action_copy.triggered.connect(lambda: QApplication.clipboard().setText(selected))
-        action_copy.setEnabled(self.hasSelectedText())
-        menu.addAction(action_copy)
-
-        action_copy_all = QAction("复制全部内容", self)
-        action_copy_all.setIcon(qta.icon('fa5s.clone', color='#4b5563'))
-        action_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.text() or ""))
-        action_copy_all.setEnabled(bool((self.text() or "").strip()))
-        menu.addAction(action_copy_all)
-
-        action_select_all = QAction("全选", self)
-        action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
-        action_select_all.triggered.connect(lambda: self.setSelection(0, len(self.text())))
-        menu.addAction(action_select_all)
-
+        populate_text_context_menu(menu, self, plain_text=self.text)
         menu.exec(event.globalPos())
 
 class ReadOnlyTextEdit(QTextEdit):
@@ -9820,33 +9931,7 @@ class ReadOnlyTextEdit(QTextEdit):
 
     def contextMenuEvent(self, event):
         menu = create_styled_menu(self)
-
-        selected = self.textCursor().selectedText()
-        selected_len = len(selected or "")
-        status = QAction(f"已选中 {selected_len} 字符", self)
-        status.setEnabled(False)
-        menu.addAction(status)
-        menu.addSeparator()
-
-        action_copy = QAction("复制选中内容", self)
-        action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
-        action_copy.setShortcut("Ctrl+C")
-        action_copy.setShortcutVisibleInContextMenu(True)
-        action_copy.triggered.connect(self.copy)
-        action_copy.setEnabled(self.textCursor().hasSelection())
-        menu.addAction(action_copy)
-
-        action_copy_all = QAction("复制全部内容", self)
-        action_copy_all.setIcon(qta.icon('fa5s.clone', color='#4b5563'))
-        action_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText() or ""))
-        action_copy_all.setEnabled(bool((self.toPlainText() or "").strip()))
-        menu.addAction(action_copy_all)
-
-        action_select_all = QAction("全选", self)
-        action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
-        action_select_all.triggered.connect(self.selectAll)
-        menu.addAction(action_select_all)
-
+        populate_text_context_menu(menu, self)
         menu.exec(event.globalPos())
 
 class AutoResizingTextEdit(ReadOnlyTextEdit):
@@ -9919,33 +10004,7 @@ class ReadOnlyPlainTextEdit(QPlainTextEdit):
 
     def contextMenuEvent(self, event):
         menu = create_styled_menu(self)
-
-        selected = self.textCursor().selectedText()
-        selected_len = len(selected or "")
-        status = QAction(f"已选中 {selected_len} 字符", self)
-        status.setEnabled(False)
-        menu.addAction(status)
-        menu.addSeparator()
-
-        action_copy = QAction("复制选中内容", self)
-        action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
-        action_copy.setShortcut("Ctrl+C")
-        action_copy.setShortcutVisibleInContextMenu(True)
-        action_copy.triggered.connect(self.copy)
-        action_copy.setEnabled(self.textCursor().hasSelection())
-        menu.addAction(action_copy)
-
-        action_copy_all = QAction("复制全部内容", self)
-        action_copy_all.setIcon(qta.icon('fa5s.clone', color='#4b5563'))
-        action_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText() or ""))
-        action_copy_all.setEnabled(bool((self.toPlainText() or "").strip()))
-        menu.addAction(action_copy_all)
-
-        action_select_all = QAction("全选", self)
-        action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
-        action_select_all.triggered.connect(self.selectAll)
-        menu.addAction(action_select_all)
-
+        populate_text_context_menu(menu, self)
         menu.exec(event.globalPos())
 
 
@@ -10130,52 +10189,7 @@ class AutoResizingInputEdit(QTextEdit):
     
     def contextMenuEvent(self, event):
         menu = create_styled_menu(self)
-        
-        # Undo
-        action_undo = QAction("撤销", self)
-        action_undo.setIcon(qta.icon('fa5s.undo', color='#4b5563'))
-        action_undo.triggered.connect(self.undo)
-        action_undo.setEnabled(self.document().isUndoAvailable())
-        menu.addAction(action_undo)
-        
-        # Redo
-        action_redo = QAction("重做", self)
-        action_redo.setIcon(qta.icon('fa5s.redo', color='#4b5563'))
-        action_redo.triggered.connect(self.redo)
-        action_redo.setEnabled(self.document().isRedoAvailable())
-        menu.addAction(action_redo)
-        
-        menu.addSeparator()
-
-        # Cut
-        action_cut = QAction("剪切", self)
-        action_cut.setIcon(qta.icon('fa5s.cut', color='#4b5563'))
-        action_cut.triggered.connect(self.cut)
-        action_cut.setEnabled(self.textCursor().hasSelection())
-        menu.addAction(action_cut)
-
-        # Copy
-        action_copy = QAction("复制", self)
-        action_copy.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
-        action_copy.triggered.connect(self.copy)
-        action_copy.setEnabled(self.textCursor().hasSelection())
-        menu.addAction(action_copy)
-        
-        # Paste
-        action_paste = QAction("粘贴", self)
-        action_paste.setIcon(qta.icon('fa5s.paste', color='#4b5563'))
-        action_paste.triggered.connect(self.paste)
-        action_paste.setEnabled(self.canPaste())
-        menu.addAction(action_paste)
-        
-        menu.addSeparator()
-        
-        # Select All
-        action_select_all = QAction("全选", self)
-        action_select_all.setIcon(qta.icon('fa5s.mouse-pointer', color='#4b5563'))
-        action_select_all.triggered.connect(self.selectAll)
-        menu.addAction(action_select_all)
-        
+        populate_text_context_menu(menu, self, editable=True)
         menu.exec(event.globalPos())
 
 class DaemonRequestWorker(QThread):
@@ -11586,7 +11600,7 @@ class ChatBubble(QFrame):
                 content_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 content_edit.setStyleSheet(
                     f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
-                    f"selection-background-color: {DesignTokens.primary_focus}; selection-color: {DesignTokens.text_primary};"
+                    f"selection-background-color: {DesignTokens.selection_bg}; selection-color: {DesignTokens.selection_text};"
                 )
                 apply_selection_palette(content_edit, DesignTokens.primary_focus, DesignTokens.text_primary)
 
@@ -11963,7 +11977,7 @@ class ChatBubble(QFrame):
             self.user_content_edit.setReadOnly(True)
             self.user_content_edit.setStyleSheet(
                 f"color: {DesignTokens.text_primary}; font-size: 14px; line-height: 1.6; border: none; background: transparent; "
-                f"selection-background-color: {DesignTokens.primary_focus}; selection-color: {DesignTokens.text_primary};"
+                f"selection-background-color: {DesignTokens.selection_bg}; selection-color: {DesignTokens.selection_text};"
             )
         if self.user_bubble_frame is not None:
             self.user_bubble_frame.setStyleSheet(f"""
@@ -13764,6 +13778,7 @@ class SessionState:
         self.has_file_changes = False
         self.changed_files = []
         self.auto_scroll_enabled = True
+        self.scroll_dragging = False
         self.scroll_flush_timer = None
         self.pending_scroll_force = False
         self.virtualization_timer = None
@@ -13797,6 +13812,7 @@ class SessionState:
         self.office_draft_preview_pending = False
         self.office_draft_task_card = None
         self.skill_capture_status_card = None
+        self.pending_conversation_skill_result = None
         self.office_task_result_paths = []
         self.ppt_agent_mode = False
         self.ppt_agent_strategy = PPT_AGENT_STRATEGY_AUTO
@@ -14133,7 +14149,7 @@ class SmartSplitter(QSplitter):
             # Assuming 3-column layout: [Sidebar, Main, RightSidebar]
             # Handle 1: Between Sidebar (0) and Main (1)
             if idx == 1: 
-                target_width = 260
+                target_width = DesignTokens.sidebar_width
                 if len(sizes) > 1:
                     current_w = sizes[0]
                     diff = target_width - current_w
@@ -14636,6 +14652,7 @@ class ConversationSkillDraftWorker(QThread):
             )
             self.finished_signal.emit({
                 "ok": True,
+                "session_id": self.session_id,
                 "draft": draft,
                 "mode": self.mode,
                 "target_skill": self.target_skill,
@@ -14651,6 +14668,7 @@ class ConversationSkillDraftWorker(QThread):
             )
             self.finished_signal.emit({
                 "ok": False,
+                "session_id": self.session_id,
                 "error": str(exc),
             })
 
@@ -14965,8 +14983,8 @@ class MainWindow(QMainWindow):
                 background: {DesignTokens.bg_main};
                 font-size: 14px;
                 color: {DesignTokens.text_primary};
-                selection-background-color: {DesignTokens.primary_soft};
-                selection-color: {DesignTokens.text_primary};
+                selection-background-color: {DesignTokens.selection_bg};
+                selection-color: {DesignTokens.selection_text};
             }}
             QTextEdit#MainInput:focus {{
                 border: 1px solid {DesignTokens.primary_focus};
@@ -15778,6 +15796,16 @@ class MainWindow(QMainWindow):
         td_args_layout.addWidget(td_args_label)
         self.td_args_edit = ProductCodeViewer("json")
         td_args_layout.addWidget(self.td_args_edit)
+        self.td_args_meta_label = QLabel("其他参数")
+        self.td_args_meta_label.setStyleSheet(
+            f"font-size: 11px; font-weight: 600; color: {DesignTokens.text_secondary};"
+        )
+        self.td_args_meta_edit = ProductCodeViewer("json")
+        self.td_args_meta_edit.setMaximumHeight(150)
+        self.td_args_meta_label.hide()
+        self.td_args_meta_edit.hide()
+        td_args_layout.addWidget(self.td_args_meta_label)
+        td_args_layout.addWidget(self.td_args_meta_edit)
 
         td_result_section = QWidget()
         td_result_layout = QVBoxLayout(td_result_section)
@@ -19633,8 +19661,20 @@ class MainWindow(QMainWindow):
         session_layout.addWidget(session_header)
 
         chat_scroll = QScrollArea()
+        chat_scroll.setObjectName("ChatScrollArea")
         chat_scroll.setWidgetResizable(True)
-        chat_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        chat_scroll.setStyleSheet(
+            f"QScrollArea#ChatScrollArea {{ border: none; background: transparent; }}"
+            f"QScrollArea#ChatScrollArea QScrollBar:vertical {{ width: 12px; background: transparent; margin: 0; }}"
+            f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical {{ background: {DesignTokens.border_strong}; "
+            f"min-height: 32px; border-radius: 5px; margin: 1px; }}"
+            f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical:hover {{ background: {DesignTokens.text_tertiary}; }}"
+            f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical:pressed {{ background: {DesignTokens.primary}; }}"
+            "QScrollArea#ChatScrollArea QScrollBar::add-line:vertical, "
+            "QScrollArea#ChatScrollArea QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollArea#ChatScrollArea QScrollBar::add-page:vertical, "
+            "QScrollArea#ChatScrollArea QScrollBar::sub-page:vertical { background: transparent; }"
+        )
         chat_container = QWidget()
         chat_container.setStyleSheet("background: transparent;")
         chat_layout = QVBoxLayout(chat_container)
@@ -19671,6 +19711,8 @@ class MainWindow(QMainWindow):
         state.virtualization_timer.setInterval(90)
         state.virtualization_timer.timeout.connect(lambda sid=session_id: self.virtualize_session_bubbles(sid))
         chat_scroll.verticalScrollBar().valueChanged.connect(lambda value, sid=session_id: self.on_chat_scroll_value_changed(value, sid))
+        chat_scroll.verticalScrollBar().sliderPressed.connect(lambda sid=session_id: self.on_chat_scroll_drag_started(sid))
+        chat_scroll.verticalScrollBar().sliderReleased.connect(lambda sid=session_id: self.on_chat_scroll_drag_finished(sid))
         state.empty_state = empty_state
         state.history_loaded = is_fresh_session
         state.selected_model_id = self._default_model_id_for_new_session()
@@ -19706,6 +19748,7 @@ class MainWindow(QMainWindow):
         state.llm_worker = None
         state.live_activity = False
         state.auto_scroll_enabled = True
+        state.scroll_dragging = False
         state.pending_scroll_force = False
         state.active_turn_id = 0
         state.completed_turn_id = 0
@@ -21786,6 +21829,22 @@ class MainWindow(QMainWindow):
             return
         self.load_more_history(session_id=session_id)
 
+    def on_chat_scroll_drag_started(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        state.scroll_dragging = True
+        state.auto_scroll_enabled = False
+
+    def on_chat_scroll_drag_finished(self, session_id):
+        state = self.get_session(session_id)
+        if not state or not getattr(state, "chat_scroll", None):
+            return
+        state.scroll_dragging = False
+        bar = state.chat_scroll.verticalScrollBar()
+        state.auto_scroll_enabled = max(0, bar.maximum() - bar.value()) <= SCROLL_BOTTOM_THRESHOLD_PX
+        self.queue_session_bubble_virtualization(session_id)
+
     def queue_session_bubble_virtualization(self, session_id=None):
         state = self.get_session(session_id)
         if not state or not getattr(state, "chat_scroll", None):
@@ -21809,6 +21868,8 @@ class MainWindow(QMainWindow):
     def virtualize_session_bubbles(self, session_id=None):
         state = self.get_session(session_id)
         if not state or not getattr(state, "chat_scroll", None):
+            return
+        if getattr(state, "scroll_dragging", False):
             return
         bubbles = self._eligible_virtualized_bubbles(state)
         if len(bubbles) < CHAT_BUBBLE_VIRTUALIZATION_MIN_BUBBLES:
@@ -21856,6 +21917,8 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state:
             return
+        if getattr(state, "scroll_dragging", False):
+            return
         if force:
             state.auto_scroll_enabled = True
             state.pending_scroll_force = True
@@ -21872,6 +21935,8 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state or not getattr(state, "chat_scroll", None):
             return
+        if getattr(state, "scroll_dragging", False):
+            return
         if not force and not state.auto_scroll_enabled:
             return
         vbar = state.chat_scroll.verticalScrollBar()
@@ -21881,6 +21946,8 @@ class MainWindow(QMainWindow):
     def flush_session_scroll(self, session_id):
         state = self.get_session(session_id)
         if not state or not getattr(state, "chat_scroll", None):
+            return
+        if getattr(state, "scroll_dragging", False):
             return
         force = bool(getattr(state, "pending_scroll_force", False))
         state.pending_scroll_force = False
@@ -23961,7 +24028,7 @@ class MainWindow(QMainWindow):
             if page is not None:
                 page.refresh_list()
                 self.main_page_stack.setCurrentWidget(page)
-            self.workspace_title_label.setText("能力")
+            self.workspace_title_label.setText("能力中心")
             self.workspace_subtitle_label.setText("查看、启用并配置 Cowork 可使用的能力。")
             return True
         if self.current_product_route == self.PAGE_AUTOMATION and self.current_product_subroute == "task_editor":
@@ -24128,7 +24195,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="product_page")
         titles = {
-            self.PAGE_CAPABILITIES: ("能力", "查看、启用并配置 Cowork 可使用的能力。"),
+            self.PAGE_CAPABILITIES: ("能力中心", "查看、启用并配置 Cowork 可使用的能力。"),
             self.PAGE_AUTOMATION: ("自动化", "管理计划任务、运行状态和执行历史。"),
             self.PAGE_SETTINGS: ("设置", "管理模型、工作区、智能体、记忆与系统偏好。"),
         }
@@ -24720,7 +24787,9 @@ class MainWindow(QMainWindow):
             button = QPushButton("查看并保存")
             button.setObjectName("SkillCaptureReviewButton")
             button.setStyleSheet(product_button_style("ghost", radius=6))
-            button.clicked.connect(self.review_pending_conversation_skill_draft)
+            button.clicked.connect(
+                lambda _checked=False, sid=state.session_id: self.review_pending_conversation_skill_draft(sid)
+            )
             button.hide()
             layout.addWidget(button)
             state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
@@ -24782,13 +24851,31 @@ class MainWindow(QMainWindow):
                         if message_id:
                             selected_message_ids.insert(0, message_id)
                         break
-        wizard = ConversationSkillWizardDialog(
-            skills,
-            state.messages,
-            self,
-            selected_message_ids=selected_message_ids,
+        log_conversation_skill_capture(
+            "wizard_construct_begin",
+            session_id=state.session_id,
+            skill_count=len(skills or []),
+            message_count=len(state.messages or []),
         )
-        if wizard.exec() != QDialog.Accepted:
+        try:
+            wizard = ConversationSkillWizardDialog(
+                skills,
+                state.messages,
+                self,
+                selected_message_ids=selected_message_ids,
+            )
+            log_conversation_skill_capture("wizard_construct_done", session_id=state.session_id)
+            wizard_result = wizard.exec()
+        except Exception as exc:
+            log_conversation_skill_capture(
+                "wizard_construct_error",
+                session_id=state.session_id,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            self.add_system_toast(f"无法打开 Skill 向导：{exc}", "error", auto_close_ms=8000)
+            return
+        if wizard_result != QDialog.Accepted:
             log_conversation_skill_capture("options_cancelled", session_id=state.session_id)
             return
         options = wizard.selected_options()
@@ -24838,8 +24925,15 @@ class MainWindow(QMainWindow):
 
     def handle_conversation_skill_finished(self, result):
         worker = self.conversation_skill_worker
-        target_session_id = str(getattr(worker, "session_id", "") or self.current_session_id or "")
+        target_session_id = str(
+            (result or {}).get("session_id")
+            or getattr(worker, "session_id", "")
+            or self.current_session_id
+            or ""
+        )
         target_state = self.get_session(target_session_id) if target_session_id else self.get_current_session()
+        if target_state is None:
+            raise RuntimeError(f"Skill 草稿所属会话不存在：{target_session_id}")
         self.conversation_skill_worker = None
         if worker:
             try:
@@ -24863,7 +24957,7 @@ class MainWindow(QMainWindow):
             return
 
         if not bool(getattr(self, "_reviewing_pending_skill_draft", False)):
-            self.pending_conversation_skill_result = dict(result)
+            target_state.pending_conversation_skill_result = dict(result)
             self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             self.add_system_toast(
                 "Skill 草稿已生成，待你确认后保存",
@@ -24871,7 +24965,7 @@ class MainWindow(QMainWindow):
                 auto_close_ms=0,
             )
             return
-        self.pending_conversation_skill_result = None
+        target_state.pending_conversation_skill_result = None
 
         mode = result.get("mode") or "create"
         target_skill = result.get("target_skill")
@@ -24890,7 +24984,7 @@ class MainWindow(QMainWindow):
                 mode=mode,
                 target_skill=target_skill,
             )
-            self.pending_conversation_skill_result = dict(result)
+            target_state.pending_conversation_skill_result = dict(result)
             self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             self.add_system_toast("Skill 草稿已保留，可稍后继续确认", "info", auto_close_ms=4000)
             return
@@ -24932,7 +25026,7 @@ class MainWindow(QMainWindow):
                         error=save_result.message,
                     )
                     QMessageBox.warning(self, "保存失败", save_result.message)
-                    self.pending_conversation_skill_result = pending_payload
+                    target_state.pending_conversation_skill_result = pending_payload
                     self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
                     return
             else:
@@ -24963,7 +25057,7 @@ class MainWindow(QMainWindow):
                         error=save_result.message,
                     )
                     QMessageBox.warning(self, "更新失败", save_result.message)
-                    self.pending_conversation_skill_result = pending_payload
+                    target_state.pending_conversation_skill_result = pending_payload
                     self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
                     return
         except Exception as exc:
@@ -24975,7 +25069,7 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
             QMessageBox.warning(self, "保存失败", f"保存 Skill 时发生错误：{exc}")
-            self.pending_conversation_skill_result = pending_payload
+            target_state.pending_conversation_skill_result = pending_payload
             self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             return
         status_card = getattr(target_state, "skill_capture_status_card", None) if target_state else None
@@ -25000,16 +25094,35 @@ class MainWindow(QMainWindow):
         self.action_btn.setText("开始")
         self.action_btn.setEnabled(session_history_ready(state))
 
-    def review_pending_conversation_skill_draft(self):
-        result = getattr(self, "pending_conversation_skill_result", None)
+    def review_pending_conversation_skill_draft(self, session_id=None):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        result = getattr(state, "pending_conversation_skill_result", None) if state else None
         if not result:
+            log_conversation_skill_capture(
+                "review_missing_draft",
+                session_id=str(session_id or self.current_session_id or ""),
+            )
+            self.add_system_toast("当前会话没有待确认的 Skill 草稿", "error", auto_close_ms=4000)
             return False
-        self.pending_conversation_skill_result = None
+        state.pending_conversation_skill_result = None
         self._reviewing_pending_skill_draft = True
+        log_conversation_skill_capture("review_open_begin", session_id=state.session_id)
         try:
             self.handle_conversation_skill_finished(dict(result))
+        except Exception as exc:
+            state.pending_conversation_skill_result = dict(result)
+            self._update_skill_capture_status_card(state, "Skill 草稿待确认", pending=True)
+            log_conversation_skill_capture(
+                "review_open_error",
+                session_id=state.session_id,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            self.add_system_toast(f"无法打开 Skill 草稿：{exc}", "error", auto_close_ms=8000)
+            return False
         finally:
             self._reviewing_pending_skill_draft = False
+        log_conversation_skill_capture("review_open_done", session_id=state.session_id)
         return True
 
     def handle_skill_used(self, skill_name, session_id=None):
@@ -26077,28 +26190,27 @@ class MainWindow(QMainWindow):
         self.td_meta_label.setVisible(bool(meta_text))
         
         # Format arguments by intent so executable code is readable first.
-        args_obj = None
-        try:
-            if isinstance(args, str):
-                args_obj = json.loads(args)
-            else:
-                args_obj = args
-        except Exception:
-            args_obj = None
+        args_obj, args_parse_error = parse_tool_arguments(args)
         tool_name = str(getattr(selected_card, "tool_name", "") or "").lower()
+        self.td_args_meta_label.hide()
+        self.td_args_meta_edit.hide()
         if isinstance(args_obj, dict) and isinstance(args_obj.get("code"), str):
-            language = "python" if "python" in tool_name else ("shell" if any(key in tool_name for key in ("bash", "shell", "command")) else "text")
+            language = tool_code_language(tool_name)
             code_text = args_obj.get("code") or ""
             remaining = {key: value for key, value in args_obj.items() if key != "code"}
             args_text = code_text
+            self.td_args_edit.set_code(detail_text(code_text, 12000), language)
             if remaining:
-                args_text += "\n\n# 其他参数\n" + json.dumps(remaining, indent=2, ensure_ascii=False)
-            self.td_args_edit.set_code(detail_text(args_text, 12000), language)
+                remaining_text = json.dumps(remaining, indent=2, ensure_ascii=False)
+                args_text += "\n" + remaining_text
+                self.td_args_meta_edit.set_code(detail_text(remaining_text, 6000), "json")
+                self.td_args_meta_label.show()
+                self.td_args_meta_edit.show()
         elif args_obj is not None:
             args_text = json.dumps(args_obj, indent=2, ensure_ascii=False)
             self.td_args_edit.set_code(detail_text(args_text, 12000), "json")
         else:
-            args_text = str(args)
+            args_text = f"{args_parse_error}\n\n原始参数：\n{str(args)}"
             self.td_args_edit.set_code(detail_text(args_text, 12000), "text")
         
         try:
@@ -26113,8 +26225,8 @@ class MainWindow(QMainWindow):
                     res_text = result
             else:
                 res_text = json.dumps(result, indent=2, ensure_ascii=False)
-        except:
-            res_text = str(result)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            res_text = f"结果格式化失败：{exc}\n\n原始结果：\n{str(result)}"
 
         if not (res_text or "").strip() and selected_card and not getattr(selected_card, "is_finished", False):
             res_text = "(Running...)"

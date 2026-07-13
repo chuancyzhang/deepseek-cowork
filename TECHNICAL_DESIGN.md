@@ -152,3 +152,10 @@ Cowork 采用交错式推理流程：
 - `core/config_manager.py`
 
 如果需要产品视角的说明，见 [PRODUCT_DOC.md](PRODUCT_DOC.md)；如果需要快速上手，见 [README_CN.md](README_CN.md)。
+## 交互表面与 Skill 草稿状态
+
+- `DesignTokens.selection_bg/selection_text` 是全局文字选区语义色；文本控件通过共享菜单保持剪贴板操作一致。
+- 每个 `SessionState` 独立保存滚动拖动状态和待确认 Skill 草稿。滚动拖动期间禁止自动滚底与气泡虚拟化重排，草稿确认也不读取主窗口全局值。
+- 技术详情通过 `parse_tool_arguments()` 显式解析字典、JSON 或安全的 Python 字面量。解析失败属于可见错误，不进入静默文本降级。
+- `ProductCodeViewer` 负责语言标签、行号、轻量语法高亮和复制；代码参数与其余 JSON 参数使用独立查看器。
+- Skill 向导、草稿生成、预览和保存路径写入分阶段诊断日志；Python 异常保留 traceback，原生退出继续由 `native_crash.log` 捕获。

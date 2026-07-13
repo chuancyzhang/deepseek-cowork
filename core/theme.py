@@ -7,6 +7,8 @@ class DesignTokens:
     primary_pressed = "#4651b7"
     primary_soft = "#eef0ff"
     primary_focus = "#c9cdf7"
+    selection_bg = "#b9c0f4"
+    selection_text = "#17181c"
     primary_gradient_start = "#6975dc"
     primary_gradient_end = "#5e6ad2"
 
@@ -96,8 +98,8 @@ class DesignTokens:
     shadow_soft = "0 6px 16px rgba(15, 23, 42, 0.06)"
 
     sidebar_min_width = 204
-    sidebar_width = 220
-    sidebar_max_width = 260
+    sidebar_width = 240
+    sidebar_max_width = 320
     drawer_min_width = 272
     drawer_preferred_min_width = 360
     drawer_max_width = 500
@@ -209,7 +211,7 @@ def get_tech_stylesheet(theme="light"):
         c_accent = DesignTokens.primary
         c_accent_hover = DesignTokens.primary_hover
         c_border = DesignTokens.border
-        c_selection = DesignTokens.primary_soft
+        c_selection = DesignTokens.selection_bg
 
     css = f"""
     QWidget {{
@@ -217,7 +219,7 @@ def get_tech_stylesheet(theme="light"):
         font-size: 14px;
         color: {c_text_primary};
         selection-background-color: {c_selection};
-        selection-color: {c_text_primary};
+        selection-color: {DesignTokens.selection_text};
     }}
 
     QMainWindow, QWidget#MainContainer {{

@@ -8,8 +8,8 @@ prevents parent styling from leaking into labels and nested controls.
 import json
 import re
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -20,11 +20,13 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QMessageBox as QtMessageBox,
+    QMenu,
     QPushButton,
     QButtonGroup,
     QScrollArea,
     QSplitter,
     QStackedWidget,
+    QToolButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -75,11 +77,34 @@ class ProductCodeViewer(QPlainTextEdit):
         super().__init__(parent)
         self._line_number_area = QWidget(self)
         self._line_number_area.paintEvent = self._paint_line_numbers
+        self._header = QFrame(self)
+        self._header.setObjectName("ProductCodeViewerHeader")
+        header_layout = QHBoxLayout(self._header)
+        header_layout.setContentsMargins(10, 0, 6, 0)
+        header_layout.setSpacing(6)
+        self.language_label = QLabel("TEXT")
+        self.language_label.setObjectName("ProductCodeLanguage")
+        header_layout.addWidget(self.language_label)
+        header_layout.addStretch()
+        self.copy_button = QToolButton()
+        self.copy_button.setText("复制")
+        self.copy_button.setToolTip("复制代码")
+        self.copy_button.setCursor(Qt.PointingHandCursor)
+        self.copy_button.clicked.connect(self._copy_all)
+        header_layout.addWidget(self.copy_button)
         self._language = "text"
         self.setReadOnly(True)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.setFont(QFont("Cascadia Mono", 10))
-        self.setStyleSheet(product_code_style("QPlainTextEdit"))
+        self.setStyleSheet(
+            product_code_style("QPlainTextEdit")
+            + f"QFrame#ProductCodeViewerHeader {{ background: {DesignTokens.bg_secondary}; border: none; "
+              f"border-bottom: 1px solid {DesignTokens.border_subtle}; }}"
+              f"QLabel#ProductCodeLanguage {{ color: {DesignTokens.text_tertiary}; font-size: 10px; font-weight: 700; }}"
+              f"QToolButton {{ color: {DesignTokens.text_secondary}; background: transparent; border: none; "
+              f"border-radius: 5px; padding: 3px 7px; font-size: 11px; }}"
+              f"QToolButton:hover {{ color: {DesignTokens.primary}; background: {DesignTokens.primary_soft}; }}"
+        )
         self.blockCountChanged.connect(self._update_line_number_width)
         self.updateRequest.connect(self._update_line_number_area)
         self._highlighter = None
@@ -88,6 +113,8 @@ class ProductCodeViewer(QPlainTextEdit):
 
     def set_language(self, language):
         self._language = str(language or "text").lower()
+        if hasattr(self, "language_label"):
+            self.language_label.setText({"shell": "BASH"}.get(self._language, self._language.upper()))
         if self._highlighter is not None:
             self._highlighter.setDocument(None)
         self._highlighter = _ProductCodeHighlighter(self.document(), self._language)
@@ -102,7 +129,7 @@ class ProductCodeViewer(QPlainTextEdit):
         return 12 + self.fontMetrics().horizontalAdvance("9") * digits
 
     def _update_line_number_width(self, *_):
-        self.setViewportMargins(self._line_number_width(), 0, 0, 0)
+        self.setViewportMargins(self._line_number_width(), 30, 0, 0)
 
     def _update_line_number_area(self, rect, dy):
         if dy:
@@ -115,7 +142,40 @@ class ProductCodeViewer(QPlainTextEdit):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         rect = self.contentsRect()
-        self._line_number_area.setGeometry(QRect(rect.left(), rect.top(), self._line_number_width(), rect.height()))
+        self._header.setGeometry(QRect(rect.left(), rect.top(), rect.width(), 30))
+        self._header.raise_()
+        self._line_number_area.setGeometry(QRect(rect.left(), rect.top() + 30, self._line_number_width(), max(0, rect.height() - 30)))
+
+    def _copy_all(self):
+        QApplication.clipboard().setText(self.toPlainText())
+        self.copy_button.setText("已复制")
+        QTimer.singleShot(1200, lambda: self.copy_button.setText("复制"))
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; "
+            f"border-radius: {DesignTokens.radius_md}px; padding: 6px; }}"
+            f"QMenu::item {{ min-height: {DesignTokens.control_height_sm}px; padding: 4px 24px 4px 10px; "
+            f"border-radius: {DesignTokens.radius_sm}px; color: {DesignTokens.text_primary}; }}"
+            f"QMenu::item:selected {{ background: {DesignTokens.primary_soft}; }}"
+            f"QMenu::item:disabled {{ color: {DesignTokens.text_disabled}; }}"
+        )
+        copy_action = QAction("复制", self)
+        copy_action.setShortcut("Ctrl+C")
+        copy_action.setEnabled(self.textCursor().hasSelection())
+        copy_action.triggered.connect(self.copy)
+        menu.addAction(copy_action)
+        copy_all = QAction("复制全部", self)
+        copy_all.setEnabled(bool(self.toPlainText().strip()))
+        copy_all.triggered.connect(self._copy_all)
+        menu.addAction(copy_all)
+        menu.addSeparator()
+        select_all = QAction("全选", self)
+        select_all.setShortcut("Ctrl+A")
+        select_all.triggered.connect(self.selectAll)
+        menu.addAction(select_all)
+        menu.exec(event.globalPos())
 
     def _paint_line_numbers(self, event):
         painter = QPainter(self._line_number_area)
@@ -151,7 +211,12 @@ class ProductResultViewer(ProductCodeViewer):
                 return "invalid_json"
             self.set_code(json.dumps(parsed, ensure_ascii=False, indent=2), "json")
             return "json"
-        language = "python" if "Traceback (most recent call last)" in text else "text"
+        if "Traceback (most recent call last)" in text:
+            language = "python"
+        elif re.search(r"(^|\n)(stdout|stderr|exit code|command):", text, re.IGNORECASE):
+            language = "shell"
+        else:
+            language = "text"
         self.set_code(text, language)
         return language
 
@@ -828,7 +893,8 @@ def product_field_style():
             min-height: {DesignTokens.control_height}px;
             background: {DesignTokens.bg_main}; color: {DesignTokens.text_primary};
             border: 1px solid {DesignTokens.border}; border-radius: {DesignTokens.radius_md}px;
-            padding: 0 9px; selection-background-color: {DesignTokens.primary_soft};
+            padding: 0 9px; selection-background-color: {DesignTokens.selection_bg};
+            selection-color: {DesignTokens.selection_text};
         }}
         QTextEdit, QPlainTextEdit {{ padding: 8px 10px; }}
         QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QComboBox:hover {{
@@ -856,7 +922,8 @@ def product_code_style(selector="QPlainTextEdit, QTextEdit"):
             background: {DesignTokens.bg_code}; color: {DesignTokens.text_primary};
             border: 1px solid {DesignTokens.border_subtle}; border-radius: {DesignTokens.radius_md}px;
             padding: 10px; font-family: 'Cascadia Mono', 'Consolas', monospace; font-size: 12px;
-            selection-background-color: {DesignTokens.primary_soft};
+            selection-background-color: {DesignTokens.selection_bg};
+            selection-color: {DesignTokens.selection_text};
         }}
         {focus_selectors} {{ border-color: {DesignTokens.primary_focus}; }}
     """

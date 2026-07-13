@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QToolButton, QWidget
 
-from main import ConversationHistoryRow, MainWindow, ProjectHistoryRow
+from main import ConversationHistoryRow, MainWindow, ProjectHistoryRow, parse_tool_arguments
 from ui.primitives import ProductCodeViewer, ProductResultViewer, ProductSegmentedControl, SidebarInlineNameEditor
 
 
@@ -32,6 +32,53 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIsInstance(self.window.observability_segment_control, ProductSegmentedControl)
         self.assertIsInstance(self.window.td_args_edit, ProductCodeViewer)
         self.assertIsInstance(self.window.td_result_edit, ProductResultViewer)
+        self.assertIsInstance(self.window.td_args_meta_edit, ProductCodeViewer)
+
+    def test_tool_arguments_accept_json_and_python_literal_without_hiding_errors(self):
+        parsed, error = parse_tool_arguments("{'code': 'print(1)', 'timeout': 3}")
+        self.assertEqual(parsed["code"], "print(1)")
+        self.assertFalse(error)
+        parsed, error = parse_tool_arguments("not valid payload")
+        self.assertIsNone(parsed)
+        self.assertIn("无法解析", error)
+
+    def test_chat_scroll_drag_pauses_and_recomputes_auto_scroll(self):
+        state = self.window.get_current_session()
+        bar = state.chat_scroll.verticalScrollBar()
+        bar.setRange(0, 100)
+        bar.setValue(20)
+        self.window.on_chat_scroll_drag_started(state.session_id)
+        self.assertTrue(state.scroll_dragging)
+        self.assertFalse(state.auto_scroll_enabled)
+        self.window.on_chat_scroll_drag_finished(state.session_id)
+        self.assertFalse(state.scroll_dragging)
+        self.assertFalse(state.auto_scroll_enabled)
+        bar.setValue(100)
+        self.window.on_chat_scroll_drag_finished(state.session_id)
+        self.assertTrue(state.auto_scroll_enabled)
+
+    def test_pending_skill_draft_is_owned_by_its_session(self):
+        first = self.window.get_current_session()
+        second_id = self.window.create_new_session(make_current=True)
+        second = self.window.get_session(second_id)
+        first.pending_conversation_skill_result = {
+            "ok": True,
+            "session_id": first.session_id,
+            "draft": {"skill_name": "session-skill"},
+        }
+        captured = []
+        with patch.object(self.window, "handle_conversation_skill_finished", captured.append):
+            self.assertTrue(self.window.review_pending_conversation_skill_draft(first.session_id))
+        self.assertEqual(captured[0]["session_id"], first.session_id)
+        self.assertIsNone(first.pending_conversation_skill_result)
+        self.assertIsNone(second.pending_conversation_skill_result)
+
+    def test_capability_page_uses_direct_refresh_action(self):
+        from main import SkillsCenterDialog
+        page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
+        self.assertEqual(page.more_btn.text(), "刷新")
+        self.assertIsNone(page.more_btn.menu())
+        page.deleteLater()
 
     def test_project_preview_keeps_five_conversations_and_hidden_actions(self):
         with tempfile.TemporaryDirectory() as project_dir:

@@ -120,3 +120,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ## 许可证
 
 MIT License
+## 聊天交互与 Skill 草稿
+
+- 聊天消息、输入框和技术详情使用统一的高对比度文字选区，以及一致的复制、粘贴、剪切和全选菜单。
+- 聊天记录滚动条支持稳定拖动；拖动期间流式输出不会把视图强制拉回底部。
+- Python 与 Bash/Shell 工具调用会分离展示代码和其他参数，并提供语言标识、行号、高亮与复制操作。
+- `request_user_input` 使用应用自有的选项行，不依赖 Windows 原生黑色选择控件。
+- Skill 草稿按会话保存；生成后可通过“查看并保存”继续预览、编辑和保存。

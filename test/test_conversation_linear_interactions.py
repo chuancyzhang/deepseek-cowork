@@ -22,6 +22,9 @@ from main import (
     ModelSelectorPopover,
     SearchableSkillPickerButton,
     SessionSkillPickerPopover,
+    GuidanceTimelineEvent,
+    TimelineTextEvent,
+    ToolCallCard,
 )
 from ui.primitives import ProductActionRow, ProductPopover
 
@@ -345,6 +348,138 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertTrue(bubble.think_toggle_btn.isChecked())
         self.assertIn("2.5 秒", bubble.think_toggle_btn.text())
         bubble.deleteLater()
+
+    def test_task_timeline_keeps_guidance_visible_and_starts_new_thinking_event(self):
+        bubble = ChatBubble("Agent", "")
+        bubble.update_thinking("先检查环境")
+        first_thinking = bubble.current_thinking_event
+        checkpoint = bubble.add_guidance_checkpoint("guide-1", "优先检查测试", status="queued")
+        self.assertIsInstance(first_thinking, TimelineTextEvent)
+        self.assertIsNotNone(first_thinking.finished_at)
+        self.assertIsInstance(checkpoint, GuidanceTimelineEvent)
+        self.assertTrue(checkpoint.isVisibleTo(bubble) or not bubble.isVisible())
+        bubble.update_thinking("继续检查")
+        self.assertIsNot(first_thinking, bubble.current_thinking_event)
+        self.assertEqual(bubble.current_thinking_event.text(), "继续检查")
+        bubble.update_guidance_checkpoint("guide-1", "applied")
+        self.assertEqual(checkpoint.status, "applied")
+        bubble.deleteLater()
+
+    def test_task_timeline_freezes_streamed_content_before_guidance(self):
+        bubble = ChatBubble("Agent", "")
+        bubble.set_main_content("阶段性文字", final=True)
+        checkpoint = bubble.add_guidance_checkpoint("guide-2", "调整方向", status="waiting_tool")
+        fragments = [item for item in bubble.timeline_events if isinstance(item, TimelineTextEvent)]
+        self.assertEqual(len(fragments), 1)
+        self.assertEqual(fragments[0].kind, "content_fragment")
+        self.assertEqual(fragments[0].text(), "阶段性文字")
+        self.assertEqual(bubble.main_content_text, "")
+        self.assertEqual(checkpoint.status, "waiting_tool")
+        bubble.deleteLater()
+
+    def test_task_timeline_keeps_running_tool_before_guidance_checkpoint(self):
+        bubble = ChatBubble("Agent", "")
+        bubble.update_thinking("准备执行")
+        tool = ToolCallCard("run_command", {"command": "pytest"}, "tool-1")
+        bubble.add_tool_card(tool)
+        checkpoint = bubble.add_guidance_checkpoint("guide-3", "先跑单测", status="waiting_tool")
+        self.assertLess(bubble.timeline_events.index(tool), bubble.timeline_events.index(checkpoint))
+        tool.set_result("ok")
+        self.assertTrue(tool.is_finished)
+        self.assertEqual(checkpoint.status, "waiting_tool")
+        bubble.deleteLater()
+
+    def test_ui_timeline_metadata_validation_is_explicit(self):
+        events, warning = MainWindow._normalize_ui_timeline_events(
+            None,
+            [{"kind": "thinking", "sequence": 1, "started_at": 1.0, "text": "检查"}],
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(warning, "")
+        events, warning = MainWindow._normalize_ui_timeline_events(None, [{"kind": "unknown"}])
+        self.assertEqual(events, [])
+        self.assertTrue(warning)
+
+    def test_ui_timeline_coalesces_deltas_and_splits_at_guidance(self):
+        class TimelineStub:
+            _timeline_append_event = MainWindow._timeline_append_event
+            _timeline_find_event = MainWindow._timeline_find_event
+            _timeline_append_text_delta = MainWindow._timeline_append_text_delta
+
+        window = TimelineStub()
+        state = SimpleNamespace(active_turn_id=3, ui_timeline_events=[], ui_timeline_sequence=0)
+        first = window._timeline_append_text_delta(state, "thinking", "先检查")
+        second = window._timeline_append_text_delta(state, "thinking", "环境")
+        self.assertIs(first, second)
+        self.assertEqual(first["text"], "先检查环境")
+        window._timeline_append_event(
+            state,
+            "guidance",
+            status="queued",
+            message_id="guide-4",
+            text="优先测试",
+        )
+        continued = window._timeline_append_text_delta(state, "thinking", "继续")
+        self.assertIsNot(first, continued)
+        self.assertEqual([event["kind"] for event in state.ui_timeline_events], ["thinking", "guidance", "thinking"])
+
+    def test_persisted_timeline_rebuilds_send_time_order(self):
+        state = SimpleNamespace(
+            session_id="session-timeline",
+            live_activity=False,
+            last_agent_bubble=None,
+            tool_cards={},
+            ui_timeline_events=[
+                {"sequence": 1, "turn_id": "7", "kind": "thinking", "status": "completed", "started_at": 1.0, "finished_at": 2.0, "text": "先分析"},
+                {"sequence": 2, "turn_id": "7", "kind": "tool", "status": "completed", "started_at": 2.0, "finished_at": 3.0, "tool_call_id": "tool-7", "text": "运行测试"},
+                {"sequence": 3, "turn_id": "7", "kind": "guidance", "status": "applied", "started_at": 2.5, "finished_at": 3.1, "message_id": "guide-7", "text": "优先测试"},
+                {"sequence": 4, "turn_id": "7", "kind": "thinking", "status": "completed", "started_at": 3.1, "finished_at": 4.0, "text": "继续分析"},
+                {"sequence": 5, "turn_id": "7", "kind": "final_content", "status": "completed", "started_at": 4.0, "finished_at": 4.2, "text": "最终结果"},
+            ],
+        )
+
+        class RenderStub:
+            _render_persisted_timeline_items = MainWindow._render_persisted_timeline_items
+
+            def add_chat_bubble(self, *_args, **_kwargs):
+                self.bubble = ChatBubble("Agent", "")
+                return self.bubble
+
+            def add_tool_card(self, data, **_kwargs):
+                card = ToolCallCard(data["name"], data["args"], data["id"], meta=data.get("meta"))
+                state.tool_cards[data["id"]] = card
+                state.last_agent_bubble.add_tool_card(card)
+
+            def update_tool_card(self, data, **_kwargs):
+                state.tool_cards[data["id"]].set_result(data.get("result") or "", data.get("result_obj"))
+
+            def _assistant_source_message_id_from_messages(self, messages):
+                return str((messages or [{}])[-1].get("id") or "")
+
+            def _message_display_content(self, message):
+                return str((message or {}).get("content") or "")
+
+            def _message_user_attachments(self, _message):
+                return []
+
+        render_items = [
+            {
+                "type": "assistant",
+                "content": "阶段回复",
+                "messages": [{"id": "assistant-1"}],
+                "tool_calls": [{"id": "tool-7", "name": "run_command", "args": {"command": "tests"}, "result": "ok"}],
+            },
+            {"type": "guidance", "message": {"id": "guide-7", "content": "优先测试", "meta": {"same_turn_guidance": True, "turn_id": "7"}}},
+            {"type": "assistant", "content": "最终结果", "messages": [{"id": "assistant-2"}], "tool_calls": []},
+        ]
+        window = RenderStub()
+        self.assertTrue(window._render_persisted_timeline_items(render_items, state))
+        self.assertEqual(
+            [type(item) for item in window.bubble.timeline_events],
+            [TimelineTextEvent, ToolCallCard, GuidanceTimelineEvent, TimelineTextEvent],
+        )
+        self.assertEqual(window.bubble.main_content_text, "最终结果")
+        window.bubble.deleteLater()
 
     def test_short_user_message_uses_natural_width(self):
         bubble = ChatBubble("User", "你好")

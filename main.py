@@ -11490,6 +11490,153 @@ class FileChip(QFrame):
 
         self.setToolTip(self.path)
 
+class TimelineTextEvent(QFrame):
+    """Compact expandable text event used by the task activity timeline."""
+
+    def __init__(self, kind="thinking", text="", parent=None):
+        super().__init__(parent)
+        self.kind = "content_fragment" if kind == "content_fragment" else "thinking"
+        self.started_at = time.time()
+        self.finished_at = None
+        self._text = str(text or "")
+        self.setObjectName("TimelineTextEvent")
+        self.setStyleSheet("QFrame#TimelineTextEvent { background: transparent; border: none; }")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.summary_btn = QPushButton()
+        self.summary_btn.setCheckable(True)
+        self.summary_btn.setChecked(False)
+        self.summary_btn.setCursor(Qt.PointingHandCursor)
+        self.summary_btn.setStyleSheet(f"""
+            QPushButton {{
+                text-align: left; min-height: 26px; background: transparent; border: none;
+                border-radius: 6px; padding: 1px 6px; color: {DesignTokens.text_secondary};
+                font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary}; }}
+        """)
+        self.summary_btn.toggled.connect(self._toggle_details)
+        layout.addWidget(self.summary_btn)
+
+        self.detail_label = AutoResizingLabel()
+        self.detail_label.setVisible(False)
+        self.detail_label.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; font-size: 12px; line-height: 1.5; "
+            "background: transparent; border: none; padding-left: 8px;"
+        )
+        layout.addWidget(self.detail_label)
+        self._refresh()
+
+    def append_text(self, delta):
+        self._text += str(delta or "")
+        self.detail_label.setText(self._text)
+        self._refresh()
+
+    def set_text(self, text):
+        self._text = str(text or "")
+        self.detail_label.setText(self._text)
+        self._refresh()
+
+    def text(self):
+        return self._text
+
+    def finalize(self, finished_at=None):
+        self.finished_at = float(finished_at or time.time())
+        self._refresh()
+
+    def _toggle_details(self, checked):
+        self.detail_label.setVisible(bool(checked and self._text.strip()))
+        self._refresh()
+
+    def _refresh(self):
+        label = "回复片段" if self.kind == "content_fragment" else "思考"
+        end = self.finished_at or time.time()
+        duration = max(0.0, end - self.started_at)
+        state = "" if self.finished_at else "中"
+        arrow = "▴" if self.summary_btn.isChecked() else "▾"
+        self.summary_btn.setText(f"{label}{state} · {duration:.1f} 秒  {arrow}")
+        self.detail_label.setVisible(bool(self.summary_btn.isChecked() and self._text.strip()))
+
+
+class GuidanceTimelineEvent(QFrame):
+    """Always-visible user intent checkpoint inside an active task timeline."""
+
+    STATUS_COPY = {
+        "queued": "等待下一安全节点",
+        "waiting_tool": "完成当前步骤后应用",
+        "applied": "已应用",
+        "rejected": "未应用",
+    }
+
+    def __init__(self, message_id, text, status="queued", attachments=None, parent=None):
+        super().__init__(parent)
+        self.message_id = str(message_id or "")
+        self.status = status if status in self.STATUS_COPY else "queued"
+        self.setObjectName("GuidanceTimelineEvent")
+        self.setStyleSheet(f"""
+            QFrame#GuidanceTimelineEvent {{
+                background: {DesignTokens.primary_soft}; border: none; border-radius: 7px;
+                border-left: 2px solid {DesignTokens.primary};
+            }}
+        """)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 7, 20, 7)
+        layout.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        title = QLabel("补充引导")
+        title.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 12px; font-weight: 700;")
+        self.status_label = QLabel()
+        self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        head.addWidget(title)
+        head.addStretch()
+        head.addWidget(self.status_label)
+        layout.addLayout(head)
+
+        self.content_label = QLabel(str(text or "").strip())
+        self.content_label.setWordWrap(True)
+        self.content_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.content_label.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: 13px; line-height: 1.45; background: transparent;"
+        )
+        layout.addWidget(self.content_label)
+
+        attachment_items = list(attachments or [])
+        if attachment_items:
+            chip_row = QWidget()
+            chip_layout = QHBoxLayout(chip_row)
+            chip_layout.setContentsMargins(0, 2, 0, 0)
+            chip_layout.setSpacing(6)
+            for attachment in attachment_items:
+                path = attachment.get("path") if isinstance(attachment, dict) else str(attachment or "")
+                if path:
+                    chip_layout.addWidget(FileChip(path, removable=False))
+            chip_layout.addStretch()
+            layout.addWidget(chip_row)
+        self.set_status(self.status)
+
+    def set_status(self, status):
+        if status not in self.STATUS_COPY:
+            raise ValueError(f"unsupported guidance timeline status: {status}")
+        self.status = status
+        colors = {
+            "queued": DesignTokens.text_tertiary,
+            "waiting_tool": DesignTokens.status_tool,
+            "applied": DesignTokens.success_text,
+            "rejected": DesignTokens.error_text,
+        }
+        icons = {"queued": "○", "waiting_tool": "◷", "applied": "✓", "rejected": "!"}
+        self.status_label.setText(f"{icons[status]} {self.STATUS_COPY[status]}")
+        self.status_label.setStyleSheet(
+            f"color: {colors[status]}; font-size: 10px; font-weight: 600; background: transparent;"
+        )
+
+
 class ChatBubble(QFrame):
     editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
@@ -11643,6 +11790,12 @@ class ChatBubble(QFrame):
             main_layout.addWidget(content_wrapper)
             
         else: # Agent
+            self.timeline_started_at = time.time()
+            self.timeline_finished_at = None
+            self.timeline_events = []
+            self.timeline_guidance_widgets = {}
+            self.current_thinking_event = None
+            self.current_content_fragment_event = None
             main_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             
             # Avatar
@@ -11666,15 +11819,15 @@ class ChatBubble(QFrame):
             col_layout.setContentsMargins(0, 0, 0, 0)
             col_layout.setSpacing(6)
             
-            # 1. Thinking Section (DeepSeek Style - Grey Block)
+            # 1. Unified task activity timeline.
             self.thinking_widget = QWidget()
             think_layout = QVBoxLayout(self.thinking_widget)
             think_layout.setContentsMargins(0, 0, 0, 0)
             think_layout.setSpacing(0)
             
             # Toggle Header
-            self.think_toggle_btn = QPushButton(" 深度思考  ▾")
-            self.think_toggle_btn.setIcon(qta.icon('fa5s.lightbulb', color=DesignTokens.accent_tool))
+            self.think_toggle_btn = QPushButton(" 任务过程  ▾")
+            self.think_toggle_btn.setIcon(qta.icon('fa5s.stream', color=DesignTokens.primary))
             self.think_toggle_btn.setCursor(Qt.PointingHandCursor)
             self.think_toggle_btn.setCheckable(True)
             self.think_toggle_btn.setChecked(False)
@@ -11703,7 +11856,7 @@ class ChatBubble(QFrame):
             # Container for Thinking Stream
             self.think_container = QWidget()
             self.think_container.setObjectName("ThinkingContainer")
-            self.think_container.setVisible(False)
+            self.think_container.setVisible(True)
             self.think_container.setStyleSheet(f"""
                 QWidget#ThinkingContainer {{
                     background: transparent;
@@ -11714,7 +11867,7 @@ class ChatBubble(QFrame):
                 }}
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
-            self.think_container_layout.setContentsMargins(14, 6, 4, 8)
+            self.think_container_layout.setContentsMargins(14, 4, 4, 8)
             self.think_container_layout.setSpacing(8)
             self.think_duration = 0.0 # Store duration
             self.think_start_time = None
@@ -12044,61 +12197,21 @@ class ChatBubble(QFrame):
         current_total = self.think_duration + elapsed
         
         arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-        self.think_toggle_btn.setText(f" 深度思考中 · {current_total:.1f} 秒  {arrow}")
+        self.think_toggle_btn.setText(f" 任务进行中 · {current_total:.1f} 秒  {arrow}")
+        if self.current_thinking_event is not None:
+            self.current_thinking_event._refresh()
 
     def toggle_thinking(self, checked):
-        # Animation for Folding
-        if not hasattr(self, 'think_animation'):
-             self.think_animation = QPropertyAnimation(self.think_container, b"maximumHeight")
-             self.think_animation.setEasingCurve(QEasingCurve.OutCubic)
-             self.think_animation.setDuration(200)
-             self._think_animation_finished_slot = None
-
-        previous_slot = getattr(self, "_think_animation_finished_slot", None)
-        if previous_slot is not None:
-            try:
-                self.think_animation.finished.disconnect(previous_slot)
-            except (RuntimeError, TypeError):
-                pass
-            self._think_animation_finished_slot = None
-
-        # Calculate target height
-        # Since we can't easily get exact height if it's dynamic and hidden,
-        # we can set a large max height for open, and 0 for closed.
-        # Or better: use sizeHint if visible, or a large number.
-        
-        # When opening
-        if checked:
-            self.think_container.setVisible(True)
-            self.think_container.setMaximumHeight(0) # Start from 0
-            
-            # We need to force layout to calculate size
-            self.think_container.adjustSize() 
-            # This might be tricky with dynamic content. 
-            # Simple approach: Animate to a large value (e.g. 1000 or 5000), 
-            # then remove constraint or set to minimum required.
-            
-            # Better approach for smooth slide:
-            # 1. Get total height of content
-            total_height = self.think_container_layout.sizeHint().height()
-            # If sizeHint is small (hidden), try measure content
-            if total_height < 50: total_height = 800 # Fallback
-            
-            self.think_animation.setStartValue(0)
-            self.think_animation.setEndValue(total_height)
-            self._think_animation_finished_slot = lambda: self.think_container.setMaximumHeight(16777215)
-            self.think_animation.finished.connect(self._think_animation_finished_slot)
-            self.think_animation.start()
-            
-        else:
-            # Closing
-            current_h = self.think_container.height()
-            self.think_animation.setStartValue(current_h)
-            self.think_animation.setEndValue(0)
-            self._think_animation_finished_slot = lambda: self.think_container.setVisible(False)
-            self.think_animation.finished.connect(self._think_animation_finished_slot)
-            self.think_animation.start()
-            
+        # The timeline skeleton, tools and user checkpoints remain visible.
+        # This toggle only expands/collapses AI text details.
+        self.think_container.setVisible(True)
+        self.think_container.setMaximumHeight(16777215)
+        for index in range(self.think_container_layout.count()):
+            widget = self.think_container_layout.itemAt(index).widget()
+            if isinstance(widget, TimelineTextEvent):
+                widget.summary_btn.setChecked(bool(checked))
+            elif isinstance(widget, AutoResizingLabel):
+                widget.setVisible(bool(checked))
         text = re.sub(r"\s+[▴▾]\s*$", "", self.think_toggle_btn.text())
         self.think_toggle_btn.setText(f"{text}  {'▴' if checked else '▾'}")
 
@@ -12262,7 +12375,7 @@ class ChatBubble(QFrame):
                 self.think_timer.start()
                 
             arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-            self.think_toggle_btn.setText(f" 深度思考中 · {self.think_duration:.1f} 秒  {arrow}")
+            self.think_toggle_btn.setText(f" 任务进行中 · {self.think_duration:.1f} 秒  {arrow}")
             self.thinking_widget.setVisible(True)
         else:
             if self.think_timer.isActive():
@@ -12272,27 +12385,62 @@ class ChatBubble(QFrame):
                     self.think_start_time = None
 
     def get_active_think_widget(self, force_new=False):
-        if not force_new:
-            count = self.think_container_layout.count()
-            if count > 0:
-                item = self.think_container_layout.itemAt(count - 1)
-                widget = item.widget()
-                if isinstance(widget, AutoResizingLabel):
-                    return widget
+        if not force_new and self.current_thinking_event is not None:
+            return self.current_thinking_event
+        event = TimelineTextEvent("thinking")
+        self.think_container_layout.addWidget(event)
+        self.timeline_events.append(event)
+        self.current_thinking_event = event
+        event.show()
+        return event
 
-        new_widget = AutoResizingLabel()
-        self.think_container_layout.addWidget(new_widget)
-        new_widget.show()
-        return new_widget
+    def finalize_open_timeline_events(self):
+        if self.current_thinking_event is not None:
+            self.current_thinking_event.finalize()
+            self.current_thinking_event = None
+        if self.current_content_fragment_event is not None:
+            self.current_content_fragment_event.finalize()
+            self.current_content_fragment_event = None
+
+    def freeze_content_fragment(self):
+        text = str(getattr(self, "main_content_text", "") or "").strip()
+        if not text:
+            return None
+        event = TimelineTextEvent("content_fragment", text=text)
+        event.finalize()
+        self.think_container_layout.addWidget(event)
+        self.timeline_events.append(event)
+        self.current_content_fragment_event = None
+        self.set_main_content("", final=False)
+        self.copy_result_btn.setVisible(False)
+        self.office_draft_btn.setVisible(False)
+        self.skill_capture_btn.setVisible(False)
+        return event
+
+    def add_guidance_checkpoint(self, message_id, text, status="queued", attachments=None):
+        self.finalize_open_timeline_events()
+        self.freeze_content_fragment()
+        checkpoint = GuidanceTimelineEvent(message_id, text, status=status, attachments=attachments)
+        self.think_container_layout.addWidget(checkpoint)
+        self.timeline_events.append(checkpoint)
+        self.timeline_guidance_widgets[str(message_id or "")] = checkpoint
+        self.thinking_widget.setVisible(True)
+        self.think_container.setVisible(True)
+        return checkpoint
+
+    def update_guidance_checkpoint(self, message_id, status):
+        checkpoint = self.timeline_guidance_widgets.get(str(message_id or ""))
+        if checkpoint is None:
+            return False
+        checkpoint.set_status(status)
+        return True
 
     def update_thinking(self, text=None, duration=None, is_final=False):
         if text is not None or duration is not None:
             self.thinking_widget.setVisible(True)
         if text is not None:
-            # Simple streaming append for now
             widget = self.get_active_think_widget()
-            current = widget.text()
-            widget.setText(current + text)
+            widget.append_text(text)
         
         if duration:
             self.think_duration = duration
@@ -12302,8 +12450,11 @@ class ChatBubble(QFrame):
                 self.think_timer.stop()
                 self.think_start_time = None
                 
+            self.finalize_open_timeline_events()
+            self.timeline_finished_at = time.time()
+            total = max(self.think_duration, self.timeline_finished_at - self.timeline_started_at)
             arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-            self.think_toggle_btn.setText(f" 深度思考 · {self.think_duration:.1f} 秒  {arrow}")
+            self.think_toggle_btn.setText(f" 任务过程 · {total:.1f} 秒  {arrow}")
 
     def stop_thinking_timers(self):
         if self.think_timer.isActive():
@@ -12314,8 +12465,10 @@ class ChatBubble(QFrame):
         timer = getattr(self, "_thinking_replay_timer", None)
         if timer and timer.isActive():
             timer.stop()
+        self.finalize_open_timeline_events()
+        self.timeline_finished_at = time.time()
         arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
-        self.think_toggle_btn.setText(f" 深度思考已停止 · {self.think_duration:.1f} 秒  {arrow}")
+        self.think_toggle_btn.setText(f" 任务过程已停止 · {self.think_duration:.1f} 秒  {arrow}")
 
     def _set_main_content_view_mode(self, mode):
         target_mode = "plain" if mode == "plain" else "rich"
@@ -12363,7 +12516,7 @@ class ChatBubble(QFrame):
         self._pending_main_content_text = text
         self._pending_main_content_parts = content_parts
         self._pending_main_content_final = bool(final)
-        self.copy_result_btn.setVisible(bool(text.strip()))
+        self.copy_result_btn.setVisible(bool(final and text.strip()))
         if getattr(self, "office_draft_btn", None) is not None:
             self.office_draft_btn.setVisible(bool(final and text.strip()))
         if getattr(self, "skill_capture_btn", None) is not None:
@@ -12523,16 +12676,14 @@ class ChatBubble(QFrame):
         QTimer.singleShot(1200, lambda: self.copy_result_btn.setText("复制结果"))
         
     def add_tool_card(self, card_widget, session_id=None):
-        # Tools inside thinking container? Or after?
-        # DeepSeek puts tool calls usually in the thought process or just after.
-        # Let's put them in the thought container if visible, else append to content column.
-        
-        # We'll put it in the Thinking Container for a cleaner log look
+        if self.current_thinking_event is not None:
+            self.current_thinking_event.finalize()
+            self.current_thinking_event = None
         self.think_container_layout.addWidget(card_widget)
+        self.timeline_events.append(card_widget)
         self._start_new_think_segment = True
-        
-        # Ensure thinking is accessible
         self.thinking_widget.setVisible(True)
+        self.think_container.setVisible(True)
 
 
 class OfficeDraftTaskCard(QFrame):
@@ -13788,6 +13939,9 @@ class SessionState:
         self.turn_steerable = False
         self.pending_guidance_messages = []
         self.guidance_workers = []
+        self.ui_timeline_events = []
+        self.ui_timeline_sequence = 0
+        self.ui_timeline_warning = ""
         self.persisted_agents = []
         self.sub_agent_events = []
         self.sub_agent_history_loaded = False
@@ -18632,6 +18786,16 @@ class MainWindow(QMainWindow):
                     state,
                     event.get("usage") if isinstance(event.get("usage"), dict) else {},
                 )
+            elif event_type == "guidance":
+                message_id = str(event.get("message_id") or "")
+                if message_id:
+                    self._timeline_set_guidance_status(state, message_id, "applied")
+                    self.save_chat_history(session_id=state.session_id)
+                    log_sub_agent_runtime(
+                        "ui_guidance_timeline_applied",
+                        session_id=state.session_id,
+                        message_id=message_id,
+                    )
             state.observability_events.append(event)
             if len(state.observability_events) > 500:
                 state.observability_events = state.observability_events[-500:]
@@ -19745,6 +19909,9 @@ class MainWindow(QMainWindow):
         state.pending_thinking_delta = ""
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
+        state.ui_timeline_events = []
+        state.ui_timeline_sequence = 0
+        state.ui_timeline_warning = ""
         state.llm_worker = None
         state.live_activity = False
         state.auto_scroll_enabled = True
@@ -19975,6 +20142,16 @@ class MainWindow(QMainWindow):
             or "draft"
         )
         state.persisted_conversation_meta = copy.deepcopy(conversation_meta or {})
+        timeline_events, timeline_warning = self._normalize_ui_timeline_events(
+            conversation_meta.get("ui_timeline_v1")
+        )
+        state.ui_timeline_events = timeline_events
+        state.ui_timeline_sequence = max(
+            [int(item.get("sequence") or 0) for item in timeline_events] or [0]
+        )
+        state.ui_timeline_warning = timeline_warning
+        if timeline_warning:
+            self.append_log(f"任务过程恢复失败({session_id}): {timeline_warning}")
         state.token_usage_summary = normalize_token_usage_summary(
             conversation_meta.get("token_usage_summary")
         )
@@ -20022,6 +20199,13 @@ class MainWindow(QMainWindow):
             )
         self._rebuild_session_render_spans(state)
         self._render_initial_session_history(state)
+        if state.ui_timeline_warning:
+            self.add_system_toast(
+                "部分任务过程无法按原顺序恢复，已按会话消息显示。",
+                "warning",
+                session_id=state.session_id,
+                auto_close_ms=6000,
+            )
 
         self._finish_session_history_load(state)
         self.update_session_tab_title(session_id)
@@ -21987,9 +22171,144 @@ class MainWindow(QMainWindow):
         finally:
             state.auto_loading_history = False
 
+    def _render_persisted_timeline_items(self, render_items, state, insert_index=None, animate=True):
+        """Render a guided turn from its UI ledger so send-time ordering survives reload."""
+        if not state or getattr(state, "live_activity", False):
+            return False
+        guidance_messages = {}
+        turn_ids = set()
+        assistant_items = []
+        for item in render_items or []:
+            item_type = item.get("type")
+            if item_type == "guidance":
+                message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                message_id = str(message.get("id") or "")
+                if message_id:
+                    guidance_messages[message_id] = message
+                meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+                if str(meta.get("turn_id") or ""):
+                    turn_ids.add(str(meta.get("turn_id")))
+            elif item_type == "assistant":
+                assistant_items.append(item)
+        if not guidance_messages or not turn_ids:
+            return False
+        events = [
+            event for event in list(getattr(state, "ui_timeline_events", []) or [])
+            if isinstance(event, dict) and str(event.get("turn_id") or "") in turn_ids
+        ]
+        if not events or not any(
+            event.get("kind") == "guidance" and str(event.get("message_id") or "") in guidance_messages
+            for event in events
+        ):
+            return False
+        events.sort(key=lambda event: int(event.get("sequence") or 0))
+
+        tool_by_id = {}
+        final_content = ""
+        final_content_parts = None
+        source_message_id = ""
+        for item in assistant_items:
+            if (item.get("content") or "").strip():
+                final_content = item.get("content") or ""
+                final_content_parts = item.get("content_parts") if isinstance(item.get("content_parts"), list) else None
+            source_id = self._assistant_source_message_id_from_messages(item.get("messages") or [])
+            if source_id:
+                source_message_id = source_id
+            for tool in item.get("tool_calls") or []:
+                if isinstance(tool, dict) and str(tool.get("id") or ""):
+                    tool_by_id[str(tool.get("id"))] = tool
+
+        bubble = self.add_chat_bubble(
+            "Agent",
+            "",
+            thinking=None,
+            index=insert_index,
+            animate=animate,
+            source_message_id=source_message_id,
+            session_id=state.session_id,
+        )
+        if bubble is None:
+            return False
+        state.last_agent_bubble = bubble
+
+        for event in events:
+            kind = event.get("kind")
+            if kind in {"thinking", "content_fragment"}:
+                text_event = TimelineTextEvent(kind, text=event.get("text") or "")
+                text_event.started_at = float(event.get("started_at") or time.time())
+                finished_at = event.get("finished_at")
+                if finished_at is not None:
+                    text_event.finalize(float(finished_at))
+                bubble.think_container_layout.addWidget(text_event)
+                bubble.timeline_events.append(text_event)
+                continue
+            if kind == "guidance":
+                message_id = str(event.get("message_id") or "")
+                message = guidance_messages.get(message_id, {})
+                status = str(event.get("status") or "applied")
+                if status not in GuidanceTimelineEvent.STATUS_COPY:
+                    status = "applied"
+                bubble.add_guidance_checkpoint(
+                    message_id,
+                    event.get("text") or self._message_display_content(message),
+                    status=status,
+                    attachments=self._message_user_attachments(message),
+                )
+                continue
+            if kind == "tool":
+                tool_id = str(event.get("tool_call_id") or "")
+                tool = tool_by_id.get(tool_id)
+                if not tool:
+                    continue
+                self.add_tool_card(
+                    {
+                        "id": tool_id,
+                        "name": tool.get("name") or "unknown_tool",
+                        "args": tool.get("args") if tool.get("args") is not None else {},
+                        "meta": tool.get("meta") or {},
+                    },
+                    session_id=state.session_id,
+                    animate=animate,
+                )
+                if tool.get("result") or tool.get("result_obj") is not None or tool.get("meta"):
+                    self.update_tool_card(
+                        {
+                            "id": tool_id,
+                            "result": tool.get("result") or "",
+                            "result_obj": tool.get("result_obj"),
+                            "meta": tool.get("meta") or {},
+                        },
+                        session_id=state.session_id,
+                    )
+                continue
+            if kind == "final_content" and (event.get("text") or "").strip():
+                final_content = event.get("text") or final_content
+            elif kind == "error" and not final_content:
+                final_content = f"⚠️ {event.get('text') or '任务执行失败'}"
+
+        started_values = [float(event.get("started_at") or 0) for event in events if event.get("started_at")]
+        finished_values = [
+            float(event.get("finished_at") or event.get("started_at") or 0)
+            for event in events if event.get("started_at")
+        ]
+        if started_values and finished_values:
+            bubble.timeline_started_at = min(started_values)
+            bubble.think_duration = max(0.0, max(finished_values) - bubble.timeline_started_at)
+        bubble.update_thinking(duration=bubble.think_duration, is_final=True)
+        bubble.set_main_content(final_content, content_parts=final_content_parts, final=True)
+        return True
+
     def render_render_items(self, render_items, session_id, insert_index=None, animate=True):
         state = self.get_session(session_id)
         if not state:
+            return
+
+        if self._render_persisted_timeline_items(
+            render_items,
+            state,
+            insert_index=insert_index,
+            animate=animate,
+        ):
             return
 
         current_idx = insert_index
@@ -22017,15 +22336,25 @@ class MainWindow(QMainWindow):
 
             if item_type == "guidance":
                 message = item.get("message") if isinstance(item.get("message"), dict) else {}
-                self.add_turn_guidance_inline(
-                    message,
-                    display_content=self._message_display_content(message),
-                    attachments=self._message_user_attachments(message),
-                    index=current_idx,
-                    session_id=session_id,
-                )
-                if current_idx is not None:
-                    current_idx += 1
+                bubble = state.last_agent_bubble
+                if bubble is not None and hasattr(bubble, "add_guidance_checkpoint"):
+                    bubble.add_guidance_checkpoint(
+                        str(message.get("id") or ""),
+                        self._message_display_content(message),
+                        status="applied",
+                        attachments=self._message_user_attachments(message),
+                    )
+                    bubble._timeline_waiting_continuation = True
+                else:
+                    self.add_turn_guidance_inline(
+                        message,
+                        display_content=self._message_display_content(message),
+                        attachments=self._message_user_attachments(message),
+                        index=current_idx,
+                        session_id=session_id,
+                    )
+                    if current_idx is not None:
+                        current_idx += 1
                 continue
 
             if item_type != "assistant":
@@ -22035,17 +22364,25 @@ class MainWindow(QMainWindow):
             tool_calls = item.get("tool_calls") or []
             if not content and tool_calls:
                 content = "任务已处理完成，请查看上方思考过程。"
-            bubble = self.add_chat_bubble(
-                "Agent",
-                "",
-                thinking=None,
-                index=current_idx,
-                animate=animate,
-                source_message_id=self._assistant_source_message_id_from_messages(item.get("messages") or []),
-                session_id=session_id,
-            )
-            if current_idx is not None:
-                current_idx += 1
+            bubble = state.last_agent_bubble
+            reuse_timeline = bool(bubble is not None and getattr(bubble, "_timeline_waiting_continuation", False))
+            if not reuse_timeline:
+                bubble = self.add_chat_bubble(
+                    "Agent",
+                    "",
+                    thinking=None,
+                    index=current_idx,
+                    animate=animate,
+                    source_message_id=self._assistant_source_message_id_from_messages(item.get("messages") or []),
+                    session_id=session_id,
+                )
+                if current_idx is not None:
+                    current_idx += 1
+            else:
+                bubble._timeline_waiting_continuation = False
+                continuation_source_id = self._assistant_source_message_id_from_messages(item.get("messages") or [])
+                if continuation_source_id:
+                    bubble.set_source_message_id(continuation_source_id)
             state.last_agent_bubble = bubble
 
             reasoning = item.get("reasoning") or ""
@@ -22211,19 +22548,34 @@ class MainWindow(QMainWindow):
             
             if role == 'user':
                 if is_same_turn_guidance_message(msg):
-                    finalize_active_bubble()
-                    self.add_turn_guidance_inline(
-                        msg,
-                        display_content=self._message_display_content(msg),
-                        attachments=self._message_user_attachments(msg),
-                        index=current_idx if target_layout is None else None,
-                        session_id=session_id,
-                        target_layout=target_layout,
-                    )
-                    if current_idx is not None and target_layout is None:
-                        current_idx += 1
-                    if target_layout is None:
-                        inserted_count += 1
+                    if active_agent_bubble is not None:
+                        if pending_content_parts:
+                            active_agent_bubble.set_main_content(
+                                "\n\n".join(pending_content_parts),
+                                content_parts=pending_struct_parts,
+                                final=True,
+                            )
+                        active_agent_bubble.add_guidance_checkpoint(
+                            str(msg.get("id") or ""),
+                            self._message_display_content(msg),
+                            status="applied",
+                            attachments=self._message_user_attachments(msg),
+                        )
+                        pending_content_parts = []
+                        pending_struct_parts = []
+                    else:
+                        self.add_turn_guidance_inline(
+                            msg,
+                            display_content=self._message_display_content(msg),
+                            attachments=self._message_user_attachments(msg),
+                            index=current_idx if target_layout is None else None,
+                            session_id=session_id,
+                            target_layout=target_layout,
+                        )
+                        if current_idx is not None and target_layout is None:
+                            current_idx += 1
+                        if target_layout is None:
+                            inserted_count += 1
                     continue
                 finalize_active_bubble()
                 self.add_chat_bubble(
@@ -22431,6 +22783,116 @@ class MainWindow(QMainWindow):
             session_id=str(getattr(self, "current_session_id", "") or ""),
         )
 
+    def _timeline_append_event(self, state, kind, status="running", **payload):
+        if not state:
+            return None
+        allowed = {"thinking", "tool", "guidance", "content_fragment", "final_content", "error"}
+        if kind not in allowed:
+            raise ValueError(f"unsupported UI timeline event kind: {kind}")
+        state.ui_timeline_sequence = int(getattr(state, "ui_timeline_sequence", 0) or 0) + 1
+        event = {
+            "id": str(payload.pop("id", "") or uuid.uuid4().hex),
+            "turn_id": str(payload.pop("turn_id", "") or getattr(state, "active_turn_id", "")),
+            "sequence": state.ui_timeline_sequence,
+            "kind": kind,
+            "status": str(status or "running"),
+            "started_at": float(payload.pop("started_at", 0) or time.time()),
+            "finished_at": payload.pop("finished_at", None),
+            "message_id": str(payload.pop("message_id", "") or ""),
+            "tool_call_id": str(payload.pop("tool_call_id", "") or ""),
+            "text": str(payload.pop("text", "") or ""),
+        }
+        event.update(payload)
+        state.ui_timeline_events.append(event)
+        return event
+
+    def _timeline_find_event(self, state, *, kind=None, message_id=None, tool_call_id=None, open_only=False):
+        if not state:
+            return None
+        for event in reversed(list(getattr(state, "ui_timeline_events", []) or [])):
+            if not isinstance(event, dict):
+                continue
+            if kind and event.get("kind") != kind:
+                continue
+            if message_id is not None and str(event.get("message_id") or "") != str(message_id or ""):
+                continue
+            if tool_call_id is not None and str(event.get("tool_call_id") or "") != str(tool_call_id or ""):
+                continue
+            if open_only and event.get("finished_at") is not None:
+                continue
+            return event
+        return None
+
+    def _timeline_append_text_delta(self, state, kind, delta):
+        delta = str(delta or "")
+        if not delta:
+            return None
+        event = self._timeline_find_event(state, kind=kind, open_only=True)
+        last = (getattr(state, "ui_timeline_events", []) or [None])[-1]
+        if event is None or event is not last:
+            event = self._timeline_append_event(state, kind, status="running")
+        event["text"] = str(event.get("text") or "") + delta
+        return event
+
+    def _timeline_close_open_events(self, state, kinds=None, status="completed"):
+        allowed = set(kinds or {"thinking", "content_fragment"})
+        now = time.time()
+        for event in getattr(state, "ui_timeline_events", []) or []:
+            if not isinstance(event, dict) or event.get("kind") not in allowed:
+                continue
+            if event.get("finished_at") is None:
+                event["finished_at"] = now
+                event["status"] = status
+
+    def _timeline_has_running_tools(self, state):
+        return any(
+            isinstance(card, ToolCallCard) and not bool(getattr(card, "is_finished", False))
+            for card in (getattr(state, "tool_cards", {}) or {}).values()
+        )
+
+    def _timeline_set_guidance_status(self, state, message_id, status):
+        event = self._timeline_find_event(state, kind="guidance", message_id=message_id)
+        if event is None:
+            return False
+        event["status"] = status
+        if status in {"applied", "rejected"}:
+            event["finished_at"] = time.time()
+        bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        if bubble is not None and hasattr(bubble, "update_guidance_checkpoint"):
+            bubble.update_guidance_checkpoint(message_id, status)
+        return True
+
+    def _normalize_ui_timeline_events(self, raw_events):
+        if raw_events in (None, []):
+            return [], ""
+        if not isinstance(raw_events, list):
+            return [], "任务过程数据不是列表。"
+        normalized = []
+        allowed = {"thinking", "tool", "guidance", "content_fragment", "final_content", "error"}
+        for raw in raw_events:
+            if not isinstance(raw, dict) or raw.get("kind") not in allowed:
+                return [], "任务过程包含无法识别的事件。"
+            try:
+                sequence = int(raw.get("sequence"))
+                started_at = float(raw.get("started_at"))
+            except (TypeError, ValueError):
+                return [], "任务过程包含无效的顺序或时间。"
+            event = {
+                "id": str(raw.get("id") or uuid.uuid4().hex),
+                "turn_id": str(raw.get("turn_id") or ""),
+                "sequence": sequence,
+                "kind": raw.get("kind"),
+                "status": str(raw.get("status") or "completed"),
+                "started_at": started_at,
+                "finished_at": raw.get("finished_at"),
+                "message_id": str(raw.get("message_id") or ""),
+                "tool_call_id": str(raw.get("tool_call_id") or ""),
+                "text": str(raw.get("text") or ""),
+            }
+            normalized.append(event)
+        normalized.sort(key=lambda item: item["sequence"])
+        return normalized, ""
+
     def _session_base_meta(self, state):
         cached_meta = {}
         if state:
@@ -22468,6 +22930,11 @@ class MainWindow(QMainWindow):
             meta.pop("last_token_usage", None)
         meta.update(self._session_clarify_meta(state))
         meta.update(self._session_selected_skills_meta(state))
+        timeline_events = copy.deepcopy(getattr(state, "ui_timeline_events", []) or [])
+        if timeline_events:
+            meta["ui_timeline_v1"] = timeline_events
+        else:
+            meta.pop("ui_timeline_v1", None)
         return meta
 
     def _build_chat_save_request(self, state):
@@ -25276,6 +25743,15 @@ class MainWindow(QMainWindow):
         state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
+        self._reject_unapplied_guidance(state, restore_input=True)
+        self._timeline_close_open_events(state, status="interrupted")
+        self._timeline_append_event(
+            state,
+            "error",
+            status="interrupted",
+            text="任务已由用户停止",
+            finished_at=time.time(),
+        )
         self._persist_pending_guidance(state)
         partial_content = (state.current_content_buffer or "").strip()
         partial_thinking = (state.current_thinking_buffer or "").strip()
@@ -25662,6 +26138,98 @@ class MainWindow(QMainWindow):
             self.input_field.setFocus()
             self.add_system_toast("当前任务已结束，引导内容已恢复到输入框。", "warning", session_id=state.session_id)
 
+    def _reject_unapplied_guidance(self, state, restore_input=True):
+        if not state:
+            return []
+        rejected_message_ids = set()
+        for event in list(getattr(state, "ui_timeline_events", []) or []):
+            if not isinstance(event, dict) or event.get("kind") != "guidance":
+                continue
+            if event.get("status") not in {"queued", "waiting_tool"}:
+                continue
+            message_id = str(event.get("message_id") or "")
+            self._timeline_set_guidance_status(state, message_id, "rejected")
+            rejected_message_ids.add(message_id)
+        rejected_messages = [
+            message for message in list(getattr(state, "pending_guidance_messages", []) or [])
+            if str((message or {}).get("id") or "") in rejected_message_ids
+        ]
+        state.pending_guidance_messages = [
+            message for message in list(getattr(state, "pending_guidance_messages", []) or [])
+            if str((message or {}).get("id") or "") not in rejected_message_ids
+        ]
+        if restore_input and rejected_messages:
+            restored_text = "\n\n".join(
+                self._message_display_content(message) for message in rejected_messages
+                if self._message_display_content(message).strip()
+            )
+            restored_paths = []
+            for rejected_message in rejected_messages:
+                restored_paths.extend(
+                    item.get("path") for item in self._message_user_attachments(rejected_message)
+                    if isinstance(item, dict) and item.get("path")
+                )
+            self._restore_rejected_guidance(state, restored_text, restored_paths)
+        if rejected_message_ids:
+            log_sub_agent_runtime(
+                "ui_guidance_timeline_rejected",
+                session_id=state.session_id,
+                message_count=len(rejected_message_ids),
+                restored=bool(restore_input and rejected_messages),
+            )
+        return rejected_messages
+
+    def _render_turn_guidance_checkpoint(self, state, message, display_content, attachments):
+        if not state or not isinstance(message, dict):
+            return None
+        message_id = str(message.get("id") or "")
+        existing = self._timeline_find_event(state, kind="guidance", message_id=message_id)
+        if existing is not None:
+            return existing
+        self.flush_session_thinking(state.session_id)
+        self.flush_session_content(state.session_id, final=False)
+        self._timeline_close_open_events(state, kinds={"thinking", "content_fragment"})
+        waiting_status = "waiting_tool" if self._timeline_has_running_tools(state) else "queued"
+        event = self._timeline_append_event(
+            state,
+            "guidance",
+            status=waiting_status,
+            message_id=message_id,
+            text=str(display_content or self._message_display_content(message) or "").strip(),
+        )
+        log_sub_agent_runtime(
+            "ui_guidance_timeline_queued",
+            session_id=state.session_id,
+            message_id=message_id,
+            status=waiting_status,
+            running_tool=waiting_status == "waiting_tool",
+        )
+        bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        if bubble is not None and hasattr(bubble, "add_guidance_checkpoint"):
+            bubble.add_guidance_checkpoint(
+                message_id,
+                event.get("text") or "",
+                status=waiting_status,
+                attachments=attachments or [],
+            )
+        elif state.session_id == self.current_session_id:
+            self.add_turn_guidance_inline(
+                message,
+                display_content=event.get("text") or "",
+                attachments=attachments or [],
+                force_scroll=True,
+                session_id=state.session_id,
+            )
+        # Content buffers are presentation-only; generated_messages remain canonical.
+        state.current_content_buffer = ""
+        state.last_flushed_content_buffer = ""
+        if state.session_id == self.current_session_id:
+            self.current_content_buffer = ""
+            self.last_flushed_content_buffer = ""
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
+        self.save_chat_history(session_id=state.session_id)
+        return event
+
     def _accept_turn_guidance(self, state, message, display_content, attachments):
         if not state:
             return
@@ -25672,14 +26240,13 @@ class MainWindow(QMainWindow):
         )
         if not already_persisted:
             state.pending_guidance_messages.append(copy.deepcopy(message))
+        self._render_turn_guidance_checkpoint(
+            state,
+            message,
+            display_content or "",
+            attachments or [],
+        )
         if state.session_id == self.current_session_id:
-            self.add_turn_guidance_inline(
-                message,
-                display_content=display_content or "",
-                attachments=attachments or [],
-                force_scroll=True,
-                session_id=state.session_id,
-            )
             self.add_system_toast("已加入当前任务", "info", session_id=state.session_id, auto_close_ms=2200)
 
     def _handle_daemon_guidance_result(
@@ -25700,7 +26267,11 @@ class MainWindow(QMainWindow):
         if accepted:
             self._accept_turn_guidance(state, message, display_content, attachments)
         else:
+            if state:
+                self._timeline_set_guidance_status(state, message.get("id"), "rejected")
             self._restore_rejected_guidance(state, raw_user_text, prompt_files)
+            if state:
+                self.save_chat_history(session_id=state.session_id)
 
     def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
@@ -25747,6 +26318,9 @@ class MainWindow(QMainWindow):
             if clear_current_input and state.session_id == self.current_session_id:
                 self.input_field.clear()
                 self._clear_prompt_files(state.session_id)
+            self._render_turn_guidance_checkpoint(
+                state, message, payload.get("display_content") or "", payload.get("attachments") or []
+            )
             worker = DaemonSteerWorker(
                 self.daemon_client, state.session_id, expected_turn_id, message, parent=self
             )
@@ -26247,6 +26821,19 @@ class MainWindow(QMainWindow):
         
         state = self.get_session(session_id)
         if not state: return
+        if getattr(state, "live_activity", False):
+            self.flush_session_thinking(state.session_id)
+            self.flush_session_content(state.session_id, final=False)
+            if (state.current_content_buffer or "").strip():
+                active_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+                if active_bubble is not None and hasattr(active_bubble, "freeze_content_fragment"):
+                    active_bubble.freeze_content_fragment()
+                self._timeline_close_open_events(state, kinds={"content_fragment"})
+                state.current_content_buffer = ""
+                state.last_flushed_content_buffer = ""
+                if state.session_id == self.current_session_id:
+                    self.current_content_buffer = ""
+                    self.last_flushed_content_buffer = ""
         args_obj = data.get("args")
         if isinstance(args_obj, str):
             try:
@@ -26282,6 +26869,22 @@ class MainWindow(QMainWindow):
             for path in related_files:
                 state.changed_files.append({"path": path, "type": "related", "summary": summary})
         state.tool_cards[data['id']] = card
+        if getattr(state, "live_activity", False):
+            pending_guidance = self._timeline_find_event(state, kind="guidance", open_only=True)
+            if pending_guidance is not None and pending_guidance.get("status") == "queued":
+                pending_guidance["status"] = "waiting_tool"
+                bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+                if bubble is not None and hasattr(bubble, "update_guidance_checkpoint"):
+                    bubble.update_guidance_checkpoint(pending_guidance.get("message_id"), "waiting_tool")
+            self._timeline_close_open_events(state, kinds={"thinking"})
+            self._timeline_append_event(
+                state,
+                "tool",
+                status="running",
+                tool_call_id=data["id"],
+                text=title or str(data.get("name") or "工具"),
+                tool_name=str(data.get("name") or ""),
+            )
         has_pending_result = data['id'] in state.pending_tool_results
         pending_result = state.pending_tool_results.pop(data['id'], None)
         
@@ -26339,6 +26942,10 @@ class MainWindow(QMainWindow):
 
         card = state.tool_cards[tool_id]
         card.set_result(result, result_obj=data.get("result_obj"))
+        timeline_event = self._timeline_find_event(state, kind="tool", tool_call_id=tool_id)
+        if timeline_event is not None:
+            timeline_event["status"] = "completed"
+            timeline_event["finished_at"] = time.time()
         if meta:
             card.meta.update(meta)
         result_obj = data.get("result_obj")
@@ -27392,6 +27999,7 @@ class MainWindow(QMainWindow):
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
         state.current_content_buffer += text
+        self._timeline_append_text_delta(state, "content_fragment", text)
         if state.content_flush_timer and not state.content_flush_timer.isActive():
             state.content_flush_timer.start()
         if state.session_id == self.current_session_id:
@@ -27411,6 +28019,7 @@ class MainWindow(QMainWindow):
             else:
                 self.set_session_phase("Analyzing", state.session_id)
         state.current_thinking_buffer += delta
+        self._timeline_append_text_delta(state, "thinking", delta)
         state.pending_thinking_delta += delta
         if state.thinking_flush_timer and not state.thinking_flush_timer.isActive():
             state.thinking_flush_timer.start()
@@ -27605,6 +28214,9 @@ class MainWindow(QMainWindow):
             self.temp_thinking_bubble = state.temp_thinking_bubble
 
         if "error" in result:
+            self._reject_unapplied_guidance(state, restore_input=True)
+            self._timeline_close_open_events(state, status="failed")
+            self._timeline_append_event(state, "error", status="failed", text=str(result.get("error") or "未知错误"), finished_at=time.time())
             self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
             self.add_system_toast(f"任务执行失败：{result['error']}", "error", session_id=state.session_id)
@@ -27626,6 +28238,38 @@ class MainWindow(QMainWindow):
         content_parts = result.get("content_parts") if isinstance(result.get("content_parts"), list) else []
         role = result.get("role", "assistant")
         duration = result.get("duration", None)
+        self._timeline_close_open_events(state, kinds={"thinking"})
+        turn_key = str(getattr(state, "active_turn_id", ""))
+        has_timeline_thinking = any(
+            isinstance(event, dict)
+            and event.get("kind") == "thinking"
+            and str(event.get("turn_id") or "") == turn_key
+            for event in list(getattr(state, "ui_timeline_events", []) or [])
+        )
+        if (reasoning or "").strip() and not has_timeline_thinking:
+            finished_at = time.time()
+            started_at = finished_at - max(0.0, float(duration or 0))
+            self._timeline_append_event(
+                state,
+                "thinking",
+                status="completed",
+                text=reasoning,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        open_content_event = self._timeline_find_event(state, kind="content_fragment", open_only=True)
+        if open_content_event is not None:
+            open_content_event["kind"] = "final_content"
+            open_content_event["status"] = "completed"
+            open_content_event["finished_at"] = time.time()
+        elif (content or "").strip():
+            self._timeline_append_event(
+                state,
+                "final_content",
+                status="completed",
+                text=content,
+                finished_at=time.time(),
+            )
         generated_messages_raw = result.get("generated_messages", [])
         generated_messages = self._merge_generated_messages(
             state.messages,
@@ -27663,11 +28307,16 @@ class MainWindow(QMainWindow):
             content = "任务已处理完成，请查看上方思考过程。"
 
         has_thinking_text = False
-        if bubble.think_container_layout.count() > 0:
-            item = bubble.think_container_layout.itemAt(bubble.think_container_layout.count() - 1)
-            widget = item.widget()
+        for timeline_index in range(bubble.think_container_layout.count() - 1, -1, -1):
+            widget = bubble.think_container_layout.itemAt(timeline_index).widget()
+            if isinstance(widget, TimelineTextEvent) and widget.kind == "thinking":
+                has_thinking_text = bool(widget.text().strip())
+                if has_thinking_text:
+                    break
             if isinstance(widget, AutoResizingLabel):
                 has_thinking_text = bool(widget.text().strip())
+                if has_thinking_text:
+                    break
 
         should_replay_thinking = (reasoning or "").strip() and not has_thinking_text
         if should_replay_thinking and result.get("_from_daemon"):

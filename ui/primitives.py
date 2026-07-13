@@ -210,10 +210,30 @@ class ProductPopover(QFrame):
 
     def eventFilter(self, obj, event):
         if self.isVisible() and event.type() == QEvent.MouseButtonPress:
-            widget = obj if isinstance(obj, QWidget) else None
-            inside_popover = widget is self or bool(widget and self.isAncestorOf(widget))
             anchor = self._anchor
-            inside_anchor = widget is anchor or bool(widget and anchor and anchor.isAncestorOf(widget))
+            global_position = None
+            position_getter = getattr(event, "globalPosition", None)
+            if callable(position_getter):
+                try:
+                    global_position = position_getter().toPoint()
+                except (AttributeError, RuntimeError, TypeError):
+                    global_position = None
+
+            if global_position is not None:
+                try:
+                    inside_popover = self.rect().contains(self.mapFromGlobal(global_position))
+                    inside_anchor = bool(
+                        anchor
+                        and anchor.isVisible()
+                        and anchor.rect().contains(anchor.mapFromGlobal(global_position))
+                    )
+                except RuntimeError:
+                    inside_popover = False
+                    inside_anchor = False
+            else:
+                widget = obj if isinstance(obj, QWidget) else None
+                inside_popover = widget is self or bool(widget and self.isAncestorOf(widget))
+                inside_anchor = widget is anchor or bool(widget and anchor and anchor.isAncestorOf(widget))
             if not inside_popover and not inside_anchor:
                 self.close()
         return super().eventFilter(obj, event)

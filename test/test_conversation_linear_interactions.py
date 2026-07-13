@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -20,7 +21,7 @@ from main import (
     SearchableSkillPickerButton,
     SessionSkillPickerPopover,
 )
-from ui.primitives import ProductPopover
+from ui.primitives import ProductActionRow, ProductPopover
 
 
 class ConversationLinearInteractionTests(unittest.TestCase):
@@ -65,11 +66,77 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertTrue(any(button and button.text() == "高" and button.isChecked() for button in effort_buttons))
         picker.deleteLater()
 
+    def test_model_picker_viewport_click_emits_selected_model(self):
+        host = QWidget()
+        host.resize(640, 480)
+        anchor = QPushButton("模型", host)
+        anchor.setGeometry(300, 420, 80, 32)
+        profiles = [
+            {"id": "model-a", "display_name": "A", "model_name": "a"},
+            {"id": "model-b", "display_name": "B", "model_name": "b"},
+        ]
+        picker = ModelSelectorPopover(profiles, "model-a", host)
+        selected = []
+        picker.modelSelected.connect(selected.append)
+        host.show()
+        self.app.processEvents()
+        self.assertTrue(picker.show_for(anchor, prefer_above=True))
+
+        item = picker.model_list.item(1)
+        QTest.mouseClick(
+            picker.model_list.viewport(),
+            Qt.LeftButton,
+            pos=picker.model_list.visualItemRect(item).center(),
+        )
+        self.app.processEvents()
+
+        self.assertEqual(selected, ["model-b"])
+        self.assertEqual(picker.selected_id, "model-b")
+        host.deleteLater()
+
     def test_composer_add_popover_has_no_duplicate_agent_entry(self):
         source = inspect.getsource(ComposerActionPopover.__init__)
         for title in ("添加文件", "指定能力", "沉淀为 Skill"):
             self.assertIn(title, source)
         self.assertNotIn("添加智能体", source)
+
+    def test_composer_add_popover_clicks_enabled_action_and_keeps_disabled_action_inert(self):
+        host = QWidget()
+        host.resize(640, 480)
+        anchor = QPushButton("+", host)
+        anchor.setGeometry(300, 420, 32, 32)
+        hits = []
+        state = SimpleNamespace(selected_skill_names=[], messages=[])
+        window = SimpleNamespace(
+            pending_conversation_skill_result=None,
+            skill_manager_ready=True,
+            skill_load_error="",
+            conversation_skill_worker=None,
+            get_current_session=lambda: state,
+            _session_is_busy=lambda _state: False,
+            select_files_for_prompt=lambda: hits.append("file"),
+            open_session_skill_picker=lambda: hits.append("skill"),
+            start_conversation_skill_flow=lambda: hits.append("capture"),
+        )
+        popover = ComposerActionPopover(window, host)
+        rows = popover.findChildren(ProductActionRow)
+        host.show()
+        self.app.processEvents()
+        self.assertTrue(popover.show_for(anchor, prefer_above=True))
+
+        QTest.mouseClick(rows[0].title_label, Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(hits, ["file"])
+        self.assertTrue(popover.isHidden())
+
+        second_popover = ComposerActionPopover(window, host)
+        second_rows = second_popover.findChildren(ProductActionRow)
+        self.assertFalse(second_rows[-1].isEnabled())
+        second_popover.show_for(anchor, prefer_above=True)
+        QTest.mouseClick(second_rows[-1].title_label, Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(hits, ["file"])
+        host.deleteLater()
 
     def test_inline_choice_request_resolves_without_dialog(self):
         card = InlineInteractionCard(
@@ -157,6 +224,86 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(popover.isHidden())
         host.deleteLater()
+
+    def test_product_popover_keeps_native_window_target_click_inside(self):
+        host = QWidget()
+        host.resize(640, 480)
+        anchor = QPushButton("+", host)
+        anchor.setGeometry(300, 420, 32, 32)
+        popover = ProductPopover(host, width=260)
+        layout = QVBoxLayout(popover)
+        layout.addWidget(QLabel("单一操作列表"))
+        host.show()
+        self.app.processEvents()
+        self.assertTrue(popover.show_for(anchor, prefer_above=True))
+
+        global_position = popover.mapToGlobal(popover.rect().center())
+        event = QMouseEvent(
+            QEvent.MouseButtonPress,
+            QPointF(popover.mapFromGlobal(global_position)),
+            QPointF(global_position),
+            Qt.LeftButton,
+            Qt.LeftButton,
+            Qt.NoModifier,
+        )
+        popover.eventFilter(host.windowHandle(), event)
+
+        self.assertTrue(popover.isVisible())
+        host.deleteLater()
+
+    def test_product_action_row_child_label_click_triggers_action(self):
+        row = ProductActionRow("添加文件", "图片、文档或其他工作资料")
+        hits = []
+        row.clicked.connect(lambda: hits.append("file"))
+        row.show()
+        self.app.processEvents()
+
+        QTest.mouseClick(row.title_label, Qt.LeftButton)
+        self.app.processEvents()
+
+        self.assertEqual(hits, ["file"])
+        row.deleteLater()
+
+    def test_model_selection_updates_session_meta_and_refreshes_controls(self):
+        state = SimpleNamespace(selected_model_id="model-a", persisted_conversation_meta={})
+
+        class WindowStub:
+            _set_session_model_id = MainWindow._set_session_model_id
+
+            def __init__(self):
+                self.saved_session_ids = []
+                self.model_refreshes = 0
+                self.badge_refreshes = 0
+
+            def get_current_session(self):
+                return state
+
+            def _model_profile_for_state(self, _state=None, model_id=None):
+                if model_id == "model-b":
+                    return {"id": "model-b", "display_name": "B"}
+                return {}
+
+            def save_chat_history(self, session_id=None):
+                self.saved_session_ids.append(session_id)
+
+            def refresh_model_selector(self):
+                self.model_refreshes += 1
+
+            def refresh_context_badges(self):
+                self.badge_refreshes += 1
+
+            def add_system_toast(self, *_args, **_kwargs):
+                raise AssertionError("successful selection must not show an error toast")
+
+        state.session_id = "session-1"
+        window = WindowStub()
+
+        self.assertTrue(MainWindow.on_model_selection_changed(window, "model-b"))
+        self.assertEqual(state.selected_model_id, "model-b")
+        self.assertEqual(state.persisted_conversation_meta["selected_model_id"], "model-b")
+        self.assertEqual(window.saved_session_ids, ["session-1"])
+        self.assertEqual(window.model_refreshes, 1)
+        self.assertEqual(window.badge_refreshes, 1)
 
     def test_thinking_stays_expanded_when_finalized(self):
         bubble = ChatBubble("Agent", "")

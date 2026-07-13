@@ -1,6 +1,6 @@
 # DeepSeek Cowork 技术设计
 
-当前应用版本：**4.9.9**
+当前应用版本：**5.0.0**
 
 ## 1. 设计目标
 
@@ -65,7 +65,7 @@ Cowork 采用交错式推理流程：
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量。需要生成 MCP server 的能力可声明 `mcp_server_presets`，由 `SkillManager` 使用已保存配置渲染 `stdio` 或 Streamable HTTP server，并通过配置管理器按 server ID upsert，避免重复生成。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
-- Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。指定能力以会话态 `selected_skill_names` 为唯一数据源。
+- Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。浮层通过鼠标全局坐标命中自身与锚点，不能依赖事件接收对象一定是 `QWidget`，以兼容 Windows 原生事件分发。指定能力以会话态 `selected_skill_names` 为唯一数据源。
 - Thinking 继续持久化原始 reasoning 和工具消息结构，只把折叠态压缩为过程行。展开态按同一工具调用 ID 串联 reasoning、工具摘要和右侧任务观测；历史恢复不重放流式动画，当前进程内记录用户主动展开状态。
 - 生成办公稿使用本次请求级 `workflow_mode = office_html_first` 和 `office_output_profile` 注入提示；从 HTML 继续生成 PPTX、DOCX、PDF 使用 `workflow_mode = office_file_conversion` 和 `office_conversion_target` 标记；两者都不新增 `RUN_MODE`，因此不改变工具权限。
 - PPT Agent 是 `office_html_first + office_output_profile = ppt` 上的一层产品工作流；`core/ppt_agent.py` 注册默认 PPT Agent、Guizang PPT Skill、Frontend Slides、Huashu Design 等 html-ppt 策略，并根据显式选择、偏好、模板和关键词自动选择策略。后三者作为真实 `ai_skills` 包内置，PPT Agent 提交时会把选中的策略映射为临时 `selected_skill_names`，让上游 `SKILL.md`、引用和资源说明进入本轮系统上下文与任务观测页，但不会写回用户会话的手动技能选择。`core/agent.py` 通过 `ppt_agent_mode`、`ppt_agent_strategy`、`ppt_agent_selected_strategy`、`ppt_agent_preference` 和 `ppt_agent_template_file` 注入 PPT Agent 运行提示，但仍要求最终输出 HTML deliverable。

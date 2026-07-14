@@ -8,6 +8,8 @@ DeepSeek Cowork 是一个 Windows 桌面 Agent 工作台，把对话、项目工
 
 当前应用版本：**5.0.0**
 
+5.0.0 发布说明见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。这是当前文档、界面和运行时行为的统一基线。
+
 ## 它能做什么
 
 - 在桌面端运行可读文件、可调工具、可执行多步骤任务的本地 Agent。
@@ -60,7 +62,7 @@ Cowork 只把 `tool` 当作直接执行面：
 
 ### Windows 可执行文件
 
-1. 从 [Releases](../../releases) 下载最新版。
+1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载最新版。
 2. 解压。
 3. 运行 `deepseek-cowork.exe`。
 
@@ -96,6 +98,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 7. 用右侧抽屉浏览文件、预览交付物、转换 HTML 工作稿并查看工具执行过程。
 8. 当某段流程有复用价值时，在 **设置 → 个性与记忆** 维护长期信息，或从 `+` Popover、AI 回复末尾选择 **沉淀为 Skill**；两步向导会选择保存方式和会话片段，随后在后台生成草稿。完成后由持久任务行提示“Skill 草稿待确认”，用户主动查看并保存，不会被自动弹窗打断。
 
+## 交互细节
+
+- 聊天消息、输入框和技术详情使用统一的高对比度文字选区，以及一致的复制、粘贴、剪切和全选菜单。
+- 聊天记录滚动条支持稳定拖动；拖动期间流式输出不会把视图强制拉回底部。
+- Python 与 Bash/Shell 工具调用会分离展示代码和其他参数，并提供语言标识、行号、高亮与复制操作。
+- `request_user_input` 使用应用自有的选项行，不依赖 Windows 原生黑色选择控件。
+- Skill 草稿按会话保存；生成后可通过“查看并保存”继续预览、编辑和保存。
+
 ## 架构入口
 
 - `main.py`：PySide6 桌面 UI
@@ -116,14 +126,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 - [PRODUCT_DOC.md](PRODUCT_DOC.md)：产品定位与用户流程
 - [USER_GUIDE.md](USER_GUIDE.md)：图文使用指南
 - [ROADMAP.md](ROADMAP.md)：项目状态
+- [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)：5.0.0 发布说明、兼容性与验收清单
 
 ## 许可证
 
 MIT License
-## 聊天交互与 Skill 草稿
-
-- 聊天消息、输入框和技术详情使用统一的高对比度文字选区，以及一致的复制、粘贴、剪切和全选菜单。
-- 聊天记录滚动条支持稳定拖动；拖动期间流式输出不会把视图强制拉回底部。
-- Python 与 Bash/Shell 工具调用会分离展示代码和其他参数，并提供语言标识、行号、高亮与复制操作。
-- `request_user_input` 使用应用自有的选项行，不依赖 Windows 原生黑色选择控件。
-- Skill 草稿按会话保存；生成后可通过“查看并保存”继续预览、编辑和保存。

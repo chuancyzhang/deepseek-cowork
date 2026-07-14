@@ -8,6 +8,8 @@ This project is a personal exploration and is not an official DeepSeek product.
 
 Current app version: **5.0.0**
 
+The 5.0.0 release baseline is documented in [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md). It is the source of truth for the current release scope, compatibility notes, and acceptance checklist.
+
 ## What It Does
 
 - Run a local desktop agent that can read files, use tools, and complete multi-step tasks.
@@ -58,7 +60,7 @@ See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the detailed model.
 
 ### Windows executable
 
-1. Download the latest package from [Releases](../../releases).
+1. Download the latest package from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
 2. Unzip it.
 3. Run `deepseek-cowork.exe`.
 
@@ -114,6 +116,7 @@ See [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) for the technical design and [PRO
 - [PRODUCT_DOC.md](PRODUCT_DOC.md): product positioning and user flow
 - [USER_GUIDE.md](USER_GUIDE.md): illustrated user guide
 - [ROADMAP.md](ROADMAP.md): current project status
+- [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md): 5.0.0 release scope and compatibility
 
 ## License
 

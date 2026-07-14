@@ -1,6 +1,6 @@
 # DeepSeek Cowork Roadmap
 
-Last updated: `2026-06-10`
+Last updated: `2026-07-14`
 
 This file is a shared project-status note for both the team and AI agents.
 It records where the project is now, what has already landed, and what we are likely to focus on next.
@@ -8,13 +8,15 @@ Treat it as the current working map, not a strict release contract.
 
 ## Current Phase
 
-**Phase:** Product polish and platform stabilization
+**Phase:** 5.0.0 release hardening and post-release stabilization
 
-The project has moved past early framework assembly and is now focused on:
+The 5.0.0 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
 
 - making the desktop experience feel more like a polished product and less like an internal tool
 - stabilizing long-running agent, automation, and tool-use workflows
 - keeping packaging, runtime bootstrap, and documentation aligned with real behavior
+
+For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md).
 
 ## Completed
 
@@ -48,7 +50,7 @@ The project has moved past early framework assembly and is now focused on:
 
 ### Quality and usability improvements
 
-- Apple-style settings and automation surface polish has already been applied in key dialogs
+- Linear-style settings and automation surface polish has already been applied in key dialogs
 - Streaming, markdown rendering, and background save behavior have been tuned for better responsiveness
 - Long-term memory update and conversation-to-skill workflows are available with manual confirmation
 
@@ -56,14 +58,21 @@ The project has moved past early framework assembly and is now focused on:
 
 - Continue reducing "admin panel" visual weight in desktop surfaces
 - Keep shared design tokens and reusable style helpers consistent across dialogs and drawers
-- Improve doc consistency so user-facing Markdown stays aligned with the shipped UI
+- Keep the 5.0.0 release notes, user guide, and screenshots aligned with the shipped UI
 - Preserve behavior while making polish changes low-risk
+
+## 5.0.0 Release Baseline
+
+- Version source is centralized in `core/app_version.py` and currently reads `5.0.0`
+- README, product documentation, user guide, technical design, Skill system, and this roadmap link to the 5.0.0 release notes
+- Release validation covers packaged startup, model configuration, workspace boundaries, SQLite history recovery, deliverable conversion, PPT Agent, Skill/MCP configuration, automation runs, and diagnostic logs
+- Any behavior change that affects a user-facing flow must update the affected Markdown document in the same change
 
 ## Candidate Next Steps
 
 These are likely next areas, not hard commitments:
 
-- further unify Apple-style visual language across remaining secondary panels
+- further unify the Linear-style visual language across remaining secondary panels
 - continue hardening packaging and bundled runtime behavior on Windows
 - deepen observability for multi-agent and long-running automation flows
 - expand MCP-related capability beyond the current tools-only first step

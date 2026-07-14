@@ -1,7 +1,9 @@
 import os
 import inspect
+import subprocess
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -23,8 +25,8 @@ from main import (
     SearchableSkillPickerButton,
     SessionSkillPickerPopover,
     GuidanceTimelineEvent,
-    TimelineTextEvent,
     ToolCallCard,
+    launch_daemon_subprocess,
 )
 from ui.primitives import ProductActionRow, ProductPopover
 
@@ -216,6 +218,33 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             window.close()
             window.deleteLater()
 
+    def test_legacy_interaction_dialog_cannot_create_top_level_surface(self):
+        with self.assertRaisesRegex(RuntimeError, "InlineInteractionCard"):
+            MainWindow.show_interaction_dialog(object(), {"kind": "text"})
+
+    def test_retiring_first_send_empty_state_does_not_create_window(self):
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        empty_state = QWidget(host)
+        layout.addWidget(empty_state)
+        state = SimpleNamespace(session_id="first-submit", empty_state=empty_state, chat_layout=layout)
+        before = {id(widget) for widget in QApplication.topLevelWidgets() if widget.isVisible()}
+        self.assertTrue(MainWindow._retire_session_empty_state(object(), state, reason="test_first_submit"))
+        self.app.processEvents()
+        after = {id(widget) for widget in QApplication.topLevelWidgets() if widget.isVisible()}
+        self.assertIsNone(state.empty_state)
+        self.assertEqual(layout.indexOf(empty_state), -1)
+        self.assertEqual(after - before, set())
+        host.deleteLater()
+
+    def test_daemon_launch_keeps_windows_console_hidden(self):
+        with patch("main.subprocess.Popen") as popen:
+            launch_daemon_subprocess(23333)
+        kwargs = popen.call_args.kwargs
+        if os.name == "nt":
+            self.assertTrue(kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW)
+            self.assertTrue(kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
+
     def test_inline_request_resolution_failure_preserves_input_for_retry(self):
         window = MainWindow()
         try:
@@ -349,45 +378,80 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertIn("2.5 秒", bubble.think_toggle_btn.text())
         bubble.deleteLater()
 
-    def test_task_timeline_keeps_guidance_visible_and_starts_new_thinking_event(self):
+    def test_deep_thinking_fold_hides_reasoning_and_tools_together(self):
         bubble = ChatBubble("Agent", "")
         bubble.update_thinking("先检查环境")
-        first_thinking = bubble.current_thinking_event
-        checkpoint = bubble.add_guidance_checkpoint("guide-1", "优先检查测试", status="queued")
-        self.assertIsInstance(first_thinking, TimelineTextEvent)
-        self.assertIsNotNone(first_thinking.finished_at)
-        self.assertIsInstance(checkpoint, GuidanceTimelineEvent)
-        self.assertTrue(checkpoint.isVisibleTo(bubble) or not bubble.isVisible())
-        bubble.update_thinking("继续检查")
-        self.assertIsNot(first_thinking, bubble.current_thinking_event)
-        self.assertEqual(bubble.current_thinking_event.text(), "继续检查")
-        bubble.update_guidance_checkpoint("guide-1", "applied")
-        self.assertEqual(checkpoint.status, "applied")
-        bubble.deleteLater()
-
-    def test_task_timeline_freezes_streamed_content_before_guidance(self):
-        bubble = ChatBubble("Agent", "")
-        bubble.set_main_content("阶段性文字", final=True)
-        checkpoint = bubble.add_guidance_checkpoint("guide-2", "调整方向", status="waiting_tool")
-        fragments = [item for item in bubble.timeline_events if isinstance(item, TimelineTextEvent)]
-        self.assertEqual(len(fragments), 1)
-        self.assertEqual(fragments[0].kind, "content_fragment")
-        self.assertEqual(fragments[0].text(), "阶段性文字")
-        self.assertEqual(bubble.main_content_text, "")
-        self.assertEqual(checkpoint.status, "waiting_tool")
-        bubble.deleteLater()
-
-    def test_task_timeline_keeps_running_tool_before_guidance_checkpoint(self):
-        bubble = ChatBubble("Agent", "")
-        bubble.update_thinking("准备执行")
         tool = ToolCallCard("run_command", {"command": "pytest"}, "tool-1")
         bubble.add_tool_card(tool)
-        checkpoint = bubble.add_guidance_checkpoint("guide-3", "先跑单测", status="waiting_tool")
-        self.assertLess(bubble.timeline_events.index(tool), bubble.timeline_events.index(checkpoint))
-        tool.set_result("ok")
-        self.assertTrue(tool.is_finished)
-        self.assertEqual(checkpoint.status, "waiting_tool")
+        self.assertFalse(bubble.think_toggle_btn.isChecked())
+        self.assertTrue(bubble.think_container.isHidden())
+        bubble.think_toggle_btn.setChecked(True)
+        self.assertFalse(bubble.think_container.isHidden())
+        self.assertIn(tool, bubble.timeline_events)
+        bubble.think_toggle_btn.setChecked(False)
+        self.assertTrue(bubble.think_container.isHidden())
         bubble.deleteLater()
+
+    def test_stage_reply_remains_visible_when_thinking_segment_finishes(self):
+        bubble = ChatBubble("Agent", "")
+        bubble.set_main_content("阶段性文字", final=True)
+        self.assertEqual(bubble.freeze_content_fragment(), "阶段性文字")
+        self.assertEqual(bubble.main_content_text, "阶段性文字")
+        self.assertIn("阶段性文字", bubble.content_edit.toPlainText())
+        bubble.deleteLater()
+
+    def test_guidance_status_updates_outside_thinking_segment(self):
+        class TimelineStub:
+            _timeline_find_event = MainWindow._timeline_find_event
+            _timeline_set_guidance_status = MainWindow._timeline_set_guidance_status
+
+        checkpoint = GuidanceTimelineEvent("guide-3", "先跑单测", status="waiting_tool")
+        state = SimpleNamespace(
+            ui_timeline_events=[{
+                "kind": "guidance", "message_id": "guide-3", "status": "waiting_tool", "finished_at": None,
+            }],
+            guidance_widgets={"guide-3": checkpoint},
+        )
+        self.assertTrue(TimelineStub()._timeline_set_guidance_status(state, "guide-3", "applied"))
+        self.assertEqual(checkpoint.status, "applied")
+        checkpoint.deleteLater()
+
+    def test_live_guidance_splits_thinking_into_conversational_segments(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_guidance")
+            first = ChatBubble("Agent", "", thinking="...")
+            first.update_thinking("先分析")
+            first.set_main_content("阶段回复", final=False)
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, first)
+            state.temp_thinking_bubble = first
+            state.last_agent_bubble = first
+            state.live_activity = True
+            state.active_turn_id = 1
+            state.current_content_buffer = "阶段回复"
+            state.current_thinking_buffer = "先分析"
+
+            message = {
+                "id": "guide-live",
+                "role": "user",
+                "content": "调整方向",
+                "meta": {"same_turn_guidance": True, "turn_id": "1"},
+            }
+            window._render_turn_guidance_checkpoint(state, message, "调整方向", [])
+            guidance = state.guidance_widgets["guide-live"]
+            continuation = state.temp_thinking_bubble
+            guidance_wrapper = guidance.parentWidget()
+
+            self.assertEqual(first.main_content_text, "阶段回复")
+            self.assertIsNot(first, continuation)
+            self.assertLess(state.chat_layout.indexOf(first), state.chat_layout.indexOf(guidance_wrapper))
+            self.assertLess(state.chat_layout.indexOf(guidance_wrapper), state.chat_layout.indexOf(continuation))
+            self.assertIn("深度思考", first.think_toggle_btn.text())
+            self.assertIn("深度思考", continuation.think_toggle_btn.text())
+        finally:
+            window.close()
+            window.deleteLater()
 
     def test_ui_timeline_metadata_validation_is_explicit(self):
         events, warning = MainWindow._normalize_ui_timeline_events(
@@ -441,9 +505,24 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         class RenderStub:
             _render_persisted_timeline_items = MainWindow._render_persisted_timeline_items
 
+            def __init__(self):
+                self.bubbles = []
+                self.render_order = []
+
             def add_chat_bubble(self, *_args, **_kwargs):
-                self.bubble = ChatBubble("Agent", "")
-                return self.bubble
+                bubble = ChatBubble("Agent", "")
+                self.bubbles.append(bubble)
+                self.render_order.append(("thinking", bubble))
+                return bubble
+
+            def add_turn_guidance_inline(self, message, **kwargs):
+                guidance = GuidanceTimelineEvent(
+                    message.get("id") or "",
+                    kwargs.get("display_content") or "",
+                    status=kwargs.get("status") or "applied",
+                )
+                self.render_order.append(("guidance", guidance))
+                return guidance
 
             def add_tool_card(self, data, **_kwargs):
                 card = ToolCallCard(data["name"], data["args"], data["id"], meta=data.get("meta"))
@@ -474,12 +553,11 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         ]
         window = RenderStub()
         self.assertTrue(window._render_persisted_timeline_items(render_items, state))
-        self.assertEqual(
-            [type(item) for item in window.bubble.timeline_events],
-            [TimelineTextEvent, ToolCallCard, GuidanceTimelineEvent, TimelineTextEvent],
-        )
-        self.assertEqual(window.bubble.main_content_text, "最终结果")
-        window.bubble.deleteLater()
+        self.assertEqual([kind for kind, _widget in window.render_order], ["thinking", "guidance", "thinking"])
+        self.assertTrue(any(isinstance(item, ToolCallCard) for item in window.bubbles[0].timeline_events))
+        self.assertEqual(window.bubbles[1].main_content_text, "最终结果")
+        for _kind, widget in window.render_order:
+            widget.deleteLater()
 
     def test_short_user_message_uses_natural_width(self):
         bubble = ChatBubble("User", "你好")

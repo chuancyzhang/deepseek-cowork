@@ -227,22 +227,25 @@ def main_run():
         thinking_bubble = window.add_chat_bubble("Agent", "", animate=False)
         if thinking_bubble is not None:
             thinking_bubble.update_thinking("先分析任务目标，再检查工作区文件。")
-            thinking_bubble.current_thinking_event.started_at -= 10.2
             demo_tool = main.ToolCallCard("run_command", {"command": "python -m unittest"}, "guide-demo-tool")
             thinking_bubble.add_tool_card(demo_tool)
-            thinking_bubble.add_guidance_checkpoint(
-                "guide-timeline-demo",
-                "先验证现有测试，再继续修改界面。",
-                status="waiting_tool",
-            )
             demo_tool.set_result("测试通过")
-            thinking_bubble.update_guidance_checkpoint("guide-timeline-demo", "applied")
-            thinking_bubble.update_thinking("测试通过，继续整理最终结果。")
-            thinking_bubble.current_thinking_event.started_at -= 4.1
-            thinking_bubble.update_thinking(duration=14.3, is_final=True)
+            thinking_bubble.update_thinking(duration=10.2, is_final=True)
             thinking_bubble.think_toggle_btn.setChecked(True)
             save_widget(window, "37-thinking-expanded.png")
             thinking_bubble.think_toggle_btn.setChecked(False)
+
+            window.add_turn_guidance_inline(
+                {"id": "guide-timeline-demo", "content": "先验证现有测试，再继续修改界面。"},
+                status="applied",
+            )
+            followup_bubble = window.add_chat_bubble("Agent", "", animate=False)
+            followup_bubble.update_thinking("测试通过，继续整理最终结果。")
+            followup_bubble.update_thinking(duration=4.1, is_final=True)
+            followup_bubble.set_main_content(
+                "现有测试已经通过。我已按验证结果整理最终修改说明。",
+                final=True,
+            )
             save_widget(window, "38-guidance-timeline.png")
 
         clipboard_image = QImage(240, 140, QImage.Format_ARGB32)

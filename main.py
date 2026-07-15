@@ -12778,9 +12778,25 @@ class ChatBubble(QFrame):
 
     def _sync_inline_visualizations(self, text):
         marker = "::cowork-inline-vis{file="
-        if marker not in str(text or "") or self.chat_storage is None or not self.session_id:
+        if marker not in str(text or ""):
             return text
         requested = find_inline_visualization_files(text)
+        if not requested:
+            return text
+        if self.chat_storage is None or not self.session_id:
+            missing = []
+            if self.chat_storage is None:
+                missing.append("chat_storage")
+            if not self.session_id:
+                missing.append("session_id")
+            log_sub_agent_runtime(
+                "inline_visualization_context_missing",
+                missing=missing,
+                file_count=len(requested),
+            )
+            clean_text = strip_inline_visualization_directives(text, requested)
+            message = "交互可视化未加载：消息缺少会话上下文，请重新打开会话后重试。"
+            return f"{clean_text}\n\n> {message}".strip()
         artifacts = []
         for filename in requested:
             artifact = self.chat_storage.get_inline_visualization(self.session_id, filename)
@@ -26196,11 +26212,24 @@ class MainWindow(QMainWindow):
             )
         return rejected_messages
 
+    def _create_agent_chat_bubble(self, state, text="", thinking=None, duration=None, workspace_dir=""):
+        if state is None:
+            raise ValueError("创建 Agent 消息需要有效的会话状态。")
+        return ChatBubble(
+            "agent",
+            text,
+            thinking=thinking,
+            duration=duration,
+            workspace_dir=workspace_dir or self._workspace_dir_for_state(state),
+            session_id=state.session_id,
+            chat_storage=self.chat_storage,
+            visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
+        )
+
     def _append_live_thinking_segment(self, state):
         if not state:
             return None
-        bubble = ChatBubble("agent", "", thinking="...")
-        bubble.workspace_dir = self._workspace_dir_for_state(state)
+        bubble = self._create_agent_chat_bubble(state, thinking="...")
         self._connect_chat_bubble_actions(bubble, state)
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
@@ -27461,14 +27490,10 @@ class MainWindow(QMainWindow):
         effective_workspace_dir = self._ensure_session_workspace(state)
         
         # Insert "Thinking" bubble
-        state.temp_thinking_bubble = ChatBubble(
-            "agent",
-            "",
+        state.temp_thinking_bubble = self._create_agent_chat_bubble(
+            state,
             thinking="...",
             workspace_dir=effective_workspace_dir,
-            session_id=state.session_id,
-            chat_storage=self.chat_storage,
-            visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
         )
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
@@ -27546,14 +27571,10 @@ class MainWindow(QMainWindow):
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
         effective_workspace_dir = self._ensure_session_workspace(state)
-        state.temp_thinking_bubble = ChatBubble(
-            "agent",
-            "",
+        state.temp_thinking_bubble = self._create_agent_chat_bubble(
+            state,
             thinking="...",
             workspace_dir=effective_workspace_dir,
-            session_id=state.session_id,
-            chat_storage=self.chat_storage,
-            visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
         )
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
@@ -28434,14 +28455,9 @@ class MainWindow(QMainWindow):
             bubble = state.temp_thinking_bubble
             state.temp_thinking_bubble = None
         else:
-            bubble = ChatBubble(
-                "agent",
-                "",
+            bubble = self._create_agent_chat_bubble(
+                state,
                 thinking=result.get("reasoning"),
-                workspace_dir=self._workspace_dir_for_state(state),
-                session_id=state.session_id,
-                chat_storage=self.chat_storage,
-                visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
             )
             self._connect_chat_bubble_actions(bubble, state)
             bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)

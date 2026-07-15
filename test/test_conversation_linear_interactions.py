@@ -1,6 +1,8 @@
 import os
+import hashlib
 import inspect
 import subprocess
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,6 +13,8 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
+
+from core.chat_storage import ChatStorage
 
 from main import (
     ChatBubble,
@@ -499,9 +503,47 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertLess(state.chat_layout.indexOf(guidance_wrapper), state.chat_layout.indexOf(continuation))
             self.assertIn("深度思考", first.think_toggle_btn.text())
             self.assertIn("深度思考", continuation.think_toggle_btn.text())
+            self.assertEqual(continuation.session_id, state.session_id)
+            self.assertIs(continuation.chat_storage, window.chat_storage)
         finally:
             window.close()
             window.deleteLater()
+
+    def test_live_continuation_renders_registered_inline_visualization(self):
+        with tempfile.TemporaryDirectory() as root:
+            window = MainWindow()
+            try:
+                state = window.get_current_session()
+                window._retire_session_empty_state(state, reason="test_inline_visualization")
+                window.chat_storage = ChatStorage(os.path.join(root, "chat.sqlite"))
+                path = os.path.join(root, "live-visual.html")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write('<div id="live-visual">ok</div>')
+                with open(path, "rb") as handle:
+                    digest = hashlib.sha256(handle.read()).hexdigest()
+                artifact = {
+                    "file": "live-visual-12345678.html",
+                    "path": path,
+                    "sha256": digest,
+                    "title": "续接视图",
+                    "origins": [],
+                }
+                window.chat_storage.register_inline_visualization(state.session_id, artifact)
+
+                with patch.object(window.config_manager, "is_skill_enabled", return_value=True):
+                    continuation = window._append_live_thinking_segment(state)
+                directive = '::cowork-inline-vis{file="live-visual-12345678.html"}'
+                with patch("main.QTimer.singleShot"):
+                    continuation.set_main_content(f"结果\n\n{directive}", final=True)
+
+                self.assertEqual(continuation.session_id, state.session_id)
+                self.assertIs(continuation.chat_storage, window.chat_storage)
+                self.assertTrue(continuation.visualize_enabled)
+                self.assertEqual(len(continuation.inline_visualization_cards), 1)
+                self.assertNotIn("cowork-inline-vis", continuation.content_edit.toPlainText())
+            finally:
+                window.close()
+                window.deleteLater()
 
     def test_ui_timeline_metadata_validation_is_explicit(self):
         events, warning = MainWindow._normalize_ui_timeline_events(

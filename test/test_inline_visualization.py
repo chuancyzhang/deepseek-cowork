@@ -141,6 +141,23 @@ class TestInlineVisualization(unittest.TestCase):
             self.assertTrue(history.inline_visualization_cards[0].read_only)
             self.assertNotIn("cowork-inline-vis", history.content_edit.toPlainText())
 
+    def test_valid_directive_without_conversation_context_surfaces_error(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        directive = '::cowork-inline-vis{file="visual-12345678.html"}'
+        with patch("main.log_sub_agent_runtime") as log_mock:
+            bubble = main.ChatBubble("Agent", directive)
+        self.assertNotIn("cowork-inline-vis", bubble.content_edit.toPlainText())
+        self.assertIn("缺少会话上下文", bubble.content_edit.toPlainText())
+        log_mock.assert_any_call(
+            "inline_visualization_context_missing",
+            missing=["chat_storage", "session_id"],
+            file_count=1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,7 +46,7 @@ The 5.0.0 release baseline is documented in [RELEASE_NOTES_5.0.0.md](RELEASE_NOT
 - **Settings center**: manage models, agents, personality and memory, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions respond only to semantic configuration changes, not background logs or connection tests.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
-- **Skill center**: search, filter, enable, configure, and debug skills without restarting. Enabling a Skill makes it discoverable and records that state in the current conversation, but does not add it to the conversation's explicitly selected Skills.
+- **Skill center**: search, filter, enable, configure, and debug skills without restarting. Enable/disable changes take effect without inserting chat messages and do not alter the conversation's explicitly selected Skills.
 
 ## Skill Model
 

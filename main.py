@@ -218,7 +218,7 @@ import traceback
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
-                          QBrush, QPainterPath, QTextCursor, QTextCharFormat, QPen, QPalette)
+                          QBrush, QPainterPath, QTextCursor, QPen, QPalette)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
@@ -2203,6 +2203,18 @@ def flush_pending_skill_runtime_reload(skill_manager):
     skill_manager.load_skills()
     mark_skill_runtime_reload_pending(skill_manager, False)
     return True
+
+
+def is_hidden_manual_skill_change_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    payload = meta.get("skill_change") if isinstance(meta.get("skill_change"), dict) else {}
+    return (
+        bool(meta.get("ui_only"))
+        and str(payload.get("source") or "").strip().lower() == "ui"
+        and str(payload.get("action") or "").strip().lower() in {"enabled", "disabled"}
+    )
 
 
 def session_status_text(status, im_provider=None):
@@ -12341,29 +12353,6 @@ class ChatBubble(QFrame):
             col_layout.addWidget(self.deliverable_cards)
             self._deliverable_paths = []
             
-            # 3. Sub-Agent Indicators
-            self.sub_agent_indicators = QWidget()
-            self.sub_agent_indicators.setVisible(False)
-            self.sub_agent_indicators_layout = QHBoxLayout(self.sub_agent_indicators)
-            self.sub_agent_indicators_layout.setContentsMargins(0, 0, 0, 0)
-            self.sub_agent_indicators_layout.setSpacing(8)
-            self.sub_agent_indicators_layout.setAlignment(Qt.AlignLeft)
-            col_layout.addWidget(self.sub_agent_indicators)
-            
-            # 4. Sub-Agent Logs (Hidden Drawer)
-            self.sub_agent_logs = QStackedWidget()
-            self.sub_agent_logs.setVisible(False)
-            self.sub_agent_logs.setStyleSheet(f"""
-                QStackedWidget {{
-                    background: {DesignTokens.bg_main};
-                    border: 1px solid {DesignTokens.border};
-                    border-radius: 8px;
-                }}
-            """)
-            col_layout.addWidget(self.sub_agent_logs)
-            
-            self.active_agent_logs = {} # agent_id -> QTextEdit
-            
             # Handle Initial State
             if thinking == "...":
                 self.set_thinking_state(True)
@@ -12581,159 +12570,6 @@ class ChatBubble(QFrame):
         text = re.sub(r"\s+[▴▾]\s*$", "", self.think_toggle_btn.text())
         self.think_toggle_btn.setText(f"{text}  {'▴' if checked else '▾'}")
 
-    # --- Sub-Agent PiP Methods ---
-    def add_sub_agent_indicator(self, agent_id, status="pending"):
-        if not hasattr(self, 'agent_indicators'):
-            self.agent_indicators = {}
-            
-        if agent_id in self.agent_indicators:
-            # Already exists, just update status
-            self.update_sub_agent_status_icon(agent_id, status)
-            return
-
-        # Create Indicator
-        indicator = QPushButton()
-        indicator.setFixedHeight(26)
-        indicator.setMinimumWidth(84)
-        indicator.setMaximumWidth(140)
-        indicator.setCursor(Qt.PointingHandCursor)
-        indicator.setToolTip(f"Agent: {agent_id} ({status_label_text(status)})")
-        
-        # Style based on status
-        color = status_color(status)
-        set_stylesheet_if_changed(indicator, f"""
-            QPushButton {{
-                background-color: {DesignTokens.bg_glass};
-                border: 1px solid {rgba_from_hex(color, 0.28)};
-                border-radius: 13px;
-                color: {DesignTokens.text_primary};
-                font-size: 11px;
-                font-weight: 700;
-                padding: 3px 9px;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: {DesignTokens.primary_soft};
-                border-color: {color};
-            }}
-        """)
-        
-        # Simple initial or dot
-        short_id = agent_id[:6] if agent_id else "agent"
-        indicator.setText(f"● {short_id}")
-        
-        indicator.clicked.connect(lambda: self._toggle_sub_agent_log(agent_id))
-        
-        self.sub_agent_indicators_layout.addWidget(indicator)
-        
-        if not self.sub_agent_indicators.isVisible():
-            self.sub_agent_indicators.setVisible(True)
-            
-        # Create Log Viewer (Hidden)
-        self._create_log_viewer(agent_id)
-        
-        self.agent_indicators[agent_id] = indicator
-
-    def update_sub_agent_log(self, agent_id, content, status):
-        # Ensure exists
-        self.add_sub_agent_indicator(agent_id, status)
-        
-        # Update Log Content
-        if agent_id in self.active_agent_logs:
-            text_edit = self.active_agent_logs[agent_id]
-            
-            cursor = text_edit.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            
-            fmt = QTextCharFormat()
-            if status == "input":
-                fmt.setForeground(QColor(DesignTokens.status_running))
-                fmt.setFontWeight(QFont.Bold)
-            elif status == "thinking":
-                fmt.setForeground(QColor(DesignTokens.accent_ai))
-                fmt.setFontItalic(True)
-            elif status == "provider_log":
-                fmt.setForeground(QColor("#0f766e"))
-                fmt.setFontWeight(QFont.Bold)
-            elif status == "provider_error":
-                fmt.setForeground(QColor("#b91c1c"))
-                fmt.setFontWeight(QFont.Bold)
-            elif status == "tool_use":
-                fmt.setForeground(QColor(DesignTokens.accent_tool))
-            elif status == "tool_result":
-                fmt.setForeground(QColor(DesignTokens.success_text))
-            elif status == "completed":
-                fmt.setForeground(QColor(DesignTokens.success_text))
-            elif status == "error":
-                fmt.setForeground(QColor(DesignTokens.error_text))
-            else:
-                fmt.setForeground(QColor(DesignTokens.text_primary))
-                
-            cursor.insertText(content, fmt)
-            text_edit.setTextCursor(cursor)
-            text_edit.ensureCursorVisible()
-            
-        # Update Status Icon
-        self.update_sub_agent_status_icon(agent_id, status)
-
-    def update_sub_agent_status_icon(self, agent_id, status):
-        if hasattr(self, 'agent_indicators') and agent_id in self.agent_indicators:
-            indicator = self.agent_indicators[agent_id]
-            color = status_color(status)
-            set_stylesheet_if_changed(indicator, f"""
-                QPushButton {{
-                    background-color: {DesignTokens.bg_glass};
-                    border: 1px solid {rgba_from_hex(color, 0.28)};
-                    border-radius: 13px;
-                    color: {DesignTokens.text_primary};
-                    font-size: 11px;
-                    font-weight: 700;
-                    padding: 3px 9px;
-                    text-align: left;
-                }}
-                QPushButton:hover {{
-                    background-color: {DesignTokens.primary_soft};
-                    border-color: {color};
-                }}
-            """)
-            indicator.setToolTip(f"Agent: {agent_id} ({status_label_text(status)})")
-            indicator.setText(f"● {agent_id[:6] if agent_id else 'agent'}")
-
-    def _get_status_color(self, status):
-        return status_color(status)
-
-    def _create_log_viewer(self, agent_id):
-        text_edit = AutoResizingPlainTextEdit()
-        text_edit.setReadOnly(True)
-        text_edit.setStyleSheet(f"""
-            QPlainTextEdit {{
-                border: none;
-                padding: 10px;
-                background: transparent;
-                font-family: 'SF Mono', 'Cascadia Mono', 'Consolas', monospace;
-                font-size: 11px;
-                color: {DesignTokens.text_secondary};
-            }}
-        """)
-        
-        self.sub_agent_logs.addWidget(text_edit)
-        self.active_agent_logs[agent_id] = text_edit
-
-    def _toggle_sub_agent_log(self, agent_id):
-        if agent_id not in self.active_agent_logs: return
-        
-        target_log = self.active_agent_logs[agent_id]
-        
-        if not self.sub_agent_logs.isVisible():
-            self.sub_agent_logs.setCurrentWidget(target_log)
-            self.sub_agent_logs.setVisible(True)
-        else:
-            if self.sub_agent_logs.currentWidget() == target_log:
-                self.sub_agent_logs.setVisible(False)
-            else:
-                self.sub_agent_logs.setCurrentWidget(target_log)
-                target_log.ensureCursorVisible() # Ensure scrolled to bottom
-        
     def set_thinking_state(self, is_thinking):
         if is_thinking:
             if not self.think_timer.isActive():
@@ -20410,8 +20246,9 @@ class MainWindow(QMainWindow):
 
     def _render_session_history_spans(self, state, spans, insert_index=None):
         if not state or not spans:
-            return
+            return 0
         current_index = insert_index
+        inserted_total = 0
         for span in spans:
             start = span.get("start", 0)
             end = span.get("end", start)
@@ -20423,8 +20260,10 @@ class MainWindow(QMainWindow):
                 insert_index=current_index,
                 animate=False,
             )
+            inserted_total += int(inserted or 0)
             if current_index is not None:
                 current_index += int(inserted or 0)
+        return inserted_total
 
     def _render_initial_session_history(self, state):
         spans = getattr(state, "render_items", []) or []
@@ -20438,7 +20277,11 @@ class MainWindow(QMainWindow):
         start_idx = max(0, total - HISTORY_RENDER_PAGE_SIZE)
         initial_spans = spans[start_idx:]
         state.displayed_render_count = len(initial_spans)
-        self._render_session_history_spans(state, initial_spans)
+        inserted = self._render_session_history_spans(state, initial_spans)
+        if not inserted:
+            empty_state = EmptyStateWidget(self)
+            state.chat_layout.insertWidget(0, empty_state)
+            state.empty_state = empty_state
         self.queue_session_bubble_virtualization(state.session_id)
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
@@ -22620,9 +22463,15 @@ class MainWindow(QMainWindow):
         
         current_idx = insert_index
         inserted_count = 0
+        messages = [
+            message
+            for message in (messages or [])
+            if not is_hidden_manual_skill_change_message(message)
+        ]
+        if not messages:
+            return 0
         backup_last_agent = state.last_agent_bubble
-        state.last_agent_bubble = None 
-        messages = list(messages or [])
+        state.last_agent_bubble = None
         office_card = None
         target_layout = None
         if messages and self._message_is_office_draft_request(messages[0]):
@@ -28047,6 +27896,8 @@ class MainWindow(QMainWindow):
         names = "、".join(payload.get("skill_names") or []) or "Skill"
         action = str(payload.get("action") or "updated")
         source = str(payload.get("source") or "system")
+        if source.strip().lower() == "ui" and action.strip().lower() in {"enabled", "disabled"}:
+            return True
         if source == "ai" and action == "created":
             text = f"AI 已创建能力：{names}，现已可用"
         elif action == "enabled":
@@ -28333,52 +28184,6 @@ class MainWindow(QMainWindow):
             _log_stage("summoned_result", "ui_agent_state_stage_done", session_id=state.session_id)
         except Exception:
             _log_stage("summoned_result", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
-
-        try:
-            _log_stage("bubble_pip_update", "ui_agent_state_stage_begin", session_id=state.session_id, has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)))
-            if state.session_id == self.current_session_id and agent_id and state.last_agent_bubble and _qt_object_alive(state.last_agent_bubble):
-                content = None
-                if status == "input":
-                    content = f"Input: {payload.get('input_text') or payload.get('content') or ''}\n"
-                elif status == "thinking":
-                    content = payload.get("reasoning_delta")
-                elif status == "content":
-                    content = payload.get("content_delta")
-                elif status == "log":
-                    content = payload.get("log_content")
-                elif status == "provider_log":
-                    content = payload.get("provider_message")
-                elif status == "provider_error":
-                    content = payload.get("provider_message") or payload.get("error")
-                elif status == "tool_use":
-                    content = payload.get("task")
-                elif status == "tool_result":
-                    content = f"Tool result: {preview_text(payload.get('tool_result') or '', limit=120)}\n"
-                elif status == "pending":
-                    content = f"Task: {payload.get('task')}\n"
-                elif status in {"running", "active"}:
-                    content = "Running...\n"
-                elif status == "waiting_input":
-                    content = "Waiting for input...\n"
-                elif status == "completed":
-                    content = "\nDone."
-                elif status in {"failed", "failed_recovered"}:
-                    content = f"\nFailed: {payload.get('content') or payload.get('error') or ''}"
-                elif status == "closed":
-                    detail = (payload.get("error") or "").strip()
-                    content = f"\nClosed: {detail}" if detail else "\nClosed."
-                elif status == "killed":
-                    detail = (payload.get("error") or "").strip()
-                    content = f"\nKilled: {detail}" if detail else "\nKilled."
-
-                if content or status in ["completed", "pending", "running", "active", "waiting_input", "failed", "failed_recovered", "closed", "killed", "content", "provider_log", "provider_error", "tool_result", "input"]:
-                    if hasattr(state.last_agent_bubble, 'update_sub_agent_log'):
-                        state.last_agent_bubble.update_sub_agent_log(agent_id, content, status)
-                if hasattr(state.last_agent_bubble, 'add_sub_agent_indicator'):
-                    state.last_agent_bubble.add_sub_agent_indicator(agent_id, status)
-            _log_stage("bubble_pip_update", "ui_agent_state_stage_done", session_id=state.session_id, has_last_agent_bubble=bool(getattr(state, "last_agent_bubble", None)))
-        except Exception:
-            _log_stage("bubble_pip_update", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
 
         try:
             _log_stage("live_agent_check", "ui_agent_state_stage_begin", session_id=state.session_id)

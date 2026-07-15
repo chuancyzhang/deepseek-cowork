@@ -26,6 +26,7 @@ from main import (
     SessionSkillPickerPopover,
     GuidanceTimelineEvent,
     ToolCallCard,
+    is_hidden_manual_skill_change_message,
     launch_daemon_subprocess,
 )
 from ui.primitives import ProductActionRow, ProductPopover
@@ -377,6 +378,55 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertTrue(bubble.think_toggle_btn.isChecked())
         self.assertIn("2.5 秒", bubble.think_toggle_btn.text())
         bubble.deleteLater()
+
+    def test_agent_bubble_has_no_sub_agent_pip_or_raw_log_widgets(self):
+        bubble = ChatBubble("Agent", "")
+        self.assertFalse(hasattr(bubble, "sub_agent_indicators"))
+        self.assertFalse(hasattr(bubble, "sub_agent_logs"))
+        self.assertFalse(hasattr(bubble, "update_sub_agent_log"))
+        bubble.deleteLater()
+
+    def test_manual_skill_toggle_messages_are_hidden_but_ai_creation_is_visible(self):
+        enabled = {
+            "role": "assistant",
+            "content": "◈ 已启用能力：visualize，可被 AI 发现",
+            "meta": {
+                "ui_only": True,
+                "skill_change": {"source": "ui", "action": "enabled"},
+            },
+        }
+        created = {
+            "role": "assistant",
+            "content": "◈ AI 已创建能力：demo，现已可用",
+            "meta": {
+                "ui_only": True,
+                "skill_change": {"source": "ai", "action": "created"},
+            },
+        }
+        self.assertTrue(is_hidden_manual_skill_change_message(enabled))
+        self.assertFalse(is_hidden_manual_skill_change_message(created))
+
+        state = SimpleNamespace(messages=[])
+
+        class WindowStub:
+            def get_session(self, _session_id):
+                return state
+
+            def add_chat_bubble(self, *_args, **_kwargs):
+                raise AssertionError("manual Skill toggles must not create a chat bubble")
+
+        applied = MainWindow._append_skill_change_conversation_event(
+            WindowStub(),
+            {
+                "event_id": "toggle-1",
+                "source": "ui",
+                "action": "enabled",
+                "skill_names": ["visualize"],
+            },
+            "session-1",
+        )
+        self.assertTrue(applied)
+        self.assertEqual(state.messages, [])
 
     def test_deep_thinking_fold_hides_reasoning_and_tools_together(self):
         bubble = ChatBubble("Agent", "")

@@ -12007,6 +12007,46 @@ class InlineVisualizationCard(QFrame):
             self.status_label.setVisible(True)
 
 
+class AssistantTurnGroup(QFrame):
+    """One visible assistant turn containing one or more conversational stages."""
+
+    def __init__(self, group_id, parent=None):
+        super().__init__(parent)
+        self.group_id = str(group_id or uuid.uuid4().hex)
+        self.stage_bubbles = []
+        self.setObjectName("AssistantTurnGroup")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet("QFrame#AssistantTurnGroup { background: transparent; border: none; }")
+        self.group_layout = QVBoxLayout(self)
+        self.group_layout.setContentsMargins(0, 0, 0, 0)
+        self.group_layout.setSpacing(0)
+
+    def add_stage(self, bubble, stage_id=None):
+        if bubble is None:
+            raise ValueError("AI 轮次阶段不能为空。")
+        if self.stage_bubbles:
+            separator = QFrame(self)
+            separator.setObjectName("AssistantStageSeparator")
+            separator.setFixedHeight(1)
+            separator.setStyleSheet(
+                f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.border_subtle}; border: none; "
+                "margin-left: 42px; margin-right: 8px; }"
+            )
+            self.group_layout.addWidget(separator)
+        bubble.ui_turn_group_id = self.group_id
+        bubble.ui_stage_id = str(stage_id or f"{self.group_id}:stage-{len(self.stage_bubbles) + 1}")
+        self.stage_bubbles.append(bubble)
+        self.group_layout.addWidget(bubble)
+        return bubble
+
+    def active_stage(self):
+        return self.stage_bubbles[-1] if self.stage_bubbles else None
+
+    def apply_dynamic_widths(self, message_width, user_bubble_width):
+        for bubble in self.stage_bubbles:
+            bubble.apply_dynamic_widths(message_width, user_bubble_width)
+
+
 class ChatBubble(QFrame):
     editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
@@ -12056,6 +12096,7 @@ class ChatBubble(QFrame):
         self.edit_btn = None
         self.delete_btn = None
         self.message_action_buttons = []
+        self.message_actions_enabled = True
         self.edit_controls = None
         self.edit_original_text = ""
         self.setFrameShape(QFrame.NoFrame)
@@ -12612,6 +12653,17 @@ class ChatBubble(QFrame):
         self.set_main_content(text, final=True)
         return text
 
+    def set_message_actions_enabled(self, enabled):
+        self.message_actions_enabled = bool(enabled)
+        final_text = bool((self.main_content_text or "").strip() and self._pending_main_content_final)
+        self.copy_result_btn.setVisible(bool(self.message_actions_enabled and final_text))
+        if getattr(self, "office_draft_btn", None) is not None:
+            self.office_draft_btn.setVisible(bool(self.message_actions_enabled and final_text))
+        if getattr(self, "skill_capture_btn", None) is not None:
+            self.skill_capture_btn.setVisible(
+                bool(self.message_actions_enabled and final_text and self.source_message_id)
+            )
+
     def update_thinking(self, text=None, duration=None, is_final=False):
         if text is not None or duration is not None:
             self.thinking_widget.setVisible(True)
@@ -12691,11 +12743,12 @@ class ChatBubble(QFrame):
         self._pending_main_content_text = text
         self._pending_main_content_parts = content_parts
         self._pending_main_content_final = bool(final)
-        self.copy_result_btn.setVisible(bool(final and text.strip()))
+        actions_visible = bool(self.message_actions_enabled and final and text.strip())
+        self.copy_result_btn.setVisible(actions_visible)
         if getattr(self, "office_draft_btn", None) is not None:
-            self.office_draft_btn.setVisible(bool(final and text.strip()))
+            self.office_draft_btn.setVisible(actions_visible)
         if getattr(self, "skill_capture_btn", None) is not None:
-            self.skill_capture_btn.setVisible(bool(final and text.strip() and self.source_message_id))
+            self.skill_capture_btn.setVisible(bool(actions_visible and self.source_message_id))
 
         already_rendered = (
             self._rendered_main_content_text == text
@@ -14140,6 +14193,9 @@ class SessionState:
         self.last_flushed_content_buffer = ""
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
+        self.active_agent_turn_group = None
+        self.agent_turn_group_sequence = 0
+        self.agent_stage_closed = False
         self.llm_worker = None
         self.daemon_running = False
         self.daemon_worker = None
@@ -17235,6 +17291,8 @@ class MainWindow(QMainWindow):
                 widget = item.widget() if item is not None else None
                 if isinstance(widget, ChatBubble):
                     yield widget
+                elif isinstance(widget, AssistantTurnGroup):
+                    yield from widget.stage_bubbles
 
     def sync_conversation_widths(self, drawer_geometry=None):
         metrics = self._compute_conversation_shell_metrics(drawer_geometry)
@@ -20168,6 +20226,9 @@ class MainWindow(QMainWindow):
         state.pending_thinking_delta = ""
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
+        state.active_agent_turn_group = None
+        state.agent_turn_group_sequence = 0
+        state.agent_stage_closed = False
         state.ui_timeline_events = []
         state.ui_timeline_sequence = 0
         state.ui_timeline_warning = ""
@@ -22473,6 +22534,192 @@ class MainWindow(QMainWindow):
             log_attachment_event("conversation_attachment_cleanup_failed", session_id=session_id, error=str(exc))
         self.refresh_history_list()
 
+    def _validate_unified_assistant_batch(self, messages):
+        tool_call_ids = set()
+        has_assistant = False
+        for message in messages or []:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            has_assistant = True
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            group_id = str(meta.get("ui_turn_group_id") or "")
+            stage_id = str(meta.get("ui_stage_id") or "")
+            if bool(group_id) != bool(stage_id):
+                return False, "AI 消息的轮次容器与阶段标识不完整。"
+            reply_kind = str(meta.get("ui_reply_kind") or "")
+            if reply_kind and reply_kind not in {"stage", "final", "error", "interrupted"}:
+                return False, "AI 消息包含无效的回复类型。"
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict) or not str(tool_call.get("id") or ""):
+                    return False, "AI 消息包含缺少 ID 的工具调用。"
+                tool_call_ids.add(str(tool_call.get("id")))
+        if not has_assistant:
+            return False, ""
+        for message in messages or []:
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            tool_call_id = str(message.get("tool_call_id") or "")
+            if not tool_call_id or tool_call_id not in tool_call_ids:
+                return False, f"对话过程找不到工具调用：{tool_call_id or '缺少 ID'}"
+        return True, ""
+
+    def _render_unified_restore_error(self, state, message, insert_index=None):
+        text = f"对话过程恢复失败：{str(message or '未知错误')} 请保留会话并查看诊断日志。"
+        notice = ProductInlineNotice(text, "error")
+        if insert_index is not None:
+            state.chat_layout.insertWidget(insert_index, notice)
+        else:
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, notice)
+        state.ui_timeline_warning = str(message or "未知错误")
+        log_sub_agent_runtime(
+            "ui_assistant_turn_restore_rejected",
+            session_id=state.session_id,
+            error=state.ui_timeline_warning,
+        )
+        return 1
+
+    def _render_unified_assistant_batch(self, messages, state, insert_index=None, animate=True):
+        """Restore every assistant/tool round as stages in one conversational turn."""
+        current_index = insert_index
+        inserted_count = 0
+        current_group = None
+        current_group_id = ""
+        active_bubble = None
+        backup_last_agent = state.last_agent_bubble
+        backup_group = getattr(state, "active_agent_turn_group", None)
+        derived_group_sequence = 0
+
+        def create_group(group_id):
+            nonlocal current_index, inserted_count
+            group = AssistantTurnGroup(group_id)
+            if current_index is not None:
+                state.chat_layout.insertWidget(current_index, group)
+                current_index += 1
+            else:
+                state.chat_layout.insertWidget(state.chat_layout.count() - 1, group)
+            inserted_count += 1
+            return group
+
+        try:
+            for message in messages or []:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get("role") or "")
+                if role == "user" and is_same_turn_guidance_message(message):
+                    if active_bubble is not None:
+                        active_bubble.set_message_actions_enabled(False)
+                    current_group = None
+                    current_group_id = ""
+                    active_bubble = None
+                    state.last_agent_bubble = None
+                    self.add_turn_guidance_inline(
+                        message,
+                        display_content=self._message_display_content(message),
+                        attachments=self._message_user_attachments(message),
+                        status="applied",
+                        index=current_index,
+                        session_id=state.session_id,
+                    )
+                    if current_index is not None:
+                        current_index += 1
+                    inserted_count += 1
+                    continue
+                if role == "assistant":
+                    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+                    group_id = str(meta.get("ui_turn_group_id") or "")
+                    stage_id = str(meta.get("ui_stage_id") or "")
+                    if not group_id:
+                        if current_group is None:
+                            derived_group_sequence += 1
+                            group_id = f"history-{state.session_id}-group-{derived_group_sequence}"
+                        else:
+                            group_id = current_group_id
+                    if current_group is None or group_id != current_group_id:
+                        current_group = create_group(group_id)
+                        current_group_id = group_id
+                    if not stage_id:
+                        stage_id = f"{group_id}:stage-{len(current_group.stage_bubbles) + 1}"
+                    active_bubble = self._create_agent_chat_bubble(state)
+                    self._connect_chat_bubble_actions(active_bubble, state)
+                    active_bubble.apply_dynamic_widths(
+                        self.dynamic_message_width,
+                        self.dynamic_user_bubble_width,
+                    )
+                    current_group.add_stage(active_bubble, stage_id=stage_id)
+                    state.last_agent_bubble = active_bubble
+                    source_id = str(message.get("id") or "")
+                    if source_id:
+                        active_bubble.set_source_message_id(source_id)
+                    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+                    if reasoning:
+                        active_bubble.update_thinking(reasoning)
+                    reply_kind = str(
+                        meta.get("ui_reply_kind")
+                        or ("stage" if message.get("tool_calls") else "final")
+                    )
+                    is_stage = reply_kind != "final" or bool(message.get("tool_calls"))
+                    content = str(message.get("content") or "")
+                    missing_final = not is_stage and not content.strip()
+                    if missing_final:
+                        reply_kind = "error"
+                        is_stage = True
+                        content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
+                    active_bubble.set_message_actions_enabled(not is_stage)
+                    if content:
+                        active_bubble.set_main_content(
+                            content,
+                            content_parts=message.get("content_parts") if isinstance(message.get("content_parts"), list) else None,
+                            final=True,
+                        )
+                    for tool_call in message.get("tool_calls") or []:
+                        if not isinstance(tool_call, dict):
+                            continue
+                        function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                        arguments = function.get("arguments")
+                        if isinstance(arguments, str):
+                            try:
+                                arguments = json.loads(arguments)
+                            except Exception:
+                                pass
+                        self.add_tool_card(
+                            {
+                                "id": str(tool_call.get("id") or uuid.uuid4().hex),
+                                "name": function.get("name") or "unknown_tool",
+                                "args": arguments if arguments is not None else {},
+                            },
+                            session_id=state.session_id,
+                            animate=animate,
+                        )
+                    active_bubble.update_thinking(duration=None, is_final=True)
+                    continue
+                if role == "tool" and message.get("tool_call_id"):
+                    tool_id = str(message.get("tool_call_id"))
+                    if tool_id not in state.tool_cards:
+                        raise ValueError(f"对话过程找不到工具调用：{tool_id}")
+                    self.update_tool_card(
+                        {
+                            "id": tool_id,
+                            "result": message.get("content") or "",
+                            "result_obj": message.get("result_obj"),
+                            "meta": message.get("meta") or {},
+                        },
+                        session_id=state.session_id,
+                    )
+            self.process_ui_events(force=False)
+            return inserted_count
+        except Exception as exc:
+            state.ui_timeline_warning = f"对话过程恢复失败：{exc}"
+            log_sub_agent_runtime(
+                "ui_assistant_turn_restore_failed",
+                session_id=state.session_id,
+                error=str(exc),
+            )
+            raise
+        finally:
+            if insert_index is not None:
+                state.last_agent_bubble = backup_last_agent
+            state.active_agent_turn_group = backup_group
+
     def render_message_batch(self, messages, session_id, insert_index=None, animate=True):
         state = self.get_session(session_id)
         if not state: return 0
@@ -22486,6 +22733,19 @@ class MainWindow(QMainWindow):
         ]
         if not messages:
             return 0
+        has_unified_assistant, unified_error = self._validate_unified_assistant_batch(messages)
+        if unified_error:
+            return self._render_unified_restore_error(state, unified_error, insert_index=insert_index)
+        if has_unified_assistant and not self._message_is_office_draft_request(messages[0]):
+            try:
+                return self._render_unified_assistant_batch(
+                    messages,
+                    state,
+                    insert_index=insert_index,
+                    animate=animate,
+                )
+            except Exception as exc:
+                return self._render_unified_restore_error(state, str(exc), insert_index=insert_index)
         backup_last_agent = state.last_agent_bubble
         state.last_agent_bubble = None
         office_card = None
@@ -22812,9 +23072,14 @@ class MainWindow(QMainWindow):
         if kind not in allowed:
             raise ValueError(f"unsupported UI timeline event kind: {kind}")
         state.ui_timeline_sequence = int(getattr(state, "ui_timeline_sequence", 0) or 0) + 1
+        active_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        active_group = getattr(state, "active_agent_turn_group", None)
         event = {
             "id": str(payload.pop("id", "") or uuid.uuid4().hex),
             "turn_id": str(payload.pop("turn_id", "") or getattr(state, "active_turn_id", "")),
+            "group_id": str(payload.pop("group_id", "") or getattr(active_group, "group_id", "")),
+            "stage_id": str(payload.pop("stage_id", "") or getattr(active_bubble, "ui_stage_id", "")),
+            "reply_kind": str(payload.pop("reply_kind", "") or ""),
             "sequence": state.ui_timeline_sequence,
             "kind": kind,
             "status": str(status or "running"),
@@ -22851,7 +23116,13 @@ class MainWindow(QMainWindow):
             return None
         event = self._timeline_find_event(state, kind=kind, open_only=True)
         last = (getattr(state, "ui_timeline_events", []) or [None])[-1]
-        if event is None or event is not last:
+        active_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        active_stage_id = str(getattr(active_bubble, "ui_stage_id", ""))
+        if (
+            event is None
+            or event is not last
+            or str(event.get("stage_id") or "") != active_stage_id
+        ):
             event = self._timeline_append_event(state, kind, status="running")
         event["text"] = str(event.get("text") or "") + delta
         return event
@@ -22899,9 +23170,19 @@ class MainWindow(QMainWindow):
                 started_at = float(raw.get("started_at"))
             except (TypeError, ValueError):
                 return [], "对话过程包含无效的顺序或时间。"
+            group_id = str(raw.get("group_id") or "")
+            stage_id = str(raw.get("stage_id") or "")
+            reply_kind = str(raw.get("reply_kind") or "")
+            if bool(group_id) != bool(stage_id) and raw.get("kind") != "guidance":
+                return [], "对话过程的轮次容器与阶段标识不完整。"
+            if reply_kind not in {"", "stage", "final", "error", "interrupted"}:
+                return [], "对话过程包含无效的回复类型。"
             event = {
                 "id": str(raw.get("id") or uuid.uuid4().hex),
                 "turn_id": str(raw.get("turn_id") or ""),
+                "group_id": group_id,
+                "stage_id": stage_id,
+                "reply_kind": reply_kind,
                 "sequence": sequence,
                 "kind": raw.get("kind"),
                 "status": str(raw.get("status") or "completed"),
@@ -25727,6 +26008,7 @@ class MainWindow(QMainWindow):
     def stop_agent(self):
         state = self.get_current_session()
         if not state: return
+        stopped_turn_id = state.active_turn_id
         if state.temp_thinking_bubble:
             state.temp_thinking_bubble.stop_thinking_timers()
         if state.last_agent_bubble and state.last_agent_bubble is not state.temp_thinking_bubble:
@@ -25783,27 +26065,46 @@ class MainWindow(QMainWindow):
             "error",
             status="interrupted",
             text="任务已由用户停止",
+            turn_id=stopped_turn_id,
+            reply_kind="interrupted",
             finished_at=time.time(),
         )
         self._persist_pending_guidance(state)
         partial_content = (state.current_content_buffer or "").strip()
         partial_thinking = (state.current_thinking_buffer or "").strip()
-        if partial_content or partial_thinking:
-            existing_content = ""
-            if state.messages and isinstance(state.messages[-1], dict) and state.messages[-1].get("role") == "assistant":
-                existing_content = (state.messages[-1].get("content") or "").strip()
-            stop_text = "⚠️ 任务已停止（保留未完成内容）"
-            if partial_content:
-                stop_text = f"{partial_content}\n\n{stop_text}"
-            if existing_content != stop_text:
-                state.messages.append({
-                    "id": self._new_message_id(),
-                    "role": "assistant",
-                    "content": stop_text,
-                    "reasoning": partial_thinking,
-                    "content_parts": [{"type": "text", "text": stop_text}]
-                })
-                self.save_chat_history(session_id=state.session_id)
+        stopped_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        stop_text = "⚠️ 任务已停止（保留未完成内容）"
+        if partial_content:
+            stop_text = f"{partial_content}\n\n{stop_text}"
+        existing_content = ""
+        if state.messages and isinstance(state.messages[-1], dict) and state.messages[-1].get("role") == "assistant":
+            existing_content = (state.messages[-1].get("content") or "").strip()
+        if existing_content != stop_text:
+            stop_message = {
+                "id": self._new_message_id(),
+                "role": "assistant",
+                "content": stop_text,
+                "reasoning": partial_thinking,
+                "content_parts": [{"type": "text", "text": stop_text}],
+            }
+            if stopped_bubble is not None:
+                stop_message["meta"] = {
+                    "ui_turn_id": str(stopped_turn_id),
+                    "ui_turn_group_id": str(getattr(stopped_bubble, "ui_turn_group_id", "")),
+                    "ui_stage_id": str(getattr(stopped_bubble, "ui_stage_id", "")),
+                    "ui_reply_kind": "interrupted",
+                }
+            state.messages.append(stop_message)
+            self.save_chat_history(session_id=state.session_id)
+        if stopped_bubble is not None:
+            stopped_bubble.set_message_actions_enabled(False)
+            stopped_bubble.set_main_content(stop_text, final=True)
+        log_sub_agent_runtime(
+            "ui_assistant_turn_interrupted",
+            session_id=state.session_id,
+            turn_id=str(getattr(state, "active_turn_id", "")),
+            group_id=str(getattr(getattr(state, "active_agent_turn_group", None), "group_id", "")),
+        )
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
@@ -26226,20 +26527,82 @@ class MainWindow(QMainWindow):
             visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
         )
 
+    def _next_agent_turn_group_id(self, state):
+        state.agent_turn_group_sequence = int(getattr(state, "agent_turn_group_sequence", 0) or 0) + 1
+        return f"turn-{getattr(state, 'active_turn_id', 0)}-group-{state.agent_turn_group_sequence}"
+
+    def _attach_live_agent_stage(self, state, bubble, *, create_group=False):
+        if state is None or bubble is None:
+            raise ValueError("追加 AI 阶段需要有效的会话和消息组件。")
+        group = None if create_group else getattr(state, "active_agent_turn_group", None)
+        if group is None:
+            group = AssistantTurnGroup(self._next_agent_turn_group_id(state))
+            state.active_agent_turn_group = group
+            office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
+            if office_card is not None:
+                office_card.add_process_widget(group)
+            else:
+                state.chat_layout.insertWidget(state.chat_layout.count() - 1, group)
+            log_sub_agent_runtime(
+                "ui_assistant_turn_group_started",
+                session_id=state.session_id,
+                turn_id=str(getattr(state, "active_turn_id", "")),
+                group_id=group.group_id,
+            )
+        group.add_stage(bubble)
+        state.temp_thinking_bubble = bubble
+        state.last_agent_bubble = bubble
+        state.agent_stage_closed = False
+        log_sub_agent_runtime(
+            "ui_assistant_stage_started",
+            session_id=state.session_id,
+            turn_id=str(getattr(state, "active_turn_id", "")),
+            group_id=group.group_id,
+            stage_id=bubble.ui_stage_id,
+            stage_count=len(group.stage_bubbles),
+        )
+        return bubble
+
+    def _ensure_live_agent_stage(self, state):
+        if not state:
+            return None
+        bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        if bubble is not None and not getattr(state, "agent_stage_closed", False):
+            return bubble
+        return self._append_live_thinking_segment(state)
+
+    def _close_live_agent_stage(self, state, *, reply_kind="stage"):
+        if not state:
+            return None
+        bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
+        if bubble is None:
+            return None
+        if reply_kind != "final":
+            bubble.set_message_actions_enabled(False)
+        bubble.freeze_content_fragment()
+        bubble.update_thinking(duration=None, is_final=True)
+        state.agent_stage_closed = True
+        event = self._timeline_find_event(state, kind="content_fragment", open_only=True)
+        if event is not None:
+            event["reply_kind"] = str(reply_kind or "stage")
+        log_sub_agent_runtime(
+            "ui_assistant_stage_finished",
+            session_id=state.session_id,
+            turn_id=str(getattr(state, "active_turn_id", "")),
+            group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+            stage_id=str(getattr(bubble, "ui_stage_id", "")),
+            reply_kind=str(reply_kind or "stage"),
+            content_len=len(str(getattr(bubble, "main_content_text", "") or "")),
+        )
+        return bubble
+
     def _append_live_thinking_segment(self, state):
         if not state:
             return None
         bubble = self._create_agent_chat_bubble(state, thinking="...")
         self._connect_chat_bubble_actions(bubble, state)
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
-        office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
-        if office_card is not None:
-            office_card.add_process_widget(bubble)
-        else:
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, bubble)
-        state.temp_thinking_bubble = bubble
-        state.last_agent_bubble = bubble
-        return bubble
+        return self._attach_live_agent_stage(state, bubble)
 
     def _render_turn_guidance_checkpoint(self, state, message, display_content, attachments):
         if not state or not isinstance(message, dict):
@@ -26266,10 +26629,8 @@ class MainWindow(QMainWindow):
             status=waiting_status,
             running_tool=waiting_status == "waiting_tool",
         )
-        bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
-        if bubble is not None:
-            bubble.freeze_content_fragment()
-            bubble.update_thinking(duration=None, is_final=True)
+        bubble = self._close_live_agent_stage(state, reply_kind="stage")
+        previous_group_id = str(getattr(bubble, "ui_turn_group_id", "")) if bubble is not None else ""
         self.add_turn_guidance_inline(
             message,
             display_content=event.get("text") or "",
@@ -26280,7 +26641,17 @@ class MainWindow(QMainWindow):
         )
         # The next model delta belongs to a new conversational thought after
         # the user's guidance, never to the segment that preceded it.
+        state.active_agent_turn_group = None
+        state.agent_stage_closed = False
         self._append_live_thinking_segment(state)
+        log_sub_agent_runtime(
+            "ui_assistant_turn_guidance_boundary",
+            session_id=state.session_id,
+            turn_id=str(getattr(state, "active_turn_id", "")),
+            previous_group_id=previous_group_id,
+            next_group_id=str(getattr(state.active_agent_turn_group, "group_id", "")),
+            message_id=message_id,
+        )
         # Content buffers are presentation-only; generated_messages remain canonical.
         state.current_content_buffer = ""
         state.last_flushed_content_buffer = ""
@@ -26333,7 +26704,6 @@ class MainWindow(QMainWindow):
             self._restore_rejected_guidance(state, raw_user_text, prompt_files)
             if state:
                 self.save_chat_history(session_id=state.session_id)
-
     def _submit_turn_guidance(self, state, raw_user_text, prompt_files=None, clear_current_input=False):
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if not state or not getattr(state, "turn_steerable", False):
@@ -26983,15 +27353,9 @@ class MainWindow(QMainWindow):
         if getattr(state, "live_activity", False):
             self.flush_session_thinking(state.session_id)
             self.flush_session_content(state.session_id, final=False)
+            active_bubble = self._close_live_agent_stage(state, reply_kind="stage")
+            self._timeline_close_open_events(state, kinds={"thinking", "content_fragment"})
             if (state.current_content_buffer or "").strip():
-                active_bubble = getattr(state, "temp_thinking_bubble", None) or getattr(state, "last_agent_bubble", None)
-                if active_bubble is not None and hasattr(active_bubble, "freeze_content_fragment"):
-                    active_bubble.freeze_content_fragment()
-                    active_bubble.update_thinking(duration=None, is_final=True)
-                self._timeline_close_open_events(state, kinds={"content_fragment"})
-                state.temp_thinking_bubble = None
-                state.last_agent_bubble = None
-                self._append_live_thinking_segment(state)
                 state.current_content_buffer = ""
                 state.last_flushed_content_buffer = ""
                 if state.session_id == self.current_session_id:
@@ -27048,6 +27412,15 @@ class MainWindow(QMainWindow):
                 status="running",
                 tool_call_id=data["id"],
                 text=title or str(data.get("name") or "工具"),
+                tool_name=str(data.get("name") or ""),
+            )
+            log_sub_agent_runtime(
+                "ui_assistant_stage_tool_attached",
+                session_id=state.session_id,
+                turn_id=str(getattr(state, "active_turn_id", "")),
+                group_id=str(getattr(active_bubble, "ui_turn_group_id", "")),
+                stage_id=str(getattr(active_bubble, "ui_stage_id", "")),
+                tool_call_id=str(data.get("id") or ""),
                 tool_name=str(data.get("name") or ""),
             )
         has_pending_result = data['id'] in state.pending_tool_results
@@ -27460,10 +27833,26 @@ class MainWindow(QMainWindow):
             source_messages = self._office_file_conversion_run_messages(state)
         else:
             source_messages = getattr(state, "messages", []) or []
-        return copy.deepcopy([
+        messages = copy.deepcopy([
             message for message in source_messages
             if not (isinstance(message, dict) and isinstance(message.get("meta"), dict) and message["meta"].get("ui_only"))
         ])
+        presentation_keys = {
+            "ui_turn_id",
+            "ui_turn_group_id",
+            "ui_stage_id",
+            "ui_reply_kind",
+        }
+        for message in messages:
+            if not isinstance(message, dict) or not isinstance(message.get("meta"), dict):
+                continue
+            message["meta"] = {
+                key: value for key, value in message["meta"].items()
+                if key not in presentation_keys
+            }
+            if not message["meta"]:
+                message.pop("meta", None)
+        return messages
 
     def process_agent_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
         state = self.get_session(session_id)
@@ -27483,6 +27872,9 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
+        state.active_agent_turn_group = None
+        state.agent_turn_group_sequence = 0
+        state.agent_stage_closed = False
         self.set_session_phase("Preparing", state.session_id)
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
@@ -27497,17 +27889,15 @@ class MainWindow(QMainWindow):
         )
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
+        self._attach_live_agent_stage(state, state.temp_thinking_bubble, create_group=True)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
-            office_card.add_process_widget(state.temp_thinking_bubble)
             office_card.add_process_note("本地模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
             log_ppt_agent_debug(
                 "process_agent_office_card_attached",
                 session_id=state.session_id,
                 process_widget_count=office_card.process_widget_count(),
             )
-        else:
-            state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
 
@@ -27566,6 +27956,9 @@ class MainWindow(QMainWindow):
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
+        state.active_agent_turn_group = None
+        state.agent_turn_group_sequence = 0
+        state.agent_stage_closed = False
         self.set_session_phase("Preparing", state.session_id)
         if state.session_id == self.current_session_id:
             self.current_content_buffer = ""
@@ -27578,17 +27971,15 @@ class MainWindow(QMainWindow):
         )
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
+        self._attach_live_agent_stage(state, state.temp_thinking_bubble, create_group=True)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
         if office_card is not None:
-            office_card.add_process_widget(state.temp_thinking_bubble)
             office_card.add_process_note("后台模型流已启动，等待模型返回 thinking、工具或正文。", tone="success")
             log_ppt_agent_debug(
                 "process_daemon_office_card_attached",
                 session_id=state.session_id,
                 process_widget_count=office_card.process_widget_count(),
             )
-        else:
-            state.chat_layout.insertWidget(state.chat_layout.count()-1, state.temp_thinking_bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=True)
         self.process_ui_events(force=True)
         state.daemon_running = True
@@ -28251,6 +28642,7 @@ class MainWindow(QMainWindow):
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
+        self._ensure_live_agent_stage(state)
         state.current_content_buffer += text
         self._timeline_append_text_delta(state, "content_fragment", text)
         if state.content_flush_timer and not state.content_flush_timer.isActive():
@@ -28265,6 +28657,7 @@ class MainWindow(QMainWindow):
             return
         if turn_id is not None and turn_id <= state.completed_turn_id:
             return
+        self._ensure_live_agent_stage(state)
         delta = text or ""
         if delta.strip():
             if state.pending_clarify_questions:
@@ -28402,6 +28795,77 @@ class MainWindow(QMainWindow):
             tail_signature = msg_signature
         return deduped_delta
 
+    def _annotate_generated_messages_for_unified_turn(self, state, generated_messages):
+        """Attach UI-only projection metadata without changing provider wire messages."""
+        if not state or not isinstance(generated_messages, list):
+            return generated_messages
+        events = sorted(
+            [
+                event for event in (getattr(state, "ui_timeline_events", []) or [])
+                if isinstance(event, dict)
+                and str(event.get("turn_id") or "") == str(getattr(state, "active_turn_id", ""))
+            ],
+            key=lambda item: int(item.get("sequence") or 0),
+        )
+        ordered_stages = []
+        for event in events:
+            key = (str(event.get("group_id") or ""), str(event.get("stage_id") or ""))
+            if all(key) and key not in ordered_stages:
+                ordered_stages.append(key)
+        if not ordered_stages:
+            bubble = getattr(state, "last_agent_bubble", None)
+            key = (
+                str(getattr(bubble, "ui_turn_group_id", "")),
+                str(getattr(bubble, "ui_stage_id", "")),
+            )
+            if all(key):
+                ordered_stages.append(key)
+
+        assistant_index = 0
+        tool_stage_by_id = {
+            str(event.get("tool_call_id")): (
+                str(event.get("group_id") or ""),
+                str(event.get("stage_id") or ""),
+            )
+            for event in events
+            if event.get("kind") == "tool" and str(event.get("tool_call_id") or "")
+        }
+        last_key = ordered_stages[-1] if ordered_stages else ("", "")
+        for message in generated_messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "")
+            key = last_key
+            if role == "assistant":
+                if assistant_index < len(ordered_stages):
+                    key = ordered_stages[assistant_index]
+                assistant_index += 1
+                meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+                meta.update({
+                    "ui_turn_id": str(getattr(state, "active_turn_id", "")),
+                    "ui_turn_group_id": key[0],
+                    "ui_stage_id": key[1],
+                    "ui_reply_kind": (
+                        "stage" if message.get("tool_calls")
+                        else "final" if str(message.get("content") or "").strip()
+                        else "error"
+                    ),
+                })
+                message["meta"] = meta
+                for tool_call in message.get("tool_calls") or []:
+                    if isinstance(tool_call, dict) and tool_call.get("id"):
+                        tool_stage_by_id.setdefault(str(tool_call.get("id")), key)
+            elif role == "tool":
+                key = tool_stage_by_id.get(str(message.get("tool_call_id") or ""), last_key)
+                meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+                meta.update({
+                    "ui_turn_id": str(getattr(state, "active_turn_id", "")),
+                    "ui_turn_group_id": key[0],
+                    "ui_stage_id": key[1],
+                })
+                message["meta"] = meta
+        return generated_messages
+
     def handle_llm_response(self, result, session_id=None, turn_id=None):
         state = self.get_session(session_id)
         if not state:
@@ -28448,6 +28912,11 @@ class MainWindow(QMainWindow):
             state.content_flush_timer.stop()
         if state.thinking_flush_timer and state.thinking_flush_timer.isActive():
             state.thinking_flush_timer.stop()
+        if getattr(state, "agent_stage_closed", False) and (
+            (isinstance(result, dict) and str(result.get("content") or "").strip())
+            or (isinstance(result, dict) and "error" in result)
+        ):
+            self._append_live_thinking_segment(state)
         self.flush_session_content(state.session_id, final=True)
         self.flush_session_thinking(state.session_id)
         is_current = state.session_id == self.current_session_id
@@ -28484,13 +28953,48 @@ class MainWindow(QMainWindow):
                 state.first_submit_diagnostic_turn_id = 0
             self._reject_unapplied_guidance(state, restore_input=True)
             self._timeline_close_open_events(state, status="failed")
-            self._timeline_append_event(state, "error", status="failed", text=str(result.get("error") or "未知错误"), finished_at=time.time())
+            self._timeline_append_event(
+                state,
+                "error",
+                status="failed",
+                text=str(result.get("error") or "未知错误"),
+                reply_kind="error",
+                finished_at=time.time(),
+            )
             self._persist_pending_guidance(state)
             self.append_log(f"Error: {result['error']}")
             self.add_system_toast(f"任务执行失败：{result['error']}", "error", session_id=state.session_id)
             bubble.stop_thinking_timers()
             bubble.update_thinking(duration=None, is_final=True)
-            bubble.set_main_content(f"⚠️ Error: {result['error']}", final=True)
+            bubble.set_message_actions_enabled(False)
+            error_text = f"⚠️ Error: {result['error']}"
+            bubble.set_main_content(error_text, final=True)
+            error_message_id = self._new_message_id()
+            state.messages.append({
+                "id": error_message_id,
+                "role": "assistant",
+                "content": error_text,
+                "reasoning": "",
+                "content_parts": [{"type": "text", "text": error_text}],
+                "meta": {
+                    "ui_only": True,
+                    "ui_turn_id": str(getattr(state, "active_turn_id", "")),
+                    "ui_turn_group_id": str(getattr(bubble, "ui_turn_group_id", "")),
+                    "ui_stage_id": str(getattr(bubble, "ui_stage_id", "")),
+                    "ui_reply_kind": "error",
+                },
+            })
+            state.messages = self.chat_storage.normalize_messages(state.messages)
+            self._rebuild_session_render_spans(state)
+            self.save_chat_history(session_id=state.session_id)
+            log_sub_agent_runtime(
+                "ui_assistant_turn_failed",
+                session_id=state.session_id,
+                turn_id=str(getattr(state, "active_turn_id", "")),
+                group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                stage_id=str(getattr(bubble, "ui_stage_id", "")),
+                error=str(result.get("error") or "未知错误"),
+            )
             self._finish_office_draft_task_card(state, failed_message=self._office_task_failed_title(state))
             self.request_session_scroll_to_bottom(state.session_id, force=False)
             state.current_content_buffer = ""
@@ -28529,6 +29033,7 @@ class MainWindow(QMainWindow):
         if open_content_event is not None:
             open_content_event["kind"] = "final_content"
             open_content_event["status"] = "completed"
+            open_content_event["reply_kind"] = "final"
             open_content_event["finished_at"] = time.time()
         elif (content or "").strip():
             self._timeline_append_event(
@@ -28536,6 +29041,7 @@ class MainWindow(QMainWindow):
                 "final_content",
                 status="completed",
                 text=content,
+                reply_kind="final",
                 finished_at=time.time(),
             )
         generated_messages_raw = result.get("generated_messages", [])
@@ -28554,7 +29060,7 @@ class MainWindow(QMainWindow):
                             content_parts = msg.get("content_parts") or content_parts
                         if not (reasoning or "").strip():
                             reasoning = msg.get("reasoning") or msg.get("reasoning_content") or reasoning
-                        break
+                    break
         tool_results = {}
         if generated_messages:
             for msg in generated_messages:
@@ -28571,8 +29077,31 @@ class MainWindow(QMainWindow):
                 tool_calls.extend(msg.get("tool_calls") or [])
         assistant_source_message_id = self._assistant_source_message_id_from_messages(generated_messages)
 
-        if not (content or "").strip() and not tool_calls:
-            content = "任务已处理完成，可展开上方深度思考查看执行记录。"
+        missing_final_content = not (content or "").strip()
+        if missing_final_content:
+            content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
+            if open_content_event is not None:
+                open_content_event["status"] = "error"
+                open_content_event["reply_kind"] = "error"
+                open_content_event["text"] = content
+            else:
+                self._timeline_append_event(
+                    state,
+                    "final_content",
+                    status="error",
+                    text=content,
+                    reply_kind="error",
+                    finished_at=time.time(),
+                )
+            log_sub_agent_runtime(
+                "ui_assistant_turn_missing_final_content",
+                session_id=state.session_id,
+                turn_id=str(getattr(state, "active_turn_id", "")),
+                group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+                stage_id=str(getattr(bubble, "ui_stage_id", "")),
+            )
+
+        bubble.set_message_actions_enabled(not missing_final_content)
 
         has_thinking_text = False
         for timeline_index in range(bubble.think_container_layout.count() - 1, -1, -1):
@@ -28613,6 +29142,7 @@ class MainWindow(QMainWindow):
             bubble.set_main_content(content, content_parts=content_parts, final=True)
         if assistant_source_message_id:
             bubble.set_source_message_id(assistant_source_message_id)
+            bubble.set_message_actions_enabled(not missing_final_content)
         self._finish_office_draft_task_card(state, content=content, bubble=bubble)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
@@ -28635,19 +29165,32 @@ class MainWindow(QMainWindow):
                 }, session_id=state.session_id)
 
         if generated_messages:
+            self._annotate_generated_messages_for_unified_turn(state, generated_messages)
             state.messages.extend(generated_messages)
         elif isinstance(generated_messages_raw, list) and generated_messages_raw:
             pass
         else:
             assistant_source_message_id = self._new_message_id()
-            state.messages.append({
+            fallback_message = {
                 "id": assistant_source_message_id,
                 "role": role, 
                 "content": content,
                 "reasoning": reasoning,
                 "content_parts": content_parts
-            })
+            }
+            self._annotate_generated_messages_for_unified_turn(state, [fallback_message])
+            state.messages.append(fallback_message)
             bubble.set_source_message_id(assistant_source_message_id)
+        log_sub_agent_runtime(
+            "ui_assistant_turn_finished",
+            session_id=state.session_id,
+            turn_id=str(getattr(state, "active_turn_id", "")),
+            group_id=str(getattr(bubble, "ui_turn_group_id", "")),
+            stage_id=str(getattr(bubble, "ui_stage_id", "")),
+            content_len=len(str(content or "")),
+            generated_message_count=len(generated_messages),
+        )
+        state.agent_stage_closed = True
         state.pending_guidance_messages = []
         state.messages = self.chat_storage.normalize_messages(state.messages)
         self._rebuild_session_render_spans(state)

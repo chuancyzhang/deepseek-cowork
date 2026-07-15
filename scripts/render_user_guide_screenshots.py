@@ -28,6 +28,7 @@ import main
 
 
 OUTPUT_DIR = Path(os.environ.get("COWORK_SCREENSHOT_OUTPUT_DIR") or (ROOT / "images" / "user-guide"))
+SCREENSHOT_SCOPE = str(os.environ.get("COWORK_SCREENSHOT_SCOPE") or "").strip().lower()
 
 
 def process_events(delay_ms=120):
@@ -56,6 +57,55 @@ def save_window_with_popups(window, filename, delay_ms=120):
     output_path = OUTPUT_DIR / filename
     if pixmap.isNull() or not pixmap.save(str(output_path), "PNG"):
         raise RuntimeError(f"Unable to capture screenshot with popups: {output_path}")
+
+
+def render_assistant_turn_screens(window):
+    state = window.get_current_session()
+    window._retire_session_empty_state(state, reason="user_guide_assistant_turn")
+    window.add_chat_bubble(
+        "User",
+        "请检查工作区和现有测试，再给出最终修改说明。",
+        animate=False,
+        source_message_id="guide-turn-user",
+    )
+    turn_group = main.AssistantTurnGroup("guide-turn-group")
+    state.chat_layout.insertWidget(state.chat_layout.count() - 1, turn_group)
+    stage = window._create_agent_chat_bubble(state)
+    window._connect_chat_bubble_actions(stage, state)
+    turn_group.add_stage(stage, "guide-turn-group:stage-1")
+    stage.update_thinking("先分析任务目标，再检查工作区文件。")
+    tool = main.ToolCallCard("run_command", {"command": "python -m pytest"}, "guide-turn-tool")
+    stage.add_tool_card(tool)
+    tool.set_result("测试通过")
+    stage.update_thinking(duration=10.2, is_final=True)
+    stage.set_message_actions_enabled(False)
+    stage.set_main_content("先完成环境与测试检查。", final=True)
+    stage.think_toggle_btn.setChecked(True)
+    final = window._create_agent_chat_bubble(state)
+    window._connect_chat_bubble_actions(final, state)
+    turn_group.add_stage(final, "guide-turn-group:stage-2")
+    final.update_thinking("根据检查结果整理最终答复。")
+    final.update_thinking(duration=4.1, is_final=True)
+    final.set_source_message_id("guide-turn-final")
+    final.set_main_content("现有测试已经通过。我已按验证结果整理最终修改说明。", final=True)
+    save_widget(window, "37-thinking-expanded.png", 220)
+
+    stage.think_toggle_btn.setChecked(False)
+    final.set_message_actions_enabled(False)
+    window.add_turn_guidance_inline(
+        {"id": "guide-timeline-demo", "content": "先验证现有测试，再继续修改界面。"},
+        status="applied",
+    )
+    followup_group = main.AssistantTurnGroup("guide-followup-group")
+    state.chat_layout.insertWidget(state.chat_layout.count() - 1, followup_group)
+    followup = window._create_agent_chat_bubble(state)
+    window._connect_chat_bubble_actions(followup, state)
+    followup_group.add_stage(followup, "guide-followup-group:stage-1")
+    followup.update_thinking("测试通过，继续整理最终结果。")
+    followup.update_thinking(duration=4.1, is_final=True)
+    followup.set_source_message_id("guide-followup-final")
+    followup.set_main_content("现有测试已经通过。我已按验证结果整理最终修改说明。", final=True)
+    save_widget(window, "38-guidance-timeline.png", 220)
 
 
 def select_settings_page(dialog, label):
@@ -119,6 +169,9 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "assistant-turn":
+            render_assistant_turn_screens(window)
+            return
         save_widget(window, "04-home-screen.png", 250)
         model_style = window.model_select_btn.styleSheet()
         window.model_select_btn.setStyleSheet(main.apple_tool_button_style(True))
@@ -224,24 +277,45 @@ def main_run():
             user_bubble.begin_inline_edit()
             save_widget(user_bubble, "36-history-message-edit.png", 200)
             user_bubble.cancel_inline_edit()
-        thinking_bubble = window.add_chat_bubble("Agent", "", animate=False)
+        state = window.get_current_session()
+        turn_group = main.AssistantTurnGroup("guide-turn-group")
+        state.chat_layout.insertWidget(state.chat_layout.count() - 1, turn_group)
+        thinking_bubble = window._create_agent_chat_bubble(state)
+        window._connect_chat_bubble_actions(thinking_bubble, state)
+        turn_group.add_stage(thinking_bubble, "guide-turn-group:stage-1")
         if thinking_bubble is not None:
             thinking_bubble.update_thinking("先分析任务目标，再检查工作区文件。")
             demo_tool = main.ToolCallCard("run_command", {"command": "python -m unittest"}, "guide-demo-tool")
             thinking_bubble.add_tool_card(demo_tool)
             demo_tool.set_result("测试通过")
             thinking_bubble.update_thinking(duration=10.2, is_final=True)
+            thinking_bubble.set_message_actions_enabled(False)
+            thinking_bubble.set_main_content("先完成环境与测试检查。", final=True)
             thinking_bubble.think_toggle_btn.setChecked(True)
+
+            final_bubble = window._create_agent_chat_bubble(state)
+            window._connect_chat_bubble_actions(final_bubble, state)
+            turn_group.add_stage(final_bubble, "guide-turn-group:stage-2")
+            final_bubble.update_thinking("根据检查结果整理最终答复。")
+            final_bubble.update_thinking(duration=4.1, is_final=True)
+            final_bubble.set_source_message_id("guide-final-message")
+            final_bubble.set_main_content("现有测试已经通过。我已按验证结果整理最终修改说明。", final=True)
             save_widget(window, "37-thinking-expanded.png")
             thinking_bubble.think_toggle_btn.setChecked(False)
+            final_bubble.set_message_actions_enabled(False)
 
             window.add_turn_guidance_inline(
                 {"id": "guide-timeline-demo", "content": "先验证现有测试，再继续修改界面。"},
                 status="applied",
             )
-            followup_bubble = window.add_chat_bubble("Agent", "", animate=False)
+            followup_group = main.AssistantTurnGroup("guide-followup-group")
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, followup_group)
+            followup_bubble = window._create_agent_chat_bubble(state)
+            window._connect_chat_bubble_actions(followup_bubble, state)
+            followup_group.add_stage(followup_bubble, "guide-followup-group:stage-1")
             followup_bubble.update_thinking("测试通过，继续整理最终结果。")
             followup_bubble.update_thinking(duration=4.1, is_final=True)
+            followup_bubble.set_source_message_id("guide-followup-final")
             followup_bubble.set_main_content(
                 "现有测试已经通过。我已按验证结果整理最终修改说明。",
                 final=True,

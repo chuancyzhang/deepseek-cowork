@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBo
 from core.chat_storage import ChatStorage
 
 from main import (
+    AssistantTurnGroup,
     ChatBubble,
     ComposerActionPopover,
     ConversationSkillOptionsDialog,
@@ -475,14 +476,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         try:
             state = window.get_current_session()
             window._retire_session_empty_state(state, reason="test_guidance")
-            first = ChatBubble("Agent", "", thinking="...")
-            first.update_thinking("先分析")
-            first.set_main_content("阶段回复", final=False)
-            state.chat_layout.insertWidget(state.chat_layout.count() - 1, first)
-            state.temp_thinking_bubble = first
-            state.last_agent_bubble = first
             state.live_activity = True
             state.active_turn_id = 1
+            first = window._append_live_thinking_segment(state)
+            first_group = state.active_agent_turn_group
+            first.update_thinking("先分析")
+            first.set_main_content("阶段回复", final=False)
             state.current_content_buffer = "阶段回复"
             state.current_thinking_buffer = "先分析"
 
@@ -499,12 +498,315 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
             self.assertEqual(first.main_content_text, "阶段回复")
             self.assertIsNot(first, continuation)
-            self.assertLess(state.chat_layout.indexOf(first), state.chat_layout.indexOf(guidance_wrapper))
-            self.assertLess(state.chat_layout.indexOf(guidance_wrapper), state.chat_layout.indexOf(continuation))
+            self.assertLess(state.chat_layout.indexOf(first_group), state.chat_layout.indexOf(guidance_wrapper))
+            continuation_group = continuation.parentWidget()
+            self.assertIsInstance(continuation_group, AssistantTurnGroup)
+            self.assertLess(state.chat_layout.indexOf(guidance_wrapper), state.chat_layout.indexOf(continuation_group))
             self.assertIn("深度思考", first.think_toggle_btn.text())
             self.assertIn("深度思考", continuation.think_toggle_btn.text())
             self.assertEqual(continuation.session_id, state.session_id)
             self.assertIs(continuation.chat_storage, window.chat_storage)
+            self.assertFalse(first.copy_result_btn.isVisible())
+            self.assertFalse(first.office_draft_btn.isVisible())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_rejected_daemon_guidance_does_not_mark_reply_as_stopped(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            bubble = ChatBubble("Agent", "")
+            bubble.set_main_content("仍在处理", final=False)
+            state.temp_thinking_bubble = bubble
+            state.last_agent_bubble = bubble
+            state.active_turn_id = 1
+            worker = object()
+            state.guidance_workers = [worker]
+            message = {"id": "guide-rejected", "role": "user", "content": "调整"}
+            with patch.object(window, "_restore_rejected_guidance"):
+                window._handle_daemon_guidance_result(
+                    {"status": "error", "accepted": False},
+                    worker,
+                    state.session_id,
+                    1,
+                    message,
+                    "调整",
+                    [],
+                    "调整",
+                    [],
+                )
+            self.assertEqual(bubble.main_content_text, "仍在处理")
+            self.assertNotIn("任务已停止", bubble.main_content_text)
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_stop_marks_partial_stage_without_message_actions(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_stop_stage")
+            state.active_turn_id = 1
+            bubble = window._append_live_thinking_segment(state)
+            state.current_content_buffer = "部分结果"
+            bubble.set_main_content("部分结果", final=False)
+            window.stop_agent()
+            self.assertIn("任务已停止", bubble.main_content_text)
+            self.assertTrue(bubble.copy_result_btn.isHidden())
+            self.assertTrue(bubble.office_draft_btn.isHidden())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_error_finishes_current_group_without_message_actions_and_persists_status(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_error_stage")
+            state.live_activity = True
+            state.active_turn_id = 1
+            bubble = window._append_live_thinking_segment(state)
+            window.handle_llm_response({"error": "provider failed"}, state.session_id, turn_id=1)
+            self.assertIn("provider failed", bubble.main_content_text)
+            self.assertTrue(bubble.copy_result_btn.isHidden())
+            self.assertTrue(bubble.office_draft_btn.isHidden())
+            error_message = state.messages[-1]
+            self.assertTrue(error_message["meta"]["ui_only"])
+            self.assertEqual(error_message["meta"]["ui_reply_kind"], "error")
+            self.assertFalse(any(message.get("id") == error_message["id"] for message in window._messages_for_worker(state, {})))
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_tool_rounds_append_stages_inside_one_assistant_turn_group(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_unified_turn")
+            state.live_activity = True
+            state.active_turn_id = 1
+            first = window._append_live_thinking_segment(state)
+            first.update_thinking("先检查")
+            state.current_content_buffer = "先执行检查。"
+            window.flush_session_content(state.session_id, final=False)
+
+            window.add_tool_card(
+                {"id": "tool-unified", "name": "run_command", "args": {"command": "pytest"}},
+                session_id=state.session_id,
+                animate=False,
+            )
+            group = state.active_agent_turn_group
+            self.assertIsInstance(group, AssistantTurnGroup)
+            self.assertEqual(len(group.stage_bubbles), 1)
+            self.assertFalse(first.copy_result_btn.isVisible())
+            self.assertFalse(first.office_draft_btn.isVisible())
+
+            window.handle_thinking_signal("继续分析", state.session_id, turn_id=1)
+            second = state.temp_thinking_bubble
+            self.assertIsNot(first, second)
+            self.assertIs(second.parentWidget(), group)
+            self.assertEqual(len(group.stage_bubbles), 2)
+            self.assertEqual(state.chat_layout.indexOf(group), 0)
+            window.handle_content_signal("检查已通过。", state.session_id, turn_id=1)
+            window.handle_llm_response(
+                {
+                    "role": "assistant",
+                    "content": "检查已通过。",
+                    "reasoning": "继续分析",
+                    "duration": 0.2,
+                    "generated_messages": [
+                        {
+                            "id": "assistant-live-stage",
+                            "role": "assistant",
+                            "content": "先执行检查。",
+                            "reasoning_content": "先检查",
+                            "tool_calls": [{
+                                "id": "tool-unified",
+                                "type": "function",
+                                "function": {"name": "run_command", "arguments": "{\"command\": \"pytest\"}"},
+                            }],
+                        },
+                        {"id": "tool-live-result", "role": "tool", "tool_call_id": "tool-unified", "content": "ok"},
+                        {
+                            "id": "assistant-live-final",
+                            "role": "assistant",
+                            "content": "检查已通过。",
+                            "reasoning_content": "继续分析",
+                        },
+                    ],
+                },
+                state.session_id,
+                turn_id=1,
+            )
+            self.assertIs(state.chat_layout.itemAt(0).widget(), group)
+            self.assertTrue(first.copy_result_btn.isHidden())
+            self.assertFalse(second.copy_result_btn.isHidden())
+            assistant_messages = [message for message in state.messages if message.get("role") == "assistant"]
+            self.assertEqual(assistant_messages[0]["meta"]["ui_reply_kind"], "stage")
+            self.assertEqual(assistant_messages[-1]["meta"]["ui_reply_kind"], "final")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_history_restores_one_group_and_final_actions_only(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_unified_history")
+            messages = [
+                {
+                    "id": "assistant-stage",
+                    "role": "assistant",
+                    "content": "先执行检查。",
+                    "reasoning_content": "分析环境",
+                    "tool_calls": [{
+                        "id": "tool-history",
+                        "type": "function",
+                        "function": {"name": "run_command", "arguments": "{\"command\": \"pytest\"}"},
+                    }],
+                },
+                {"id": "tool-result", "role": "tool", "tool_call_id": "tool-history", "content": "ok"},
+                {
+                    "id": "assistant-final",
+                    "role": "assistant",
+                    "content": "检查已通过。",
+                    "reasoning_content": "汇总结论",
+                },
+            ]
+            inserted = window.render_message_batch(messages, state.session_id, animate=False)
+            self.assertEqual(inserted, 1)
+            group = state.chat_layout.itemAt(0).widget()
+            self.assertIsInstance(group, AssistantTurnGroup)
+            self.assertEqual(len(group.stage_bubbles), 2)
+            stage, final = group.stage_bubbles
+            self.assertTrue(stage.copy_result_btn.isHidden())
+            self.assertTrue(stage.office_draft_btn.isHidden())
+            self.assertFalse(final.copy_result_btn.isHidden())
+            self.assertFalse(final.office_draft_btn.isHidden())
+            self.assertEqual(final.main_content_text, "检查已通过。")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_history_guidance_splits_groups_and_suppresses_pre_guidance_actions(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_legacy_guidance_history")
+            messages = [
+                {"id": "assistant-before-guide", "role": "assistant", "content": "先给出阶段结论。"},
+                {
+                    "id": "legacy-guide",
+                    "role": "user",
+                    "content": "继续验证测试",
+                    "meta": {"same_turn_guidance": True, "turn_id": "1"},
+                },
+                {"id": "assistant-after-guide", "role": "assistant", "content": "最终结论。"},
+            ]
+            inserted = window.render_message_batch(messages, state.session_id, animate=False)
+            self.assertEqual(inserted, 3)
+            first_group = state.chat_layout.itemAt(0).widget()
+            guidance = state.chat_layout.itemAt(1).widget()
+            second_group = state.chat_layout.itemAt(2).widget()
+            self.assertIsInstance(first_group, AssistantTurnGroup)
+            self.assertIsInstance(second_group, AssistantTurnGroup)
+            self.assertIsNotNone(guidance)
+            self.assertTrue(first_group.stage_bubbles[-1].copy_result_btn.isHidden())
+            self.assertFalse(second_group.stage_bubbles[-1].copy_result_btn.isHidden())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_worker_messages_strip_unified_ui_metadata(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.messages = [{
+                "id": "assistant-final",
+                "role": "assistant",
+                "content": "完成",
+                "meta": {
+                    "ui_turn_id": "1",
+                    "ui_turn_group_id": "turn-1-group-1",
+                    "ui_stage_id": "turn-1-group-1:stage-1",
+                    "ui_reply_kind": "final",
+                    "provider_hint": "keep",
+                },
+            }]
+            messages = window._messages_for_worker(state, {})
+            self.assertEqual(messages[0]["meta"], {"provider_hint": "keep"})
+            self.assertEqual(state.messages[0]["meta"]["ui_turn_group_id"], "turn-1-group-1")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_history_missing_final_body_shows_error_without_actions(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_missing_history_final")
+            messages = [
+                {
+                    "id": "assistant-stage",
+                    "role": "assistant",
+                    "content": "阶段内容不能成为最终答复。",
+                    "tool_calls": [{
+                        "id": "tool-missing-final",
+                        "type": "function",
+                        "function": {"name": "run_command", "arguments": "{}"},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "tool-missing-final", "content": "ok"},
+                {"id": "assistant-empty-final", "role": "assistant", "content": ""},
+            ]
+            self.assertEqual(window.render_message_batch(messages, state.session_id, animate=False), 1)
+            group = state.chat_layout.itemAt(0).widget()
+            final = group.stage_bubbles[-1]
+            self.assertIn("未收到最终答复", final.main_content_text)
+            self.assertNotIn("阶段内容不能成为最终答复", final.main_content_text)
+            self.assertTrue(final.copy_result_btn.isHidden())
+            self.assertTrue(final.office_draft_btn.isHidden())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_live_missing_final_body_does_not_promote_stage_reply(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_missing_live_final")
+            state.live_activity = True
+            state.active_turn_id = 1
+            bubble = window._append_live_thinking_segment(state)
+            window.handle_llm_response(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "generated_messages": [
+                        {
+                            "id": "assistant-stage",
+                            "role": "assistant",
+                            "content": "阶段内容不能成为最终答复。",
+                            "tool_calls": [{
+                                "id": "tool-live-missing-final",
+                                "type": "function",
+                                "function": {"name": "run_command", "arguments": "{}"},
+                            }],
+                        },
+                        {"role": "tool", "tool_call_id": "tool-live-missing-final", "content": "ok"},
+                        {"id": "assistant-empty-final", "role": "assistant", "content": ""},
+                    ],
+                },
+                state.session_id,
+                turn_id=1,
+            )
+            self.assertIn("未收到最终答复", bubble.main_content_text)
+            self.assertNotIn("阶段内容不能成为最终答复", bubble.main_content_text)
+            self.assertTrue(bubble.copy_result_btn.isHidden())
+            self.assertTrue(bubble.office_draft_btn.isHidden())
+            assistants = [message for message in state.messages if message.get("role") == "assistant"]
+            self.assertEqual(assistants[-1]["meta"]["ui_reply_kind"], "error")
         finally:
             window.close()
             window.deleteLater()
@@ -555,6 +857,24 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         events, warning = MainWindow._normalize_ui_timeline_events(None, [{"kind": "unknown"}])
         self.assertEqual(events, [])
         self.assertTrue(warning)
+        events, warning = MainWindow._normalize_ui_timeline_events(
+            None,
+            [{
+                "kind": "thinking",
+                "sequence": 2,
+                "started_at": 2.0,
+                "group_id": "turn-1-group-1",
+                "stage_id": "turn-1-group-1:stage-1",
+            }],
+        )
+        self.assertEqual(events[0]["group_id"], "turn-1-group-1")
+        self.assertEqual(warning, "")
+        events, warning = MainWindow._normalize_ui_timeline_events(
+            None,
+            [{"kind": "thinking", "sequence": 3, "started_at": 3.0, "group_id": "incomplete"}],
+        )
+        self.assertEqual(events, [])
+        self.assertIn("不完整", warning)
 
     def test_ui_timeline_coalesces_deltas_and_splits_at_guidance(self):
         class TimelineStub:

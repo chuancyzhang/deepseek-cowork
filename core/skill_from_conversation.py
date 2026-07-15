@@ -2,8 +2,10 @@ import ast
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
+import copy
 from dataclasses import dataclass
 
 from core.env_utils import get_app_data_dir
@@ -548,16 +550,24 @@ def save_new_skill(draft, target_root=None):
     if os.path.exists(target_dir):
         return SaveResult(False, f"Skill '{skill_name}' already exists.", target_dir)
 
+    staging_dir = ""
     try:
-        os.makedirs(os.path.join(target_dir, "experience"), exist_ok=False)
-        _atomic_write_text(os.path.join(target_dir, "SKILL.md"), build_skill_md(draft))
-        _atomic_write_json(os.path.join(target_dir, "skill.json"), build_skill_json(draft))
+        os.makedirs(root, exist_ok=True)
+        staging_dir = tempfile.mkdtemp(prefix=f".{skill_name}-staging-", dir=root)
+        os.makedirs(os.path.join(staging_dir, "experience"), exist_ok=False)
+        _atomic_write_text(os.path.join(staging_dir, "SKILL.md"), build_skill_md(draft))
+        _atomic_write_json(os.path.join(staging_dir, "skill.json"), build_skill_json(draft))
         if impl_py:
-            _atomic_write_text(os.path.join(target_dir, "impl.py"), impl_py.rstrip() + "\n")
-        write_script_assets(target_dir, draft)
+            _atomic_write_text(os.path.join(staging_dir, "impl.py"), impl_py.rstrip() + "\n")
+        write_script_assets(staging_dir, draft)
+        os.replace(staging_dir, target_dir)
+        staging_dir = ""
         return SaveResult(True, f"Skill '{skill_name}' created.", target_dir)
     except Exception as exc:
         return SaveResult(False, f"Failed to create skill: {exc}", target_dir)
+    finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def merge_skill_json_metadata(skill_record, tags=None, triggers=None):
@@ -593,15 +603,12 @@ def merge_skill_json_metadata(skill_record, tags=None, triggers=None):
         return SaveResult(False, f"Failed to update skill metadata: {exc}", json_path)
 
 
-def update_existing_skill_from_draft(skill_manager, skill_name, draft, strategy="append"):
+def _update_existing_skill_from_draft_in_place(skill_manager, skill_name, draft, strategy="append"):
     if not skill_manager:
         return SaveResult(False, "SkillManager is not available.")
     if not skill_name:
         return SaveResult(False, "Target skill is required.")
     record = getattr(skill_manager, "skill_records", {}).get(skill_name)
-    if not record:
-        skill_manager.load_skills()
-        record = getattr(skill_manager, "skill_records", {}).get(skill_name)
     if not record:
         return SaveResult(False, f"Skill '{skill_name}' not found.")
 
@@ -637,5 +644,60 @@ def update_existing_skill_from_draft(skill_manager, skill_name, draft, strategy=
     script_result = merge_script_assets_metadata(record, draft)
     if not script_result.ok:
         return script_result
-    skill_manager.load_skills()
     return SaveResult(True, f"Skill '{skill_name}' updated.", record.get("path") or "")
+
+
+def update_existing_skill_from_draft(skill_manager, skill_name, draft, strategy="append"):
+    if not skill_manager or not skill_name:
+        return _update_existing_skill_from_draft_in_place(skill_manager, skill_name, draft, strategy=strategy)
+    record = getattr(skill_manager, "skill_records", {}).get(skill_name)
+    target_path = os.path.abspath((record or {}).get("path") or "")
+    if not target_path or not os.path.isdir(target_path):
+        return SaveResult(False, f"Skill '{skill_name}' not found.")
+    parent_dir = os.path.dirname(target_path)
+    transaction_root = tempfile.mkdtemp(prefix=f".{skill_name}-transaction-", dir=parent_dir)
+    staged_path = os.path.join(transaction_root, skill_name)
+    backup_path = ""
+    try:
+        shutil.copytree(target_path, staged_path)
+        staged_manager = copy.copy(skill_manager)
+        staged_manager.skills_dirs = [transaction_root]
+        staged_manager.skill_records = dict(skill_manager.skill_records)
+        staged_record = copy.deepcopy(record)
+        staged_record["path"] = staged_path
+        staged_manager.skill_records[skill_name] = staged_record
+        result = _update_existing_skill_from_draft_in_place(
+            staged_manager,
+            skill_name,
+            draft,
+            strategy=strategy,
+        )
+        if not result.ok:
+            return result
+        validation = staged_manager.validate_skill(skill_name)
+        if not validation.get("ok"):
+            return SaveResult(False, "Skill validation failed: " + "; ".join(validation.get("issues") or []), target_path)
+        backup_path = tempfile.mkdtemp(prefix=f".{skill_name}-backup-", dir=parent_dir)
+        os.rmdir(backup_path)
+        os.replace(target_path, backup_path)
+        try:
+            os.replace(staged_path, target_path)
+        except Exception:
+            os.replace(backup_path, target_path)
+            backup_path = ""
+            raise
+        shutil.rmtree(backup_path, ignore_errors=True)
+        backup_path = ""
+        try:
+            refreshed_record = skill_manager._load_skill_record(skill_name, target_path)
+        except Exception:
+            refreshed_record = copy.deepcopy(staged_manager.skill_records.get(skill_name) or staged_record)
+        refreshed_record["path"] = target_path
+        skill_manager.skill_records[skill_name] = refreshed_record
+        return SaveResult(True, f"Skill '{skill_name}' updated.", target_path)
+    except Exception as exc:
+        return SaveResult(False, f"Failed to update skill atomically: {exc}", target_path)
+    finally:
+        if backup_path:
+            shutil.rmtree(backup_path, ignore_errors=True)
+        shutil.rmtree(transaction_root, ignore_errors=True)

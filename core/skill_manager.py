@@ -10,8 +10,11 @@ import uuid
 import tempfile
 import zipfile
 import ast
+import copy
+import threading
+import hashlib
 
-from .env_utils import ensure_package_installed, get_app_data_dir
+from .env_utils import get_app_data_dir
 from .mcp_client import (
     DEFAULT_MCP_TIMEOUT_SECONDS,
     TRANSPORT_STDIO,
@@ -25,7 +28,12 @@ from .mcp_client import (
     prepare_mcp_server_config,
     summarize_mcp_server,
 )
-from .sandbox_runtime import build_sandbox_env, get_runtime_executable, install_skill_dependencies
+from .sandbox_runtime import (
+    build_sandbox_env,
+    get_runtime_executable,
+    install_skill_dependencies,
+    read_skill_dependency_status,
+)
 from .skill_adapter import (
     EXCLUDED_DIRS,
     adapt_skill_directory,
@@ -76,6 +84,68 @@ def _humanize_skill_name(skill_name):
     return mapping.get(text, text.replace("-", " ").title())
 
 
+_SKILL_MODULE_CACHE = {}
+_SKILL_MODULE_CACHE_LOCK = threading.RLock()
+
+
+def _skill_impl_hash(impl_path):
+    digest = hashlib.sha256()
+    with open(impl_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_cached_skill_module(skill_name, impl_path):
+    content_hash = _skill_impl_hash(impl_path)
+    key = (os.path.abspath(impl_path), content_hash)
+    with _SKILL_MODULE_CACHE_LOCK:
+        module = _SKILL_MODULE_CACHE.get(key)
+        if module is not None:
+            return module
+        spec = importlib.util.spec_from_file_location(f"skills.{skill_name}.{content_hash[:12]}", impl_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Unable to load module spec for {impl_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SKILL_MODULE_CACHE[key] = module
+        return module
+
+
+class _LazySkillHandler:
+    def __init__(self, skill_name, impl_path, function_name, parameters_schema=None):
+        self.skill_name = skill_name
+        self.impl_path = impl_path
+        self.function_name = function_name
+        properties = (parameters_schema or {}).get("properties") or {}
+        parameters = [
+            inspect.Parameter(str(name), inspect.Parameter.KEYWORD_ONLY, default=None)
+            for name in properties
+            if str(name).isidentifier() and str(name) not in {"workspace_dir", "_context"}
+        ]
+        parameters.extend(
+            [
+                inspect.Parameter("workspace_dir", inspect.Parameter.KEYWORD_ONLY, default=None),
+                inspect.Parameter("_context", inspect.Parameter.KEYWORD_ONLY, default=None),
+            ]
+        )
+        self.__signature__ = inspect.Signature(parameters)
+        self.__name__ = function_name
+
+    def __call__(self, **kwargs):
+        module = _load_cached_skill_module(self.skill_name, self.impl_path)
+        handler = getattr(module, self.function_name, None)
+        if not callable(handler):
+            raise RuntimeError(
+                f"Skill '{self.skill_name}' binding '{self.function_name}' is not callable in {self.impl_path}."
+            )
+        signature = inspect.signature(handler)
+        if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in signature.parameters.values()):
+            return handler(**kwargs)
+        accepted = {name: value for name, value in kwargs.items() if name in signature.parameters}
+        return handler(**accepted)
+
+
 class SkillManager:
     ALWAYS_ALLOWED_SCOPE_TOOLS = {"tool_search", "parallel_tools"}
     MCP_SOURCE_FORMAT = "mcp_server"
@@ -110,10 +180,22 @@ class SkillManager:
         for folder in ("skills", "ai_skills"):
             self._append_skill_dir(os.path.join(base_dir, folder))
 
-    def __init__(self, workspace_dir=None, config_manager=None, auto_load=True, load_mcp_tools=True):
+    def __init__(
+        self,
+        workspace_dir=None,
+        config_manager=None,
+        auto_load=True,
+        load_mcp_tools=True,
+        prepare_dependencies=False,
+    ):
         self.workspace_dir = workspace_dir
         self.config_manager = config_manager
         self.load_mcp_tools = bool(load_mcp_tools)
+        self.prepare_dependencies = bool(prepare_dependencies)
+        self.catalog_revision = 0
+        self.dependency_coordinator = None
+        self.change_publisher = None
+        self._runtime_lock = threading.RLock()
         self.skills_dirs = []
 
         data_dir = get_app_data_dir()
@@ -142,6 +224,7 @@ class SkillManager:
         self.skill_prompts_brief = []
         self.skill_prompts_full = {}
         self.skill_records = {}
+        self.skill_load_errors = {}
         self.experience_packages = {}
         self.last_load_time = 0
         if auto_load:
@@ -152,6 +235,113 @@ class SkillManager:
 
     def set_workspace_dir(self, workspace_dir):
         self.workspace_dir = workspace_dir
+
+    def clone_for_runtime(
+        self,
+        workspace_dir=None,
+        config_manager=None,
+        catalog_revision=0,
+        dependency_coordinator=None,
+        change_publisher=None,
+    ):
+        """Create a cheap per-run view without scanning or importing Skill files."""
+        runtime = SkillManager(
+            workspace_dir,
+            config_manager or self.config_manager,
+            auto_load=False,
+            load_mcp_tools=False,
+            prepare_dependencies=False,
+        )
+        runtime.tools = {}
+        runtime.tool_definitions = []
+        runtime.tool_registry.clear()
+        runtime.tool_to_skill_map = dict(self.tool_to_skill_map)
+        runtime.tool_records = copy.deepcopy(self.tool_records)
+        runtime.skill_to_tools = copy.deepcopy(self.skill_to_tools)
+        runtime.loaded_skills_meta = copy.deepcopy(self.loaded_skills_meta)
+        runtime.loaded_skill_sources = dict(self.loaded_skill_sources)
+        runtime.skill_prompts_brief = list(self.skill_prompts_brief)
+        runtime.skill_prompts_full = dict(self.skill_prompts_full)
+        runtime.skill_records = copy.deepcopy(self.skill_records)
+        runtime.experience_packages = runtime.skill_records
+        runtime.last_load_time = self.last_load_time
+        runtime.catalog_revision = int(catalog_revision or 0)
+        runtime.dependency_coordinator = dependency_coordinator
+        runtime.change_publisher = change_publisher
+        for name, record in self.tool_registry.records.items():
+            handler = self.tools.get(name)
+            if not callable(handler):
+                continue
+            if record.skill_name == "builtin":
+                handler = getattr(runtime, getattr(handler, "__name__", ""), handler)
+            cloned = runtime.tool_registry.register(
+                name,
+                handler,
+                record.description,
+                record.parameters_schema,
+                skill_name=record.skill_name,
+                kind=record.kind,
+                aliases=record.aliases,
+                search_hint=record.search_hint,
+                read_only=record.read_only,
+                destructive=record.destructive,
+                allowed_modes=record.allowed_modes,
+                should_defer=record.should_defer,
+                always_load=record.always_load,
+                runtime_binding=record.runtime_binding,
+                skill_refs=record.skill_refs,
+                metadata=record.metadata,
+            )
+            if cloned:
+                runtime.tools[name] = handler
+                runtime.tool_definitions.append(cloned.to_definition())
+        return runtime
+
+    def apply_snapshot(self, snapshot):
+        """Replace this run view at a model boundary while preserving run-local state."""
+        refreshed = snapshot.runtime(
+            self.workspace_dir,
+            config_manager=self.config_manager,
+            dependency_coordinator=self.dependency_coordinator,
+            change_publisher=self.change_publisher,
+        )
+        for name, record in self.tool_registry.records.items():
+            skill_name = str(record.skill_name or "")
+            if not skill_name.startswith("mcp-") or name in refreshed.tools:
+                continue
+            handler = self.tools.get(name)
+            if not callable(handler):
+                continue
+            cloned = refreshed.tool_registry.register(
+                name,
+                handler,
+                record.description,
+                record.parameters_schema,
+                skill_name=record.skill_name,
+                kind=record.kind,
+                aliases=record.aliases,
+                search_hint=record.search_hint,
+                read_only=record.read_only,
+                destructive=record.destructive,
+                allowed_modes=record.allowed_modes,
+                should_defer=record.should_defer,
+                always_load=record.always_load,
+                runtime_binding=record.runtime_binding,
+                skill_refs=record.skill_refs,
+                metadata=record.metadata,
+            )
+            if cloned:
+                refreshed.tools[name] = handler
+                refreshed.tool_definitions.append(cloned.to_definition())
+                refreshed.tool_to_skill_map[name] = skill_name
+                refreshed.tool_records[name] = copy.deepcopy(self.tool_records.get(name) or {})
+                refreshed.skill_to_tools.setdefault(skill_name, []).append(name)
+                if skill_name in self.skill_records:
+                    refreshed.skill_records[skill_name] = copy.deepcopy(self.skill_records[skill_name])
+        with self._runtime_lock:
+            self.__dict__.update(refreshed.__dict__)
+            self.catalog_revision = snapshot.revision
+        return True
 
     def _scan_dist_dirs(self):
         if getattr(sys, "frozen", False):
@@ -923,25 +1113,17 @@ class SkillManager:
 
     def _load_legacy_implementation(self, skill_name, impl_path):
         try:
-            skill_spec = self._load_skill_json(os.path.dirname(impl_path))
-            declared_python_dependencies = self._coerce_string_list(skill_spec.get("python_dependencies"))
             python_path = build_sandbox_env(skill_id=skill_name).get("PYTHONPATH", "")
             for path in reversed([item for item in python_path.split(os.pathsep) if item]):
                 if os.path.isdir(path) and path not in sys.path:
                     sys.path.insert(0, path)
-            spec = importlib.util.spec_from_file_location(f"skills.{skill_name}", impl_path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Unable to load module spec for {impl_path}")
-            module = importlib.util.module_from_spec(spec)
             try:
-                spec.loader.exec_module(module)
+                module = _load_cached_skill_module(skill_name, impl_path)
             except ImportError as e:
-                missing_pkg = getattr(e, "name", None)
-                if missing_pkg and not declared_python_dependencies:
-                    ensure_package_installed(missing_pkg, skill_id=skill_name)
-                    spec.loader.exec_module(module)
-                else:
-                    raise e
+                raise ImportError(
+                    f"Skill '{skill_name}' implementation import failed during catalog build: {e}. "
+                    "Declare runtime packages in python_dependencies and import them inside the tool handler."
+                ) from e
             explicit_exports = getattr(module, "TOOL_EXPORTS", None)
             if explicit_exports is None:
                 explicit_exports = getattr(module, "TOOLS", None)
@@ -963,7 +1145,50 @@ class SkillManager:
                 tool_kind = "system_entry" if skill_name in self.SYSTEM_SKILLS else "legacy_function"
                 self._register_tool(skill_name, name, func, tool_kind=tool_kind)
         except Exception as e:
+            self.skill_load_errors[skill_name] = str(e)
             print(f"Error loading implementation {impl_path}: {e}")
+
+    def _register_declarative_tools(self, skill_name, skill_path, declarations):
+        impl_path = os.path.join(skill_path, "impl.py")
+        for declaration in declarations or []:
+            if not isinstance(declaration, dict):
+                raise ValueError(f"Skill '{skill_name}' tools entries must be JSON objects.")
+            tool_name = str(declaration.get("name") or "").strip()
+            if not tool_name:
+                raise ValueError(f"Skill '{skill_name}' has a tool declaration without a name.")
+            binding = declaration.get("binding") or declaration.get("runtime_binding") or f"impl.py:{tool_name}"
+            if isinstance(binding, dict):
+                binding = binding.get("target") or binding.get("binding") or binding.get("export_name") or tool_name
+            binding = str(binding or "").strip()
+            if ":" in binding:
+                relative_impl, function_name = binding.rsplit(":", 1)
+                resolved_impl = os.path.abspath(os.path.join(skill_path, relative_impl))
+            else:
+                resolved_impl = impl_path
+                function_name = binding
+            if os.path.commonpath([os.path.abspath(skill_path), resolved_impl]) != os.path.abspath(skill_path):
+                raise ValueError(f"Skill '{skill_name}' tool '{tool_name}' binding escapes the Skill directory.")
+            if not os.path.isfile(resolved_impl):
+                raise ValueError(f"Skill '{skill_name}' tool '{tool_name}' binding file is missing: {resolved_impl}")
+            parameters_schema = declaration.get("parameters_schema") or declaration.get("parameters") or {
+                "type": "object",
+                "properties": {},
+            }
+            export = dict(declaration)
+            export["name"] = tool_name
+            export["parameters_schema"] = parameters_schema
+            export["handler"] = _LazySkillHandler(
+                skill_name,
+                resolved_impl,
+                function_name or tool_name,
+                parameters_schema=parameters_schema,
+            )
+            export["runtime_binding"] = {
+                "type": "python_function",
+                "skill_name": skill_name,
+                "target": f"{os.path.relpath(resolved_impl, skill_path)}:{function_name or tool_name}",
+            }
+            self._register_explicit_tool_export(skill_name, export)
 
     def _register_builtin_tools(self):
         search_parameters_schema = {
@@ -1731,6 +1956,16 @@ class SkillManager:
         node_dependencies = self._coerce_string_list(spec.get("node_dependencies"))
         if not python_dependencies and not node_dependencies:
             return {"ok": True, "message": "No dependencies declared."}
+        if not self.prepare_dependencies:
+            status = read_skill_dependency_status(skill_name)
+            if not status:
+                status = {
+                    "ok": False,
+                    "pending": True,
+                    "message": "Dependencies will be prepared on first use.",
+                    "installed": False,
+                }
+            return status
         status = install_skill_dependencies(
             skill_name,
             python_dependencies=python_dependencies,
@@ -1860,17 +2095,41 @@ class SkillManager:
         _root, path, error = self._resolve_skill_file_path(skill_name, relative_path, require_writable=True)
         if error:
             return {"ok": False, "error": error}
+        original = None
+        existed = os.path.isfile(path)
+        temp_path = ""
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            if existed:
+                with open(path, "rb") as handle:
+                    original = handle.read()
+            fd, temp_path = tempfile.mkstemp(prefix=".skill-edit-", dir=os.path.dirname(path))
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(str(content or ""))
+            os.replace(temp_path, path)
+            temp_path = ""
             validation = self.validate_skill(skill_name)
-            self.load_skills()
             if not validation.get("ok"):
-                return {"ok": True, "error": "", "validation": validation}
+                if existed:
+                    fd, temp_path = tempfile.mkstemp(prefix=".skill-restore-", dir=os.path.dirname(path))
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(original or b"")
+                    os.replace(temp_path, path)
+                    temp_path = ""
+                else:
+                    os.remove(path)
+                return {
+                    "ok": False,
+                    "error": "Skill validation failed; the original file was restored: "
+                    + "; ".join(validation.get("issues") or []),
+                    "validation": validation,
+                }
             return {"ok": True, "error": "", "validation": validation}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def validate_skill(self, skill_name):
         skill_path = self._find_skill_path(skill_name)
@@ -1987,16 +2246,35 @@ class SkillManager:
                 "skill_name": skill_name,
                 "message": f"Skill '{skill_name}' already exists",
             }
-        result = adapt_skill_directory(source_path, target_path, skill_name=skill_name, source_format=source_format)
-        dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
-        message = result.get("message") or f"Skill '{skill_name}' imported successfully"
-        if not dependency_status.get("ok"):
-            message = f"{message}\nDependency setup incomplete: {dependency_status.get('message')}"
-        return {
-            "status": "imported",
-            "skill_name": skill_name,
-            "message": message,
-        }
+        staging_path = tempfile.mkdtemp(prefix=f".{skill_name}-staging-", dir=target_dir)
+        os.rmdir(staging_path)
+        try:
+            result = adapt_skill_directory(source_path, staging_path, skill_name=skill_name, source_format=source_format)
+            validation_issues = []
+            skill_json_path = os.path.join(staging_path, "skill.json")
+            with open(skill_json_path, "r", encoding="utf-8-sig") as handle:
+                if not isinstance(json.load(handle), dict):
+                    validation_issues.append("skill.json must contain a JSON object.")
+            impl_path = os.path.join(staging_path, "impl.py")
+            if os.path.isfile(impl_path):
+                with open(impl_path, "r", encoding="utf-8-sig") as handle:
+                    ast.parse(handle.read(), filename=impl_path)
+            if validation_issues:
+                raise ValueError("; ".join(validation_issues))
+            os.replace(staging_path, target_path)
+            staging_path = ""
+            dependency_status = self._prepare_skill_dependencies(skill_name, target_path)
+            message = result.get("message") or f"Skill '{skill_name}' imported successfully"
+            if not dependency_status.get("ok"):
+                message = f"{message}\nDependency setup deferred: {dependency_status.get('message')}"
+            return {
+                "status": "imported",
+                "skill_name": skill_name,
+                "message": message,
+            }
+        finally:
+            if staging_path:
+                shutil.rmtree(staging_path, ignore_errors=True)
 
     def export_skill(self, skill_name, destination_zip_path):
         skill_path = self._find_skill_path(skill_name)
@@ -2095,8 +2373,6 @@ class SkillManager:
             seen.add(normalized)
             result = self.delete_skill(normalized)
             summary.setdefault(result.get("status") or "failed", []).append(result)
-        if summary["deleted"]:
-            self.load_skills()
         lines = [
             f"删除完成：{len(summary['deleted'])} 个已删除，{len(summary['skipped'])} 个跳过，{len(summary['failed'])} 个失败。"
         ]
@@ -2322,8 +2598,7 @@ class SkillManager:
                 result = self._import_single_skill_dir(candidate_dirs[0], source_format=source_format)
                 if result.get("status") == "skipped_existing":
                     return False, result.get("message") or "Skill already exists"
-                if result.get("status") == "imported":
-                    self.load_skills()
+                self.last_imported_skill_names = [result.get("skill_name")] if result.get("status") == "imported" else []
                 return True, result.get("message") or f"Skill '{result.get('skill_name')}' imported successfully"
 
             summary = {"imported": [], "skipped_existing": [], "failed": []}
@@ -2342,8 +2617,7 @@ class SkillManager:
                 success = True
             if not summary["imported"] and not summary["skipped_existing"]:
                 success = False
-            if summary["imported"]:
-                self.load_skills()
+            self.last_imported_skill_names = [item.get("skill_name") for item in summary["imported"] if item.get("skill_name")]
             return success, self._format_import_summary_message(summary)
         except Exception as e:
             return False, f"Import failed: {e}"
@@ -2421,14 +2695,16 @@ class SkillManager:
             return False, "experience_text is required."
 
         target_skill = skill_name
+        general_path = ""
         if not target_skill:
             general_path = self._ensure_general_experience_skill()
             target_skill = os.path.basename(general_path)
 
         skill_record = self.skill_records.get(target_skill)
-        if not skill_record:
-            self.load_skills()
-            skill_record = self.skill_records.get(target_skill)
+        if not skill_record and general_path:
+            spec = self._load_skill_json(general_path)
+            skill_record = {"path": general_path, "spec": spec, "experience_entries": []}
+            self.skill_records[target_skill] = skill_record
         if not skill_record:
             return False, f"Skill '{target_skill}' not found."
 
@@ -2447,7 +2723,7 @@ class SkillManager:
         try:
             self._append_experience_entry(skill_record["path"], skill_record["spec"], entry)
             self._ensure_summary_experience(skill_record["path"], experience_text)
-            self.load_skills()
+            skill_record.setdefault("experience_entries", []).append(entry)
             return True, f"Recorded experience in '{target_skill}'."
         except Exception as e:
             return False, f"Failed to record experience: {e}"
@@ -2500,6 +2776,7 @@ class SkillManager:
         self.skill_prompts_brief = []
         self.skill_prompts_full = {}
         self.skill_records = {}
+        self.skill_load_errors = {}
         self.experience_packages = self.skill_records
         if load_mcp_tools is not None:
             self.load_mcp_tools = bool(load_mcp_tools)
@@ -2524,7 +2801,14 @@ class SkillManager:
                 dependency_status = self._prepare_skill_dependencies(skill_name, skill_path)
                 impl_path = os.path.join(skill_path, "impl.py")
                 if os.path.exists(impl_path):
-                    self._load_legacy_implementation(skill_name, impl_path)
+                    declarations = self._load_skill_json(skill_path).get("tools") or []
+                    if declarations:
+                        try:
+                            self._register_declarative_tools(skill_name, skill_path, declarations)
+                        except Exception as exc:
+                            self.skill_load_errors[skill_name] = str(exc)
+                    else:
+                        self._load_legacy_implementation(skill_name, impl_path)
                 pending_records.append((skill_name, skill_path, dependency_status))
 
         for skill_name, skill_path, dependency_status in pending_records:
@@ -2534,6 +2818,9 @@ class SkillManager:
                 print(f"[SkillManager] Failed to load skill '{skill_name}' from {skill_path}: {e}")
                 continue
             registered_tools = list(self.skill_to_tools.get(skill_name) or [])
+            if skill_name in self.skill_load_errors:
+                record["available"] = False
+                record["load_error"] = self.skill_load_errors[skill_name]
             if registered_tools:
                 merged_tool_refs = []
                 for tool_ref in list(record.get("tool_refs") or []) + registered_tools:
@@ -2877,8 +3164,42 @@ class SkillManager:
             record = self.skill_records.get(skill_name)
             dependency_status = (record or {}).get("dependency_status") or {"ok": True}
             if not dependency_status.get("ok") and record:
-                dependency_status = self._prepare_skill_dependencies(skill_name, record["path"])
+                spec = record.get("spec") or {}
+                coordinator = self.dependency_coordinator
+                progress = effective_context.get("step_signal")
+                observability = effective_context.get("observability_signal")
+
+                def progress_callback(message):
+                    if hasattr(progress, "emit"):
+                        progress.emit(message)
+                    if hasattr(observability, "emit"):
+                        observability.emit(
+                            {
+                                "type": "skill_dependency",
+                                "status": "installing",
+                                "skill_name": skill_name,
+                                "message": message,
+                            }
+                        )
+
+                if coordinator is None:
+                    return f"Error: Dependency coordinator is unavailable for skill '{skill_name}'."
+                dependency_status = coordinator.ensure_ready(
+                    skill_name,
+                    python_dependencies=self._coerce_string_list(spec.get("python_dependencies")),
+                    node_dependencies=self._coerce_string_list(spec.get("node_dependencies")),
+                    progress=progress_callback,
+                )
                 record["dependency_status"] = dependency_status
+                if hasattr(observability, "emit"):
+                    observability.emit(
+                        {
+                            "type": "skill_dependency",
+                            "status": "ready" if dependency_status.get("ok") else "failed",
+                            "skill_name": skill_name,
+                            "message": dependency_status.get("message") or "",
+                        }
+                    )
                 if not dependency_status.get("ok"):
                     return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
             effective_context["skill_config"] = self._skill_config_values(skill_name)
@@ -2890,7 +3211,9 @@ class SkillManager:
         sig = inspect.signature(func)
         args = dict(args or {})
         if "workspace_dir" in sig.parameters:
-            args["workspace_dir"] = self.workspace_dir
+            args["workspace_dir"] = effective_context.get("workspace_dir") or self.workspace_dir
+        if "_context" in sig.parameters:
+            effective_context.setdefault("skill_change_publisher", self.change_publisher)
         if "_context" in sig.parameters:
             args["_context"] = effective_context
         try:

@@ -17,6 +17,7 @@ from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
 from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
+from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -86,6 +87,15 @@ class DaemonState:
         self.last_activity = time.time()
         idle_minutes = config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
+        self.skill_catalog = SkillCatalogService(config_manager, logger=_log_daemon)
+        self.dependency_coordinator = DependencyCoordinator(config_manager, logger=_log_daemon)
+        self.skill_catalog_error = ""
+        try:
+            self.skill_catalog.preload()
+            self.skill_catalog.start_watching()
+        except Exception as exc:
+            self.skill_catalog_error = str(exc)
+            _log_daemon(f"skill_catalog preload_failed error={exc}")
 
     def touch(self):
         self.last_activity = time.time()
@@ -345,6 +355,8 @@ class DaemonState:
             workspace_dir,
             session_id=session_id,
             run_context=run_context,
+            skill_catalog_service=self.skill_catalog,
+            dependency_coordinator=self.dependency_coordinator,
         )
         worker.finished_signal.connect(on_finished)
         self.set_active_worker(session_id, worker)
@@ -834,6 +846,8 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 session_id=session_id,
                 run_context=run_context,
                 turn_id=turn_id,
+                skill_catalog_service=state.skill_catalog,
+                dependency_coordinator=state.dependency_coordinator,
             )
             worker_holder["worker"] = worker
             worker.thinking_signal.connect(lambda text: send_stream({"type": "thinking", "delta": text}), Qt.DirectConnection)
@@ -913,6 +927,19 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 return
             result = self.server.state.steer_session(session_id, expected_turn_id, message)
             self._send({"status": "ok", **result})
+            return
+        if action == "refresh_skills":
+            try:
+                event = SkillChangeEvent.create(
+                    data.get("change_action") or "updated",
+                    data.get("skill_names") or [],
+                    source=data.get("source") or "ui",
+                    session_id=data.get("session_id") or "",
+                )
+                applied = self.server.state.skill_catalog.publish_change(event)
+                self._send({"status": "ok", "event": applied.to_dict()})
+            except Exception as exc:
+                self._send({"status": "error", "error": str(exc)})
             return
         if action == "respond_interaction":
             request_id = data.get("request_id")
@@ -1051,6 +1078,18 @@ class DaemonClient:
             )
         except Exception:
             return None
+
+    def refresh_skills(self, skill_names, action="updated", source="ui", session_id=""):
+        return self._request(
+            {
+                "action": "refresh_skills",
+                "skill_names": list(skill_names or []),
+                "change_action": action,
+                "source": source,
+                "session_id": session_id,
+            },
+            timeout=self.send_timeout,
+        )
     
     def respond_interaction(self, request_id, result):
         try:

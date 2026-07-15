@@ -19,6 +19,7 @@ A skill can include:
 
 - `SKILL.md`: human-readable guidance
 - `skill.json`: metadata for discovery and disclosure
+- `skill.json.tools`: declarative tool names, JSON schemas, permission attributes, and `impl.py:function` bindings
 - `impl.py`: optional callable tools
 - `experience/entries.jsonl`: optional structured lessons
 - `references/`: optional long-form reference material
@@ -55,9 +56,24 @@ The runtime flow is:
 
 This keeps prompts smaller and makes the system easier to reason about.
 
-Startup keeps Skill discovery lightweight: sandbox Python DLL/PYD directory
-scans are cached across legacy Skill implementations, and heavy specialist
-capabilities should be optional or user-installed instead of default built-ins.
+Skill discovery is process-scoped. UI and daemon each build an immutable catalog
+snapshot in the background; request workers create cheap isolated runtime views and
+never scan folders, import implementations, or install packages while submitting a
+message. Declarative tool handlers import only on first invocation. Legacy reflective
+implementations are cached by file hash and failures are exposed as unavailable Skills.
+
+All mutations publish a `SkillChangeEvent`. The catalog validates and atomically swaps
+the next snapshot, active workers adopt it only at a model-request boundary, and a
+filesystem watcher repairs external edits as a fallback. Enabling a Skill makes it
+discoverable but does not add it to the conversation's explicitly selected Skills.
+An AI-created Skill is discoverable on the next model iteration in the same turn.
+
+Declared Python and Node dependencies are installed only before first tool use. A
+shared coordinator deduplicates concurrent installs by dependency hash, persists both
+success and failure, and does not retry a failed hash automatically. The default
+timeout is 300 seconds (`skill_dependency_install_timeout_seconds`, range 30–1800).
+
+Heavy specialist capabilities should remain optional or user-installed instead of default built-ins.
 Bundled finance support is limited to financial data querying through
 `financial-data-akshare`; strategy backtesting is no longer shipped as a
 default built-in Skill.

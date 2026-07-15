@@ -2,10 +2,15 @@ import json
 import os
 import re
 import shutil
+import tempfile
+import ast
+import threading
 
 from core.env_utils import get_app_data_dir
-from core.sandbox_runtime import install_skill_dependencies
 from core.skill_adapter import adapt_skill_directory, parse_skill_md_content, resolve_agent_skill_source
+
+
+_SKILL_MUTATION_LOCK = threading.RLock()
 
 
 def _is_valid_skill_name(skill_name):
@@ -52,6 +57,78 @@ def _resolve_skill_dir(skill_name, target_scope="auto"):
     if os.path.isdir(builtin_path):
         return builtin_path, None
     return ai_path, None
+
+
+def _publish_skill_change(context, action, skill_name):
+    context = context if isinstance(context, dict) else {}
+    publisher = context.get("skill_change_publisher")
+    if not callable(publisher):
+        raise RuntimeError("Skill was written but the runtime change publisher is unavailable.")
+    config_manager = context.get("config_manager")
+    prior_enabled = None
+    if action == "created" and config_manager and hasattr(config_manager, "set_skill_enabled"):
+        if hasattr(config_manager, "is_skill_enabled"):
+            prior_enabled = config_manager.is_skill_enabled(skill_name, True)
+        config_manager.set_skill_enabled(skill_name, True)
+    try:
+        return publisher(
+            {
+                "action": action,
+                "skill_names": [skill_name],
+                "source": "ai",
+                "session_id": context.get("session_id") or "",
+            }
+        )
+    except Exception:
+        if prior_enabled is not None:
+            config_manager.set_skill_enabled(skill_name, prior_enabled)
+        raise
+
+
+def _validate_staged_skill(skill_dir, skill_name):
+    md_path = os.path.join(skill_dir, "SKILL.md")
+    if not os.path.isfile(md_path):
+        raise ValueError("SKILL.md is required.")
+    meta, _body = parse_skill_md_content(md_path)
+    declared_name = str((meta or {}).get("name") or "").strip()
+    if not declared_name:
+        raise ValueError("SKILL.md frontmatter name is required.")
+    if declared_name != skill_name:
+        raise ValueError(f"SKILL.md name '{declared_name}' does not match '{skill_name}'.")
+    if not str((meta or {}).get("description") or "").strip():
+        raise ValueError("SKILL.md frontmatter description is required.")
+    json_path = os.path.join(skill_dir, "skill.json")
+    if os.path.isfile(json_path):
+        with open(json_path, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            raise ValueError("skill.json must contain a JSON object.")
+    impl_path = os.path.join(skill_dir, "impl.py")
+    if os.path.isfile(impl_path):
+        with open(impl_path, "r", encoding="utf-8-sig") as handle:
+            ast.parse(handle.read(), filename=impl_path)
+
+
+def _swap_staged_skill(staging_dir, target_dir):
+    backup_dir = ""
+    if os.path.exists(target_dir):
+        backup_dir = tempfile.mkdtemp(prefix=f".{os.path.basename(target_dir)}-backup-", dir=os.path.dirname(target_dir))
+        os.rmdir(backup_dir)
+        os.replace(target_dir, backup_dir)
+    try:
+        os.replace(staging_dir, target_dir)
+    except Exception:
+        if backup_dir and os.path.exists(backup_dir):
+            os.replace(backup_dir, target_dir)
+        raise
+    return backup_dir
+
+
+def _rollback_published_skill(target_dir, backup_dir):
+    if os.path.isdir(target_dir):
+        shutil.rmtree(target_dir)
+    if backup_dir and os.path.exists(backup_dir):
+        os.replace(backup_dir, target_dir)
 
 
 def _build_sections(description, usage_guidelines, interface_details=None):
@@ -115,6 +192,7 @@ def _default_skill_json(
     script_entries=None,
     asset_refs=None,
     source_format=None,
+    tools=None,
 ):
     return {
         "version": 2,
@@ -137,6 +215,7 @@ def _default_skill_json(
         "script_entries": script_entries or [],
         "asset_refs": asset_refs or [],
         "source_format": source_format or "cowork",
+        "tools": tools or [],
     }
 
 
@@ -193,18 +272,30 @@ def create_new_skill(
     script_refs=None,
     script_entries=None,
     asset_refs=None,
+    _context=None,
 ):
+    staging_dir = ""
+    backup_dir = ""
+    published = False
+    _SKILL_MUTATION_LOCK.acquire()
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope="ai_only")
         if error:
             return error
-        action = "Created"
-        if os.path.exists(target_dir):
-            action = "Updated"
-        else:
-            os.makedirs(target_dir, exist_ok=True)
+        action = "Updated" if os.path.exists(target_dir) else "Created"
+        staging_dir = tempfile.mkdtemp(
+            prefix=f".{skill_name}-staging-",
+            dir=os.path.dirname(target_dir),
+        )
+        if action == "Updated":
+            shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True)
+        write_dir = staging_dir
 
         parsed_tools = _normalize_tools_list(tools_list)
+        if tool_code and not parsed_tools:
+            raise ValueError("tools_list with declarative schemas and bindings is required when tool_code is provided.")
+        if tool_code:
+            ast.parse(str(tool_code), filename=f"{skill_name}/impl.py")
         kind = (skill_kind or "knowledge").lower()
         if kind not in {"knowledge", "system"}:
             kind = "knowledge"
@@ -235,6 +326,7 @@ def create_new_skill(
             script_entries=_normalize_json_value(script_entries) or [],
             asset_refs=_normalize_json_value(asset_refs) or [],
             source_format="cowork",
+            tools=parsed_tools,
         )
 
         md_content = _build_skill_md(
@@ -246,24 +338,34 @@ def create_new_skill(
             kind=kind,
             capability_group=capability_group,
         )
-        with open(os.path.join(target_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+        with open(os.path.join(write_dir, "SKILL.md"), "w", encoding="utf-8") as f:
             f.write(md_content)
-        with open(os.path.join(target_dir, "skill.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(write_dir, "skill.json"), "w", encoding="utf-8") as f:
             json.dump(skill_json, f, ensure_ascii=False, indent=2)
-        os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
-        dependency_status = install_skill_dependencies(
-            skill_name,
-            skill_json.get("python_dependencies") or [],
-            skill_json.get("node_dependencies") or [],
-        )
+        os.makedirs(os.path.join(write_dir, "experience"), exist_ok=True)
         if tool_code is not None:
-            with open(os.path.join(target_dir, "impl.py"), "w", encoding="utf-8") as f:
+            with open(os.path.join(write_dir, "impl.py"), "w", encoding="utf-8") as f:
                 f.write(tool_code)
-        if not dependency_status.get("ok"):
-            return f"Success: {action} skill '{skill_name}' at '{target_dir}', but dependency setup is incomplete: {dependency_status.get('message')}"
+        _validate_staged_skill(staging_dir, skill_name)
+        backup_dir = _swap_staged_skill(staging_dir, target_dir)
+        staging_dir = ""
+        published = True
+        _publish_skill_change(_context, "created" if action == "Created" else "updated", skill_name)
+        if backup_dir:
+            shutil.rmtree(backup_dir)
+            backup_dir = ""
         return f"Success: {action} skill '{skill_name}' at '{target_dir}' as kind '{kind}'."
     except Exception as e:
+        if published:
+            _rollback_published_skill(target_dir, backup_dir)
+            backup_dir = ""
         return f"Error: {str(e)}"
+    finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if backup_dir:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        _SKILL_MUTATION_LOCK.release()
 
 
 def update_skill(
@@ -291,7 +393,12 @@ def update_skill(
     script_refs=None,
     script_entries=None,
     asset_refs=None,
+    _context=None,
 ):
+    staging_dir = ""
+    backup_dir = ""
+    published = False
+    _SKILL_MUTATION_LOCK.acquire()
     try:
         target_dir, error = _resolve_skill_dir(skill_name, target_scope=target_scope)
         if error:
@@ -299,9 +406,11 @@ def update_skill(
         if not os.path.isdir(target_dir):
             return f"Error: Skill '{skill_name}' not found in scope '{target_scope}'."
 
-        md_path = os.path.join(target_dir, "SKILL.md")
-        skill_json_path = os.path.join(target_dir, "skill.json")
-        impl_path = os.path.join(target_dir, "impl.py")
+        staging_dir = tempfile.mkdtemp(prefix=f".{skill_name}-staging-", dir=os.path.dirname(target_dir))
+        shutil.copytree(target_dir, staging_dir, dirs_exist_ok=True)
+        md_path = os.path.join(staging_dir, "SKILL.md")
+        skill_json_path = os.path.join(staging_dir, "skill.json")
+        impl_path = os.path.join(staging_dir, "impl.py")
         if not os.path.exists(md_path):
             return f"Error: SKILL.md not found for '{skill_name}'."
 
@@ -384,24 +493,35 @@ def update_skill(
             skill_json.setdefault("name", skill_name)
             with open(skill_json_path, "w", encoding="utf-8") as f:
                 json.dump(skill_json, f, ensure_ascii=False, indent=2)
-            dependency_status = install_skill_dependencies(
-                skill_name,
-                skill_json.get("python_dependencies") or [],
-                skill_json.get("node_dependencies") or [],
-            )
-            if not dependency_status.get("ok"):
-                changed.append("dependencies_not_ready")
         os.makedirs(os.path.join(target_dir, "experience"), exist_ok=True)
 
         if tool_code is not None:
+            ast.parse(str(tool_code), filename=f"{skill_name}/impl.py")
             with open(impl_path, "w", encoding="utf-8") as f:
                 f.write(tool_code)
             changed.append("impl.py")
 
         changed_desc = ", ".join(changed) if changed else "no fields"
+        _validate_staged_skill(staging_dir, skill_name)
+        backup_dir = _swap_staged_skill(staging_dir, target_dir)
+        staging_dir = ""
+        published = True
+        _publish_skill_change(_context, "updated", skill_name)
+        if backup_dir:
+            shutil.rmtree(backup_dir)
+            backup_dir = ""
         return f"Success: Updated skill '{skill_name}' at '{target_dir}'. Changed: {changed_desc}."
     except Exception as e:
+        if published:
+            _rollback_published_skill(target_dir, backup_dir)
+            backup_dir = ""
         return f"Error: {str(e)}"
+    finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if backup_dir:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        _SKILL_MUTATION_LOCK.release()
 
 
 def _read_agent_skill_name(source_dir):
@@ -411,6 +531,10 @@ def _read_agent_skill_name(source_dir):
 
 
 def install_agent_skill(source_path, skill_name=None, _context=None):
+    staging_dir = ""
+    backup_dir = ""
+    published = False
+    _SKILL_MUTATION_LOCK.acquire()
     try:
         if not os.path.exists(source_path):
             return f"Error: Source path '{source_path}' does not exist."
@@ -427,26 +551,33 @@ def install_agent_skill(source_path, skill_name=None, _context=None):
             return error
         if os.path.exists(target_dir):
             return f"Error: Target skill directory '{target_dir}' already exists. Please delete it or choose a different name."
-        result = adapt_skill_directory(resolved_source, target_dir, skill_name=skill_name, source_format="agent_skill")
-        skill_json_path = os.path.join(target_dir, "skill.json")
+        staging_dir = tempfile.mkdtemp(prefix=f".{skill_name}-staging-", dir=os.path.dirname(target_dir))
+        os.rmdir(staging_dir)
+        result = adapt_skill_directory(resolved_source, staging_dir, skill_name=skill_name, source_format="agent_skill")
+        skill_json_path = os.path.join(staging_dir, "skill.json")
         skill_json = {}
         if os.path.isfile(skill_json_path):
             with open(skill_json_path, "r", encoding="utf-8") as f:
                 skill_json = json.load(f)
-        dependency_status = install_skill_dependencies(
-            skill_name,
-            skill_json.get("python_dependencies") or [],
-            skill_json.get("node_dependencies") or [],
-        )
-        context = _context or {}
-        skill_manager = context.get("skill_manager") if isinstance(context, dict) else None
-        if skill_manager and hasattr(skill_manager, "load_skills"):
-            skill_manager.load_skills()
-        if not dependency_status.get("ok"):
-            return f"Success: Installed agent skill '{result.get('skill_name')}' at '{target_dir}', but dependency setup is incomplete: {dependency_status.get('message')}"
+        _validate_staged_skill(staging_dir, skill_name)
+        backup_dir = _swap_staged_skill(staging_dir, target_dir)
+        staging_dir = ""
+        published = True
+        _publish_skill_change(_context, "created", skill_name)
+        if backup_dir:
+            shutil.rmtree(backup_dir)
+            backup_dir = ""
         return f"Success: Installed agent skill '{result.get('skill_name')}' at '{target_dir}'."
     except Exception as e:
+        if published:
+            _rollback_published_skill(target_dir, backup_dir)
+            backup_dir = ""
         return f"Error installing agent skill: {str(e)}"
     finally:
+        if staging_dir:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if backup_dir:
+            shutil.rmtree(backup_dir, ignore_errors=True)
         if "temp_dir" in locals() and temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
+        _SKILL_MUTATION_LOCK.release()

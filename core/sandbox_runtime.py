@@ -751,6 +751,10 @@ def _dependency_hash(python_dependencies, node_dependencies):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def skill_dependency_hash(python_dependencies=None, node_dependencies=None):
+    return _dependency_hash(python_dependencies or [], node_dependencies or [])
+
+
 def _read_dependency_status(skill_id):
     path = os.path.join(_skill_root(skill_id), "dependency_status.json")
     if not os.path.isfile(path):
@@ -769,7 +773,18 @@ def _write_dependency_status(skill_id, status):
         json.dump(status, f, ensure_ascii=False, indent=2)
 
 
-def install_skill_dependencies(skill_id, python_dependencies=None, node_dependencies=None, force=False):
+def read_skill_dependency_status(skill_id):
+    """Return the persisted dependency state without installing anything."""
+    return dict(_read_dependency_status(skill_id) or {})
+
+
+def install_skill_dependencies(
+    skill_id,
+    python_dependencies=None,
+    node_dependencies=None,
+    force=False,
+    timeout_seconds=300,
+):
     python_dependencies = [p for p in (python_dependencies or []) if isinstance(p, str) and p.strip()]
     node_dependencies = [p for p in (node_dependencies or []) if isinstance(p, str) and p.strip()]
     if not python_dependencies and not node_dependencies:
@@ -784,6 +799,7 @@ def install_skill_dependencies(skill_id, python_dependencies=None, node_dependen
     env = build_sandbox_env(skill_id=skill_id)
     logs = []
     try:
+        timeout_seconds = max(30, min(int(timeout_seconds or 300), 1800))
         if python_dependencies:
             python_exe = runtime.get("python")
             if not python_exe:
@@ -792,7 +808,16 @@ def install_skill_dependencies(skill_id, python_dependencies=None, node_dependen
             os.makedirs(target, exist_ok=True)
             from core.runtime_components import selected_python_index_url
             cmd = [python_exe, "-m", "pip", "install", "--index-url", selected_python_index_url(), "--upgrade", "--target", target] + python_dependencies
-            out = subprocess.check_output(cmd, env=env, text=True, encoding="utf-8", errors="replace", stderr=subprocess.STDOUT, **_no_window_kwargs())
+            out = subprocess.check_output(
+                cmd,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stderr=subprocess.STDOUT,
+                timeout=timeout_seconds,
+                **_no_window_kwargs(),
+            )
             logs.append(out.strip())
         if node_dependencies:
             npm_exe = runtime.get("npm")
@@ -801,7 +826,16 @@ def install_skill_dependencies(skill_id, python_dependencies=None, node_dependen
             node_root = _skill_node_root(skill_id)
             os.makedirs(node_root, exist_ok=True)
             cmd = _node_script_command(npm_exe) + ["install", "--prefix", node_root] + node_dependencies
-            out = subprocess.check_output(cmd, env=env, text=True, encoding="utf-8", errors="replace", stderr=subprocess.STDOUT, **_no_window_kwargs())
+            out = subprocess.check_output(
+                cmd,
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stderr=subprocess.STDOUT,
+                timeout=timeout_seconds,
+                **_no_window_kwargs(),
+            )
             logs.append(out.strip())
         reset_native_library_dir_caches(skill_id)
         status = {"ok": True, "hash": dep_hash, "message": "\n".join([line for line in logs if line]), "installed": True}

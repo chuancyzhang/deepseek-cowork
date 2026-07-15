@@ -22,6 +22,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
 from core.skill_manager import SkillManager
+from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
@@ -1913,20 +1914,26 @@ class DeliverableScanWorker(QThread):
 class SkillManagerLoadWorker(QThread):
     completed = Signal(object)
 
-    def __init__(self, config_manager, workspace_dir=None, load_mcp_tools=False, parent=None):
+    def __init__(self, config_manager, workspace_dir=None, load_mcp_tools=False, catalog_service=None, parent=None):
         super().__init__(parent)
         self.config_manager = config_manager
         self.workspace_dir = workspace_dir
         self.load_mcp_tools = bool(load_mcp_tools)
+        self.catalog_service = catalog_service
 
     def run(self):
         try:
-            manager = SkillManager(
-                self.workspace_dir,
-                self.config_manager,
-                auto_load=True,
-                load_mcp_tools=self.load_mcp_tools,
-            )
+            if self.catalog_service is not None:
+                snapshot = self.catalog_service.preload()
+                manager = snapshot.manager
+            else:
+                manager = SkillManager(
+                    self.workspace_dir,
+                    self.config_manager,
+                    auto_load=True,
+                    load_mcp_tools=self.load_mcp_tools,
+                    prepare_dependencies=False,
+                )
             self.completed.emit({"ok": True, "skill_manager": manager})
         except Exception as exc:
             self.completed.emit({
@@ -1934,6 +1941,49 @@ class SkillManagerLoadWorker(QThread):
                 "error": str(exc),
                 "traceback": traceback.format_exc(),
             })
+
+
+class SkillCatalogRefreshWorker(QThread):
+    completed = Signal(object)
+
+    def __init__(self, client, skill_names, action, session_id, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self.skill_names = list(skill_names or [])
+        self.action = str(action or "updated")
+        self.session_id = str(session_id or "")
+
+    def run(self):
+        try:
+            result = self.client.refresh_skills(
+                self.skill_names,
+                action=self.action,
+                source="ui",
+                session_id=self.session_id,
+            )
+            self.completed.emit(result or {"status": "error", "error": "Daemon 无响应"})
+        except Exception as exc:
+            self.completed.emit({"status": "error", "error": str(exc)})
+
+
+class SkillDependencyRetryWorker(QThread):
+    completed = Signal(str, object)
+
+    def __init__(self, coordinator, skill_name, python_dependencies, node_dependencies, parent=None):
+        super().__init__(parent)
+        self.coordinator = coordinator
+        self.skill_name = str(skill_name or "")
+        self.python_dependencies = list(python_dependencies or [])
+        self.node_dependencies = list(node_dependencies or [])
+
+    def run(self):
+        result = self.coordinator.ensure_ready(
+            self.skill_name,
+            python_dependencies=self.python_dependencies,
+            node_dependencies=self.node_dependencies,
+            retry=True,
+        )
+        self.completed.emit(self.skill_name, result)
 
 
 def clarify_phase_label(phase):
@@ -3139,6 +3189,13 @@ class CapabilityWorkbenchDialog(QDialog):
         if not result.get("ok"):
             QMessageBox.warning(self, "保存能力", result.get("error") or "保存失败。")
             return
+        owner = self.parent()
+        while owner is not None and not hasattr(owner, "publish_ui_skill_change"):
+            owner = owner.parent() if hasattr(owner, "parent") else None
+        if owner is None or not owner.publish_ui_skill_change(self.skill_name, "updated"):
+            QMessageBox.warning(self, "保存能力", "文件已保存，但能力目录刷新失败。")
+            return
+        self.skill_manager = owner.skill_manager
         validation = result.get("validation") or {}
         if validation.get("ok", True):
             QMessageBox.information(self, "保存能力", "已保存并重新加载能力。")
@@ -8279,6 +8336,29 @@ class SkillsCenterDialog(QDialog):
         tools_text.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
         tools_section.layout.addWidget(tools_text)
         layout.addWidget(tools_section)
+        python_dependencies = skill.get("python_dependencies") or []
+        node_dependencies = skill.get("node_dependencies") or []
+        if python_dependencies or node_dependencies:
+            dependency_status = skill.get("dependency_status") or {}
+            if dependency_status.get("ok"):
+                dependency_text = "依赖已就绪"
+            elif dependency_status.get("pending"):
+                dependency_text = "依赖将在首次调用时准备"
+            else:
+                dependency_text = "依赖准备失败：" + str(dependency_status.get("message") or "未知错误")
+            dependency_section = ProductSection("运行依赖", "", kind="subtle")
+            dependency_label = QLabel(dependency_text)
+            dependency_label.setWordWrap(True)
+            dependency_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+            dependency_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+            dependency_section.layout.addWidget(dependency_label)
+            retry_btn = QPushButton("重试依赖")
+            retry_btn.setStyleSheet(product_button_style("secondary"))
+            retry_btn.clicked.connect(
+                lambda checked=False, name=skill.get("name"): self.window().retry_skill_dependencies(name)
+            )
+            dependency_section.layout.addWidget(retry_btn, 0, Qt.AlignLeft)
+            layout.addWidget(dependency_section)
         layout.addStretch()
         actions = QHBoxLayout()
         actions.addStretch()
@@ -8422,9 +8502,17 @@ class SkillsCenterDialog(QDialog):
                 self.config_manager.set_skill_enabled(name, enabled)
         else:
             self.config_manager.set_skill_enabled(name, enabled)
+        window = self.window()
+        if hasattr(window, "publish_ui_skill_change"):
+            applied = window.publish_ui_skill_change(name, "enabled" if enabled else "disabled")
+            if not applied:
+                if skill:
+                    skill["enabled"] = not enabled
+                self._render_tab(skill_center_tab_key(skill) if skill else self.current_tab_key)
+                return
+            self.skill_manager = window.skill_manager
         if skill:
             skill["enabled"] = enabled
-        mark_skill_runtime_reload_pending(self.skill_manager, True)
         tab_key = skill_center_tab_key(skill) if skill else self.current_tab_key
         self._render_tab(tab_key)
         self._refresh_count_label()
@@ -8507,6 +8595,10 @@ class SkillsCenterDialog(QDialog):
         if path:
             success, msg = self.skill_manager.import_skill(path)
             if success:
+                names = list(getattr(self.skill_manager, "last_imported_skill_names", []) or [])
+                if self._main is not None and names:
+                    self._main.publish_ui_skill_changes(names, "created")
+                    self.skill_manager = self._main.skill_manager
                 QMessageBox.information(self, "能力中心", msg)
                 self.refresh_list()
             else:
@@ -8577,6 +8669,14 @@ class SkillsCenterDialog(QDialog):
         if reply != QMessageBox.Yes:
             return
         result = self.skill_manager.delete_skill_collection(sorted(self.selected_skill_names))
+        deleted_names = [
+            item.get("skill_name")
+            for item in (result.get("summary") or {}).get("deleted", [])
+            if item.get("skill_name")
+        ]
+        if self._main is not None and deleted_names:
+            self._main.publish_ui_skill_changes(deleted_names, "deleted")
+            self.skill_manager = self._main.skill_manager
         QMessageBox.information(self, "删除自定义能力", result.get("message") or "删除完成。")
         self.selection_mode = False
         self.selected_skill_names.clear()
@@ -15316,6 +15416,7 @@ def resolve_app_icon_path():
 
 class MainWindow(QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
+    skill_catalog_changed_ui_signal = Signal(object, object)
 
     RIGHT_TAB_FILES = 0
     RIGHT_TAB_DELIVERABLES = RIGHT_TAB_FILES
@@ -15332,6 +15433,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DeepSeek Cowork")
         self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
+        self.skill_catalog_changed_ui_signal.connect(self._handle_local_skill_catalog_changed, Qt.QueuedConnection)
         self.component_task_manager = ComponentTaskManager(self)
         self.component_task_manager.notification_requested.connect(self.notify_component_task)
         self.sidebar_hover_tips = SidebarHoverTipController(self)
@@ -15535,6 +15637,12 @@ class MainWindow(QMainWindow):
         self.conversation_skill_worker = None
         
         self.config_manager = ConfigManager()
+        self.skill_catalog_service = SkillCatalogService(
+            self.config_manager,
+            logger=lambda message: log_startup_stage("skill_catalog", message=message),
+        )
+        self.skill_catalog_service.subscribe(self._relay_local_skill_catalog_changed)
+        self.skill_dependency_coordinator = DependencyCoordinator(self.config_manager)
         self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
         legacy_deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
         configured_file_workspace_mode = self.config_manager.get("file_workspace_view_mode", "")
@@ -15550,6 +15658,8 @@ class MainWindow(QMainWindow):
         self.skill_manager_loading = False
         self.skill_load_worker = None
         self.skill_load_error = ""
+        self.skill_catalog_refresh_workers = []
+        self.skill_dependency_retry_workers = []
         self.skill_generator = SkillGenerator(self.config_manager)
         self.daemon_host = DEFAULT_HOST
         self.daemon_port = self.config_manager.get("daemon_port", DEFAULT_PORT)
@@ -19149,7 +19259,13 @@ class MainWindow(QMainWindow):
         self.skill_load_error = ""
         log_startup_stage("skill_load_begin")
         log_startup_stage("mcp_probe_deferred")
-        worker = SkillManagerLoadWorker(self.config_manager, None, load_mcp_tools=False, parent=self)
+        worker = SkillManagerLoadWorker(
+            self.config_manager,
+            None,
+            load_mcp_tools=False,
+            catalog_service=self.skill_catalog_service,
+            parent=self,
+        )
         self.skill_load_worker = worker
         worker.completed.connect(self.handle_background_skill_load_completed, Qt.QueuedConnection)
         worker.finished.connect(worker.deleteLater)
@@ -19164,6 +19280,7 @@ class MainWindow(QMainWindow):
             if manager is not None:
                 self.skill_manager = manager
                 self.skill_manager_ready = True
+                self.skill_catalog_service.start_watching()
             log_startup_stage(
                 "skill_load_done",
                 ok=True,
@@ -19799,6 +19916,7 @@ class MainWindow(QMainWindow):
             self.hide()
             self.tray_icon.showMessage("DeepSeek Cowork", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
         else:
+            self.skill_catalog_service.stop_watching()
             self.shutdown_workers()
             self.stop_daemon_process()
             self.stop_gateway_process()
@@ -25508,7 +25626,12 @@ class MainWindow(QMainWindow):
                 save_result = save_new_skill(draft)
                 if save_result.ok:
                     try:
-                        self.skill_manager.load_skills()
+                        if not self.publish_ui_skill_change(
+                            draft.get("skill_name"),
+                            "created",
+                            session_id=target_state.session_id,
+                        ):
+                            raise RuntimeError("Skill 目录刷新未完成。")
                         log_conversation_skill_capture(
                             "save_create_finished",
                             session_id=self.current_session_id,
@@ -25549,6 +25672,12 @@ class MainWindow(QMainWindow):
                     strategy=update_strategy,
                 )
                 if save_result.ok:
+                    if not self.publish_ui_skill_change(
+                        target_skill,
+                        "updated",
+                        session_id=target_state.session_id,
+                    ):
+                        raise RuntimeError("Skill 目录刷新未完成。")
                     log_conversation_skill_capture(
                         "save_update_finished",
                         session_id=self.current_session_id,
@@ -27450,8 +27579,13 @@ class MainWindow(QMainWindow):
     def _messages_for_worker(self, state, run_context=None):
         workflow_mode = normalize_workflow_mode((run_context or {}).get("workflow_mode"))
         if workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
-            return self._office_file_conversion_run_messages(state)
-        return copy.deepcopy(getattr(state, "messages", []) or [])
+            source_messages = self._office_file_conversion_run_messages(state)
+        else:
+            source_messages = getattr(state, "messages", []) or []
+        return copy.deepcopy([
+            message for message in source_messages
+            if not (isinstance(message, dict) and isinstance(message.get("meta"), dict) and message["meta"].get("ui_only"))
+        ])
 
     def process_agent_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
         state = self.get_session(session_id)
@@ -27511,6 +27645,8 @@ class MainWindow(QMainWindow):
             session_id=state.session_id,
             run_context=run_context,
             turn_id=turn_id,
+            skill_catalog_service=self.skill_catalog_service,
+            dependency_coordinator=self.skill_dependency_coordinator,
         )
         state.turn_steerable = not bool(getattr(state, "automation_task_id", ""))
         if state.session_id == self.current_session_id:
@@ -27898,10 +28034,156 @@ class MainWindow(QMainWindow):
             return
         self._handle_agent_state_ui(data, session_id)
 
+    def _append_skill_change_conversation_event(self, event, session_id=None):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state:
+            return False
+        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        event_id = str(payload.get("event_id") or "")
+        for message in getattr(state, "messages", []) or []:
+            meta = message.get("meta") if isinstance(message, dict) and isinstance(message.get("meta"), dict) else {}
+            if event_id and meta.get("skill_change_event_id") == event_id:
+                return True
+        names = "、".join(payload.get("skill_names") or []) or "Skill"
+        action = str(payload.get("action") or "updated")
+        source = str(payload.get("source") or "system")
+        if source == "ai" and action == "created":
+            text = f"AI 已创建能力：{names}，现已可用"
+        elif action == "enabled":
+            text = f"已启用能力：{names}，可被 AI 发现"
+        elif action == "disabled":
+            text = f"已关闭能力：{names}"
+        else:
+            text = f"能力已更新：{names}"
+        message = {
+            "id": uuid.uuid4().hex,
+            "role": "assistant",
+            "content": f"◈ {text}",
+            "meta": {
+                "ui_only": True,
+                "skill_change_event_id": event_id,
+                "skill_change": payload,
+            },
+        }
+        state.messages.append(message)
+        self.add_chat_bubble(
+            "Agent",
+            message["content"],
+            thinking=None,
+            source_message_id=message["id"],
+            session_id=state.session_id,
+        )
+        self.save_chat_history(session_id=state.session_id)
+        self.request_session_scroll_to_bottom(state.session_id, force=True)
+        return True
+
+    def _relay_local_skill_catalog_changed(self, event, snapshot):
+        self.skill_catalog_changed_ui_signal.emit(event, snapshot)
+
+    def _handle_local_skill_catalog_changed(self, event, snapshot):
+        if snapshot is None:
+            return
+        self.skill_manager = snapshot.manager
+        self.skill_manager_ready = True
+        page = (getattr(self, "product_pages", {}) or {}).get(self.PAGE_CAPABILITIES)
+        if page is not None and hasattr(page, "refresh_list"):
+            page.skill_manager = self.skill_manager
+            page.refresh_list()
+
+    def publish_ui_skill_change(self, skill_name, action, session_id=None, source="ui"):
+        return self.publish_ui_skill_changes([skill_name], action, session_id=session_id, source=source)
+
+    def publish_ui_skill_changes(self, skill_names, action, session_id=None, source="ui"):
+        names = [str(name or "").strip() for name in (skill_names or []) if str(name or "").strip()]
+        if not names:
+            return False
+        target_session_id = session_id or self.current_session_id
+        event = SkillChangeEvent.create(
+            action,
+            names,
+            source=source,
+            session_id=target_session_id,
+        )
+        try:
+            applied = self.skill_catalog_service.publish_change(event)
+            self.skill_manager = self.skill_catalog_service.snapshot().manager
+            self.skill_manager_ready = True
+        except Exception as exc:
+            self.add_system_toast(f"能力配置已保存，但本地刷新失败：{exc}", "error", auto_close_ms=8000)
+            return False
+        self.refresh_selected_skill_controls(target_session_id)
+        if self.daemon_available and self.daemon_client is not None:
+            worker = SkillCatalogRefreshWorker(
+                self.daemon_client,
+                names,
+                action,
+                target_session_id,
+                parent=self,
+            )
+            self.skill_catalog_refresh_workers.append(worker)
+
+            def finished(response, current=worker):
+                if current in self.skill_catalog_refresh_workers:
+                    self.skill_catalog_refresh_workers.remove(current)
+                if not isinstance(response, dict) or response.get("status") != "ok":
+                    error = response.get("error") if isinstance(response, dict) else "Daemon 无响应"
+                    self.add_system_toast(
+                        f"能力配置已保存，但后台能力刷新失败：{error}",
+                        "error",
+                        auto_close_ms=8000,
+                    )
+                else:
+                    self._append_skill_change_conversation_event(applied, target_session_id)
+
+            worker.completed.connect(finished, Qt.QueuedConnection)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+        else:
+            self._append_skill_change_conversation_event(applied, target_session_id)
+        return True
+
+    def retry_skill_dependencies(self, skill_name):
+        record = (getattr(self.skill_manager, "skill_records", {}) or {}).get(str(skill_name or ""))
+        if not record:
+            self.add_system_toast(f"未找到能力：{skill_name}", "error")
+            return False
+        spec = record.get("spec") or {}
+        worker = SkillDependencyRetryWorker(
+            self.skill_dependency_coordinator,
+            skill_name,
+            spec.get("python_dependencies") or [],
+            spec.get("node_dependencies") or [],
+            parent=self,
+        )
+        self.skill_dependency_retry_workers.append(worker)
+        self.add_system_toast(f"正在重试 {skill_name} 的依赖准备", "info")
+
+        def finished(name, result, current=worker):
+            if current in self.skill_dependency_retry_workers:
+                self.skill_dependency_retry_workers.remove(current)
+            if result.get("ok"):
+                self.add_system_toast(f"能力依赖已就绪：{name}", "success")
+                self.publish_ui_skill_change(name, "dependency_changed")
+            else:
+                self.add_system_toast(
+                    f"能力依赖准备失败：{result.get('message') or '未知错误'}",
+                    "error",
+                    auto_close_ms=10000,
+                )
+
+        worker.completed.connect(finished, Qt.QueuedConnection)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        return True
+
     def _handle_agent_state_ui(self, data, session_id=None):
         self._agent_state_ui_event_seq = int(getattr(self, "_agent_state_ui_event_seq", 0)) + 1
         ui_event_seq = self._agent_state_ui_event_seq
         payload = dict(data) if isinstance(data, dict) else {}
+        if payload.get("type") == "skill_changed":
+            self._append_skill_change_conversation_event(payload, session_id)
+            self.start_background_skill_load(force=True)
+            return
         status = payload.get("status") or ""
         agent_id = payload.get("agent_id") or ""
         event_type = payload.get("event_type") or ""

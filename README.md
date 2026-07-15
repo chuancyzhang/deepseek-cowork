@@ -39,12 +39,14 @@ The 5.0.0 release baseline is documented in [RELEASE_NOTES_5.0.0.md](RELEASE_NOT
 - **Structured observability**: runtime context, tool calls, and technical details remain first-level views, with readable Python/Shell/JSON arguments and separated output, error, and traceback rendering.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
 - **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
-- **Lightweight startup**: the main workspace becomes interactive before skill indexing, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.
+- **Immediate Skill availability**: message submission reads an immutable process catalog snapshot and never scans Skill folders, imports implementations, or installs dependencies. Explicit change events refresh the UI and daemon, while active turns switch snapshots at the next model-request boundary.
+- **First-use dependencies**: declared Python and Node dependencies are prepared only before the first actual tool call. Matching dependency hashes share a single flight; failures persist and require an explicit retry or declaration change.
+- **Lightweight startup**: the main workspace becomes interactive before the Skill catalog snapshot, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.
 - **Main-content management pages**: the sidebar keeps only Capabilities, Automation, and Settings as stable destinations. They switch inside the main content area and restore the prior conversation instead of opening large blocking dialogs.
 - **Settings center**: manage models, agents, personality and memory, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions respond only to semantic configuration changes, not background logs or connection tests.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
-- **Skill center**: search, filter, enable, configure, and debug skills in a master/detail layout without restarting the app.
+- **Skill center**: search, filter, enable, configure, and debug skills without restarting. Enabling a Skill makes it discoverable and records that state in the current conversation, but does not add it to the conversation's explicitly selected Skills.
 
 ## Skill Model
 

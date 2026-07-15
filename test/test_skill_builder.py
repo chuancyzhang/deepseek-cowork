@@ -17,6 +17,8 @@ class TestSkillBuilder(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.ai_dir = os.path.join(self.temp_dir, "ai_skills")
         os.makedirs(self.ai_dir, exist_ok=True)
+        self.events = []
+        self.context = {"skill_change_publisher": self.events.append, "session_id": "session-test"}
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -30,6 +32,7 @@ class TestSkillBuilder(unittest.TestCase):
                 tools_list=[{"name": "hello", "description": "say hello"}],
                 tool_code="def hello():\n    return 'ok'\n",
                 usage_guidelines="Use it carefully.",
+                _context=self.context,
             )
             self.assertIn("Success", create_result)
             update_result = skill_builder_impl.update_skill(
@@ -38,6 +41,7 @@ class TestSkillBuilder(unittest.TestCase):
                 target_scope="ai_only",
                 description="updated desc",
                 usage_guidelines="Updated usage.",
+                _context=self.context,
             )
             self.assertIn("Success", update_result)
             md_path = os.path.join(self.ai_dir, "builder-test", "SKILL.md")
@@ -51,6 +55,8 @@ class TestSkillBuilder(unittest.TestCase):
             with open(skill_json_path, "r", encoding="utf-8") as f:
                 payload = f.read()
             self.assertIn("\"version\": 2", payload)
+            self.assertIn("\"tools\"", payload)
+            self.assertEqual([event["action"] for event in self.events], ["created", "updated"])
 
     def test_update_not_found_in_scope(self):
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
@@ -75,7 +81,7 @@ class TestSkillBuilder(unittest.TestCase):
             f.write("print('hello')\n")
 
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
-            result = skill_builder_impl.install_agent_skill(source_dir)
+            result = skill_builder_impl.install_agent_skill(source_dir, _context=self.context)
             self.assertIn("Success", result)
 
         target_dir = os.path.join(self.ai_dir, "agent-skill-sample")
@@ -102,7 +108,7 @@ class TestSkillBuilder(unittest.TestCase):
             f.write(original_md)
 
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
-            result = skill_builder_impl.install_agent_skill(md_path)
+            result = skill_builder_impl.install_agent_skill(md_path, _context=self.context)
             self.assertIn("Success", result)
 
         target_dir = os.path.join(self.ai_dir, "aihot")
@@ -120,7 +126,7 @@ class TestSkillBuilder(unittest.TestCase):
             archive.write(os.path.join(source_dir, "SKILL.md"), arcname="zip-skill/SKILL.md")
 
         with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
-            result = skill_builder_impl.install_agent_skill(zip_path)
+            result = skill_builder_impl.install_agent_skill(zip_path, _context=self.context)
             self.assertIn("Success", result)
 
         self.assertTrue(os.path.isfile(os.path.join(self.ai_dir, "zip-skill", "SKILL.md")))
@@ -129,6 +135,18 @@ class TestSkillBuilder(unittest.TestCase):
         self.assertFalse(hasattr(skill_builder_impl, "convert_claude_skill"))
         self.assertFalse(hasattr(skill_builder_impl, "convert_openclaw_skill"))
         self.assertFalse(hasattr(skill_builder_impl, "convert_external_skill"))
+
+    def test_create_rolls_back_when_catalog_publish_fails(self):
+        context = {"skill_change_publisher": lambda _event: (_ for _ in ()).throw(RuntimeError("reload failed"))}
+        with patch.object(skill_builder_impl, "get_app_data_dir", return_value=self.temp_dir):
+            result = skill_builder_impl.create_new_skill(
+                workspace_dir=self.temp_dir,
+                skill_name="rollback-test",
+                description="must not remain visible",
+                _context=context,
+            )
+        self.assertIn("reload failed", result)
+        self.assertFalse(os.path.exists(os.path.join(self.ai_dir, "rollback-test")))
 
 
 if __name__ == "__main__":

@@ -472,6 +472,8 @@ class LLMWorker(QThread):
         is_subagent=False,
         run_context=None,
         turn_id=None,
+        skill_catalog_service=None,
+        dependency_coordinator=None,
     ):
         super().__init__()
         self.messages = messages
@@ -494,8 +496,24 @@ class LLMWorker(QThread):
         self._pending_guidance = []
         self._guidance_open = True
         
-        # Initialize Skill Manager
-        self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
+        # Skill discovery is process-scoped. Request workers only create a cheap run view.
+        self.skill_catalog_service = skill_catalog_service
+        self.dependency_coordinator = dependency_coordinator
+        self._pending_skill_snapshot = None
+        self._skill_snapshot_lock = threading.Lock()
+        if skill_catalog_service is not None:
+            snapshot = skill_catalog_service.snapshot()
+            self.skill_manager = snapshot.runtime(
+                workspace_dir,
+                config_manager=config_manager,
+                dependency_coordinator=dependency_coordinator,
+                change_publisher=self._publish_skill_change,
+            )
+            skill_catalog_service.subscribe(self._on_skill_catalog_changed)
+            self.finished.connect(self._detach_skill_catalog)
+        else:
+            # Compatibility path for direct unit construction; production request paths pass a catalog.
+            self.skill_manager = SkillManager(workspace_dir, config_manager, load_mcp_tools=False)
         self.discovered_tool_names = set()
         self.tools = []
         self._refresh_tool_definitions()
@@ -512,6 +530,40 @@ class LLMWorker(QThread):
         self._bind_agent_manager()
         self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
         self._stable_system_prompt = None
+
+    def _publish_skill_change(self, event):
+        if self.skill_catalog_service is None:
+            raise RuntimeError("Skill catalog service is unavailable.")
+        return self.skill_catalog_service.publish_change(event)
+
+    def _detach_skill_catalog(self):
+        if self.skill_catalog_service is not None:
+            self.skill_catalog_service.unsubscribe(self._on_skill_catalog_changed)
+
+    def _on_skill_catalog_changed(self, event, snapshot):
+        if snapshot.revision <= getattr(self.skill_manager, "catalog_revision", 0):
+            return
+        with self._skill_snapshot_lock:
+            pending = self._pending_skill_snapshot
+            if pending and pending[1].revision >= snapshot.revision:
+                return
+            self._pending_skill_snapshot = (event, snapshot)
+
+    def _apply_pending_skill_snapshot(self):
+        with self._skill_snapshot_lock:
+            pending = self._pending_skill_snapshot
+            self._pending_skill_snapshot = None
+        if not pending:
+            return
+        event, snapshot = pending
+        self.skill_manager.apply_snapshot(snapshot)
+        self._refresh_tool_definitions()
+        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        payload["type"] = "skill_changed"
+        self.observability_signal.emit(payload)
+        self.agent_state_signal.emit(payload)
+        names = "、".join(payload.get("skill_names") or [])
+        self.step_signal.emit(f"能力目录已更新：{names or 'Skill'}")
 
     def _selected_skill_names(self):
         return normalize_selected_skill_names(self.run_context.get("selected_skill_names"))
@@ -670,9 +722,33 @@ class LLMWorker(QThread):
                 step_signal=self.step_signal,
                 agent_state_signal=self.agent_state_signal,
                 owner_worker=self,
+                worker_factory=self._create_subagent_worker,
             )
         except Exception:
             self.agent_manager = None
+
+    def _create_subagent_worker(
+        self,
+        messages,
+        config_manager,
+        workspace_dir,
+        agent_id,
+        conversation_id,
+        run_context=None,
+    ):
+        return LLMWorker(
+            messages,
+            config_manager,
+            workspace_dir,
+            parent_agent_id=agent_id,
+            session_id=conversation_id,
+            conversation_id=conversation_id,
+            agent_id=agent_id,
+            is_subagent=True,
+            run_context=run_context,
+            skill_catalog_service=self.skill_catalog_service,
+            dependency_coordinator=self.dependency_coordinator,
+        )
 
     @Slot(str)
     def relay_agent_step(self, text):
@@ -1245,18 +1321,12 @@ class LLMWorker(QThread):
 
             self._append_pending_guidance(current_messages, generated_messages)
 
+            # Catalog changes are applied only between model requests.
+            self._apply_pending_skill_snapshot()
+
             turn_count += 1
             self._refresh_tool_definitions()
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
-
-            # --- Hot Reload Skills ---
-            # Check if any new skills were added or modified
-            if self.skill_manager.check_for_updates():
-                self.step_signal.emit("System: Detecting skill updates... Reloading.")
-                self.skill_manager.load_skills()
-                self._refresh_tool_definitions()
-                disclosed_skills.clear()
-            # -------------------------
 
             self._append_skill_prompts_for_names(
                 self._selected_skill_names(),
@@ -1640,6 +1710,7 @@ class LLMWorker(QThread):
                                 "agent_manager": self.agent_manager,
                                 "file_state": self.file_state_cache,
                                 "agent_state_signal": self.agent_state_signal,
+                                "observability_signal": self.observability_signal,
                                 "tool_call_id": tool.id,
                                 "abort_signal": self.abort_signal,
                                 "current_agent_id": self.agent_id or (self.parent_agent_id or ""),

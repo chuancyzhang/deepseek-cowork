@@ -243,8 +243,18 @@ def update_experience(skill_name=None, experience=None, description=None, instru
     if not updates:
         return "No changes requested."
 
-    skill_manager.load_skills()
     target_name = skill_name or "general-experience"
+    publisher = _context.get("skill_change_publisher")
+    if not callable(publisher):
+        return "Error: Skill update was written but the runtime change publisher is unavailable."
+    publisher(
+        {
+            "action": "updated" if skill_name else "created",
+            "skill_names": [target_name],
+            "source": "ai",
+            "session_id": _context.get("session_id") or "",
+        }
+    )
     return f"Successfully updated '{target_name}': {', '.join(updates)}"
 
 

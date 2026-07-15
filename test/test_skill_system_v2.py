@@ -1071,6 +1071,9 @@ class TestSkillSystemV2(unittest.TestCase):
             self.assertTrue(success, message)
             self.assertIn("2 个成功", message)
 
+            self.assertEqual(set(sm.last_imported_skill_names), {"claim-expert", "policy-review"})
+            self.assertNotIn("claim-expert", sm.skill_records)
+            sm.load_skills()
             self.assertIn("claim-expert", sm.skill_records)
             self.assertIn("policy-review", sm.skill_records)
             self.assertIn("claim-expert", sm.select_relevant_skills("CLAIM EXPERT", limit=5))
@@ -1104,7 +1107,7 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("Do not use `glob`, `grep`, or `bash`", full_prompt)
         self.assertIn("script-execution:", record["brief"])
 
-    def test_skill_dependencies_are_preserved_and_prepared(self):
+    def test_skill_dependencies_are_preserved_without_installing_during_catalog_load(self):
         skill_dir = os.path.join(self.skills_dir, "dependency-skill")
         os.makedirs(skill_dir, exist_ok=True)
         with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
@@ -1130,14 +1133,11 @@ class TestSkillSystemV2(unittest.TestCase):
         with patch("core.skill_manager.install_skill_dependencies", return_value={"ok": True, "message": "ready"}) as installer:
             sm = self._build_manager()
 
-        installer.assert_called_with(
-            "dependency-skill",
-            python_dependencies=["requests"],
-            node_dependencies=["lodash"],
-        )
+        installer.assert_not_called()
         record = sm.skill_records["dependency-skill"]
         self.assertEqual(record["spec"]["python_dependencies"], ["requests"])
         self.assertEqual(record["spec"]["node_dependencies"], ["lodash"])
+        self.assertTrue(record["dependency_status"].get("pending"))
 
     def test_command_tools_skill_is_discoverable_and_registers_expected_tools(self):
         self._copy_repo_skill("command-tools")
@@ -1300,6 +1300,9 @@ class TestSkillSystemV2(unittest.TestCase):
             success, message = sm.import_skill(source_dir)
             self.assertTrue(success, message)
 
+            self.assertEqual(sm.last_imported_skill_names, ["aihot"])
+            self.assertNotIn("aihot", sm.skill_records)
+            sm.load_skills()
             self.assertIn("aihot", sm.skill_records)
             record = sm.skill_records["aihot"]
             self.assertEqual(record["spec"]["creation_hints"]["source_format"], "agent_skill")

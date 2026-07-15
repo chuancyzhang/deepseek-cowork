@@ -22,7 +22,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 2. **Agent 层**
    `core/agent.py` 负责推理循环、工具调度、模式约束和结果汇总。
 3. **能力层**
-   `core/skill_manager.py` 负责加载 `skills/`、`ai_skills/`、MCP 工具，并按需向模型披露技能内容。
+   `core/skill_catalog.py` 在 UI 与 daemon 进程内分别维护原子替换的不可变 Skill 目录快照；`core/skill_manager.py` 提供会话隔离的轻量运行视图、工具披露与调用。
 4. **运行层**
    `core/daemon.py`、`core/sandbox_runtime.py` 与相关 provider 代码负责模型请求、后台执行和运行时环境。
 5. **数据层**
@@ -46,7 +46,11 @@ UI 采用三层表面模型：应用画布、功能面板、控件或数据行�
 
 这套结构的核心目的是把“执行过程”和“产品操作”留在同一个窗口内完成，而不是依赖外部终端或浏览器页面。
 
-启动时先显示轻量准备窗口，再通过 `QTimer.singleShot(0, ...)` 构造主窗口；只有 `MainWindow` 初始化完成并发出显示请求后才关闭准备窗口。主窗口构造期只做必要控件、配置、会话保存队列和初始会话初始化；默认工作区加载、历史首屏刷新和后台服务启动放到显示后的 hydration 与后台任务阶段，避免启动遮罩被长任务卡住。Skill 初始化在主窗口显示后由后台 worker 构建完整 `SkillManager`，启动期只保留轻量发现入口；MCP server 先注册为能力元数据，具体 `list_tools()` 等到 `tool_search`、MCP 调试或调用路径再执行。交付物 WebEngine 预览延迟到首次 HTML/Markdown/Office 预览时创建；历史侧栏默认只取最近一页摘要，用户需要时再继续加载更多记录。
+启动时先显示轻量准备窗口，再通过 `QTimer.singleShot(0, ...)` 构造主窗口；只有 `MainWindow` 初始化完成并发出显示请求后才关闭准备窗口。主窗口构造期只做必要控件、配置、会话保存队列和初始会话初始化；默认工作区加载、历史首屏刷新和后台服务启动放到显示后的 hydration 与后台任务阶段，避免启动遮罩被长任务卡住。Skill 初始化在主窗口显示后由后台 worker 构建进程级目录快照；请求 Worker 只克隆运行视图，不执行 `load_skills()`。声明式 `skill.json.tools` 记录名称、参数 schema、权限和 `impl.py:function` 绑定，处理器延迟到首次调用才导入；旧反射 Skill 按实现哈希复用模块。MCP server 先注册为能力元数据，具体 `list_tools()` 等到 `tool_search`、MCP 调试或调用路径再执行。交付物 WebEngine 预览延迟到首次 HTML/Markdown/Office 预览时创建；历史侧栏默认只取最近一页摘要，用户需要时再继续加载更多记录。
+
+Skill 变更统一使用 `SkillChangeEvent`（事件 ID、动作、Skill 名称、来源、会话和修订号）。能力中心启停、导入、删除、会话沉淀以及 AI 创建/更新都先完成校验与原子目录发布，再让 UI 与 daemon 分别重建快照；重复事件幂等，旧修订不会覆盖新快照。运行中工具不被中断，Worker 只在下一模型请求边界调用 `apply_snapshot()`。根目录后台监听只修复外部编辑，不参与强一致业务链路。
+
+`DependencyCoordinator` 在首次工具调用前按 Skill 与依赖哈希执行 single-flight。默认超时 300 秒，配置项 `skill_dependency_install_timeout_seconds` 被限制在 30–1800 秒；成功与失败都持久化，失败不会随新对话自动重试，只能由能力中心显式重试或依赖声明变化触发。安装 start/finish/error、快照构建/切换和工具执行均进入 daemon 日志与 observability。
 
 右侧上下文徽标、澄清状态和抽屉提示属于同一组 UI 状态，但刷新方向必须保持单向：`refresh_context_badges()` 可以调度局部控件同步，局部控件刷新函数不能反向触发全量上下文刷新。移除或重构控件时要同步清理旧刷新链路，并用当前会话存在的场景覆盖递归回归测试。
 

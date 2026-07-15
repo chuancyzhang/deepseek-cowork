@@ -263,6 +263,7 @@ class ConfigManager:
             "context_compression_recent_keep_turns": 40,
             "disabled_skills": [],
             "enabled_skills": [],
+            "skill_dependency_install_timeout_seconds": 300,
             "agent_profiles": self._default_agent_profiles(),
             "automation_tasks": [],
             "automation_run_history": [],

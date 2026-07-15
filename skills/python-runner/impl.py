@@ -127,6 +127,16 @@ def run_python_code(workspace_dir, code, _context=None):
     if _context and 'config_manager' in _context:
         god_mode = _context['config_manager'].get_god_mode()
 
+    visualization_dir = ""
+    manager = (_context or {}).get("skill_manager") if isinstance(_context, dict) else None
+    visualize_enabled = "visualize" in (getattr(manager, "skill_records", {}) or {})
+    if visualize_enabled:
+        from core.inline_visualization import visualization_staging_dir
+
+        conversation_id = str((_context or {}).get("conversation_id") or (_context or {}).get("session_id") or "").strip()
+        if conversation_id:
+            visualization_dir = visualization_staging_dir(conversation_id, create=True)
+
     try:
         validate_code_safety(code, workspace_dir, god_mode=god_mode)
     except SecurityError as e:
@@ -154,6 +164,7 @@ def run_python_code(workspace_dir, code, _context=None):
             skill_id="python-runner",
             shell_kind="exec",
             text=False,
+            extra_env={"COWORK_VISUALIZATION_DIR": visualization_dir} if visualization_dir else None,
         )
         while True:
             if abort_state["aborted"]:

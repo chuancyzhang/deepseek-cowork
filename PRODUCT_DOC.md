@@ -58,6 +58,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 - 腾讯文档、飞书文档、钉钉文档、WeKnora、ShowDoc MCP、Airflow 与官方 Superset MCP 以独立可选 skill 内置。WeKnora、Airflow 复用隔离的 Skill Python 运行环境并自动注入凭据；Superset 使用用户账号密码在内存中获取和刷新 JWT，不把 access/refresh token 写入 MCP 配置
 - `tool` 是直接执行面，`skill` 是经验包
 - 自动工具发现命中的技能全文只参与当前轮推理，不进入会话历史，避免临时技能上下文降低后续 prompt cache 命中稳定性
+- `visualize` 是默认关闭的随包插件。启用后可通过受限 Python 计算生成离线 HTML Fragment，发布后以沙箱 iframe 嵌入 AI 回复；关闭时不暴露工具、不创建新产物，已登记且哈希有效的历史产物只读可见
 
 ### 3.4 自动化
 

@@ -74,6 +74,28 @@ class TestSkillSystemV2(unittest.TestCase):
         shutil.copytree(source_dir, target_dir)
         return target_dir
 
+    def test_visualize_plugin_is_disabled_by_default_and_registers_no_tools(self):
+        self._copy_repo_ai_skill("visualize")
+        manager = self._build_manager()
+
+        self.assertNotIn("visualize", manager.skill_records)
+        tool_names = {
+            (item.get("function") or {}).get("name")
+            for item in manager.get_tool_definitions()
+        }
+        self.assertNotIn("run_visualization_python", tool_names)
+        self.assertNotIn("finalize_inline_visualization", tool_names)
+
+    def test_visualize_plugin_registers_tools_only_when_enabled(self):
+        self._copy_repo_ai_skill("visualize")
+        manager = self._build_manager_with_enabled({"visualize"})
+
+        self.assertIn("visualize", manager.skill_records)
+        self.assertEqual(
+            set(manager.get_tools_for_skill("visualize")),
+            {"run_visualization_python", "finalize_inline_visualization"},
+        )
+
     def test_knowledge_skill_is_discoverable_without_registering_new_tools(self):
         skill_dir = os.path.join(self.skills_dir, "http-guide")
         os.makedirs(skill_dir, exist_ok=True)

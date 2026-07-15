@@ -129,6 +129,35 @@ class ChatStorage:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS inline_visualizations (
+                    conversation_id TEXT NOT NULL,
+                    file TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    title TEXT,
+                    origins TEXT,
+                    created_at INTEGER,
+                    PRIMARY KEY (conversation_id, file),
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS inline_visualization_states (
+                    conversation_id TEXT NOT NULL,
+                    file TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    state TEXT,
+                    updated_at INTEGER,
+                    PRIMARY KEY (conversation_id, file),
+                    FOREIGN KEY(conversation_id, file)
+                        REFERENCES inline_visualizations(conversation_id, file) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS agents (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT NOT NULL,
@@ -1383,9 +1412,126 @@ class ChatStorage:
         return normalized_messages
 
     def delete_conversation(self, conversation_id):
+        artifact_paths = []
         with self._connect() as conn:
+            artifact_paths = [
+                str(row["path"] or "")
+                for row in conn.execute(
+                    "SELECT path FROM inline_visualizations WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchall()
+            ]
             conn.execute("DELETE FROM im_sessions WHERE conversation_id = ?", (conversation_id,))
             conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        if artifact_paths:
+            from .env_utils import get_app_data_dir
+
+            visualization_root = os.path.normcase(
+                os.path.abspath(os.path.join(get_app_data_dir(), "visualizations"))
+            )
+            for raw_path in artifact_paths:
+                candidate = os.path.normcase(os.path.abspath(raw_path))
+                try:
+                    inside_root = os.path.commonpath([visualization_root, candidate]) == visualization_root
+                except ValueError:
+                    inside_root = False
+                if not inside_root or not os.path.isfile(candidate):
+                    continue
+                try:
+                    os.remove(candidate)
+                except OSError:
+                    continue
+
+    def register_inline_visualization(self, conversation_id, artifact):
+        if not conversation_id or not isinstance(artifact, dict):
+            raise ValueError("conversation_id and artifact are required")
+        now = int(time.time())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO conversations (
+                    id, title, created_at, updated_at, status, meta
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (conversation_id, "新对话", now, now, "active", "{}"),
+            )
+            conn.execute(
+                """
+                INSERT INTO inline_visualizations (
+                    conversation_id, file, path, sha256, title, origins, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id, file) DO UPDATE SET
+                    path = excluded.path,
+                    sha256 = excluded.sha256,
+                    title = excluded.title,
+                    origins = excluded.origins
+                """,
+                (
+                    conversation_id,
+                    artifact.get("file"),
+                    artifact.get("path"),
+                    artifact.get("sha256"),
+                    artifact.get("title") or "",
+                    json.dumps(artifact.get("origins") or [], ensure_ascii=False),
+                    now,
+                ),
+            )
+        return self.get_inline_visualization(conversation_id, artifact.get("file"))
+
+    def get_inline_visualization(self, conversation_id, file):
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT conversation_id, file, path, sha256, title, origins, created_at
+                FROM inline_visualizations
+                WHERE conversation_id = ? AND file = ?
+                """,
+                (conversation_id, file),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "conversation_id": row["conversation_id"],
+            "file": row["file"],
+            "path": row["path"],
+            "sha256": row["sha256"],
+            "title": row["title"] or "",
+            "origins": self._parse_json_value(row["origins"], default=[]),
+            "created_at": row["created_at"],
+        }
+
+    def get_inline_visualization_state(self, conversation_id, file, sha256=""):
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT sha256, state FROM inline_visualization_states
+                WHERE conversation_id = ? AND file = ?
+                """,
+                (conversation_id, file),
+            ).fetchone()
+        if not row or (sha256 and row["sha256"] != sha256):
+            return {}
+        return self._parse_json_value(row["state"], default={}) or {}
+
+    def save_inline_visualization_state(self, conversation_id, file, sha256, state):
+        from .inline_visualization import INLINE_VISUALIZATION_STATE_MAX_BYTES
+
+        payload = json.dumps(state if isinstance(state, dict) else {}, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > INLINE_VISUALIZATION_STATE_MAX_BYTES:
+            raise ValueError("可视化状态超过 64 KB。")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO inline_visualization_states (
+                    conversation_id, file, sha256, state, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id, file) DO UPDATE SET
+                    sha256 = excluded.sha256,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at
+                """,
+                (conversation_id, file, sha256, payload, int(time.time())),
+            )
 
     @staticmethod
     def _normalize_deliverable_location(path):

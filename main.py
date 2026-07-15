@@ -45,6 +45,12 @@ from core.deliverable_preview import (
     render_structured_document_preview,
 )
 from core.html_render import extract_renderable_html_response
+from core.inline_visualization import (
+    build_visualization_document,
+    find_inline_visualization_files,
+    sha256_file,
+    strip_inline_visualization_directives,
+)
 from core.theme import apply_tooltip_theme, DesignTokens
 from ui.primitives import (
     ProductActionBar,
@@ -215,7 +221,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -11615,6 +11621,280 @@ class GuidanceTimelineEvent(QFrame):
         )
 
 
+class InlineVisualizationBridge(QObject):
+    heightReported = Signal(int)
+    stateReceived = Signal(str)
+    errorReported = Signal(str)
+
+    @Slot(int)
+    def reportHeight(self, height):
+        self.heightReported.emit(int(height or 0))
+
+    @Slot(str)
+    def saveState(self, payload):
+        self.stateReceived.emit(str(payload or "{}"))
+
+    @Slot(str)
+    def reportError(self, message):
+        self.errorReported.emit(str(message or "未知 JavaScript 错误"))
+
+
+def inline_visualization_theme_css():
+    return f"""
+:root {{
+  color-scheme: light;
+  --background: {DesignTokens.bg_main};
+  --foreground: {DesignTokens.text_primary};
+  --card: {DesignTokens.bg_secondary};
+  --card-foreground: {DesignTokens.text_primary};
+  --muted: {DesignTokens.bg_hover};
+  --muted-foreground: {DesignTokens.text_secondary};
+  --accent: {DesignTokens.primary_soft};
+  --accent-foreground: {DesignTokens.primary};
+  --primary: {DesignTokens.primary};
+  --primary-foreground: #ffffff;
+  --border: {DesignTokens.border_subtle};
+  --input: {DesignTokens.border};
+  --ring: {DesignTokens.primary_focus};
+  --viz-series-1: {DesignTokens.primary};
+  --viz-series-2: #d97706;
+  --viz-series-3: #16a34a;
+  --viz-series-4: #db2777;
+  --viz-series-5: #7c3aed;
+  --viz-series-6: #0f766e;
+  --font-size-base: 14px;
+}}
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; padding: 4px; color: var(--foreground); background: transparent; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; font-size: var(--font-size-base); }}
+.viz-controls {{ display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }}
+.form-label {{ display: block; margin-bottom: 5px; color: var(--muted-foreground); font-size: 12px; }}
+.form-control, .form-select, .btn {{ min-height: 30px; border: 1px solid var(--input); border-radius: 7px; color: var(--foreground); background: var(--background); font: inherit; }}
+.form-control, .form-select {{ width: 100%; padding: 4px 8px; }}
+.btn {{ padding: 4px 10px; cursor: pointer; }}
+.btn-ghost {{ border-color: transparent; color: var(--muted-foreground); background: transparent; }}
+.btn:hover, .btn:focus-visible {{ color: var(--primary); background: var(--accent); outline: none; }}
+table {{ border-collapse: collapse; width: 100%; }}
+th, td {{ border-bottom: 1px solid var(--border); padding: 7px 8px; text-align: left; }}
+svg, canvas {{ display: block; max-width: 100%; }}
+"""
+
+
+class InlineVisualizationCard(QFrame):
+    def __init__(self, artifact, conversation_id, chat_storage, read_only=False, parent=None):
+        super().__init__(parent)
+        self.artifact = dict(artifact or {})
+        self.conversation_id = str(conversation_id or "")
+        self.chat_storage = chat_storage
+        self.read_only = bool(read_only)
+        self.web_view = None
+        self.bridge = None
+        self._pending_state = None
+        self._active = True
+        self._expanded = False
+        self.setObjectName("InlineVisualizationCard")
+        self.setStyleSheet(
+            f"QFrame#InlineVisualizationCard {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        self.title_label = QLabel(self.artifact.get("title") or self.artifact.get("file") or "交互可视化")
+        self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
+        header.addWidget(self.title_label, 1)
+        if self.read_only:
+            readonly = QLabel("只读")
+            readonly.setStyleSheet(apple_status_chip_style("disabled", subtle=True))
+            header.addWidget(readonly)
+        self.expand_btn = QPushButton("展开")
+        self.expand_btn.setCursor(Qt.PointingHandCursor)
+        self.expand_btn.setFixedHeight(26)
+        self.expand_btn.setStyleSheet(apple_button_style("secondary", radius=7))
+        self.expand_btn.clicked.connect(self._toggle_expanded)
+        header.addWidget(self.expand_btn)
+        layout.addLayout(header)
+
+        self.body_layout = QVBoxLayout()
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.status_label = QLabel("正在准备交互视图…")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px; padding: 12px;")
+        self.body_layout.addWidget(self.status_label)
+        layout.addLayout(self.body_layout)
+        self.state_timer = QTimer(self)
+        self.state_timer.setSingleShot(True)
+        self.state_timer.setInterval(500)
+        self.state_timer.timeout.connect(self._flush_state)
+        QTimer.singleShot(0, self.ensure_loaded)
+
+    def _toggle_expanded(self):
+        self._expanded = not self._expanded
+        self.expand_btn.setText("收起" if self._expanded else "展开")
+        if self.web_view is not None:
+            self.web_view.setFixedHeight(900 if self._expanded else max(180, min(620, self.web_view.height())))
+
+    def _show_error(self, message):
+        self.status_label.setText(str(message or "交互可视化加载失败。"))
+        self.status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px; padding: 12px;")
+        self.status_label.setVisible(True)
+
+    def _configure_view(self, view):
+        try:
+            module = importlib.import_module("PySide6.QtWebEngineCore")
+            settings = view.settings()
+            attributes = module.QWebEngineSettings.WebAttribute
+            for name, enabled in (
+                ("JavascriptEnabled", True),
+                ("JavascriptCanOpenWindows", False),
+                ("JavascriptCanAccessClipboard", False),
+                ("LocalContentCanAccessFileUrls", False),
+                ("LocalContentCanAccessRemoteUrls", False),
+                ("FullScreenSupportEnabled", False),
+            ):
+                attribute = getattr(attributes, name, None)
+                if attribute is not None:
+                    settings.setAttribute(attribute, enabled)
+        except Exception as exc:
+            raise RuntimeError(f"无法配置交互可视化沙箱：{exc}") from exc
+
+    def ensure_loaded(self):
+        if not self._active or self.web_view is not None:
+            return
+        path = os.path.abspath(str(self.artifact.get("path") or ""))
+        expected_hash = str(self.artifact.get("sha256") or "")
+        try:
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"历史可视化文件不存在：{path}")
+            if sha256_file(path) != expected_hash:
+                raise RuntimeError("可视化文件校验失败，内容与历史记录不一致。")
+            with open(path, "r", encoding="utf-8") as handle:
+                fragment = handle.read()
+            view_cls = load_qwebengine_view()
+            if view_cls is None:
+                raise RuntimeError(webengine_unavailable_message())
+            view = view_cls(self)
+            self._configure_view(view)
+            view.setStyleSheet("background: transparent; border: none;")
+            view.setFixedHeight(420)
+            initial_state = self.chat_storage.get_inline_visualization_state(
+                self.conversation_id,
+                self.artifact.get("file"),
+                expected_hash,
+            ) if self.chat_storage is not None else {}
+            document = build_visualization_document(
+                fragment,
+                initial_state=initial_state,
+                read_only=self.read_only,
+                theme_css=inline_visualization_theme_css(),
+            )
+            channel_module = importlib.import_module("PySide6.QtWebChannel")
+            channel = channel_module.QWebChannel(view.page())
+            bridge = InlineVisualizationBridge(channel)
+            channel.registerObject("bridge", bridge)
+            view.page().setWebChannel(channel)
+            bridge.heightReported.connect(self._apply_height)
+            bridge.stateReceived.connect(self._queue_state)
+            bridge.errorReported.connect(self._handle_runtime_error)
+            view.loadFinished.connect(self._handle_load_finished)
+            self.bridge = bridge
+            self._web_channel = channel
+            self.web_view = view
+            self.body_layout.addWidget(view)
+            view.setHtml(document, QUrl("qrc:///"))
+            log_sub_agent_runtime(
+                "inline_visualization_load_start",
+                conversation_id=self.conversation_id,
+                file=self.artifact.get("file"),
+                read_only=self.read_only,
+            )
+        except Exception as exc:
+            self._show_error(str(exc))
+            log_sub_agent_runtime(
+                "inline_visualization_load_error",
+                conversation_id=self.conversation_id,
+                file=self.artifact.get("file"),
+                error=str(exc),
+            )
+
+    def _handle_load_finished(self, ok):
+        if ok:
+            self.status_label.setVisible(False)
+        else:
+            self._show_error("交互可视化页面加载失败，请检查 Fragment 的 HTML、CSS 和 JavaScript。")
+        log_sub_agent_runtime(
+            "inline_visualization_load_finish",
+            conversation_id=self.conversation_id,
+            file=self.artifact.get("file"),
+            ok=bool(ok),
+        )
+
+    def _apply_height(self, height):
+        if self.web_view is None or self._expanded:
+            return
+        self.web_view.setFixedHeight(max(180, min(620, int(height or 420))))
+
+    def _handle_runtime_error(self, message):
+        detail = str(message or "未知 JavaScript 错误")
+        self._show_error(f"交互可视化脚本运行失败：{detail}")
+        log_sub_agent_runtime(
+            "inline_visualization_runtime_error",
+            conversation_id=self.conversation_id,
+            file=self.artifact.get("file"),
+            error=detail,
+        )
+
+    def _queue_state(self, payload):
+        if self.read_only:
+            return
+        try:
+            state = json.loads(str(payload or "{}"))
+            if not isinstance(state, dict):
+                raise ValueError("状态必须是 JSON object。")
+            self._pending_state = state
+            self.state_timer.start()
+        except Exception as exc:
+            log_sub_agent_runtime("inline_visualization_state_invalid", error=str(exc))
+
+    def _flush_state(self):
+        if self.read_only or self._pending_state is None or self.chat_storage is None:
+            return
+        state = self._pending_state
+        self._pending_state = None
+        try:
+            self.chat_storage.save_inline_visualization_state(
+                self.conversation_id,
+                self.artifact.get("file"),
+                self.artifact.get("sha256"),
+                state,
+            )
+            log_sub_agent_runtime(
+                "inline_visualization_state_saved",
+                conversation_id=self.conversation_id,
+                file=self.artifact.get("file"),
+            )
+        except Exception as exc:
+            self._show_error(f"交互状态保存失败：{exc}")
+
+    def set_active(self, active):
+        self._active = bool(active)
+        if self._active:
+            self.ensure_loaded()
+            return
+        if self.state_timer.isActive():
+            self.state_timer.stop()
+            self._flush_state()
+        if self.web_view is not None:
+            self.body_layout.removeWidget(self.web_view)
+            self.web_view.deleteLater()
+            self.web_view = None
+            self.bridge = None
+            self.status_label.setText("滚动回此消息时重新加载交互视图。")
+            self.status_label.setVisible(True)
+
+
 class ChatBubble(QFrame):
     editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
@@ -11635,6 +11915,9 @@ class ChatBubble(QFrame):
         source_message_id="",
         workspace_dir="",
         edited=False,
+        session_id="",
+        chat_storage=None,
+        visualize_enabled=False,
     ):
         super().__init__()
         self.role = role
@@ -11651,6 +11934,13 @@ class ChatBubble(QFrame):
         self._virtualized_visible_state = {}
         self.source_message_id = str(source_message_id or "").strip()
         self.workspace_dir = str(workspace_dir or "").strip()
+        self.session_id = str(session_id or "").strip()
+        self.chat_storage = chat_storage
+        self.visualize_enabled = bool(visualize_enabled)
+        self._inline_visualization_files = []
+        self.inline_visualization_cards = []
+        self.inline_visualization_container = None
+        self.inline_visualization_layout = None
         self.edit_btn = None
         self.delete_btn = None
         self.message_action_buttons = []
@@ -11791,6 +12081,7 @@ class ChatBubble(QFrame):
             content_col.setMaximumWidth(DesignTokens.message_max_width)
             content_col.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             col_layout = QVBoxLayout(content_col)
+            self.content_col_layout = col_layout
             col_layout.setContentsMargins(0, 0, 0, 0)
             col_layout.setSpacing(6)
             
@@ -11867,6 +12158,12 @@ class ChatBubble(QFrame):
             self.content_plain_edit.setVisible(False)
             col_layout.addWidget(self.content_rich_edit)
             col_layout.addWidget(self.content_plain_edit)
+            if self.visualize_enabled or (
+                "::cowork-inline-vis{file=" in str(text or "")
+                and self.chat_storage is not None
+                and self.session_id
+            ):
+                self._ensure_inline_visualization_container()
             self.content_edit = self.content_rich_edit
             self._main_content_view_mode = "rich"
             self.main_content_text = ""
@@ -11986,6 +12283,8 @@ class ChatBubble(QFrame):
         if self._virtualized == virtualized:
             return
         if virtualized:
+            for card in self.inline_visualization_cards:
+                card.set_active(False)
             height = self.height() if self.height() > 0 else self.sizeHint().height()
             self._virtualized_height = max(32, int(height or 32))
             self.setUpdatesEnabled(False)
@@ -12005,6 +12304,8 @@ class ChatBubble(QFrame):
         self._virtualized_visible_state = {}
         self._virtualized = False
         self.setUpdatesEnabled(True)
+        for card in self.inline_visualization_cards:
+            card.set_active(True)
         if self.user_content_edit is not None:
             self.user_content_edit.scheduleAdjustHeight()
         if self.content_edit is not None:
@@ -12499,8 +12800,12 @@ class ChatBubble(QFrame):
         if already_rendered:
             return
 
+        render_text = text
+        if final:
+            render_text = self._sync_inline_visualizations(text)
+
         render_mode = "plain" if self._should_render_main_content_as_plain(
-            text,
+            render_text,
             content_parts=content_parts,
             final=final,
         ) else "rich"
@@ -12509,11 +12814,11 @@ class ChatBubble(QFrame):
         try:
             content_widget.setUpdatesEnabled(False)
             if render_mode == "plain":
-                self._render_plain_stream_content(text)
+                self._render_plain_stream_content(render_text)
                 render_mode = "plain"
             else:
                 render_mode, html_content = render_markdown_or_html_with_cache(
-                    text,
+                    render_text,
                     final=final,
                     workspace_dir=self.workspace_dir,
                 )
@@ -12521,7 +12826,7 @@ class ChatBubble(QFrame):
         except Exception:
             plain_widget = self._set_main_content_view_mode("plain")
             plain_widget.setUpdatesEnabled(False)
-            plain_widget.setPlainText(text)
+            plain_widget.setPlainText(render_text)
             render_mode = "plain"
         finally:
             self.content_edit.setUpdatesEnabled(True)
@@ -12534,6 +12839,54 @@ class ChatBubble(QFrame):
         self.content_edit.scheduleAdjustHeight()
         QTimer.singleShot(0, self.content_edit.scheduleAdjustHeight)
         QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
+
+    def _sync_inline_visualizations(self, text):
+        marker = "::cowork-inline-vis{file="
+        if marker not in str(text or "") or self.chat_storage is None or not self.session_id:
+            return text
+        requested = find_inline_visualization_files(text)
+        artifacts = []
+        for filename in requested:
+            artifact = self.chat_storage.get_inline_visualization(self.session_id, filename)
+            if artifact:
+                artifacts.append(artifact)
+        files = [artifact.get("file") for artifact in artifacts]
+        if files == self._inline_visualization_files:
+            return strip_inline_visualization_directives(text, files)
+        if artifacts:
+            self._ensure_inline_visualization_container()
+        if self.inline_visualization_layout is None:
+            return text
+        while self.inline_visualization_layout.count():
+            item = self.inline_visualization_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.inline_visualization_cards = []
+        for artifact in artifacts:
+            card = InlineVisualizationCard(
+                artifact,
+                self.session_id,
+                self.chat_storage,
+                read_only=not self.visualize_enabled,
+            )
+            self.inline_visualization_layout.addWidget(card)
+            self.inline_visualization_cards.append(card)
+        self._inline_visualization_files = files
+        self.inline_visualization_container.setVisible(bool(files))
+        return strip_inline_visualization_directives(text, files)
+
+    def _ensure_inline_visualization_container(self):
+        if self.inline_visualization_container is not None:
+            return
+        container = QWidget()
+        container.setVisible(False)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(8)
+        self.inline_visualization_container = container
+        self.inline_visualization_layout = layout
+        self.content_col_layout.addWidget(container)
 
     def _handle_content_link(self, href):
         value = str(href or "")
@@ -26858,6 +27211,9 @@ class MainWindow(QMainWindow):
             source_message_id=source_message_id,
             workspace_dir=self._workspace_dir_for_state(state),
             edited=edited,
+            session_id=state.session_id,
+            chat_storage=self.chat_storage,
+            visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
         )
         self._connect_chat_bubble_actions(bubble, state)
         if str(role or "").strip().lower() in {"agent", "assistant"} and getattr(bubble, "_deliverable_paths", None):
@@ -27122,8 +27478,15 @@ class MainWindow(QMainWindow):
         effective_workspace_dir = self._ensure_session_workspace(state)
         
         # Insert "Thinking" bubble
-        state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
-        state.temp_thinking_bubble.workspace_dir = effective_workspace_dir
+        state.temp_thinking_bubble = ChatBubble(
+            "agent",
+            "",
+            thinking="...",
+            workspace_dir=effective_workspace_dir,
+            session_id=state.session_id,
+            chat_storage=self.chat_storage,
+            visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
+        )
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
@@ -27198,8 +27561,15 @@ class MainWindow(QMainWindow):
             self.current_content_buffer = ""
             self.current_thinking_buffer = ""
         effective_workspace_dir = self._ensure_session_workspace(state)
-        state.temp_thinking_bubble = ChatBubble("agent", "", thinking="...")
-        state.temp_thinking_bubble.workspace_dir = effective_workspace_dir
+        state.temp_thinking_bubble = ChatBubble(
+            "agent",
+            "",
+            thinking="...",
+            workspace_dir=effective_workspace_dir,
+            session_id=state.session_id,
+            chat_storage=self.chat_storage,
+            visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
+        )
         self._connect_chat_bubble_actions(state.temp_thinking_bubble, state)
         state.temp_thinking_bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
@@ -27977,8 +28347,15 @@ class MainWindow(QMainWindow):
             bubble = state.temp_thinking_bubble
             state.temp_thinking_bubble = None
         else:
-            bubble = ChatBubble("agent", "", thinking=result.get("reasoning"))
-            bubble.workspace_dir = self._workspace_dir_for_state(state)
+            bubble = ChatBubble(
+                "agent",
+                "",
+                thinking=result.get("reasoning"),
+                workspace_dir=self._workspace_dir_for_state(state),
+                session_id=state.session_id,
+                chat_storage=self.chat_storage,
+                visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
+            )
             self._connect_chat_bubble_actions(bubble, state)
             bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
             office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None

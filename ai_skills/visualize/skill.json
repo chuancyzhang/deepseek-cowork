@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "name": "visualize",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "default_enabled": false,
+  "description": "Generate executable HTML fragments from data or code and embed them as interactive visualizations in the conversation.",
+  "description_cn": "由 AI 处理数据并生成可执行 HTML Fragment，直接以内联交互视图显示在对话中。",
+  "tags": ["visualization", "chart", "data explorer", "diagram", "ui preview", "interactive html"],
+  "triggers": ["交互可视化", "交互图表", "数据探索器", "模拟器", "UI Preview", "interactive visualization"],
+  "anti_triggers": ["普通 Markdown 表格", "静态文字说明"],
+  "tool_refs": ["run_visualization_python", "finalize_inline_visualization"]
+}

@@ -110,6 +110,8 @@ Rules:
 
 ## 6. Skill Sources
 
+Bundled optional plugins may own both workflow guidance and narrowly scoped tools. For example, the default-off `ai_skills/visualize` plugin exposes generation and publication tools only while enabled; its published HTML fragments are content-addressed, registered per conversation, sandboxed, and rendered read-only from history when the plugin is later disabled.
+
 Cowork loads capabilities from:
 
 - `skills/`: built-in skills

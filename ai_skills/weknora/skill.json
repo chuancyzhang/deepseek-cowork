@@ -6,17 +6,18 @@
   "source_type": "bundled_plugin",
   "source_format": "agent_skill",
   "default_enabled": false,
-  "description": "WeKnora knowledge-base import and retrieval skill using the WeKnora REST API.",
-  "description_cn": "WeKnora 知识库导入与检索能力，通过 WeKnora REST API 上传、导入、浏览和搜索知识内容。",
-  "tags": ["weknora", "knowledge base", "retrieval", "hybrid search", "知识库"],
+  "description": "Official WeKnora MCP skill for knowledge-base import, browsing, and retrieval.",
+  "description_cn": "WeKnora 官方 MCP 知识库能力，支持知识导入、浏览和检索。",
+  "tags": ["weknora", "knowledge base", "retrieval", "hybrid search", "知识库", "mcp"],
   "triggers": ["WeKnora", "知识库检索", "上传知识库", "导入网页到知识库", "hybrid search", "知识库搜索"],
   "anti_triggers": ["Superset", "Airflow", "ShowDoc", "腾讯文档"],
   "tool_refs": [],
   "references": ["SOURCE.md"],
+  "script_refs": ["scripts/run_mcp.py"],
   "config_fields": [
     {
       "name": "WEKNORA_BASE_URL",
-      "label": "WeKnora Base URL",
+      "label": "WeKnora API 地址",
       "kind": "text",
       "required": true,
       "env": "WEKNORA_BASE_URL",
@@ -31,11 +32,27 @@
       "placeholder": "sk-..."
     }
   ],
-  "python_dependencies": [],
+  "mcp_server_presets": [
+    {
+      "id": "weknora",
+      "name": "WeKnora MCP",
+      "description": "Official WeKnora stdio MCP server running in the Cowork Skill Python sandbox.",
+      "enabled": false,
+      "transport": "stdio",
+      "timeout_seconds": 60,
+      "runtime": "skill_python",
+      "entrypoint": "scripts/run_mcp.py",
+      "env": {
+        "WEKNORA_BASE_URL": "{{WEKNORA_BASE_URL}}",
+        "WEKNORA_API_KEY": "{{WEKNORA_API_KEY}}"
+      }
+    }
+  ],
+  "python_dependencies": ["weknora-mcp-server==1.0.0"],
   "node_dependencies": [],
   "workflow": [
+    "Save WEKNORA_BASE_URL and WEKNORA_API_KEY, then generate and enable the WeKnora MCP server.",
     "Use WeKnora only for knowledge-base import, browsing, and retrieval tasks.",
-    "Verify WEKNORA_BASE_URL and WEKNORA_API_KEY before any API call.",
     "Require explicit confirmation before editing or deleting an existing knowledge entry."
   ]
 }

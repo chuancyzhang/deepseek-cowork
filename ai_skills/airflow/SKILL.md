@@ -23,7 +23,7 @@ Authentication requires either `AIRFLOW_AUTH_TOKEN` or `AIRFLOW_USERNAME` plus `
 
 ## MCP Server
 
-After saving configuration, generate the `airflow` MCP preset. It starts `astro-airflow-mcp` through `uvx` over `stdio` and injects the configured Airflow environment.
+After saving configuration, generate the `airflow` MCP preset. Cowork installs `astro-airflow-mcp` into the isolated Skill Python environment, starts it explicitly with `--transport stdio`, and injects the configured Airflow environment. No system `uvx` installation is required.
 
 ## CLI Workflow
 
@@ -50,6 +50,8 @@ Common `af` commands:
 | Direct API discovery | `af api ls` |
 
 See `api-reference.md` for direct REST API examples.
+
+`run_af` invokes the installed Python CLI entry directly inside the same Skill sandbox, so MCP and CLI calls use the same declared dependencies and environment variables.
 
 ## Safety Rules
 

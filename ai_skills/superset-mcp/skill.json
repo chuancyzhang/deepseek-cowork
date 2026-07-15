@@ -6,8 +6,8 @@
   "source_type": "bundled_plugin",
   "source_format": "agent_skill",
   "default_enabled": false,
-  "description": "Official Apache Superset MCP Streamable HTTP skill for connecting to a running Superset /mcp endpoint.",
-  "description_cn": "官方 Apache Superset MCP 能力，通过 Streamable HTTP 连接已运行的 Superset /mcp endpoint。",
+  "description": "Official Apache Superset MCP Streamable HTTP skill with username/password JWT authentication.",
+  "description_cn": "官方 Apache Superset MCP 能力，通过用户名和密码获取 JWT，并以 Streamable HTTP 连接 Superset MCP。",
   "tags": ["superset", "apache superset", "mcp", "streamable http", "dashboard", "charts"],
   "triggers": ["Superset MCP", "Apache Superset", "Superset dashboard", "Superset chart", "Superset 数据集"],
   "anti_triggers": ["Airflow", "ShowDoc", "WeKnora", "third-party superset-mcp npm"],
@@ -15,27 +15,58 @@
   "references": ["SOURCE.md"],
   "config_fields": [
     {
+      "name": "SUPERSET_BASE_URL",
+      "label": "Superset 地址",
+      "kind": "text",
+      "required": true,
+      "env": "SUPERSET_BASE_URL",
+      "placeholder": "https://superset.example.com",
+      "help": "Superset Web/API 根地址，用于调用 /api/v1/security/login 和 refresh。"
+    },
+    {
       "name": "SUPERSET_MCP_URL",
       "label": "Superset MCP URL",
       "kind": "text",
       "required": true,
       "env": "SUPERSET_MCP_URL",
-      "placeholder": "http://localhost:5008/mcp"
+      "placeholder": "https://superset.example.com/mcp",
+      "help": "Superset MCP Streamable HTTP endpoint，必须以 /mcp 结尾。"
     },
     {
-      "name": "SUPERSET_MCP_BEARER_TOKEN",
-      "label": "Bearer Token",
+      "name": "SUPERSET_USERNAME",
+      "label": "用户名",
+      "kind": "text",
+      "required": true,
+      "env": "SUPERSET_USERNAME",
+      "placeholder": "admin"
+    },
+    {
+      "name": "SUPERSET_PASSWORD",
+      "label": "密码",
       "kind": "secret",
       "required": true,
-      "env": "SUPERSET_MCP_BEARER_TOKEN",
-      "placeholder": "JWT or Bearer token"
+      "env": "SUPERSET_PASSWORD",
+      "placeholder": "Superset password"
+    },
+    {
+      "name": "SUPERSET_PROVIDER",
+      "label": "登录方式",
+      "kind": "select",
+      "required": true,
+      "env": "SUPERSET_PROVIDER",
+      "default": "db",
+      "options": [
+        {"value": "db", "label": "数据库账号 (db)"},
+        {"value": "ldap", "label": "LDAP"}
+      ]
     },
     {
       "name": "SUPERSET_MCP_TIMEOUT_SECONDS",
-      "label": "Timeout Seconds",
+      "label": "超时秒数",
       "kind": "text",
       "required": false,
       "env": "SUPERSET_MCP_TIMEOUT_SECONDS",
+      "default": "30",
       "placeholder": "30"
     }
   ],
@@ -43,13 +74,18 @@
     {
       "id": "superset-mcp",
       "name": "Superset MCP",
-      "description": "Official Apache Superset MCP Streamable HTTP endpoint.",
+      "description": "Official Apache Superset MCP Streamable HTTP endpoint with managed JWT authentication.",
       "enabled": false,
       "transport": "streamable_http",
       "timeout_seconds": "{{SUPERSET_MCP_TIMEOUT_SECONDS}}",
       "url": "{{SUPERSET_MCP_URL}}",
-      "headers": {
-        "Authorization": "Bearer {{SUPERSET_MCP_BEARER_TOKEN}}"
+      "auth": {
+        "type": "superset_password",
+        "skill_name": "superset-mcp",
+        "base_url_field": "SUPERSET_BASE_URL",
+        "username_field": "SUPERSET_USERNAME",
+        "password_field": "SUPERSET_PASSWORD",
+        "provider_field": "SUPERSET_PROVIDER"
       }
     }
   ],
@@ -57,7 +93,7 @@
   "node_dependencies": [],
   "workflow": [
     "Use this skill for official Apache Superset MCP connections only.",
-    "Confirm the Superset /mcp endpoint is running before generating the MCP server.",
+    "Generate the MCP server after saving the Superset URL, MCP URL, username, password, and provider.",
     "Rely on Superset RBAC/JWT permissions and confirm high-impact actions with the user."
   ]
 }

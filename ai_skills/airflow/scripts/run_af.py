@@ -1,7 +1,7 @@
 import os
-import shutil
-import subprocess
 import sys
+
+from astro_airflow_mcp.cli.main import cli_main
 
 
 WRITE_PATTERNS = {
@@ -44,22 +44,12 @@ def main():
         )
         return 3
 
-    af_exe = shutil.which("af")
-    if af_exe:
-        command = [af_exe] + args
-    else:
-        uvx_exe = shutil.which("uvx")
-        if not uvx_exe:
-            print("Neither `af` nor `uvx` was found on PATH. Install astro-airflow-mcp or make uvx available.", file=sys.stderr)
-            return 127
-        command = [uvx_exe, "--from", "astro-airflow-mcp", "af"] + args
-
-    completed = subprocess.run(command, text=True, capture_output=True)
-    if completed.stdout:
-        print(completed.stdout, end="")
-    if completed.stderr:
-        print(completed.stderr, end="", file=sys.stderr)
-    return completed.returncode
+    sys.argv = ["af"] + args
+    try:
+        cli_main()
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return 0
 
 
 if __name__ == "__main__":

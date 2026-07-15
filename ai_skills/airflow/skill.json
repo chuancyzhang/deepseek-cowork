@@ -61,6 +61,7 @@
       "kind": "text",
       "required": false,
       "env": "AF_READ_ONLY",
+      "default": "true",
       "placeholder": "true"
     }
   ],
@@ -78,8 +79,9 @@
       "enabled": false,
       "transport": "stdio",
       "timeout_seconds": 60,
-      "command": "uvx",
-      "args": ["astro-airflow-mcp"],
+      "runtime": "skill_python",
+      "module": "astro_airflow_mcp",
+      "args": ["--transport", "stdio"],
       "env": {
         "AIRFLOW_API_URL": "{{AIRFLOW_API_URL}}",
         "AIRFLOW_AUTH_TOKEN": "{{AIRFLOW_AUTH_TOKEN}}",
@@ -89,7 +91,7 @@
       }
     }
   ],
-  "python_dependencies": [],
+  "python_dependencies": ["astro-airflow-mcp>=0.9.1,<1"],
   "node_dependencies": [],
   "workflow": [
     "Use read-only af commands first: health, dags list, runs list, tasks logs, and diagnose.",

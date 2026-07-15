@@ -1,6 +1,6 @@
 ---
 name: weknora
-description: Import documents and perform knowledge retrieval through the WeKnora REST API. Use for uploading files, importing URLs or Markdown, listing knowledge bases, and hybrid search across knowledge bases.
+description: Import documents and perform knowledge retrieval through the official WeKnora MCP server. Use for uploading files, importing URLs or Markdown, listing knowledge bases, and hybrid search across knowledge bases.
 kind: knowledge
 source_type: bundled_plugin
 default_enabled: false
@@ -19,9 +19,11 @@ Configure the skill in the Skill Center before use:
 
 Stop and ask the user to configure the skill if either value is missing.
 
+After saving, generate the `weknora` MCP preset. Cowork installs `weknora-mcp-server` into the isolated Skill Python environment, starts it over stdio, and injects both values into that process. The generated MCP server remains disabled until the user enables it in Settings > MCP.
+
 ## API Workflow
 
-All requests use `WEKNORA_BASE_URL` and the header `X-API-Key: WEKNORA_API_KEY`.
+The official MCP server performs requests using `WEKNORA_BASE_URL` and the header `X-API-Key: WEKNORA_API_KEY`.
 
 Common endpoints:
 

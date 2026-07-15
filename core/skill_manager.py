@@ -22,9 +22,10 @@ from .mcp_client import (
     mcp_package_available,
     mcp_transport_label,
     normalize_mcp_transport,
+    prepare_mcp_server_config,
     summarize_mcp_server,
 )
-from .sandbox_runtime import build_sandbox_env, install_skill_dependencies
+from .sandbox_runtime import build_sandbox_env, get_runtime_executable, install_skill_dependencies
 from .skill_adapter import (
     EXCLUDED_DIRS,
     adapt_skill_directory,
@@ -342,9 +343,19 @@ class SkillManager:
                 continue
             seen.add(name)
             kind = str(item.get("kind") or item.get("type") or "text").strip().lower()
-            if kind not in {"text", "secret"}:
+            if kind not in {"text", "secret", "select"}:
                 kind = "text"
             env_name = str(item.get("env") or name).strip()
+            options = []
+            for option in item.get("options") or []:
+                if isinstance(option, dict):
+                    value = str(option.get("value") or "").strip()
+                    label = str(option.get("label") or value).strip()
+                else:
+                    value = str(option or "").strip()
+                    label = value
+                if value and not any(existing["value"] == value for existing in options):
+                    options.append({"value": value, "label": label or value})
             normalized.append({
                 "name": name,
                 "label": str(item.get("label") or name).strip(),
@@ -353,6 +364,8 @@ class SkillManager:
                 "env": env_name,
                 "help": str(item.get("help") or item.get("description") or "").strip(),
                 "placeholder": str(item.get("placeholder") or "").strip(),
+                "default": str(item.get("default") if item.get("default") is not None else ""),
+                "options": options,
             })
         return normalized
 
@@ -404,6 +417,14 @@ class SkillManager:
                     for key, value in (item.get("headers") or {}).items()
                     if str(key or "").strip()
                 } if isinstance(item.get("headers"), dict) else {},
+                "runtime": str(item.get("runtime") or "").strip().lower(),
+                "module": str(item.get("module") or "").strip(),
+                "entrypoint": str(item.get("entrypoint") or "").strip(),
+                "auth": {
+                    str(key): str(value if value is not None else "").strip()
+                    for key, value in (item.get("auth") or {}).items()
+                    if str(key or "").strip() and str(value if value is not None else "").strip()
+                } if isinstance(item.get("auth"), dict) else {},
                 "description": str(item.get("description") or "").strip(),
             })
         return normalized
@@ -1156,13 +1177,21 @@ class SkillManager:
             return {}
         return self.config_manager.get_skill_config(skill_name)
 
+    def _resolved_skill_config_values(self, skill_name):
+        values = dict(self._skill_config_values(skill_name))
+        for field in self.get_skill_config_fields(skill_name):
+            name = str(field.get("name") or "").strip()
+            if name and not str(values.get(name, "") or "").strip() and str(field.get("default") or ""):
+                values[name] = str(field.get("default") or "")
+        return values
+
     def _skill_config_requirement_errors(self, skill_name, values=None):
         record = self._record_for_skill_name(skill_name) or {}
         spec = record.get("spec") or {}
         requirements = spec.get("config_requirements") or []
         if not requirements:
             return []
-        values = values if isinstance(values, dict) else self._skill_config_values(skill_name)
+        values = values if isinstance(values, dict) else self._resolved_skill_config_values(skill_name)
 
         def configured(identifier):
             key = str(identifier or "").strip()
@@ -1186,7 +1215,7 @@ class SkillManager:
 
     def get_skill_config_status(self, skill_name):
         fields = self.get_skill_config_fields(skill_name)
-        values = self._skill_config_values(skill_name)
+        values = self._resolved_skill_config_values(skill_name)
         missing = []
         configured = []
         for field in fields:
@@ -1210,7 +1239,7 @@ class SkillManager:
 
     def build_skill_config_env(self, skill_name):
         fields = self.get_skill_config_fields(skill_name)
-        values = self._skill_config_values(skill_name)
+        values = self._resolved_skill_config_values(skill_name)
         env = {}
         missing = []
         for field in fields:
@@ -1264,6 +1293,40 @@ class SkillManager:
                 timeout_seconds = DEFAULT_MCP_TIMEOUT_SECONDS
             timeout_seconds = max(5, min(300, timeout_seconds))
             transport = normalize_mcp_transport(rendered.get("transport", rendered.get("type")))
+            runtime = str(rendered.get("runtime") or "").strip().lower()
+            command = str(rendered.get("command") or "").strip()
+            args = [str(item) for item in rendered.get("args") or [] if str(item).strip()]
+            cwd = str(rendered.get("cwd") or "").strip()
+            runtime_skill = ""
+            if runtime:
+                if runtime != "skill_python":
+                    return {"ok": False, "error": f"Unsupported MCP preset runtime: {runtime}", "servers": []}
+                module = str(rendered.get("module") or "").strip()
+                entrypoint = str(rendered.get("entrypoint") or "").strip()
+                if bool(module) == bool(entrypoint):
+                    return {
+                        "ok": False,
+                        "error": f"MCP preset '{rendered.get('id')}' must declare exactly one module or entrypoint.",
+                        "servers": [],
+                    }
+                dependency_status = self._prepare_skill_dependencies(skill_name, record.get("path") or "")
+                if not dependency_status.get("ok"):
+                    return {"ok": False, "error": dependency_status.get("message") or "Skill dependencies are not ready.", "servers": []}
+                command = get_runtime_executable("python")
+                if not command:
+                    return {"ok": False, "error": "Cowork sandbox Python runtime is unavailable.", "servers": []}
+                prefix_args = ["-X", "utf8"]
+                if module:
+                    prefix_args.extend(["-m", module])
+                else:
+                    skill_root = os.path.abspath(record.get("path") or "")
+                    entry_path = os.path.abspath(os.path.join(skill_root, os.path.normpath(entrypoint)))
+                    if os.path.commonpath([skill_root, entry_path]) != skill_root or not os.path.isfile(entry_path):
+                        return {"ok": False, "error": f"MCP preset entrypoint not found: {entrypoint}", "servers": []}
+                    prefix_args.append(entry_path)
+                args = prefix_args + args
+                cwd = cwd or os.path.abspath(record.get("path") or "")
+                runtime_skill = skill_name
             server = {
                 "id": str(rendered.get("id") or "").strip(),
                 "name": str(rendered.get("name") or rendered.get("id") or "MCP Server").strip(),
@@ -1272,9 +1335,9 @@ class SkillManager:
                 "type": transport,
                 "timeout_seconds": timeout_seconds,
                 "startup_timeout_ms": timeout_seconds * 1000,
-                "command": str(rendered.get("command") or "").strip(),
-                "args": [str(item) for item in rendered.get("args") or [] if str(item).strip()],
-                "cwd": str(rendered.get("cwd") or "").strip(),
+                "command": command,
+                "args": args,
+                "cwd": cwd,
                 "env": {
                     str(key): str(item)
                     for key, item in (rendered.get("env") or {}).items()
@@ -1286,6 +1349,8 @@ class SkillManager:
                     for key, item in (rendered.get("headers") or {}).items()
                     if str(key or "").strip() and str(item or "").strip()
                 } if isinstance(rendered.get("headers"), dict) else {},
+                "auth": dict(rendered.get("auth") or {}) if isinstance(rendered.get("auth"), dict) else {},
+                "runtime_skill": runtime_skill,
             }
             if not server["id"]:
                 return {"ok": False, "error": "MCP preset is missing id.", "servers": []}
@@ -1295,6 +1360,13 @@ class SkillManager:
                 return {"ok": False, "error": f"MCP preset '{server['id']}' is missing URL.", "servers": []}
             servers.append(server)
         return {"ok": True, "error": "", "servers": servers}
+
+    def validate_mcp_server_auth(self, server_config):
+        try:
+            prepare_mcp_server_config(server_config, config_manager=self.config_manager, force_login=True)
+            return {"ok": True, "error": ""}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     def is_tool_allowed(self, name, run_mode):
         return self.tool_registry.is_allowed(name, run_mode)
@@ -1441,7 +1513,7 @@ class SkillManager:
             def _handler(_arguments=None, _server=json.loads(json.dumps(server_config, ensure_ascii=False)), _remote_name=remote_name, **kwargs):
                 payload = dict(_arguments or {})
                 payload.update(kwargs)
-                return call_mcp_tool(_server, _remote_name, payload)
+                return call_mcp_tool(_server, _remote_name, payload, config_manager=self.config_manager)
 
             export = {
                 "name": local_name,
@@ -1506,7 +1578,7 @@ class SkillManager:
                     "message": "MCP server configured. Tools will be discovered on demand.",
                 }
             else:
-                result = list_mcp_server_tools(server_config)
+                result = list_mcp_server_tools(server_config, config_manager=self.config_manager)
                 if result.get("ok"):
                     tool_refs = self._register_mcp_tools_for_server(skill_name, server_config, result.get("tools"))
                     dependency_status = {
@@ -1538,7 +1610,7 @@ class SkillManager:
         if not mcp_package_available():
             record["dependency_status"] = {"ok": False, "message": "Python package 'mcp' is not installed."}
             return False
-        result = list_mcp_server_tools(server_config)
+        result = list_mcp_server_tools(server_config, config_manager=self.config_manager)
         if not result.get("ok"):
             record["dependency_status"] = {
                 "ok": False,

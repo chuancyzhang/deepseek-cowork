@@ -54,7 +54,7 @@ Cowork 只把 `tool` 当作直接执行面：
 - `tool`：模型可直接调用的执行能力
 - `skill`：指导工具选择与组合方式的经验包
 
-技能既可以只提供经验，也可以同时携带工具实现。内置技能位于 `skills/`，随包插件和用户技能位于 `ai_skills/`。Cowork 可以安装符合标准的 Agent Skill 包，保留原始根目录 `SKILL.md`，只生成本地检索、工作台和调试所需的 `skill.json`。PPT Agent 的 Guizang PPT Skill、Frontend Slides、Huashu Design 三个策略已经作为真实 `ai_skills` 包内置，选择后会把上游 `SKILL.md`、资源说明和来源元数据注入本轮运行上下文，并在任务观测页可见。技能可以在 `skill.json` 声明 `config_fields`，工作台会自动生成“配置”页，并把保存的值按字段声明注入到脚本或工具运行环境；也可以声明 `mcp_server_presets`，用已保存的能力凭据生成或更新本地 MCP server 配置，避免把密钥写进内置文件。
+技能既可以只提供经验，也可以同时携带工具实现。内置技能位于 `skills/`，随包插件和用户技能位于 `ai_skills/`。Cowork 可以安装符合标准的 Agent Skill 包，保留原始根目录 `SKILL.md`，只生成本地检索、工作台和调试所需的 `skill.json`。PPT Agent 的 Guizang PPT Skill、Frontend Slides、Huashu Design 三个策略已经作为真实 `ai_skills` 包内置，选择后会把上游 `SKILL.md`、资源说明和来源元数据注入本轮运行上下文，并在任务观测页可见。技能可以在 `skill.json` 声明文本、密钥或固定选项配置，工作台会自动生成“配置”页，并把保存值注入脚本、工具或隔离的 Skill Python MCP 运行环境；托管 MCP 认证只保存配置引用，短期 token 不写入 server headers。
 
 完整说明见 [SKILL_SYSTEM.md](SKILL_SYSTEM.md)。
 

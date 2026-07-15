@@ -21,7 +21,12 @@ from .automation_manager import (
     normalize_automation_history,
     normalize_automation_tasks,
 )
-from .mcp_client import DEFAULT_MCP_TIMEOUT_SECONDS, TRANSPORT_STDIO, normalize_mcp_transport
+from .mcp_client import (
+    DEFAULT_MCP_TIMEOUT_SECONDS,
+    TRANSPORT_STDIO,
+    clear_mcp_auth_cache,
+    normalize_mcp_transport,
+)
 from .runtime_components import default_download_sources, normalize_download_sources
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -66,6 +71,24 @@ def normalize_mcp_string_list(value):
     return items
 
 
+def normalize_mcp_auth(value):
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "type",
+        "skill_name",
+        "base_url_field",
+        "username_field",
+        "password_field",
+        "provider_field",
+    }
+    return {
+        str(key): str(item if item is not None else "").strip()
+        for key, item in value.items()
+        if str(key or "").strip() in allowed and str(item if item is not None else "").strip()
+    }
+
+
 def normalize_mcp_server(server, index=0, used_ids=None):
     used_ids = used_ids if used_ids is not None else set()
     if not isinstance(server, dict):
@@ -89,6 +112,7 @@ def normalize_mcp_server(server, index=0, used_ids=None):
     args = normalize_mcp_string_list(source.get("args"))
     env = normalize_mcp_env_or_headers(source.get("env"))
     headers = normalize_mcp_env_or_headers(source.get("headers"))
+    auth = normalize_mcp_auth(source.get("auth"))
     cwd = str(source.get("cwd") or "").strip()
     if cwd:
         cwd = os.path.normpath(os.path.abspath(os.path.expanduser(cwd)))
@@ -106,6 +130,8 @@ def normalize_mcp_server(server, index=0, used_ids=None):
         "env": env,
         "url": str(source.get("url") or "").strip(),
         "headers": headers,
+        "auth": auth,
+        "runtime_skill": str(source.get("runtime_skill") or "").strip(),
     }
 
 
@@ -139,6 +165,8 @@ def _looks_like_single_mcp_server(value):
         "env",
         "url",
         "headers",
+        "auth",
+        "runtime_skill",
     }
     return bool(keys & hint_keys)
 
@@ -1159,6 +1187,8 @@ class ConfigManager:
         if configs == self.config.get("skill_configs"):
             return
         self.config["skill_configs"] = configs
+        if name == "superset-mcp":
+            clear_mcp_auth_cache()
         self.save_config()
 
     def upsert_project(self, path, name=None, pinned=None):

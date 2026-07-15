@@ -4,6 +4,7 @@ import os
 import shutil
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -223,7 +224,12 @@ class TestSkillSystemV2(unittest.TestCase):
         superset_presets = sm.get_skill_mcp_server_presets("superset-mcp")
         self.assertEqual(superset_presets[0]["transport"], "streamable_http")
         self.assertEqual(superset_presets[0]["url"], "{{SUPERSET_MCP_URL}}")
+        self.assertEqual(superset_presets[0]["auth"]["type"], "superset_password")
         self.assertEqual(superset_presets[0].get("command"), "")
+
+        weknora_presets = sm.get_skill_mcp_server_presets("weknora")
+        self.assertEqual(weknora_presets[0]["runtime"], "skill_python")
+        self.assertEqual(weknora_presets[0]["entrypoint"], "scripts/run_mcp.py")
 
         airflow_info = skills["airflow"]
         self.assertTrue(any(entry.get("name") == "run_af" for entry in airflow_info["script_entries"]))
@@ -231,7 +237,7 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("AF_READ_ONLY", json.dumps(airflow_info, ensure_ascii=False))
 
     def test_skill_mcp_presets_materialize_from_config(self):
-        for skill_name in ("showdoc-mcp", "airflow", "superset-mcp"):
+        for skill_name in ("showdoc-mcp", "airflow", "superset-mcp", "weknora"):
             self._copy_repo_ai_skill(skill_name)
 
         class ConfigStub:
@@ -265,9 +271,16 @@ class TestSkillSystemV2(unittest.TestCase):
                         "AF_READ_ONLY": "true",
                     },
                     "superset-mcp": {
+                        "SUPERSET_BASE_URL": "https://superset.example",
                         "SUPERSET_MCP_URL": "http://localhost:5008/mcp",
-                        "SUPERSET_MCP_BEARER_TOKEN": "jwt",
+                        "SUPERSET_USERNAME": "admin",
+                        "SUPERSET_PASSWORD": "secret",
+                        "SUPERSET_PROVIDER": "db",
                         "SUPERSET_MCP_TIMEOUT_SECONDS": "45",
+                    },
+                    "weknora": {
+                        "WEKNORA_BASE_URL": "https://weknora.example/api/v1",
+                        "WEKNORA_API_KEY": "sk-test",
                     },
                 }
             ),
@@ -281,16 +294,26 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(showdoc["servers"][0]["command"], "npx")
         self.assertIn("Backend", showdoc["servers"][0]["args"])
 
-        airflow = sm.build_skill_mcp_server_configs("airflow")
+        with patch.object(sm, "_prepare_skill_dependencies", return_value={"ok": True, "message": "ready"}), \
+             patch("core.skill_manager.get_runtime_executable", return_value=r"C:\Cowork\python.exe"):
+            airflow = sm.build_skill_mcp_server_configs("airflow")
+            weknora = sm.build_skill_mcp_server_configs("weknora")
         self.assertTrue(airflow["ok"], airflow.get("error"))
-        self.assertEqual(airflow["servers"][0]["command"], "uvx")
+        self.assertEqual(airflow["servers"][0]["command"], r"C:\Cowork\python.exe")
+        self.assertEqual(airflow["servers"][0]["runtime_skill"], "airflow")
+        self.assertEqual(airflow["servers"][0]["args"][-2:], ["--transport", "stdio"])
         self.assertEqual(airflow["servers"][0]["env"]["AF_READ_ONLY"], "true")
+
+        self.assertTrue(weknora["ok"], weknora.get("error"))
+        self.assertEqual(weknora["servers"][0]["runtime_skill"], "weknora")
+        self.assertEqual(weknora["servers"][0]["env"]["WEKNORA_API_KEY"], "sk-test")
 
         superset = sm.build_skill_mcp_server_configs("superset-mcp")
         self.assertTrue(superset["ok"], superset.get("error"))
         self.assertEqual(superset["servers"][0]["transport"], "streamable_http")
         self.assertEqual(superset["servers"][0]["url"], "http://localhost:5008/mcp")
-        self.assertEqual(superset["servers"][0]["headers"]["Authorization"], "Bearer jwt")
+        self.assertEqual(superset["servers"][0]["headers"], {})
+        self.assertEqual(superset["servers"][0]["auth"]["type"], "superset_password")
         self.assertEqual(superset["servers"][0]["timeout_seconds"], 45)
 
     def test_skill_mcp_presets_fail_on_missing_required_config(self):
@@ -326,7 +349,65 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("AIRFLOW_AUTH_TOKEN", airflow["error"])
         superset = sm.build_skill_mcp_server_configs("superset-mcp")
         self.assertFalse(superset["ok"])
-        self.assertIn("SUPERSET_MCP_BEARER_TOKEN", superset["error"])
+        self.assertIn("SUPERSET_BASE_URL", superset["error"])
+
+    def test_skill_config_select_default_is_used_for_status_and_env(self):
+        skill_dir = os.path.join(self.skills_dir, "select-skill")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: select-skill\ndescription: Select\nkind: knowledge\n---\n# Select\n")
+        with open(os.path.join(skill_dir, "skill.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "name": "select-skill",
+                    "default_enabled": True,
+                    "config_fields": [
+                        {
+                            "name": "PROVIDER",
+                            "kind": "select",
+                            "required": True,
+                            "default": "db",
+                            "options": [
+                                {"value": "db", "label": "Database"},
+                                {"value": "ldap", "label": "LDAP"},
+                            ],
+                        }
+                    ],
+                },
+                f,
+            )
+        sm = self._build_manager()
+        fields = sm.get_skill_config_fields("select-skill")
+        self.assertEqual(fields[0]["kind"], "select")
+        self.assertEqual(fields[0]["options"][1]["value"], "ldap")
+        self.assertTrue(sm.get_skill_config_status("select-skill")["complete"])
+        self.assertEqual(sm.build_skill_config_env("select-skill"), {"PROVIDER": "db"})
+
+    def test_airflow_run_af_uses_python_cli_and_keeps_read_only_guard(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        script_path = os.path.join(repo_root, "ai_skills", "airflow", "scripts", "run_af.py")
+        calls = []
+        cli_module = types.ModuleType("astro_airflow_mcp.cli.main")
+
+        def fake_cli_main():
+            calls.append(list(sys.argv))
+            raise SystemExit(0)
+
+        cli_module.cli_main = fake_cli_main
+        modules = {
+            "astro_airflow_mcp": types.ModuleType("astro_airflow_mcp"),
+            "astro_airflow_mcp.cli": types.ModuleType("astro_airflow_mcp.cli"),
+            "astro_airflow_mcp.cli.main": cli_module,
+        }
+        spec = importlib.util.spec_from_file_location("test_airflow_run_af", script_path)
+        module = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, {"AF_READ_ONLY": "true"}):
+            spec.loader.exec_module(module)
+            with patch.object(sys, "argv", ["run_af.py", "health"]):
+                self.assertEqual(module.main(), 0)
+            with patch.object(sys, "argv", ["run_af.py", "runs", "trigger", "demo"]):
+                self.assertEqual(module.main(), 3)
+        self.assertEqual(calls, [["af", "health"]])
 
     def test_frozen_internal_ai_skills_are_discovered_as_default_off_plugins(self):
         exe_dir = os.path.join(self.temp_dir, "dist", "deepseek-cowork")

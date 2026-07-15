@@ -1,4 +1,5 @@
 import unittest
+import base64
 import os
 import sys
 import tempfile
@@ -23,7 +24,13 @@ from core import sandbox_runtime
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.agent import LLMWorker
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
-from core.mcp_client import describe_mcp_import_error, _open_streamable_http_transport
+from core.mcp_client import (
+    _open_mcp_session,
+    _open_streamable_http_transport,
+    clear_mcp_auth_cache,
+    describe_mcp_import_error,
+    prepare_mcp_server_config,
+)
 from core.single_instance import (
     UiSingleInstanceServer,
     build_ui_server_name,
@@ -106,6 +113,12 @@ class TestConfigManager(unittest.TestCase):
         cm.set_skill_config("dingtalk-docs", {})
 
         self.assertEqual(cm.get_skill_config("dingtalk-docs"), {})
+
+    def test_superset_skill_config_change_clears_managed_auth_cache(self):
+        cm = self._create_config_manager({})
+        with patch("core.config_manager.clear_mcp_auth_cache") as clear_cache:
+            cm.set_skill_config("superset-mcp", {"SUPERSET_USERNAME": "admin"})
+        clear_cache.assert_called_once_with()
 
     def test_defaults_include_new_deepseek_settings(self):
         cm = self._create_config_manager()
@@ -474,6 +487,168 @@ class TestConfigManager(unittest.TestCase):
         self.assertFalse(stored[0]["enabled"])
         self.assertEqual(stored[0]["id"], "remote-docs")
         self.assertEqual(stored[0]["timeout_seconds"], 45)
+
+    def test_mcp_managed_auth_and_runtime_skill_are_preserved(self):
+        servers = normalize_mcp_servers(
+            [
+                {
+                    "id": "superset-mcp",
+                    "name": "Superset MCP",
+                    "transport": "streamable_http",
+                    "url": "https://superset.example/mcp",
+                    "runtime_skill": "superset-mcp",
+                    "auth": {
+                        "type": "superset_password",
+                        "skill_name": "superset-mcp",
+                        "password_field": "SUPERSET_PASSWORD",
+                        "ignored": "drop-me",
+                    },
+                }
+            ]
+        )
+        self.assertEqual(servers[0]["runtime_skill"], "superset-mcp")
+        self.assertEqual(servers[0]["auth"]["type"], "superset_password")
+        self.assertNotIn("ignored", servers[0]["auth"])
+
+    def test_superset_managed_auth_logs_in_and_keeps_token_in_memory(self):
+        def jwt(expiry):
+            header = base64.urlsafe_b64encode(b'{"alg":"HS256"}').decode().rstrip("=")
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+            return f"{header}.{payload}.signature"
+
+        class ConfigStub:
+            def get_skill_config(self, _skill_name):
+                return {
+                    "SUPERSET_BASE_URL": "https://superset.example",
+                    "SUPERSET_USERNAME": "admin",
+                    "SUPERSET_PASSWORD": "secret",
+                    "SUPERSET_PROVIDER": "ldap",
+                }
+
+        class Response:
+            status_code = 200
+            reason_phrase = "OK"
+
+            def json(self):
+                return {"access_token": jwt(int(time.time()) + 3600), "refresh_token": "refresh-secret"}
+
+        server = {
+            "id": "superset-mcp",
+            "timeout_seconds": 30,
+            "headers": {},
+            "auth": {"type": "superset_password", "skill_name": "superset-mcp"},
+        }
+        clear_mcp_auth_cache()
+        with patch("httpx.post", return_value=Response()) as post:
+            first = prepare_mcp_server_config(server, ConfigStub())
+            second = prepare_mcp_server_config(server, ConfigStub())
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(first["headers"]["Authorization"].startswith("Bearer "))
+        self.assertEqual(first["headers"], second["headers"])
+        self.assertEqual(server["headers"], {})
+        self.assertEqual(post.call_args.kwargs["json"]["provider"], "ldap")
+
+    def test_superset_refresh_401_reauthenticates_once(self):
+        def jwt(expiry):
+            header = base64.urlsafe_b64encode(b'{"alg":"HS256"}').decode().rstrip("=")
+            payload = base64.urlsafe_b64encode(json.dumps({"exp": expiry}).encode()).decode().rstrip("=")
+            return f"{header}.{payload}.signature"
+
+        class ConfigStub:
+            def get_skill_config(self, _skill_name):
+                return {
+                    "SUPERSET_BASE_URL": "https://superset.example",
+                    "SUPERSET_USERNAME": "admin",
+                    "SUPERSET_PASSWORD": "secret",
+                }
+
+        class Response:
+            reason_phrase = "OK"
+
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                if status_code == 401:
+                    self.reason_phrase = "Unauthorized"
+
+            def json(self):
+                return self._payload
+
+        expired_login = Response(
+            200,
+            {"access_token": jwt(int(time.time()) + 1), "refresh_token": "expired-refresh"},
+        )
+        refresh_401 = Response(401, {"message": "Token has expired"})
+        fresh_login = Response(
+            200,
+            {"access_token": jwt(int(time.time()) + 3600), "refresh_token": "fresh-refresh"},
+        )
+        server = {
+            "id": "superset-mcp-refresh",
+            "timeout_seconds": 30,
+            "auth": {"type": "superset_password", "skill_name": "superset-mcp"},
+        }
+        clear_mcp_auth_cache()
+        with patch("httpx.post", side_effect=[expired_login, refresh_401, fresh_login]) as post:
+            prepare_mcp_server_config(server, ConfigStub())
+            prepared = prepare_mcp_server_config(server, ConfigStub())
+        self.assertEqual(post.call_count, 3)
+        self.assertTrue(prepared["headers"]["Authorization"].startswith("Bearer "))
+        self.assertTrue(post.call_args_list[1].args[0].endswith("/api/v1/security/refresh"))
+
+    def test_stdio_runtime_skill_uses_sandbox_environment(self):
+        calls = {}
+
+        class ServerParameters:
+            def __init__(self, command, args, cwd, env):
+                calls["params"] = {"command": command, "args": args, "cwd": cwd, "env": env}
+
+        class Session:
+            def __init__(self, _read, _write):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+            async def initialize(self):
+                calls["initialized"] = True
+
+        @asynccontextmanager
+        async def stdio_client(_params):
+            yield object(), object()
+
+        mcp_module = types.ModuleType("mcp")
+        mcp_module.ClientSession = Session
+        mcp_module.StdioServerParameters = ServerParameters
+        mcp_client_module = types.ModuleType("mcp.client")
+        stdio_module = types.ModuleType("mcp.client.stdio")
+        stdio_module.stdio_client = stdio_client
+
+        async def exercise():
+            with patch.dict(
+                sys.modules,
+                {"mcp": mcp_module, "mcp.client": mcp_client_module, "mcp.client.stdio": stdio_module},
+            ), patch("core.sandbox_runtime.build_sandbox_env", return_value={"SANDBOX": "ready"}) as build_env:
+                async with _open_mcp_session(
+                    {
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["-m", "demo"],
+                        "cwd": "D:\\demo",
+                        "runtime_skill": "airflow",
+                        "env": {"AIRFLOW_API_URL": "https://airflow.example"},
+                    }
+                ):
+                    pass
+                build_env.assert_called_once_with(workspace_dir="D:\\demo", skill_id="airflow")
+
+        asyncio.run(exercise())
+        self.assertTrue(calls["initialized"])
+        self.assertEqual(calls["params"]["env"]["SANDBOX"], "ready")
+        self.assertEqual(calls["params"]["env"]["AIRFLOW_API_URL"], "https://airflow.example")
 
     def test_upsert_mcp_servers_replaces_by_id(self):
         cm = self._create_config_manager(

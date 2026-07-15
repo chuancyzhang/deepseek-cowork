@@ -2896,11 +2896,25 @@ class CapabilityWorkbenchDialog(QDialog):
             name = str(field.get("name") or "").strip()
             if not name:
                 continue
-            editor = QLineEdit()
-            editor.setText(str(values.get(name, "") or ""))
-            editor.setPlaceholderText(str(field.get("placeholder") or ""))
-            if str(field.get("kind") or "text").lower() == "secret":
-                editor.setEchoMode(QLineEdit.Password)
+            current_value = str(values.get(name, "") or field.get("default") or "")
+            kind = str(field.get("kind") or "text").lower()
+            if kind == "select":
+                editor = QComboBox()
+                for option in field.get("options") or []:
+                    if not isinstance(option, dict):
+                        continue
+                    option_value = str(option.get("value") or "").strip()
+                    if option_value:
+                        editor.addItem(str(option.get("label") or option_value), option_value)
+                selected_index = editor.findData(current_value)
+                if selected_index >= 0:
+                    editor.setCurrentIndex(selected_index)
+            else:
+                editor = QLineEdit()
+                editor.setText(current_value)
+                editor.setPlaceholderText(str(field.get("placeholder") or ""))
+                if kind == "secret":
+                    editor.setEchoMode(QLineEdit.Password)
             editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             label = str(field.get("label") or name)
             if field.get("required"):
@@ -2970,11 +2984,15 @@ class CapabilityWorkbenchDialog(QDialog):
             label.setText("配置完整。")
 
     def _current_skill_config_values(self):
-        return {
-            name: editor.text().strip()
-            for name, editor in self.config_editors.items()
-            if editor.text().strip()
-        }
+        values = {}
+        for name, editor in self.config_editors.items():
+            if isinstance(editor, QComboBox):
+                value = str(editor.currentData() or editor.currentText() or "").strip()
+            else:
+                value = editor.text().strip()
+            if value:
+                values[name] = value
+        return values
 
     def _save_skill_config_values(self, show_message=True):
         if not hasattr(self.config_manager, "set_skill_config"):
@@ -3005,6 +3023,13 @@ class CapabilityWorkbenchDialog(QDialog):
         if not generated:
             QMessageBox.warning(self, "MCP 配置", "没有可生成的 MCP 配置。")
             return
+        for server in generated:
+            if not server.get("auth"):
+                continue
+            auth_result = self.skill_manager.validate_mcp_server_auth(server)
+            if not auth_result.get("ok"):
+                QMessageBox.warning(self, "MCP 认证", auth_result.get("error") or "认证失败。")
+                return
         if hasattr(self.config_manager, "upsert_mcp_servers"):
             summary = self.config_manager.upsert_mcp_servers(generated)
             added = int(summary.get("added") or 0)
@@ -3312,7 +3337,7 @@ class CapabilityWorkbenchDialog(QDialog):
             QMessageBox.warning(self, "MCP 调试", "未找到 MCP 配置。")
             return
         self.mcp_result.setPlainText("Connecting...")
-        self.mcp_worker = McpToolDebugWorker("list", self.mcp_server, parent=self)
+        self.mcp_worker = McpToolDebugWorker("list", self.mcp_server, config_manager=self.config_manager, parent=self)
         self.mcp_worker.finished_signal.connect(self._handle_mcp_list_result)
         self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
         self.mcp_worker.start()
@@ -3335,7 +3360,9 @@ class CapabilityWorkbenchDialog(QDialog):
         if args is None:
             return
         self.mcp_result.setPlainText("Calling...")
-        self.mcp_worker = McpToolDebugWorker("call", self.mcp_server, tool_name, args, self)
+        self.mcp_worker = McpToolDebugWorker(
+            "call", self.mcp_server, tool_name, args, config_manager=self.config_manager, parent=self
+        )
         self.mcp_worker.finished_signal.connect(self._handle_mcp_call_result)
         self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
         self.mcp_worker.start()
@@ -5540,13 +5567,16 @@ class AutomationDialog(QDialog):
 class McpConnectionWorker(QThread):
     finished_signal = Signal(dict)
 
-    def __init__(self, server_config, parent=None):
+    def __init__(self, server_config, config_manager=None, parent=None):
         super().__init__(parent)
         self.server_config = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
+        self.config_manager = config_manager
 
     def run(self):
         try:
-            self.finished_signal.emit(test_mcp_server_connection(self.server_config))
+            self.finished_signal.emit(
+                test_mcp_server_connection(self.server_config, config_manager=self.config_manager)
+            )
         except Exception as exc:
             self.finished_signal.emit({"ok": False, "error": str(exc)})
 
@@ -5571,20 +5601,30 @@ class SkillToolDebugWorker(QThread):
 class McpToolDebugWorker(QThread):
     finished_signal = Signal(dict)
 
-    def __init__(self, action, server_config, tool_name="", arguments=None, parent=None):
+    def __init__(self, action, server_config, tool_name="", arguments=None, config_manager=None, parent=None):
         super().__init__(parent)
         self.action = str(action or "")
         self.server_config = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
         self.tool_name = str(tool_name or "")
         self.arguments = json.loads(json.dumps(arguments or {}, ensure_ascii=False))
+        self.config_manager = config_manager
 
     def run(self):
         try:
             if self.action == "list":
-                self.finished_signal.emit(list_mcp_server_tools(self.server_config))
+                self.finished_signal.emit(
+                    list_mcp_server_tools(self.server_config, config_manager=self.config_manager)
+                )
                 return
             if self.action == "call":
-                self.finished_signal.emit(call_mcp_tool(self.server_config, self.tool_name, self.arguments))
+                self.finished_signal.emit(
+                    call_mcp_tool(
+                        self.server_config,
+                        self.tool_name,
+                        self.arguments,
+                        config_manager=self.config_manager,
+                    )
+                )
                 return
             self.finished_signal.emit({"ok": False, "error": "Unknown MCP debug action."})
         except Exception as exc:
@@ -5792,6 +5832,11 @@ class McpServerEditDialog(QDialog):
         self.headers_edit.setPlainText(self._mapping_to_text(self.server.get("headers"), separator=": "))
         self.headers_edit.setStyleSheet(apple_code_edit_style(bg=DesignTokens.bg_panel_strong, radius=14, subtle=True, padding=10))
         http_layout.addRow(build_form_row_label("Headers"), self.headers_edit)
+        if self.server.get("auth"):
+            managed_auth_note = QLabel("认证由对应的 AI Skill 管理，access token 不会写入 Headers。")
+            managed_auth_note.setWordWrap(True)
+            managed_auth_note.setStyleSheet(apple_settings_inline_note_style())
+            http_card_layout.addWidget(managed_auth_note)
         http_card_layout.addLayout(http_layout)
         http_page_layout.addWidget(http_card)
         self.transport_stack.addWidget(http_page)
@@ -5866,6 +5911,8 @@ class McpServerEditDialog(QDialog):
             "env": self._parse_mapping(self.env_edit.toPlainText()),
             "url": self.url_input.text().strip(),
             "headers": self._parse_mapping(self.headers_edit.toPlainText()),
+            "auth": dict(self.server.get("auth") or {}),
+            "runtime_skill": str(self.server.get("runtime_skill") or "").strip(),
         }
 
     def accept(self):
@@ -5887,9 +5934,10 @@ class McpServerEditDialog(QDialog):
 class McpServerManager(QWidget):
     changed = Signal()
 
-    def __init__(self, servers, parent=None):
+    def __init__(self, servers, config_manager=None, parent=None):
         super().__init__(parent)
         self.servers = json.loads(json.dumps(servers or [], ensure_ascii=False))
+        self.config_manager = config_manager
         self.test_worker = None
 
         layout = QVBoxLayout(self)
@@ -6110,7 +6158,7 @@ class McpServerManager(QWidget):
             return
         server = self.servers[index]
         self.status_label.setText(f"正在测试 {server.get('name') or 'MCP Server'} ...")
-        self.test_worker = McpConnectionWorker(server, self)
+        self.test_worker = McpConnectionWorker(server, config_manager=self.config_manager, parent=self)
         self.test_worker.finished_signal.connect(self._handle_test_result)
         self.test_worker.finished.connect(self.test_worker.deleteLater)
         self.test_worker.start()
@@ -6631,6 +6679,7 @@ class SettingsDialog(QDialog):
         )
         self.mcp_server_manager = McpServerManager(
             self.config_manager.get_mcp_servers(),
+            config_manager=self.config_manager,
             parent=self,
         )
         permission_group, permission_group_layout = build_settings_surface(

@@ -64,7 +64,7 @@ Cowork 采用交错式推理流程：
 
 - 直接执行面只有 `tool`
 - `skill` 只负责经验和边界，不作为独立调用协议
-- `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，运行脚本或工具时按字段声明显式注入环境变量。需要生成 MCP server 的能力可声明 `mcp_server_presets`，由 `SkillManager` 使用已保存配置渲染 `stdio` 或 Streamable HTTP server，并通过配置管理器按 server ID upsert，避免重复生成。
+- `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，支持文本、密钥和带默认值的固定选项，运行脚本或工具时按字段声明显式注入环境变量。`mcp_server_presets` 由 `SkillManager` 渲染为 `stdio` 或 Streamable HTTP server 并按 ID upsert；`skill_python` runtime 复用 Skill 隔离依赖目录，托管认证只持久化配置引用，access/refresh token 留在进程内存并在请求前解析。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
 - Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。浮层通过鼠标全局坐标命中自身与锚点，不能依赖事件接收对象一定是 `QWidget`，以兼容 Windows 原生事件分发。指定能力以会话态 `selected_skill_names` 为唯一数据源。

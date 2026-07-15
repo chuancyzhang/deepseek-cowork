@@ -1,13 +1,25 @@
 import asyncio
+import base64
+import hashlib
 import json
+import logging
 import os
 import re
+import threading
+import time
 from contextlib import asynccontextmanager
 
 
 TRANSPORT_STDIO = "stdio"
 TRANSPORT_STREAMABLE_HTTP = "streamable_http"
 DEFAULT_MCP_TIMEOUT_SECONDS = 30
+SUPERSET_AUTH_TYPE = "superset_password"
+SUPERSET_TOKEN_REFRESH_SKEW_SECONDS = 60
+
+
+logger = logging.getLogger(__name__)
+_SUPERSET_TOKEN_CACHE = {}
+_SUPERSET_TOKEN_CACHE_LOCK = threading.RLock()
 
 
 def normalize_mcp_transport(value):
@@ -96,6 +108,178 @@ def _stringify_string_list(value):
         if text:
             values.append(text)
     return values
+
+
+def _jwt_expiry(token):
+    parts = str(token or "").split(".")
+    if len(parts) != 3:
+        raise ValueError("Superset returned an invalid JWT access token.")
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+        expiry = int(decoded.get("exp"))
+    except Exception as exc:
+        raise ValueError("Superset access token does not contain a valid exp claim.") from exc
+    if expiry <= 0:
+        raise ValueError("Superset access token contains an invalid exp claim.")
+    return expiry
+
+
+def _auth_field(auth, key, default):
+    return str(auth.get(key) or default).strip()
+
+
+def _superset_auth_values(server_config, config_manager):
+    auth = server_config.get("auth") if isinstance(server_config.get("auth"), dict) else {}
+    skill_name = str(auth.get("skill_name") or "superset-mcp").strip()
+    if not config_manager or not hasattr(config_manager, "get_skill_config"):
+        raise ValueError("Superset managed authentication requires the Skill configuration manager.")
+    values = config_manager.get_skill_config(skill_name)
+    fields = {
+        "base_url": _auth_field(auth, "base_url_field", "SUPERSET_BASE_URL"),
+        "username": _auth_field(auth, "username_field", "SUPERSET_USERNAME"),
+        "password": _auth_field(auth, "password_field", "SUPERSET_PASSWORD"),
+        "provider": _auth_field(auth, "provider_field", "SUPERSET_PROVIDER"),
+    }
+    resolved = {
+        name: str(values.get(field_name, "") or "").strip()
+        for name, field_name in fields.items()
+    }
+    resolved["provider"] = resolved["provider"] or "db"
+    missing = [name for name in ("base_url", "username", "password") if not resolved[name]]
+    if missing:
+        raise ValueError("Superset authentication is missing configuration: " + ", ".join(missing))
+    if resolved["provider"] not in {"db", "ldap"}:
+        raise ValueError("Superset provider must be 'db' or 'ldap'.")
+    return resolved
+
+
+def _superset_cache_key(server_config, values):
+    password_fingerprint = hashlib.sha256(values["password"].encode("utf-8")).hexdigest()
+    return (
+        str(server_config.get("id") or server_config.get("name") or "superset").strip(),
+        values["base_url"].rstrip("/"),
+        values["username"],
+        values["provider"],
+        password_fingerprint,
+    )
+
+
+def _superset_response_error(response, action):
+    detail = ""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = str(payload.get("message") or payload.get("detail") or "").strip()
+    except Exception:
+        detail = ""
+    suffix = f": {detail}" if detail else ""
+    return RuntimeError(f"Superset {action} failed ({response.status_code} {response.reason_phrase}){suffix}")
+
+
+def _superset_login(values, timeout_seconds):
+    import httpx
+
+    url = values["base_url"].rstrip("/") + "/api/v1/security/login"
+    logger.info("mcp_auth.login.start provider=%s host=%s", values["provider"], values["base_url"])
+    try:
+        response = httpx.post(
+            url,
+            json={
+                "username": values["username"],
+                "password": values["password"],
+                "provider": values["provider"],
+                "refresh": True,
+            },
+            headers={"Accept": "application/json"},
+            timeout=timeout_seconds,
+            follow_redirects=True,
+        )
+    except Exception:
+        logger.exception("mcp_auth.login.error host=%s", values["base_url"])
+        raise
+    if response.status_code != 200:
+        logger.error("mcp_auth.login.error host=%s status=%s", values["base_url"], response.status_code)
+        raise _superset_response_error(response, "login")
+    payload = response.json()
+    access_token = str(payload.get("access_token") or "").strip() if isinstance(payload, dict) else ""
+    refresh_token = str(payload.get("refresh_token") or "").strip() if isinstance(payload, dict) else ""
+    if not access_token or not refresh_token:
+        raise ValueError("Superset login response must contain access_token and refresh_token.")
+    expiry = _jwt_expiry(access_token)
+    logger.info("mcp_auth.login.finish host=%s", values["base_url"])
+    return {"access_token": access_token, "refresh_token": refresh_token, "expires_at": expiry}
+
+
+def _superset_refresh(values, cached, timeout_seconds):
+    import httpx
+
+    url = values["base_url"].rstrip("/") + "/api/v1/security/refresh"
+    logger.info("mcp_auth.refresh.start host=%s", values["base_url"])
+    try:
+        response = httpx.post(
+            url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": "Bearer " + cached["refresh_token"],
+            },
+            timeout=timeout_seconds,
+            follow_redirects=True,
+        )
+    except Exception:
+        logger.exception("mcp_auth.refresh.error host=%s", values["base_url"])
+        raise
+    if response.status_code == 401:
+        logger.warning("mcp_auth.refresh.relogin host=%s", values["base_url"])
+        return None
+    if response.status_code != 200:
+        logger.error("mcp_auth.refresh.error host=%s status=%s", values["base_url"], response.status_code)
+        raise _superset_response_error(response, "token refresh")
+    payload = response.json()
+    access_token = str(payload.get("access_token") or "").strip() if isinstance(payload, dict) else ""
+    if not access_token:
+        raise ValueError("Superset refresh response must contain access_token.")
+    refreshed = dict(cached)
+    refreshed["access_token"] = access_token
+    refreshed["expires_at"] = _jwt_expiry(access_token)
+    logger.info("mcp_auth.refresh.finish host=%s", values["base_url"])
+    return refreshed
+
+
+def _superset_access_token(server_config, config_manager, force_login=False):
+    values = _superset_auth_values(server_config, config_manager)
+    cache_key = _superset_cache_key(server_config, values)
+    timeout_seconds = _resolve_timeout_seconds(server_config)
+    with _SUPERSET_TOKEN_CACHE_LOCK:
+        cached = _SUPERSET_TOKEN_CACHE.get(cache_key)
+        if force_login or not cached:
+            cached = _superset_login(values, timeout_seconds)
+        elif int(cached.get("expires_at") or 0) <= int(time.time()) + SUPERSET_TOKEN_REFRESH_SKEW_SECONDS:
+            cached = _superset_refresh(values, cached, timeout_seconds)
+            if cached is None:
+                cached = _superset_login(values, timeout_seconds)
+        _SUPERSET_TOKEN_CACHE[cache_key] = cached
+        return cached["access_token"]
+
+
+def prepare_mcp_server_config(server_config, config_manager=None, force_login=False):
+    prepared = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
+    auth = prepared.get("auth") if isinstance(prepared.get("auth"), dict) else {}
+    auth_type = str(auth.get("type") or "").strip().lower()
+    if not auth_type:
+        return prepared
+    if auth_type != SUPERSET_AUTH_TYPE:
+        raise ValueError(f"Unsupported MCP managed auth type: {auth_type}")
+    token = _superset_access_token(prepared, config_manager, force_login=force_login)
+    headers = _stringify_mapping(prepared.get("headers"))
+    headers["Authorization"] = "Bearer " + token
+    prepared["headers"] = headers
+    return prepared
+
+
+def clear_mcp_auth_cache():
+    with _SUPERSET_TOKEN_CACHE_LOCK:
+        _SUPERSET_TOKEN_CACHE.clear()
 
 
 def _as_plain_data(value):
@@ -212,7 +396,16 @@ async def _open_mcp_session(server_config):
         raise RuntimeError(describe_mcp_import_error(exc)) from exc
 
     if transport == TRANSPORT_STDIO:
-        env = os.environ.copy()
+        runtime_skill = str(server_config.get("runtime_skill") or "").strip()
+        if runtime_skill:
+            from .sandbox_runtime import build_sandbox_env
+
+            env = build_sandbox_env(
+                workspace_dir=str(server_config.get("cwd") or "").strip() or None,
+                skill_id=runtime_skill,
+            )
+        else:
+            env = os.environ.copy()
         env.update(_stringify_mapping(server_config.get("env")))
         server_params = StdioServerParameters(
             command=str(server_config.get("command") or "").strip(),
@@ -273,19 +466,30 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
-def list_mcp_server_tools(server_config):
+def _managed_auth_error(server_config, exc):
+    auth = server_config.get("auth") if isinstance(server_config.get("auth"), dict) else {}
+    if str(auth.get("type") or "").strip().lower() == SUPERSET_AUTH_TYPE and "401" in str(exc):
+        return (
+            f"{exc} Superset MCP rejected the login JWT. Check MCP_AUTH_ENABLED, "
+            "MCP_JWT_ALGORITHM/signing key, and MCP_USER_RESOLVER on the Superset server."
+        )
+    return str(exc)
+
+
+def list_mcp_server_tools(server_config, config_manager=None):
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"ok": False, "error": f"MCP server '{server_name}' is disabled.", "tools": []}
     try:
-        tools = _run_async(_list_mcp_server_tools_async(server_config))
+        prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+        tools = _run_async(_list_mcp_server_tools_async(prepared))
         return {"ok": True, "error": "", "tools": tools}
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "tools": []}
+        return {"ok": False, "error": _managed_auth_error(server_config, exc), "tools": []}
 
 
-def test_mcp_server_connection(server_config):
-    result = list_mcp_server_tools(server_config)
+def test_mcp_server_connection(server_config, config_manager=None):
+    result = list_mcp_server_tools(server_config, config_manager=config_manager)
     if not result.get("ok"):
         return result
     tool_names = [item.get("name") for item in result.get("tools") or [] if item.get("name")]
@@ -298,18 +502,19 @@ def test_mcp_server_connection(server_config):
     }
 
 
-def call_mcp_tool(server_config, tool_name, arguments=None):
+def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None):
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"status": "error", "error": f"MCP server '{server_name}' is disabled."}
     try:
-        payload = _run_async(_call_mcp_tool_async(server_config, tool_name, arguments or {}))
+        prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+        payload = _run_async(_call_mcp_tool_async(prepared, tool_name, arguments or {}))
     except Exception as exc:
         return {
             "status": "error",
             "server": server_name,
             "tool": str(tool_name or "").strip(),
-            "error": str(exc),
+            "error": _managed_auth_error(server_config, exc),
         }
     payload["status"] = "error" if payload.get("is_error") else "ok"
     return payload

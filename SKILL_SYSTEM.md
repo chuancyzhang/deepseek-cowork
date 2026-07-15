@@ -92,7 +92,9 @@ If a matched skill exposes tools, those tools still execute through the normal t
 
 ### Runtime configuration
 
-`skill.json` may declare `config_fields` with `name`, `label`, `kind`, `required`, `env`, `help`, and `placeholder`. The workbench renders these fields in a configuration tab. Saved values are stored in local `skill_configs` and injected into script or tool execution through the declared environment variable names. Missing required values fail explicitly before execution. `config_requirements` may express grouped requirements such as token-or-username/password. `mcp_server_presets` may reference those environment names with `{{ENV_NAME}}` placeholders and materialize default-off `stdio` or Streamable HTTP MCP server entries from saved skill configuration.
+`skill.json` may declare `config_fields` with `name`, `label`, `kind`, `required`, `env`, `help`, `placeholder`, `default`, and `options`. `kind: select` renders a fixed-value selector; defaults participate in validation and environment construction. Saved values are stored in local `skill_configs` and injected into script or tool execution through the declared environment variable names. Missing required values fail explicitly before execution. `config_requirements` may express grouped requirements such as token-or-username/password.
+
+`mcp_server_presets` may reference environment names with `{{ENV_NAME}}` placeholders and materialize default-off `stdio` or Streamable HTTP entries. `runtime: skill_python` with exactly one `module` or `entrypoint` starts stdio MCP servers in the owning Skill's isolated Python dependency environment. A preset may also declare managed `auth`; the generated server stores only the Skill configuration reference, while short-lived tokens are resolved at connection time and are not persisted in headers.
 
 ### `parallel_tools`
 

@@ -230,6 +230,7 @@ class ProductPopover(QFrame):
         super().__init__(parent)
         self.setObjectName("ProductPopover")
         self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMinimumWidth(int(width))
         self.setMaximumWidth(int(width))
@@ -247,6 +248,9 @@ class ProductPopover(QFrame):
         host = self.parentWidget()
         if host is None:
             raise RuntimeError("ProductPopover requires an in-window parent widget.")
+        for popover in host.findChildren(ProductPopover):
+            if popover is not self and popover.isVisible():
+                popover.close()
         self._anchor = anchor
         self.adjustSize()
         available = host.rect().adjusted(8, 8, -8, -8)

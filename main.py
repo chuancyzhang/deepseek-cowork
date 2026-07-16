@@ -18429,6 +18429,8 @@ class MainWindow(QMainWindow):
         if existing and _qt_object_alive(existing) and existing.isVisible():
             existing.close()
             return
+        if existing and _qt_object_alive(existing):
+            existing.close()
         popover = ComposerActionPopover(self, self)
         self.composer_action_popover = popover
         self.tool_menu_btn.setChecked(True)
@@ -18439,6 +18441,13 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self.input_field.setFocus)
 
         popover.closed.connect(restore)
+        popover.destroyed.connect(
+            lambda _obj=None, current=popover: setattr(
+                self,
+                "composer_action_popover",
+                None,
+            ) if getattr(self, "composer_action_popover", None) is current else None
+        )
         popover.show_for(self.tool_menu_btn, prefer_above=True)
 
     def _model_id_for_state(self, state=None):

@@ -296,6 +296,61 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertTrue(popover.isHidden())
         host.deleteLater()
 
+    def test_product_popover_closes_sibling_and_is_deleted_after_close(self):
+        host = QWidget()
+        host.resize(640, 480)
+        first_anchor = QPushButton("+", host)
+        first_anchor.setGeometry(260, 420, 32, 32)
+        second_anchor = QPushButton("Agent", host)
+        second_anchor.setGeometry(300, 420, 72, 32)
+        first = ProductPopover(host, width=260)
+        QVBoxLayout(first).addWidget(QLabel("添加上下文"))
+        second = ProductPopover(host, width=260)
+        QVBoxLayout(second).addWidget(QLabel("选择 Agent"))
+        host.show()
+        self.app.processEvents()
+
+        self.assertTrue(first.show_for(first_anchor, prefer_above=True))
+        self.assertTrue(second.show_for(second_anchor, prefer_above=True))
+        self.assertTrue(first.isHidden())
+        self.assertTrue(second.isVisible())
+        self.assertEqual(
+            len([item for item in host.findChildren(ProductPopover) if item.isVisible()]),
+            1,
+        )
+
+        second.close()
+        self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
+        self.assertEqual(host.findChildren(ProductPopover), [])
+        host.deleteLater()
+
+    def test_composer_context_button_reopens_without_accumulating_popovers(self):
+        window = MainWindow()
+        window.show()
+        self.app.processEvents()
+        try:
+            QTest.mouseClick(window.tool_menu_btn, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(
+                len([item for item in window.findChildren(ProductPopover) if item.isVisible()]),
+                1,
+            )
+
+            QTest.mouseClick(window.tool_menu_btn, Qt.LeftButton)
+            self.app.sendPostedEvents(None, QEvent.DeferredDelete)
+            self.app.processEvents()
+            self.assertEqual(window.findChildren(ProductPopover), [])
+            self.assertIsNone(window.composer_action_popover)
+
+            QTest.mouseClick(window.tool_menu_btn, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(len(window.findChildren(ProductPopover)), 1)
+            self.assertTrue(window.composer_action_popover.isVisible())
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_product_popover_keeps_native_window_target_click_inside(self):
         host = QWidget()
         host.resize(640, 480)

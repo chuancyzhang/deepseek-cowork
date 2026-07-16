@@ -120,6 +120,25 @@ class UiDesignSystemTests(unittest.TestCase):
         self.assertEqual(notice.label.text(), "运行中")
         self.assertFalse(master_detail.detail_visible)
 
+    def test_plain_empty_state_supports_icon_secondary_action_and_content_updates(self):
+        empty = ProductEmptyState(
+            "暂无文件",
+            "创建后会显示在这里",
+            "打开目录",
+            appearance="plain",
+            icon=main_module.sidebar_symbol_icon("folder-open", DesignTokens.text_secondary, 18),
+            action_kind="secondary",
+        )
+        empty.set_content("还没有文件", "在对话中创建文件。")
+        empty.set_action("在资源管理器中打开")
+
+        self.assertEqual(empty.appearance, "plain")
+        self.assertIsNotNone(empty.icon_label)
+        self.assertEqual(empty.title_label.text(), "还没有文件")
+        self.assertEqual(empty.description_label.text(), "在对话中创建文件。")
+        self.assertEqual(empty.action_button.text(), "在资源管理器中打开")
+        self.assertIn("SecondaryBtn", empty.action_button.objectName())
+
     def test_business_message_and_input_calls_use_product_facades(self):
         self.assertIs(main_module.QMessageBox, ProductMessageBox)
         self.assertIs(main_module.QInputDialog, ProductInputDialog)

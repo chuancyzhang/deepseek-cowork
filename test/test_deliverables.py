@@ -36,9 +36,111 @@ from main import (
     session_history_ready,
     sidebar_symbol_icon,
 )
+from ui.primitives import ProductEmptyState
 
 
 class TestDeliverableScanning(unittest.TestCase):
+    def _file_empty_state_window(self, workspace, source="chat"):
+        QApplication.instance() or QApplication([])
+        window = MainWindow.__new__(MainWindow)
+        window.workspace_dir = workspace
+        window.file_workspace_section = window.FILE_SECTION_ALL
+        window.file_browser_empty_state = ProductEmptyState(
+            "占位标题",
+            "占位说明",
+            "在资源管理器中打开",
+            appearance="plain",
+            icon=sidebar_symbol_icon("folder-open", "#6b7280", 18),
+            action_kind="secondary",
+        )
+        window.file_source_stack = QStackedWidget()
+        window.file_product_toolbar = QWidget()
+        window.file_filter_sort_container = QWidget()
+        window._session_workspace_source = MagicMock(return_value=source)
+        return window
+
+    def test_chat_empty_workspace_uses_plain_actionable_state(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            window = self._file_empty_state_window(workspace, source="chat")
+            window.reveal_in_explorer = MagicMock()
+
+            window._sync_file_browser_empty_state()
+            window._handle_file_browser_empty_action()
+
+            self.assertEqual(window.file_browser_empty_state.title_label.text(), "还没有文件")
+            self.assertIn("Agent 创建文件", window.file_browser_empty_state.description_label.text())
+            self.assertEqual(window.file_browser_empty_action, "open_workspace")
+            self.assertFalse(window.file_browser_empty_state.action_button.isHidden())
+            self.assertTrue(window.file_product_toolbar.isHidden())
+            self.assertTrue(window.file_filter_sort_container.isHidden())
+            self.assertTrue(window.file_source_stack.isHidden())
+            window.reveal_in_explorer.assert_called_once_with(workspace)
+
+    def test_project_empty_workspace_opens_project_directory(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            window = self._file_empty_state_window(workspace, source="project")
+            window.reveal_in_explorer = MagicMock()
+
+            window._sync_file_browser_empty_state()
+            window._handle_file_browser_empty_action()
+
+            self.assertEqual(window.file_browser_empty_state.title_label.text(), "项目文件夹为空")
+            self.assertEqual(window.file_browser_empty_action, "open_workspace")
+            window.reveal_in_explorer.assert_called_once_with(workspace)
+
+    def test_nonempty_workspace_restores_search_and_file_tree(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            with open(os.path.join(workspace, "notes.txt"), "w", encoding="utf-8") as handle:
+                handle.write("ready")
+            window = self._file_empty_state_window(workspace, source="chat")
+
+            window._sync_file_browser_empty_state()
+
+            self.assertTrue(window.file_browser_empty_state.isHidden())
+            self.assertFalse(window.file_product_toolbar.isHidden())
+            self.assertFalse(window.file_source_stack.isHidden())
+
+    def test_filtered_deliverables_keep_controls_and_clear_action(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            window = self._file_empty_state_window(workspace, source="project")
+            window.file_workspace_section = window.FILE_SECTION_DELIVERABLES
+            window.file_browser_search_text = "missing"
+            window.deliverable_type_filter = "all"
+            window._filtered_deliverable_items = MagicMock(return_value=[])
+            window.clear_deliverable_filters = MagicMock()
+
+            window._sync_file_browser_empty_state()
+            window._handle_file_browser_empty_action()
+
+            self.assertEqual(window.file_browser_empty_action, "clear_filters")
+            self.assertEqual(window.file_browser_empty_state.action_button.text(), "清除筛选")
+            self.assertFalse(window.file_product_toolbar.isHidden())
+            self.assertFalse(window.file_filter_sort_container.isHidden())
+            window.clear_deliverable_filters.assert_called_once_with()
+
+    def test_invalid_workspace_hides_controls_and_action(self):
+        with tempfile.TemporaryDirectory() as parent:
+            window = self._file_empty_state_window(os.path.join(parent, "missing-workspace"))
+
+            window._sync_file_browser_empty_state()
+
+            self.assertEqual(window.file_browser_empty_state.title_label.text(), "还没有选择工作区")
+            self.assertEqual(window.file_browser_empty_action, "")
+            self.assertTrue(window.file_browser_empty_state.action_button.isHidden())
+            self.assertTrue(window.file_product_toolbar.isHidden())
+
+    def test_workspace_read_failure_surfaces_error_without_action(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            window = self._file_empty_state_window(workspace, source="project")
+
+            with patch("main.os.listdir", side_effect=PermissionError("拒绝访问")):
+                window._sync_file_browser_empty_state()
+
+            self.assertEqual(window.file_browser_empty_state.title_label.text(), "无法读取工作区")
+            self.assertIn("拒绝访问", window.file_browser_empty_state.description_label.text())
+            self.assertEqual(window.file_browser_empty_action, "")
+            self.assertTrue(window.file_browser_empty_state.action_button.isHidden())
+
     def test_file_chip_uses_icon_for_supported_attachment(self):
         app = QApplication.instance() or QApplication([])
         chip = FileChip(r"D:\tmp\slides.pptx", removable=False)

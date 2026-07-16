@@ -1261,36 +1261,77 @@ class ProductStatusBadge(QLabel):
 
 
 class ProductEmptyState(QFrame):
-    def __init__(self, title, description="", action_text="", parent=None):
+    def __init__(
+        self,
+        title,
+        description="",
+        action_text="",
+        parent=None,
+        *,
+        appearance="surface",
+        icon=None,
+        action_kind="primary",
+    ):
         super().__init__(parent)
-        self.setProperty("productSurface", "subtle")
-        self.setStyleSheet(product_surface_style("subtle"))
-        self.setMaximumHeight(180)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setObjectName("ProductEmptyState")
+        self.appearance = str(appearance or "surface").strip().lower()
+        if self.appearance == "plain":
+            self.setStyleSheet("QFrame#ProductEmptyState { background: transparent; border: none; }")
+            self.setMaximumHeight(16777215)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        else:
+            self.setProperty("productSurface", "subtle")
+            self.setStyleSheet(product_surface_style("subtle"))
+            self.setMaximumHeight(180)
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 24, 20, 24)
+        vertical_margin = 24 if self.appearance != "plain" else 20
+        layout.setContentsMargins(20, vertical_margin, 20, vertical_margin)
         layout.setSpacing(8)
         layout.setAlignment(Qt.AlignCenter)
-        title_label = QLabel(title)
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet(
+        self.icon_label = None
+        if isinstance(icon, QIcon) and not icon.isNull():
+            self.icon_label = QLabel()
+            self.icon_label.setAlignment(Qt.AlignCenter)
+            self.icon_label.setFixedSize(32, 32)
+            self.icon_label.setPixmap(icon.pixmap(18, 18))
+            self.icon_label.setStyleSheet(
+                f"background: {DesignTokens.primary_soft}; border: none; border-radius: 8px;"
+            )
+            layout.addWidget(self.icon_label, 0, Qt.AlignCenter)
+        self.title_label = QLabel(title)
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet(
             f"font-size: {DesignTokens.font_size_section}px; font-weight: 600; color: {DesignTokens.text_primary};"
         )
-        layout.addWidget(title_label)
-        if description:
-            description_label = QLabel(description)
-            description_label.setAlignment(Qt.AlignCenter)
-            description_label.setWordWrap(True)
-            description_label.setStyleSheet(
-                f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
-            )
-            layout.addWidget(description_label)
+        layout.addWidget(self.title_label)
+        self.description_label = QLabel(description)
+        self.description_label.setAlignment(Qt.AlignCenter)
+        self.description_label.setWordWrap(True)
+        self.description_label.setMaximumWidth(280)
+        self.description_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        self.description_label.setVisible(bool(description))
+        layout.addWidget(self.description_label)
         self.action_button = None
         if action_text:
             self.action_button = QPushButton(action_text)
-            self.action_button.setObjectName("PrimaryBtn")
-            self.action_button.setStyleSheet(product_button_style("primary"))
+            self.action_button.setObjectName("PrimaryBtn" if action_kind == "primary" else "SecondaryBtn")
+            self.action_button.setCursor(Qt.PointingHandCursor)
+            self.action_button.setStyleSheet(product_button_style(action_kind))
             layout.addWidget(self.action_button, 0, Qt.AlignCenter)
+
+    def set_content(self, title, description=""):
+        self.title_label.setText(str(title or ""))
+        self.description_label.setText(str(description or ""))
+        self.description_label.setVisible(bool(description))
+
+    def set_action(self, text="", visible=True):
+        if self.action_button is None:
+            raise RuntimeError("ProductEmptyState action button was not configured.")
+        self.action_button.setText(str(text or ""))
+        self.action_button.setVisible(bool(text) and bool(visible))
 
 
 class ProductDataRow(QFrame):

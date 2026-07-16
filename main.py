@@ -16160,7 +16160,8 @@ class MainWindow(QMainWindow):
         self.file_product_toolbar.finish()
         file_browse_layout.addWidget(self.file_product_toolbar)
 
-        filter_sort_row = QHBoxLayout()
+        self.file_filter_sort_container = QWidget()
+        filter_sort_row = QHBoxLayout(self.file_filter_sort_container)
         filter_sort_row.setContentsMargins(0, 0, 0, 0)
         filter_sort_row.setSpacing(6)
 
@@ -16187,14 +16188,18 @@ class MainWindow(QMainWindow):
         apply_settings_combo_style(self.deliverable_sort_combo)
         self.deliverable_sort_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
         filter_sort_row.addWidget(self.deliverable_sort_combo, 1)
-        file_browse_layout.addLayout(filter_sort_row)
+        file_browse_layout.addWidget(self.file_filter_sort_container)
 
         self.file_browser_empty_state = ProductEmptyState(
             "还没有可浏览的内容",
             "选择工作区后，可以在这里查找文件并预览交付物。",
-            "清除筛选",
+            "在资源管理器中打开",
+            appearance="plain",
+            icon=sidebar_symbol_icon("folder-open", DesignTokens.text_secondary, 18),
+            action_kind="secondary",
         )
-        self.file_browser_empty_state.action_button.clicked.connect(self.clear_deliverable_filters)
+        self.file_browser_empty_action = ""
+        self.file_browser_empty_state.action_button.clicked.connect(self._handle_file_browser_empty_action)
         self.file_browser_empty_state.setVisible(False)
         file_browse_layout.addWidget(self.file_browser_empty_state, 1)
         file_browse_layout.addWidget(self.file_source_stack, 1)
@@ -17292,12 +17297,17 @@ class MainWindow(QMainWindow):
             return
         workspace = getattr(self, "workspace_dir", "")
         section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+        action = ""
+        controls_visible = True
         if loading:
             title, description, visible = "正在扫描交付物", "正在读取当前工作区中的可预览文件。", True
+            controls_visible = False
         elif error:
             title, description, visible = "无法读取文件", str(error), True
+            controls_visible = False
         elif not workspace or not os.path.isdir(workspace):
             title, description, visible = "还没有选择工作区", "从左侧选择项目后，可以在这里查找和预览文件。", True
+            controls_visible = False
         elif section == self.FILE_SECTION_DELIVERABLES and not self._filtered_deliverable_items():
             has_filters = bool(str(getattr(self, "file_browser_search_text", "") or "").strip()) or str(
                 getattr(self, "deliverable_type_filter", "all") or "all"
@@ -17309,33 +17319,57 @@ class MainWindow(QMainWindow):
                 else "生成 HTML、PDF、PPTX、DOCX 或图片后，它们会自动出现在这里。"
             )
             visible = True
+            controls_visible = has_filters
+            action = "clear_filters" if has_filters else ""
         elif section == self.FILE_SECTION_ALL:
             try:
                 visible = not bool(os.listdir(workspace))
             except OSError as exc:
                 title, description, visible = "无法读取工作区", str(exc), True
+                controls_visible = False
             else:
-                title, description = "工作区是空的", "在对话中创建文件后，它们会自动出现在这里。"
+                if visible:
+                    source = self._session_workspace_source()
+                    if source == "project":
+                        title = "项目文件夹为空"
+                        description = "添加文件，或在对话中让 Agent 创建。"
+                    else:
+                        title = "还没有文件"
+                        description = "在对话中让 Agent 创建文件后，它们会显示在这里。"
+                    controls_visible = False
+                    action = "open_workspace"
+                else:
+                    title, description = "", ""
         else:
             title, description, visible = "", "", False
         if visible:
-            labels = empty.findChildren(QLabel)
-            if labels:
-                labels[0].setText(title)
-            if len(labels) > 1:
-                labels[1].setText(description)
+            empty.set_content(title, description)
+        toolbar = getattr(self, "file_product_toolbar", None)
+        if toolbar is not None:
+            toolbar.setVisible(controls_visible)
+        filter_container = getattr(self, "file_filter_sort_container", None)
+        if filter_container is not None:
+            filter_container.setVisible(controls_visible and section == self.FILE_SECTION_DELIVERABLES)
+        self.file_browser_empty_action = action
         action_button = getattr(empty, "action_button", None)
         if action_button is not None:
-            action_button.setVisible(
-                visible
-                and section == self.FILE_SECTION_DELIVERABLES
-                and (
-                    bool(str(getattr(self, "file_browser_search_text", "") or "").strip())
-                    or str(getattr(self, "deliverable_type_filter", "all") or "all") != "all"
-                )
-            )
+            action_text = {
+                "open_workspace": "在资源管理器中打开",
+                "clear_filters": "清除筛选",
+            }.get(action, "")
+            empty.set_action(action_text, visible=visible and bool(action_text))
         empty.setVisible(visible)
         stack.setVisible(not visible)
+
+    def _handle_file_browser_empty_action(self):
+        action = str(getattr(self, "file_browser_empty_action", "") or "")
+        if action == "clear_filters":
+            self.clear_deliverable_filters()
+            return
+        if action == "open_workspace":
+            workspace = getattr(self, "workspace_dir", "")
+            if workspace and os.path.isdir(workspace):
+                self.reveal_in_explorer(workspace)
 
     def _sync_file_workspace_detail_header(self):
         back_btn = getattr(self, "file_detail_back_btn", None)

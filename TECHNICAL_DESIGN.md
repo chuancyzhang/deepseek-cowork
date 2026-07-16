@@ -30,7 +30,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 
 ## 3. 关键界面结构
 
-- **项目式对话**：直接对话默认绑定 exe 运行目录下的 `conversation_workspaces/<session_id>/` 独立工作目录；项目对话只在用户显式绑定空白会话或从项目行新建会话时写入 `workspace_source="project"`。打开、添加、拖入或浏览项目只更新全局文件视图和项目列表，不反向修改已有会话的项目归属；左侧项目导航使用轻量图标按钮承载添加、排序和项目操作。
+- **项目式对话**：直接对话默认绑定 `ConfigManager.get_chat_workspace_root()/<session_id>/` 独立工作目录，根目录默认使用应用数据目录并可在设置中心修改；设置变更只影响新建或尚未绑定目录的会话，已有会话不静默搬迁。项目对话只在用户显式绑定空白会话或从项目行新建会话时写入 `workspace_source="project"`。打开、添加、拖入或浏览项目只更新全局文件视图和项目列表，不反向修改已有会话的项目归属；左侧项目导航使用轻量图标按钮承载添加、排序和项目操作。
 - **首页工具包提示**：新会话空态提示用户可在设置的“组件与依赖”中安装文档工具包和数据分析工具包，帮助用户在文档、表格和数据分析任务前发现可选依赖。
 - **生成办公稿**：AI 回复末尾的消息级动作，按自由、PPT、设计稿、DOCX 注入办公交付策略，并把该生成轮次默认折叠为任务卡；结果文件入口保持外显。
 - **PPT Mode / PPT Agent**：新会话空态提供 PPT Agent 卡片，输入工具栏 Agent 选择器承载内置/自定义智能体；`PptAgentModeDialog` 仅承担 PPT 需求这一原子事务，提交后仍进入 `office_html_first` 工作流。
@@ -72,6 +72,7 @@ Cowork 采用交错式推理流程：
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，支持文本、密钥和带默认值的固定选项，运行脚本或工具时按字段声明显式注入环境变量。`mcp_server_presets` 由 `SkillManager` 渲染为 `stdio` 或 Streamable HTTP server 并按 ID upsert；`skill_python` runtime 复用 Skill 隔离依赖目录，托管认证只持久化配置引用，access/refresh token 留在进程内存并在请求前解析。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
+- OpenAI 兼容模型在模型级保存 `api_protocol=chat_completions|responses`；旧配置缺少字段时保持 Chat Completions，新建 GPT‑5.6 默认 Responses。Responses provider 将消息、函数调用和函数结果转换为 typed Items，并把流式正文、reasoning summary、函数参数、用量和错误重新投影为现有统一事件协议；GPT‑5.6 可配置 `none/low/medium/high/xhigh/max` 推理强度。
 - Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。浮层通过鼠标全局坐标命中自身与锚点，不能依赖事件接收对象一定是 `QWidget`，以兼容 Windows 原生事件分发。指定能力以会话态 `selected_skill_names` 为唯一数据源。
 - 新会话首次发送在完成全部提交预检后、插入用户消息前，同步把空状态从布局移除、隐藏并 `deleteLater()`；后续布局重排和 `processEvents` 不得再次绘制它。普通发送和模型提问只使用会话内交互卡，旧模态入口显式报错而不创建 `QDialog`。Windows daemon/网关进程统一通过 `core.process_utils` 设置 `CREATE_NO_WINDOW` 与隐藏启动信息；首次提交记录 submit/start/run/finish/error 及 committed/rejected，延迟检查任何新增可见顶层窗口并记录具体窗口类名、对象名和标题。
 - 会话级 `ui_timeline_v1` 事件账本继续按原顺序保存 Thinking、工具、正文片段和运行中引导，并记录 `group_id`、`stage_id` 和 `reply_kind` 以便实时恢复。所有历史消息都由投影层直接根据标准 OpenAI-compatible 顺序 `assistant.tool_calls → tool → assistant` 重建统一轮次：携带 `tool_calls` 的 assistant 正文属于阶段回复且不显示消息动作，终止工具循环且正文非空的 assistant 属于最终回复并独占操作栏；引导关闭当前容器并开启新的容器。停止、错误或最终正文为空时显示明确状态并关闭消息动作，不能把前一阶段正文提升为最终答复。工具开始与结果仍通过同一 `tool_call_id` 原位更新，UI 投影字段在进入 Worker 前剥离，原始角色与工具消息结构保持不变。
@@ -153,6 +154,7 @@ Cowork 采用交错式推理流程：
 
 - `DesignTokens.selection_bg/selection_text` 是全局文字选区语义色；文本控件通过共享菜单保持剪贴板操作一致。
 - 每个 `SessionState` 独立保存滚动拖动状态和待确认 Skill 草稿。滚动拖动期间禁止自动滚底与气泡虚拟化重排，草稿确认也不读取主窗口全局值。
+- AI 正文控件关闭自身滚动条并按完整文档高度撑开，不设置 20,000px 截断；聊天区使用单一外层滚动条，滑块加宽并保留按压期间暂停自动滚底的状态机。
 - 技术详情通过 `parse_tool_arguments()` 显式解析字典、JSON 或安全的 Python 字面量。解析失败属于可见错误，不进入静默文本降级。
 - `ProductCodeViewer` 负责语言标签、行号、轻量语法高亮和复制；代码参数与其余 JSON 参数使用独立查看器。
 - Skill 向导、草稿生成、预览和保存路径写入分阶段诊断日志；Python 异常保留 traceback，原生退出继续由 `native_crash.log` 捕获。

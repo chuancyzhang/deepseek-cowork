@@ -79,6 +79,7 @@ class TestConfigManager(unittest.TestCase):
                 cm.set("api_key", "sk-test")
                 cm.set("base_url", "https://example.com/v1")
                 cm.set_chat_history_dir(os.path.join(self.temp_dir, "history"))
+                cm.set_chat_workspace_root(os.path.join(self.temp_dir, "chat-workspaces"))
                 cm.set_god_mode(True)
 
         self.assertEqual(write_mock.call_count, 1)
@@ -89,6 +90,7 @@ class TestConfigManager(unittest.TestCase):
         with patch.object(cm, "_write_config") as write_mock:
             cm.set("api_key", cm.get("api_key"))
             cm.set_chat_history_dir(cm.get_chat_history_dir())
+            cm.set_chat_workspace_root(cm.get_chat_workspace_root())
             cm.set_god_mode(cm.get_god_mode())
             cm.set_agent_profiles(cm.get_agent_profiles())
             cm.set_mcp_servers(cm.get_mcp_servers())
@@ -131,6 +133,34 @@ class TestConfigManager(unittest.TestCase):
         self.assertTrue(cm.get("model_channels"))
         self.assertTrue(cm.get("model_provider_configs"))
         self.assertEqual(cm.get_selected_model_id(), "openai-default")
+        self.assertEqual(
+            cm.get_chat_workspace_root(),
+            os.path.join(self.temp_dir, "conversation_workspaces"),
+        )
+
+    def test_openai_models_default_to_chat_completions_without_saved_protocol(self):
+        cm = self._create_config_manager()
+
+        entry = cm._normalize_model_entry(
+            "openai",
+            {"model_name": "gpt-5.6", "display_name": "Existing GPT-5.6"},
+        )
+
+        self.assertEqual(entry["api_protocol"], "chat_completions")
+
+    def test_openai_model_preserves_responses_protocol(self):
+        cm = self._create_config_manager()
+
+        entry = cm._normalize_model_entry(
+            "openai",
+            {
+                "model_name": "gpt-5.6",
+                "display_name": "GPT-5.6",
+                "api_protocol": "responses",
+            },
+        )
+
+        self.assertEqual(entry["api_protocol"], "responses")
 
     def test_project_config_adds_renames_pins_and_hides(self):
         cm = self._create_config_manager()
@@ -1301,6 +1331,18 @@ class TestDaemonState(unittest.TestCase):
 
         self.assertEqual(state._context_window_tokens({"selected_model_id": "openai-default"}), 1000000)
         self.assertEqual(state._context_budget_threshold({"selected_model_id": "openai-default"}), 800000)
+
+    def test_gpt_5_6_uses_documented_context_budget(self):
+        state = DaemonState(
+            _DaemonConfigStub(
+                self.temp_dir,
+                values={"context_budget_ratio": 0.8},
+                profile={"model_name": "gpt-5.6-terra"},
+            )
+        )
+
+        self.assertEqual(state._context_window_tokens({"selected_model_id": "openai-default"}), 1050000)
+        self.assertEqual(state._context_budget_threshold({"selected_model_id": "openai-default"}), 840000)
 
     def test_deepseek_v4_does_not_compress_under_budget(self):
         state = DaemonState(

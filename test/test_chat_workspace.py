@@ -43,6 +43,9 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
         window = MainWindow.__new__(MainWindow)
         window.config_manager = MagicMock()
         window.config_manager.get_selected_model_id.return_value = "model-a"
+        window.config_manager.get_chat_workspace_root.return_value = os.path.join(
+            base_dir, "conversation_workspaces"
+        )
         window.config_manager.iter_model_profiles.return_value = [
             {
                 "id": "model-a",
@@ -154,6 +157,17 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             }
 
             self.assertEqual(window._conversation_workspace_path(conversation), "")
+
+    def test_direct_chat_uses_configured_workspace_root(self):
+        with tempfile.TemporaryDirectory() as configured_root:
+            window = self._window(tempfile.gettempdir())
+            window.config_manager.get_chat_workspace_root.return_value = configured_root
+            state = _State("configured-session")
+
+            workspace = window._ensure_session_workspace(state)
+
+            self.assertEqual(workspace, os.path.join(configured_root, "configured-session"))
+            self.assertTrue(os.path.isdir(workspace))
 
     def test_load_workspace_does_not_reassign_existing_session(self):
         with tempfile.TemporaryDirectory() as project_a, tempfile.TemporaryDirectory() as project_b:

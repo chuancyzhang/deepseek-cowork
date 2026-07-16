@@ -194,6 +194,12 @@ from core.clarify_mode import (
     normalize_run_context,
     normalize_workflow_mode,
 )
+from core.llm.providers import (
+    API_PROTOCOL_CHAT_COMPLETIONS,
+    API_PROTOCOL_RESPONSES,
+    is_gpt_5_6_model,
+    normalize_openai_api_protocol,
+)
 
 OFFICE_TASK_PROCESS_BOOTSTRAP_CHECK_MS = 1000
 from core.ppt_agent import (
@@ -3714,7 +3720,8 @@ class ModelEditDialog(QDialog):
         model = dict(model or {})
         self._editing_existing = bool(model)
         self.setWindowTitle("编辑模型" if self._editing_existing else "添加模型")
-        self.resize(500, 430)
+        self.resize(560, 560)
+        self.setMinimumSize(520, 520)
         self.setStyleSheet(linear_dialog_stylesheet("ModelEditDialog"))
 
         layout = QVBoxLayout(self)
@@ -3747,6 +3754,36 @@ class ModelEditDialog(QDialog):
         self.model_name_input.setText(str(model.get("model_name") or ""))
         form.addRow(build_form_row_label("模型标识"), self.model_name_input)
 
+        self.api_protocol_combo = None
+        self._protocol_user_selected = False
+        self._syncing_protocol = False
+        if provider_id == "openai":
+            self.api_protocol_combo = QComboBox()
+            apply_settings_combo_style(self.api_protocol_combo)
+            self.api_protocol_combo.addItem("Chat Completions", API_PROTOCOL_CHAT_COMPLETIONS)
+            self.api_protocol_combo.addItem("Responses", API_PROTOCOL_RESPONSES)
+            configured_protocol = normalize_openai_api_protocol(model.get("api_protocol"))
+            protocol_index = self.api_protocol_combo.findData(configured_protocol)
+            self.api_protocol_combo.setCurrentIndex(max(0, protocol_index))
+            form.addRow(build_form_row_label("API 协议"), self.api_protocol_combo)
+
+            def mark_protocol_selected(_index):
+                if not self._syncing_protocol:
+                    self._protocol_user_selected = True
+
+            def sync_new_model_protocol(model_name):
+                if self._editing_existing or self._protocol_user_selected:
+                    return
+                protocol = API_PROTOCOL_RESPONSES if is_gpt_5_6_model(model_name) else API_PROTOCOL_CHAT_COMPLETIONS
+                index = self.api_protocol_combo.findData(protocol)
+                self._syncing_protocol = True
+                self.api_protocol_combo.setCurrentIndex(index)
+                self._syncing_protocol = False
+
+            self.api_protocol_combo.currentIndexChanged.connect(mark_protocol_selected)
+            self.model_name_input.textChanged.connect(sync_new_model_protocol)
+            sync_new_model_protocol(self.model_name_input.text())
+
         self.vision_check = QCheckBox("支持图片理解")
         self.vision_check.setChecked(bool(model.get("supports_vision", False)))
         form.addRow(build_form_row_label("图片理解"), self.vision_check)
@@ -3761,6 +3798,7 @@ class ModelEditDialog(QDialog):
             form.addRow(build_form_row_label("推理"), self.thinking_check)
 
             effort_labels = {
+                "none": "无",
                 "low": "低",
                 "medium": "中",
                 "high": "高",
@@ -3838,6 +3876,9 @@ class ModelEditDialog(QDialog):
             "supports_vision": bool(self.vision_check and self.vision_check.isChecked()),
         }
         if self.provider_id == "openai":
+            item["api_protocol"] = normalize_openai_api_protocol(
+                self.api_protocol_combo.currentData() if self.api_protocol_combo else ""
+            )
             enabled = bool(self.thinking_check and self.thinking_check.isChecked())
             efforts = [
                 effort for effort, check in self.reasoning_checks.items()
@@ -4004,6 +4045,8 @@ class ModelChannelEditor(QFrame):
         body_layout.addWidget(model_title)
         self.model_list = QListWidget()
         self.model_list.setMinimumHeight(104)
+        self.model_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.model_list.setTextElideMode(Qt.ElideRight)
         self.model_list.setStyleSheet(apple_list_style(border=False, bg=DesignTokens.bg_panel_strong, radius=14, padding=6))
         self.model_list.currentRowChanged.connect(self.clear_test_result)
         body_layout.addWidget(self.model_list)
@@ -4117,7 +4160,10 @@ class ModelChannelEditor(QFrame):
         self.model_list.clear()
         for model in self._models():
             label = model.get("display_name") or model.get("model_name") or "未命名模型"
-            item = QListWidgetItem(f"{label}  ·  {model.get('model_name', '')}")
+            protocol = normalize_openai_api_protocol(model.get("api_protocol"))
+            protocol_label = "Responses" if protocol == API_PROTOCOL_RESPONSES else "Chat Completions"
+            suffix = f"  ·  {protocol_label}" if self._provider_type() == "openai" else ""
+            item = QListWidgetItem(f"{label}  ·  {model.get('model_name', '')}{suffix}")
             item.setData(Qt.UserRole, model.get("id"))
             self.model_list.addItem(item)
         if self.model_list.count() and self.model_list.currentRow() < 0:
@@ -6697,6 +6743,31 @@ class SettingsDialog(QDialog):
 
         history_dir_btn.clicked.connect(choose_history_dir)
 
+        self.chat_workspace_root_input = QLineEdit()
+        self.chat_workspace_root_input.setText(self.config_manager.get_chat_workspace_root())
+        chat_workspace_container = QWidget()
+        chat_workspace_layout = QHBoxLayout(chat_workspace_container)
+        chat_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        chat_workspace_layout.setSpacing(8)
+        chat_workspace_layout.addWidget(self.chat_workspace_root_input, 1)
+        chat_workspace_btn = QPushButton("选择")
+        chat_workspace_btn.setObjectName("SecondaryBtn")
+        chat_workspace_btn.setFixedWidth(88)
+        chat_workspace_layout.addWidget(chat_workspace_btn)
+        storage_layout.addRow(build_form_row_label("独立聊天目录"), chat_workspace_container)
+
+        chat_workspace_desc = QLabel("未连接项目的会话会在此目录下创建独立子目录；修改后只影响新建或尚未绑定目录的会话。")
+        chat_workspace_desc.setWordWrap(True)
+        chat_workspace_desc.setStyleSheet(apple_settings_inline_note_style())
+        storage_layout.addRow("", chat_workspace_desc)
+
+        def choose_chat_workspace_root():
+            directory = QFileDialog.getExistingDirectory(self, "选择独立聊天目录")
+            if directory:
+                self.chat_workspace_root_input.setText(directory)
+
+        chat_workspace_btn.clicked.connect(choose_chat_workspace_root)
+
         archive_project_group, archive_project_layout = build_settings_surface(
             "已归档项目",
             "归档项目会从左侧栏和项目选择器中隐藏，恢复后未归档对话会重新出现。",
@@ -7259,6 +7330,7 @@ class SettingsDialog(QDialog):
             "mcp_servers": normalize_mcp_servers(self.mcp_server_manager.get_servers()),
             "default_workspace": self.default_ws_input.text().strip(),
             "history_dir": self.history_dir_input.text().strip(),
+            "chat_workspace_root": self.chat_workspace_root_input.text().strip(),
             "god_mode": self.god_mode_check.isChecked(),
             "download_sources": source_state,
             "im_gateway": {"enabled_providers": im_enabled, "providers": im_providers},
@@ -7819,6 +7891,7 @@ class SettingsDialog(QDialog):
             "mcp_servers": self.config_manager.get_mcp_servers(),
             "default_workspace": self.config_manager.get("default_workspace", ""),
             "history_dir": self.config_manager.get_chat_history_dir(),
+            "chat_workspace_root": self.config_manager.get_chat_workspace_root(),
             "god_mode": self.config_manager.get_god_mode(),
             "download_sources": self.config_manager.get("download_sources", {}),
             "im_gateway": self.config_manager.get("im_gateway", {}),
@@ -7838,6 +7911,7 @@ class SettingsDialog(QDialog):
                 self.config_manager.set_mcp_servers(mcp_servers)
                 self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
                 self.config_manager.set_chat_history_dir(target_history_dir)
+                self.config_manager.set_chat_workspace_root(self.chat_workspace_root_input.text().strip())
                 self.config_manager.set_god_mode(self.god_mode_check.isChecked())
                 self.download_sources = pending_download_sources
                 self.config_manager.set("download_sources", self.download_sources)
@@ -7861,6 +7935,7 @@ class SettingsDialog(QDialog):
                     self.config_manager.set_mcp_servers(previous_config["mcp_servers"])
                     self.config_manager.set("default_workspace", previous_config["default_workspace"])
                     self.config_manager.set_chat_history_dir(previous_config["history_dir"])
+                    self.config_manager.set_chat_workspace_root(previous_config["chat_workspace_root"])
                     self.config_manager.set_god_mode(previous_config["god_mode"])
                     self.config_manager.set("download_sources", previous_config["download_sources"])
                     self.config_manager.set("im_gateway", previous_config["im_gateway"])
@@ -10154,7 +10229,6 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         height = int(doc_height + margins.top() + margins.bottom() + frame + 4)
         # 确保最小高度避免不可见，同时限制最大高度防止初始异常
         height = max(height, 24)
-        height = min(height, 20000)
         if self.height() != height:
             self.setFixedHeight(height)
 
@@ -10223,7 +10297,6 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         frame = self.frameWidth() * 2
         height = int(doc_height + doc_margin + margins.top() + margins.bottom() + frame + 4)
         height = max(height, 24)
-        height = min(height, 20000)
         if self.height() != height:
             self.setFixedHeight(height)
 
@@ -20146,9 +20219,9 @@ class MainWindow(QMainWindow):
         chat_scroll.setWidgetResizable(True)
         chat_scroll.setStyleSheet(
             f"QScrollArea#ChatScrollArea {{ border: none; background: transparent; }}"
-            f"QScrollArea#ChatScrollArea QScrollBar:vertical {{ width: 12px; background: transparent; margin: 0; }}"
+            f"QScrollArea#ChatScrollArea QScrollBar:vertical {{ width: 16px; background: transparent; margin: 0; }}"
             f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical {{ background: {DesignTokens.border_strong}; "
-            f"min-height: 32px; border-radius: 5px; margin: 1px; }}"
+            f"min-height: 44px; border-radius: 7px; margin: 1px; }}"
             f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical:hover {{ background: {DesignTokens.text_tertiary}; }}"
             f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical:pressed {{ background: {DesignTokens.primary}; }}"
             "QScrollArea#ChatScrollArea QScrollBar::add-line:vertical, "
@@ -20752,7 +20825,7 @@ class MainWindow(QMainWindow):
         return os.path.normpath(os.path.abspath(os.path.expanduser(text)))
 
     def _chat_workspace_root(self):
-        return os.path.join(get_base_dir(), "conversation_workspaces")
+        return self.config_manager.get_chat_workspace_root()
 
     def _chat_workspace_dir_for_session(self, session_id):
         session_key = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())

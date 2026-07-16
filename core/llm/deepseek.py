@@ -4,7 +4,7 @@ LEGACY_DEEPSEEK_MODEL = "deepseek-reasoner"
 DEFAULT_DEEPSEEK_THINKING_ENABLED = True
 DEFAULT_DEEPSEEK_REASONING_EFFORT = "high"
 SUPPORTED_DEEPSEEK_REASONING_EFFORTS = ("high", "max")
-SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+SUPPORTED_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
 DEEPSEEK_V4_MODEL_PREFIXES = ("deepseek-v4-pro", "deepseek-v4-flash")
 

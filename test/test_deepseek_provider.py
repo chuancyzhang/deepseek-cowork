@@ -14,7 +14,7 @@ from core.agent import (
     repair_tool_call_sequence,
     sanitize_llm_messages,
 )
-from core.llm.providers import OpenAIProvider
+from core.llm.providers import API_PROTOCOL_RESPONSES, OpenAIProvider
 
 
 class TestOpenAIProviderDeepSeek(unittest.TestCase):
@@ -32,6 +32,7 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             thinking_enabled=kwargs.get("thinking_enabled", True),
             reasoning_effort=kwargs.get("reasoning_effort", "high"),
             supports_vision=kwargs.get("supports_vision", False),
+            api_protocol=kwargs.get("api_protocol", "chat_completions"),
         )
         self.assertIn("openai", sys.modules)
         return provider, client
@@ -96,6 +97,108 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         kwargs = client.chat.completions.create.call_args.kwargs
         self.assertEqual(kwargs["timeout"], 20)
         self.assertEqual(kwargs["reasoning_effort"], "max")
+
+    def test_responses_protocol_maps_stream_tools_reasoning_and_usage(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            reasoning_effort="max",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=0,
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc_item_1",
+                    call_id="call-1",
+                    name="lookup",
+                    arguments="",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                item_id="fc_item_1",
+                output_index=0,
+                delta='{"q":"hi"}',
+            ),
+            SimpleNamespace(type="response.reasoning_summary_text.delta", delta="检查资料"),
+            SimpleNamespace(type="response.output_text.delta", delta="完成"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(
+                    usage=SimpleNamespace(
+                        input_tokens=100,
+                        output_tokens=20,
+                        input_tokens_details=SimpleNamespace(cached_tokens=60),
+                    )
+                ),
+            ),
+        ]
+
+        chunks = list(provider.chat_stream(
+            [{"role": "user", "content": "hello"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup data",
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                },
+            }],
+        ))
+
+        params = client.responses.create.call_args.kwargs
+        self.assertEqual(params["reasoning"], {"effort": "max"})
+        self.assertEqual(params["input"][0]["content"][0]["type"], "input_text")
+        self.assertEqual(params["tools"][0]["name"], "lookup")
+        self.assertEqual(chunks[0]["id"], "call-1")
+        self.assertEqual(chunks[1]["function"]["arguments"], '{"q":"hi"}')
+        self.assertEqual(chunks[2], {"type": "reasoning", "content": "检查资料"})
+        self.assertEqual(chunks[3], {"type": "content", "content": "完成"})
+        self.assertEqual(chunks[4]["usage"]["cached_input_tokens"], 60)
+
+    def test_responses_protocol_maps_tool_history_to_typed_items(self):
+        provider, _client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+
+        items = provider._prepare_responses_input([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+        ])
+
+        self.assertEqual(items[0]["type"], "function_call")
+        self.assertEqual(items[1], {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": "ok",
+        })
+
+    def test_responses_connection_uses_responses_endpoint(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            reasoning_effort="medium",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = SimpleNamespace(output_text="OK")
+
+        self.assertEqual(provider.test_connection(timeout=12), "OK")
+        params = client.responses.create.call_args.kwargs
+        self.assertEqual(params["max_output_tokens"], 8)
+        self.assertEqual(params["reasoning"], {"effort": "medium"})
 
     def test_non_deepseek_prepare_messages_drops_reasoning_content(self):
         provider, _client = self._build_provider(

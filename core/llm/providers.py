@@ -12,6 +12,31 @@ from .deepseek import (
     normalize_reasoning_effort,
 )
 
+API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
+API_PROTOCOL_RESPONSES = "responses"
+SUPPORTED_OPENAI_API_PROTOCOLS = (
+    API_PROTOCOL_CHAT_COMPLETIONS,
+    API_PROTOCOL_RESPONSES,
+)
+GPT_5_6_CONTEXT_WINDOW_TOKENS = 1_050_000
+
+
+def normalize_openai_api_protocol(value):
+    protocol = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "chat": API_PROTOCOL_CHAT_COMPLETIONS,
+        "chat_completion": API_PROTOCOL_CHAT_COMPLETIONS,
+        "chat_completions": API_PROTOCOL_CHAT_COMPLETIONS,
+        "response": API_PROTOCOL_RESPONSES,
+        "responses": API_PROTOCOL_RESPONSES,
+    }
+    return aliases.get(protocol, API_PROTOCOL_CHAT_COMPLETIONS)
+
+
+def is_gpt_5_6_model(model_name):
+    name = str(model_name or "").strip().lower()
+    return name == "gpt-5.6" or name.startswith("gpt-5.6-")
+
 class LLMProvider(ABC):
     @abstractmethod
     def chat_stream(self, messages, tools=None, prompt_cache_key=None):
@@ -200,6 +225,7 @@ class OpenAIProvider(LLMProvider):
         supports_vision=False,
         stream_usage_enabled=True,
         prompt_cache_key_param="",
+        api_protocol=API_PROTOCOL_CHAT_COMPLETIONS,
     ):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url)
@@ -210,9 +236,18 @@ class OpenAIProvider(LLMProvider):
         self.supports_vision = bool(supports_vision)
         self.stream_usage_enabled = bool(stream_usage_enabled)
         self.prompt_cache_key_param = str(prompt_cache_key_param or "").strip()
+        self.api_protocol = normalize_openai_api_protocol(api_protocol)
+        self.provider_name = (
+            "OpenAI Responses"
+            if self.api_protocol == API_PROTOCOL_RESPONSES
+            else "OpenAI Chat Completions"
+        )
 
     def chat_stream(self, messages, tools=None, prompt_cache_key=None):
         try:
+            if self.api_protocol == API_PROTOCOL_RESPONSES:
+                yield from self._responses_stream(messages, tools=tools, prompt_cache_key=prompt_cache_key)
+                return
             # Clean messages for OpenAI (remove internal keys if any)
             clean_messages = self._prepare_messages(messages)
             
@@ -298,6 +333,18 @@ class OpenAIProvider(LLMProvider):
             yield {"type": "error", "content": str(e)}
 
     def test_connection(self, timeout=20):
+        if self.api_protocol == API_PROTOCOL_RESPONSES:
+            params = {
+                "model": self.model_name,
+                "input": "Reply with OK.",
+                "stream": False,
+                "max_output_tokens": 8,
+                "timeout": timeout,
+            }
+            if self.reasoning_effort:
+                params["reasoning"] = {"effort": self.reasoning_effort}
+            response = self.client.responses.create(**params)
+            return str(getattr(response, "output_text", "") or "").strip()
         params = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": "Reply with OK."}],
@@ -320,6 +367,183 @@ class OpenAIProvider(LLMProvider):
             raise RuntimeError("服务未返回任何响应内容。")
         message = getattr(choices[0], "message", None)
         return str(getattr(message, "content", "") or "").strip()
+
+    @staticmethod
+    def _object_value(obj, name, default=None):
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    def _responses_stream(self, messages, tools=None, prompt_cache_key=None):
+        params = {
+            "model": self.model_name,
+            "input": self._prepare_responses_input(messages),
+            "stream": True,
+        }
+        api_tools = self._prepare_responses_tools(tools)
+        if api_tools:
+            params["tools"] = api_tools
+        if self.reasoning_effort:
+            params["reasoning"] = {"effort": self.reasoning_effort}
+        if prompt_cache_key and self.prompt_cache_key_param == "prompt_cache_key":
+            params["prompt_cache_key"] = str(prompt_cache_key)
+
+        stream = self.client.responses.create(**params)
+        tool_indexes = {}
+        next_tool_index = 0
+        for event in stream:
+            event_type = str(self._object_value(event, "type", "") or "")
+            if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+                delta = self._object_value(event, "delta", "")
+                if delta:
+                    yield {"type": "content", "content": str(delta)}
+                continue
+            if event_type in {
+                "response.reasoning_summary_text.delta",
+                "response.reasoning_text.delta",
+            }:
+                delta = self._object_value(event, "delta", "")
+                if delta:
+                    yield {"type": "reasoning", "content": str(delta)}
+                continue
+            if event_type == "response.output_item.added":
+                item = self._object_value(event, "item")
+                if str(self._object_value(item, "type", "") or "") != "function_call":
+                    continue
+                item_id = str(self._object_value(item, "id", "") or "")
+                output_index = self._object_value(event, "output_index", next_tool_index)
+                try:
+                    index = int(output_index)
+                except (TypeError, ValueError):
+                    index = next_tool_index
+                next_tool_index = max(next_tool_index, index + 1)
+                if item_id:
+                    tool_indexes[item_id] = index
+                call_id = str(self._object_value(item, "call_id", "") or item_id)
+                name = str(self._object_value(item, "name", "") or "")
+                payload = {"type": "tool_call", "index": index, "function": {}}
+                if call_id:
+                    payload["id"] = call_id
+                if name:
+                    payload["function"]["name"] = name
+                arguments = self._object_value(item, "arguments")
+                if arguments:
+                    payload["function"]["arguments"] = str(arguments)
+                yield payload
+                continue
+            if event_type == "response.function_call_arguments.delta":
+                item_id = str(self._object_value(event, "item_id", "") or "")
+                output_index = self._object_value(event, "output_index", 0)
+                try:
+                    fallback_index = int(output_index)
+                except (TypeError, ValueError):
+                    fallback_index = 0
+                index = tool_indexes.get(item_id, fallback_index)
+                delta = self._object_value(event, "delta", "")
+                if delta:
+                    yield {
+                        "type": "tool_call",
+                        "index": index,
+                        "function": {"arguments": str(delta)},
+                    }
+                continue
+            if event_type == "response.completed":
+                response = self._object_value(event, "response")
+                usage_payload = self._usage_payload(response)
+                if usage_payload:
+                    yield {"type": "usage", "usage": usage_payload}
+                continue
+            if event_type in {"response.failed", "response.incomplete", "error"}:
+                response = self._object_value(event, "response")
+                error = self._object_value(event, "error") or self._object_value(response, "error")
+                message = self._object_value(error, "message", "") or self._object_value(response, "incomplete_details", "")
+                raise RuntimeError(str(message or f"Responses API stream ended with {event_type}."))
+
+    def _prepare_responses_tools(self, tools):
+        prepared = []
+        for tool in tools or []:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") != "function":
+                prepared.append(dict(tool))
+                continue
+            function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+            name = str(function.get("name") or "").strip()
+            if not name:
+                raise ValueError("Responses API function tool is missing name.")
+            entry = {
+                "type": "function",
+                "name": name,
+                "parameters": function.get("parameters") or {"type": "object", "properties": {}},
+            }
+            description = str(function.get("description") or "").strip()
+            if description:
+                entry["description"] = description
+            if "strict" in function:
+                entry["strict"] = bool(function.get("strict"))
+            prepared.append(entry)
+        return prepared
+
+    def _prepare_responses_input(self, messages):
+        items = []
+        for message in self._prepare_messages(messages):
+            role = str(message.get("role") or "").strip().lower()
+            content = message.get("content")
+            if role in {"system", "developer"}:
+                items.append({"role": "developer", "content": self._responses_content(content, "input_text")})
+                continue
+            if role == "user":
+                items.append({"role": "user", "content": self._responses_content(content, "input_text")})
+                continue
+            if role == "assistant":
+                if content:
+                    items.append({"role": "assistant", "content": self._responses_content(content, "output_text")})
+                for tool_call in message.get("tool_calls") or []:
+                    function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                    call_id = str(tool_call.get("id") or "").strip()
+                    name = str(function.get("name") or "").strip()
+                    if not call_id or not name:
+                        raise ValueError("Responses API history contains an invalid function call.")
+                    arguments = function.get("arguments")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments or {}, ensure_ascii=False)
+                    items.append({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments,
+                    })
+                continue
+            if role == "tool":
+                call_id = str(message.get("tool_call_id") or "").strip()
+                if not call_id:
+                    raise ValueError("Responses API tool result is missing tool_call_id.")
+                output = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                items.append({"type": "function_call_output", "call_id": call_id, "output": output or ""})
+                continue
+            raise ValueError(f"Responses API does not support message role: {role or 'empty'}")
+        return items
+
+    def _responses_content(self, content, text_type):
+        if isinstance(content, str):
+            return [{"type": text_type, "text": content}]
+        prepared = []
+        for part in content or []:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").strip().lower()
+            if part_type == "text":
+                prepared.append({"type": text_type, "text": str(part.get("text") or "")})
+            elif part_type == "image_url":
+                image_url = part.get("image_url") if isinstance(part.get("image_url"), dict) else {}
+                url = str(image_url.get("url") or "").strip()
+                if url:
+                    prepared.append({
+                        "type": "input_image",
+                        "image_url": url,
+                        "detail": str(image_url.get("detail") or "auto"),
+                    })
+        return prepared
 
     def _apply_prompt_cache_key(self, params, prompt_cache_key):
         key = str(prompt_cache_key or "").strip()
@@ -381,6 +605,8 @@ class OpenAIProvider(LLMProvider):
             ("prompt_tokens", "input_tokens"),
             ("completion_tokens", "output_tokens"),
             ("total_tokens", "total_tokens"),
+            ("input_tokens", "input_tokens"),
+            ("output_tokens", "output_tokens"),
         ):
             value = _value(usage, source)
             if value is not None:
@@ -465,6 +691,7 @@ class MoonshotProvider(OpenAIProvider):
         supports_vision=False,
         stream_usage_enabled=True,
         prompt_cache_key_param="",
+        api_protocol=API_PROTOCOL_CHAT_COMPLETIONS,
     ):
         # Ensure correct Base URL if user selects 'moonshot' but leaves default URL
         if not base_url or "api.openai.com" in base_url:
@@ -478,6 +705,7 @@ class MoonshotProvider(OpenAIProvider):
             supports_vision=supports_vision,
             stream_usage_enabled=stream_usage_enabled,
             prompt_cache_key_param=prompt_cache_key_param,
+            api_protocol=api_protocol,
         )
 
     def _prepare_messages(self, messages):

@@ -16,6 +16,10 @@ from .llm.deepseek import (
     normalize_reasoning_efforts,
     should_migrate_legacy_model,
 )
+from .llm.providers import (
+    API_PROTOCOL_CHAT_COMPLETIONS,
+    normalize_openai_api_protocol,
+)
 from .automation_manager import (
     AUTOMATION_HISTORY_LIMIT,
     normalize_automation_history,
@@ -273,6 +277,7 @@ class ConfigManager:
             "god_mode": False,
             "download_sources": default_download_sources(),
             "default_workspace": "",
+            "chat_workspace_root": os.path.join(self.data_dir, "conversation_workspaces"),
             "im_gateway": {
                 "enabled_providers": [],
                 "providers": {
@@ -300,6 +305,21 @@ class ConfigManager:
         if self.get_chat_history_dir() == path:
             return False
         self.config["chat_history_dir"] = path
+        self.save_config()
+        return True
+
+    def get_chat_workspace_root(self):
+        default_dir = os.path.join(self.data_dir, "conversation_workspaces")
+        path = str(self.config.get("chat_workspace_root") or default_dir).strip()
+        return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+
+    def set_chat_workspace_root(self, path):
+        normalized = os.path.normpath(os.path.abspath(os.path.expanduser(str(path or "").strip())))
+        if not str(path or "").strip():
+            normalized = os.path.join(self.data_dir, "conversation_workspaces")
+        if self.get_chat_workspace_root() == normalized:
+            return False
+        self.config["chat_workspace_root"] = normalized
         self.save_config()
         return True
 
@@ -622,6 +642,9 @@ class ConfigManager:
             "supports_vision": bool(source.get("supports_vision", False)),
         }
         if provider_id == "openai":
+            entry["api_protocol"] = normalize_openai_api_protocol(
+                source.get("api_protocol", API_PROTOCOL_CHAT_COMPLETIONS)
+            )
             thinking_enabled = bool(
                 source.get(
                     "deepseek_thinking_enabled",

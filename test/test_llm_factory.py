@@ -87,6 +87,7 @@ class TestLLMFactory(unittest.TestCase):
             "model_name": "profile-model",
             "deepseek_thinking_enabled": False,
             "deepseek_reasoning_effort": "max",
+            "api_protocol": "responses",
         }
 
         provider = LLMFactory.create_provider(self.mock_config, "openai-profile")
@@ -99,6 +100,8 @@ class TestLLMFactory(unittest.TestCase):
         )
         self.assertFalse(provider.thinking_enabled)
         self.assertEqual(provider.reasoning_effort, "max")
+        self.assertEqual(provider.api_protocol, "responses")
+        self.assertEqual(provider.provider_name, "OpenAI Responses")
         self.assertFalse(provider.supports_vision)
 
     def test_create_provider_accepts_runtime_reasoning_override(self):

@@ -17,6 +17,7 @@ from core.im_session_key import parse_im_session_key
 from core.interaction import interaction_service
 from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
+from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
 
@@ -452,6 +453,8 @@ class DaemonState:
                 return max(1, int(configured))
             except Exception:
                 return DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
+        if is_gpt_5_6_model(model_name):
+            return GPT_5_6_CONTEXT_WINDOW_TOKENS
         configured = self.config_manager.get("context_window_tokens", 128000)
         try:
             return max(1, int(configured))

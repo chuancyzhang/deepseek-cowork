@@ -28,6 +28,7 @@ class LLMFactory:
                 "supports_vision": config_manager.get("supports_vision", False),
                 "stream_usage_enabled": config_manager.get("stream_usage_enabled", True),
                 "prompt_cache_key_param": config_manager.get("prompt_cache_key_param", ""),
+                "api_protocol": config_manager.get("api_protocol", "chat_completions"),
             }
         return LLMFactory.create_provider_from_profile(profile, reasoning_effort=reasoning_effort)
 
@@ -50,6 +51,7 @@ class LLMFactory:
             "supports_vision": profile.get("supports_vision", False),
             "stream_usage_enabled": profile.get("stream_usage_enabled", True),
             "prompt_cache_key_param": profile.get("prompt_cache_key_param", ""),
+            "api_protocol": profile.get("api_protocol", "chat_completions"),
         }
 
         if provider_type == "anthropic":

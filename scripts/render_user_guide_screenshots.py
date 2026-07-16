@@ -169,6 +169,31 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "model-settings":
+            window.open_settings("模型与服务")
+            settings = window.product_pages[window.PAGE_SETTINGS]
+            settings._automatic_update_check_started = True
+            save_widget(window, "06-model-service-settings.png")
+            model_empty = main.ModelEditDialog("openai", parent=settings)
+            model_empty.model_name_input.setText("gpt-5.6")
+            save_widget(model_empty, "07-add-model.png")
+            model_empty.hide()
+            model_filled = main.ModelEditDialog(
+                "openai",
+                {
+                    "display_name": "GPT-5.6 Sol",
+                    "model_name": "gpt-5.6",
+                    "api_protocol": "responses",
+                    "supports_vision": True,
+                    "thinking_enabled": True,
+                    "reasoning_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+                    "reasoning_effort": "medium",
+                },
+                parent=settings,
+            )
+            save_widget(model_filled, "08-model-configuration.png")
+            model_filled.hide()
+            return
         if SCREENSHOT_SCOPE == "assistant-turn":
             render_assistant_turn_screens(window)
             return
@@ -204,6 +229,7 @@ def main_run():
             {
                 "display_name": "DeepSeek V4 Pro",
                 "model_name": "deepseek-v4-pro",
+                "api_protocol": "chat_completions",
                 "supports_vision": True,
                 "thinking_enabled": True,
                 "reasoning_efforts": ["low", "medium", "high"],

@@ -11175,10 +11175,10 @@ class EmptyStateWidget(QWidget):
         
         # Clear grid but keep widgets
         while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
-            # Don't delete widget, just remove from layout
-            if item.widget():
-                item.widget().setParent(None)
+            # Removing the layout item is sufficient. Detaching the widget from
+            # its parent, even briefly, promotes it to a native top-level window
+            # and can flash a framed helper window during responsive reflow.
+            self.grid_layout.takeAt(0)
             
         # Re-add to grid
         for i, btn in enumerate(self.action_cards):

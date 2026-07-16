@@ -454,6 +454,28 @@ class TestDeliverableScanning(unittest.TestCase):
         finally:
             widget.deleteLater()
 
+    def test_empty_state_reflow_keeps_action_cards_as_child_widgets(self):
+        app = QApplication.instance() or QApplication([])
+        main_window = MagicMock()
+        widget = EmptyStateWidget(main_window)
+        try:
+            widget.resize(720, 480)
+            widget.show()
+            app.processEvents()
+            widget.current_cols = 1
+            widget.reflow_cards()
+            app.processEvents()
+
+            self.assertNotIn("setParent(None)", inspect.getsource(EmptyStateWidget.reflow_cards))
+            self.assertTrue(widget.action_cards)
+            for card in widget.action_cards:
+                self.assertIs(card.parentWidget(), widget.grid_widget)
+                self.assertFalse(card.isWindow())
+                self.assertFalse(card.windowFlags() & Qt.Window)
+        finally:
+            widget.close()
+            widget.deleteLater()
+
     def test_agent_module_exposes_builtin_ppt_agent_without_custom_profile_storage(self):
         app = QApplication.instance() or QApplication([])
         dialog = AgentModuleDialog(

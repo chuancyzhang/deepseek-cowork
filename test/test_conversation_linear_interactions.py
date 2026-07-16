@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from core.chat_storage import ChatStorage
 from core.theme import DesignTokens
@@ -577,6 +577,88 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(margins.top(), DesignTokens.assistant_stage_separator_vertical_margin)
         self.assertEqual(margins.bottom(), DesignTokens.assistant_stage_separator_vertical_margin)
         group.deleteLater()
+
+    def test_first_turn_keeps_surplus_height_below_content(self):
+        host = QWidget()
+        host.resize(1200, 900)
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        user = ChatBubble("User", "测试下这个技能")
+        group = AssistantTurnGroup("first-turn")
+        agent = ChatBubble("Agent", "我会生成一个小型交互图表来验证完整链路。", thinking="正在分析")
+        group.add_stage(agent)
+        layout.addWidget(user)
+        layout.addWidget(group)
+        layout.addStretch()
+
+        host.show()
+        self.app.processEvents()
+
+        self.assertEqual(user.sizePolicy().verticalPolicy(), QSizePolicy.Maximum)
+        self.assertEqual(group.sizePolicy().verticalPolicy(), QSizePolicy.Maximum)
+        self.assertEqual(agent.sizePolicy().verticalPolicy(), QSizePolicy.Maximum)
+        self.assertLessEqual(group.height(), group.sizeHint().height() + 2)
+        self.assertLessEqual(agent.height(), agent.sizeHint().height() + 2)
+        self.assertLessEqual(agent.thinking_widget.height(), agent.thinking_widget.sizeHint().height() + 2)
+        self.assertLess(agent.think_toggle_btn.y(), 8)
+        stretch_geometry = layout.itemAt(2).geometry()
+        self.assertGreater(stretch_geometry.height(), 500)
+        self.assertGreaterEqual(stretch_geometry.y(), group.geometry().bottom())
+        host.deleteLater()
+
+    def test_live_stage_growth_stays_compact_and_emits_geometry_updates(self):
+        host = QWidget()
+        host.resize(1200, 900)
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        group = AssistantTurnGroup("streaming-turn")
+        agent = ChatBubble("Agent", "", thinking="正在分析")
+        group.add_stage(agent)
+        layout.addWidget(group)
+        layout.addStretch()
+        geometry_updates = []
+        agent.geometryChanged.connect(lambda: geometry_updates.append(agent.sizeHint().height()))
+
+        host.show()
+        agent.think_toggle_btn.setChecked(True)
+        first_tool = ToolCallCard("run_command", {"command": "pytest"}, "tool-1")
+        second_tool = ToolCallCard("search_codebase", {"query": "layout"}, "tool-2")
+        agent.add_tool_card(first_tool)
+        agent.add_tool_card(second_tool)
+        agent.set_main_content("阶段回复", final=False)
+        self.app.processEvents()
+
+        first_tool.setFocus()
+        self.app.processEvents()
+        initial_top = group.y()
+        first_tool_height = first_tool.height()
+        first_row_height = first_tool.main_row.height()
+        first_tool.update_agent_state({
+            "agent_id": "layout-agent",
+            "agent_name": "布局检查",
+            "status": "running",
+            "task": "检查工具卡动态内容高度",
+        })
+        self.app.processEvents()
+        first_tool_with_agent_height = first_tool.height()
+        first_tool.set_result("ok")
+        second_tool.set_result("ok")
+        agent.set_main_content("任务完成。", final=True)
+        self.app.processEvents()
+
+        self.assertEqual(group.y(), initial_top)
+        self.assertGreater(len(geometry_updates), 0)
+        self.assertEqual(first_tool.sizePolicy().verticalPolicy(), QSizePolicy.Maximum)
+        self.assertEqual(first_tool.main_row.sizePolicy().verticalPolicy(), QSizePolicy.Fixed)
+        self.assertLessEqual(first_tool_height, first_tool.sizeHint().height() + 2)
+        self.assertLessEqual(first_row_height, first_tool.main_row.sizeHint().height() + 2)
+        self.assertGreater(first_tool_with_agent_height, first_tool_height)
+        self.assertLessEqual(first_tool_with_agent_height, first_tool.sizeHint().height() + 2)
+        self.assertLessEqual(group.height(), group.sizeHint().height() + 2)
+        self.assertLess(agent.content_edit.y(), agent.height())
+        host.deleteLater()
 
     def test_turn_group_hides_empty_stage_and_its_separator(self):
         group = AssistantTurnGroup("empty-stage-turn")

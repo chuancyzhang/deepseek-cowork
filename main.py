@@ -12199,10 +12199,12 @@ class AssistantTurnGroup(QFrame):
         self.stage_separators = []
         self.setObjectName("AssistantTurnGroup")
         self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.setStyleSheet("QFrame#AssistantTurnGroup { background: transparent; border: none; }")
         self.group_layout = QVBoxLayout(self)
         self.group_layout.setContentsMargins(0, 0, 0, 0)
         self.group_layout.setSpacing(0)
+        self.group_layout.setAlignment(Qt.AlignTop)
 
     def add_stage(self, bubble, stage_id=None):
         if bubble is None:
@@ -12263,6 +12265,7 @@ class ChatBubble(QFrame):
     deliverablePathsChanged = Signal(object)
     officeDraftRequested = Signal(str, str, str)
     skillCaptureRequested = Signal(str)
+    geometryChanged = Signal()
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
     def __init__(
@@ -12310,6 +12313,7 @@ class ChatBubble(QFrame):
         self.edit_original_text = ""
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         attachments = list(attachments or [])
         self.user_attachments = attachments
         
@@ -12446,18 +12450,21 @@ class ChatBubble(QFrame):
             content_col = QWidget()
             self.content_col = content_col
             content_col.setMaximumWidth(DesignTokens.message_max_width)
-            content_col.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            content_col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             col_layout = QVBoxLayout(content_col)
             self.content_col_layout = col_layout
             col_layout.setContentsMargins(0, 0, 0, 0)
             col_layout.setSpacing(DesignTokens.assistant_stage_content_gap)
+            col_layout.setAlignment(Qt.AlignTop)
             
             # One conversational deep-thinking segment. Tools triggered by
             # this segment live inside the same foldable container.
             self.thinking_widget = QWidget()
+            self.thinking_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             think_layout = QVBoxLayout(self.thinking_widget)
             think_layout.setContentsMargins(0, 0, 0, 0)
             think_layout.setSpacing(DesignTokens.assistant_stage_content_gap)
+            think_layout.setAlignment(Qt.AlignTop)
             
             # Toggle Header
             self.think_toggle_btn = QPushButton(" 深度思考  ▾")
@@ -12490,6 +12497,7 @@ class ChatBubble(QFrame):
             # Container for Thinking Stream
             self.think_container = QWidget()
             self.think_container.setObjectName("ThinkingContainer")
+            self.think_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             self.think_container.setVisible(False)
             self.think_container.setStyleSheet(f"""
                 QWidget#ThinkingContainer {{
@@ -12848,6 +12856,7 @@ class ChatBubble(QFrame):
         parent = self.parentWidget()
         if isinstance(parent, AssistantTurnGroup):
             parent.sync_stage_visibility()
+        self.geometryChanged.emit()
 
     def _has_thinking_details(self):
         for index in range(self.think_container_layout.count()):
@@ -13112,6 +13121,8 @@ class ChatBubble(QFrame):
         self.content_edit.scheduleAdjustHeight()
         QTimer.singleShot(0, self.content_edit.scheduleAdjustHeight)
         QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
+        QTimer.singleShot(0, self._refresh_conversation_geometry)
+        QTimer.singleShot(60, self._refresh_conversation_geometry)
 
     def _sync_inline_visualizations(self, text):
         marker = "::cowork-inline-vis{file="
@@ -13545,6 +13556,7 @@ class ToolCallCard(QFrame):
         self.setFocusPolicy(Qt.StrongFocus)
         
         self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         # Timeline "Step" Style
         self.setStyleSheet("""
             ToolCallCard {
@@ -13561,6 +13573,7 @@ class ToolCallCard(QFrame):
         
         # --- Main Row Container (The "Timeline Node") ---
         self.main_row = QFrame()
+        self.main_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.main_row.setCursor(Qt.PointingHandCursor)
         self.main_row.setStyleSheet(f"""
             QFrame {{
@@ -13601,6 +13614,7 @@ class ToolCallCard(QFrame):
         
         # 2. Text Content
         text_container = QWidget()
+        text_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         text_container.setStyleSheet("background: transparent; border: none;")
         text_layout = QVBoxLayout(text_container)
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -28028,6 +28042,9 @@ class MainWindow(QMainWindow):
         )
         bubble.skillCaptureRequested.connect(
             lambda msg_id, sid=state.session_id: self.start_conversation_skill_flow(msg_id, sid)
+        )
+        bubble.geometryChanged.connect(
+            lambda sid=state.session_id: self.request_session_scroll_to_bottom(sid, force=False)
         )
 
     def _system_toast_duration(self, type="info", auto_close_ms=None):

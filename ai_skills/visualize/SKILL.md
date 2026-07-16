@@ -32,7 +32,9 @@ allowed-tools: [run_visualization_python, finalize_inline_visualization]
 - 根元素必须有唯一 `id`，脚本必须通过该 ID 获取根节点。
 - 使用字面 HTML 和真实换行；不要把 `\\"` 或 `\\n` 留在最终文件中。
 - 交互数据应内联。禁止 `fetch`、XHR、WebSocket、表单提交和运行时本地文件访问。
-- 首版运行时完全离线；禁止 CDN、远程字体、远程图片和其他外部 URL。使用原生 HTML、SVG、Canvas、CSS 和内联 JavaScript。
+- 优先使用原生 HTML、SVG、Canvas、CSS 和内联 JavaScript。标准 SVG/XML 命名空间 URI 不属于网络资源，可以正常使用。
+- 仅在确有必要时加载静态外部资源，并使用版本固定的 HTTPS URL。允许的 CDN 为 `cdnjs.cloudflare.com`、`esm.sh`、`cdn.jsdelivr.net`、`unpkg.com`、`fonts.googleapis.com`、`fonts.gstatic.com` 和 `fonts.bunny.net`；其他来源会在发布时被拒绝。
+- 禁止 `fetch`、XHR、WebSocket、表单提交和运行时本地文件访问；外部资源加载或 CSP 拦截失败会直接显示错误，不能把空白图表当作成功结果。
 - 使用 `--background`、`--foreground`、`--muted-foreground`、`--border`、`--accent`、`--primary` 和 `--viz-series-*` 主题变量；不要硬编码浅色或深色背景。
 - 填满可用对话宽度，默认按 736px 设计并支持 320px；避免固定外宽、横向滚动、`position: fixed` 和 viewport-height 布局。
 - 使用原生 `button`、`input`、`select`、`textarea`，提供标签、键盘操作和 SVG `<title>/<desc>`。

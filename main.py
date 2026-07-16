@@ -11977,6 +11977,7 @@ class InlineVisualizationCard(QFrame):
         self._pending_state = None
         self._active = True
         self._expanded = False
+        self._visualization_error = ""
         self.setObjectName("InlineVisualizationCard")
         self.setStyleSheet(
             f"QFrame#InlineVisualizationCard {{ background: {DesignTokens.bg_main}; "
@@ -12023,11 +12024,12 @@ class InlineVisualizationCard(QFrame):
             self.web_view.setFixedHeight(900 if self._expanded else max(180, min(620, self.web_view.height())))
 
     def _show_error(self, message):
-        self.status_label.setText(str(message or "交互可视化加载失败。"))
+        self._visualization_error = str(message or "交互可视化加载失败。")
+        self.status_label.setText(self._visualization_error)
         self.status_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 12px; padding: 12px;")
         self.status_label.setVisible(True)
 
-    def _configure_view(self, view):
+    def _configure_view(self, view, allow_remote=False):
         try:
             module = importlib.import_module("PySide6.QtWebEngineCore")
             settings = view.settings()
@@ -12037,7 +12039,7 @@ class InlineVisualizationCard(QFrame):
                 ("JavascriptCanOpenWindows", False),
                 ("JavascriptCanAccessClipboard", False),
                 ("LocalContentCanAccessFileUrls", False),
-                ("LocalContentCanAccessRemoteUrls", False),
+                ("LocalContentCanAccessRemoteUrls", bool(allow_remote)),
                 ("FullScreenSupportEnabled", False),
             ):
                 attribute = getattr(attributes, name, None)
@@ -12058,24 +12060,26 @@ class InlineVisualizationCard(QFrame):
                 raise RuntimeError("可视化文件校验失败，内容与历史记录不一致。")
             with open(path, "r", encoding="utf-8") as handle:
                 fragment = handle.read()
-            view_cls = load_qwebengine_view()
-            if view_cls is None:
-                raise RuntimeError(webengine_unavailable_message())
-            view = view_cls(self)
-            self._configure_view(view)
-            view.setStyleSheet("background: transparent; border: none;")
-            view.setFixedHeight(420)
             initial_state = self.chat_storage.get_inline_visualization_state(
                 self.conversation_id,
                 self.artifact.get("file"),
                 expected_hash,
             ) if self.chat_storage is not None else {}
+            origins = self.artifact.get("origins") or []
             document = build_visualization_document(
                 fragment,
                 initial_state=initial_state,
                 read_only=self.read_only,
                 theme_css=inline_visualization_theme_css(),
+                origins=origins,
             )
+            view_cls = load_qwebengine_view()
+            if view_cls is None:
+                raise RuntimeError(webengine_unavailable_message())
+            view = view_cls(self)
+            self._configure_view(view, allow_remote=bool(origins))
+            view.setStyleSheet("background: transparent; border: none;")
+            view.setFixedHeight(420)
             channel_module = importlib.import_module("PySide6.QtWebChannel")
             channel = channel_module.QWebChannel(view.page())
             bridge = InlineVisualizationBridge(channel)
@@ -12106,9 +12110,9 @@ class InlineVisualizationCard(QFrame):
             )
 
     def _handle_load_finished(self, ok):
-        if ok:
+        if ok and not self._visualization_error:
             self.status_label.setVisible(False)
-        else:
+        elif not ok:
             self._show_error("交互可视化页面加载失败，请检查 Fragment 的 HTML、CSS 和 JavaScript。")
         log_sub_agent_runtime(
             "inline_visualization_load_finish",
@@ -12124,9 +12128,13 @@ class InlineVisualizationCard(QFrame):
 
     def _handle_runtime_error(self, message):
         detail = str(message or "未知 JavaScript 错误")
-        self._show_error(f"交互可视化脚本运行失败：{detail}")
+        resource_error = detail.startswith(("外部资源加载失败：", "内容安全策略已阻止资源："))
+        if resource_error:
+            self._show_error(f"交互可视化资源加载失败：{detail}")
+        else:
+            self._show_error(f"交互可视化脚本运行失败：{detail}")
         log_sub_agent_runtime(
-            "inline_visualization_runtime_error",
+            "inline_visualization_resource_error" if resource_error else "inline_visualization_runtime_error",
             conversation_id=self.conversation_id,
             file=self.artifact.get("file"),
             error=detail,

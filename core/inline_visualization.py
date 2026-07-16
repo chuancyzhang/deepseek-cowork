@@ -6,6 +6,8 @@ import re
 import shutil
 import tempfile
 from datetime import datetime
+from html.parser import HTMLParser
+from urllib.parse import urlsplit
 
 from .env_utils import get_app_data_dir
 
@@ -22,7 +24,160 @@ _FORBIDDEN_DOCUMENT_RE = re.compile(
     r"<!doctype\b|<\s*(?:html|head|body)(?:\s|>)",
     re.IGNORECASE,
 )
-_REMOTE_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+_REMOTE_URL_RE = re.compile(r"https?://[^\s\"'<>`]+", re.IGNORECASE)
+_CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)(?P<url>[^)'\"]+)\1\s*\)", re.IGNORECASE)
+_TRUSTED_EXTERNAL_HOSTS = frozenset(
+    {
+        "cdnjs.cloudflare.com",
+        "esm.sh",
+        "cdn.jsdelivr.net",
+        "unpkg.com",
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
+        "fonts.bunny.net",
+    }
+)
+_ORIGIN_DEPENDENCIES = {
+    "https://fonts.googleapis.com": frozenset({"https://fonts.gstatic.com"}),
+}
+_NON_NETWORK_NAMESPACE_URIS = frozenset(
+    {
+        "http://www.w3.org/2000/svg",
+        "http://www.w3.org/1999/xlink",
+        "http://www.w3.org/xml/1998/namespace",
+        "http://www.w3.org/2000/xmlns/",
+    }
+)
+_RESOURCE_SRC_TAGS = frozenset(
+    {"audio", "embed", "iframe", "img", "input", "script", "source", "track", "video"}
+)
+_RESOURCE_HREF_TAGS = frozenset({"image", "link", "use"})
+
+
+def _clean_external_url(value):
+    candidate = str(value or "").strip().strip("\"'")
+    return candidate.rstrip("),.;]}")
+
+
+def _urls_in_script_or_style(value):
+    return [_clean_external_url(match.group(0)) for match in _REMOTE_URL_RE.finditer(str(value or ""))]
+
+
+class _VisualizationResourceParser(HTMLParser):
+    """Collect URLs that can load resources without treating namespace URIs as network access."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.urls = []
+        self._script_depth = 0
+        self._style_depth = 0
+
+    def _append(self, value):
+        candidate = _clean_external_url(value)
+        if not candidate or candidate.lower() in _NON_NETWORK_NAMESPACE_URIS:
+            return
+        if candidate.startswith("//"):
+            raise ValueError(f"外部资源必须使用完整 HTTPS URL：{candidate}")
+        if candidate.lower().startswith(("http://", "https://")):
+            self.urls.append(candidate)
+
+    def _scan_css(self, value):
+        for match in _CSS_URL_RE.finditer(str(value or "")):
+            self._append(match.group("url"))
+        for candidate in _urls_in_script_or_style(value):
+            self._append(candidate)
+
+    def _handle_tag(self, tag, attrs):
+        tag_name = str(tag or "").lower()
+        for raw_name, raw_value in attrs:
+            name = str(raw_name or "").lower()
+            value = str(raw_value or "")
+            if name == "style":
+                self._scan_css(value)
+            elif name == "src" and tag_name in _RESOURCE_SRC_TAGS:
+                self._append(value)
+            elif name in {"href", "xlink:href"} and tag_name in _RESOURCE_HREF_TAGS:
+                self._append(value)
+            elif name == "poster" and tag_name == "video":
+                self._append(value)
+            elif name == "srcset" and tag_name in {"img", "source"}:
+                for item in value.split(","):
+                    self._append(item.strip().split()[0] if item.strip() else "")
+        if tag_name == "script":
+            self._script_depth += 1
+        elif tag_name == "style":
+            self._style_depth += 1
+
+    def handle_starttag(self, tag, attrs):
+        self._handle_tag(tag, attrs)
+
+    def handle_startendtag(self, tag, attrs):
+        self._handle_tag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        tag_name = str(tag or "").lower()
+        if tag_name == "script" and self._script_depth:
+            self._script_depth -= 1
+        elif tag_name == "style" and self._style_depth:
+            self._style_depth -= 1
+
+    def handle_data(self, data):
+        if self._script_depth:
+            for candidate in _urls_in_script_or_style(data):
+                self._append(candidate)
+        elif self._style_depth:
+            self._scan_css(data)
+
+
+def _normalize_external_origin(value):
+    candidate = _clean_external_url(value)
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"外部资源 URL 无效：{candidate}") from exc
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"外部资源仅支持 HTTPS：{candidate}")
+    host = str(parsed.hostname or "").lower().rstrip(".")
+    if not host or parsed.username or parsed.password or (port not in {None, 443}):
+        raise ValueError(f"外部资源 URL 无效：{candidate}")
+    if host not in _TRUSTED_EXTERNAL_HOSTS:
+        raise ValueError(f"外部资源来源不在受信 CDN 白名单中：{host}")
+    return f"https://{host}"
+
+
+def _extract_visualization_origins(fragment):
+    parser = _VisualizationResourceParser()
+    try:
+        parser.feed(str(fragment or ""))
+        parser.close()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"无法解析可视化 Fragment 中的外部资源：{exc}") from exc
+    origins = {_normalize_external_origin(url) for url in parser.urls}
+    for origin in tuple(origins):
+        origins.update(_ORIGIN_DEPENDENCIES.get(origin, ()))
+    return sorted(origins)
+
+
+def _validated_origins(origins):
+    return sorted({_normalize_external_origin(value) for value in (origins or []) if str(value or "").strip()})
+
+
+def _content_security_policy(origins):
+    trusted = _validated_origins(origins)
+    remote_sources = "" if not trusted else " " + " ".join(trusted)
+    return (
+        "default-src 'none'; "
+        f"script-src 'unsafe-inline' 'unsafe-eval' data: blob:{remote_sources}; "
+        f"style-src 'unsafe-inline'{remote_sources}; "
+        f"img-src data: blob:{remote_sources}; "
+        f"font-src data:{remote_sources}; "
+        "connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; "
+        "base-uri 'none'; form-action 'none'"
+    )
 
 
 def _safe_session_key(conversation_id):
@@ -107,10 +262,12 @@ def validate_visualization_fragment(path, requested_origins=None):
         raise ValueError("可视化文件必须是 HTML Fragment，不能包含 doctype、html、head 或 body。")
     if not re.search(r"<[^>]+\bid\s*=\s*['\"][^'\"]+['\"]", fragment, re.IGNORECASE):
         raise ValueError("可视化 Fragment 的根元素必须包含唯一 id。")
-    requested = [str(item or "").strip() for item in (requested_origins or []) if str(item or "").strip()]
-    if requested or _REMOTE_URL_RE.search(fragment):
-        raise ValueError("首版内联可视化仅支持完全离线、自包含 Fragment，不能引用外部 URL。")
-    return {"fragment": fragment, "bytes": size, "origins": []}
+    origins = _extract_visualization_origins(fragment)
+    requested = _validated_origins(requested_origins)
+    undeclared = sorted(set(requested) - set(origins))
+    if undeclared:
+        raise ValueError(f"声明了 Fragment 未实际引用的外部来源：{', '.join(undeclared)}")
+    return {"fragment": fragment, "bytes": size, "origins": origins}
 
 
 def publish_visualization_fragment(conversation_id, filename, title="", requested_origins=None):
@@ -147,9 +304,10 @@ def publish_visualization_fragment(conversation_id, filename, title="", requeste
     }
 
 
-def build_visualization_document(fragment, initial_state=None, read_only=False, theme_css=""):
+def build_visualization_document(fragment, initial_state=None, read_only=False, theme_css="", origins=None):
     state_json = json.dumps(initial_state if isinstance(initial_state, dict) else {}, ensure_ascii=False).replace("<", "\\u003c")
     token = hashlib.sha256(os.urandom(32)).hexdigest()
+    content_security_policy = _content_security_policy(origins)
     child_bootstrap = f"""
 <script>
 (() => {{
@@ -165,17 +323,35 @@ def build_visualization_document(fragment, initial_state=None, read_only=False, 
   const report = () => parent.postMessage({{
     token, type: 'height', height: Math.ceil(document.documentElement.scrollHeight)
   }}, '*');
-  const reportError = (message) => parent.postMessage({{
-    token, type: 'error', message: String(message || '未知 JavaScript 错误')
-  }}, '*');
-  addEventListener('error', event => reportError(event.message));
+  const reportedErrors = new Set();
+  const reportError = (message) => {{
+    const detail = String(message || '未知 JavaScript 错误');
+    if (reportedErrors.has(detail)) return;
+    reportedErrors.add(detail);
+    parent.postMessage({{ token, type: 'error', message: detail }}, '*');
+  }};
+  addEventListener('error', event => {{
+    const target = event.target;
+    if (target && target !== window) {{
+      const url = target.currentSrc || target.src || target.href || target.getAttribute?.('href') || '';
+      reportError('外部资源加载失败：' + (url || target.tagName || '未知资源'));
+      return;
+    }}
+    reportError(event.message);
+  }}, true);
   addEventListener('unhandledrejection', event => reportError(event.reason));
+  addEventListener('securitypolicyviolation', event => {{
+    reportError('内容安全策略已阻止资源：' + (event.blockedURI || event.violatedDirective || '未知资源'));
+  }});
+  document.fonts?.addEventListener('loadingerror', () => {{
+    reportError('外部资源加载失败：字体资源');
+  }});
   new ResizeObserver(report).observe(document.documentElement);
   addEventListener('load', report, {{ once: true }});
 }})();
 </script>
 """
-    inner = f"""<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\"><style>{theme_css}</style></head><body>{child_bootstrap}{fragment}</body></html>"""
+    inner = f"""<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"{html.escape(content_security_policy, quote=True)}\"><style>{theme_css}</style></head><body>{child_bootstrap}{fragment}</body></html>"""
     readonly_overlay = '<div id="readonly" aria-label="历史可视化只读模式"></div>' if read_only else ""
     readonly_style = "iframe{pointer-events:none}" if read_only else ""
     iframe_tabindex = "-1" if read_only else "0"

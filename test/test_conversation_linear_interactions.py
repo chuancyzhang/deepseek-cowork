@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
@@ -36,6 +36,22 @@ from main import (
     launch_daemon_subprocess,
 )
 from ui.primitives import ProductActionRow, ProductPopover
+
+
+class TopLevelShowTracker(QObject):
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def eventFilter(self, obj, event):
+        if (
+            event.type() == QEvent.Show
+            and isinstance(obj, QWidget)
+            and obj.isWindow()
+            and obj.parentWidget() is None
+        ):
+            self.events.append((type(obj).__name__, obj.objectName()))
+        return False
 
 
 class ConversationLinearInteractionTests(unittest.TestCase):
@@ -329,6 +345,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         window = MainWindow()
         window.show()
         self.app.processEvents()
+        tracker = TopLevelShowTracker()
+        self.app.installEventFilter(tracker)
         try:
             QTest.mouseClick(window.tool_menu_btn, Qt.LeftButton)
             self.app.processEvents()
@@ -347,7 +365,13 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(len(window.findChildren(ProductPopover)), 1)
             self.assertTrue(window.composer_action_popover.isVisible())
+            self.assertEqual(tracker.events, [])
+            for row in window.composer_action_popover.findChildren(ProductActionRow):
+                for label in (row.icon_label, row.title_label, row.detail_label):
+                    self.assertIs(label.parentWidget(), row)
+                    self.assertFalse(label.isWindow())
         finally:
+            self.app.removeEventFilter(tracker)
             window.close()
             window.deleteLater()
 
@@ -388,6 +412,23 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertEqual(hits, ["file"])
+        row.deleteLater()
+
+    def test_product_action_row_never_shows_detail_as_top_level_window(self):
+        tracker = TopLevelShowTracker()
+        self.app.installEventFilter(tracker)
+        try:
+            row = ProductActionRow("添加文件", "图片、文档或其他工作资料")
+        finally:
+            self.app.removeEventFilter(tracker)
+
+        self.assertEqual(tracker.events, [])
+        self.assertIs(row.icon_label.parentWidget(), row)
+        self.assertIs(row.title_label.parentWidget(), row)
+        self.assertIs(row.detail_label.parentWidget(), row)
+        for label in (row.icon_label, row.title_label, row.detail_label):
+            self.assertFalse(label.isWindow())
+            self.assertFalse(label.windowFlags() & Qt.Window)
         row.deleteLater()
 
     def test_model_selection_updates_session_meta_and_refreshes_controls(self):

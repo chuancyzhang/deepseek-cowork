@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QToolB
 
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
-from main import AutoResizingInputEdit, FileChip, MainWindow, QMessageBox, SettingsDialog
+from main import AutoResizingInputEdit, CapabilityWorkbenchDialog, FileChip, MainWindow, QMessageBox, SettingsDialog
 from ui.primitives import ProductTooltipController
 
 
@@ -82,6 +82,64 @@ class ProductExperienceFixTests(unittest.TestCase):
                 self.assertFalse(dialog._settings_dirty)
             finally:
                 dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_skill_config_save_auto_enables_mcp_and_keeps_separate_test_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            manager = MagicMock()
+            manager.is_skill_editable.return_value = False
+            manager.list_skill_files.return_value = {"ok": False, "error": "read only"}
+            manager.get_tool_record.return_value = None
+            manager.get_skill_config_status.return_value = {
+                "missing_required": [],
+                "config_errors": [],
+                "complete": True,
+            }
+            manager.build_skill_mcp_server_configs.return_value = {
+                "ok": True,
+                "error": "",
+                "servers": [
+                    {
+                        "id": "superset-mcp",
+                        "name": "Superset MCP",
+                        "enabled": True,
+                        "transport": "streamable_http",
+                        "url": "https://superset.example/mcp",
+                        "source_skill": "superset-mcp",
+                        "managed_by_skill": True,
+                    }
+                ],
+            }
+            skill = {
+                "name": "superset-mcp",
+                "display_name": "Superset MCP",
+                "config_fields": [
+                    {"name": "SUPERSET_MCP_URL", "label": "Superset MCP URL", "required": True}
+                ],
+                "mcp_server_presets": [{"id": "superset-mcp", "name": "Superset MCP"}],
+                "tools": [],
+                "script_entries": [],
+            }
+            dialog = CapabilityWorkbenchDialog(skill, manager, config)
+            try:
+                dialog.config_editors["SUPERSET_MCP_URL"].setText("https://superset.example/mcp")
+                button_texts = {button.text() for button in dialog.findChildren(QPushButton)}
+                self.assertIn("保存配置", button_texts)
+                self.assertIn("测试连接", button_texts)
+                self.assertNotIn("生成 / 更新 MCP 配置", button_texts)
+
+                with patch("main.QMessageBox.information"), patch.object(config, "_write_config") as write_config:
+                    dialog.save_skill_config()
+
+                server = config.get_mcp_servers()[0]
+                self.assertEqual(write_config.call_count, 1)
+                self.assertTrue(server["enabled"])
+                self.assertEqual(server["source_skill"], "superset-mcp")
+                self.assertIn("连接待测试", dialog.managed_mcp_status.text())
+            finally:
                 dialog.close()
 
     def test_deliverable_registry_only_returns_registered_files(self):

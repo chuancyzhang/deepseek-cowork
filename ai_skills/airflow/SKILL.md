@@ -23,7 +23,7 @@ Authentication requires either `AIRFLOW_AUTH_TOKEN` or `AIRFLOW_USERNAME` plus `
 
 ## MCP Server
 
-After saving configuration, generate the `airflow` MCP preset. Cowork installs `astro-airflow-mcp` into the isolated Skill Python environment, starts it explicitly with `--transport stdio`, and injects the configured Airflow environment. No system `uvx` installation is required.
+Saving the Skill configuration automatically creates, updates, and enables the managed `airflow` MCP entry. The separate **Test Connection** action starts it only when diagnostics are requested. During normal use, Cowork installs `astro-airflow-mcp` into the isolated Skill Python environment and starts it on demand with `--transport stdio` for tool discovery or calls, injecting the configured Airflow environment. No separately managed MCP daemon or system `uvx` installation is required.
 
 ## CLI Workflow
 

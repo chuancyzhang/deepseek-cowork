@@ -52,7 +52,7 @@
       "id": "showdoc",
       "name": "ShowDoc MCP",
       "description": "Scoped ShowDoc API documentation MCP server.",
-      "enabled": false,
+      "enabled": true,
       "transport": "stdio",
       "timeout_seconds": 30,
       "command": "npx",
@@ -72,7 +72,7 @@
   "node_dependencies": [],
   "workflow": [
     "Use this skill for ShowDoc documentation tasks only.",
-    "Generate the MCP server after saving credentials.",
-    "Enable and test the generated MCP server from Settings > MCP."
+    "Saving credentials automatically enables the managed ShowDoc MCP server.",
+    "Use the separate connection test when tool or startup diagnostics are needed."
   ]
 }

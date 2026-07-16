@@ -95,7 +95,7 @@ Cowork 采用交错式推理流程：
 - `skills/`：核心内置技能
 - `ai_skills/`：随包可选插件与用户技能
 - 标准 Agent Skill：通过 `install_agent_skill` 写入用户级 `ai_skills`，保留原始 `SKILL.md`
-- MCP servers：通过 `stdio` 或 Streamable HTTP 接入的外部工具；ShowDoc MCP、Airflow MCP 与官方 Superset MCP 可由对应内置 skill 的配置页生成默认关闭的 server 条目
+- MCP servers：通过 `stdio` 或 Streamable HTTP 接入的外部工具；Skill 托管的 server 带有 `source_skill` 归属，保存对应 Skill 配置时自动生成、更新并启用，父 Skill 启停和工具作用域同步继承该归属。Airflow stdio 在测试、发现或调用时按需拉起；官方 Superset MCP 仍由 Superset 侧独立部署，Cowork 只负责认证、连接和工具暴露
 - 常驻执行工具：例如 `run_python_code`
 
 设计原则：

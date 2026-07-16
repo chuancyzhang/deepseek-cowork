@@ -19,7 +19,7 @@ Configure the skill in the Skill Center:
 - `SHOWDOC_PROJECT_NAME`: the project name to lock this MCP server to.
 - `SHOWDOC_USERNAME`: optional username.
 
-After saving configuration, use "Generate / Update MCP Configuration" to create the `showdoc` stdio MCP server. The generated server is disabled by default; enable and test it in Settings > MCP.
+Saving the Skill configuration automatically creates, updates, and enables the managed `showdoc` stdio MCP server. Use the separate connection test when you need to verify tools or diagnose startup.
 
 ## MCP Server
 

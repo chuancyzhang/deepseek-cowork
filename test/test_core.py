@@ -25,10 +25,12 @@ from core.clarify_mode import RUN_MODE_EXECUTION
 from core.agent import LLMWorker
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.mcp_client import (
+    McpOperationError,
     _open_mcp_session,
     _open_streamable_http_transport,
     clear_mcp_auth_cache,
     describe_mcp_import_error,
+    describe_mcp_operation_error,
     prepare_mcp_server_config,
 )
 from core.single_instance import (
@@ -121,6 +123,54 @@ class TestConfigManager(unittest.TestCase):
         with patch("core.config_manager.clear_mcp_auth_cache") as clear_cache:
             cm.set_skill_config("superset-mcp", {"SUPERSET_USERNAME": "admin"})
         clear_cache.assert_called_once_with()
+
+    def test_managed_mcp_ownership_is_inferred_and_follows_skill_toggle(self):
+        cm = self._create_config_manager({})
+        cm.set_mcp_servers(
+            [
+                {
+                    "id": "superset-mcp",
+                    "name": "Superset MCP",
+                    "enabled": True,
+                    "transport": "streamable_http",
+                    "url": "https://superset.example/mcp",
+                    "auth": {"type": "superset_password", "skill_name": "superset-mcp"},
+                },
+                {
+                    "id": "manual",
+                    "name": "Manual MCP",
+                    "enabled": True,
+                    "transport": "streamable_http",
+                    "url": "https://manual.example/mcp",
+                },
+            ]
+        )
+
+        stored = cm.get_mcp_servers()
+        self.assertEqual(stored[0]["source_skill"], "superset-mcp")
+        self.assertTrue(stored[0]["managed_by_skill"])
+        self.assertFalse(stored[1]["managed_by_skill"])
+
+        cm.set_skill_enabled("superset-mcp", False)
+        stored = cm.get_mcp_servers()
+        self.assertFalse(stored[0]["enabled"])
+        self.assertTrue(stored[1]["enabled"])
+
+        cm.set_skill_enabled("superset-mcp", True)
+        self.assertTrue(cm.get_mcp_servers()[0]["enabled"])
+
+        legacy_showdoc = normalize_mcp_servers(
+            [
+                {
+                    "id": "showdoc",
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "mcp-showdoc"],
+                }
+            ]
+        )[0]
+        self.assertEqual(legacy_showdoc["source_skill"], "showdoc-mcp")
+        self.assertTrue(legacy_showdoc["managed_by_skill"])
 
     def test_defaults_include_new_deepseek_settings(self):
         cm = self._create_config_manager()
@@ -804,6 +854,32 @@ class TestConfigManager(unittest.TestCase):
             "Missing module: httpx_sse",
             describe_mcp_import_error(ModuleNotFoundError("No module named 'httpx_sse'", name="httpx_sse")),
         )
+
+    def test_superset_connection_refusal_unwraps_exception_group(self):
+        grouped = ExceptionGroup(
+            "unhandled errors in a TaskGroup",
+            [ConnectionRefusedError("[WinError 10061] No connection could be made")],
+        )
+        error = describe_mcp_operation_error(
+            {
+                "source_skill": "superset-mcp",
+                "url": "https://192.168.239.143:5008/mcp",
+            },
+            McpOperationError("transport", grouped),
+        )
+
+        self.assertIn("无法连接远程 Superset MCP 服务", error)
+        self.assertIn("superset mcp run", error)
+        self.assertNotIn("TaskGroup", error)
+
+    def test_mcp_tls_error_reports_connection_stage(self):
+        error = describe_mcp_operation_error(
+            {"url": "https://superset.example:5008/mcp"},
+            McpOperationError("transport", RuntimeError("SSL: WRONG_VERSION_NUMBER")),
+        )
+
+        self.assertIn("TLS", error)
+        self.assertIn("transport", error)
 
     def test_open_streamable_http_transport_prefers_new_api(self):
         calls = {}

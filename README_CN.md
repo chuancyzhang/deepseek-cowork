@@ -57,7 +57,7 @@ Cowork 只把 `tool` 当作直接执行面：
 - `tool`：模型可直接调用的执行能力
 - `skill`：指导工具选择与组合方式的经验包
 
-技能既可以只提供经验，也可以同时携带工具实现。内置技能位于 `skills/`，随包插件和用户技能位于 `ai_skills/`。Cowork 可以安装符合标准的 Agent Skill 包，保留原始根目录 `SKILL.md`，只生成本地检索、工作台和调试所需的 `skill.json`。PPT Agent 的 Guizang PPT Skill、Frontend Slides、Huashu Design 三个策略已经作为真实 `ai_skills` 包内置，选择后会把上游 `SKILL.md`、资源说明和来源元数据注入本轮运行上下文，并在任务观测页可见。技能可以在 `skill.json` 声明文本、密钥或固定选项配置，工作台会自动生成“配置”页，并把保存值注入脚本、工具或隔离的 Skill Python MCP 运行环境；托管 MCP 认证只保存配置引用，短期 token 不写入 server headers。
+技能既可以只提供经验，也可以同时携带工具实现。内置技能位于 `skills/`，随包插件和用户技能位于 `ai_skills/`。Cowork 可以安装符合标准的 Agent Skill 包，保留原始根目录 `SKILL.md`，只生成本地检索、工作台和调试所需的 `skill.json`。PPT Agent 的 Guizang PPT Skill、Frontend Slides、Huashu Design 三个策略已经作为真实 `ai_skills` 包内置，选择后会把上游 `SKILL.md`、资源说明和来源元数据注入本轮运行上下文，并在任务观测页可见。技能可以在 `skill.json` 声明文本、密钥或固定选项配置，工作台会自动生成“配置”页，并把保存值注入脚本、工具或隔离的 Skill Python MCP 运行环境；保存 Skill 托管的 MCP 配置时会自动生成并启用对应 server，连接测试仍作为独立诊断动作；托管 MCP 认证只保存配置引用，短期 token 不写入 server headers。
 
 完整说明见 [SKILL_SYSTEM.md](SKILL_SYSTEM.md)。
 
@@ -96,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 2. 新建使用自动聊天工作目录的独立聊天，或把空白聊天显式连接到某个项目。
 3. 让 Agent 读取文件、修改代码、生成报告或执行自动化；需要办公交付物时，可在 AI 回复末尾点击 **生成办公稿** 并选择类型。
 4. 处理文档、表格或数据分析任务前，可根据首页提示进入 **设置 → 组件与依赖** 安装文档工具包和数据分析工具包。
-5. 在 **技能中心** 启用需要的可选能力，或通过 `install_agent_skill` 安装符合标准的 Agent Skill；`visualize` 可按需生成对话内交互视图，腾讯文档、飞书文档、钉钉文档、WeKnora、ShowDoc MCP、Airflow 和官方 Superset MCP 也以独立可选 skill 内置。
+5. 在 **技能中心** 启用需要的可选能力，或通过 `install_agent_skill` 安装符合标准的 Agent Skill；`visualize` 可按需生成对话内交互视图，腾讯文档、飞书文档、钉钉文档、WeKnora、ShowDoc MCP、Airflow 和官方 Superset MCP 也以独立可选 skill 内置。对于 Skill 托管的 MCP，保存 Skill 配置即会自动启用，无需再到 MCP 设置页执行生成或启用。
 6. 需要完整 PPT 工作流时，从首页卡片或输入工具栏的 **Agent → PPT Agent** 打开内置 PPT Agent，填写需求，选择自动或偏好策略，可附加资料和 PPTX 模板。
 7. 用右侧抽屉浏览文件、预览交付物、转换 HTML 工作稿并查看工具执行过程。
 8. 当某段流程有复用价值时，在 **设置 → 个性与记忆** 维护长期信息，或从 `+` Popover、AI 回复末尾选择 **沉淀为 Skill**；两步向导会选择保存方式和会话片段，随后在后台生成草稿。完成后由持久任务行提示“Skill 草稿待确认”，用户主动查看并保存，不会被自动弹窗打断。

@@ -110,7 +110,7 @@ If a matched skill exposes tools, those tools still execute through the normal t
 
 `skill.json` may declare `config_fields` with `name`, `label`, `kind`, `required`, `env`, `help`, `placeholder`, `default`, and `options`. `kind: select` renders a fixed-value selector; defaults participate in validation and environment construction. Saved values are stored in local `skill_configs` and injected into script or tool execution through the declared environment variable names. Missing required values fail explicitly before execution. `config_requirements` may express grouped requirements such as token-or-username/password.
 
-`mcp_server_presets` may reference environment names with `{{ENV_NAME}}` placeholders and materialize default-off `stdio` or Streamable HTTP entries. `runtime: skill_python` with exactly one `module` or `entrypoint` starts stdio MCP servers in the owning Skill's isolated Python dependency environment. A preset may also declare managed `auth`; the generated server stores only the Skill configuration reference, while short-lived tokens are resolved at connection time and are not persisted in headers.
+`mcp_server_presets` may reference environment names with `{{ENV_NAME}}` placeholders. Saving the owning Skill configuration materializes and enables the managed `stdio` or Streamable HTTP entry, records `source_skill`, and keeps connection testing as a separate diagnostic action. `runtime: skill_python` with exactly one `module` or `entrypoint` starts stdio MCP servers on demand in the owning Skill's isolated Python dependency environment. A preset may also declare managed `auth`; the generated server stores only the Skill configuration reference, while short-lived tokens are resolved at connection time and are not persisted in headers. Selecting a parent Skill also admits tools from its managed synthetic MCP provider into the same run scope.
 
 ### `parallel_tools`
 
@@ -134,7 +134,7 @@ Cowork loads capabilities from:
 - `ai_skills/`: bundled optional plugins and user-created skills
 - MCP servers: exposed as synthetic tool providers
 
-Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP ship as separate optional skills with independent config fields, script entries, and MCP presets where applicable. User-created skills remain editable, importable, exportable, and deletable.
+Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP ship as separate optional skills with independent config fields, script entries, and managed MCP presets where applicable. Managed MCP entries remain visible for diagnostics but are configured and enabled through their owning Skill. User-created skills remain editable, importable, exportable, and deletable.
 
 ## 7. Import, Export, and Editing
 

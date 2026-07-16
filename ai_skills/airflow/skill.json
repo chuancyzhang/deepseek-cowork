@@ -76,7 +76,7 @@
       "id": "airflow",
       "name": "Airflow MCP",
       "description": "Astronomer astro-airflow-mcp stdio server.",
-      "enabled": false,
+      "enabled": true,
       "transport": "stdio",
       "timeout_seconds": 60,
       "runtime": "skill_python",
@@ -95,7 +95,7 @@
   "node_dependencies": [],
   "workflow": [
     "Use read-only af commands first: health, dags list, runs list, tasks logs, and diagnose.",
-    "Use the generated MCP server for tool-based Airflow access after enabling it in Settings > MCP.",
+    "Saving this Skill configuration automatically enables its managed MCP server; use it for tool-based Airflow access.",
     "Require explicit confirmation before write operations such as trigger, clear, delete, pause, unpause, POST, PATCH, or DELETE."
   ]
 }

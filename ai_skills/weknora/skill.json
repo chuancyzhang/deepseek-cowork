@@ -37,7 +37,7 @@
       "id": "weknora",
       "name": "WeKnora MCP",
       "description": "Official WeKnora stdio MCP server running in the Cowork Skill Python sandbox.",
-      "enabled": false,
+      "enabled": true,
       "transport": "stdio",
       "timeout_seconds": 60,
       "runtime": "skill_python",
@@ -51,7 +51,7 @@
   "python_dependencies": ["weknora-mcp-server==1.0.0"],
   "node_dependencies": [],
   "workflow": [
-    "Save WEKNORA_BASE_URL and WEKNORA_API_KEY, then generate and enable the WeKnora MCP server.",
+    "Saving WEKNORA_BASE_URL and WEKNORA_API_KEY automatically enables the managed WeKnora MCP server.",
     "Use WeKnora only for knowledge-base import, browsing, and retrieval tasks.",
     "Require explicit confirmation before editing or deleting an existing knowledge entry."
   ]

@@ -37,7 +37,9 @@ Configure the skill:
 - `SUPERSET_PROVIDER`: `db` or `ldap`; defaults to `db`.
 - `SUPERSET_MCP_TIMEOUT_SECONDS`: optional timeout, default 30 seconds.
 
-When generating the MCP preset, Cowork calls `/api/v1/security/login` with `refresh: true`. Access and refresh tokens stay in memory only. Cowork refreshes the access token before expiry and logs in again after restart or an expired refresh token. The generated server is disabled by default; enable and test it in Settings > MCP.
+Saving the Skill configuration automatically creates, updates, and enables its managed MCP connection. Connection testing remains a separate action on this page and does not run during save. When testing, discovering, or calling tools, Cowork calls `/api/v1/security/login` with `refresh: true`. Access and refresh tokens stay in memory only. Cowork refreshes the access token before expiry and logs in again after restart or an expired refresh token.
+
+Cowork does not remotely start the Superset-side MCP process. If the endpoint refuses the connection, start `superset mcp run --host 0.0.0.0 --port 5008` in the Superset environment and check the port, firewall, TLS, and reverse proxy. Connection errors identify the failed authentication, transport, initialize, or `tools/list` phase instead of exposing raw task-group errors.
 
 If `/mcp` returns 401 after login succeeds, verify `MCP_AUTH_ENABLED`, the MCP JWT algorithm/signing key, and `MCP_USER_RESOLVER` in `superset_config.py`. Cowork does not silently fall back to a development user.
 

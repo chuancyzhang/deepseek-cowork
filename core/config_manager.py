@@ -120,6 +120,11 @@ def normalize_mcp_server(server, index=0, used_ids=None):
     cwd = str(source.get("cwd") or "").strip()
     if cwd:
         cwd = os.path.normpath(os.path.abspath(os.path.expanduser(cwd)))
+    source_skill = str(source.get("source_skill") or "").strip()
+    if not source_skill:
+        source_skill = str(source.get("runtime_skill") or auth.get("skill_name") or "").strip()
+    if not source_skill and server_id == "showdoc" and any("mcp-showdoc" in item.lower() for item in args):
+        source_skill = "showdoc-mcp"
     return {
         "id": server_id,
         "name": name,
@@ -136,6 +141,8 @@ def normalize_mcp_server(server, index=0, used_ids=None):
         "headers": headers,
         "auth": auth,
         "runtime_skill": str(source.get("runtime_skill") or "").strip(),
+        "source_skill": source_skill,
+        "managed_by_skill": bool(source.get("managed_by_skill") or source_skill),
     }
 
 
@@ -171,6 +178,8 @@ def _looks_like_single_mcp_server(value):
         "headers",
         "auth",
         "runtime_skill",
+        "source_skill",
+        "managed_by_skill",
     }
     return bool(keys & hint_keys)
 
@@ -1372,4 +1381,15 @@ class ConfigManager:
             enabled_skills.discard(skill_name)
         self.config["disabled_skills"] = list(disabled)
         self.config["enabled_skills"] = list(enabled_skills)
+        managed_servers = self._normalize_mcp_servers(self.config.get("mcp_servers"))
+        managed_updated = False
+        for server in managed_servers:
+            if str(server.get("source_skill") or "").strip() != str(skill_name or "").strip():
+                continue
+            if bool(server.get("enabled", True)) == bool(enabled):
+                continue
+            server["enabled"] = bool(enabled)
+            managed_updated = True
+        if managed_updated:
+            self.config["mcp_servers"] = managed_servers
         self.save_config()

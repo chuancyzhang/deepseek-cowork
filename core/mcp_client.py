@@ -22,6 +22,60 @@ _SUPERSET_TOKEN_CACHE = {}
 _SUPERSET_TOKEN_CACHE_LOCK = threading.RLock()
 
 
+class McpOperationError(RuntimeError):
+    def __init__(self, stage, cause):
+        self.stage = str(stage or "mcp")
+        self.cause = cause
+        super().__init__(str(cause))
+
+
+def _exception_leaves(exc):
+    children = getattr(exc, "exceptions", None)
+    if children:
+        leaves = []
+        for child in children:
+            leaves.extend(_exception_leaves(child))
+        return leaves
+    return [exc]
+
+
+def _meaningful_exception_text(exc):
+    messages = []
+    for leaf in _exception_leaves(exc):
+        text = str(leaf or "").strip()
+        if not text or text.lower() in {"cancelled", "cancelled by cancel scope"}:
+            continue
+        if text not in messages:
+            messages.append(text)
+    return "; ".join(messages) or str(exc or "Unknown MCP error").strip()
+
+
+def describe_mcp_operation_error(server_config, exc):
+    stage = exc.stage if isinstance(exc, McpOperationError) else "mcp"
+    cause = exc.cause if isinstance(exc, McpOperationError) else exc
+    detail = _meaningful_exception_text(cause)
+    lowered = detail.lower()
+    source_skill = str(server_config.get("source_skill") or "").strip()
+    url = str(server_config.get("url") or "").strip()
+    if any(marker in lowered for marker in ("connection refused", "all connection attempts failed", "winerror 10061")):
+        if source_skill == "superset-mcp":
+            return (
+                f"无法连接远程 Superset MCP 服务（{url or '未配置 URL'}）。"
+                "请确认 Superset 侧已运行 `superset mcp run --host 0.0.0.0 --port 5008`，"
+                "并检查端口、防火墙和反向代理。"
+            )
+        return f"MCP 连接被拒绝（阶段：{stage}）：{detail}"
+    if any(marker in lowered for marker in ("ssl", "certificate", "wrong version number", "tls")):
+        return f"MCP TLS 连接失败（阶段：{stage}，URL：{url or '未配置'}）：{detail}"
+    if "401" in detail or "unauthorized" in lowered:
+        if source_skill == "superset-mcp" or str((server_config.get("auth") or {}).get("type") or "") == SUPERSET_AUTH_TYPE:
+            return (
+                f"Superset MCP 拒绝了认证（阶段：{stage}）：{detail} "
+                "请检查 MCP_AUTH_ENABLED、JWT 算法/签名密钥和 MCP_USER_RESOLVER。"
+            )
+    return f"MCP {stage} 失败：{detail}"
+
+
 def normalize_mcp_transport(value):
     text = str(value or "").strip().lower()
     if text in {"http", "streamable-http", "streamable_http", "streamablehttp"}:
@@ -413,27 +467,46 @@ async def _open_mcp_session(server_config):
             cwd=str(server_config.get("cwd") or "").strip() or None,
             env=env,
         )
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await asyncio.wait_for(session.initialize(), timeout=timeout_seconds)
-                yield session, timeout_seconds
+        try:
+            async with stdio_client(server_params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    try:
+                        await asyncio.wait_for(session.initialize(), timeout=timeout_seconds)
+                    except Exception as exc:
+                        raise McpOperationError("initialize", exc) from exc
+                    yield session, timeout_seconds
+        except McpOperationError:
+            raise
+        except Exception as exc:
+            raise McpOperationError("stdio 进程启动", exc) from exc
         return
 
     url = str(server_config.get("url") or "").strip()
     headers = _stringify_mapping(server_config.get("headers"))
-    async with _open_streamable_http_transport(url, headers, timeout_seconds) as (
-        read_stream,
-        write_stream,
-        _get_session_id,
-    ):
-        async with ClientSession(read_stream, write_stream) as session:
-            await asyncio.wait_for(session.initialize(), timeout=timeout_seconds)
-            yield session, timeout_seconds
+    try:
+        async with _open_streamable_http_transport(url, headers, timeout_seconds) as (
+            read_stream,
+            write_stream,
+            _get_session_id,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                try:
+                    await asyncio.wait_for(session.initialize(), timeout=timeout_seconds)
+                except Exception as exc:
+                    raise McpOperationError("initialize", exc) from exc
+                yield session, timeout_seconds
+    except McpOperationError:
+        raise
+    except Exception as exc:
+        raise McpOperationError("transport", exc) from exc
 
 
 async def _list_mcp_server_tools_async(server_config):
     async with _open_mcp_session(server_config) as (session, timeout_seconds):
-        result = await asyncio.wait_for(session.list_tools(), timeout=timeout_seconds)
+        try:
+            result = await asyncio.wait_for(session.list_tools(), timeout=timeout_seconds)
+        except Exception as exc:
+            raise McpOperationError("tools/list", exc) from exc
     tools = []
     for tool in getattr(result, "tools", None) or []:
         payload = _tool_to_payload(tool)
@@ -444,10 +517,13 @@ async def _list_mcp_server_tools_async(server_config):
 
 async def _call_mcp_tool_async(server_config, tool_name, arguments):
     async with _open_mcp_session(server_config) as (session, timeout_seconds):
-        result = await asyncio.wait_for(
-            session.call_tool(str(tool_name or "").strip(), arguments=arguments or {}),
-            timeout=timeout_seconds,
-        )
+        try:
+            result = await asyncio.wait_for(
+                session.call_tool(str(tool_name or "").strip(), arguments=arguments or {}),
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            raise McpOperationError("tools/call", exc) from exc
     content = [_serialize_content_block(item) for item in (getattr(result, "content", None) or [])]
     return {
         "server": str(server_config.get("id") or server_config.get("name") or "").strip(),
@@ -467,25 +543,30 @@ def _run_async(coro):
 
 
 def _managed_auth_error(server_config, exc):
-    auth = server_config.get("auth") if isinstance(server_config.get("auth"), dict) else {}
-    if str(auth.get("type") or "").strip().lower() == SUPERSET_AUTH_TYPE and "401" in str(exc):
-        return (
-            f"{exc} Superset MCP rejected the login JWT. Check MCP_AUTH_ENABLED, "
-            "MCP_JWT_ALGORITHM/signing key, and MCP_USER_RESOLVER on the Superset server."
-        )
-    return str(exc)
+    return describe_mcp_operation_error(server_config, exc)
 
 
 def list_mcp_server_tools(server_config, config_manager=None):
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"ok": False, "error": f"MCP server '{server_name}' is disabled.", "tools": []}
+    logger.info(
+        "mcp_tools.list.start server=%s transport=%s",
+        server_name,
+        normalize_mcp_transport(server_config.get("transport")),
+    )
     try:
-        prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+        try:
+            prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+        except Exception as exc:
+            raise McpOperationError("认证", exc) from exc
         tools = _run_async(_list_mcp_server_tools_async(prepared))
+        logger.info("mcp_tools.list.finish server=%s tool_count=%s", server_name, len(tools))
         return {"ok": True, "error": "", "tools": tools}
     except Exception as exc:
-        return {"ok": False, "error": _managed_auth_error(server_config, exc), "tools": []}
+        error = _managed_auth_error(server_config, exc)
+        logger.error("mcp_tools.list.error server=%s error=%s", server_name, error)
+        return {"ok": False, "error": error, "tools": []}
 
 
 def test_mcp_server_connection(server_config, config_manager=None):
@@ -506,17 +587,24 @@ def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None)
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"status": "error", "error": f"MCP server '{server_name}' is disabled."}
+    logger.info("mcp_tool.call.start server=%s tool=%s", server_name, str(tool_name or "").strip())
     try:
-        prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+        try:
+            prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
+        except Exception as exc:
+            raise McpOperationError("认证", exc) from exc
         payload = _run_async(_call_mcp_tool_async(prepared, tool_name, arguments or {}))
     except Exception as exc:
+        error = _managed_auth_error(server_config, exc)
+        logger.error("mcp_tool.call.error server=%s tool=%s error=%s", server_name, str(tool_name or "").strip(), error)
         return {
             "status": "error",
             "server": server_name,
             "tool": str(tool_name or "").strip(),
-            "error": _managed_auth_error(server_config, exc),
+            "error": error,
         }
     payload["status"] = "error" if payload.get("is_error") else "ok"
+    logger.info("mcp_tool.call.finish server=%s tool=%s status=%s", server_name, str(tool_name or "").strip(), payload["status"])
     return payload
 
 

@@ -19,7 +19,7 @@ Configure the skill in the Skill Center before use:
 
 Stop and ask the user to configure the skill if either value is missing.
 
-After saving, generate the `weknora` MCP preset. Cowork installs `weknora-mcp-server` into the isolated Skill Python environment, starts it over stdio, and injects both values into that process. The generated MCP server remains disabled until the user enables it in Settings > MCP.
+Saving the Skill configuration automatically creates, updates, and enables the managed `weknora` MCP entry. Cowork installs `weknora-mcp-server` into the isolated Skill Python environment, starts it over stdio on demand, and injects both values into that process. Use the separate connection test when diagnostics are needed.
 
 ## API Workflow
 

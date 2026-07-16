@@ -2859,6 +2859,7 @@ class CapabilityWorkbenchDialog(QDialog):
         self.tool_worker = None
         self.mcp_worker = None
         self.mcp_tools = []
+        self.managed_mcp_server = None
         self.config_editors = {}
         self.setWindowTitle("能力工作台")
         self.resize(980, 680)
@@ -3016,8 +3017,8 @@ class CapabilityWorkbenchDialog(QDialog):
 
         if self._skill_mcp_server_presets():
             mcp_card, mcp_layout = build_settings_surface(
-                "MCP 配置",
-                "保存凭据后，可生成或更新对应的 MCP server。生成后仍默认关闭，可到设置中心 MCP 页启用。",
+                "MCP 连接",
+                "保存配置后会自动启用对应 MCP。需要确认远端或本地运行状态时，再单独测试连接。",
                 radius=18,
             )
             preset_names = [
@@ -3025,15 +3026,26 @@ class CapabilityWorkbenchDialog(QDialog):
                 for item in self._skill_mcp_server_presets()
                 if isinstance(item, dict)
             ]
-            preset_label = QLabel("将生成：" + "、".join([name for name in preset_names if name]))
+            preset_label = QLabel("托管服务：" + "、".join([name for name in preset_names if name]))
             preset_label.setWordWrap(True)
             preset_label.setStyleSheet(apple_settings_inline_note_style())
             mcp_layout.addWidget(preset_label)
+            existing_server = self._configured_managed_mcp_server()
+            if existing_server and existing_server.get("enabled", True):
+                managed_status_text = "MCP 已启用，连接待测试。"
+            elif existing_server:
+                managed_status_text = "MCP 已随 Skill 停用。"
+            else:
+                managed_status_text = "保存配置后可测试连接。"
+            self.managed_mcp_status = QLabel(managed_status_text)
+            self.managed_mcp_status.setWordWrap(True)
+            self.managed_mcp_status.setStyleSheet(apple_settings_inline_note_style())
+            mcp_layout.addWidget(self.managed_mcp_status)
             preset_row = QHBoxLayout()
             preset_row.addStretch()
-            preset_btn = QPushButton("生成 / 更新 MCP 配置")
+            preset_btn = QPushButton("测试连接")
             preset_btn.setStyleSheet(apple_button_style("secondary", radius=14))
-            preset_btn.clicked.connect(self.generate_skill_mcp_servers)
+            preset_btn.clicked.connect(self.test_managed_mcp_connection)
             preset_row.addWidget(preset_btn)
             mcp_layout.addLayout(preset_row)
             layout.addWidget(mcp_card)
@@ -3073,61 +3085,117 @@ class CapabilityWorkbenchDialog(QDialog):
             QMessageBox.warning(self, "能力配置", "当前配置管理器不支持能力配置。")
             return False
         values = self._current_skill_config_values()
-        self.config_manager.set_skill_config(self.skill_name, values)
+        batch_save = getattr(self.config_manager, "batch_save", None)
+        if callable(batch_save):
+            with batch_save():
+                self.config_manager.set_skill_config(self.skill_name, values)
+                managed_result = self._materialize_managed_mcp_servers(publish_refresh=False)
+        else:
+            self.config_manager.set_skill_config(self.skill_name, values)
+            managed_result = self._materialize_managed_mcp_servers(publish_refresh=False)
+        if not managed_result.get("ok"):
+            QMessageBox.warning(self, "MCP 配置", managed_result.get("error") or "无法启用 MCP。")
+            self._refresh_config_status()
+            return False
+        if managed_result.get("servers") and not self._publish_managed_mcp_refresh():
+            QMessageBox.warning(self, "MCP 配置", "MCP 配置已保存，但能力目录刷新失败。")
+            self._refresh_config_status()
+            return False
         self._refresh_config_status()
         if show_message:
-            QMessageBox.information(self, "能力配置", "配置已保存。")
+            message = "配置已保存。"
+            if managed_result.get("servers"):
+                message = "配置已保存，MCP 已启用；可点击“测试连接”确认可用工具。"
+            QMessageBox.information(self, "能力配置", message)
         return True
 
     def save_skill_config(self):
         self._save_skill_config_values(show_message=True)
 
-    def generate_skill_mcp_servers(self):
-        if not self._save_skill_config_values(show_message=False):
-            return
+    def _publish_managed_mcp_refresh(self):
+        window = self.window()
+        if hasattr(window, "publish_ui_skill_change"):
+            published = bool(window.publish_ui_skill_change(self.skill_name, "updated", source="skill_config"))
+            if published and hasattr(window, "skill_manager"):
+                self.skill_manager = window.skill_manager
+            return published
+        self.skill_manager.load_skills(load_mcp_tools=False)
+        return True
+
+    def _materialize_managed_mcp_servers(self, publish_refresh=True):
+        if not self._skill_mcp_server_presets():
+            return {"ok": True, "error": "", "servers": []}
         if not hasattr(self.skill_manager, "build_skill_mcp_server_configs"):
-            QMessageBox.warning(self, "MCP 配置", "当前能力管理器不支持生成 MCP 配置。")
-            return
+            return {"ok": False, "error": "当前能力管理器不支持生成 MCP 配置。", "servers": []}
         result = self.skill_manager.build_skill_mcp_server_configs(self.skill_name)
         if not result.get("ok"):
-            QMessageBox.warning(self, "MCP 配置", result.get("error") or "无法生成 MCP 配置。")
-            self._refresh_config_status()
-            return
+            return result
         generated = result.get("servers") or []
         if not generated:
-            QMessageBox.warning(self, "MCP 配置", "没有可生成的 MCP 配置。")
-            return
-        for server in generated:
-            if not server.get("auth"):
-                continue
-            auth_result = self.skill_manager.validate_mcp_server_auth(server)
-            if not auth_result.get("ok"):
-                QMessageBox.warning(self, "MCP 认证", auth_result.get("error") or "认证失败。")
-                return
+            return {"ok": False, "error": "没有可生成的 MCP 配置。", "servers": []}
         if hasattr(self.config_manager, "upsert_mcp_servers"):
-            summary = self.config_manager.upsert_mcp_servers(generated)
-            added = int(summary.get("added") or 0)
-            replaced = int(summary.get("replaced") or 0)
+            self.config_manager.upsert_mcp_servers(generated)
         else:
             servers = self.config_manager.get_mcp_servers() if hasattr(self.config_manager, "get_mcp_servers") else []
-            replaced = 0
-            added = 0
             by_id = {str(server.get("id") or "").strip(): index for index, server in enumerate(servers)}
             for server in generated:
                 server_id = str(server.get("id") or "").strip()
                 if server_id in by_id:
                     servers[by_id[server_id]] = server
-                    replaced += 1
                 else:
                     servers.append(server)
-                    added += 1
             self.config_manager.set_mcp_servers(servers)
-        self.skill_manager.load_skills()
-        QMessageBox.information(
-            self,
-            "MCP 配置",
-            f"已生成 MCP 配置：新增 {added} 个，更新 {replaced} 个。请到设置中心 MCP 页启用并测试连接。",
-        )
+        self.managed_mcp_server = json.loads(json.dumps(generated[0], ensure_ascii=False))
+        status = getattr(self, "managed_mcp_status", None)
+        if status is not None:
+            status.setText("MCP 已启用，连接待测试。")
+        if publish_refresh and not self._publish_managed_mcp_refresh():
+            return {"ok": False, "error": "MCP 配置已保存，但能力目录刷新失败。", "servers": generated}
+        return {"ok": True, "error": "", "servers": generated}
+
+    def _configured_managed_mcp_server(self):
+        servers = self.config_manager.get_mcp_servers() if hasattr(self.config_manager, "get_mcp_servers") else []
+        for server in servers:
+            if str(server.get("source_skill") or "").strip() == self.skill_name:
+                return server
+        preset_ids = {
+            str(item.get("id") or "").strip()
+            for item in self._skill_mcp_server_presets()
+            if isinstance(item, dict)
+        }
+        return next((server for server in servers if str(server.get("id") or "").strip() in preset_ids), None)
+
+    def test_managed_mcp_connection(self):
+        saved_values = self.config_manager.get_skill_config(self.skill_name) if hasattr(self.config_manager, "get_skill_config") else {}
+        if self._current_skill_config_values() != saved_values:
+            QMessageBox.warning(self, "测试连接", "当前配置尚未保存，请先保存配置再测试连接。")
+            return
+        server = self._configured_managed_mcp_server()
+        if not server:
+            QMessageBox.warning(self, "测试连接", "尚未生成托管 MCP，请先保存配置。")
+            return
+        if self.mcp_worker and self.mcp_worker.isRunning():
+            return
+        status = getattr(self, "managed_mcp_status", None)
+        if status is not None:
+            status.setText(f"正在测试 {server.get('name') or 'MCP'} ...")
+        self.mcp_worker = McpConnectionWorker(server, config_manager=self.config_manager, parent=self)
+        self.mcp_worker.finished_signal.connect(self._handle_managed_mcp_test_result)
+        self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
+        self.mcp_worker.start()
+
+    def _handle_managed_mcp_test_result(self, result):
+        self.mcp_worker = None
+        status = getattr(self, "managed_mcp_status", None)
+        if status is None:
+            return
+        if result.get("ok"):
+            tools = result.get("tools") or []
+            preview = "、".join(tools[:6]) if tools else "未暴露 tools"
+            status.setText(f"连接可用，共发现 {result.get('tool_count', 0)} 个工具：{preview}")
+            self._publish_managed_mcp_refresh()
+            return
+        status.setText("连接不可用：" + str(result.get("error") or "未知错误"))
 
     def _build_files_tab(self):
         page = QWidget()
@@ -6034,6 +6102,8 @@ class McpServerEditDialog(QDialog):
             "headers": self._parse_mapping(self.headers_edit.toPlainText()),
             "auth": dict(self.server.get("auth") or {}),
             "runtime_skill": str(self.server.get("runtime_skill") or "").strip(),
+            "source_skill": str(self.server.get("source_skill") or "").strip(),
+            "managed_by_skill": bool(self.server.get("managed_by_skill")),
         }
 
     def accept(self):
@@ -6121,6 +6191,8 @@ class McpServerManager(QWidget):
         for server in self.servers:
             title = str(server.get("name") or "MCP Server").strip()
             state = "已启用" if server.get("enabled", True) else "已停用"
+            if server.get("managed_by_skill"):
+                state += " · Skill 托管"
             summary = summarize_mcp_server(server)
             item = QListWidgetItem(f"{title}  ·  {mcp_transport_label(server.get('transport'))}  ·  {state}")
             item.setToolTip(summary)
@@ -6139,11 +6211,19 @@ class McpServerManager(QWidget):
         state_text = "已启用" if server.get("enabled", True) else "已停用"
         summary = summarize_mcp_server(server)
         summary_html = html.escape(summary)
+        managed_note = ""
+        if server.get("managed_by_skill"):
+            source_skill = str(server.get("source_skill") or "对应").strip()
+            managed_note = (
+                f"<div style='color:{DesignTokens.text_secondary};line-height:1.45;margin-top:4px;'>"
+                f"由 {html.escape(source_skill)} Skill 管理；请在 Skill 配置页修改或启停。</div>"
+            )
         self.detail_label.setText(
             "<div>"
             f"<span style='font-weight:700;color:{DesignTokens.text_primary};'>{html.escape(str(server.get('name') or 'MCP Server'))}</span>"
             f"<span style='color:{DesignTokens.text_tertiary};'> · {html.escape(mcp_transport_label(server.get('transport')))} · {state_text} · 超时 {server.get('timeout_seconds') or DEFAULT_MCP_TIMEOUT_SECONDS}s</span>"
             f"<div style='color:{DesignTokens.text_secondary};line-height:1.45;margin-top:4px;'>{summary_html}</div>"
+            f"{managed_note}"
             "</div>"
         )
 
@@ -6221,8 +6301,12 @@ class McpServerManager(QWidget):
 
         updated_servers = list(self.servers)
         replaced_count = 0
+        managed_skipped_count = 0
         if replace_duplicates:
             for index, server in duplicate_matches:
+                if updated_servers[index].get("managed_by_skill"):
+                    managed_skipped_count += 1
+                    continue
                 updated_servers[index] = server
                 replaced_count += 1
         updated_servers.extend(new_servers)
@@ -6238,6 +6322,8 @@ class McpServerManager(QWidget):
             message += f" 已替换 {replaced_count} 个重复配置。"
         if skipped_count:
             message += f" 已跳过 {skipped_count} 个重复配置。"
+        if managed_skipped_count:
+            message += f" 其中 {managed_skipped_count} 个由 Skill 托管，需在对应 Skill 配置页修改。"
         self.status_label.setText(message)
         self.changed.emit()
         QMessageBox.information(self, "导入 MCP JSON", message)
@@ -6245,6 +6331,9 @@ class McpServerManager(QWidget):
     def edit_server(self):
         index = self._current_index()
         if index < 0:
+            return
+        if self.servers[index].get("managed_by_skill"):
+            QMessageBox.information(self, "MCP 服务器", "该 MCP 由对应 Skill 管理，请到 Skill 配置页修改。")
             return
         dialog = McpServerEditDialog(self.servers[index], self)
         if dialog.exec() != QDialog.Accepted:
@@ -6257,6 +6346,9 @@ class McpServerManager(QWidget):
     def delete_server(self):
         index = self._current_index()
         if index < 0:
+            return
+        if self.servers[index].get("managed_by_skill"):
+            QMessageBox.information(self, "MCP 服务器", "该 MCP 由对应 Skill 管理；关闭对应 Skill 即可停用。")
             return
         reply = QMessageBox.question(
             self,
@@ -8388,7 +8480,11 @@ class SkillsCenterDialog(QDialog):
         enabled = bool(skill.get("enabled"))
         switch = AppleSwitch()
         switch.setChecked(enabled)
-        if skill_center_is_builtin(skill):
+        managed_source_skill = str(skill.get("source_skill") or "").strip()
+        if managed_source_skill:
+            switch.setEnabled(False)
+            switch.setToolTip(f"由 {managed_source_skill} Skill 管理")
+        elif skill_center_is_builtin(skill):
             switch.setEnabled(False)
             switch.setToolTip("内置能力始终启用")
         else:
@@ -8553,7 +8649,12 @@ class SkillsCenterDialog(QDialog):
         toggle = AppleSwitch()
         toggle.setObjectName("SkillEnableSwitch")
         toggle.setChecked(enabled)
-        if skill_center_is_builtin(skill):
+        managed_source_skill = str(skill.get("source_skill") or "").strip()
+        if managed_source_skill:
+            toggle.setEnabled(False)
+            toggle.setCursor(Qt.ArrowCursor)
+            toggle.setToolTip(f"由 {managed_source_skill} Skill 管理")
+        elif skill_center_is_builtin(skill):
             toggle.setEnabled(False)
             toggle.setCursor(Qt.ArrowCursor)
             toggle.setToolTip("内置能力始终启用，不能在这里关闭")

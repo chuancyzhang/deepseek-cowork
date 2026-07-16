@@ -322,6 +322,9 @@ class TestSkillSystemV2(unittest.TestCase):
             weknora = sm.build_skill_mcp_server_configs("weknora")
         self.assertTrue(airflow["ok"], airflow.get("error"))
         self.assertEqual(airflow["servers"][0]["command"], r"C:\Cowork\python.exe")
+        self.assertTrue(airflow["servers"][0]["enabled"])
+        self.assertEqual(airflow["servers"][0]["source_skill"], "airflow")
+        self.assertTrue(airflow["servers"][0]["managed_by_skill"])
         self.assertEqual(airflow["servers"][0]["runtime_skill"], "airflow")
         self.assertEqual(airflow["servers"][0]["args"][-2:], ["--transport", "stdio"])
         self.assertEqual(airflow["servers"][0]["env"]["AF_READ_ONLY"], "true")
@@ -337,6 +340,68 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(superset["servers"][0]["headers"], {})
         self.assertEqual(superset["servers"][0]["auth"]["type"], "superset_password")
         self.assertEqual(superset["servers"][0]["timeout_seconds"], 45)
+        self.assertTrue(superset["servers"][0]["enabled"])
+        self.assertEqual(superset["servers"][0]["source_skill"], "superset-mcp")
+
+    def test_selected_parent_skill_can_discover_managed_mcp_tools(self):
+        self._copy_repo_ai_skill("superset-mcp")
+
+        class ConfigStub:
+            def is_skill_enabled(self, skill_name, default_enabled=True):
+                return skill_name == "superset-mcp" or default_enabled
+
+            def get_mcp_servers(self):
+                return [
+                    {
+                        "id": "superset-mcp",
+                        "name": "Superset MCP",
+                        "enabled": True,
+                        "transport": "streamable_http",
+                        "url": "https://superset.example/mcp",
+                        "source_skill": "superset-mcp",
+                        "managed_by_skill": True,
+                    }
+                ]
+
+            def get(self, _key, default=None):
+                return default
+
+        sm = SkillManager(
+            workspace_dir=self.temp_dir,
+            config_manager=ConfigStub(),
+            auto_load=False,
+            load_mcp_tools=False,
+        )
+        sm.skills_dirs = [self.skills_dir, self.ai_skills_dir]
+        sm.load_skills(load_mcp_tools=False)
+        tool_payload = {
+            "ok": True,
+            "tools": [
+                {
+                    "name": "list_dashboards",
+                    "description": "List Superset dashboards",
+                    "input_schema": {"type": "object", "properties": {}, "required": []},
+                }
+            ],
+        }
+
+        with patch("core.skill_manager.mcp_package_available", return_value=True), patch(
+            "core.skill_manager.list_mcp_server_tools", return_value=tool_payload
+        ):
+            result = sm.call_tool(
+                "tool_search",
+                {"query": "Superset dashboards"},
+                context={
+                    "run_context": {
+                        "mode": "execution",
+                        "allowed_skill_names": ["superset-mcp"],
+                    },
+                    "discovered_tool_names": set(),
+                },
+            )
+
+        self.assertIn("mcp__superset_mcp__list_dashboards", result["discovered_tools"])
+        self.assertIn("mcp__superset_mcp__list_dashboards", sm.get_tools_for_skill("superset-mcp"))
 
     def test_skill_mcp_presets_fail_on_missing_required_config(self):
         for skill_name in ("showdoc-mcp", "airflow", "superset-mcp"):

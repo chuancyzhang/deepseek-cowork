@@ -75,7 +75,7 @@
       "id": "superset-mcp",
       "name": "Superset MCP",
       "description": "Official Apache Superset MCP Streamable HTTP endpoint with managed JWT authentication.",
-      "enabled": false,
+      "enabled": true,
       "transport": "streamable_http",
       "timeout_seconds": "{{SUPERSET_MCP_TIMEOUT_SECONDS}}",
       "url": "{{SUPERSET_MCP_URL}}",
@@ -93,7 +93,7 @@
   "node_dependencies": [],
   "workflow": [
     "Use this skill for official Apache Superset MCP connections only.",
-    "Generate the MCP server after saving the Superset URL, MCP URL, username, password, and provider.",
+    "Saving the Superset URL, MCP URL, username, password, and provider automatically enables the managed MCP connection.",
     "Rely on Superset RBAC/JWT permissions and confirm high-impact actions with the user."
   ]
 }

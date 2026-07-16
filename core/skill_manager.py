@@ -1555,7 +1555,7 @@ class SkillManager:
             server = {
                 "id": str(rendered.get("id") or "").strip(),
                 "name": str(rendered.get("name") or rendered.get("id") or "MCP Server").strip(),
-                "enabled": bool(rendered.get("enabled", False)),
+                "enabled": True,
                 "transport": transport,
                 "type": transport,
                 "timeout_seconds": timeout_seconds,
@@ -1576,6 +1576,8 @@ class SkillManager:
                 } if isinstance(rendered.get("headers"), dict) else {},
                 "auth": dict(rendered.get("auth") or {}) if isinstance(rendered.get("auth"), dict) else {},
                 "runtime_skill": runtime_skill,
+                "source_skill": skill_name,
+                "managed_by_skill": True,
             }
             if not server["id"]:
                 return {"ok": False, "error": "MCP preset is missing id.", "servers": []}
@@ -1692,6 +1694,8 @@ class SkillManager:
             "python_dependencies": ["mcp"],
             "node_dependencies": [],
             "source_format": self.MCP_SOURCE_FORMAT,
+            "source_skill": str(server_config.get("source_skill") or "").strip(),
+            "managed_by_skill": bool(server_config.get("managed_by_skill")),
             "disclosure_level_defaults": {
                 "default_prompt_level": "brief",
                 "include_references": False,
@@ -1787,7 +1791,16 @@ class SkillManager:
             if not isinstance(server_config, dict):
                 continue
             skill_name = build_mcp_skill_name(server_config.get("id") or server_config.get("name") or f"server-{index + 1}")
-            if not bool(server_config.get("enabled", True)):
+            source_skill = str(server_config.get("source_skill") or "").strip()
+            source_enabled = True
+            if source_skill and hasattr(self.config_manager, "is_skill_enabled"):
+                source_record = self._record_for_skill_name(source_skill) or {}
+                source_spec = source_record.get("spec") or {}
+                source_enabled = self.config_manager.is_skill_enabled(
+                    source_skill,
+                    default_enabled=bool(source_spec.get("default_enabled", True)),
+                )
+            if not bool(server_config.get("enabled", True)) or not source_enabled:
                 dependency_status = {"ok": False, "message": "MCP server is disabled in settings."}
                 record = self._build_mcp_skill_record(skill_name, server_config, [], dependency_status)
                 self.skill_records[skill_name] = record
@@ -2979,11 +2992,20 @@ class SkillManager:
         allowed = normalize_selected_skill_names(ctx.get("allowed_skill_names"))
         return [name for name in allowed if name in self.skill_records]
 
+    def _source_skill_for_record(self, skill_name):
+        record = self.skill_records.get(str(skill_name or "").strip()) or {}
+        spec = record.get("spec") or {}
+        return str(spec.get("source_skill") or (record.get("mcp_server") or {}).get("source_skill") or "").strip()
+
     def _is_skill_allowed_by_scope(self, skill_name, run_context):
         allowed_skill_names = self._allowed_skill_names(run_context)
         if not allowed_skill_names:
             return True
-        return str(skill_name or "").strip() in allowed_skill_names
+        normalized_name = str(skill_name or "").strip()
+        if normalized_name in allowed_skill_names:
+            return True
+        source_skill = self._source_skill_for_record(normalized_name)
+        return bool(source_skill and source_skill in allowed_skill_names)
 
     def _is_tool_allowed_by_skill_scope(self, tool_name, run_context):
         allowed_skill_names = self._allowed_skill_names(run_context)
@@ -2995,7 +3017,7 @@ class SkillManager:
         skill_name = self.tool_to_skill_map.get(resolved_name)
         if not skill_name:
             return False
-        return skill_name in allowed_skill_names
+        return self._is_skill_allowed_by_scope(skill_name, run_context)
 
     def _filter_definitions_by_allowed_skills(self, definitions, run_context):
         filtered = []
@@ -3045,7 +3067,15 @@ class SkillManager:
         return {"ok": True, "name": resolved_name, "record": record, "error": ""}
 
     def get_tools_for_skill(self, skill_name):
-        return list(self.skill_to_tools.get(skill_name) or [])
+        normalized_name = str(skill_name or "").strip()
+        tool_names = list(self.skill_to_tools.get(normalized_name) or [])
+        for child_name, record in self.skill_records.items():
+            if self._source_skill_for_record(child_name) != normalized_name:
+                continue
+            for tool_name in record.get("tool_refs") or []:
+                if tool_name not in tool_names:
+                    tool_names.append(tool_name)
+        return tool_names
 
     def get_skill_display_name(self, skill_name):
         record = self.skill_records.get(skill_name)

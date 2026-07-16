@@ -6,9 +6,9 @@ DeepSeek Cowork 是一个 Windows 桌面 Agent 工作台，把对话、项目工
 
 本项目不是 DeepSeek 官方产品，仅为个人探索。
 
-当前应用版本：**5.0.0**
+当前应用版本：**5.0.1**
 
-5.0.0 发布说明见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。这是当前文档、界面和运行时行为的统一基线。
+当前 5.0.1 基线见本文档；更早的详细发布说明和兼容性清单见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。
 
 ## 它能做什么
 

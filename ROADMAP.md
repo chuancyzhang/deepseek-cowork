@@ -8,9 +8,9 @@ Treat it as the current working map, not a strict release contract.
 
 ## Current Phase
 
-**Phase:** 5.0.0 release hardening and post-release stabilization
+**Phase:** 5.0.1 release hardening and post-release stabilization
 
-The 5.0.0 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
+The 5.0.1 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
 
 - making the desktop experience feel more like a polished product and less like an internal tool
 - stabilizing long-running agent, automation, and tool-use workflows
@@ -58,13 +58,13 @@ For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.0.md](REL
 
 - Continue reducing "admin panel" visual weight in desktop surfaces
 - Keep shared design tokens and reusable style helpers consistent across dialogs and drawers
-- Keep the 5.0.0 release notes, user guide, and screenshots aligned with the shipped UI
+- Keep the release notes, user guide, and screenshots aligned with the shipped UI
 - Preserve behavior while making polish changes low-risk
 
-## 5.0.0 Release Baseline
+## 5.0.1 Release Baseline
 
-- Version source is centralized in `core/app_version.py` and currently reads `5.0.0`
-- README, product documentation, user guide, technical design, Skill system, and this roadmap link to the 5.0.0 release notes
+- Version source is centralized in `core/app_version.py` and currently reads `5.0.1`
+- README, product documentation, user guide, technical design, Skill system, and this roadmap link to the release notes and current baseline
 - Release validation covers packaged startup, model configuration, workspace boundaries, SQLite history recovery, deliverable conversion, PPT Agent, Skill/MCP configuration, automation runs, and diagnostic logs
 - Any behavior change that affects a user-facing flow must update the affected Markdown document in the same change
 

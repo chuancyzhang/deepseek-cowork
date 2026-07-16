@@ -125,6 +125,20 @@ class DesignTokens:
     user_bubble_compact_min_width = 360
     user_bubble_max_width = 640
     user_bubble_ratio = 0.88
+
+    # Conversation timeline density. Assistant stages remain individually
+    # visible, but share one compact rhythm inside the same turn group.
+    chat_message_vertical_margin = 2
+    assistant_stage_header_height = 28
+    assistant_stage_content_gap = 4
+    assistant_stage_separator_vertical_margin = 8
+    assistant_stage_separator_indent = 32
+    assistant_stage_separator_right_margin = 8
+    assistant_thinking_timeline_indent = 8
+    assistant_thinking_content_indent = 14
+    user_message_padding_horizontal = 12
+    user_message_padding_vertical = 8
+    message_action_gap = 4
     toast_min_width = 260
     toast_max_width = 720
     toast_top_margin = 16

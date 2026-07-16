@@ -15,6 +15,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from core.chat_storage import ChatStorage
+from core.theme import DesignTokens
 
 from main import (
     AssistantTurnGroup,
@@ -445,6 +446,71 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertIn(tool, bubble.timeline_events)
         bubble.think_toggle_btn.setChecked(False)
         self.assertTrue(bubble.think_container.isHidden())
+        bubble.deleteLater()
+
+    def test_empty_thinking_expansion_does_not_create_timeline_height(self):
+        bubble = ChatBubble("Agent", "", thinking="...")
+        bubble.think_toggle_btn.setChecked(True)
+        self.app.processEvents()
+        self.assertTrue(bubble.think_container.isHidden())
+
+        bubble.update_thinking("正在检查")
+        self.app.processEvents()
+        self.assertFalse(bubble.think_container.isHidden())
+
+        expanded_height = bubble.sizeHint().height()
+        bubble.think_toggle_btn.setChecked(False)
+        self.app.processEvents()
+        self.assertTrue(bubble.think_container.isHidden())
+        self.assertLess(bubble.sizeHint().height(), expanded_height)
+        bubble.deleteLater()
+
+    def test_turn_group_keeps_multiple_compact_thinking_stages_and_separators(self):
+        group = AssistantTurnGroup("compact-turn")
+        for index in range(5):
+            bubble = ChatBubble("Agent", "")
+            group.add_stage(bubble)
+            bubble.update_thinking(f"阶段 {index + 1}", duration=index + 1, is_final=True)
+
+        self.assertEqual(len(group.stage_bubbles), 5)
+        self.assertEqual(len(group.stage_separators), 4)
+        self.assertTrue(all(not bubble.isHidden() for bubble in group.stage_bubbles))
+        self.assertTrue(all(not separator.isHidden() for separator in group.stage_separators))
+        margins = group.stage_separators[0].layout().contentsMargins()
+        self.assertEqual(margins.left(), DesignTokens.assistant_stage_separator_indent)
+        self.assertEqual(margins.top(), DesignTokens.assistant_stage_separator_vertical_margin)
+        self.assertEqual(margins.bottom(), DesignTokens.assistant_stage_separator_vertical_margin)
+        group.deleteLater()
+
+    def test_turn_group_hides_empty_stage_and_its_separator(self):
+        group = AssistantTurnGroup("empty-stage-turn")
+        first = ChatBubble("Agent", "", thinking="先分析")
+        empty = ChatBubble("Agent", "")
+        group.add_stage(first)
+        group.add_stage(empty)
+
+        self.assertFalse(first.isHidden())
+        self.assertTrue(empty.isHidden())
+        self.assertTrue(group.stage_separators[0].isHidden())
+
+        empty.set_main_content("阶段回复", final=True)
+        self.app.processEvents()
+        self.assertFalse(empty.isHidden())
+        self.assertFalse(group.stage_separators[0].isHidden())
+        group.deleteLater()
+
+    def test_stage_without_reply_does_not_reserve_text_editor_height(self):
+        bubble = ChatBubble("Agent", "", thinking="只显示思考标题")
+        self.assertTrue(bubble.content_rich_edit.isHidden())
+        self.assertTrue(bubble.content_plain_edit.isHidden())
+
+        bubble.set_main_content("阶段回复", final=True)
+        self.app.processEvents()
+        self.assertFalse(bubble.content_edit.isHidden())
+
+        bubble.set_main_content("", final=True)
+        self.app.processEvents()
+        self.assertTrue(bubble.content_edit.isHidden())
         bubble.deleteLater()
 
     def test_stage_reply_remains_visible_when_thinking_segment_finishes(self):

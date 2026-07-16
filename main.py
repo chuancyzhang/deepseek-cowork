@@ -12087,6 +12087,7 @@ class AssistantTurnGroup(QFrame):
         super().__init__(parent)
         self.group_id = str(group_id or uuid.uuid4().hex)
         self.stage_bubbles = []
+        self.stage_separators = []
         self.setObjectName("AssistantTurnGroup")
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet("QFrame#AssistantTurnGroup { background: transparent; border: none; }")
@@ -12098,19 +12099,45 @@ class AssistantTurnGroup(QFrame):
         if bubble is None:
             raise ValueError("AI 轮次阶段不能为空。")
         if self.stage_bubbles:
-            separator = QFrame(self)
-            separator.setObjectName("AssistantStageSeparator")
-            separator.setFixedHeight(1)
-            separator.setStyleSheet(
-                f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.border_subtle}; border: none; "
-                "margin-left: 42px; margin-right: 8px; }"
+            separator = QWidget(self)
+            separator.setObjectName("AssistantStageSeparatorArea")
+            separator_layout = QHBoxLayout(separator)
+            separator_layout.setContentsMargins(
+                DesignTokens.assistant_stage_separator_indent,
+                DesignTokens.assistant_stage_separator_vertical_margin,
+                DesignTokens.assistant_stage_separator_right_margin,
+                DesignTokens.assistant_stage_separator_vertical_margin,
             )
+            separator_layout.setSpacing(0)
+            line = QFrame(separator)
+            line.setObjectName("AssistantStageSeparator")
+            line.setFixedHeight(1)
+            line.setStyleSheet(
+                f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.border_subtle}; border: none; }}"
+            )
+            separator_layout.addWidget(line)
+            self.stage_separators.append(separator)
             self.group_layout.addWidget(separator)
         bubble.ui_turn_group_id = self.group_id
         bubble.ui_stage_id = str(stage_id or f"{self.group_id}:stage-{len(self.stage_bubbles) + 1}")
         self.stage_bubbles.append(bubble)
         self.group_layout.addWidget(bubble)
+        self.sync_stage_visibility()
         return bubble
+
+    def sync_stage_visibility(self):
+        """Hide semantically empty stages and separators without changing stage order."""
+        visible_before = False
+        for index, bubble in enumerate(self.stage_bubbles):
+            visible = bubble.has_visible_stage_content()
+            bubble.setVisible(visible)
+            if index > 0:
+                self.stage_separators[index - 1].setVisible(bool(visible_before and visible))
+            if visible:
+                visible_before = True
+        self.setVisible(visible_before)
+        self.group_layout.invalidate()
+        self.updateGeometry()
 
     def active_stage(self):
         return self.stage_bubbles[-1] if self.stage_bubbles else None
@@ -12179,7 +12206,7 @@ class ChatBubble(QFrame):
         
         # Main Horizontal Layout (Avatar | Content)
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 4, 0, 4)
+        main_layout.setContentsMargins(0, DesignTokens.chat_message_vertical_margin, 0, DesignTokens.chat_message_vertical_margin)
         main_layout.setSpacing(10)
         
         if role == "User":
@@ -12231,7 +12258,12 @@ class ChatBubble(QFrame):
                     }}
                 """)
                 bubble_layout = QVBoxLayout(bubble_frame)
-                bubble_layout.setContentsMargins(15, 10, 15, 10)
+                bubble_layout.setContentsMargins(
+                    DesignTokens.user_message_padding_horizontal,
+                    DesignTokens.user_message_padding_vertical,
+                    DesignTokens.user_message_padding_horizontal,
+                    DesignTokens.user_message_padding_vertical,
+                )
                 self.user_bubble_layout = bubble_layout
 
                 content_edit = AutoResizingTextEdit()
@@ -12309,14 +12341,14 @@ class ChatBubble(QFrame):
             col_layout = QVBoxLayout(content_col)
             self.content_col_layout = col_layout
             col_layout.setContentsMargins(0, 0, 0, 0)
-            col_layout.setSpacing(6)
+            col_layout.setSpacing(DesignTokens.assistant_stage_content_gap)
             
             # One conversational deep-thinking segment. Tools triggered by
             # this segment live inside the same foldable container.
             self.thinking_widget = QWidget()
             think_layout = QVBoxLayout(self.thinking_widget)
             think_layout.setContentsMargins(0, 0, 0, 0)
-            think_layout.setSpacing(0)
+            think_layout.setSpacing(DesignTokens.assistant_stage_content_gap)
             
             # Toggle Header
             self.think_toggle_btn = QPushButton(" 深度思考  ▾")
@@ -12327,13 +12359,13 @@ class ChatBubble(QFrame):
             self.think_toggle_btn.setStyleSheet(f"""
                 QPushButton {{
                     text-align: left;
-                    min-height: 32px;
-                    max-height: 32px;
+                    min-height: {DesignTokens.assistant_stage_header_height}px;
+                    max-height: {DesignTokens.assistant_stage_header_height}px;
                     background-color: transparent;
                     color: {DesignTokens.text_secondary};
                     border: none;
                     border-radius: 6px;
-                    padding: 0 6px;
+                    padding: 0 4px;
                     font-size: 12px;
                     font-weight: 600;
                 }}
@@ -12355,12 +12387,16 @@ class ChatBubble(QFrame):
                     background: transparent;
                     border: none;
                     border-left: 2px solid {DesignTokens.border_strong};
-                    margin-top: 2px;
-                    margin-left: 8px;
+                    margin-left: {DesignTokens.assistant_thinking_timeline_indent}px;
                 }}
             """)
             self.think_container_layout = QVBoxLayout(self.think_container)
-            self.think_container_layout.setContentsMargins(14, 4, 4, 8)
+            self.think_container_layout.setContentsMargins(
+                DesignTokens.assistant_thinking_content_indent,
+                0,
+                4,
+                4,
+            )
             self.think_container_layout.setSpacing(8)
             self.think_duration = 0.0 # Store duration
             self.think_start_time = None
@@ -12381,6 +12417,7 @@ class ChatBubble(QFrame):
             self.content_plain_edit = AutoResizingPlainTextEdit()
             self.content_rich_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
             self.content_plain_edit.setStyleSheet("background: transparent; border: none; padding: 0;")
+            self.content_rich_edit.setVisible(False)
             self.content_plain_edit.setVisible(False)
             col_layout.addWidget(self.content_rich_edit)
             col_layout.addWidget(self.content_plain_edit)
@@ -12391,7 +12428,7 @@ class ChatBubble(QFrame):
             ):
                 self._ensure_inline_visualization_container()
             self.content_edit = self.content_rich_edit
-            self._main_content_view_mode = "rich"
+            self._main_content_view_mode = None
             self.main_content_text = ""
             self._pending_main_content_text = ""
             self._pending_main_content_parts = None
@@ -12452,6 +12489,7 @@ class ChatBubble(QFrame):
             )
             copy_row = QHBoxLayout()
             copy_row.setContentsMargins(0, 0, 0, 0)
+            copy_row.setSpacing(DesignTokens.message_action_gap)
             copy_row.addWidget(self.copy_result_btn, 0, Qt.AlignLeft)
             copy_row.addWidget(self.office_draft_btn, 0, Qt.AlignLeft)
             copy_row.addWidget(self.skill_capture_btn, 0, Qt.AlignLeft)
@@ -12670,6 +12708,54 @@ class ChatBubble(QFrame):
         if self.content_col is not None:
             self.content_col.setMaximumWidth(max(0, int(message_width)))
 
+    def has_visible_stage_content(self):
+        if self.role == "User":
+            return True
+        if bool((getattr(self, "main_content_text", "") or "").strip()):
+            return True
+        if self.thinking_widget is not None and not self.thinking_widget.isHidden():
+            return True
+        if self.timeline_events:
+            return True
+        if self.inline_visualization_container is not None and not self.inline_visualization_container.isHidden():
+            return True
+        deliverable_cards = getattr(self, "deliverable_cards", None)
+        return bool(deliverable_cards is not None and not deliverable_cards.isHidden())
+
+    def _notify_stage_visibility_changed(self):
+        parent = self.parentWidget()
+        if isinstance(parent, AssistantTurnGroup):
+            parent.sync_stage_visibility()
+
+    def _refresh_conversation_geometry(self):
+        for widget in (self.think_container, self.thinking_widget, self.content_col, self):
+            if widget is None:
+                continue
+            layout = widget.layout()
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+            widget.updateGeometry()
+        parent = self.parentWidget()
+        if isinstance(parent, AssistantTurnGroup):
+            parent.sync_stage_visibility()
+
+    def _has_thinking_details(self):
+        for index in range(self.think_container_layout.count()):
+            widget = self.think_container_layout.itemAt(index).widget()
+            if widget is None:
+                continue
+            if isinstance(widget, AutoResizingLabel):
+                if widget.text().strip():
+                    return True
+                continue
+            return True
+        return False
+
+    def _sync_thinking_container_visibility(self):
+        self.think_container.setVisible(bool(self.think_toggle_btn.isChecked() and self._has_thinking_details()))
+        self._refresh_conversation_geometry()
+
     def _on_think_tick(self):
         if self.think_start_time is None: return
         
@@ -12680,9 +12766,18 @@ class ChatBubble(QFrame):
         self.think_toggle_btn.setText(f" 深度思考中 · {current_total:.1f} 秒  {arrow}")
 
     def toggle_thinking(self, checked):
-        self.think_container.setVisible(bool(checked))
+        self._sync_thinking_container_visibility()
         text = re.sub(r"\s+[▴▾]\s*$", "", self.think_toggle_btn.text())
         self.think_toggle_btn.setText(f"{text}  {'▴' if checked else '▾'}")
+        log_sub_agent_runtime(
+            "ui_thinking_toggled",
+            session_id=self.session_id,
+            group_id=str(getattr(self, "ui_turn_group_id", "")),
+            stage_id=str(getattr(self, "ui_stage_id", "")),
+            expanded=bool(checked),
+            has_details=self._has_thinking_details(),
+        )
+        QTimer.singleShot(0, self._refresh_conversation_geometry)
 
     def set_thinking_state(self, is_thinking):
         if is_thinking:
@@ -12693,6 +12788,7 @@ class ChatBubble(QFrame):
             arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
             self.think_toggle_btn.setText(f" 深度思考中 · {self.think_duration:.1f} 秒  {arrow}")
             self.thinking_widget.setVisible(True)
+            self._notify_stage_visibility_changed()
         else:
             if self.think_timer.isActive():
                 self.think_timer.stop()
@@ -12715,6 +12811,7 @@ class ChatBubble(QFrame):
         self.think_container_layout.addWidget(widget)
         self.timeline_events.append(widget)
         widget.show()
+        self._sync_thinking_container_visibility()
         return widget
 
     def freeze_content_fragment(self):
@@ -12743,6 +12840,7 @@ class ChatBubble(QFrame):
         if text is not None:
             widget = self.get_active_think_widget()
             widget.setText(widget.text() + str(text or ""))
+            self._sync_thinking_container_visibility()
         
         if duration:
             self.think_duration = duration
@@ -12756,6 +12854,7 @@ class ChatBubble(QFrame):
             total = max(self.think_duration, self.timeline_finished_at - self.timeline_started_at)
             arrow = "▴" if self.think_toggle_btn.isChecked() else "▾"
             self.think_toggle_btn.setText(f" 深度思考 · {total:.1f} 秒  {arrow}")
+        self._notify_stage_visibility_changed()
 
     def stop_thinking_timers(self):
         if self.think_timer.isActive():
@@ -12773,6 +12872,7 @@ class ChatBubble(QFrame):
     def _set_main_content_view_mode(self, mode):
         target_mode = "plain" if mode == "plain" else "rich"
         if self._main_content_view_mode == target_mode and self.content_edit is not None:
+            self.content_edit.setVisible(True)
             return self.content_edit
         if target_mode == "plain":
             self.content_rich_edit.setVisible(False)
@@ -12816,6 +12916,7 @@ class ChatBubble(QFrame):
         self._pending_main_content_text = text
         self._pending_main_content_parts = content_parts
         self._pending_main_content_final = bool(final)
+        self._notify_stage_visibility_changed()
         actions_visible = bool(self.message_actions_enabled and final and text.strip())
         self.copy_result_btn.setVisible(actions_visible)
         if getattr(self, "office_draft_btn", None) is not None:
@@ -12872,6 +12973,7 @@ class ChatBubble(QFrame):
             final=final,
         ) else "rich"
         content_widget = self._set_main_content_view_mode(render_mode)
+        content_widget.setVisible(bool(render_text.strip()))
 
         try:
             content_widget.setUpdatesEnabled(False)
@@ -13049,6 +13151,8 @@ class ChatBubble(QFrame):
         self.timeline_events.append(card_widget)
         self._start_new_think_segment = True
         self.thinking_widget.setVisible(True)
+        self._sync_thinking_container_visibility()
+        self._notify_stage_visibility_changed()
 
 
 class OfficeDraftTaskCard(QFrame):

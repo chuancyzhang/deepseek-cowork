@@ -70,3 +70,8 @@ understood from the snapshot.
 - Exit code 3: browser execution failed; confirm the tab is still open.
 - Exit code 4: command timeout; increase the timeout only when justified.
 - Exit code 5: CLI and extension versions do not match; repair the component in settings.
+
+If Cowork reports an outer CLI timeout, inspect `session_cleanup`: a successful
+cleanup means Cowork deliberately ended the session, not that the Agent Window
+crashed. A BrowserSkill-native timeout is returned as a normal CLI error and the
+session remains available for one focused retry before the required final stop.

@@ -134,7 +134,10 @@ is directed to **Settings → Components & Dependencies → Optional Browser
 Capability**, where Cowork installs a pinned, SHA-256-verified `bsk` CLI and guides
 the user through installing the Chrome/Edge extension. The Skill exposes only the
 parameterized `browser_skill_cli` tool; it does not fall back to Playwright or a
-general-purpose shell.
+general-purpose shell. Component readiness requires both `bsk doctor` and a
+privacy-scoped execution probe in a temporary Agent Window; CLI stdout and stderr
+are redirected to isolated temporary files so large structured results and
+daemon-inherited handles cannot deadlock on Windows pipe buffers.
 
 Cowork loads capabilities from:
 

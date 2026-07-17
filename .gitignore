@@ -73,6 +73,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Generated documentation artifacts
+/USER_GUIDE.docx
+
 # PyBuilder
 target/
 

@@ -139,6 +139,7 @@ Cowork 采用交错式推理流程：
 - 打包模式保留 Python 基础运行时和 Git Bash
 - Node.js、文档读取和金融数据等 Python/Node 依赖改为设置中的可选组件；浏览器自动化独立使用应用管理的 Tencent BrowserSkill `bsk` CLI 与用户确认安装的 Chrome/Edge 扩展，不再依赖 Playwright/UIAutomation
 - BrowserSkill CLI 固定版本与 SHA-256，采用临时目录下载、路径安全解压、候选验证和原子目录替换；`browser_skill_cli` 仅接受参数数组并统一处理 JSON、超时、取消、截图路径和敏感 `evaluate` 拒绝，组件缺失或扩展未通过 `doctor` 时明确失败
+- BrowserSkill 子进程从启动时把 stdout/stderr 重定向到独立临时文件，避免 Windows 管道写满或 daemon 继承管道句柄造成假超时；连接检查在 `doctor` 后用临时会话执行 Agent Window 范围的 `tab list`，区分“扩展已连接”和“执行通道可用”。组件更新、修复和卸载前由应用停止 daemon，避免运行中的 `bsk.exe` 阻塞原子替换
 - 打包版内置 MCP client 运行时，便于直接接入 MCP tools
 
 ## 9. 设计取舍

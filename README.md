@@ -48,7 +48,7 @@ The 5.0.1 release baseline is documented here. For the previous detailed release
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
 - **Skill center**: search, filter, enable, configure, and debug skills without restarting. Enable/disable changes take effect without inserting chat messages and do not alter the conversation's explicitly selected Skills.
-- **Real-browser automation**: the default-off `browser-automation` plugin uses Tencent BrowserSkill. After enabling it, install the pinned and SHA-256-verified `bsk` CLI from **Settings → Components & Dependencies → Optional Browser Capability**, install the Chrome/Edge extension, and verify the connection before the AI reads or operates logged-in pages.
+- **Real-browser automation**: the default-off `browser-automation` plugin uses Tencent BrowserSkill. After enabling it, install the pinned and SHA-256-verified `bsk` CLI from **Settings → Components & Dependencies → Optional Browser Capability**, install the Chrome/Edge extension, and run the temporary Agent Window execution probe before the AI reads or operates logged-in pages.
 
 ## Skill Model
 

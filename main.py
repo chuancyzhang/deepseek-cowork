@@ -6419,9 +6419,16 @@ class RuntimeComponentWorker(QThread):
                 if self.action in {"install", "repair"}:
                     result = install_browser_skill(progress)
                 elif self.action == "check":
-                    progress("正在检查 BrowserSkill CLI、daemon 和浏览器扩展…", 20)
+                    progress(
+                        "正在检查 BrowserSkill CLI、扩展和浏览器执行通道，"
+                        "期间会短暂打开 Agent Window…",
+                        20,
+                    )
                     result = browser_skill_status(run_diagnostics=True)
-                    if result.get("state") == "check_failed":
+                    if result.get("state") in {
+                        "check_failed",
+                        "execution_unresponsive",
+                    }:
                         raise RuntimeError(
                             result.get("health_error")
                             or "BrowserSkill 连接检查失败，请查看诊断信息后重试。"
@@ -7041,7 +7048,8 @@ class SettingsDialog(QDialog):
         toolkit_group, toolkit_group_layout = build_settings_surface("工具包", "工具包安装到沙箱 Python，可被代码执行和相关 Skill 共同使用。", radius=20, show_subtitle=False)
         browser_group, browser_group_layout = build_settings_surface(
             "可选浏览器能力",
-            "安装 Tencent BrowserSkill CLI 后，还需要在 Chrome 或 Edge 中安装扩展并确认连接。",
+            "安装 Tencent BrowserSkill CLI 后，还需要在 Chrome 或 Edge 中安装扩展。"
+            "“检查连接”会短暂打开 Agent Window，并验证真实浏览器执行通道。",
             radius=20,
             show_subtitle=False,
         )

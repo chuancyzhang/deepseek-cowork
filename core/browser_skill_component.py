@@ -29,6 +29,7 @@ BROWSER_SKILL_EXTENSION_URL = (
     "hhcmgoofomhgciiibhipgmgkgnoenaoi"
 )
 BROWSER_SKILL_MARKER_SCHEMA = 1
+BROWSER_SKILL_PROBE_TIMEOUT_SECONDS = 45
 
 _LOG_LOCK = threading.RLock()
 
@@ -144,6 +145,44 @@ def _run_bsk(args, timeout=20):
     }
 
 
+def _wait_process_while_monitoring(process, timeout_seconds, abort_check=None):
+    """Monitor a process whose output is redirected to non-blocking files."""
+    started = time.monotonic()
+    aborted = False
+    timed_out = False
+    while process.poll() is None:
+        if callable(abort_check) and abort_check():
+            aborted = True
+            break
+        if time.monotonic() - started > timeout_seconds:
+            timed_out = True
+            break
+        time.sleep(0.1)
+    if aborted or timed_out:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            process.wait(timeout=3)
+    return {
+        "aborted": aborted,
+        "timed_out": timed_out,
+    }
+
+
+def _read_redirected_output(handle):
+    handle.flush()
+    handle.seek(0)
+    return handle.read().decode("utf-8", errors="replace")
+
+
 def _parse_json_output(stdout, stderr=""):
     for raw in (stdout, stderr):
         text = str(raw or "").strip()
@@ -227,6 +266,154 @@ def _extension_health(payload, combined_text):
     return None
 
 
+def _session_id_from_payload(payload):
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("session_id", "session", "id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def browser_skill_execution_probe(timeout_seconds=BROWSER_SKILL_PROBE_TIMEOUT_SECONDS):
+    """Verify the extension can execute a real, privacy-scoped tab command."""
+    started = time.monotonic()
+    session_id = ""
+    cleanup = {
+        "attempted": False,
+        "session_id": "",
+        "stopped": False,
+        "exit_code": None,
+        "error": "",
+    }
+    probe_result = None
+    log_browser_skill_event("probe_start")
+    try:
+        start_result = _run_bsk(
+            ["--json", "--quiet", "session", "start"],
+            timeout=min(15, timeout_seconds),
+        )
+        start_payload = _parse_json_output(
+            start_result["stdout"],
+            start_result["stderr"],
+        )
+        session_id = _session_id_from_payload(start_payload)
+        if start_result["returncode"] != 0 or not session_id:
+            raise RuntimeError(
+                start_result["stderr"]
+                or start_result["stdout"]
+                or "BrowserSkill 未返回临时会话 ID。"
+            )
+        list_result = _run_bsk(
+            [
+                "--json",
+                "--quiet",
+                "tab",
+                "list",
+                "--session",
+                session_id,
+                "--scope",
+                "agent",
+            ],
+            timeout=timeout_seconds,
+        )
+        list_payload = _parse_json_output(
+            list_result["stdout"],
+            list_result["stderr"],
+        )
+        if list_result["returncode"] != 0:
+            raise RuntimeError(
+                list_result["stderr"]
+                or list_result["stdout"]
+                or "BrowserSkill 执行通道检查失败。"
+            )
+        tabs = list_payload.get("tabs") if isinstance(list_payload, dict) else None
+        if not isinstance(tabs, list):
+            raise RuntimeError("BrowserSkill tab list 未返回可识别的 tabs 数组。")
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        probe_result = {
+            "ok": True,
+            "elapsed_ms": elapsed_ms,
+            "tab_count": len(tabs),
+            "error": "",
+        }
+        return probe_result
+    except subprocess.TimeoutExpired:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        error = f"浏览器执行通道在 {elapsed_ms}ms 内未响应。"
+        probe_result = {
+            "ok": False,
+            "elapsed_ms": elapsed_ms,
+            "tab_count": 0,
+            "error": error,
+            "code": "execution_unresponsive",
+        }
+        return probe_result
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        error = str(exc)
+        probe_result = {
+            "ok": False,
+            "elapsed_ms": elapsed_ms,
+            "tab_count": 0,
+            "error": error,
+            "code": "execution_unresponsive",
+        }
+        return probe_result
+    finally:
+        if session_id:
+            try:
+                cleanup = _stop_session_after_interruption(session_id)
+            except Exception as cleanup_exc:
+                cleanup = {
+                    "attempted": True,
+                    "session_id": session_id,
+                    "stopped": False,
+                    "exit_code": None,
+                    "error": str(cleanup_exc),
+                }
+                log_browser_skill_event(
+                    "error",
+                    operation="probe_cleanup",
+                    session_id=session_id,
+                    error=str(cleanup_exc),
+                )
+            if probe_result is not None:
+                probe_result["session_cleanup"] = cleanup
+                if not cleanup.get("stopped"):
+                    previous_error = str(probe_result.get("error") or "").strip()
+                    cleanup_error = (
+                        cleanup.get("error")
+                        or "临时 BrowserSkill 会话未能清理。"
+                    )
+                    probe_result.update({
+                        "ok": False,
+                        "code": "probe_cleanup_failed",
+                        "error": "；".join(
+                            item
+                            for item in (previous_error, cleanup_error)
+                            if item
+                        ),
+                    })
+            log_browser_skill_event(
+                "session_cleanup",
+                source="probe",
+                **cleanup,
+            )
+        if probe_result is not None:
+            log_browser_skill_event(
+                "probe_finish",
+                ok=bool(probe_result.get("ok")),
+                elapsed_ms=probe_result.get("elapsed_ms"),
+                tab_count=probe_result.get("tab_count"),
+                error=probe_result.get("error") or "",
+                cleanup_stopped=(
+                    (probe_result.get("session_cleanup") or {}).get("stopped")
+                ),
+            )
+
+
 def browser_skill_status(run_diagnostics=False):
     root = browser_skill_root()
     executable = browser_skill_executable()
@@ -292,7 +479,12 @@ def browser_skill_status(run_diagnostics=False):
         return result
     if not run_diagnostics:
         cached = _read_diagnostics_cache()
-        if cached.get("state") in {"ready", "extension_disconnected", "check_failed"}:
+        if cached.get("state") in {
+            "ready",
+            "extension_disconnected",
+            "execution_unresponsive",
+            "check_failed",
+        }:
             result.update({
                 "healthy": cached.get("state") in {"ready", "extension_disconnected"},
                 "ready": bool(cached.get("ready")),
@@ -350,6 +542,26 @@ def browser_skill_status(run_diagnostics=False):
         "extension_connected": extension_connected,
     }
     if extension_connected is True and doctor["returncode"] == 0:
+        probe = browser_skill_execution_probe()
+        result["diagnostics"]["probe"] = probe
+        if not probe.get("ok"):
+            result.update({
+                "healthy": False,
+                "ready": False,
+                "health_error": (
+                    f"{probe.get('error') or '浏览器执行通道无响应'} "
+                    "请重新加载 BrowserSkill 扩展或重启 Chrome/Edge 后再次检查。"
+                ),
+                "state": "execution_unresponsive",
+                "state_text": "执行通道无响应",
+            })
+            _write_diagnostics_cache(result)
+            log_browser_skill_event(
+                "error",
+                operation="probe",
+                error=result["health_error"],
+            )
+            return result
         result.update({
             "healthy": True,
             "ready": True,
@@ -402,7 +614,7 @@ def _safe_extract_zip(archive_path, target_dir):
 def _replace_component_root(staged_root, target_root):
     backup_root = target_root + ".previous"
     if os.path.isdir(backup_root):
-        shutil.rmtree(backup_root)
+        _remove_tree_with_retry(backup_root)
     had_existing = os.path.isdir(target_root)
     if had_existing:
         os.replace(target_root, backup_root)
@@ -413,7 +625,54 @@ def _replace_component_root(staged_root, target_root):
             os.replace(backup_root, target_root)
         raise
     if os.path.isdir(backup_root):
-        shutil.rmtree(backup_root)
+        _remove_tree_with_retry(backup_root)
+
+
+def _remove_tree_with_retry(path, timeout_seconds=5):
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    last_error = None
+    while os.path.isdir(path):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+    if os.path.isdir(path):
+        raise RuntimeError(
+            f"无法删除 BrowserSkill 组件目录，文件可能仍被占用：{last_error}"
+        )
+
+
+def _stop_managed_daemon():
+    executable = browser_skill_executable()
+    if not os.path.isfile(executable):
+        return {"attempted": False, "stopped": True, "exit_code": None, "error": ""}
+    result = _run_bsk(["--json", "--quiet", "daemon", "stop"], timeout=12)
+    text = "\n".join([result["stdout"], result["stderr"]]).strip()
+    lowered = text.lower()
+    already_stopped = any(
+        token in lowered
+        for token in (
+            "not running",
+            "no daemon",
+            "daemon is not registered",
+            "daemon not registered",
+        )
+    )
+    stopped = result["returncode"] == 0 or already_stopped
+    payload = {
+        "attempted": True,
+        "stopped": stopped,
+        "exit_code": result["returncode"],
+        "error": "" if stopped else (text or "无法停止 BrowserSkill daemon。"),
+    }
+    log_browser_skill_event("daemon_stop", **payload)
+    if not stopped:
+        raise RuntimeError(payload["error"])
+    return payload
 
 
 def install_browser_skill(progress_callback=None):
@@ -500,6 +759,8 @@ def install_browser_skill(progress_callback=None):
         if progress_callback:
             progress_callback("正在启用 Tencent BrowserSkill…", 94)
         target_root = browser_skill_root()
+        if os.path.isdir(target_root):
+            _stop_managed_daemon()
         _replace_component_root(install_root, target_root)
         if progress_callback:
             progress_callback("BrowserSkill CLI 已安装，请继续安装并启用浏览器扩展。", 100)
@@ -527,7 +788,8 @@ def uninstall_browser_skill():
     root = browser_skill_root()
     log_browser_skill_event("uninstall", root=root)
     if os.path.isdir(root):
-        shutil.rmtree(root)
+        _stop_managed_daemon()
+        _remove_tree_with_retry(root)
     return browser_skill_status(run_diagnostics=False)
 
 
@@ -542,19 +804,47 @@ def _session_id_from_args(args):
 
 
 def _stop_session_after_interruption(session_id):
+    cleanup = {
+        "attempted": bool(session_id),
+        "session_id": session_id or "",
+        "stopped": False,
+        "exit_code": None,
+        "error": "",
+    }
     if not session_id:
-        return
+        return cleanup
     cleanup = _run_bsk(
         ["--json", "--quiet", "session", "stop", session_id],
         timeout=10,
     )
+    payload = _parse_json_output(cleanup["stdout"], cleanup["stderr"])
+    detail = cleanup["stderr"] or cleanup["stdout"]
+    lowered = detail.lower()
+    already_stopped = (
+        "session is not registered" in lowered
+        or "session" in lowered and "not registered" in lowered
+        or "session" in lowered and "no longer exists" in lowered
+    )
+    stopped = cleanup["returncode"] == 0 or already_stopped
+    result = {
+        "attempted": True,
+        "session_id": session_id,
+        "stopped": stopped,
+        "exit_code": cleanup["returncode"],
+        "already_stopped": already_stopped,
+        "error": "" if stopped else (detail or "BrowserSkill 会话清理失败。"),
+        "result": payload,
+    }
     log_browser_skill_event(
         "session_stop",
         session_id=session_id,
         cleanup=True,
         returncode=cleanup["returncode"],
-        error=cleanup["stderr"] if cleanup["returncode"] else "",
+        stopped=stopped,
+        already_stopped=already_stopped,
+        error=result["error"],
     )
+    return result
 
 
 def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
@@ -574,59 +864,89 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
         }
     command_args = [str(item) for item in (args or [])]
     timeout_seconds = max(1, min(int(timeout_seconds or 120), 1800))
-    started = time.time()
-    process = subprocess.Popen(
-        [browser_skill_executable(), "--json", "--quiet", *command_args],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **subprocess_kwargs_no_window(),
-    )
-    log_browser_skill_event(
-        "command",
-        command=command_args[0] if command_args else "",
-        pid=process.pid,
-    )
-    timed_out = False
-    aborted = False
-    while process.poll() is None:
-        if callable(abort_check) and abort_check():
-            aborted = True
-            process.terminate()
-            break
-        if time.time() - started > timeout_seconds:
-            timed_out = True
-            process.terminate()
-            break
-        time.sleep(0.1)
-    try:
-        stdout, stderr = process.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate()
+    started = time.monotonic()
+    with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
+        mode="w+b"
+    ) as stderr_file:
+        process = subprocess.Popen(
+            [browser_skill_executable(), "--json", "--quiet", *command_args],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            **subprocess_kwargs_no_window(),
+        )
+        log_browser_skill_event(
+            "command",
+            command=command_args[0] if command_args else "",
+            pid=process.pid,
+        )
+        streams = _wait_process_while_monitoring(
+            process,
+            timeout_seconds,
+            abort_check=abort_check,
+        )
+        stdout = _read_redirected_output(stdout_file)
+        stderr = _read_redirected_output(stderr_file)
+    timed_out = streams["timed_out"]
+    aborted = streams["aborted"]
     payload = _parse_json_output(stdout, stderr)
     returncode = process.returncode if process.returncode is not None else -1
+    elapsed_ms = int((time.monotonic() - started) * 1000)
     if aborted or timed_out:
         code = "aborted" if aborted else "timeout"
-        message = "BrowserSkill 命令已由用户中止。" if aborted else "BrowserSkill 命令执行超时。"
+        message = (
+            "BrowserSkill 命令已由用户中止。"
+            if aborted
+            else "BrowserSkill CLI 在 Cowork 外层时限内未结束。"
+        )
         session_id = _session_id_from_args(command_args)
         try:
-            _stop_session_after_interruption(session_id)
+            session_cleanup = _stop_session_after_interruption(session_id)
         except Exception as cleanup_exc:
+            session_cleanup = {
+                "attempted": bool(session_id),
+                "session_id": session_id,
+                "stopped": False,
+                "exit_code": None,
+                "error": str(cleanup_exc),
+            }
             log_browser_skill_event(
                 "error",
                 operation="session_cleanup",
                 session_id=session_id,
                 error=str(cleanup_exc),
             )
+        if session_cleanup.get("stopped"):
+            message += " Cowork 已结束该 BrowserSkill 会话。"
         log_browser_skill_event(
-            "error",
+            "session_cleanup",
+            source=code,
+            attempted=session_cleanup.get("attempted"),
+            session_id=session_cleanup.get("session_id"),
+            stopped=session_cleanup.get("stopped"),
+            exit_code=session_cleanup.get("exit_code"),
+            already_stopped=session_cleanup.get("already_stopped"),
+            error=session_cleanup.get("error") or "",
+        )
+        log_browser_skill_event(
+            "command_finish",
+            command=command_args[0] if command_args else "",
+            ok=False,
+            elapsed_ms=elapsed_ms,
+            returncode=returncode,
+            stdout_chars=len(stdout or ""),
+            stderr_chars=len(stderr or ""),
+            code=code,
+        )
+        log_browser_skill_event(
+            "timeout" if timed_out else "error",
             operation="command",
             code=code,
             command=command_args[0] if command_args else "",
+            elapsed_ms=elapsed_ms,
+            stdout_chars=len(stdout or ""),
+            stderr_chars=len(stderr or ""),
+            cleanup_stopped=session_cleanup.get("stopped"),
         )
         return {
             "status": "incomplete",
@@ -635,15 +955,28 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             "stdout": (stdout or "").strip(),
             "stderr": (stderr or "").strip(),
             "error": {"code": code, "message": message},
-            "elapsed_ms": int((time.time() - started) * 1000),
+            "session_cleanup": session_cleanup,
+            "elapsed_ms": elapsed_ms,
         }
     if returncode != 0:
+        log_browser_skill_event(
+            "command_finish",
+            command=command_args[0] if command_args else "",
+            ok=False,
+            elapsed_ms=elapsed_ms,
+            returncode=returncode,
+            stdout_chars=len(stdout or ""),
+            stderr_chars=len(stderr or ""),
+        )
         log_browser_skill_event(
             "error",
             operation="command",
             code="bsk_command_failed",
             returncode=returncode,
             command=command_args[0] if command_args else "",
+            elapsed_ms=elapsed_ms,
+            stdout_chars=len(stdout or ""),
+            stderr_chars=len(stderr or ""),
         )
         return {
             "status": "incomplete",
@@ -656,13 +989,23 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
                 "message": (stderr or stdout or "BrowserSkill 命令执行失败。").strip(),
                 "exit_code": returncode,
             },
-            "elapsed_ms": int((time.time() - started) * 1000),
+            "elapsed_ms": elapsed_ms,
         }
-    return {
+    result = {
         "status": "completed",
         "result": payload if payload not in ({}, None) else (stdout or "").strip(),
         "artifacts": _collect_artifacts(payload),
         "stderr": (stderr or "").strip(),
         "error": None,
-        "elapsed_ms": int((time.time() - started) * 1000),
+        "elapsed_ms": elapsed_ms,
     }
+    log_browser_skill_event(
+        "command_finish",
+        command=command_args[0] if command_args else "",
+        ok=True,
+        elapsed_ms=elapsed_ms,
+        returncode=returncode,
+        stdout_chars=len(stdout or ""),
+        stderr_chars=len(stderr or ""),
+    )
+    return result

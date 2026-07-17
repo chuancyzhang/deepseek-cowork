@@ -161,7 +161,7 @@ def browser_skill_cli(
             abort_check=lambda: bool(abort_state["aborted"]),
         )
         if result.get("status") == "completed":
-            log_browser_skill_event("finish", command=normalized[:2])
+            log_browser_skill_event("finish", command=normalized[0])
         return _json(result)
     except Exception as exc:
         log_browser_skill_event("error", operation="tool", error=str(exc))

@@ -128,6 +128,14 @@ Rules:
 
 Bundled optional plugins may own both workflow guidance and narrowly scoped tools. For example, the default-off `ai_skills/visualize` plugin exposes generation and publication tools only while enabled; its published HTML fragments are content-addressed, registered per conversation, sandboxed, and rendered read-only from history when the plugin is later disabled.
 
+The default-off `ai_skills/browser-automation` plugin uses Tencent BrowserSkill as
+an external component. Enabling the Skill does not silently download it. The user
+is directed to **Settings → Components & Dependencies → Optional Browser
+Capability**, where Cowork installs a pinned, SHA-256-verified `bsk` CLI and guides
+the user through installing the Chrome/Edge extension. The Skill exposes only the
+parameterized `browser_skill_cli` tool; it does not fall back to Playwright or a
+general-purpose shell.
+
 Cowork loads capabilities from:
 
 - `skills/`: built-in skills

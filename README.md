@@ -48,6 +48,7 @@ The 5.0.1 release baseline is documented here. For the previous detailed release
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
 - **Skill center**: search, filter, enable, configure, and debug skills without restarting. Enable/disable changes take effect without inserting chat messages and do not alter the conversation's explicitly selected Skills.
+- **Real-browser automation**: the default-off `browser-automation` plugin uses Tencent BrowserSkill. After enabling it, install the pinned and SHA-256-verified `bsk` CLI from **Settings → Components & Dependencies → Optional Browser Capability**, install the Chrome/Edge extension, and verify the connection before the AI reads or operates logged-in pages.
 
 ## Skill Model
 
@@ -95,7 +96,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 2. Start a direct chat with its auto-created conversation workspace, or explicitly attach an empty conversation to a project.
 3. Ask the agent to inspect files, edit code, generate reports, or run automation.
 4. For document, spreadsheet, or data-analysis tasks, use the home prompt to open **Settings → Components & dependencies** and install the document and data-analysis toolkits.
-5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`; Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP are bundled as separate optional skills. For Skill-owned MCP capabilities, saving the Skill configuration automatically enables the managed MCP entry; use the separate connection test only when you need to verify tools or diagnose the endpoint.
+5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`. Browser automation directs you to **Settings → Components & Dependencies → Optional Browser Capability** to install BrowserSkill and its Chrome/Edge extension. Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP are bundled as separate optional skills. For Skill-owned MCP capabilities, saving the Skill configuration automatically enables the managed MCP entry; use the separate connection test only when you need to verify tools or diagnose the endpoint.
 6. Use the home **PPT Agent** card or the built-in **PPT Agent** inside the Agent module when you want a focused presentation workflow; choose automatic strategy selection, a web/technical/business/template preference, optional source files, and an optional PPTX template.
 7. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
 8. Maintain long-term context under **Settings → Personality & Memory**, or choose **沉淀为 Skill** from the `+` popover or an assistant response. The two-step flow selects the save mode and source messages, then generates a draft in the background. A persistent task row asks the user to review and save it instead of opening an interrupting preview automatically.

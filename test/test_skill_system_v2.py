@@ -1245,10 +1245,11 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertIn("browser-automation", sm.skill_records)
         self.assertCountEqual(
             sm.get_tools_for_skill("browser-automation"),
-            ["browser_automate", "get_active_tab_info", "visit_and_screenshot"],
+            ["browser_skill_cli"],
         )
         record = sm.skill_records["browser-automation"]
-        self.assertEqual(record["tool_refs"], ["browser_automate", "get_active_tab_info", "visit_and_screenshot"])
+        self.assertEqual(record["tool_refs"], ["browser_skill_cli"])
+        self.assertEqual(record["spec"].get("python_dependencies"), [])
 
     def test_builtin_ppt_agent_ai_skills_load_with_resources(self):
         for skill_name in ("guizang-ppt-skill", "frontend-slides", "huashu-design"):

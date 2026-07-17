@@ -1,12 +1,10 @@
 import importlib.util
 import json
 import os
-import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _load_module():
@@ -23,44 +21,84 @@ class BrowserAutomationUnitTests(unittest.TestCase):
     def setUpClass(cls):
         cls.module = _load_module()
 
-    def test_rejects_invalid_session_mode_before_launch(self):
-        payload = json.loads(self.module.browser_automate([{"action": "observe"}], session_mode="shared"))
+    def test_rejects_shell_command_string(self):
+        payload = json.loads(self.module.browser_skill_cli("snapshot --session abcd"))
         self.assertEqual(payload["status"], "incomplete")
-        self.assertIn("session_mode", payload["error"]["message"])
+        self.assertIn("JSON array", payload["error"]["message"])
 
-    def test_rejects_invalid_session_id_before_launch(self):
-        payload = json.loads(self.module.browser_automate([{"action": "observe"}], session_id="../escape"))
+    def test_rejects_unsupported_command(self):
+        payload = json.loads(self.module.browser_skill_cli(["daemon", "start"]))
         self.assertEqual(payload["status"], "incomplete")
-        self.assertIn("session_id", payload["error"]["message"])
+        self.assertIn("unsupported", payload["error"]["message"])
 
     def test_file_url_must_stay_inside_workspace(self):
         with tempfile.TemporaryDirectory() as workspace:
             inside = os.path.join(workspace, "page.html")
             outside = os.path.abspath(os.path.join(workspace, "..", "outside.html"))
-            self.assertEqual(self.module._validate_url(self.module.Path(inside).as_uri(), workspace), self.module.Path(inside).as_uri())
-            with self.assertRaises(ValueError):
-                self.module._validate_url(self.module.Path(outside).as_uri(), workspace)
+            normalized = self.module._normalize_args(
+                ["navigate", Path(inside).as_uri()],
+                workspace,
+            )
+            self.assertEqual(normalized[0], "navigate")
+            with self.assertRaisesRegex(ValueError, "file URL"):
+                self.module._normalize_args(
+                    ["navigate", Path(outside).as_uri()],
+                    workspace,
+                )
 
-    def test_existing_mode_requires_explicit_chrome_debugging(self):
-        state = {"lock": self.module.threading.Lock(), "process": None, "profile_dir": "", "mode": "", "endpoint": ""}
-        with patch.object(self.module, "_chrome_profile_candidates", return_value=[]):
-            with self.assertRaisesRegex(RuntimeError, "chrome://inspect"):
-                self.module._ensure_endpoint(state, "existing", playwright=None)
+    def test_screenshot_output_must_stay_inside_allowed_roots(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            inside = os.path.join(workspace, "images", "page.png")
+            normalized = self.module._normalize_args(
+                ["screenshot", "--out", inside, "--session", "abcd"],
+                workspace,
+            )
+            self.assertEqual(normalized[2], os.path.abspath(inside))
+            outside = os.path.abspath(os.path.join(workspace, "..", "outside.png"))
+            with self.assertRaisesRegex(ValueError, "screenshot output"):
+                self.module._normalize_args(
+                    ["screenshot", "--out", outside, "--session", "abcd"],
+                    workspace,
+                )
 
-    def test_visit_and_screenshot_uses_isolated_session(self):
-        with patch.object(self.module, "browser_automate", return_value='{"status":"completed"}') as automate:
-            result = self.module.visit_and_screenshot("https://example.com", workspace_dir="C:\\workspace")
-        self.assertEqual(json.loads(result)["status"], "completed")
-        self.assertEqual(automate.call_args.kwargs["session_mode"], "isolated")
-        self.assertEqual(automate.call_args.args[0][0]["action"], "goto")
+    def test_sensitive_evaluate_is_rejected(self):
+        for expression in (
+            "document.cookie",
+            "localStorage.getItem('token')",
+            "sessionStorage.clear()",
+            "fetch('/api', {headers: {Authorization: 'x'}})",
+        ):
+            with self.subTest(expression=expression):
+                with self.assertRaisesRegex(ValueError, "cannot read"):
+                    self.module._normalize_args(["evaluate", expression], os.getcwd())
 
-    def test_explicit_exports_match_skill_surface(self):
+    def test_cli_uses_structured_adapter(self):
+        completed = {"status": "completed", "result": {"ok": True}}
+        with patch.object(self.module, "run_browser_skill_cli", return_value=completed) as run:
+            payload = json.loads(
+                self.module.browser_skill_cli(
+                    ["snapshot", "--session", "abcd"],
+                    timeout_seconds=33,
+                    workspace_dir=os.getcwd(),
+                )
+            )
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(
+            run.call_args.args[0],
+            ["snapshot", "--session", "abcd"],
+        )
+        self.assertEqual(run.call_args.kwargs["timeout_seconds"], 33)
+
+    def test_explicit_export_matches_new_skill_surface(self):
         self.assertEqual(
             [item["name"] for item in self.module.TOOL_EXPORTS],
-            ["browser_automate", "get_active_tab_info", "visit_and_screenshot"],
+            ["browser_skill_cli"],
         )
         self.assertTrue(self.module.TOOL_EXPORTS[0]["destructive"])
-        self.assertTrue(self.module.TOOL_EXPORTS[1]["read_only"])
+        self.assertEqual(
+            self.module.TOOL_EXPORTS[0]["metadata"]["component_id"],
+            "browser-skill",
+        )
 
 
 if __name__ == "__main__":

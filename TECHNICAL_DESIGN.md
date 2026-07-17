@@ -137,7 +137,8 @@ Cowork 采用交错式推理流程：
 - 桌面 UI 基于 PySide6
 - 模型接入支持 OpenAI-compatible 与 Anthropic
 - 打包模式保留 Python 基础运行时和 Git Bash
-- Node.js、文档读取、浏览器自动化和金融数据等依赖改为设置中的可选组件；内置金融 Skill 保持数据查询边界，不再默认内置策略回测能力
+- Node.js、文档读取和金融数据等 Python/Node 依赖改为设置中的可选组件；浏览器自动化独立使用应用管理的 Tencent BrowserSkill `bsk` CLI 与用户确认安装的 Chrome/Edge 扩展，不再依赖 Playwright/UIAutomation
+- BrowserSkill CLI 固定版本与 SHA-256，采用临时目录下载、路径安全解压、候选验证和原子目录替换；`browser_skill_cli` 仅接受参数数组并统一处理 JSON、超时、取消、截图路径和敏感 `evaluate` 拒绝，组件缺失或扩展未通过 `doctor` 时明确失败
 - 打包版内置 MCP client 运行时，便于直接接入 MCP tools
 
 ## 9. 设计取舍

@@ -113,6 +113,14 @@ from core.runtime_components import (
     uninstall_node_runtime,
     uninstall_toolkit,
 )
+from core.browser_skill_component import (
+    BROWSER_SKILL_COMPONENT_ID,
+    BROWSER_SKILL_EXTENSION_URL,
+    browser_skill_status,
+    install_browser_skill,
+    log_browser_skill_event,
+    uninstall_browser_skill,
+)
 from core.llm.factory import LLMFactory
 from core.memory_update import (
     DEFAULT_MEMORY_BATCH_TOKEN_LIMIT,
@@ -6407,6 +6415,20 @@ class RuntimeComponentWorker(QThread):
             progress = lambda message, percent: self.progress_signal.emit(str(message), int(percent))
             if self.component_id == "node":
                 result = install_node_runtime(self.source, progress) if self.action in {"install", "repair"} else uninstall_node_runtime()
+            elif self.component_id == BROWSER_SKILL_COMPONENT_ID:
+                if self.action in {"install", "repair"}:
+                    result = install_browser_skill(progress)
+                elif self.action == "check":
+                    progress("正在检查 BrowserSkill CLI、daemon 和浏览器扩展…", 20)
+                    result = browser_skill_status(run_diagnostics=True)
+                    if result.get("state") == "check_failed":
+                        raise RuntimeError(
+                            result.get("health_error")
+                            or "BrowserSkill 连接检查失败，请查看诊断信息后重试。"
+                        )
+                    progress(result.get("state_text") or "检查完成", 100)
+                else:
+                    result = uninstall_browser_skill()
             else:
                 result = install_toolkit(self.component_id, self.source, progress, force=self.action == "repair") if self.action in {"install", "repair"} else uninstall_toolkit(self.component_id)
             self.finished_signal.emit({"ok": True, "component_id": self.component_id, "result": result})
@@ -6469,11 +6491,14 @@ class ComponentTaskManager(QObject):
             "install": "安装",
             "repair": "修复",
             "uninstall": "卸载",
+            "check": "检查",
         }.get(action, action)
 
     def _component_name(self, component_id):
         if component_id == "node":
             return "Node.js"
+        if component_id == BROWSER_SKILL_COMPONENT_ID:
+            return "Tencent BrowserSkill"
         return (TOOLKITS.get(component_id) or {}).get("name") or component_id
 
     def _append_log(self, component_id, message):
@@ -6950,6 +6975,7 @@ class SettingsDialog(QDialog):
             "组件与依赖",
             "按需安装运行环境与常用工具包；其他 Skill 依赖仍会在首次使用时自动准备。",
         )
+        self.components_scroll_area = components_page
         self.component_task_manager = getattr(self._main, "component_task_manager", None)
         self.source_test_worker = None
         self.component_rows = {}
@@ -7013,6 +7039,14 @@ class SettingsDialog(QDialog):
 
         runtime_group, runtime_group_layout = build_settings_surface("运行环境", "Node.js 不再占用基础分发包体积。", radius=20, show_subtitle=False)
         toolkit_group, toolkit_group_layout = build_settings_surface("工具包", "工具包安装到沙箱 Python，可被代码执行和相关 Skill 共同使用。", radius=20, show_subtitle=False)
+        browser_group, browser_group_layout = build_settings_surface(
+            "可选浏览器能力",
+            "安装 Tencent BrowserSkill CLI 后，还需要在 Chrome 或 Edge 中安装扩展并确认连接。",
+            radius=20,
+            show_subtitle=False,
+        )
+        browser_group.setObjectName("BrowserSkillComponentSection")
+        self.browser_skill_component_section = browser_group
 
         def add_component_row(container, component_id, title_text, detail_text, status):
             panel = QFrame()
@@ -7056,6 +7090,33 @@ class SettingsDialog(QDialog):
             container.addWidget(panel)
             self.update_component_row(component_id, status)
 
+        add_component_row(
+            browser_group_layout,
+            BROWSER_SKILL_COMPONENT_ID,
+            "Tencent BrowserSkill",
+            "让 AI 在独立 Agent 窗口中读取和操作真实登录态网页。插件默认关闭，启用后仍需完成此处安装。",
+            browser_skill_status(run_diagnostics=False),
+        )
+        browser_actions = QHBoxLayout()
+        browser_actions.addStretch()
+        self.browser_skill_extension_btn = QPushButton("安装浏览器扩展")
+        self.browser_skill_extension_btn.setObjectName("SecondaryBtn")
+        self.browser_skill_extension_btn.clicked.connect(
+            lambda _checked=False: self.open_browser_skill_extension_page()
+        )
+        self.browser_skill_check_btn = QPushButton("检查连接")
+        self.browser_skill_check_btn.setObjectName("SecondaryBtn")
+        self.browser_skill_check_btn.clicked.connect(
+            lambda _checked=False: self.start_component_action("check", BROWSER_SKILL_COMPONENT_ID)
+        )
+        browser_actions.addWidget(self.browser_skill_extension_btn)
+        browser_actions.addWidget(self.browser_skill_check_btn)
+        browser_group_layout.addLayout(browser_actions)
+        self.update_component_row(
+            BROWSER_SKILL_COMPONENT_ID,
+            browser_skill_status(run_diagnostics=False),
+        )
+
         add_component_row(runtime_group_layout, "node", "Node.js", "JavaScript 执行、npm / npx 与 Node Skill", node_runtime_status())
         for toolkit_id, spec in TOOLKITS.items():
             packages = "、".join(spec["packages"])
@@ -7063,6 +7124,7 @@ class SettingsDialog(QDialog):
             add_component_row(toolkit_group_layout, toolkit_id, spec["name"], f"{spec['description']}\n关联：{skills} · 包：{packages}", toolkit_status(toolkit_id))
         runtime_group_layout.addStretch()
         toolkit_group_layout.addStretch()
+        components_layout.addWidget(browser_group)
         components_layout.addWidget(runtime_group)
         components_layout.addWidget(toolkit_group)
 
@@ -7496,6 +7558,22 @@ class SettingsDialog(QDialog):
             raise ValueError(f"未找到设置页：{initial_page_label}")
         self.nav_list.setCurrentItem(matches[0])
 
+    def focus_component(self, component_id):
+        if str(component_id or "") != BROWSER_SKILL_COMPONENT_ID:
+            return False
+        section = getattr(self, "browser_skill_component_section", None)
+        scroll_area = getattr(self, "components_scroll_area", None)
+        row = (getattr(self, "component_rows", {}) or {}).get(BROWSER_SKILL_COMPONENT_ID)
+        if section is None or scroll_area is None or not row:
+            return False
+
+        def reveal():
+            scroll_area.ensureWidgetVisible(section, 24, 24)
+            row["action"].setFocus(Qt.OtherFocusReason)
+
+        QTimer.singleShot(0, reveal)
+        return True
+
     def refresh_archive_lists(self):
         def format_time(timestamp):
             if not timestamp:
@@ -7634,6 +7712,23 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "下载源测试失败", result.get("error") or "无法连接下载源。")
         self.source_test_worker = None
 
+    def _component_status(self, component_id):
+        if component_id == "node":
+            return node_runtime_status()
+        if component_id == BROWSER_SKILL_COMPONENT_ID:
+            return browser_skill_status(run_diagnostics=False)
+        return toolkit_status(component_id)
+
+    def open_browser_skill_extension_page(self):
+        if QDesktopServices.openUrl(QUrl(BROWSER_SKILL_EXTENSION_URL)):
+            return True
+        ProductMessageBox.warning(
+            self,
+            "无法打开浏览器扩展页面",
+            "系统未能打开 Chrome Web Store。请检查默认浏览器设置后重试。",
+        )
+        return False
+
     def update_component_row(self, component_id, status):
         row = self.component_rows.get(component_id)
         if not row:
@@ -7645,19 +7740,42 @@ class SettingsDialog(QDialog):
         suffix = f" · {format_file_size(size)}" if size else ""
         source = status.get("source") or ""
         source_suffix = f" · {source}" if source else ""
-        state_text = "需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装"))
+        state_text = (
+            str(status.get("state_text") or "")
+            if component_id == BROWSER_SKILL_COMPONENT_ID
+            else ""
+        )
+        if not state_text:
+            state_text = "需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装"))
         if needs_repair and status.get("health_error"):
+            state_text += f"：{status['health_error']}"
+        elif component_id == BROWSER_SKILL_COMPONENT_ID and status.get("health_error"):
             state_text += f"：{status['health_error']}"
         row["status"].setText(state_text + suffix + source_suffix)
         row["action"].setText("更新" if needs_update else ("卸载" if installed else "安装"))
         row["repair"].setVisible(installed)
         row["progress"].setVisible(False)
+        if component_id == BROWSER_SKILL_COMPONENT_ID and hasattr(self, "browser_skill_extension_btn"):
+            self.browser_skill_extension_btn.setEnabled(installed)
+            self.browser_skill_check_btn.setEnabled(installed)
 
     def toggle_component(self, component_id):
-        status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
+        status = self._component_status(component_id)
         action = "repair" if status.get("needs_update") or status.get("needs_repair") else ("uninstall" if status.get("installed") else "install")
         if action == "uninstall":
-            reply = QMessageBox.question(self, "卸载组件", "确定卸载该组件？相关能力下次使用时可能重新安装依赖。", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            uninstall_message = (
+                "确定卸载 Tencent BrowserSkill CLI？浏览器自动化插件会保持启用，"
+                "但在手动重新安装并连接扩展前不可用。"
+                if component_id == BROWSER_SKILL_COMPONENT_ID
+                else "确定卸载该组件？相关能力下次使用时可能重新安装依赖。"
+            )
+            reply = QMessageBox.question(
+                self,
+                "卸载组件",
+                uninstall_message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
             if reply != QMessageBox.Yes:
                 return
         self.start_component_action(action, component_id)
@@ -7669,7 +7787,11 @@ class SettingsDialog(QDialog):
         if self.component_task_manager.has_task(component_id):
             return
         try:
-            source = self._current_component_source("node" if component_id == "node" else "python") if action in {"install", "repair"} else {}
+            source = (
+                self._current_component_source("node" if component_id == "node" else "python")
+                if action in {"install", "repair"} and component_id != BROWSER_SKILL_COMPONENT_ID
+                else {}
+            )
         except Exception as exc:
             QMessageBox.warning(self, "组件管理", str(exc))
             return
@@ -7681,13 +7803,16 @@ class SettingsDialog(QDialog):
         for component_id, row in self.component_rows.items():
             task = tasks.get(component_id)
             if not task:
-                status = node_runtime_status() if component_id == "node" else toolkit_status(component_id)
+                status = self._component_status(component_id)
                 self.update_component_row(component_id, status)
                 row["action"].setEnabled(True)
                 row["repair"].setEnabled(True)
                 continue
             row["action"].setEnabled(False)
             row["repair"].setEnabled(False)
+            if component_id == BROWSER_SKILL_COMPONENT_ID:
+                self.browser_skill_extension_btn.setEnabled(False)
+                self.browser_skill_check_btn.setEnabled(False)
             state = task.get("state")
             if state == "queued":
                 position = int(task.get("queue_position") or 0)
@@ -8704,6 +8829,8 @@ class SkillsCenterDialog(QDialog):
         tab_key = skill_center_tab_key(skill) if skill else self.current_tab_key
         self._render_tab(tab_key)
         self._refresh_count_label()
+        if enabled and name == "browser-automation" and hasattr(window, "offer_browser_skill_setup"):
+            window.offer_browser_skill_setup()
 
     def toggle_selection_mode(self):
         self.selection_mode = not self.selection_mode
@@ -25365,8 +25492,51 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.input_field.setFocus)
         return True
 
-    def open_settings(self, initial_page_label=None):
-        return self.show_product_page(self.PAGE_SETTINGS, section=initial_page_label)
+    def open_settings(self, initial_page_label=None, target_component=None):
+        opened = self.show_product_page(self.PAGE_SETTINGS, section=initial_page_label)
+        if not opened or not target_component:
+            return opened
+        page = (getattr(self, "product_pages", {}) or {}).get(self.PAGE_SETTINGS)
+        if page is not None and hasattr(page, "focus_component"):
+            page.focus_component(target_component)
+        return opened
+
+    def offer_browser_skill_setup(self):
+        status = browser_skill_status(run_diagnostics=False)
+        log_browser_skill_event(
+            "enable",
+            installed=bool(status.get("installed")),
+            ready=bool(status.get("ready")),
+            state=status.get("state"),
+        )
+        if status.get("ready"):
+            return False
+        if not status.get("installed"):
+            message = (
+                "浏览器自动化需要 Tencent BrowserSkill。"
+                "可前往设置下载安装相关能力。"
+            )
+        else:
+            message = (
+                "Tencent BrowserSkill CLI 已安装，但浏览器扩展尚未确认连接。"
+                "可前往设置安装扩展并检查连接。"
+            )
+        choice = ProductMessageDialog(
+            "配置浏览器自动化",
+            message,
+            tone="information",
+            buttons=[
+                ("稍后", "later", "secondary", False),
+                ("前往设置", "settings", "primary", True),
+            ],
+            parent=self,
+        ).exec_result("later")
+        if choice == "settings":
+            self.open_settings(
+                "组件与依赖",
+                target_component=BROWSER_SKILL_COMPONENT_ID,
+            )
+        return True
 
     def notify_component_task(self, title, message):
         if getattr(self, "tray_icon", None):

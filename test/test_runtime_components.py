@@ -35,7 +35,7 @@ class TestRuntimeComponents(unittest.TestCase):
     def test_toolkit_catalog_has_expected_groups(self):
         self.assertEqual(
             set(runtime_components.TOOLKITS),
-            {"documents", "data-analysis", "finance", "browser-automation", "web-research"},
+            {"documents", "data-analysis", "finance", "web-research"},
         )
         self.assertIn("scikit-learn", runtime_components.TOOLKITS["data-analysis"]["packages"])
         self.assertEqual(runtime_components.TOOLKITS["finance"]["skills"], ["financial-data-akshare"])

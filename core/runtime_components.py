@@ -52,13 +52,6 @@ TOOLKITS = {
         "imports": ["pandas", "akshare"],
         "skills": ["financial-data-akshare"],
     },
-    "browser-automation": {
-        "name": "浏览器自动化工具包",
-        "description": "连接并自动化已授权的 Chrome 会话",
-        "packages": ["playwright", "uiautomation"],
-        "imports": ["playwright", "uiautomation"],
-        "skills": ["browser-automation"],
-    },
     "web-research": {
         "name": "网页研究工具包",
         "description": "网页搜索、解析与结构化采集",

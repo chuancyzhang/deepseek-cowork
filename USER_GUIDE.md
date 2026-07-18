@@ -1,12 +1,12 @@
 # DeepSeek Cowork 使用指南
 
-本指南适用于 DeepSeek Cowork **5.0.1**，介绍安装、模型配置、基础使用方式，以及如何从 AI 回复生成可编辑的 PPTX 文件。
+本指南适用于 DeepSeek Cowork **5.0.2**，介绍安装、模型配置、基础使用方式，以及如何从 AI 回复生成可编辑的 PPTX 文件。
 
 面向零技术基础用户、并预留截图占位符的 Word 版手册见 [USER_GUIDE.docx](USER_GUIDE.docx)。Word 版中的截图框均带有编号、建议画面和替换说明，可在后续补拍界面后直接插入。
 
 首次安装或升级前，请先阅读 [5.0.0 发布说明](RELEASE_NOTES_5.0.0.md) 中的兼容性和发布前检查。
 
-> 当前界面截图基于 5.0.1 的浅色 Linear 风格工作台。后续版本的按钮位置或文案可能略有调整，请以实际界面为准。
+> 当前界面截图基于 5.0.2 的浅色 Linear 风格工作台。后续版本的按钮位置或文案可能略有调整，请以实际界面为准。
 
 ## 目录
 
@@ -62,6 +62,7 @@ DeepSeek Cowork 需要配置可用的大模型 API 后才能正常执行任务�
 
    - `gpt-5.6` 是路由到 GPT‑5.6 Sol 的别名；
    - OpenAI 兼容模型可逐个选择 **Chat Completions** 或 **Responses**；新建 `gpt-5.6`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 时默认选择 Responses，其他模型默认选择 Chat Completions；
+   - Responses 请求会自动携带稳定的会话级 `prompt_cache_key`；Chat Completions 保持原有服务配置行为；
    - GPT‑5.6 可配置从“无”到“极限”的推理强度，常规任务可从“中”开始验证。
 
    ![填写模型配置](images/user-guide/08-model-configuration.png)

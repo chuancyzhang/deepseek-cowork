@@ -1,6 +1,6 @@
 # DeepSeek Cowork Roadmap
 
-Last updated: `2026-07-14`
+Last updated: `2026-07-18`
 
 This file is a shared project-status note for both the team and AI agents.
 It records where the project is now, what has already landed, and what we are likely to focus on next.
@@ -8,9 +8,9 @@ Treat it as the current working map, not a strict release contract.
 
 ## Current Phase
 
-**Phase:** 5.0.1 release hardening and post-release stabilization
+**Phase:** 5.0.2 release hardening and post-release stabilization
 
-The 5.0.1 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
+The 5.0.2 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
 
 - making the desktop experience feel more like a polished product and less like an internal tool
 - stabilizing long-running agent, automation, and tool-use workflows
@@ -61,9 +61,10 @@ For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.0.md](REL
 - Keep the release notes, user guide, and screenshots aligned with the shipped UI
 - Preserve behavior while making polish changes low-risk
 
-## 5.0.1 Release Baseline
+## 5.0.2 Release Baseline
 
-- Version source is centralized in `core/app_version.py` and currently reads `5.0.1`
+- Version source is centralized in `core/app_version.py` and currently reads `5.0.2`
+- Responses requests automatically send the conversation-scoped `prompt_cache_key`; Chat Completions retains its existing provider-configured behavior
 - README, product documentation, user guide, technical design, Skill system, and this roadmap link to the release notes and current baseline
 - Release validation covers packaged startup, model configuration, workspace boundaries, SQLite history recovery, deliverable conversion, PPT Agent, Skill/MCP configuration, automation runs, and diagnostic logs
 - Any behavior change that affects a user-facing flow must update the affected Markdown document in the same change

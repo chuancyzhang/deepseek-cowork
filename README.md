@@ -6,9 +6,9 @@ DeepSeek Cowork is a Windows desktop agent workspace built around DeepSeek-style
 
 This project is a personal exploration and is not an official DeepSeek product.
 
-Current app version: **5.0.1**
+Current app version: **5.0.2**
 
-The 5.0.1 release baseline is documented here. For the previous detailed release notes and compatibility checklist, see [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md).
+The 5.0.2 release baseline is documented here. For the previous detailed release notes and compatibility checklist, see [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md).
 
 ## What It Does
 
@@ -27,7 +27,7 @@ The 5.0.1 release baseline is documented here. For the previous detailed release
 ## Product Surface
 
 - **Conversation + project model**: direct chats get their own workspace under a configurable application-data root (`%APPDATA%\DeepSeekCowork` when installed or `user_data` in portable mode), or you can explicitly bind an empty conversation to a project workspace. Opening, adding, dragging, or browsing a project updates the file view without silently moving an existing conversation into that project; newly submitted conversations appear in the sidebar immediately while the background save queue catches up.
-- **OpenAI protocols**: each OpenAI-compatible model can use Chat Completions or Responses independently. Newly added GPT-5.6 models default to Responses; other models remain on Chat Completions unless changed explicitly.
+- **OpenAI protocols**: each OpenAI-compatible model can use Chat Completions or Responses independently. Newly added GPT-5.6 models default to Responses; other models remain on Chat Completions unless changed explicitly. Responses requests automatically send the stable conversation-scoped `prompt_cache_key`; Chat Completions keeps its existing provider-configured behavior.
 - **Conversation-scoped model choice**: the model selector is saved per conversation and applies to the next turn. All model channels may be removed and saved; an unconfigured composer routes the user to Model services.
 - **Natural conversational reasoning**: without in-flight guidance, every reasoning/tool round and stage reply stays inside one assistant-turn container in real execution order. Each stage keeps its own compact “deep thinking · duration” disclosure and a short hairline divider; empty process areas neither draw a timeline nor reserve height. Stage replies remain readable but have no copy, office-draft, or other message actions; only the final answer exposes those actions. In-flight guidance remains a dedicated conversational boundary and starts a new assistant container at its actual send position.
 - **Compact composer tools**: the anchored `+` popover is a single in-window overlay that adds files, prioritizes skills, or captures experience as a Skill. Only one product popover remains active at a time, closed popovers are released, and every action-row label is parented before it becomes visible so opening the panel cannot flash native helper windows.

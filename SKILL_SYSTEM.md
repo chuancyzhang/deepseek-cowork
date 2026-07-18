@@ -1,8 +1,8 @@
 # Skill System
 
-Current implementation sync: app version **5.0.1**
+Current implementation sync: app version **5.0.2**
 
-This document is aligned with the 5.0.1 release baseline. See [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md) for the previous user-facing scope and compatibility notes.
+This document is aligned with the 5.0.2 release baseline. See [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md) for the previous user-facing scope and compatibility notes.
 
 ## 1. Core Idea
 

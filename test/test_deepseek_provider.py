@@ -159,6 +159,35 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(chunks[3], {"type": "content", "content": "完成"})
         self.assertEqual(chunks[4]["usage"]["cached_input_tokens"], 60)
 
+    def test_responses_protocol_sends_prompt_cache_key_without_explicit_param_config(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = []
+
+        list(provider.chat_stream(
+            [{"role": "user", "content": "hello"}],
+            prompt_cache_key="conv-1",
+        ))
+
+        params = client.responses.create.call_args.kwargs
+        self.assertEqual(params["prompt_cache_key"], "conv-1")
+
+    def test_responses_protocol_omits_empty_prompt_cache_key(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        client.responses.create.return_value = []
+
+        list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        params = client.responses.create.call_args.kwargs
+        self.assertNotIn("prompt_cache_key", params)
+
     def test_responses_protocol_maps_tool_history_to_typed_items(self):
         provider, _client = self._build_provider(
             base_url="https://api.openai.com/v1",

@@ -1,8 +1,8 @@
 # DeepSeek Cowork 技术设计
 
-当前应用版本：**5.0.1**
+当前应用版本：**5.0.2**
 
-本设计以 5.0.1 发布基线为准；更早的面向用户范围、兼容性和验收清单见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。
+本设计以 5.0.2 发布基线为准；更早的面向用户范围、兼容性和验收清单见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。
 
 ## 1. 设计目标
 
@@ -72,7 +72,7 @@ Cowork 采用交错式推理流程：
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，支持文本、密钥和带默认值的固定选项，运行脚本或工具时按字段声明显式注入环境变量。`mcp_server_presets` 由 `SkillManager` 渲染为 `stdio` 或 Streamable HTTP server 并按 ID upsert；`skill_python` runtime 复用 Skill 隔离依赖目录，托管认证只持久化配置引用，access/refresh token 留在进程内存并在请求前解析。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
-- OpenAI 兼容模型在模型级保存 `api_protocol=chat_completions|responses`；旧配置缺少字段时保持 Chat Completions，新建 GPT‑5.6 默认 Responses。Responses provider 将消息、函数调用和函数结果转换为 typed Items，并把流式正文、reasoning summary、函数参数、用量和错误重新投影为现有统一事件协议；GPT‑5.6 可配置 `none/low/medium/high/xhigh/max` 推理强度。
+- OpenAI 兼容模型在模型级保存 `api_protocol=chat_completions|responses`；旧配置缺少字段时保持 Chat Completions，新建 GPT‑5.6 默认 Responses。Responses provider 将消息、函数调用和函数结果转换为 typed Items，把 Worker 提供的会话级 key 直接写入顶层 `prompt_cache_key`，并把流式正文、reasoning summary、函数参数、用量和错误重新投影为现有统一事件协议；Chat Completions 继续仅按原有 `prompt_cache_key_param` 配置注入缓存字段；GPT‑5.6 可配置 `none/low/medium/high/xhigh/max` 推理强度。
 - Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。浮层通过鼠标全局坐标命中自身与锚点，不能依赖事件接收对象一定是 `QWidget`，以兼容 Windows 原生事件分发。指定能力以会话态 `selected_skill_names` 为唯一数据源。
 - 新会话首次发送在完成全部提交预检后、插入用户消息前，同步把空状态从布局移除、隐藏并 `deleteLater()`；后续布局重排和 `processEvents` 不得再次绘制它。普通发送和模型提问只使用会话内交互卡，旧模态入口显式报错而不创建 `QDialog`。Windows daemon/网关进程统一通过 `core.process_utils` 设置 `CREATE_NO_WINDOW` 与隐藏启动信息；首次提交记录 submit/start/run/finish/error 及 committed/rejected，延迟检查任何新增可见顶层窗口并记录具体窗口类名、对象名和标题。
 - 会话级 `ui_timeline_v1` 事件账本继续按原顺序保存 Thinking、工具、正文片段和运行中引导，并记录 `group_id`、`stage_id` 和 `reply_kind` 以便实时恢复。所有历史消息都由投影层直接根据标准 OpenAI-compatible 顺序 `assistant.tool_calls → tool → assistant` 重建统一轮次：每个阶段保留独立的思考开关，`AssistantTurnGroup` 统一管理短细分隔线、空阶段可见性与最终操作栏；展开区没有推理或工具时不绘制时间线，也不保留布局高度。携带 `tool_calls` 的 assistant 正文属于阶段回复且不显示消息动作，终止工具循环且正文非空的 assistant 属于最终回复并独占操作栏；引导关闭当前容器并开启新的容器。停止、错误或最终正文为空时显示明确状态并关闭消息动作，不能把前一阶段正文提升为最终答复。工具开始与结果仍通过同一 `tool_call_id` 原位更新，UI 投影字段在进入 Worker 前剥离，原始角色与工具消息结构保持不变。

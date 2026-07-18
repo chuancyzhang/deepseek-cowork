@@ -385,7 +385,7 @@ class OpenAIProvider(LLMProvider):
             params["tools"] = api_tools
         if self.reasoning_effort:
             params["reasoning"] = {"effort": self.reasoning_effort}
-        if prompt_cache_key and self.prompt_cache_key_param == "prompt_cache_key":
+        if prompt_cache_key:
             params["prompt_cache_key"] = str(prompt_cache_key)
 
         stream = self.client.responses.create(**params)

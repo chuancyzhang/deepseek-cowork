@@ -787,6 +787,10 @@ class ThemeSettingsPanel(QWidget):
         self._preview_active = False
         self._preview_signature = None
         previous = self._snapshot
+        theme_changed = (
+            self._active_theme_id != previous.active_theme_id
+            or self._themes != [copy.deepcopy(item) for item in previous.themes]
+        )
         append_theme_log(
             self.repository.data_dir,
             "settings_save_submit",
@@ -820,6 +824,11 @@ class ThemeSettingsPanel(QWidget):
                 self.last_commit_warning = (
                     "设置和主题已保存，但当前界面刷新失败。"
                     "请重启应用以载入新主题。"
+                )
+            elif theme_changed:
+                self.last_commit_warning = (
+                    "外观设置已保存并应用。"
+                    "建议重启应用，以确保新主题完整生效。"
                 )
             append_theme_log(
                 self.repository.data_dir,

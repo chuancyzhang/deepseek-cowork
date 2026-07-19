@@ -170,6 +170,25 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
 
         add_toast.assert_not_called()
 
+    def test_preview_bar_save_recommends_restart_after_success(self):
+        self.manager.repository.write_preview(
+            name="AI 主题",
+            overrides={},
+            default_tokens={},
+            session_id="ai-session",
+        )
+        with patch.object(
+            self.manager,
+            "commit_current_preview",
+            return_value={"theme": {"name": "AI 主题"}},
+        ), patch.object(self.window, "add_system_toast") as add_toast:
+            self.window._save_theme_preview_from_bar()
+
+        message, level = add_toast.call_args.args
+        self.assertEqual(level, "warning")
+        self.assertIn("已保存并启用", message)
+        self.assertIn("建议重启应用", message)
+
 
 if __name__ == "__main__":
     unittest.main()

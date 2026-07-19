@@ -33,6 +33,7 @@
     "Inspect the active theme and token schema.",
     "Validate a minimal override set.",
     "Preview changes before persistence.",
-    "Save or activate only after explicit user acceptance."
+    "Save or activate only after explicit user acceptance.",
+    "Recommend restarting Cowork after a theme is saved and activated."
   ]
 }

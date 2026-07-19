@@ -82,6 +82,8 @@ class ThemeToolTests(unittest.TestCase):
             )
         self.assertEqual(saved["status"], "ok")
         self.assertEqual(repository.load().active_theme_id, saved["theme"]["id"])
+        self.assertTrue(saved["restart_recommended"])
+        self.assertIn("restarting Cowork", saved["content"])
 
     def test_cancelled_save_keeps_preview(self):
         preview = self.manager.call_tool(
@@ -103,6 +105,27 @@ class ThemeToolTests(unittest.TestCase):
             )
         self.assertEqual(saved["status"], "cancelled")
         self.assertIsNotNone(ThemeRepository(self.temp_dir).load_preview())
+
+    def test_activate_theme_recommends_restart(self):
+        repository = ThemeRepository(self.temp_dir)
+        theme = repository.upsert_theme(
+            name="可启用主题",
+            overrides={},
+            default_tokens={},
+        )["theme"]
+        with patch(
+            "skills.interaction.impl.request_user_approval",
+            return_value={"interaction_response": {"approved": True, "status": "completed"}},
+        ):
+            activated = self.manager.call_tool(
+                "activate_ui_theme",
+                {"theme_id": theme["id"]},
+                context=self.context,
+            )
+
+        self.assertEqual(activated["status"], "ok")
+        self.assertTrue(activated["restart_recommended"])
+        self.assertIn("restarting Cowork", activated["content"])
 
     def test_patch_preview_increments_revision_and_stale_save_is_rejected(self):
         preview = self.manager.call_tool(

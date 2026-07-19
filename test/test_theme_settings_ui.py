@@ -44,6 +44,12 @@ class ThemeSettingsUiTests(unittest.TestCase):
         snapshot = self.repository.load()
         self.assertEqual(len(snapshot.themes), 1)
         self.assertEqual(snapshot.active_theme_id, draft["active_theme_id"])
+        self.assertIn("建议重启应用", self.panel.last_commit_warning)
+
+    def test_unchanged_appearance_save_does_not_recommend_restart(self):
+        self.panel.commit()
+
+        self.assertEqual(self.panel.last_commit_warning, "")
 
     def test_runtime_refresh_failure_keeps_saved_theme_and_requests_restart(self):
         manager = Mock()

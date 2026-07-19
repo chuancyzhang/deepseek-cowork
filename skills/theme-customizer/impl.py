@@ -380,8 +380,13 @@ def save_ui_theme_preview(
         "theme": result["theme"],
         "path": repository.theme_path(result["theme"]["id"]),
         "active": bool(activate),
+        "restart_recommended": bool(activate),
         "content": f"Theme '{result['theme']['name']}' saved"
-        + (" and activated." if activate else "."),
+        + (
+            " and activated. Recommend restarting Cowork so the new theme takes full effect."
+            if activate
+            else "."
+        ),
     }
 
 
@@ -416,7 +421,11 @@ def activate_ui_theme(theme_id, _context=None):
         "status": "ok",
         "approval": approval,
         "active_theme_id": snapshot.active_theme_id,
-        "content": f"Theme '{theme.get('name')}' activated.",
+        "restart_recommended": True,
+        "content": (
+            f"Theme '{theme.get('name')}' activated. "
+            "Recommend restarting Cowork so the theme takes full effect."
+        ),
     }
 
 

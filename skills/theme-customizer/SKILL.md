@@ -17,10 +17,12 @@ Each saved user theme is one validated JSON file in Cowork's user theme director
 5. Describe the preview briefly and ask what to adjust. Use `patch_ui_theme_preview` with the current `preview_id` and `preview_revision` for incremental changes. Each patch creates a new revision. Use `clear_ui_theme_preview` when the user rejects it.
 6. Call `save_ui_theme_preview` with the exact accepted `preview_id` and `preview_revision` only after the user explicitly accepts that revision. The tool performs its own approval check.
 7. Use `activate_ui_theme` or `delete_ui_theme` only for an explicit request; both tools confirm the action.
+8. After a successful save-and-activate or activation, explicitly recommend restarting Cowork so every existing surface loads the theme completely.
 
 ## Guardrails
 
 - Never claim a theme was applied when a tool returned an error or cancellation.
+- When a successful tool result has `restart_recommended: true`, include the restart recommendation in the final user-facing result.
 - Do not invent token names. Unknown tokens fail validation.
 - Keep body text readable. Treat contrast warnings as actionable, although the user may choose to save.
 - Do not style document, PDF, Office, HTML deliverable, image, or visualization content. You may style their Cowork toolbar, tab, loading/error state, and preview shell.

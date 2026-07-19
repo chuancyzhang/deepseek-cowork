@@ -17809,7 +17809,12 @@ class MainWindow(QMainWindow):
                 if not panels:
                     raise ValueError("外观设置页已关闭，请恢复原主题后重新打开设置。")
                 panels[-1].commit()
-                self.add_system_toast("外观设置已保存并应用。", "success")
+                message = panels[-1].last_commit_warning or "外观设置已保存。"
+                self.add_system_toast(
+                    message,
+                    "warning" if panels[-1].last_commit_warning else "success",
+                    auto_close_ms=10000 if panels[-1].last_commit_warning else 3200,
+                )
                 return
             result = self.theme_manager.commit_current_preview(
                 activate=True,
@@ -17817,8 +17822,10 @@ class MainWindow(QMainWindow):
             )
             theme = result.get("theme") or {}
             self.add_system_toast(
-                f"主题“{theme.get('name') or '自定义主题'}”已保存并启用。",
-                "success",
+                f"主题“{theme.get('name') or '自定义主题'}”已保存并启用。"
+                "建议重启应用，以确保新主题完整生效。",
+                "warning",
+                auto_close_ms=10000,
             )
         except Exception as exc:
             self.add_system_toast(f"保存主题失败：{exc}", "error", auto_close_ms=8000)

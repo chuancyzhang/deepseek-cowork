@@ -133,7 +133,7 @@ Cowork 采用交错式推理流程：
 - **自动化**：提示词任务、引用能力、Agent 绑定、计划任务和执行历史保存在本地配置数据中；旧 SOP 模板配置会在迁移时清空，旧模板任务会停用保留并提示用户补充提示词
 - **主题持久化**：代码内的 Linear 默认主题是只读基线，永不序列化。应用数据 `themes/` 下每个非下划线 JSON 是一个用户主题，唯一格式为 `format / id / name / overrides`，不含版本、迁移或兼容字段；`_state.json` 为空或只含当前自定义主题 ID。`_preview.json` 保存 `preview_id + revision`、来源会话和覆盖，预览不自动过期，启动时总是丢弃
 - **语义注册表**：`core/theme.py` 与 `core/theme_service.py` 将可配置令牌按 global、left_sidebar、conversation、composer、right_sidebar、management、feedback、controls、preview_shell 分组，覆盖颜色、字体缩放、字重、图标、边框、圆角、阴影、间距、滚动条与受限几何；区域令牌未显式覆盖时从当前全局令牌继承
-- **动态应用**：`ThemeRuntimeManager` 统一更新 `DesignTokens`、应用字体、QSS、Palette 和聊天 Markdown CSS；`ThemeBindingRegistry` 以弱引用绑定样式、图标、几何和自绘回调，监听 Qt 对象销毁并在刷新前验证底层 C++ 对象仍然有效，既刷新现存控件，也让后创建控件立即取得当前主题。绑定失败会回滚令牌、字体、Palette 和控件，并在 `theme_debug.log` 记录失败控件、刷新数量和各区域耗时；主题已持久化但当前界面刷新失败时，明确提示用户重启应用载入新主题
+- **动态应用**：`ThemeRuntimeManager` 统一更新 `DesignTokens`、应用字体、QSS、Palette 和聊天 Markdown CSS；`ThemeBindingRegistry` 以弱引用绑定样式、图标、几何和自绘回调，监听 Qt 对象销毁并在刷新前验证底层 C++ 对象仍然有效，既刷新现存控件，也让后创建控件立即取得当前主题。绑定失败会回滚令牌、字体、Palette 和控件，并在 `theme_debug.log` 记录失败控件、刷新数量和各区域耗时；主题已持久化但当前界面刷新失败时，明确提示用户重启应用载入新主题。设置页确有外观变化或 AI 保存并启用主题时，即使即时应用成功也建议重启，确保全部界面完整载入；其他设置保存不触发该提示
 - **边界**：主题不能写任意 QSS、隐藏或重排功能、移动组件、替换资源或改变交互。PDF、Office、HTML、图片和可视化只覆盖 Cowork 工具栏、标签、状态与预览外壳；文件内容模板、固定安全恢复条、系统标题栏和原生文件选择器在静态审计白名单中
 - **设置与 AI 预览**：设置页只维护内存草稿，选择或编辑不会应用；显式“预览”才校验并一次性刷新，统一保存才原子写入。`skills/theme-customizer` 的 `preview_ui_theme` 创建预览，`patch_ui_theme_preview` 按当前 revision 增量修改；审批与保存必须绑定具体 revision，修改后必须重新确认
 

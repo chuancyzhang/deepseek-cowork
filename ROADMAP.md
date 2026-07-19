@@ -8,15 +8,15 @@ Treat it as the current working map, not a strict release contract.
 
 ## Current Phase
 
-**Phase:** 5.0.2 release hardening and post-release stabilization
+**Phase:** 5.0.3 release hardening and post-release stabilization
 
-The 5.0.2 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
+The 5.0.3 release baseline is now documented across the product, user, technical, and Skill docs. The project is focused on:
 
 - making the desktop experience feel more like a polished product and less like an internal tool
 - stabilizing long-running agent, automation, and tool-use workflows
 - keeping packaging, runtime bootstrap, and documentation aligned with real behavior
 
-For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md).
+For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md).
 
 ## Completed
 
@@ -51,6 +51,7 @@ For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.0.md](REL
 ### Quality and usability improvements
 
 - Linear-style settings and automation surface polish has already been applied in key dialogs
+- User-authored themes now use one final JSON format per skin, with explicit non-live Settings previews, full native-UI semantic coverage, revision-bound AI patches, and approval-gated persistence
 - Streaming, markdown rendering, and background save behavior have been tuned for better responsiveness
 - Long-term memory update and conversation-to-skill workflows are available with manual confirmation
 
@@ -61,10 +62,11 @@ For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.0.md](REL
 - Keep the release notes, user guide, and screenshots aligned with the shipped UI
 - Preserve behavior while making polish changes low-risk
 
-## 5.0.2 Release Baseline
+## 5.0.3 Release Baseline
 
-- Version source is centralized in `core/app_version.py` and currently reads `5.0.2`
+- Version source is centralized in `core/app_version.py` and currently reads `5.0.3`
 - Responses requests automatically send the conversation-scoped `prompt_cache_key`; Chat Completions retains its existing provider-configured behavior
+- The code-only read-only Linear theme can be extended by user JSON themes; a weak binding registry applies colors, type, icons, geometry, custom painting, and Markdown CSS across all native regions while preview recovery and diagnostics share one service boundary
 - README, product documentation, user guide, technical design, Skill system, and this roadmap link to the release notes and current baseline
 - Release validation covers packaged startup, model configuration, workspace boundaries, SQLite history recovery, deliverable conversion, PPT Agent, Skill/MCP configuration, automation runs, and diagnostic logs
 - Any behavior change that affects a user-facing flow must update the affected Markdown document in the same change

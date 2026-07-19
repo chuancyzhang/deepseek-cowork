@@ -169,6 +169,101 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "theme-acceptance":
+            from unittest.mock import patch
+
+            from core.theme import ThemeRuntimeManager, default_design_tokens
+            from core.theme_service import ThemeRepository
+
+            repository = ThemeRepository(str(APP_DATA_DIR))
+            theme_manager = ThemeRuntimeManager(app, repository)
+            app.theme_manager = theme_manager
+            window.theme_manager = theme_manager
+            theme_manager.themeChanged.connect(window._apply_runtime_theme)
+            theme_manager.previewStateChanged.connect(window._on_theme_preview_state)
+            repository.write_preview(
+                name="深夜验收",
+                overrides={
+                    "font_scale": 1.05,
+                    "density": "compact",
+                    "tokens": {
+                        "primary": "#8b93ff",
+                        "bg_app": "#101116",
+                        "bg_main": "#15171d",
+                        "bg_sidebar": "#12141a",
+                        "bg_chat": "#15171d",
+                        "text_primary": "#eceef3",
+                        "text_secondary": "#b7bcc8",
+                        "text_tertiary": "#858c9b",
+                        "composer_bg": "#181b22",
+                        "composer_text": "#eceef3",
+                        "right_sidebar_bg": "#171920",
+                        "right_sidebar_text": "#eceef3",
+                        "management_bg": "#101116",
+                        "management_panel_bg": "#181b22",
+                        "overlay_bg": "#181b22",
+                        "overlay_text": "#eceef3",
+                        "preview_shell_bg": "#181b22",
+                        "preview_shell_text": "#eceef3",
+                        "border": "#343946",
+                        "border_subtle": "#292d36",
+                        "separator": "#292d36",
+                        "sidebar_border": "#292d36",
+                        "chat_border": "#292d36",
+                        "composer_border": "#343946",
+                        "right_sidebar_border": "#292d36",
+                    },
+                },
+                default_tokens=default_design_tokens(),
+                session_id="theme-acceptance",
+            )
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                if not theme_manager.apply_repository_state(reason="screenshot_acceptance"):
+                    raise RuntimeError(theme_manager.last_error)
+            window.add_chat_bubble(
+                "User",
+                "请展示左右侧栏、聊天区、工具卡和输入区的完整主题覆盖。",
+                animate=False,
+                source_message_id="theme-acceptance-user",
+            )
+            state = window.get_current_session()
+            group = main.AssistantTurnGroup("theme-acceptance-group")
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, group)
+            bubble = window._create_agent_chat_bubble(state)
+            group.add_stage(bubble, "theme-acceptance-stage")
+            bubble.update_thinking("正在检查主题绑定、Markdown CSS 与自绘控件。")
+            tool = main.ToolCallCard(
+                "validate_ui_theme",
+                {"areas": ["sidebar", "conversation", "composer", "drawer"]},
+                "theme-acceptance-tool",
+            )
+            bubble.add_tool_card(tool)
+            tool.set_result("全部区域通过")
+            bubble.update_thinking(duration=2.4, is_final=True)
+            bubble.set_source_message_id("theme-acceptance-assistant")
+            bubble.set_main_content(
+                "## 全界面主题已应用\n\n- 左右侧栏与聊天画布\n- 输入区、工具卡和 Markdown\n- 固定安全恢复条",
+                final=True,
+            )
+            window.show_context_drawer(window.RIGHT_TAB_OBSERVABILITY)
+            window.show()
+            process_events(180)
+            scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+            for width, height in ((1280, 720), (1440, 900), (1920, 1080)):
+                window.resize(width, height)
+                process_events(120)
+                window.sync_context_drawer_layout()
+                process_events(80)
+                verify_drawer_layout(window, width, height)
+                save_widget(
+                    window,
+                    f"theme-acceptance-{width}x{height}-{scale_label}x.png",
+                    220,
+                )
+            return
         if SCREENSHOT_SCOPE == "model-settings":
             window.open_settings("模型与服务")
             settings = window.product_pages[window.PAGE_SETTINGS]

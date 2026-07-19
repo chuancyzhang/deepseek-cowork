@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.theme import DesignTokens
+from core.theme import DesignTokens, bind_theme
 
 
 class _ProductCodeHighlighter(QSyntaxHighlighter):
@@ -95,7 +95,9 @@ class ProductCodeViewer(QPlainTextEdit):
         self._language = "text"
         self.setReadOnly(True)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.setFont(QFont("Cascadia Mono", 10))
+        initial_font = QFont("Consolas")
+        initial_font.setPixelSize(DesignTokens.font_size_body)
+        self.setFont(initial_font)
         self.setStyleSheet(
             product_code_style("QPlainTextEdit")
             + f"QFrame#ProductCodeViewerHeader {{ background: {DesignTokens.bg_secondary}; border: none; "
@@ -110,6 +112,7 @@ class ProductCodeViewer(QPlainTextEdit):
         self._highlighter = None
         self.set_language(language)
         self._update_line_number_width()
+        bind_theme(self, self.refresh_theme, surface="controls")
 
     def set_language(self, language):
         self._language = str(language or "text").lower()
@@ -118,6 +121,28 @@ class ProductCodeViewer(QPlainTextEdit):
         if self._highlighter is not None:
             self._highlighter.setDocument(None)
         self._highlighter = _ProductCodeHighlighter(self.document(), self._language)
+
+    def refresh_theme(self, _resolved=None):
+        app = QApplication.instance()
+        mono_family = (
+            str(app.property("themeMonoFontFamily") or "Consolas")
+            if app is not None
+            else "Consolas"
+        )
+        mono_font = QFont(mono_family)
+        mono_font.setPixelSize(DesignTokens.font_size_body)
+        self.setFont(mono_font)
+        self.setStyleSheet(
+            product_code_style("QPlainTextEdit")
+            + f"QFrame#ProductCodeViewerHeader {{ background: {DesignTokens.bg_secondary}; border: none; "
+              f"border-bottom: 1px solid {DesignTokens.border_subtle}; }}"
+              f"QLabel#ProductCodeLanguage {{ color: {DesignTokens.text_tertiary}; font-size: 10px; font-weight: 700; }}"
+              f"QToolButton {{ color: {DesignTokens.text_secondary}; background: transparent; border: none; "
+              f"border-radius: 5px; padding: 3px 7px; font-size: 11px; }}"
+              f"QToolButton:hover {{ color: {DesignTokens.primary}; background: {DesignTokens.primary_soft}; }}"
+        )
+        self.set_language(self._language)
+        self.viewport().update()
 
     def set_code(self, text, language=None):
         if language is not None:
@@ -241,6 +266,15 @@ class ProductPopover(QFrame):
             f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
         )
         self.hide()
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#ProductPopover {{ background: {DesignTokens.overlay_bg}; "
+            f"color: {DesignTokens.overlay_text}; "
+            f"border: 1px solid {DesignTokens.overlay_border}; "
+            f"border-radius: {DesignTokens.overlay_radius}px; }}"
+        )
 
     def show_for(self, anchor, *, align_right=False, prefer_above=True, gap=6):
         if anchor is None or not anchor.isVisible():
@@ -355,6 +389,7 @@ class ProductActionRow(QFrame):
         self._icon = QIcon()
         self.setIcon(icon)
         self._apply_style()
+        bind_theme(self, self.refresh_theme, surface="feedback")
 
     def _apply_style(self):
         self.setStyleSheet(
@@ -363,6 +398,10 @@ class ProductActionRow(QFrame):
             f"QLabel#ProductActionRowTitle {{ color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600; }}"
             f"QLabel#ProductActionRowDetail {{ color: {DesignTokens.text_tertiary}; font-size: 11px; }}"
         )
+
+    def refresh_theme(self, _resolved=None):
+        self._apply_style()
+        self.setEnabled(self.isEnabled())
 
     def setIcon(self, icon):
         self._icon = icon if isinstance(icon, QIcon) else QIcon()
@@ -410,6 +449,10 @@ class SidebarInlineNameEditor(QLineEdit):
         self.setFixedHeight(28)
         self.setStyleSheet(product_field_style())
         self.selectAll()
+        bind_theme(self, self.refresh_theme, surface="left_sidebar")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(product_field_style())
 
     def keyPressEvent(self, event):
         if event.key() in {Qt.Key_Return, Qt.Key_Enter}:
@@ -824,8 +867,8 @@ def product_button_style(kind="secondary", radius=None):
             DesignTokens.error_bg,
             DesignTokens.error_text,
             DesignTokens.error_border,
-            "#fde8e8",
-            "#fbd5d5",
+            DesignTokens.error_hover_bg,
+            DesignTokens.error_pressed_bg,
         ),
         "ghost": (
             "transparent",
@@ -921,11 +964,18 @@ def product_field_style():
 def product_code_style(selector="QPlainTextEdit, QTextEdit"):
     selector = str(selector or "QPlainTextEdit, QTextEdit")
     focus_selectors = ", ".join(f"{part.strip()}:focus" for part in selector.split(","))
+    app = QApplication.instance()
+    mono_family = (
+        str(app.property("themeMonoFontFamily") or "Consolas")
+        if app is not None
+        else "Consolas"
+    ).replace("'", "")
     return f"""
         {selector} {{
             background: {DesignTokens.bg_code}; color: {DesignTokens.text_primary};
             border: 1px solid {DesignTokens.border_subtle}; border-radius: {DesignTokens.radius_md}px;
-            padding: 10px; font-family: 'Cascadia Mono', 'Consolas', monospace; font-size: 12px;
+            padding: 10px; font-family: '{mono_family}', 'Cascadia Mono', 'Consolas', monospace;
+            font-size: {DesignTokens.font_size_body}px;
             selection-background-color: {DesignTokens.selection_bg};
             selection-color: {DesignTokens.selection_text};
         }}
@@ -1010,6 +1060,23 @@ class ProductPageHeader(QWidget):
             self.primary_button.setStyleSheet(product_button_style("primary"))
             self.primary_button.clicked.connect(self.primaryRequested)
             layout.addWidget(self.primary_button, 0, Qt.AlignTop)
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        self.title_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_page}px; "
+            f"font-weight: {DesignTokens.font_weight_bold}; "
+            f"color: {DesignTokens.text_primary};"
+        )
+        if self.subtitle_label is not None:
+            self.subtitle_label.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; "
+                f"color: {DesignTokens.text_secondary};"
+            )
+        if self.back_button is not None:
+            self.back_button.setStyleSheet(product_button_style("ghost"))
+        if self.primary_button is not None:
+            self.primary_button.setStyleSheet(product_button_style("primary"))
 
     def set_title(self, title, subtitle=None):
         self.title_label.setText(str(title or ""))
@@ -1035,6 +1102,19 @@ class ProductToolbar(QFrame):
         self.result_label.setStyleSheet(
             f"color: {DesignTokens.text_tertiary}; font-size: {DesignTokens.font_size_meta}px;"
         )
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#ProductToolbar {{ background: transparent; border: none; "
+            f"border-bottom: 1px solid {DesignTokens.management_border}; }}"
+        )
+        self.result_label.setStyleSheet(
+            f"color: {DesignTokens.text_tertiary}; "
+            f"font-size: {DesignTokens.font_size_meta}px;"
+        )
+        if self.search_input is not None:
+            self.search_input.setStyleSheet(product_field_style())
 
     def add_search(self, placeholder="搜索"):
         self.search_input = QLineEdit()
@@ -1083,6 +1163,12 @@ class ProductSegmentedControl(QFrame):
         selected = str(current or (items[0][0] if items else ""))
         if selected in self.buttons:
             self.buttons[selected].setChecked(True)
+        bind_theme(self, self.refresh_theme, surface="controls")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(product_segmented_style())
+        for button in self.buttons.values():
+            button.setMinimumHeight(DesignTokens.control_height_sm)
 
     def set_current(self, key):
         key = str(key or "")
@@ -1104,6 +1190,19 @@ class ProductNavigationRow(QPushButton):
         self.setStyleSheet(
             f"QPushButton {{ text-align:left; padding:7px 10px; border:none; border-radius:{DesignTokens.radius_sm}px; "
             f"background:transparent; color:{DesignTokens.text_primary}; }}"
+            f"QPushButton:hover {{ background:{DesignTokens.bg_hover}; }}"
+            f"QPushButton:checked {{ background:{DesignTokens.primary_soft}; color:{DesignTokens.primary}; }}"
+            f"QPushButton:focus {{ border:1px solid {DesignTokens.primary_focus}; }}"
+            f"QPushButton:disabled {{ color:{DesignTokens.text_disabled}; background:transparent; }}"
+        )
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        self.setMinimumHeight(DesignTokens.row_height_comfortable)
+        self.setStyleSheet(
+            f"QPushButton {{ text-align:left; padding:7px 10px; border:none; "
+            f"border-radius:{DesignTokens.radius_sm}px; background:transparent; "
+            f"color:{DesignTokens.text_primary}; }}"
             f"QPushButton:hover {{ background:{DesignTokens.bg_hover}; }}"
             f"QPushButton:checked {{ background:{DesignTokens.primary_soft}; color:{DesignTokens.primary}; }}"
             f"QPushButton:focus {{ border:1px solid {DesignTokens.primary_focus}; }}"
@@ -1194,8 +1293,10 @@ class ProductInlineNotice(QFrame):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.addWidget(self.label)
         self.set_tone(tone)
+        bind_theme(self, self.refresh_theme, surface="feedback")
 
     def set_tone(self, tone):
+        self._tone = str(tone or "neutral")
         tones = {
             "neutral": (DesignTokens.bg_secondary, DesignTokens.text_secondary),
             "info": (DesignTokens.info_bg, DesignTokens.info_text),
@@ -1203,11 +1304,14 @@ class ProductInlineNotice(QFrame):
             "warning": (DesignTokens.warning_bg, DesignTokens.warning_text),
             "error": (DesignTokens.error_bg, DesignTokens.error_text),
         }
-        bg, fg = tones.get(str(tone), tones["neutral"])
+        bg, fg = tones.get(self._tone, tones["neutral"])
         self.setStyleSheet(
             f"QFrame#ProductInlineNotice {{ background:{bg}; border:none; border-radius:{DesignTokens.radius_sm}px; }}"
             f"QFrame#ProductInlineNotice QLabel {{ color:{fg}; background:transparent; border:none; }}"
         )
+
+    def refresh_theme(self, _resolved=None):
+        self.set_tone(getattr(self, "_tone", "neutral"))
 
     def set_text(self, text, tone=None):
         self.label.setText(str(text or ""))
@@ -1223,41 +1327,65 @@ class ProductSection(QFrame):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(4, 12, 4, 16)
         self.layout.setSpacing(10)
+        self.kind = str(kind or "panel")
+        self.title_label = None
+        self.subtitle_label = None
         if title:
             title_label = QLabel(title)
+            self.title_label = title_label
             title_label.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_section}px; font-weight: 600; color: {DesignTokens.text_primary};"
             )
             self.layout.addWidget(title_label)
         if subtitle:
             subtitle_label = QLabel(subtitle)
+            self.subtitle_label = subtitle_label
             subtitle_label.setWordWrap(True)
             subtitle_label.setStyleSheet(
                 f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
             )
             self.layout.addWidget(subtitle_label)
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(product_surface_style(self.kind))
+        if self.title_label is not None:
+            self.title_label.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_section}px; "
+                f"font-weight: {DesignTokens.font_weight_semibold}; "
+                f"color: {DesignTokens.text_primary};"
+            )
+        if self.subtitle_label is not None:
+            self.subtitle_label.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; "
+                f"color: {DesignTokens.text_secondary};"
+            )
 
 
 class ProductStatusBadge(QLabel):
-    TONES = {
-        "neutral": (DesignTokens.muted_chip_bg, DesignTokens.muted_chip_text),
-        "primary": (DesignTokens.primary_soft, DesignTokens.primary),
-        "success": (DesignTokens.success_bg, DesignTokens.success_text),
-        "warning": (DesignTokens.warning_bg, DesignTokens.warning_text),
-        "error": (DesignTokens.error_bg, DesignTokens.error_text),
-    }
-
     def __init__(self, text="", tone="neutral", parent=None):
         super().__init__(text, parent)
         self.setAlignment(Qt.AlignCenter)
         self.set_tone(tone)
+        bind_theme(self, self.refresh_theme, surface="feedback")
 
     def set_tone(self, tone):
-        bg, fg = self.TONES.get(tone, self.TONES["neutral"])
+        self._tone = str(tone or "neutral")
+        tones = {
+            "neutral": (DesignTokens.muted_chip_bg, DesignTokens.muted_chip_text),
+            "primary": (DesignTokens.primary_soft, DesignTokens.primary),
+            "success": (DesignTokens.success_bg, DesignTokens.success_text),
+            "warning": (DesignTokens.warning_bg, DesignTokens.warning_text),
+            "error": (DesignTokens.error_bg, DesignTokens.error_text),
+        }
+        bg, fg = tones.get(self._tone, tones["neutral"])
         self.setStyleSheet(
             f"background: {bg}; color: {fg}; border: none; border-radius: 6px; "
             "padding: 3px 7px; font-size: 11px; font-weight: 600;"
         )
+
+    def refresh_theme(self, _resolved=None):
+        self.set_tone(getattr(self, "_tone", "neutral"))
 
 
 class ProductEmptyState(QFrame):
@@ -1321,6 +1449,32 @@ class ProductEmptyState(QFrame):
             self.action_button.setCursor(Qt.PointingHandCursor)
             self.action_button.setStyleSheet(product_button_style(action_kind))
             layout.addWidget(self.action_button, 0, Qt.AlignCenter)
+        self.action_kind = str(action_kind or "primary")
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        if self.appearance == "plain":
+            self.setStyleSheet(
+                "QFrame#ProductEmptyState { background: transparent; border: none; }"
+            )
+        else:
+            self.setStyleSheet(product_surface_style("subtle"))
+        if self.icon_label is not None:
+            self.icon_label.setStyleSheet(
+                f"background: {DesignTokens.primary_soft}; border: none; "
+                f"border-radius: {DesignTokens.radius_md}px;"
+            )
+        self.title_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_section}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            f"color: {DesignTokens.text_primary};"
+        )
+        self.description_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"color: {DesignTokens.text_secondary};"
+        )
+        if self.action_button is not None:
+            self.action_button.setStyleSheet(product_button_style(self.action_kind))
 
     def set_content(self, title, description=""):
         self.title_label.setText(str(title or ""))
@@ -1357,6 +1511,21 @@ class ProductDataRow(QFrame):
         )
         text_layout.addWidget(self.subtitle_label)
         self.row_layout.addLayout(text_layout, 1)
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f'QFrame[productRow="true"] {{ background: transparent; border: none; '
+            f"border-bottom: 1px solid {DesignTokens.management_border}; }}"
+        )
+        self.title_label.setStyleSheet(
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            f"color: {DesignTokens.text_primary};"
+        )
+        self.subtitle_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"color: {DesignTokens.text_secondary};"
+        )
 
 
 class ProductActionBar(QFrame):
@@ -1371,3 +1540,10 @@ class ProductActionBar(QFrame):
         self.layout.setContentsMargins(0, 10, 0, 0)
         self.layout.setSpacing(8)
         self.layout.addStretch()
+        bind_theme(self, self.refresh_theme, surface="management")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f'QFrame[productSurface="panel"] {{ background: {DesignTokens.management_panel_bg}; '
+            f"border: none; border-top: 1px solid {DesignTokens.management_border}; }}"
+        )

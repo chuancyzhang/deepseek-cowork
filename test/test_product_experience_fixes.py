@@ -202,6 +202,17 @@ class ProductExperienceFixTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].size(), image.size())
 
+    def test_input_height_animation_is_owned_by_editor(self):
+        host = QWidget()
+        editor = AutoResizingInputEdit(host)
+        editor.setFixedHeight(120)
+        editor.setPlainText("触发输入框高度调整")
+
+        editor.adjustHeight()
+
+        self.assertIsNotNone(editor.anim)
+        self.assertIs(editor.anim.parent(), editor)
+
     def test_clipboard_image_is_saved_in_session_attachment_directory(self):
         class Stub:
             _managed_attachment_root = MainWindow._managed_attachment_root

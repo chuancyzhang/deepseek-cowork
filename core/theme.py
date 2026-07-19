@@ -1,4 +1,22 @@
+import os
+import time
+import weakref
+
 import qdarktheme
+
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QFont, QFontDatabase
+from shiboken6 import isValid as is_qt_object_valid
+
+from .theme_service import (
+    DEFAULT_THEME_ID,
+    ThemeRepository,
+    append_theme_log,
+    configurable_theme_tokens,
+    resolve_theme,
+    theme_token_bounds,
+    theme_token_group,
+)
 
 
 class DesignTokens:
@@ -46,6 +64,39 @@ class DesignTokens:
     bg_settings_nav_selected = "#e5e6f5"
     bg_settings_summary = "#f4f4fb"
 
+    sidebar_text = "#5f6269"
+    sidebar_text_muted = "#8b8e96"
+    sidebar_border = "#e6e6e9"
+    chat_text = "#202124"
+    chat_text_muted = "#5f6269"
+    chat_border = "#e8e8eb"
+    composer_bg = "#ffffff"
+    composer_text = "#202124"
+    composer_text_muted = "#8b8e96"
+    composer_border = "#e8e8eb"
+    right_sidebar_bg = "#ffffff"
+    right_sidebar_header_bg = "#ffffff"
+    right_sidebar_text = "#202124"
+    right_sidebar_text_muted = "#5f6269"
+    right_sidebar_border = "#e6e6e9"
+    management_bg = "#f7f7f8"
+    management_panel_bg = "#ffffff"
+    management_border = "#e6e6e9"
+    overlay_bg = "#ffffff"
+    overlay_text = "#202124"
+    overlay_border = "#d8d8dc"
+    preview_shell_bg = "#ffffff"
+    preview_shell_toolbar_bg = "#ffffff"
+    preview_shell_text = "#202124"
+    preview_shell_text_muted = "#5f6269"
+    preview_shell_border = "#e6e6e9"
+    scrollbar_track = "#f1f1f3"
+    scrollbar_thumb = "#b9bbc2"
+    scrollbar_thumb_hover = "#9699a2"
+    icon_primary = "#202124"
+    icon_secondary = "#5f6269"
+    icon_disabled = "#a7a9af"
+
     border = "#d8d8dc"
     border_strong = "#c5c5cb"
     separator = "#e6e6e9"
@@ -58,6 +109,9 @@ class DesignTokens:
     radius_md = 8
     radius_lg = 10
     radius_xl = 14
+    composer_radius = 10
+    preview_shell_radius = 8
+    overlay_radius = 10
 
     # Product geometry. Keep these values on the 4 px grid so dialogs and the
     # main workspace use the same density instead of accumulating local sizes.
@@ -69,6 +123,7 @@ class DesignTokens:
     icon_size_sm = 14
     icon_size = 16
     icon_size_lg = 20
+    scrollbar_width = 10
 
     font_size_caption = 11
     font_size_meta = 12
@@ -107,6 +162,7 @@ class DesignTokens:
 
     conversation_min_width = 840
     conversation_compact_min_width = 560
+    conversation_preferred_width = 1040
     conversation_max_width = 1040
     conversation_closed_min_width = 900
     conversation_closed_max_width = 1040
@@ -159,6 +215,8 @@ class DesignTokens:
     success_accent = "#2f9e64"
 
     error_bg = "#fef2f2"
+    error_hover_bg = "#fde8e8"
+    error_pressed_bg = "#fbd5d5"
     error_text = "#991b1b"
     error_border = "#fecaca"
     error_icon = "#991b1b"
@@ -197,6 +255,466 @@ class DesignTokens:
     activity_indicator_size = 14
     activity_indicator_stroke = 1.6
     activity_indicator_interval_ms = 70
+
+
+_DEFAULT_DESIGN_TOKEN_VALUES = {
+    name: value
+    for name, value in vars(DesignTokens).items()
+    if not name.startswith("_") and isinstance(value, (str, int, float))
+}
+
+
+def default_design_tokens():
+    """Return an immutable-source copy of the built-in appearance tokens."""
+    return dict(_DEFAULT_DESIGN_TOKEN_VALUES)
+
+
+def theme_token_schema():
+    defaults = default_design_tokens()
+    schema = {}
+    for name, token_type in configurable_theme_tokens(defaults).items():
+        item = {
+            "type": token_type,
+            "group": theme_token_group(name),
+            "default": defaults[name],
+            "description": name.replace("_", " "),
+        }
+        bounds = theme_token_bounds(name, token_type)
+        if bounds is not None:
+            item["minimum"], item["maximum"] = bounds
+        schema[name] = item
+    return schema
+
+
+def _runtime_theme_stylesheet(resolved):
+    tokens = resolved["tokens"]
+    font_family = str(resolved.get("font_family") or "Microsoft YaHei UI").replace("'", "")
+    mono_family = str(resolved.get("mono_font_family") or "Consolas").replace("'", "")
+    return f"""
+    QMainWindow, QDialog, QWidget#MainContainer {{
+        background: {tokens['management_bg']};
+        color: {tokens['text_primary']};
+        font-family: '{font_family}';
+    }}
+    QWidget#Sidebar {{
+        background: {tokens['bg_sidebar']};
+        color: {tokens['sidebar_text']};
+        border-right: 1px solid {tokens['sidebar_border']};
+    }}
+    QWidget#ConversationPage, QWidget#ConversationColumn,
+    QTabWidget#SessionTabs::pane {{
+        background: {tokens['bg_chat']};
+        color: {tokens['chat_text']};
+        border: none;
+    }}
+    QFrame#ContentCard {{
+        background: {tokens['composer_bg']};
+        color: {tokens['composer_text']};
+        border: 1px solid {tokens['composer_border']};
+        border-radius: {tokens['composer_radius']}px;
+    }}
+    QFrame#RightSidebar, QWidget[themeSurface="right-sidebar"] {{
+        background: {tokens['right_sidebar_bg']};
+        color: {tokens['right_sidebar_text']};
+        border-left: 1px solid {tokens['right_sidebar_border']};
+    }}
+    QWidget[themeSurface="preview-shell"] {{
+        background: {tokens['preview_shell_bg']};
+        color: {tokens['preview_shell_text']};
+        border-color: {tokens['preview_shell_border']};
+    }}
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+        selection-background-color: {tokens['selection_bg']};
+        selection-color: {tokens['selection_text']};
+    }}
+    QMenu {{
+        background: {tokens['overlay_bg']};
+        color: {tokens['overlay_text']};
+        border: 1px solid {tokens['overlay_border']};
+        selection-background-color: {tokens['primary_soft']};
+        selection-color: {tokens['text_primary']};
+    }}
+    QToolTip {{
+        background-color: {tokens['bg_main']};
+        color: {tokens['text_primary']};
+        border: 1px solid {tokens['border']};
+    }}
+    QTextEdit[codeSurface="true"], QPlainTextEdit[codeSurface="true"] {{
+        font-family: '{mono_family}';
+    }}
+    QScrollBar:vertical {{
+        width: {tokens['scrollbar_width']}px;
+        background: {tokens['scrollbar_track']};
+        border: none;
+    }}
+    QScrollBar::handle:vertical {{
+        min-height: 28px;
+        background: {tokens['scrollbar_thumb']};
+        border-radius: {max(1, int(tokens['scrollbar_width']) // 2)}px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {tokens['scrollbar_thumb_hover']}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0;
+        background: transparent;
+    }}
+    """
+
+
+class ThemeRuntimeManager(QObject):
+    """UI-only adapter that applies repository state to Qt and runtime tokens."""
+
+    themeChanged = Signal(dict)
+    themeApplyFailed = Signal(str)
+    previewStateChanged = Signal(object)
+
+    def __init__(self, app, repository=None, parent=None):
+        super().__init__(parent)
+        self.app = app
+        self.repository = repository or ThemeRepository()
+        self.current = None
+        self.last_error = ""
+        self.last_failure = {}
+        self.binding_registry = ThemeBindingRegistry()
+        self.app.theme_binding_registry = self.binding_registry
+        self._last_store_stamp = None
+        self._last_preview_stamp = None
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(700)
+        self._poll_timer.timeout.connect(self.poll_external_changes)
+
+    def start(self):
+        if self.repository.clear_preview():
+            append_theme_log(self.repository.data_dir, "startup_preview_discarded")
+        self.apply_repository_state(reason="startup")
+        self._capture_stamps()
+        self._poll_timer.start()
+
+    def stop(self):
+        self._poll_timer.stop()
+
+    @staticmethod
+    def _path_stamp(path):
+        try:
+            stat = os.stat(path)
+            return stat.st_mtime_ns, stat.st_size
+        except FileNotFoundError:
+            return None
+
+    def _directory_stamp(self):
+        try:
+            items = []
+            for filename in sorted(os.listdir(self.repository.themes_dir)):
+                if not filename.lower().endswith(".json") or filename == os.path.basename(
+                    self.repository.preview_path
+                ):
+                    continue
+                path = os.path.join(self.repository.themes_dir, filename)
+                stat = os.stat(path)
+                items.append((filename, stat.st_mtime_ns, stat.st_size))
+            return tuple(items)
+        except FileNotFoundError:
+            return tuple()
+
+    def _capture_stamps(self):
+        self._last_store_stamp = self._directory_stamp()
+        self._last_preview_stamp = self._path_stamp(self.repository.preview_path)
+
+    def poll_external_changes(self):
+        store_stamp = self._directory_stamp()
+        preview_stamp = self._path_stamp(self.repository.preview_path)
+        if store_stamp == self._last_store_stamp and preview_stamp == self._last_preview_stamp:
+            return
+        self._last_store_stamp = store_stamp
+        self._last_preview_stamp = preview_stamp
+        self.apply_repository_state(
+            reason="external_change",
+            persisted_on_failure=True,
+        )
+
+    def apply_repository_state(self, *, reason="apply", persisted_on_failure=False):
+        try:
+            preview = self.repository.load_preview()
+            if preview:
+                profile = {
+                    "id": f"preview:{preview.get('preview_id')}",
+                    "name": preview.get("name") or "主题预览",
+                    "base": DEFAULT_THEME_ID,
+                    "overrides": preview.get("overrides") or {},
+                    "preview_id": preview.get("preview_id"),
+                    "preview_revision": int(preview.get("revision") or 1),
+                }
+                preview_mode = True
+            else:
+                snapshot = self.repository.load()
+                profile = self.repository.get_theme(snapshot.active_theme_id)
+                preview_mode = False
+            applied = self.apply_profile(
+                profile,
+                preview=preview_mode,
+                reason=reason,
+                persisted_on_failure=bool(persisted_on_failure and not preview_mode),
+            )
+            if applied:
+                self.previewStateChanged.emit(_json_theme_copy(preview) if preview else None)
+            return applied
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.last_failure = {
+                "error": str(exc),
+                "reason": reason,
+                "theme_id": "",
+                "preview": False,
+                "saved_requires_restart": False,
+            }
+            append_theme_log(
+                self.repository.data_dir,
+                "apply_error",
+                reason=reason,
+                error=str(exc),
+            )
+            self.themeApplyFailed.emit(str(exc))
+            return False
+
+    def apply_profile(
+        self,
+        profile,
+        *,
+        preview=False,
+        reason="apply",
+        persisted_on_failure=False,
+    ):
+        append_theme_log(
+            self.repository.data_dir,
+            "apply_start",
+            reason=reason,
+            theme_id=(profile or {}).get("id", DEFAULT_THEME_ID),
+            preview=bool(preview),
+        )
+        previous_tokens = {
+            name: getattr(DesignTokens, name)
+            for name in default_design_tokens()
+            if hasattr(DesignTokens, name)
+        }
+        previous_font = QFont(self.app.font())
+        previous_stylesheet = self.app.styleSheet()
+        previous_mono_family = self.app.property("themeMonoFontFamily")
+        previous_palette = self.app.palette()
+        previous_current = _json_theme_copy(self.current)
+        try:
+            resolved = resolve_theme(profile, default_design_tokens())
+            installed = {name.casefold(): name for name in QFontDatabase.families()}
+            for field in ("font_family", "mono_font_family"):
+                family = str(resolved.get(field) or "").strip()
+                if family.casefold() not in installed:
+                    raise ValueError(f"系统未安装主题字体：{family}")
+            for name, value in resolved["tokens"].items():
+                if hasattr(DesignTokens, name):
+                    setattr(DesignTokens, name, value)
+            app_font = QFont(resolved["font_family"])
+            app_font.setPixelSize(int(resolved["tokens"]["font_size_body"]))
+            self.app.setFont(app_font)
+            self.app.setProperty("themeMonoFontFamily", resolved["mono_font_family"])
+            self.app.setStyleSheet(_runtime_theme_stylesheet(resolved))
+            apply_tooltip_palette(self.app)
+            self.current = dict(resolved)
+            self.current["preview"] = bool(preview)
+            if preview:
+                self.current["preview_id"] = (profile or {}).get("preview_id")
+                self.current["preview_revision"] = int(
+                    (profile or {}).get("preview_revision") or 1
+                )
+            self.last_error = ""
+            self.last_failure = {}
+            self._refresh_existing_widgets()
+            self.themeChanged.emit(dict(self.current))
+            append_theme_log(
+                self.repository.data_dir,
+                "apply_finish",
+                reason=reason,
+                theme_id=resolved["id"],
+                preview=bool(preview),
+                refreshed_controls=int(self.current.get("_binding_count") or 0),
+                surface_elapsed_ms=self.current.get("_binding_surface_elapsed_ms") or {},
+            )
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            for name, value in previous_tokens.items():
+                setattr(DesignTokens, name, value)
+            self.app.setFont(previous_font)
+            self.app.setProperty("themeMonoFontFamily", previous_mono_family)
+            self.app.setStyleSheet(previous_stylesheet)
+            self.app.setPalette(previous_palette)
+            self.current = previous_current
+            self.last_failure = {
+                "error": str(exc),
+                "reason": reason,
+                "theme_id": (profile or {}).get("id", DEFAULT_THEME_ID),
+                "preview": bool(preview),
+                "saved_requires_restart": bool(persisted_on_failure and not preview),
+            }
+            recovery_error = ""
+            try:
+                self._refresh_existing_widgets()
+            except Exception as recovery_exc:
+                recovery_error = str(recovery_exc)
+            append_theme_log(
+                self.repository.data_dir,
+                "apply_error",
+                reason=reason,
+                theme_id=(profile or {}).get("id", DEFAULT_THEME_ID),
+                preview=bool(preview),
+                error=str(exc),
+                recovery_error=recovery_error,
+            )
+            self.themeApplyFailed.emit(str(exc))
+            return False
+
+    def _refresh_existing_widgets(self):
+        revision = int(time.time() * 1000)
+        bound_ids = self.binding_registry.apply(self.current or {})
+        for top_level in self.app.topLevelWidgets():
+            candidates = [top_level, *top_level.findChildren(QObject)]
+            for candidate in candidates:
+                if id(candidate) in bound_ids:
+                    continue
+                refresh = getattr(candidate, "refresh_theme", None)
+                if callable(refresh):
+                    refresh()
+            top_level.setProperty("themeRevision", revision)
+            style = top_level.style()
+            style.unpolish(top_level)
+            style.polish(top_level)
+            top_level.update()
+
+    def restore_saved_theme(self, *, reason="preview_restore"):
+        self.repository.clear_preview()
+        applied = self.apply_repository_state(reason=reason)
+        if applied:
+            self.previewStateChanged.emit(None)
+        return applied
+
+    def commit_current_preview(self, *, activate=True, reason="preview_commit"):
+        preview = self.repository.load_preview()
+        if not preview:
+            raise ValueError("当前没有主题预览。")
+        result = self.repository.commit_preview(
+            preview_id=preview["preview_id"],
+            preview_revision=int(preview.get("revision") or 1),
+            activate=bool(activate),
+            default_tokens=default_design_tokens(),
+        )
+        if not self.apply_repository_state(
+            reason=reason,
+            persisted_on_failure=True,
+        ):
+            raise ValueError("主题已保存，但当前界面刷新失败；请重启应用以载入新主题。")
+        self.previewStateChanged.emit(None)
+        return result
+
+
+def _json_theme_copy(value):
+    import json
+
+    return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
+
+
+class ThemeBindingRegistry:
+    """Weak runtime bindings for styles, icons, geometry, and custom painters."""
+
+    def __init__(self):
+        self._bindings = {}
+
+    def bind(self, widget, callback, *, surface="global"):
+        if widget is None or not callable(callback):
+            raise ValueError("主题绑定需要控件和可调用回调。")
+        key = id(widget)
+        widget_ref = weakref.ref(
+            widget,
+            lambda _ref, binding_key=key: self._bindings.pop(binding_key, None),
+        )
+        callback_ref = (
+            weakref.WeakMethod(callback)
+            if getattr(callback, "__self__", None) is not None
+            else callback
+        )
+        descriptor = (
+            f"{widget.metaObject().className()}#{widget.objectName() or '-'}"
+        )
+        self._bindings[key] = (
+            widget_ref,
+            callback_ref,
+            str(surface or "global"),
+            descriptor,
+        )
+        widget.destroyed.connect(
+            lambda _object=None, binding_key=key: self._bindings.pop(
+                binding_key,
+                None,
+            )
+        )
+        return widget
+
+    def apply(self, resolved):
+        applied_ids = set()
+        failures = []
+        surface_elapsed = {}
+        surface_counts = {}
+        started = time.perf_counter()
+        for key, (
+            widget_ref,
+            callback_ref,
+            surface,
+            descriptor,
+        ) in list(self._bindings.items()):
+            widget = widget_ref()
+            callback = callback_ref() if isinstance(callback_ref, weakref.WeakMethod) else callback_ref
+            if (
+                widget is None
+                or callback is None
+                or not is_qt_object_valid(widget)
+            ):
+                self._bindings.pop(key, None)
+                continue
+            try:
+                callback_started = time.perf_counter()
+                callback(resolved)
+                applied_ids.add(key)
+                surface_elapsed[surface] = surface_elapsed.get(surface, 0.0) + (
+                    time.perf_counter() - callback_started
+                ) * 1000
+                surface_counts[surface] = surface_counts.get(surface, 0) + 1
+            except Exception as exc:
+                failures.append(f"{surface}:{descriptor}: {exc}")
+        if failures:
+            raise RuntimeError("主题绑定刷新失败：" + " | ".join(failures[:8]))
+        if resolved is not None:
+            resolved["_binding_count"] = len(applied_ids)
+            resolved["_binding_elapsed_ms"] = round(
+                (time.perf_counter() - started) * 1000,
+                2,
+            )
+            resolved["_binding_surface_elapsed_ms"] = {
+                name: round(value, 2) for name, value in surface_elapsed.items()
+            }
+            resolved["_binding_surface_counts"] = surface_counts
+        return applied_ids
+
+
+def bind_theme(widget, callback=None, *, surface="global"):
+    """Register a live theme callback when the application manager is available."""
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    registry = getattr(app, "theme_binding_registry", None) if app is not None else None
+    target = callback or getattr(widget, "refresh_theme", None)
+    if registry is not None and callable(target):
+        registry.bind(widget, target, surface=surface)
+        manager = getattr(app, "theme_manager", None)
+        current = getattr(manager, "current", None)
+        if current is not None:
+            target(current)
+    return widget
 
 
 def get_tech_stylesheet(theme="light"):
@@ -430,6 +948,10 @@ def apply_theme(app, theme="auto"):
     # Native tooltip windows still read palette roles on Windows. Keep these
     # colors identical to the deliberately minimal QToolTip stylesheet above;
     # translucent or rounded tooltip rules can render as black native windows.
+    apply_tooltip_palette(app)
+
+
+def apply_tooltip_palette(app):
     from PySide6.QtGui import QColor, QPalette
     palette = app.palette()
     palette.setColor(QPalette.ToolTipBase, QColor(DesignTokens.bg_main))
@@ -443,8 +965,4 @@ def apply_tooltip_theme(app):
         f"QToolTip {{ background-color: {DesignTokens.bg_main}; "
         f"color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border}; }}"
     )
-    from PySide6.QtGui import QColor, QPalette
-    palette = app.palette()
-    palette.setColor(QPalette.ToolTipBase, QColor(DesignTokens.bg_main))
-    palette.setColor(QPalette.ToolTipText, QColor(DesignTokens.text_primary))
-    app.setPalette(palette)
+    apply_tooltip_palette(app)

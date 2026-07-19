@@ -1,0 +1,38 @@
+{
+  "version": 2,
+  "name": "theme-customizer",
+  "kind": "knowledge",
+  "capability_group": "appearance",
+  "description": "Design, validate, preview, and manage Cowork UI themes through the built-in theme service.",
+  "description_cn": "通过内置主题服务帮助用户设计、校验、预览和管理 Cowork 界面主题。",
+  "tags": ["theme", "appearance", "skin", "font", "color", "UI", "主题", "皮肤", "字体", "配色"],
+  "triggers": ["customize theme", "change skin", "appearance", "主题", "换肤", "界面配色", "字体大小"],
+  "anti_triggers": ["document theme", "PPT theme", "网页主题", "演示文稿主题"],
+  "tool_refs": [
+    "inspect_ui_theme",
+    "validate_ui_theme",
+    "preview_ui_theme",
+    "patch_ui_theme_preview",
+    "clear_ui_theme_preview",
+    "save_ui_theme_preview",
+    "activate_ui_theme",
+    "delete_ui_theme"
+  ],
+  "references": [],
+  "script_refs": [],
+  "script_entries": [],
+  "asset_refs": [],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "Inspect the active theme and token schema.",
+    "Validate a minimal override set.",
+    "Preview changes before persistence.",
+    "Save or activate only after explicit user acceptance."
+  ]
+}

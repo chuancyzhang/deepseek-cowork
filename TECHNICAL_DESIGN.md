@@ -1,8 +1,8 @@
 # DeepSeek Cowork 技术设计
 
-当前应用版本：**5.0.2**
+当前应用版本：**5.0.3**
 
-本设计以 5.0.2 发布基线为准；更早的面向用户范围、兼容性和验收清单见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。
+本设计以 5.0.3 发布基线为准；面向用户的范围、兼容性和验收清单见 [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md)。
 
 ## 1. 设计目标
 
@@ -18,7 +18,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 系统由五层组成：
 
 1. **UI 层**
-   `main.py` 提供对话界面、项目侧栏、右侧上下文抽屉，以及 `conversation / capabilities / automation / settings` 主内容区页面路由；`core/theme.py` 的 `DesignTokens` 是颜色、状态、排版和基础几何的唯一主题来源，`ui/primitives.py` 提供页头、工具栏、分段控件、主从容器、状态提示、数据行和固定操作栏等共享组件。
+   `main.py` 提供对话界面、项目侧栏、右侧上下文抽屉，以及 `conversation / capabilities / automation / settings` 主内容区页面路由；`core/theme.py` 的 `DesignTokens` 是颜色、状态、排版和基础几何的运行时主题来源，`core/theme_service.py` 负责与 Qt 解耦的主题校验、解析和文件仓库，`ui/primitives.py` 提供页头、工具栏、分段控件、主从容器、状态提示、数据行和固定操作栏等共享组件。
 2. **Agent 层**
    `core/agent.py` 负责推理循环、工具调度、模式约束和结果汇总。
 3. **能力层**
@@ -36,7 +36,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 - **PPT Mode / PPT Agent**：新会话空态提供 PPT Agent 卡片，输入工具栏 Agent 选择器承载内置/自定义智能体；`PptAgentModeDialog` 仅承担 PPT 需求这一原子事务，提交后仍进入 `office_html_first` 工作流。
 - **右侧上下文抽屉**：文件、交付物、任务观测、子 Agent 状态默认隐藏。文件浏览首页由 SQLite 交付物索引驱动：有明确产物时先显示交付物并按需切到工作区，无产物时直接显示目录树；聊天结果、办公转换和用户标记负责注册索引，普通扩展名扫描不再决定交付物。真实空目录根据 `workspace_source` 区分聊天目录与项目目录文案，隐藏搜索/筛选并提供打开实际目录的操作；筛选无结果仍保留恢复控件。浏览态和详情态之间保留选中路径、筛选、目录展开项和滚动位置。
 - **子 Agent 观测边界**：子 Agent 事件继续保存到会话状态、右侧观测页和诊断日志；普通对话气泡不创建 Agent 短 ID、状态 PiP 或原始日志容器，只接收需要回传的最终结果。
-- **设置中心**：作为主内容区页面，以紧凑分类导航集中配置模型、智能体、个性与记忆、工作区、MCP、企业消息、更新和运行组件；用户尚未创建智能体时显示的“新智能体”模板默认停用，需完成配置并主动启用后才进入可用智能体列表；脏状态比较规范化后的可保存快照，记忆与配置失败时共同回滚。
+- **设置中心**：作为主内容区页面，以紧凑分类导航集中配置外观、模型、智能体、个性与记忆、工作区、MCP、企业消息、更新和运行组件；外观页只把内置浅色主题作为只读基线，用户主题使用独立 JSON 文件并参与统一脏状态、预览和回滚；主题文件持久化成功后不因当前 Qt 界面刷新失败而撤销，设置页会明确提示重启载入，其他配置或持久化步骤失败时仍统一回滚；用户尚未创建智能体时显示的“新智能体”模板默认停用，需完成配置并主动启用后才进入可用智能体列表；脏状态比较规范化后的可保存快照，记忆与配置失败时共同回滚。
 - **自动化中心**：作为主内容区页面，以分段控制、任务列表、页面内任务编辑和执行详情承载提示词任务、引用能力、Agent 绑定、计划任务和执行历史；每个任务独立保存。
 
 UI 采用三层表面模型：应用画布、功能面板、控件或数据行。共享 QSS 必须通过明确控件类型、`objectName` 或动态属性限定作用域，避免父级边框和背景继承到子控件；普通控件保持 `30-32px` 高度和 `6-8px` 圆角。`ProductTooltipController` 拦截 QWidget 与 item view 的提示事件，在当前顶层窗口内绘制提示，避免 Windows 原生 Tooltip 黑窗。所有交互控件必须提供 hover、pressed、focus、disabled 等状态。
@@ -131,6 +131,11 @@ Cowork 采用交错式推理流程：
 - **记忆**：`core/memory_store.py` 与 `core/memory_update.py` 管理灵魂提示词、全局摘要和工作区摘要
 - **技能**：文件系统中的 `SKILL.md`、`skill.json`、`impl.py`、`experience/entries.jsonl`；自动工具发现披露的技能全文是本轮运行时上下文，历史迁移和响应合并会过滤这些隐藏 system 消息，避免把临时技能材料带入后续请求的 prompt cache 前缀
 - **自动化**：提示词任务、引用能力、Agent 绑定、计划任务和执行历史保存在本地配置数据中；旧 SOP 模板配置会在迁移时清空，旧模板任务会停用保留并提示用户补充提示词
+- **主题持久化**：代码内的 Linear 默认主题是只读基线，永不序列化。应用数据 `themes/` 下每个非下划线 JSON 是一个用户主题，唯一格式为 `format / id / name / overrides`，不含版本、迁移或兼容字段；`_state.json` 为空或只含当前自定义主题 ID。`_preview.json` 保存 `preview_id + revision`、来源会话和覆盖，预览不自动过期，启动时总是丢弃
+- **语义注册表**：`core/theme.py` 与 `core/theme_service.py` 将可配置令牌按 global、left_sidebar、conversation、composer、right_sidebar、management、feedback、controls、preview_shell 分组，覆盖颜色、字体缩放、字重、图标、边框、圆角、阴影、间距、滚动条与受限几何；区域令牌未显式覆盖时从当前全局令牌继承
+- **动态应用**：`ThemeRuntimeManager` 统一更新 `DesignTokens`、应用字体、QSS、Palette 和聊天 Markdown CSS；`ThemeBindingRegistry` 以弱引用绑定样式、图标、几何和自绘回调，监听 Qt 对象销毁并在刷新前验证底层 C++ 对象仍然有效，既刷新现存控件，也让后创建控件立即取得当前主题。绑定失败会回滚令牌、字体、Palette 和控件，并在 `theme_debug.log` 记录失败控件、刷新数量和各区域耗时；主题已持久化但当前界面刷新失败时，明确提示用户重启应用载入新主题
+- **边界**：主题不能写任意 QSS、隐藏或重排功能、移动组件、替换资源或改变交互。PDF、Office、HTML、图片和可视化只覆盖 Cowork 工具栏、标签、状态与预览外壳；文件内容模板、固定安全恢复条、系统标题栏和原生文件选择器在静态审计白名单中
+- **设置与 AI 预览**：设置页只维护内存草稿，选择或编辑不会应用；显式“预览”才校验并一次性刷新，统一保存才原子写入。`skills/theme-customizer` 的 `preview_ui_theme` 创建预览，`patch_ui_theme_preview` 按当前 revision 增量修改；审批与保存必须绑定具体 revision，修改后必须重新确认
 
 ## 8. 运行环境
 
@@ -172,4 +177,4 @@ Cowork 采用交错式推理流程：
 - `core/chat_storage.py`
 - `core/config_manager.py`
 
-如果需要产品视角的说明，见 [PRODUCT_DOC.md](PRODUCT_DOC.md)；如果需要快速上手，见 [README_CN.md](README_CN.md)；如果需要 5.0.0 发布范围和验收清单，见 [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md)。
+如果需要产品视角的说明，见 [PRODUCT_DOC.md](PRODUCT_DOC.md)；如果需要快速上手，见 [README_CN.md](README_CN.md)；如果需要 5.0.3 发布范围和验收清单，见 [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md)。

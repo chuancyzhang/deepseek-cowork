@@ -1,0 +1,8 @@
+interface:
+  display_name: "主题定制"
+  short_description: "通过内置工具设计、预览并保存 Cowork 自定义主题"
+  default_prompt: "使用 $theme-customizer 帮我设计并预览一个适合长期工作的界面主题。"
+
+policy:
+  allow_implicit_invocation: true
+

@@ -52,7 +52,15 @@ from core.inline_visualization import (
     sha256_file,
     strip_inline_visualization_directives,
 )
-from core.theme import apply_tooltip_theme, DesignTokens
+from core.theme import (
+    apply_tooltip_theme,
+    default_design_tokens,
+    DesignTokens,
+    bind_theme,
+    resolve_theme,
+    ThemeRuntimeManager,
+)
+from core.theme_service import ThemeRepository
 from ui.primitives import (
     ProductActionBar,
     ProductCodeViewer,
@@ -82,6 +90,7 @@ from ui.primitives import (
     product_segmented_style,
     product_surface_style,
 )
+from ui.theme_settings import ThemeSettingsPanel
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.app_version import APP_VERSION
@@ -595,14 +604,21 @@ _MARKDOWN_RENDER_CACHE = OrderedDict()
 
 
 def markdown_render_style():
+    app = QApplication.instance()
+    font_family = app.font().family() if app is not None else "Microsoft YaHei UI"
+    mono_family = (
+        str(app.property("themeMonoFontFamily") or "Consolas")
+        if app is not None
+        else "Consolas"
+    )
     return f"""
     <style>
        body {{
-           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+           font-family: "{font_family}", "Segoe UI", sans-serif;
            line-height: 1.62;
-           color: {DesignTokens.text_primary};
+           color: {DesignTokens.chat_text};
            margin: 0;
-           font-size: 14px;
+           font-size: {DesignTokens.font_size_body}px;
        }}
        p {{ margin-top: 0; margin-bottom: 12px; }}
        pre {{
@@ -612,23 +628,23 @@ def markdown_render_style():
            border: 1px solid {DesignTokens.border_subtle};
            white-space: pre-wrap;
            margin-bottom: 12px;
-           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+           font-family: "{mono_family}", monospace;
        }}
        code {{
-           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+           font-family: "{mono_family}", monospace;
            font-size: 90%;
            padding: 0.2em 0.4em;
            background-color: {DesignTokens.bg_secondary};
            border-radius: 6px;
        }}
-       h1, h2, h3 {{ color: {DesignTokens.text_primary}; font-weight: 700; margin-top: 22px; margin-bottom: 10px; }}
+       h1, h2, h3 {{ color: {DesignTokens.chat_text}; font-weight: {DesignTokens.font_weight_bold}; margin-top: 22px; margin-bottom: 10px; }}
        h1 {{ font-size: 1.42em; border-bottom: 1px solid {DesignTokens.border_subtle}; padding-bottom: 0.3em; }}
        h2 {{ font-size: 1.22em; }}
        h3 {{ font-size: 1.08em; }}
        a {{ color: {DesignTokens.primary}; text-decoration: none; }}
        blockquote {{
            border-left: 3px solid {DesignTokens.border};
-           color: {DesignTokens.text_secondary};
+           color: {DesignTokens.chat_text_muted};
            padding-left: 1em;
            margin: 0 0 16px 0;
        }}
@@ -666,7 +682,19 @@ def render_markdown_or_html_with_cache(text, final=False, workspace_dir=""):
     raw_html = extract_renderable_html_response(text) if final else ""
     cache_kind = "raw_html" if raw_html else "markdown"
     workspace_key = os.path.normcase(os.path.abspath(workspace_dir)) if workspace_dir else ""
-    cache_key = (cache_kind, text, workspace_key)
+    app = QApplication.instance()
+    theme_key = (
+        app.font().family() if app is not None else "",
+        str(app.property("themeMonoFontFamily") or "") if app is not None else "",
+        DesignTokens.chat_text,
+        DesignTokens.chat_text_muted,
+        DesignTokens.bg_code,
+        DesignTokens.bg_secondary,
+        DesignTokens.chat_border,
+        DesignTokens.primary,
+        DesignTokens.font_size_body,
+    )
+    cache_key = (cache_kind, text, workspace_key, theme_key)
     cached = _MARKDOWN_RENDER_CACHE.get(cache_key)
     if cached is not None:
         _MARKDOWN_RENDER_CACHE.move_to_end(cache_key)
@@ -935,14 +963,20 @@ def apple_code_edit_style(bg=None, radius=8, subtle=False, padding=9):
     radius = min(int(radius), DesignTokens.radius_md)
     bg = bg or (DesignTokens.bg_secondary if subtle else DesignTokens.bg_code)
     border_rule = f"border: 1px solid {DesignTokens.border_subtle};" if subtle else f"border: 1px solid {DesignTokens.border};"
+    app = QApplication.instance()
+    mono_family = (
+        str(app.property("themeMonoFontFamily") or "Consolas")
+        if app is not None
+        else "Consolas"
+    ).replace("'", "")
     return f"""
         QTextEdit {{
             {border_rule}
             border-radius: {radius}px;
             background: {bg};
             color: {DesignTokens.text_primary};
-            font-family: 'SF Mono', 'Cascadia Mono', 'Consolas', 'Microsoft YaHei UI', monospace;
-            font-size: 11px;
+            font-family: '{mono_family}', 'SF Mono', 'Cascadia Mono', 'Consolas', 'Microsoft YaHei UI', monospace;
+            font-size: {DesignTokens.font_size_meta}px;
             padding: {padding}px;
             line-height: 1.45;
         }}
@@ -1129,13 +1163,13 @@ def status_label_text(status):
 def rgba_from_hex(hex_color, alpha):
     text = str(hex_color or "").strip().lstrip("#")
     if len(text) != 6:
-        return f"rgba(0, 0, 0, {alpha})"
+        raise ValueError(f"无法转换非 #RRGGBB 颜色：{hex_color}")
     try:
         r = int(text[0:2], 16)
         g = int(text[2:4], 16)
         b = int(text[4:6], 16)
     except ValueError:
-        return f"rgba(0, 0, 0, {alpha})"
+        raise ValueError(f"无法转换非 #RRGGBB 颜色：{hex_color}") from None
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
@@ -1283,7 +1317,7 @@ def apple_sidebar_icon_button_style(active=False):
         f"background: {DesignTokens.bg_sidebar_hover}; color: {DesignTokens.text_primary}; border-color: transparent;"
         "} "
         "QToolButton:pressed { "
-        f"background: rgba(255, 255, 255, 0.82); color: {DesignTokens.primary};"
+        f"background: {DesignTokens.bg_pressed}; color: {DesignTokens.primary};"
         "} "
     )
 
@@ -1293,9 +1327,17 @@ def apple_sidebar_action_button_style(selected=False):
     hover_color = DesignTokens.primary if selected else DesignTokens.text_secondary
     border = rgba_from_hex(DesignTokens.primary, 0.18) if selected else "transparent"
     bg = rgba_from_hex(DesignTokens.primary, 0.10) if selected else "transparent"
-    hover_bg = rgba_from_hex(DesignTokens.primary, 0.12) if selected else "rgba(255, 255, 255, 0.56)"
+    hover_bg = (
+        rgba_from_hex(DesignTokens.primary, 0.12)
+        if selected
+        else DesignTokens.bg_sidebar_hover
+    )
     hover_border = rgba_from_hex(DesignTokens.primary, 0.24) if selected else DesignTokens.border_subtle
-    pressed_bg = rgba_from_hex(DesignTokens.primary, 0.16) if selected else "rgba(255, 255, 255, 0.78)"
+    pressed_bg = (
+        rgba_from_hex(DesignTokens.primary, 0.16)
+        if selected
+        else DesignTokens.bg_pressed
+    )
     return (
         "QToolButton { "
         f"background: {bg}; color: {color}; border: 1px solid {border}; border-radius: 11px; padding: 0px;"
@@ -1402,7 +1444,7 @@ def apple_disclosure_button_style():
         "border-radius: 10px; padding: 4px 10px; text-align: left; font-size: 11px; font-weight: 600;"
         "} "
         "QPushButton:hover { "
-        f"background: rgba(255, 255, 255, 0.42); color: {DesignTokens.text_primary};"
+        f"background: {DesignTokens.bg_hover}; color: {DesignTokens.text_primary};"
         "} "
     )
 
@@ -2048,8 +2090,8 @@ def apple_checkable_list_style(radius=14, bg=None, padding=6):
         f"QListWidget::item {{ padding: 10px 12px; border-radius: 10px; color: {DesignTokens.text_primary}; }}"
         f"QListWidget::item:selected {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.text_primary}; }}"
         "QListWidget::indicator { width: 18px; height: 18px; }"
-        f"QListWidget::indicator:unchecked {{ background: rgba(255, 255, 255, 0.96); border: 1px solid {DesignTokens.border_strong}; border-radius: 6px; }}"
-        f"QListWidget::indicator:unchecked:hover {{ border-color: {DesignTokens.primary}; background: rgba(255, 255, 255, 1); }}"
+        f"QListWidget::indicator:unchecked {{ background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border_strong}; border-radius: 6px; }}"
+        f"QListWidget::indicator:unchecked:hover {{ border-color: {DesignTokens.primary}; background: {DesignTokens.bg_hover}; }}"
         f"QListWidget::indicator:checked {{ background: {checked_bg}; border: 1px solid {checked_border}; border-radius: 6px; }}"
         f"QListWidget::indicator:checked:hover {{ background: {rgba_from_hex(DesignTokens.primary, 0.16)}; border-color: {DesignTokens.primary}; }}"
     )
@@ -2587,13 +2629,28 @@ class Avatar(QLabel):
         icon_size = int(size * 0.6)
         
         if self.role == "User":
-            self.bg_color = QColor("#4b5563") # 用户灰
+            self.bg_color = QColor(DesignTokens.accent_user)
             # 使用 user-alt 通常比 user 好看一点
-            self.pixmap = qta.icon('fa5s.user', color='white').pixmap(icon_size, icon_size)
+            self.pixmap = qta.icon('fa5s.user', color=DesignTokens.text_inverse).pixmap(icon_size, icon_size)
         else:
-            self.bg_color = QColor("#4d6bfe") # DeepSeek 蓝
+            self.bg_color = QColor(DesignTokens.accent_ai)
             # 也可以尝试 fa5s.brain 代表 AI，或者保持 fa5s.robot
-            self.pixmap = qta.icon('fa5s.robot', color='white').pixmap(icon_size, icon_size)
+            self.pixmap = qta.icon('fa5s.robot', color=DesignTokens.text_inverse).pixmap(icon_size, icon_size)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        icon_size = int(self.width() * 0.6)
+        if self.role == "User":
+            self.bg_color = QColor(DesignTokens.accent_user)
+            icon_name = "fa5s.user"
+        else:
+            self.bg_color = QColor(DesignTokens.accent_ai)
+            icon_name = "fa5s.robot"
+        self.pixmap = qta.icon(
+            icon_name,
+            color=DesignTokens.text_inverse,
+        ).pixmap(icon_size, icon_size)
+        self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -2670,7 +2727,9 @@ class _LegacySettingsDialog(QDialog):
         
         # API Key Guide
         guide_label = QLabel('API Key 获取方法：<br>① DeepSeek: <a href="https://platform.deepseek.com/">DeepSeek 开发者平台</a>')
-        guide_label.setStyleSheet("color: #5f6368; font-size: 11px; margin-bottom: 8px;")
+        guide_label.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_caption}px; margin-bottom: 8px;"
+        )
         guide_label.setOpenExternalLinks(True)
         guide_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
         form_layout.addRow("", guide_label)
@@ -2729,7 +2788,9 @@ class _LegacySettingsDialog(QDialog):
         self.god_mode_check = QCheckBox("启用 God Mode (解除安全限制)")
         self.god_mode_check.setToolTip("警告：开启后，Agent 将拥有对全盘文件的访问权限，并可执行任意 Python 代码。\n请仅在您完全信任 Agent 操作时开启。")
         self.god_mode_check.setChecked(self.config_manager.get_god_mode())
-        self.god_mode_check.setStyleSheet("QCheckBox { color: #d93025; font-weight: bold; }")
+        self.god_mode_check.setStyleSheet(
+            f"QCheckBox {{ color: {DesignTokens.error_text}; font-weight: bold; }}"
+        )
         form_layout.addRow("", self.god_mode_check)
         
 
@@ -2743,9 +2804,11 @@ class _LegacySettingsDialog(QDialog):
         im_layout.addWidget(im_intro)
         gateway_bar = QHBoxLayout()
         gateway_info = QLabel("支持飞书、钉钉和企业微信智能机器人。")
-        gateway_info.setStyleSheet("color: #5f6368; font-size: 11px;")
+        gateway_info.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; font-size: {DesignTokens.font_size_caption}px;"
+        )
         gateway_btn = QPushButton("启动网关")
-        gateway_btn.setIcon(qta.icon('fa5s.play', color='#374151'))
+        gateway_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.icon_secondary))
         def start_gateway():
             try:
                 if hasattr(self._main, "queue_daemon_connection"):
@@ -2816,10 +2879,12 @@ class AppleSwitch(QCheckBox):
         if not is_enabled:
             track_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.24))
         else:
-            track_color = QColor(DesignTokens.success_accent if checked else "#d1d5db")
+            track_color = QColor(
+                DesignTokens.success_accent if checked else DesignTokens.border
+            )
         if self.underMouse() and not checked and is_enabled:
-            track_color = QColor("#c4c9d3")
-        border_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.42)) if not is_enabled else QColor(DesignTokens.success_accent if checked else "#c7ccd5")
+            track_color = QColor(DesignTokens.border_strong)
+        border_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.42)) if not is_enabled else QColor(DesignTokens.success_accent if checked else DesignTokens.border_strong)
         painter.setPen(QPen(border_color, 1))
         painter.setBrush(QBrush(track_color))
         painter.drawRoundedRect(track, 12, 12)
@@ -2827,7 +2892,9 @@ class AppleSwitch(QCheckBox):
         knob_x = 27 if checked else 5
         knob = QRect(knob_x, 5, 20, 20)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#ffffff" if is_enabled else "#f8f9fb"))
+        painter.setBrush(
+            QColor(DesignTokens.bg_main if is_enabled else DesignTokens.bg_disabled)
+        )
         painter.drawEllipse(knob)
 
 
@@ -2846,13 +2913,13 @@ class AppleSelectionCheck(QCheckBox):
             painter.setPen(QPen(QColor(DesignTokens.primary), 1))
             painter.setBrush(QBrush(QColor(DesignTokens.primary)))
             painter.drawEllipse(circle)
-            painter.setPen(QPen(QColor("#ffffff"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setPen(QPen(QColor(DesignTokens.text_inverse), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             painter.drawLine(8, 12, 11, 15)
             painter.drawLine(11, 15, 17, 9)
             return
         border = QColor(DesignTokens.primary if self.underMouse() else DesignTokens.border_strong)
         painter.setPen(QPen(border, 1.5))
-        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.setBrush(QBrush(QColor(DesignTokens.bg_main)))
         painter.drawEllipse(circle)
 
 
@@ -3589,12 +3656,12 @@ class _LegacySkillsCenterDialog(QDialog):
         # Bottom Bar (Import & Refresh)
         bottom_layout = QHBoxLayout()
         import_btn = QPushButton(" 导入新功能包")
-        import_btn.setIcon(qta.icon('fa5s.box-open', color='#374151'))
+        import_btn.setIcon(qta.icon('fa5s.box-open', color=DesignTokens.icon_secondary))
         import_btn.clicked.connect(self.import_skill)
         bottom_layout.addWidget(import_btn)
         
         refresh_btn = QPushButton(" 刷新列表")
-        refresh_btn.setIcon(qta.icon('fa5s.sync', color='#374151'))
+        refresh_btn.setIcon(qta.icon('fa5s.sync', color=DesignTokens.icon_secondary))
         refresh_btn.clicked.connect(self.manual_refresh)
         bottom_layout.addWidget(refresh_btn)
 
@@ -3638,7 +3705,11 @@ class _LegacySkillsCenterDialog(QDialog):
     def add_skill_card(self, skill, parent_layout):
         card = QFrame()
         card.setFrameStyle(QFrame.StyledPanel | QFrame.Raised)
-        card.setStyleSheet("background-color: #f9f9f9; border-radius: 5px; margin-bottom: 5px;")
+        card.setStyleSheet(
+            f"background: {DesignTokens.management_panel_bg}; "
+            f"border: 1px solid {DesignTokens.management_border}; "
+            f"border-radius: {DesignTokens.radius_sm}px; margin-bottom: 5px;"
+        )
         
         h_layout = QHBoxLayout(card)
         
@@ -3648,7 +3719,7 @@ class _LegacySkillsCenterDialog(QDialog):
         name_lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
         desc_lbl = QLabel(skill.get('description_cn') or skill.get('description', ''))
         desc_lbl.setWordWrap(True)
-        desc_lbl.setStyleSheet("color: #555;")
+        desc_lbl.setStyleSheet(f"color: {DesignTokens.text_secondary};")
         
         v_layout.addWidget(name_lbl)
         v_layout.addWidget(desc_lbl)
@@ -3658,7 +3729,7 @@ class _LegacySkillsCenterDialog(QDialog):
         if deps and isinstance(deps, list):
             deps_str = ", ".join(deps)
             deps_lbl = QLabel(f" 依赖: {deps_str}")
-            deps_lbl.setPixmap(qta.icon('fa5s.box', color='#1a73e8').pixmap(12, 12))
+            deps_lbl.setPixmap(qta.icon('fa5s.box', color=DesignTokens.primary).pixmap(12, 12))
             deps_lbl = QLabel() # Re-create to use layout for icon+text or just text with emoji? 
             # Let's keep it simple with text but replace emoji with a small icon if possible or just text
             # Using simple text for now to avoid layout complexity in this list
@@ -3672,11 +3743,13 @@ class _LegacySkillsCenterDialog(QDialog):
             deps_layout.setSpacing(4)
             
             icon_lbl = QLabel()
-            icon_lbl.setPixmap(qta.icon('fa5s.box', color='#1a73e8').pixmap(12, 12))
+            icon_lbl.setPixmap(qta.icon('fa5s.box', color=DesignTokens.primary).pixmap(12, 12))
             icon_lbl.setFixedSize(14, 14)
             
             txt_lbl = QLabel(f"依赖: {deps_str}")
-            txt_lbl.setStyleSheet("color: #1a73e8; font-size: 11px;")
+            txt_lbl.setStyleSheet(
+                f"color: {DesignTokens.primary}; font-size: {DesignTokens.font_size_caption}px;"
+            )
             
             deps_layout.addWidget(icon_lbl)
             deps_layout.addWidget(txt_lbl)
@@ -3688,7 +3761,10 @@ class _LegacySkillsCenterDialog(QDialog):
         exp = skill.get('experience', [])
         if exp and isinstance(exp, list):
              exp_frame = QFrame()
-             exp_frame.setStyleSheet("background-color: #f1f8e9; border-radius: 4px; padding: 4px; margin-top: 4px;")
+             exp_frame.setStyleSheet(
+                 f"background: {DesignTokens.success_bg}; border-radius: {DesignTokens.radius_sm}px; "
+                 "padding: 4px; margin-top: 4px;"
+             )
              exp_layout = QVBoxLayout(exp_frame)
              exp_layout.setContentsMargins(4,4,4,4)
              exp_layout.setSpacing(2)
@@ -3699,9 +3775,12 @@ class _LegacySkillsCenterDialog(QDialog):
              h_layout_exp.setSpacing(4)
              
              exp_icon = QLabel()
-             exp_icon.setPixmap(qta.icon('fa5s.chart-line', color='#33691e').pixmap(12, 12))
+             exp_icon.setPixmap(qta.icon('fa5s.chart-line', color=DesignTokens.success_icon).pixmap(12, 12))
              exp_header = QLabel(f"进化记录 ({len(exp)})")
-             exp_header.setStyleSheet("font-weight: bold; color: #33691e; font-size: 11px;")
+             exp_header.setStyleSheet(
+                 f"font-weight: bold; color: {DesignTokens.success_text}; "
+                 f"font-size: {DesignTokens.font_size_caption}px;"
+             )
              
              h_layout_exp.addWidget(exp_icon)
              h_layout_exp.addWidget(exp_header)
@@ -3711,7 +3790,10 @@ class _LegacySkillsCenterDialog(QDialog):
              
              for e in exp:
                  e_lbl = QLabel(f"• {e}")
-                 e_lbl.setStyleSheet("color: #558b2f; font-size: 10px;")
+                 e_lbl.setStyleSheet(
+                     f"color: {DesignTokens.success_text}; "
+                     f"font-size: {max(9, DesignTokens.font_size_caption - 1)}px;"
+                 )
                  e_lbl.setWordWrap(True)
                  exp_layout.addWidget(e_lbl)
              v_layout.addWidget(exp_frame)
@@ -3719,7 +3801,11 @@ class _LegacySkillsCenterDialog(QDialog):
         # Security Level
         if 'security_level' in skill:
              sec_lvl = skill['security_level']
-             color = "#e67c73" if "high" in sec_lvl.lower() else "#fbbc04"
+             color = (
+                 DesignTokens.error_text
+                 if "high" in sec_lvl.lower()
+                 else DesignTokens.warning_text
+             )
              
              sec_container = QWidget()
              sec_layout = QHBoxLayout(sec_container)
@@ -3754,16 +3840,20 @@ class _LegacySkillsCenterDialog(QDialog):
         toggle_btn.setCursor(Qt.PointingHandCursor)
         
         if is_enabled:
-             toggle_btn.setStyleSheet("""
-                QPushButton { background-color: #e6f4ea; color: #137333; border: none; border-radius: 4px; font-weight: bold; padding: 6px; }
-                QPushButton:hover { background-color: #ceead6; }
-             """)
+             toggle_btn.setStyleSheet(
+                 f"QPushButton {{ background: {DesignTokens.success_bg}; "
+                 f"color: {DesignTokens.success_text}; border: none; "
+                 f"border-radius: {DesignTokens.radius_sm}px; font-weight: bold; padding: 6px; }}"
+                 f"QPushButton:hover {{ background: {DesignTokens.primary_soft}; }}"
+             )
              toggle_btn.setToolTip("点击禁用")
         else:
-             toggle_btn.setStyleSheet("""
-                QPushButton { background-color: #f1f3f4; color: #5f6368; border: none; border-radius: 4px; font-weight: bold; padding: 6px; }
-                QPushButton:hover { background-color: #e8eaed; }
-             """)
+             toggle_btn.setStyleSheet(
+                 f"QPushButton {{ background: {DesignTokens.bg_disabled}; "
+                 f"color: {DesignTokens.text_secondary}; border: none; "
+                 f"border-radius: {DesignTokens.radius_sm}px; font-weight: bold; padding: 6px; }}"
+                 f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; }}"
+             )
              toggle_btn.setToolTip("点击启用")
 
         toggle_btn.clicked.connect(lambda: self.toggle_skill(skill['name'], not is_enabled))
@@ -5349,7 +5439,7 @@ class AutomationDialog(QDialog):
         title_box.addWidget(subtitle)
         header.addLayout(title_box, 1)
         self.create_task_btn = QPushButton("新建定时任务")
-        self.create_task_btn.setIcon(qta.icon("fa5s.plus", color="#ffffff"))
+        self.create_task_btn.setIcon(qta.icon("fa5s.plus", color=DesignTokens.text_inverse))
         self.create_task_btn.setObjectName("PrimaryBtn")
         self.create_task_btn.clicked.connect(self.create_task)
         header.addWidget(self.create_task_btn)
@@ -6712,6 +6802,25 @@ class SettingsDialog(QDialog):
             self.config_manager.get_model_channels()
         )
 
+        appearance_page, appearance_layout = make_scroll_page(
+            "外观",
+            "创建和切换自定义主题，或让 AI 根据描述生成可确认的临时预览。",
+        )
+        theme_repository = (
+            self._main.theme_manager.repository
+            if self._main and getattr(self._main, "theme_manager", None)
+            else ThemeRepository(self.config_manager.data_dir)
+        )
+        self.theme_settings_panel = ThemeSettingsPanel(
+            theme_repository,
+            runtime_manager=(
+                self._main.theme_manager
+                if self._main and getattr(self._main, "theme_manager", None)
+                else getattr(QApplication.instance(), "theme_manager", None)
+            ),
+        )
+        appearance_layout.addWidget(self.theme_settings_panel)
+
         agent_page, agent_layout = make_scroll_page(
             "智能体",
             "把重复出现的工作角色预设下来，后续在会话里可以直接复用。",
@@ -7333,10 +7442,10 @@ class SettingsDialog(QDialog):
         gateway_btn.setIcon(qta.icon('fa5s.play', color='white'))
         stop_gateway_btn = QPushButton("停止网关")
         stop_gateway_btn.setObjectName("SecondaryBtn")
-        stop_gateway_btn.setIcon(qta.icon('fa5s.stop', color='#334155'))
+        stop_gateway_btn.setIcon(qta.icon('fa5s.stop', color=DesignTokens.icon_secondary))
         log_btn = QPushButton("打开日志")
         log_btn.setObjectName("SecondaryBtn")
-        log_btn.setIcon(qta.icon('fa5s.file-alt', color='#334155'))
+        log_btn.setIcon(qta.icon('fa5s.file-alt', color=DesignTokens.icon_secondary))
 
         def start_gateway():
             try:
@@ -7377,6 +7486,7 @@ class SettingsDialog(QDialog):
         im_layout.addWidget(gateway_group)
         im_layout.addStretch()
 
+        add_settings_page("外观", "fa5s.palette", appearance_page)
         add_settings_page("模型与服务", "fa5s.brain", model_page)
         add_settings_page("智能体", "fa5s.user-astronaut", agent_page)
         add_settings_page("个性与记忆", "fa5s.brain", memory_page)
@@ -7448,6 +7558,7 @@ class SettingsDialog(QDialog):
             date_edit.dateTimeChanged.connect(callback)
         for manager in (self.model_channel_manager, self.agent_profile_manager, self.mcp_server_manager):
             manager.changed.connect(callback)
+        self.theme_settings_panel.changed.connect(callback)
 
     @staticmethod
     def _strip_settings_state_metadata(value):
@@ -7496,6 +7607,7 @@ class SettingsDialog(QDialog):
             "god_mode": self.god_mode_check.isChecked(),
             "download_sources": source_state,
             "im_gateway": {"enabled_providers": im_enabled, "providers": im_providers},
+            "appearance": self.theme_settings_panel.state_signature(),
             "memory": {
                 "soul": self.memory_soul_edit.toPlainText(),
                 "global": self.memory_global_edit.toPlainText(),
@@ -7536,6 +7648,7 @@ class SettingsDialog(QDialog):
             )
             if reply != QMessageBox.Yes:
                 return False
+            self.theme_settings_panel.restore_saved_theme()
         return True
 
     def request_reject(self):
@@ -8141,8 +8254,10 @@ class SettingsDialog(QDialog):
                 self.download_sources = pending_download_sources
                 self.config_manager.set("download_sources", self.download_sources)
                 self._save_im_gateway_config()
+            self.theme_settings_panel.commit()
         except Exception as exc:
             try:
+                self.theme_settings_panel.restore_saved_theme()
                 target_memory_store.save_soul(previous_memory["soul"])
                 target_memory_store.save_summary(previous_memory["global"], "global", "")
                 if self.memory_workspace_dir:
@@ -8175,15 +8290,33 @@ class SettingsDialog(QDialog):
             return
         self.memory_store = target_memory_store
         self.requires_skill_reload = mcp_servers != current_mcp_servers
+        theme_commit_warning = self.theme_settings_panel.last_commit_warning
         self._clear_settings_dirty()
         self._allow_close_without_prompt = True
         if self.property("embeddedProductPage"):
             if self._main and hasattr(self._main, "add_system_toast"):
-                self._main.add_system_toast("设置已保存", "success", auto_close_ms=3200)
+                if theme_commit_warning:
+                    self._main.add_system_toast(
+                        theme_commit_warning,
+                        "warning",
+                        auto_close_ms=10000,
+                    )
+                else:
+                    self._main.add_system_toast(
+                        "设置已保存",
+                        "success",
+                        auto_close_ms=3200,
+                    )
             if self.requires_skill_reload and self._main:
                 self._main.skill_manager_ready = False
                 self._main.start_background_skill_load(force=True)
             return
+        if theme_commit_warning:
+            QMessageBox.warning(
+                self,
+                "设置已保存",
+                theme_commit_warning,
+            )
         self.accept()
 
 
@@ -9550,10 +9683,16 @@ class InteractionChoiceButton(QPushButton):
         self.setCheckable(True)
         self.setProperty("option_value", str(value or label or ""))
         self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(42 if description else 34)
+        self._has_description = bool(description)
+        self.setMinimumHeight(42 if self._has_description else 34)
+        self._apply_theme_style()
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def _apply_theme_style(self):
         self.setStyleSheet(
-            f"QPushButton {{ text-align: left; padding: 7px 10px; color: {DesignTokens.text_primary}; "
-            f"background: {DesignTokens.bg_main}; border: 1px solid {DesignTokens.border}; border-radius: 7px; }}"
+            f"QPushButton {{ text-align: left; padding: 7px 10px; color: {DesignTokens.overlay_text}; "
+            f"font-size: {DesignTokens.font_size_meta}px; background: {DesignTokens.overlay_bg}; "
+            f"border: 1px solid {DesignTokens.overlay_border}; border-radius: {DesignTokens.radius_sm}px; }}"
             f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; border-color: {DesignTokens.border_strong}; }}"
             f"QPushButton:checked {{ background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
             f"border: 2px solid {DesignTokens.primary}; padding: 6px 9px; }}"
@@ -9561,6 +9700,15 @@ class InteractionChoiceButton(QPushButton):
             f"QPushButton:disabled {{ background: {DesignTokens.bg_disabled}; color: {DesignTokens.text_disabled}; "
             f"border-color: {DesignTokens.border_subtle}; }}"
         )
+
+    def refresh_theme(self, _resolved=None):
+        self.setMinimumHeight(
+            max(
+                DesignTokens.control_height,
+                42 if self._has_description else 34,
+            )
+        )
+        self._apply_theme_style()
 
 
 class InlineInteractionCard(QFrame):
@@ -9575,6 +9723,7 @@ class InlineInteractionCard(QFrame):
         self._resolved = False
         self.option_checks = []
         self.question_controls = []
+        self.question_labels = []
         self.option_group = None
         self.setObjectName("InlineInteractionCard")
         self.setStyleSheet(
@@ -9584,14 +9733,14 @@ class InlineInteractionCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
-        title = QLabel(str(self.request.get("title") or "需要你的输入"))
-        title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
-        message = QLabel(str(self.request.get("message") or ""))
-        message.setWordWrap(True)
-        message.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        message.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
-        layout.addWidget(title)
-        layout.addWidget(message)
+        self.title_label = QLabel(str(self.request.get("title") or "需要你的输入"))
+        self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
+        self.message_label = QLabel(str(self.request.get("message") or ""))
+        self.message_label.setWordWrap(True)
+        self.message_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.message_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 12px;")
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.message_label)
 
         self.text_input = QLineEdit()
         self.text_input.setPlaceholderText("补充说明…")
@@ -9621,6 +9770,7 @@ class InlineInteractionCard(QFrame):
                 question_label = QLabel(str(question.get("question") or question.get("header") or "问题"))
                 question_label.setWordWrap(True)
                 question_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600;")
+                self.question_labels.append(question_label)
                 group = QButtonGroup(self)
                 group.setExclusive(True)
                 buttons = []
@@ -9647,6 +9797,7 @@ class InlineInteractionCard(QFrame):
 
         self.validation_label = QLabel("")
         self.validation_label.setWordWrap(True)
+        self._validation_tone = "error"
         self.validation_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 11px;")
         self.validation_label.hide()
         layout.addWidget(self.validation_label)
@@ -9668,6 +9819,47 @@ class InlineInteractionCard(QFrame):
         self.timeout_timer.setSingleShot(True)
         self.timeout_timer.timeout.connect(self._expire)
         self.timeout_timer.start(int(timeout_seconds * 1000))
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#InlineInteractionCard {{ background: {DesignTokens.overlay_bg}; "
+            f"border: 1px solid {DesignTokens.overlay_border}; "
+            f"border-radius: {DesignTokens.overlay_radius}px; }}"
+        )
+        self.title_label.setStyleSheet(
+            f"color: {DesignTokens.overlay_text}; "
+            f"font-size: {DesignTokens.font_size_body}px; "
+            f"font-weight: {DesignTokens.font_weight_bold};"
+        )
+        self.message_label.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; "
+            f"font-size: {DesignTokens.font_size_meta}px;"
+        )
+        for label in self.question_labels:
+            label.setStyleSheet(
+                f"color: {DesignTokens.overlay_text}; "
+                f"font-size: {DesignTokens.font_size_meta}px; "
+                f"font-weight: {DesignTokens.font_weight_semibold};"
+            )
+        self.text_input.setStyleSheet(product_field_style())
+        for control in self.question_controls:
+            control["input"].setStyleSheet(product_field_style())
+        validation_color = (
+            DesignTokens.success_text
+            if self._validation_tone == "success"
+            else DesignTokens.error_text
+        )
+        self.validation_label.setStyleSheet(
+            f"color: {validation_color}; "
+            f"font-size: {DesignTokens.font_size_caption}px;"
+        )
+        self.cancel_btn.setStyleSheet(
+            product_button_style("secondary", radius=DesignTokens.radius_sm)
+        )
+        self.submit_btn.setStyleSheet(
+            product_button_style("primary", radius=DesignTokens.radius_sm)
+        )
 
     def _select_only(self, current, checked):
         if not checked:
@@ -9684,7 +9876,9 @@ class InlineInteractionCard(QFrame):
         ]
 
     def _show_validation(self, text):
+        self._validation_tone = "error"
         self.validation_label.setText(str(text or "请检查输入"))
+        self.refresh_theme()
         self.validation_label.show()
 
     def _submit(self):
@@ -9756,7 +9950,8 @@ class InlineInteractionCard(QFrame):
         self._resolved = True
         self.timeout_timer.stop()
         self._set_controls_enabled(False)
-        self.validation_label.setStyleSheet(f"color: {DesignTokens.success_text}; font-size: 11px;")
+        self._validation_tone = "success"
+        self.refresh_theme()
         self.validation_label.setText("已提交")
         self.validation_label.show()
         self.resolved.emit(value)
@@ -9764,7 +9959,8 @@ class InlineInteractionCard(QFrame):
     def restore_after_resolution_error(self, message):
         self._resolved = False
         self._set_controls_enabled(True)
-        self.validation_label.setStyleSheet(f"color: {DesignTokens.error_text}; font-size: 11px;")
+        self._validation_tone = "error"
+        self.refresh_theme()
         self.validation_label.setText(f"提交失败：{str(message or '未知错误')}。请重试。")
         self.validation_label.show()
         timeout_seconds = max(1.0, float(self.request.get("timeout_seconds") or 120.0))
@@ -10381,7 +10577,9 @@ class DragOverlay(QWidget):
         layout.addWidget(container)
         
         # Semi-transparent background
-        self.setStyleSheet("background-color: rgba(0, 0, 0, 0.4);")
+        self.setStyleSheet(
+            f"background-color: {rgba_from_hex(DesignTokens.overlay_text, 0.4)};"
+        )
 
 class AutoResizingLabel(QLabel):
     def __init__(self, parent=None):
@@ -10614,13 +10812,17 @@ class AutoResizingInputEdit(QTextEdit):
             
         if self.height() != height:
             if self.anim: self.anim.stop()
-            self.anim = QVariantAnimation()
+            self.anim = QVariantAnimation(self)
             self.anim.setDuration(150)
             self.anim.setStartValue(self.height())
             self.anim.setEndValue(height)
             self.anim.setEasingCurve(QEasingCurve.OutCubic)
-            self.anim.valueChanged.connect(lambda v: self.setFixedHeight(int(v)))
+            self.anim.valueChanged.connect(self._set_animated_height)
             self.anim.start()
+
+    def _set_animated_height(self, value):
+        if _qt_object_alive(self):
+            self.setFixedHeight(int(value))
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
@@ -11473,7 +11675,7 @@ class PptAgentModeDialog(QDialog):
             }}
             QPlainTextEdit:focus {{
                 border-color: {rgba_from_hex(DesignTokens.primary, 0.42)};
-                background: #ffffff;
+                background: {DesignTokens.bg_main};
             }}
             """
         )
@@ -11875,6 +12077,52 @@ class SystemToast(QFrame):
         self.icon_badge = icon_badge
         self.icon_label = icon_badge
         self.close_button = close_btn
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def refresh_theme(self, _resolved=None):
+        icon_name = "fa5s.info-circle"
+        icon_color = DesignTokens.info_icon
+        tint_color = DesignTokens.toast_tint_info
+        if self.toast_type == "error":
+            icon_name = "fa5s.exclamation-circle"
+            icon_color = DesignTokens.error_icon
+            tint_color = DesignTokens.toast_tint_error
+        elif self.toast_type == "success":
+            icon_name = "fa5s.check-circle"
+            icon_color = DesignTokens.success_icon
+            tint_color = DesignTokens.toast_tint_success
+        elif self.toast_type == "warning":
+            icon_name = "fa5s.exclamation-triangle"
+            icon_color = DesignTokens.warning_icon
+            tint_color = DesignTokens.toast_tint_warning
+        self.icon_badge.setPixmap(
+            qta.icon(icon_name, color=icon_color).pixmap(
+                DesignTokens.icon_size_sm,
+                DesignTokens.icon_size_sm,
+            )
+        )
+        self.close_button.setIcon(
+            qta.icon("fa5s.times", color=DesignTokens.icon_secondary)
+        )
+        self.setStyleSheet(
+            f"QFrame#SystemToast {{ background: transparent; border: none; }}"
+            f"QFrame#SystemToastSurface {{ background: {DesignTokens.toast_bg}; "
+            f"border: 1px solid {DesignTokens.toast_border}; "
+            f"border-radius: {DesignTokens.overlay_radius}px; }}"
+            f"QLabel#SystemToastIconBadge {{ background: {tint_color}; "
+            f"border: 1px solid {rgba_from_hex(icon_color, 0.14)}; "
+            f"border-radius: {DesignTokens.radius_lg}px; }}"
+            f"QLabel#SystemToastText {{ color: {DesignTokens.overlay_text}; "
+            f"font-size: {DesignTokens.font_size_body}px; "
+            f"font-weight: {DesignTokens.font_weight_medium}; background: transparent; }}"
+            f"QToolButton#SystemToastClose {{ background: transparent; border: none; "
+            f"border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QToolButton#SystemToastClose:hover {{ background: {DesignTokens.bg_hover}; }}"
+            f"QToolButton#SystemToastClose:pressed {{ background: {DesignTokens.bg_pressed}; }}"
+        )
+        self.apply_dynamic_width(
+            min(DesignTokens.message_max_width - 60, DesignTokens.toast_max_width)
+        )
 
     def apply_dynamic_width(self, message_width):
         target = max(1, min(int(message_width or 0), DesignTokens.toast_max_width))
@@ -11926,10 +12174,13 @@ class FileChip(QFrame):
 
         layout = QHBoxLayout(self)
         is_image = self.path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+        self._is_image = is_image
+        self._uses_file_icon = not is_image
         layout.setContentsMargins(6 if is_image else 10, 6, 8 if is_image else 10, 6)
         layout.setSpacing(6)
 
         icon_label = QLabel()
+        self.icon_label = icon_label
         if is_image:
             pixmap = QPixmap(self.path)
             if not pixmap.isNull():
@@ -11940,6 +12191,7 @@ class FileChip(QFrame):
                     f"background: {DesignTokens.bg_secondary}; border: none; border-radius: 5px;"
                 )
             else:
+                self._uses_file_icon = True
                 icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
         else:
             icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
@@ -11947,12 +12199,15 @@ class FileChip(QFrame):
 
         name = os.path.basename(self.path) or self.path
         text_label = QLabel(name)
+        self.text_label = text_label
         text_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 500;")
         text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         layout.addWidget(text_label)
 
+        self.remove_btn = None
         if removable:
             remove_btn = QToolButton()
+            self.remove_btn = remove_btn
             remove_btn.setCursor(Qt.PointingHandCursor)
             remove_btn.setAutoRaise(True)
             remove_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_tertiary))
@@ -11965,6 +12220,43 @@ class FileChip(QFrame):
             layout.addWidget(remove_btn)
 
         self.setToolTip(self.path)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#FileChip {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.chat_border}; "
+            f"border-radius: {DesignTokens.radius_sm}px; }}"
+        )
+        self.text_label.setStyleSheet(
+            f"color: {DesignTokens.chat_text}; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_medium};"
+        )
+        if self._uses_file_icon:
+            self.icon_label.setPixmap(
+                qta.icon(
+                    file_chip_icon_name(self.path),
+                    color=DesignTokens.primary,
+                ).pixmap(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm)
+            )
+        elif self._is_image:
+            self.icon_label.setStyleSheet(
+                f"background: {DesignTokens.bg_secondary}; border: none; "
+                f"border-radius: {DesignTokens.radius_sm}px;"
+            )
+        if self.remove_btn is not None:
+            self.remove_btn.setIcon(
+                qta.icon("fa5s.times", color=DesignTokens.icon_secondary)
+            )
+            self.remove_btn.setIconSize(
+                QSize(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm)
+            )
+            self.remove_btn.setStyleSheet(
+                f"QToolButton {{ border: none; padding: 0; "
+                f"color: {DesignTokens.icon_secondary}; }}"
+                f"QToolButton:hover {{ color: {DesignTokens.icon_primary}; }}"
+            )
 
 class GuidanceTimelineEvent(QFrame):
     """Always-visible user guidance row between conversational reasoning segments."""
@@ -11981,12 +12273,13 @@ class GuidanceTimelineEvent(QFrame):
         self.message_id = str(message_id or "")
         self.status = status if status in self.STATUS_COPY else "queued"
         self.setObjectName("GuidanceTimelineEvent")
-        self.setStyleSheet(f"""
+        self._theme_stylesheet_factory = lambda: f"""
             QFrame#GuidanceTimelineEvent {{
                 background: {DesignTokens.primary_soft}; border: none; border-radius: 7px;
                 border-left: 2px solid {DesignTokens.primary};
             }}
-        """)
+        """
+        self.setStyleSheet(self._theme_stylesheet_factory())
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 7, 20, 7)
         layout.setSpacing(4)
@@ -11995,6 +12288,7 @@ class GuidanceTimelineEvent(QFrame):
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
         title = QLabel("补充引导")
+        self.title_label = title
         title.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 12px; font-weight: 700;")
         self.status_label = QLabel()
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -12024,6 +12318,21 @@ class GuidanceTimelineEvent(QFrame):
             chip_layout.addStretch()
             layout.addWidget(chip_row)
         self.set_status(self.status)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(self._theme_stylesheet_factory())
+        self.title_label.setStyleSheet(
+            f"color: {DesignTokens.primary}; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_bold};"
+        )
+        self.content_label.setStyleSheet(
+            f"color: {DesignTokens.chat_text}; "
+            f"font-size: {DesignTokens.font_size_body}px; "
+            "line-height: 1.45; background: transparent;"
+        )
+        self.set_status(self.status)
 
     def set_status(self, status):
         if status not in self.STATUS_COPY:
@@ -12038,7 +12347,10 @@ class GuidanceTimelineEvent(QFrame):
         icons = {"queued": "○", "waiting_tool": "◷", "applied": "✓", "rejected": "!"}
         self.status_label.setText(f"{icons[status]} {self.STATUS_COPY[status]}")
         self.status_label.setStyleSheet(
-            f"color: {colors[status]}; font-size: 10px; font-weight: 600; background: transparent;"
+            f"color: {colors[status]}; "
+            f"font-size: {DesignTokens.font_size_caption}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            "background: transparent;"
         )
 
 
@@ -12061,23 +12373,24 @@ class InlineVisualizationBridge(QObject):
 
 
 def inline_visualization_theme_css():
+    # THEME_STATIC_AUDIT_ALLOW_BEGIN: embedded_visualization_content
     return f"""
 :root {{
   color-scheme: light;
-  --background: {DesignTokens.bg_main};
-  --foreground: {DesignTokens.text_primary};
-  --card: {DesignTokens.bg_secondary};
-  --card-foreground: {DesignTokens.text_primary};
-  --muted: {DesignTokens.bg_hover};
-  --muted-foreground: {DesignTokens.text_secondary};
-  --accent: {DesignTokens.primary_soft};
-  --accent-foreground: {DesignTokens.primary};
-  --primary: {DesignTokens.primary};
+  --background: #ffffff;
+  --foreground: #202124;
+  --card: #f4f4f5;
+  --card-foreground: #202124;
+  --muted: #e9e9eb;
+  --muted-foreground: #5f6269;
+  --accent: #eef0ff;
+  --accent-foreground: #5e6ad2;
+  --primary: #5e6ad2;
   --primary-foreground: #ffffff;
-  --border: {DesignTokens.border_subtle};
-  --input: {DesignTokens.border};
-  --ring: {DesignTokens.primary_focus};
-  --viz-series-1: {DesignTokens.primary};
+  --border: #e8e8eb;
+  --input: #d8d8dc;
+  --ring: #c9cdf7;
+  --viz-series-1: #5e6ad2;
   --viz-series-2: #d97706;
   --viz-series-3: #16a34a;
   --viz-series-4: #db2777;
@@ -12098,6 +12411,7 @@ table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border-bottom: 1px solid var(--border); padding: 7px 8px; text-align: left; }}
 svg, canvas {{ display: block; max-width: 100%; }}
 """
+    # THEME_STATIC_AUDIT_ALLOW_END
 
 
 class InlineVisualizationCard(QFrame):
@@ -12340,6 +12654,26 @@ class AssistantTurnGroup(QFrame):
         self.group_layout.setContentsMargins(0, 0, 0, 0)
         self.group_layout.setSpacing(0)
         self.group_layout.setAlignment(Qt.AlignTop)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            "QFrame#AssistantTurnGroup { background: transparent; border: none; }"
+        )
+        for separator in self.stage_separators:
+            separator_layout = separator.layout()
+            if separator_layout is not None:
+                separator_layout.setContentsMargins(
+                    DesignTokens.assistant_stage_separator_indent,
+                    DesignTokens.assistant_stage_separator_vertical_margin,
+                    DesignTokens.assistant_stage_separator_right_margin,
+                    DesignTokens.assistant_stage_separator_vertical_margin,
+                )
+            line = separator.findChild(QFrame, "AssistantStageSeparator")
+            if line is not None:
+                line.setStyleSheet(
+                    f"QFrame#AssistantStageSeparator {{ background: {DesignTokens.chat_border}; border: none; }}"
+                )
 
     def add_stage(self, bubble, stage_id=None):
         if bubble is None:
@@ -12446,6 +12780,8 @@ class ChatBubble(QFrame):
         self.message_actions_enabled = True
         self.edit_controls = None
         self.edit_original_text = ""
+        self.code_output_label = None
+        self.code_output_edit = None
         self.setFrameShape(QFrame.NoFrame)
         self.setLineWidth(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -12770,6 +13106,120 @@ class ChatBubble(QFrame):
                 
             main_layout.addWidget(content_col)
             # main_layout.addStretch() # Removed to allow content to take full width
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        layout = self.layout()
+        if layout is not None:
+            layout.setContentsMargins(
+                0,
+                DesignTokens.chat_message_vertical_margin,
+                0,
+                DesignTokens.chat_message_vertical_margin,
+            )
+            layout.setSpacing(DesignTokens.spacing_sm + 2)
+        if self.content_wrapper is not None:
+            self.content_wrapper.setMaximumWidth(DesignTokens.message_max_width)
+        if self.content_col is not None:
+            self.content_col.setMaximumWidth(DesignTokens.message_max_width)
+        if self.user_bubble_frame is not None:
+            self.user_bubble_frame.setMaximumWidth(DesignTokens.user_bubble_max_width)
+            self.user_bubble_frame.setStyleSheet(
+                f"QFrame#UserBubbleFrame {{ background: {DesignTokens.bg_user_bubble}; "
+                f"border: 1px solid {DesignTokens.chat_border}; "
+                f"border-radius: {DesignTokens.radius_md}px; }}"
+            )
+        if self.user_content_edit is not None:
+            self.user_content_edit.setStyleSheet(
+                f"color: {DesignTokens.chat_text}; font-size: {DesignTokens.font_size_body}px; "
+                "line-height: 1.6; border: none; background: transparent; "
+                f"selection-background-color: {DesignTokens.selection_bg}; "
+                f"selection-color: {DesignTokens.selection_text};"
+            )
+            apply_selection_palette(
+                self.user_content_edit,
+                DesignTokens.selection_bg,
+                DesignTokens.selection_text,
+            )
+        if getattr(self, "think_toggle_btn", None) is not None:
+            self.think_toggle_btn.setIcon(
+                qta.icon("fa5s.lightbulb", color=DesignTokens.accent_tool)
+            )
+            self.think_toggle_btn.setStyleSheet(
+                f"QPushButton {{ text-align: left; min-height: {DesignTokens.assistant_stage_header_height}px; "
+                f"max-height: {DesignTokens.assistant_stage_header_height}px; background: transparent; "
+                f"color: {DesignTokens.chat_text_muted}; border: none; "
+                f"border-radius: {DesignTokens.radius_sm}px; padding: 0 {DesignTokens.spacing_xs}px; "
+                f"font-size: {DesignTokens.font_size_meta}px; font-weight: {DesignTokens.font_weight_semibold}; }}"
+                f"QPushButton:hover {{ background: {DesignTokens.bg_hover}; color: {DesignTokens.chat_text}; }}"
+                f"QPushButton:checked {{ background: transparent; color: {DesignTokens.chat_text}; }}"
+            )
+        if getattr(self, "think_container", None) is not None:
+            self.think_container.setStyleSheet(
+                f"QWidget#ThinkingContainer {{ background: transparent; border: none; "
+                f"border-left: 2px solid {DesignTokens.chat_border}; "
+                f"margin-left: {DesignTokens.assistant_thinking_timeline_indent}px; }}"
+            )
+        for editor in (
+            getattr(self, "content_rich_edit", None),
+            getattr(self, "content_plain_edit", None),
+        ):
+            if editor is not None:
+                editor.setStyleSheet(
+                    f"background: transparent; border: none; padding: 0; "
+                    f"color: {DesignTokens.chat_text}; "
+                    f"font-size: {DesignTokens.font_size_body}px; "
+                    f"selection-background-color: {DesignTokens.selection_bg}; "
+                    f"selection-color: {DesignTokens.selection_text};"
+                )
+                apply_selection_palette(
+                    editor,
+                    DesignTokens.selection_bg,
+                    DesignTokens.selection_text,
+                )
+        action_style = (
+            f"QPushButton {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
+            f"padding: 2px {DesignTokens.spacing_sm + 1}px; background: transparent; "
+            f"color: {DesignTokens.chat_text_muted}; font-size: {DesignTokens.font_size_meta}px; }}"
+            f"QPushButton:hover {{ color: {DesignTokens.primary}; background: {DesignTokens.primary_soft}; }}"
+        )
+        action_icons = (
+            ("copy_result_btn", "fa5s.copy"),
+            ("office_draft_btn", "fa5s.file-code"),
+            ("skill_capture_btn", "fa5s.magic"),
+        )
+        for attribute, icon_name in action_icons:
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.setStyleSheet(action_style)
+                button.setIcon(qta.icon(icon_name, color=DesignTokens.icon_secondary))
+        if self.code_output_label is not None:
+            self.code_output_label.setStyleSheet(
+                f"font-weight: {DesignTokens.font_weight_semibold}; "
+                f"color: {DesignTokens.chat_text}; "
+                f"font-size: {DesignTokens.font_size_meta}px; "
+                f"margin-top: {DesignTokens.spacing_sm}px; margin-left: {DesignTokens.spacing_xs}px;"
+            )
+        if self.code_output_edit is not None:
+            mono_family = str(
+                QApplication.instance().property("themeMonoFontFamily") or "Consolas"
+            )
+            self.code_output_edit.setStyleSheet(
+                f"color: {DesignTokens.chat_text}; font-family: '{mono_family}'; "
+                f"font-size: {DesignTokens.font_size_code}px; "
+                f"background: {DesignTokens.bg_code}; border: 1px solid {DesignTokens.chat_border}; "
+                f"padding: {DesignTokens.spacing_sm}px; border-radius: {DesignTokens.radius_sm}px; "
+                f"margin-left: {DesignTokens.spacing_xs}px;"
+            )
+        if self.content_edit is not None and self.main_content_text:
+            was_final = bool(getattr(self, "_rendered_main_content_final", False))
+            self._rendered_main_content_text = None
+            self._render_main_content(
+                self.main_content_text,
+                content_parts=self._pending_main_content_parts,
+                final=was_final,
+            )
+        self.updateGeometry()
 
     def set_virtualized(self, virtualized):
         virtualized = bool(virtualized)
@@ -13354,7 +13804,7 @@ class ChatBubble(QFrame):
             button.setMaximumWidth(220)
             button.setStyleSheet(f"""
                 QPushButton {{
-                    background: rgba(255, 255, 255, 0.82);
+                    background: {DesignTokens.bg_main};
                     color: {DesignTokens.text_primary};
                     border: 1px solid {DesignTokens.border_subtle};
                     border-radius: 14px;
@@ -13540,11 +13990,11 @@ class OfficeDraftTaskCard(QFrame):
         if not message:
             return None
         colors = {
-            "error": ("#b42318", "rgba(180, 35, 24, 0.08)"),
-            "success": (DesignTokens.status_success, "rgba(34, 197, 94, 0.10)"),
-            "muted": (DesignTokens.text_tertiary, "rgba(148, 163, 184, 0.10)"),
+            "error": DesignTokens.error_text,
+            "success": DesignTokens.status_success,
+            "muted": DesignTokens.text_tertiary,
         }
-        fg, bg = colors.get(str(tone or "info"), (DesignTokens.text_secondary, "rgba(0, 122, 255, 0.08)"))
+        fg = colors.get(str(tone or "info"), DesignTokens.text_secondary)
         label = QLabel(message)
         label.setWordWrap(True)
         label.setStyleSheet(
@@ -13642,7 +14092,7 @@ class OfficeDraftTaskCard(QFrame):
         button.setFixedHeight(34)
         button.setStyleSheet(f"""
             QPushButton {{
-                background: rgba(255, 255, 255, 0.84);
+                background: {DesignTokens.bg_main};
                 color: {DesignTokens.text_primary};
                 border: 1px solid {DesignTokens.border_subtle};
                 border-radius: 16px;
@@ -13736,6 +14186,7 @@ class ToolCallCard(QFrame):
             "glob": "fa5s.globe", "web_search": "fa5s.globe-americas", "get_diagnostics": "fa5s.stethoscope",
         }
         icon_name = tool_icons.get(tool_name, "fa5s.tools")
+        self.tool_icon_name = icon_name
         
         # Icon with base
         self.icon_label = QLabel()
@@ -13759,10 +14210,12 @@ class ToolCallCard(QFrame):
         args_obj = args if isinstance(args, dict) else {}
         display_title, display_summary = summarize_tool_action(tool_name, args_obj)
         name_label = QLabel(display_title or f"{tool_name}")
+        self.name_label = name_label
         name_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 12px; border: none;")
         
         # Subtitle (Short Args Summary)
         args_preview = QLabel(display_summary or "查看调用详情")
+        self.args_preview_label = args_preview
         args_preview.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px; border: none;")
         
         text_layout.addWidget(name_label)
@@ -13787,7 +14240,7 @@ class ToolCallCard(QFrame):
             }}
             QPushButton:hover {{
                 color: {DesignTokens.primary};
-                background: rgba(255, 255, 255, 0.9);
+                background: {DesignTokens.primary_soft};
             }}
         """)
         self.view_btn.clicked.connect(lambda: self.clicked.emit(self.tool_id, str(self.args), str(self.result), self.meta))
@@ -13808,6 +14261,58 @@ class ToolCallCard(QFrame):
         layout.addWidget(self.sub_agents_container)
         
         self.sub_agent_widgets = {}
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.icon_label.setPixmap(
+            qta.icon(self.tool_icon_name, color=DesignTokens.accent_tool).pixmap(
+                DesignTokens.icon_size_sm,
+                DesignTokens.icon_size_sm,
+            )
+        )
+        self.name_label.setStyleSheet(
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            f"color: {DesignTokens.chat_text}; "
+            f"font-size: {DesignTokens.font_size_meta}px; border: none;"
+        )
+        self.args_preview_label.setStyleSheet(
+            f"color: {DesignTokens.chat_text_muted}; "
+            f"font-size: {DesignTokens.font_size_caption}px; border: none;"
+        )
+        self.view_btn.setStyleSheet(
+            f"QPushButton {{ border: none; border-radius: {DesignTokens.radius_sm}px; "
+            f"color: {DesignTokens.chat_text_muted}; "
+            f"font-size: {DesignTokens.font_size_caption}px; "
+            f"padding: 3px {DesignTokens.spacing_sm}px; background: transparent; }}"
+            f"QPushButton:hover {{ color: {DesignTokens.primary}; "
+            f"background: {DesignTokens.primary_soft}; }}"
+        )
+        if self.is_finished:
+            self.status_icon.setPixmap(
+                qta.icon("fa5s.check-circle", color=DesignTokens.success_accent).pixmap(
+                    DesignTokens.icon_size_sm,
+                    DesignTokens.icon_size_sm,
+                )
+            )
+        else:
+            self.status_icon.setPixmap(
+                qta.icon(
+                    "fa5s.spinner",
+                    color=DesignTokens.icon_secondary,
+                    animation=qta.Spin(self.status_icon),
+                ).pixmap(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm)
+            )
+        self.set_selected(self.is_selected)
+        for widgets in self.sub_agent_widgets.values():
+            widgets["name_label"].setStyleSheet(
+                f"font-weight: {DesignTokens.font_weight_bold}; "
+                f"color: {DesignTokens.chat_text}; "
+                f"font-size: {DesignTokens.font_size_caption}px;"
+            )
+            widgets["detail_label"].setStyleSheet(
+                f"color: {DesignTokens.chat_text_muted}; "
+                f"font-size: {max(9, DesignTokens.font_size_caption - 1)}px;"
+            )
 
     def update_agent_state(self, state):
         agent_id = state.get("agent_id")
@@ -13923,7 +14428,7 @@ class ToolCallCard(QFrame):
             status_text = "Provider..."
             style = apple_status_chip_style(status)
             detail_text = _trim(state.get("provider_message") or "")
-            detail_style = "color: #0f766e; font-size: 10px;"
+            detail_style = f"color: {DesignTokens.info_text}; font-size: 10px;"
         elif status == "provider_error":
             status_text = "Provider 异常"
             style = apple_status_chip_style(status)
@@ -14327,7 +14832,7 @@ class SubAgentMonitor(QWidget):
         self.notice_label.setVisible(False)
         self.notice_label.setStyleSheet(
             f"color: {DesignTokens.text_tertiary}; font-size: 11px; "
-            f"background: rgba(255, 255, 255, 0.62); border-radius: 12px; padding: 8px 10px;"
+            f"background: {DesignTokens.bg_secondary}; border-radius: 12px; padding: 8px 10px;"
         )
         layout.addWidget(self.notice_label)
 
@@ -14521,7 +15026,7 @@ class StartupLoadingWindow(QWidget):
         shell.setStyleSheet(
             f"""
             QFrame#StartupShell {{
-                background: rgba(255, 255, 255, 0.96);
+                background: {DesignTokens.bg_main};
                 border: 1px solid {DesignTokens.border_subtle};
                 border-radius: 24px;
             }}
@@ -14592,11 +15097,19 @@ def finish_startup_loading_window(startup_window):
     log_startup_stage("startup_loading_closed")
 
 
-def schedule_main_window_startup(app, startup_window, single_instance_server, single_instance_server_started, pending_activation):
+def schedule_main_window_startup(
+    app,
+    startup_window,
+    single_instance_server,
+    single_instance_server_started,
+    pending_activation,
+    config_manager=None,
+    theme_manager=None,
+):
     holder = {"window": None}
 
     def build_main_window():
-        window = MainWindow()
+        window = MainWindow(config_manager=config_manager, theme_manager=theme_manager)
         holder["window"] = window
         app.main_window = window
         if single_instance_server_started:
@@ -14789,6 +15302,7 @@ class DeliverableWebPreview(QWidget):
 
     def __init__(self, web_view, parent=None):
         super().__init__(parent)
+        self.setProperty("themeSurface", "preview-shell")
         self.web_view = web_view
         self._syncing_scrollbars = False
         self._sync_pending = False
@@ -14811,17 +15325,7 @@ class DeliverableWebPreview(QWidget):
         layout.addWidget(self.vertical_scrollbar, 0, 1)
         layout.addWidget(self.horizontal_scrollbar, 1, 0)
 
-        scrollbar_style = f"""
-            QScrollBar {{ background: transparent; border: none; margin: 0px; }}
-            QScrollBar:vertical {{ width: 10px; }}
-            QScrollBar:horizontal {{ height: 10px; }}
-            QScrollBar::handle {{ background: {DesignTokens.border_strong}; border-radius: 5px; min-width: 30px; min-height: 30px; }}
-            QScrollBar::handle:hover {{ background: {DesignTokens.text_tertiary}; }}
-            QScrollBar::add-line, QScrollBar::sub-line {{ width: 0px; height: 0px; }}
-            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-        """
-        self.vertical_scrollbar.setStyleSheet(scrollbar_style)
-        self.horizontal_scrollbar.setStyleSheet(scrollbar_style)
+        self.refresh_theme()
         self.vertical_scrollbar.valueChanged.connect(self._apply_scrollbar_values)
         self.horizontal_scrollbar.valueChanged.connect(self._apply_scrollbar_values)
         web_view.loadFinished.connect(self._handle_load_finished)
@@ -14829,6 +15333,27 @@ class DeliverableWebPreview(QWidget):
         if app is None:
             raise RuntimeError("HTML 预览滚轮控制需要已初始化的 QApplication")
         app.installEventFilter(self)
+        bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f'QWidget[themeSurface="preview-shell"] {{ '
+            f"background: {DesignTokens.preview_shell_bg}; "
+            f"color: {DesignTokens.preview_shell_text}; "
+            f"border: 1px solid {DesignTokens.preview_shell_border}; "
+            f"border-radius: {DesignTokens.preview_shell_radius}px; }}"
+        )
+        scrollbar_style = f"""
+            QScrollBar {{ background: transparent; border: none; margin: 0px; }}
+            QScrollBar:vertical {{ width: {DesignTokens.scrollbar_width}px; }}
+            QScrollBar:horizontal {{ height: {DesignTokens.scrollbar_width}px; }}
+            QScrollBar::handle {{ background: {DesignTokens.scrollbar_thumb}; border-radius: {max(1, DesignTokens.scrollbar_width // 2)}px; min-width: 30px; min-height: 30px; }}
+            QScrollBar::handle:hover {{ background: {DesignTokens.scrollbar_thumb_hover}; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ width: 0px; height: 0px; }}
+            QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+        """
+        self.vertical_scrollbar.setStyleSheet(scrollbar_style)
+        self.horizontal_scrollbar.setStyleSheet(scrollbar_style)
 
     def _handle_load_finished(self, ok):
         if not ok:
@@ -14970,50 +15495,40 @@ class SmartSplitter(QSplitter):
         super().__init__(orientation, parent)
         self.setHandleWidth(1) # Visual width is 1px via CSS, but we keep this consistent
         
-        # Default Stylesheet for Handles
-        base_style = """
-            QSplitter::handle { 
-                background-color: #e5e7eb; 
-                margin: 0 4px; 
-            } 
-            QSplitter::handle:hover { 
-                background-color: #3b82f6; 
-            }
-        """
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="global")
+
+    def refresh_theme(self, _resolved=None):
+        orientation = self.orientation()
         if orientation == Qt.Horizontal:
-            # Horizontal handles have vertical margin/padding in some contexts, but here margin 0 4px is for horizontal spacing?
-            # Actually for horizontal splitter, handle is vertical bar.
-            # margin: 0 4px means top/bottom 0, left/right 4px? No.
-            # In Qt SS, margin is usually external.
-            # Let's use the user provided CSS which was known good.
-            self.setStyleSheet("""
-                QSplitter::handle:horizontal { 
+            self.setStyleSheet(f"""
+                QSplitter::handle:horizontal {{
                     background-color: transparent; 
                     width: 1px; 
                     margin: 0; 
-                } 
-                QSplitter::handle:horizontal:hover { 
-                    background-color: rgba(0, 122, 255, 0.16); 
-                }
-                QSplitter::handle:vertical { 
-                    background-color: #d2d2d7; 
+                }}
+                QSplitter::handle:horizontal:hover {{
+                    background-color: {rgba_from_hex(DesignTokens.primary, 0.16)};
+                }}
+                QSplitter::handle:vertical {{
+                    background-color: {DesignTokens.separator};
                     height: 1px; 
                     margin: 4px 0; 
-                } 
-                QSplitter::handle:vertical:hover { 
-                    background-color: #007aff; 
-                }
+                }}
+                QSplitter::handle:vertical:hover {{
+                    background-color: {DesignTokens.primary};
+                }}
             """)
         else:
-            self.setStyleSheet("""
-                QSplitter::handle:vertical { 
-                    background-color: #d2d2d7; 
+            self.setStyleSheet(f"""
+                QSplitter::handle:vertical {{
+                    background-color: {DesignTokens.separator};
                     height: 1px; 
                     margin: 4px 0; 
-                } 
-                QSplitter::handle:vertical:hover { 
-                    background-color: #007aff; 
-                }
+                }}
+                QSplitter::handle:vertical:hover {{
+                    background-color: {DesignTokens.primary};
+                }}
             """)
 
     def createHandle(self):
@@ -15399,7 +15914,7 @@ class MemoryUpdateDialog(QDialog):
         self.save_btn = QPushButton("确认并保存摘要")
         self.save_btn.setCursor(Qt.PointingHandCursor)
         self.save_btn.setEnabled(False)
-        self.save_btn.setIcon(qta.icon('fa5s.save', color='#ffffff'))
+        self.save_btn.setIcon(qta.icon('fa5s.save', color=DesignTokens.text_inverse))
         self.save_btn.setProperty("variant", "primary")
         self.save_btn.clicked.connect(lambda: self.save_requested.emit(self.memory_text()))
         button_row.addWidget(self.background_btn)
@@ -15591,20 +16106,36 @@ class SessionContextChip(QWidget):
         layout.addWidget(self.main_btn)
 
         self._apply_style()
+        bind_theme(self, self.refresh_theme, surface="composer")
 
     def _apply_style(self):
         self.setStyleSheet(
-            f"QPushButton#ChipCloseButton {{ background: {DesignTokens.bg_main}; "
-            f"color: {DesignTokens.text_secondary}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 6px; padding: 0px; font-size: 12px; font-weight: 600; }}"
-            f"QPushButton#ChipMainButton {{ background: {DesignTokens.bg_main}; "
-            f"color: {DesignTokens.text_primary}; border: 1px solid {DesignTokens.border_subtle}; "
-            "border-radius: 7px; padding: 4px 10px 4px 8px; font-size: 12px; font-weight: 600; text-align: left; }}"
+            f"QPushButton#ChipCloseButton {{ background: {DesignTokens.composer_bg}; "
+            f"color: {DesignTokens.composer_text_muted}; "
+            f"border: 1px solid {DesignTokens.composer_border}; "
+            f"border-radius: {DesignTokens.radius_sm}px; padding: 0px; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; }}"
+            f"QPushButton#ChipMainButton {{ background: {DesignTokens.composer_bg}; "
+            f"color: {DesignTokens.composer_text}; "
+            f"border: 1px solid {DesignTokens.composer_border}; "
+            f"border-radius: {DesignTokens.radius_sm}px; padding: 4px 10px 4px 8px; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; text-align: left; }}"
             f"QPushButton#ChipCloseButton:hover, QPushButton#ChipMainButton:hover {{ "
             f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
             f"border-color: {rgba_from_hex(DesignTokens.primary, 0.22)}; }}"
             "QPushButton:disabled { opacity: 0.55; }"
         )
+
+    def refresh_theme(self, _resolved=None):
+        self.setFixedHeight(DesignTokens.control_height)
+        self.close_btn.setFixedSize(
+            DesignTokens.control_height_sm,
+            DesignTokens.control_height_sm,
+        )
+        self.main_btn.setFixedHeight(DesignTokens.control_height)
+        self._apply_style()
 
     def setText(self, text):
         self._text = str(text or "").strip()
@@ -15663,7 +16194,7 @@ class TokenUsagePopover(QFrame):
                 border: none;
             }}
             QFrame#TokenUsagePopoverSurface {{
-                background-color: rgba(255, 255, 255, 0.96);
+                background-color: {DesignTokens.overlay_bg};
                 border: 1px solid {DesignTokens.border_subtle};
                 border-radius: 14px;
             }}
@@ -15676,6 +16207,18 @@ class TokenUsagePopover(QFrame):
             """
         )
         add_soft_shadow(surface, blur=18, y_offset=6, alpha=12)
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#TokenUsagePopover {{ background: transparent; border: none; }}"
+            f"QFrame#TokenUsagePopoverSurface {{ background: {DesignTokens.overlay_bg}; "
+            f"border: 1px solid {DesignTokens.overlay_border}; "
+            f"border-radius: {DesignTokens.overlay_radius}px; }}"
+            f"QLabel#TokenUsagePopoverText {{ color: {DesignTokens.overlay_text}; "
+            f"background: transparent; font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_medium}; }}"
+        )
 
     def set_detail_text(self, text):
         self.detail_label.setText(str(text or ""))
@@ -15712,7 +16255,7 @@ class TokenUsageChip(QPushButton):
         self.setStyleSheet(
             f"""
             QPushButton#TokenUsageChip {{
-                background: rgba(255, 255, 255, 0.72);
+                background: {DesignTokens.bg_main};
                 color: {DesignTokens.text_secondary};
                 border: 1px solid {DesignTokens.border_subtle};
                 border-radius: 13px;
@@ -15722,7 +16265,7 @@ class TokenUsageChip(QPushButton):
                 text-align: center;
             }}
             QPushButton#TokenUsageChip:hover {{
-                background: rgba(255, 255, 255, 0.9);
+                background: {DesignTokens.bg_hover};
                 color: {DesignTokens.text_primary};
                 border-color: {DesignTokens.border};
             }}
@@ -15730,6 +16273,20 @@ class TokenUsageChip(QPushButton):
                 background: {DesignTokens.bg_secondary};
             }}
             """
+        )
+        bind_theme(self, self.refresh_theme, surface="feedback")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QPushButton#TokenUsageChip {{ background: {DesignTokens.overlay_bg}; "
+            f"color: {DesignTokens.overlay_text}; "
+            f"border: 1px solid {DesignTokens.overlay_border}; "
+            f"border-radius: {DesignTokens.radius_lg}px; padding: 3px 10px; "
+            f"font-size: {DesignTokens.font_size_caption}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; text-align: center; }}"
+            f"QPushButton#TokenUsageChip:hover {{ background: {DesignTokens.bg_hover}; "
+            f"color: {DesignTokens.text_primary}; border-color: {DesignTokens.border}; }}"
+            f"QPushButton#TokenUsageChip:pressed {{ background: {DesignTokens.bg_pressed}; }}"
         )
 
     def setDetailText(self, text):
@@ -15757,6 +16314,76 @@ def resolve_app_icon_path():
             return path
     return ""
 
+
+class ThemePreviewSafetyBar(QFrame):
+    """Immutable recovery surface; custom themes never style this widget."""
+
+    saveRequested = Signal()
+    restoreRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ThemePreviewSafetyBar")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setFixedHeight(44)
+        self.setVisible(False)
+        # THEME_STATIC_AUDIT_ALLOW_BEGIN: immutable_theme_recovery_bar
+        self.setStyleSheet(
+            """
+            QFrame#ThemePreviewSafetyBar {
+                background: #f5f5f7;
+                border: none;
+                border-bottom: 1px solid #d8d8dc;
+            }
+            QFrame#ThemePreviewSafetyBar QLabel {
+                color: #202124;
+                font-family: "Microsoft YaHei UI";
+                font-size: 12px;
+                background: transparent;
+            }
+            QFrame#ThemePreviewSafetyBar QPushButton {
+                min-height: 28px;
+                padding: 0 12px;
+                border-radius: 6px;
+                border: 1px solid #c8c8ce;
+                color: #303038;
+                background: #ffffff;
+                font-family: "Microsoft YaHei UI";
+                font-size: 12px;
+            }
+            QFrame#ThemePreviewSafetyBar QPushButton:hover { background: #ededf1; }
+            QFrame#ThemePreviewSafetyBar QPushButton#ThemePreviewSave {
+                color: #ffffff;
+                background: #5e6ad2;
+                border-color: #5e6ad2;
+                font-weight: 600;
+            }
+            QFrame#ThemePreviewSafetyBar QPushButton#ThemePreviewSave:hover {
+                background: #4f5bc0;
+            }
+            """
+        )
+        # THEME_STATIC_AUDIT_ALLOW_END
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 7, 12, 7)
+        layout.setSpacing(8)
+        self.message_label = QLabel("正在预览自定义主题")
+        layout.addWidget(self.message_label, 1)
+        self.restore_button = QPushButton("恢复原主题")
+        self.save_button = QPushButton("保存主题")
+        self.save_button.setObjectName("ThemePreviewSave")
+        self.restore_button.clicked.connect(self.restoreRequested)
+        self.save_button.clicked.connect(self.saveRequested)
+        layout.addWidget(self.restore_button)
+        layout.addWidget(self.save_button)
+
+    def show_preview(self, preview):
+        name = str((preview or {}).get("name") or "自定义主题")
+        revision = int((preview or {}).get("revision") or 1)
+        self.message_label.setText(f"正在预览“{name}” · revision {revision}")
+        self.setVisible(True)
+
+
 class MainWindow(QMainWindow):
     agent_state_ui_signal = Signal(dict, str)
     skill_catalog_changed_ui_signal = Signal(object, object)
@@ -15772,8 +16399,10 @@ class MainWindow(QMainWindow):
     PAGE_AUTOMATION = "automation"
     PAGE_SETTINGS = "settings"
 
-    def __init__(self):
+    def __init__(self, config_manager=None, theme_manager=None):
         super().__init__()
+        self.config_manager = config_manager or ConfigManager()
+        self.theme_manager = theme_manager or getattr(QApplication.instance(), "theme_manager", None)
         self.setWindowTitle("DeepSeek Cowork")
         self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
         self.skill_catalog_changed_ui_signal.connect(self._handle_local_skill_catalog_changed, Qt.QueuedConnection)
@@ -15860,23 +16489,23 @@ class MainWindow(QMainWindow):
         
         # Product-local stylesheet: keep selectors scoped so dialog and content
         # widgets can own their states without inherited chrome.
-        self.setStyleSheet(f"""
-            QMainWindow {{ background-color: {DesignTokens.bg_app}; }}
-            QLabel[roleTitle="true"] {{ font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
-            QLabel[roleSubtitle="true"] {{ font-size: 13px; color: {DesignTokens.text_secondary}; }}
+        self._theme_stylesheet_factory = lambda: f"""
+            QMainWindow {{ background-color: {DesignTokens.management_bg}; }}
+            QLabel[roleTitle="true"] {{ font-size: {DesignTokens.font_size_page}px; font-weight: {DesignTokens.font_weight_semibold}; color: {DesignTokens.text_primary}; letter-spacing: 0px; }}
+            QLabel[roleSubtitle="true"] {{ font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary}; }}
             QTextEdit#MainInput {{
                 padding: 12px 14px;
-                border-radius: 10px;
-                border: 1px solid {DesignTokens.border_subtle};
-                background: {DesignTokens.bg_main};
-                font-size: 14px;
-                color: {DesignTokens.text_primary};
+                border-radius: {DesignTokens.composer_radius}px;
+                border: 1px solid {DesignTokens.composer_border};
+                background: {DesignTokens.composer_bg};
+                font-size: {DesignTokens.font_size_body}px;
+                color: {DesignTokens.composer_text};
                 selection-background-color: {DesignTokens.selection_bg};
                 selection-color: {DesignTokens.selection_text};
             }}
             QTextEdit#MainInput:focus {{
                 border: 1px solid {DesignTokens.primary_focus};
-                background: {DesignTokens.bg_main};
+                background: {DesignTokens.composer_bg};
             }}
             QScrollArea {{ border: none; background: transparent; }}
             QTabWidget::pane {{ border: none; }}
@@ -15884,7 +16513,7 @@ class MainWindow(QMainWindow):
                 background: transparent;
                 padding: 8px 14px;
                 margin-right: 4px;
-                border-radius: 6px;
+                border-radius: {DesignTokens.radius_sm}px;
                 color: {DesignTokens.text_secondary};
             }}
             QTabBar::tab:selected {{
@@ -15897,17 +16526,17 @@ class MainWindow(QMainWindow):
             QScrollBar:vertical {{
                 border: none;
                 background: transparent;
-                width: 8px;
+                width: {DesignTokens.scrollbar_width}px;
                 margin: 0px;
             }}
             QScrollBar::handle:vertical {{
-                background: {DesignTokens.border_strong};
+                background: {DesignTokens.scrollbar_thumb};
                 min-height: 20px;
-                border-radius: 4px;
+                border-radius: {max(1, DesignTokens.scrollbar_width // 2)}px;
                 margin: 2px;
             }}
             QScrollBar::handle:vertical:hover {{
-                background: {DesignTokens.text_tertiary};
+                background: {DesignTokens.scrollbar_thumb_hover};
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
@@ -15918,17 +16547,17 @@ class MainWindow(QMainWindow):
             QScrollBar:horizontal {{
                 border: none;
                 background: transparent;
-                height: 8px;
+                height: {DesignTokens.scrollbar_width}px;
                 margin: 0px;
             }}
             QScrollBar::handle:horizontal {{
-                background: {DesignTokens.border_strong};
+                background: {DesignTokens.scrollbar_thumb};
                 min-width: 20px;
-                border-radius: 4px;
+                border-radius: {max(1, DesignTokens.scrollbar_width // 2)}px;
                 margin: 2px;
             }}
             QScrollBar::handle:horizontal:hover {{
-                background: {DesignTokens.text_tertiary};
+                background: {DesignTokens.scrollbar_thumb_hover};
             }}
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
                 width: 0px;
@@ -15936,7 +16565,8 @@ class MainWindow(QMainWindow):
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
                 background: transparent;
             }}
-        """)
+        """
+        self.setStyleSheet(self._theme_stylesheet_factory())
         
         self.sessions = {}
         self.current_session_id = None
@@ -15979,7 +16609,6 @@ class MainWindow(QMainWindow):
         self._last_memory_update_workspace_dir = ""
         self.conversation_skill_worker = None
         
-        self.config_manager = ConfigManager()
         self.skill_catalog_service = SkillCatalogService(
             self.config_manager,
             logger=lambda message: log_startup_stage("skill_catalog", message=message),
@@ -16042,6 +16671,10 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
+        self.theme_preview_bar = ThemePreviewSafetyBar()
+        self.theme_preview_bar.saveRequested.connect(self._save_theme_preview_from_bar)
+        self.theme_preview_bar.restoreRequested.connect(self._restore_theme_preview_from_bar)
+        root_layout.addWidget(self.theme_preview_bar)
         
         self.main_splitter = SmartSplitter(Qt.Horizontal)
         self.main_splitter.splitterMoved.connect(lambda *_: self.sync_context_drawer_layout())
@@ -16049,6 +16682,7 @@ class MainWindow(QMainWindow):
 
         # --- Sidebar ---
         sidebar = QWidget()
+        self.sidebar = sidebar
         sidebar.setObjectName("Sidebar")
         sidebar.setMinimumWidth(DesignTokens.sidebar_min_width)
         sidebar.setMaximumWidth(DesignTokens.sidebar_max_width)
@@ -16058,10 +16692,12 @@ class MainWindow(QMainWindow):
         )
 
         sidebar_layout = QVBoxLayout(sidebar)
+        self.sidebar_layout = sidebar_layout
         sidebar_layout.setContentsMargins(10, 14, 10, 12)
         sidebar_layout.setSpacing(8)
 
         new_chat_btn = QPushButton(" 新建聊天")
+        self.new_chat_btn = new_chat_btn
         new_chat_btn.setIcon(qta.icon('fa5s.edit', color=DesignTokens.text_primary))
         new_chat_btn.setCursor(Qt.PointingHandCursor)
         new_chat_btn.setFixedHeight(32)
@@ -16087,6 +16723,7 @@ class MainWindow(QMainWindow):
         project_header_layout.setContentsMargins(0, 8, 0, 0)
         project_header_layout.setSpacing(6)
         project_label = QLabel("项目")
+        self.project_label = project_label
         project_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 12px; font-weight: 600;")
         project_header_layout.addWidget(project_label)
         project_header_layout.addStretch()
@@ -16197,6 +16834,7 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
 
         right_header = QFrame()
+        self.right_header = right_header
         right_header.setObjectName("RightDrawerHeader")
         right_header.setStyleSheet(
             f"QFrame#RightDrawerHeader {{ background: {DesignTokens.bg_main}; border: none; "
@@ -17114,7 +17752,294 @@ class MainWindow(QMainWindow):
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
         self.sync_context_drawer_layout()
+        if self.theme_manager is not None:
+            self.theme_manager.themeChanged.connect(self._apply_runtime_theme)
+            self.theme_manager.themeApplyFailed.connect(self._handle_theme_apply_failed)
+            self.theme_manager.previewStateChanged.connect(self._on_theme_preview_state)
+            self._apply_runtime_theme(self.theme_manager.current)
+            if self.theme_manager.last_error:
+                QTimer.singleShot(
+                    0,
+                    lambda error=self.theme_manager.last_error: self._handle_theme_apply_failed(
+                        error
+                    ),
+                )
         log_startup_stage("main_window_init_complete")
+
+    def _handle_theme_apply_failed(self, error):
+        failure = (
+            getattr(self.theme_manager, "last_failure", {})
+            if self.theme_manager is not None
+            else {}
+        )
+        if failure.get("reason") == "settings_save":
+            return
+        if failure.get("saved_requires_restart"):
+            message = (
+                "主题已保存，但当前界面刷新失败。请重启应用以载入新主题。"
+                f"\n技术详情：{error}"
+            )
+        else:
+            message = f"主题应用失败：{error}"
+        self.add_system_toast(
+            message,
+            "error",
+            auto_close_ms=8000,
+        )
+
+    def _on_theme_preview_state(self, preview):
+        if preview:
+            self.theme_preview_bar.show_preview(preview)
+        else:
+            self.theme_preview_bar.setVisible(False)
+
+    def _restore_theme_preview_from_bar(self):
+        if self.theme_manager is None:
+            return
+        if self.theme_manager.restore_saved_theme(reason="safety_bar_restore"):
+            self.add_system_toast("已恢复原主题。", "success")
+
+    def _save_theme_preview_from_bar(self):
+        if self.theme_manager is None:
+            return
+        try:
+            preview = self.theme_manager.repository.load_preview()
+            if preview and preview.get("session_id") == "settings":
+                panels = self.findChildren(ThemeSettingsPanel)
+                if not panels:
+                    raise ValueError("外观设置页已关闭，请恢复原主题后重新打开设置。")
+                panels[-1].commit()
+                self.add_system_toast("外观设置已保存并应用。", "success")
+                return
+            result = self.theme_manager.commit_current_preview(
+                activate=True,
+                reason="safety_bar_save",
+            )
+            theme = result.get("theme") or {}
+            self.add_system_toast(
+                f"主题“{theme.get('name') or '自定义主题'}”已保存并启用。",
+                "success",
+            )
+        except Exception as exc:
+            self.add_system_toast(f"保存主题失败：{exc}", "error", auto_close_ms=8000)
+
+    def _apply_runtime_theme(self, _resolved=None):
+        """Refresh the persistent application shell after a theme change."""
+        self.setStyleSheet(self._theme_stylesheet_factory())
+        self.main_container.setStyleSheet(
+            f"QWidget#MainContainer {{ background: {DesignTokens.bg_chat}; }}"
+        )
+        self.sidebar.setMinimumWidth(DesignTokens.sidebar_min_width)
+        self.sidebar.setMaximumWidth(DesignTokens.sidebar_max_width)
+        self.sidebar.setStyleSheet(
+            f"background-color: {DesignTokens.bg_sidebar}; "
+            f"color: {DesignTokens.sidebar_text}; "
+            f"border-right: 1px solid {DesignTokens.sidebar_border};"
+        )
+        self.sidebar_layout.setContentsMargins(
+            DesignTokens.spacing_sm + 2,
+            DesignTokens.spacing_md - 2,
+            DesignTokens.spacing_sm + 2,
+            DesignTokens.spacing_sm + 4,
+        )
+        self.new_chat_btn.setIcon(
+            qta.icon("fa5s.edit", color=DesignTokens.icon_primary)
+        )
+        self.new_chat_btn.setStyleSheet(
+            apple_button_style("ghost", radius=DesignTokens.radius_sm, align="left")
+        )
+        self.project_label.setStyleSheet(
+            f"color: {DesignTokens.sidebar_text_muted}; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold};"
+        )
+        sidebar_btn_style = (
+            f"QPushButton {{ background: transparent; color: {DesignTokens.sidebar_text}; border: none; "
+            f"border-radius: {DesignTokens.radius_sm}px; min-height: {DesignTokens.control_height}px; "
+            f"padding: 0 {DesignTokens.spacing_sm + 2}px; text-align: left; }}"
+            f"QPushButton:hover {{ background: {DesignTokens.bg_sidebar_hover}; color: {DesignTokens.sidebar_text}; }}"
+            f"QPushButton:checked {{ background: {DesignTokens.bg_sidebar_selected}; color: {DesignTokens.primary}; font-weight: 600; }}"
+            f"QPushButton:focus {{ border: 1px solid {DesignTokens.primary_focus}; }}"
+            f"QPushButton:disabled {{ color: {DesignTokens.text_disabled}; background: transparent; }}"
+        )
+        for button in self.product_nav_buttons.values():
+            button.setStyleSheet(sidebar_btn_style)
+        nav_icons = {
+            self.PAGE_CAPABILITIES: "fa5s.puzzle-piece",
+            self.PAGE_AUTOMATION: "fa5s.tasks",
+            self.PAGE_SETTINGS: "fa5s.cog",
+        }
+        for route, icon_name in nav_icons.items():
+            button = self.product_nav_buttons.get(route)
+            if button is not None:
+                button.setIcon(qta.icon(icon_name, color=DesignTokens.icon_secondary))
+        self.sidebar_projects_menu_btn.setIcon(
+            sidebar_symbol_icon(
+                "ellipsis", DesignTokens.icon_secondary, DesignTokens.icon_size
+            )
+        )
+        self.sidebar_add_project_btn.setIcon(
+            sidebar_symbol_icon(
+                "folder-plus", DesignTokens.icon_secondary, DesignTokens.icon_size
+            )
+        )
+        self.history_search_input.setStyleSheet(apple_search_field_style())
+        self.conversation_page.setStyleSheet(
+            f"QWidget#ConversationPage {{ background: {DesignTokens.bg_chat}; "
+            f"color: {DesignTokens.chat_text}; }}"
+        )
+        self.conversation_column.setStyleSheet(
+            f"QWidget#ConversationColumn {{ background: {DesignTokens.bg_chat}; "
+            f"color: {DesignTokens.chat_text}; }}"
+        )
+        self.session_tabs.setMinimumWidth(DesignTokens.conversation_compact_min_width)
+        self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
+        self.session_tabs.setStyleSheet(
+            f"QTabWidget#SessionTabs::pane {{ background: {DesignTokens.bg_chat}; "
+            f"color: {DesignTokens.chat_text}; border: none; }}"
+        )
+        self.input_card.setStyleSheet(
+            f"QFrame#ContentCard {{ background: {DesignTokens.composer_bg}; "
+            f"color: {DesignTokens.composer_text}; "
+            f"border: 1px solid {DesignTokens.composer_border}; "
+            f"border-radius: {DesignTokens.composer_radius}px; }}"
+        )
+        self.input_field.setStyleSheet(
+            f"QTextEdit#MainInput {{ background: transparent; color: {DesignTokens.composer_text}; "
+            f"font-size: {DesignTokens.font_size_body}px; "
+            f"selection-background-color: {DesignTokens.selection_bg}; "
+            f"selection-color: {DesignTokens.selection_text}; }}"
+        )
+        input_palette = self.input_field.palette()
+        input_palette.setColor(QPalette.PlaceholderText, QColor(DesignTokens.composer_text_muted))
+        self.input_field.setPalette(input_palette)
+        self.tool_menu_btn.setIcon(
+            sidebar_plus_icon(DesignTokens.icon_secondary, DesignTokens.icon_size)
+        )
+        self.tool_menu_btn.setFixedSize(
+            DesignTokens.control_height,
+            DesignTokens.control_height,
+        )
+        self.tool_menu_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: 1px solid transparent; "
+            f"border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QPushButton:hover, QPushButton:checked {{ background: {DesignTokens.bg_hover}; "
+            "border-color: transparent; }"
+            f"QPushButton:focus {{ border-color: {DesignTokens.primary_focus}; }}"
+        )
+        self.selected_skills_badge.setIcon(
+            qta.icon("fa5s.puzzle-piece", color=DesignTokens.primary)
+        )
+        self.agent_picker_btn.setIcon(
+            qta.icon("fa5s.user-astronaut", color=DesignTokens.icon_secondary)
+        )
+        self.agent_picker_btn.setStyleSheet(
+            apple_button_style("ghost", radius=DesignTokens.radius_sm)
+        )
+        model_style = (
+            f"QToolButton {{ border: 1px solid transparent; background: transparent; "
+            f"color: {DesignTokens.composer_text_muted}; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"padding: 5px 9px; border-radius: {DesignTokens.radius_sm}px; }}"
+            f"QToolButton:hover {{ color: {DesignTokens.composer_text}; "
+            f"background: {DesignTokens.bg_hover}; border-color: transparent; }}"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
+        )
+        self.model_select_btn.setStyleSheet(model_style)
+        self.pause_btn.setIcon(
+            qta.icon(
+                "fa5s.play" if self.pause_btn.toolTip() == "继续" else "fa5s.pause",
+                color=(
+                    DesignTokens.success_icon
+                    if self.pause_btn.toolTip() == "继续"
+                    else DesignTokens.icon_secondary
+                ),
+            )
+        )
+        self.pause_btn.setStyleSheet(
+            apple_button_style("secondary", radius=DesignTokens.radius_sm)
+        )
+        self.action_btn.setIcon(
+            qta.icon("fa5s.paper-plane", color=DesignTokens.text_inverse)
+        )
+        self.action_btn.setStyleSheet(
+            apple_button_style("primary", radius=DesignTokens.radius_sm)
+        )
+        self.stop_btn.setIcon(
+            qta.icon("fa5s.stop", color=DesignTokens.error_icon)
+        )
+        self.stop_btn.setStyleSheet(
+            apple_button_style("secondary", radius=DesignTokens.radius_sm)
+        )
+        self.project_selector_btn.setIcon(
+            sidebar_symbol_icon(
+                "folder",
+                DesignTokens.icon_secondary,
+                DesignTokens.icon_size,
+            )
+        )
+        self.project_selector_btn.setIconSize(
+            QSize(DesignTokens.icon_size, DesignTokens.icon_size)
+        )
+        self.project_selector_btn.setStyleSheet(
+            f"QToolButton {{ background: transparent; "
+            f"color: {DesignTokens.composer_text_muted}; border: none; "
+            f"border-radius: {DesignTokens.radius_lg}px; padding: 4px 10px; "
+            f"font-size: {DesignTokens.font_size_meta}px; text-align: left; }}"
+            f"QToolButton:hover {{ background: {DesignTokens.bg_hover}; "
+            f"color: {DesignTokens.composer_text}; }}"
+            f"QToolButton:disabled {{ color: {DesignTokens.text_disabled}; "
+            "background: transparent; }"
+        )
+        self.prompt_files_hint.setStyleSheet(
+            f"color: {DesignTokens.info_text}; "
+            f"font-size: {DesignTokens.font_size_caption}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            f"padding-left: {max(1, DesignTokens.spacing_xs // 2)}px;"
+        )
+        self.right_sidebar.setStyleSheet(
+            f"QFrame#RightSidebar {{ background: {DesignTokens.right_sidebar_bg}; "
+            f"color: {DesignTokens.right_sidebar_text}; border: none; "
+            f"border-left: 1px solid {DesignTokens.right_sidebar_border}; }}"
+        )
+        self.right_header.setStyleSheet(
+            f"QFrame#RightDrawerHeader {{ background: {DesignTokens.right_sidebar_header_bg}; "
+            f"border: none; border-bottom: 1px solid {DesignTokens.right_sidebar_border}; }}"
+        )
+        self.right_title_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_body}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; "
+            f"color: {DesignTokens.right_sidebar_text};"
+        )
+        self.right_desc_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"color: {DesignTokens.right_sidebar_text_muted};"
+        )
+        self.right_close_btn.setIcon(
+            qta.icon("fa5s.times", color=DesignTokens.icon_secondary)
+        )
+        self.right_close_btn.setStyleSheet(apple_ghost_icon_button_style())
+        self.context_drawer_min_width = DesignTokens.drawer_min_width
+        self.context_drawer_preferred_min_width = DesignTokens.drawer_preferred_min_width
+        self.context_drawer_max_width = DesignTokens.drawer_max_width
+        self.context_drawer_min_content_width = DesignTokens.conversation_open_min_width
+        context_icons = {
+            self.RIGHT_TAB_FILES: "fa5s.folder-open",
+            self.RIGHT_TAB_OBSERVABILITY: "fa5s.chart-line",
+            self.RIGHT_TAB_SUB_AGENTS: "fa5s.project-diagram",
+        }
+        for tab_index, button in self.context_rail_buttons.items():
+            button.setIcon(
+                qta.icon(
+                    context_icons.get(tab_index, "fa5s.circle"),
+                    color=DesignTokens.icon_secondary,
+                )
+            )
+            button.setStyleSheet(apple_tool_button_style(button.isChecked()))
+        self.refresh_history_list()
+        self.refresh_context_badges()
+        self.sync_context_drawer_layout()
+        self.update()
 
     def process_ui_events(self, force=False):
         import time
@@ -17701,7 +18626,11 @@ class MainWindow(QMainWindow):
             if drawer_open else
             DesignTokens.conversation_compact_min_width
         )
-        max_conversation_width = min(DesignTokens.conversation_max_width, shell_width)
+        max_conversation_width = min(
+            DesignTokens.conversation_max_width,
+            DesignTokens.conversation_preferred_width,
+            shell_width,
+        )
         min_conversation_width = min(
             DesignTokens.conversation_min_width if not drawer_open else DesignTokens.conversation_open_min_width,
             max_conversation_width,
@@ -20431,7 +21360,10 @@ class MainWindow(QMainWindow):
         if running or running_code or running_daemon:
             self.action_btn.setText("停止")
             self.action_btn.setIcon(qta.icon('fa5s.stop', color='white'))
-            self.action_btn.setStyleSheet("background-color: #ef4444; color: white; border-radius: 18px; font-weight: bold; border: none;")
+            self.action_btn.setStyleSheet(
+                f"background: {DesignTokens.error_text}; color: {DesignTokens.text_inverse}; "
+                f"border-radius: {DesignTokens.radius_xl}px; font-weight: bold; border: none;"
+            )
             self.action_btn.setEnabled(True)
             self.input_field.setEnabled(False)
             
@@ -20442,7 +21374,10 @@ class MainWindow(QMainWindow):
             self.action_btn.setText("发送")
             self.action_btn.setText("开始")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
-            self.action_btn.setStyleSheet("background-color: #4d6bfe; color: white; border-radius: 18px; font-weight: bold; border: none;")
+            self.action_btn.setStyleSheet(
+                f"background: {DesignTokens.primary}; color: {DesignTokens.text_inverse}; "
+                f"border-radius: {DesignTokens.radius_xl}px; font-weight: bold; border: none;"
+            )
             self.action_btn.setEnabled(True)
             self.input_field.setEnabled(True)
             
@@ -21137,12 +22072,21 @@ class MainWindow(QMainWindow):
             btn = HistoryTitleButton(title)
             btn.setCursor(Qt.PointingHandCursor)
             if session_id == self.current_session_id:
-                 btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
+                 btn.setStyleSheet(
+                     f"text-align: left; padding: 10px; border: none; "
+                     f"border-radius: {DesignTokens.radius_md}px; "
+                     f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+                     "font-weight: 600;"
+                 )
             else:
-                 btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
+                 btn.setStyleSheet(
+                     f"text-align: left; padding: 10px; border: none; "
+                     f"border-radius: {DesignTokens.radius_md}px; background: transparent; "
+                     f"color: {DesignTokens.text_secondary};"
+                 )
             btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
             del_btn = QPushButton()
-            del_btn.setIcon(qta.icon('fa5s.trash-alt', color='#ef4444'))
+            del_btn.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_icon))
             del_btn.setCursor(Qt.PointingHandCursor)
             del_btn.setFixedSize(28, 28)
             del_btn.setStyleSheet("border: none; background: transparent;")
@@ -21173,12 +22117,21 @@ class MainWindow(QMainWindow):
                         btn = HistoryTitleButton(title)
                         btn.setCursor(Qt.PointingHandCursor)
                         if session_id == self.current_session_id:
-                             btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: #eff6ff; color: #1d4ed8; font-weight: 600;")
+                             btn.setStyleSheet(
+                                 f"text-align: left; padding: 10px; border: none; "
+                                 f"border-radius: {DesignTokens.radius_md}px; "
+                                 f"background: {DesignTokens.primary_soft}; color: {DesignTokens.primary}; "
+                                 "font-weight: 600;"
+                             )
                         else:
-                             btn.setStyleSheet("text-align: left; padding: 10px; border: none; border-radius: 8px; background-color: transparent; color: #4b5563;")
+                             btn.setStyleSheet(
+                                 f"text-align: left; padding: 10px; border: none; "
+                                 f"border-radius: {DesignTokens.radius_md}px; background: transparent; "
+                                 f"color: {DesignTokens.text_secondary};"
+                             )
                         btn.clicked.connect(lambda checked=False, sid=session_id: self.load_session(sid))
                         del_btn = QPushButton()
-                        del_btn.setIcon(qta.icon('fa5s.trash-alt', color='#ef4444'))
+                        del_btn.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_icon))
                         del_btn.setCursor(Qt.PointingHandCursor)
                         del_btn.setFixedSize(28, 28)
                         del_btn.setStyleSheet("border: none; background: transparent;")
@@ -21596,7 +22549,7 @@ class MainWindow(QMainWindow):
         menu_btn.setFixedSize(28, 28)
         menu_btn.setStyleSheet(
             "QToolButton { border: none; background: transparent; border-radius: 14px; padding: 0; }"
-            "QToolButton:hover { background: rgba(255, 255, 255, 0.62); }"
+            f"QToolButton:hover {{ background: {DesignTokens.bg_sidebar_hover}; }}"
             "QToolButton:focus { outline: none; border: 0px solid transparent; }"
         )
         menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))
@@ -25043,13 +25996,13 @@ class MainWindow(QMainWindow):
         menu = create_styled_menu(self)
         
         open_action = QAction("打开", self)
-        open_action.setIcon(qta.icon('fa5s.external-link-alt', color='#4b5563'))
+        open_action.setIcon(qta.icon('fa5s.external-link-alt', color=DesignTokens.icon_secondary))
         
         reveal_action = QAction("在资源管理器中显示", self)
-        reveal_action.setIcon(qta.icon('fa5s.folder-open', color='#4b5563'))
+        reveal_action.setIcon(qta.icon('fa5s.folder-open', color=DesignTokens.icon_secondary))
         
         copy_path_action = QAction("复制路径", self)
-        copy_path_action.setIcon(qta.icon('fa5s.copy', color='#4b5563'))
+        copy_path_action.setIcon(qta.icon('fa5s.copy', color=DesignTokens.icon_secondary))
 
         deliverable_action = None
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
@@ -25061,7 +26014,7 @@ class MainWindow(QMainWindow):
             )
         
         delete_action = QAction("删除", self)
-        delete_action.setIcon(qta.icon('fa5s.trash-alt', color='#ef4444'))
+        delete_action.setIcon(qta.icon('fa5s.trash-alt', color=DesignTokens.error_icon))
 
         open_action.triggered.connect(lambda: self.open_path_in_system(path))
         reveal_action.triggered.connect(lambda: self.reveal_in_explorer(path))
@@ -26441,12 +27394,12 @@ class MainWindow(QMainWindow):
             if state.llm_worker.is_paused:
                 state.llm_worker.resume()
                 self.pause_btn.setText("")
-                self.pause_btn.setIcon(qta.icon('fa5s.pause', color='#4b5563'))
+                self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.icon_secondary))
                 self.pause_btn.setToolTip("暂停")
             else:
                 state.llm_worker.pause()
                 self.pause_btn.setText("")
-                self.pause_btn.setIcon(qta.icon('fa5s.play', color='#10b981'))
+                self.pause_btn.setIcon(qta.icon('fa5s.play', color=DesignTokens.success_icon))
                 self.pause_btn.setToolTip("继续")
 
     def _disconnect_worker_signals(self, worker):
@@ -29796,13 +30749,28 @@ class MainWindow(QMainWindow):
     def handle_code_output(self, text, session_id=None):
         state = self.get_session(session_id)
         if state and state.last_agent_bubble:
-            if not hasattr(state.last_agent_bubble, 'code_output_edit'):
+            if state.last_agent_bubble.code_output_edit is None:
                 label = QLabel("执行结果:")
-                label.setStyleSheet("font-weight: bold; color: #333; margin-top: 8px; margin-left: 4px;")
+                label.setStyleSheet(
+                    f"font-weight: {DesignTokens.font_weight_semibold}; "
+                    f"color: {DesignTokens.chat_text}; "
+                    f"font-size: {DesignTokens.font_size_meta}px; "
+                    f"margin-top: {DesignTokens.spacing_sm}px; margin-left: {DesignTokens.spacing_xs}px;"
+                )
+                state.last_agent_bubble.code_output_label = label
                 state.last_agent_bubble.layout().addWidget(label)
                 
                 state.last_agent_bubble.code_output_edit = AutoResizingPlainTextEdit()
-                state.last_agent_bubble.code_output_edit.setStyleSheet("color: #444; font-family: Consolas; background: #f8f9fa; border: 1px solid #eee; padding: 8px; border-radius: 4px; margin-left: 4px;")
+                mono_family = str(
+                    QApplication.instance().property("themeMonoFontFamily") or "Consolas"
+                )
+                state.last_agent_bubble.code_output_edit.setStyleSheet(
+                    f"color: {DesignTokens.chat_text}; font-family: '{mono_family}'; "
+                    f"font-size: {DesignTokens.font_size_code}px; "
+                    f"background: {DesignTokens.bg_code}; border: 1px solid {DesignTokens.chat_border}; "
+                    f"padding: {DesignTokens.spacing_sm}px; border-radius: {DesignTokens.radius_sm}px; "
+                    f"margin-left: {DesignTokens.spacing_xs}px;"
+                )
                 state.last_agent_bubble.code_output_edit.setReadOnly(True)
                 state.last_agent_bubble.layout().addWidget(state.last_agent_bubble.code_output_edit)
             
@@ -29905,6 +30873,17 @@ if __name__ == "__main__":
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
     initialize_desktop_theme(app)
+    startup_config_manager = ConfigManager()
+    theme_repository = ThemeRepository(startup_config_manager.data_dir)
+    theme_manager = ThemeRuntimeManager(app, theme_repository)
+    app.theme_manager = theme_manager
+    theme_manager.themeApplyFailed.connect(
+        lambda error: append_background_process_log(
+            "theme_debug.log",
+            f"ui_apply_error={error}",
+        )
+    )
+    theme_manager.start()
     pending_activation = {"requested": False}
     startup_state = {"window": None}
 
@@ -29931,5 +30910,7 @@ if __name__ == "__main__":
         single_instance_server,
         single_instance_server_started,
         pending_activation,
+        startup_config_manager,
+        theme_manager,
     )
     sys.exit(app.exec())

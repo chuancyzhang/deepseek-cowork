@@ -1,8 +1,8 @@
 # Skill System
 
-Current implementation sync: app version **5.0.2**
+Current implementation sync: app version **5.0.3**
 
-This document is aligned with the 5.0.2 release baseline. See [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md) for the previous user-facing scope and compatibility notes.
+This document is aligned with the 5.0.3 release baseline. See [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md) for the previous user-facing scope and compatibility notes.
 
 ## 1. Core Idea
 
@@ -125,6 +125,18 @@ Rules:
 - writes, approvals, package installation, user input, and destructive calls are rejected
 
 ## 6. Skill Sources
+
+The built-in `skills/theme-customizer` Skill gives AI a constrained UI-theme
+workflow. It inspects the complete region-grouped token registry and installed
+fonts, validates a proposed JSON, publishes an explicit temporary preview, and can
+incrementally update it with `patch_ui_theme_preview`. Every preview has a stable
+`preview_id` and monotonic `revision`; approval and persistence must target the
+exact revision the user reviewed. The tools use the same `ThemeRepository` as
+Settings, keep one user theme per JSON file under the application data `themes/`
+directory, and never edit QSS or arbitrary files directly. The built-in Linear
+theme is virtual and read-only. Contrast issues are advisory; invalid tokens,
+malformed JSON, unavailable fonts at application time, and repository errors
+remain explicit.
 
 Bundled optional plugins may own both workflow guidance and narrowly scoped tools. For example, the default-off `ai_skills/visualize` plugin exposes generation and publication tools only while enabled; its published HTML fragments are content-addressed, registered per conversation, sandboxed, and rendered read-only from history when the plugin is later disabled.
 

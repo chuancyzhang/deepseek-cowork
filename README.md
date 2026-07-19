@@ -6,9 +6,9 @@ DeepSeek Cowork is a Windows desktop agent workspace built around DeepSeek-style
 
 This project is a personal exploration and is not an official DeepSeek product.
 
-Current app version: **5.0.2**
+Current app version: **5.0.3**
 
-The 5.0.2 release baseline is documented here. For the previous detailed release notes and compatibility checklist, see [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md).
+The 5.0.3 release baseline is documented here and in [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md).
 
 ## What It Does
 
@@ -44,7 +44,8 @@ The 5.0.2 release baseline is documented here. For the previous detailed release
 - **First-use dependencies**: declared Python and Node dependencies are prepared only before the first actual tool call. Matching dependency hashes share a single flight; failures persist and require an explicit retry or declaration change.
 - **Lightweight startup**: the main workspace becomes interactive before the Skill catalog snapshot, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.
 - **Main-content management pages**: the sidebar keeps only Capabilities, Automation, and Settings as stable destinations. They switch inside the main content area and restore the prior conversation instead of opening large blocking dialogs.
-- **Settings center**: manage models, agents, personality and memory, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions respond only to semantic configuration changes, not background logs or connection tests.
+- **Settings center**: manage appearance, models, agents, personality and memory, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages; save actions respond only to semantic configuration changes, not background logs or connection tests.
+- **Full-UI user-created themes**: Cowork keeps its built-in Linear light theme as a code-only, read-only baseline. One-JSON-per-skin custom themes can cover both sidebars, conversation, composer, management pages, feedback surfaces, and preview shells. Settings only apply a draft when Preview is clicked; the built-in `theme-customizer` Skill supports region-aware validation and revision-bound incremental previews before approval-gated saving or activation.
 - **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
 - **Skill center**: search, filter, enable, configure, and debug skills without restarting. Enable/disable changes take effect without inserting chat messages and do not alter the conversation's explicitly selected Skills.
@@ -122,6 +123,7 @@ See [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) for the technical design and [PRO
 - [USER_GUIDE.md](USER_GUIDE.md): illustrated user guide
 - [ROADMAP.md](ROADMAP.md): current project status
 - [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md): 5.0.0 release scope and compatibility
+- [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md): 5.0.3 user-theme scope and validation checklist
 
 ## License
 

@@ -1,0 +1,265 @@
+import os
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
+
+from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
+from core.theme_service import DEFAULT_THEME_ID, ThemeRepository
+from ui.theme_settings import ThemeSettingsPanel
+
+
+class ThemeSettingsUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repository = ThemeRepository(self.temp_dir.name)
+        self.panel = ThemeSettingsPanel(self.repository)
+
+    def tearDown(self):
+        self.panel.deleteLater()
+        self.temp_dir.cleanup()
+
+    def test_default_theme_is_read_only(self):
+        self.assertEqual(self.panel.theme_combo.currentData(), DEFAULT_THEME_ID)
+        self.assertFalse(self.panel.name_edit.isEnabled())
+        self.assertFalse(self.panel.delete_btn.isEnabled())
+
+    def test_new_theme_is_draft_until_commit(self):
+        self.panel._new_theme()
+        draft = self.panel.state_signature()
+        self.assertNotEqual(draft["active_theme_id"], DEFAULT_THEME_ID)
+        self.assertEqual(len(draft["themes"]), 1)
+        self.assertEqual(self.repository.load().themes, tuple())
+        self.panel.commit()
+        snapshot = self.repository.load()
+        self.assertEqual(len(snapshot.themes), 1)
+        self.assertEqual(snapshot.active_theme_id, draft["active_theme_id"])
+
+    def test_runtime_refresh_failure_keeps_saved_theme_and_requests_restart(self):
+        manager = Mock()
+        manager.themeChanged = Mock()
+        manager.themeChanged.connect = Mock()
+        manager.apply_repository_state.return_value = False
+        panel = ThemeSettingsPanel(self.repository, runtime_manager=manager)
+        try:
+            panel._new_theme()
+            draft = panel.state_signature()
+            panel.commit()
+
+            snapshot = self.repository.load()
+            self.assertEqual(snapshot.active_theme_id, draft["active_theme_id"])
+            self.assertEqual(len(snapshot.themes), 1)
+            self.assertIn("设置和主题已保存", panel.last_commit_warning)
+            self.assertIn("请重启应用", panel.last_commit_warning)
+            manager.apply_repository_state.assert_called_once_with(
+                reason="settings_save",
+                persisted_on_failure=True,
+            )
+        finally:
+            panel.deleteLater()
+
+    def test_restore_discards_unsaved_theme(self):
+        self.panel._new_theme()
+        self.panel.restore_saved_theme()
+        state = self.panel.state_signature()
+        self.assertEqual(state["active_theme_id"], DEFAULT_THEME_ID)
+        self.assertEqual(state["themes"], [])
+
+    def test_low_contrast_edit_warns_without_blocking_draft(self):
+        self.panel._new_theme()
+        self.panel.token_editor.setPlainText('{"chat_text": "#ffffff"}')
+        self.assertIn("对比度", self.panel.validation_label.text())
+        self.assertEqual(self.panel.state_signature()["editor_error"], "")
+
+    def test_numeric_wheel_requires_explicit_click_activation(self):
+        self.panel._new_theme()
+        self.panel.show()
+        self.app.processEvents()
+        spin = self.panel.font_scale_spin
+        initial = spin.value()
+
+        spin.setFocus(Qt.TabFocusReason)
+        self.app.processEvents()
+        ignored_wheel = QWheelEvent(
+            QPointF(spin.rect().center()),
+            QPointF(spin.mapToGlobal(spin.rect().center())),
+            QPoint(),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(spin, ignored_wheel)
+        self.assertEqual(spin.value(), initial)
+        self.assertFalse(ignored_wheel.isAccepted())
+
+        QTest.mouseClick(spin, Qt.LeftButton, pos=spin.rect().center())
+        self.app.processEvents()
+        active_wheel = QWheelEvent(
+            QPointF(spin.rect().center()),
+            QPointF(spin.mapToGlobal(spin.rect().center())),
+            QPoint(),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(spin, active_wheel)
+        self.assertEqual(spin.value(), initial + spin.singleStep())
+        self.assertTrue(active_wheel.isAccepted())
+
+        self.panel.name_edit.setFocus(Qt.MouseFocusReason)
+        self.app.processEvents()
+        QApplication.sendEvent(
+            spin,
+            QWheelEvent(
+                QPointF(spin.rect().center()),
+                QPointF(spin.mapToGlobal(spin.rect().center())),
+                QPoint(),
+                QPoint(0, 120),
+                Qt.NoButton,
+                Qt.NoModifier,
+                Qt.ScrollUpdate,
+                False,
+            ),
+        )
+        self.assertEqual(spin.value(), initial + spin.singleStep())
+
+    def test_combo_ignores_wheel_until_explicit_click_activation(self):
+        self.panel._new_theme()
+        self.panel.show()
+        self.app.processEvents()
+        combo = self.panel.density_combo
+        initial = combo.currentIndex()
+
+        combo.setFocus(Qt.TabFocusReason)
+        self.app.processEvents()
+        ignored_wheel = QWheelEvent(
+            QPointF(combo.rect().center()),
+            QPointF(combo.mapToGlobal(combo.rect().center())),
+            QPoint(),
+            QPoint(0, 120),
+            Qt.NoButton,
+            Qt.NoModifier,
+            Qt.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(combo, ignored_wheel)
+        self.assertEqual(combo.currentIndex(), initial)
+        self.assertFalse(ignored_wheel.isAccepted())
+
+        QTest.mouseClick(combo, Qt.LeftButton, pos=combo.rect().center())
+        self.app.processEvents()
+        self.assertTrue(combo._wheel_activated_by_click)
+        combo.hidePopup()
+
+    def test_editing_draft_does_not_apply_until_preview_clicked(self):
+        manager = Mock()
+        manager.themeChanged = Mock()
+        manager.themeChanged.connect = Mock()
+        panel = ThemeSettingsPanel(self.repository, runtime_manager=manager)
+        try:
+            panel._new_theme()
+            panel.color_edits["primary"].setText("#3366cc")
+            manager.apply_repository_state.assert_not_called()
+            panel._preview_current()
+            manager.apply_repository_state.assert_called_once_with(
+                reason="settings_preview"
+            )
+            first_preview = self.repository.load_preview()
+            panel.color_edits["primary"].setText("#2255aa")
+            self.assertIn("不是最新", panel.validation_label.text())
+            self.assertEqual(manager.apply_repository_state.call_count, 1)
+            panel._preview_current()
+            second_preview = self.repository.load_preview()
+            self.assertEqual(
+                second_preview["preview_id"],
+                first_preview["preview_id"],
+            )
+            self.assertEqual(
+                second_preview["revision"],
+                first_preview["revision"] + 1,
+            )
+        finally:
+            panel.deleteLater()
+
+    def test_runtime_applies_valid_theme_and_rejects_missing_font(self):
+        manager = ThemeRuntimeManager(self.app, self.repository)
+        original_tokens = default_design_tokens()
+        original_font = self.app.font()
+        original_stylesheet = self.app.styleSheet()
+        try:
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                applied = manager.apply_profile(
+                    {
+                        "id": "runtime",
+                        "name": "Runtime",
+                        "base": DEFAULT_THEME_ID,
+                        "overrides": {"tokens": {"primary": "#3366cc"}},
+                    },
+                    reason="test",
+                )
+                self.assertTrue(applied)
+                self.assertEqual(DesignTokens.primary, "#3366cc")
+                self.assertEqual(manager.current["id"], "runtime")
+                rejected = manager.apply_profile(
+                    {
+                        "id": "missing-font",
+                        "name": "Missing",
+                        "base": DEFAULT_THEME_ID,
+                        "overrides": {"font_family": "Not Installed"},
+                    },
+                    reason="test",
+                )
+                self.assertFalse(rejected)
+                self.assertEqual(DesignTokens.primary, "#3366cc")
+                self.assertIn("Not Installed", manager.last_error)
+        finally:
+            for name, value in original_tokens.items():
+                if hasattr(DesignTokens, name):
+                    setattr(DesignTokens, name, value)
+            self.app.setFont(original_font)
+            self.app.setStyleSheet(original_stylesheet)
+
+    def test_runtime_start_discards_unconfirmed_preview(self):
+        preview = self.repository.write_preview(
+            name="Discard me",
+            overrides={"tokens": {"primary": "#3366cc"}},
+            default_tokens=default_design_tokens(),
+        )
+        self.assertEqual(
+            self.repository.load_preview()["preview_id"],
+            preview["preview_id"],
+        )
+        previous_registry = getattr(self.app, "theme_binding_registry", None)
+        manager = ThemeRuntimeManager(self.app, self.repository)
+        try:
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                manager.start()
+            self.assertIsNone(self.repository.load_preview())
+            self.assertEqual(manager.current["id"], DEFAULT_THEME_ID)
+        finally:
+            manager.stop()
+            self.app.theme_binding_registry = previous_registry
+
+
+if __name__ == "__main__":
+    unittest.main()

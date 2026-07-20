@@ -35,7 +35,11 @@ from core.single_instance import (
 )
 from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
-from core.conversation_render import build_conversation_render_spans, is_same_turn_guidance_message
+from core.conversation_render import (
+    build_conversation_render_spans,
+    is_legacy_skill_change_notice_message,
+    is_same_turn_guidance_message,
+)
 from core.deliverable_preview import (
     DELIVERABLE_TYPES,
     OFFICE_EXTENSIONS,
@@ -2262,18 +2266,6 @@ def flush_pending_skill_runtime_reload(skill_manager):
     skill_manager.load_skills()
     mark_skill_runtime_reload_pending(skill_manager, False)
     return True
-
-
-def is_hidden_manual_skill_change_message(message):
-    if not isinstance(message, dict):
-        return False
-    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-    payload = meta.get("skill_change") if isinstance(meta.get("skill_change"), dict) else {}
-    return (
-        bool(meta.get("ui_only"))
-        and str(payload.get("source") or "").strip().lower() == "ui"
-        and str(payload.get("action") or "").strip().lower() in {"enabled", "disabled"}
-    )
 
 
 def session_status_text(status, im_provider=None):
@@ -17027,6 +17019,7 @@ class MainWindow(QMainWindow):
         self._system_toast_animation = None
         self._system_toast_position_animation = None
         self._system_toast_animation_phase = None
+        self._skill_change_toast_event_ids = OrderedDict()
         
         # Product-local stylesheet: keep selectors scoped so dialog and content
         # widgets can own their states without inherited chrome.
@@ -24755,7 +24748,7 @@ class MainWindow(QMainWindow):
         messages = [
             message
             for message in (messages or [])
-            if not is_hidden_manual_skill_change_message(message)
+            if not is_legacy_skill_change_notice_message(message)
         ]
         if not messages:
             return 0
@@ -28065,7 +28058,6 @@ class MainWindow(QMainWindow):
                             skill_name=draft.get("skill_name"),
                             path=save_result.path,
                         )
-                        self.add_system_toast(f"Skill 已创建：{save_result.path}", "success", auto_close_ms=8000)
                     except Exception as exc:
                         log_conversation_skill_capture(
                             "save_create_reload_failed",
@@ -28118,7 +28110,6 @@ class MainWindow(QMainWindow):
                         session_id=self.current_session_id,
                         target_skill=target_skill,
                     )
-                    self.add_system_toast(f"Skill 已更新：{target_skill}", "success", auto_close_ms=8000)
                 else:
                     log_conversation_skill_capture(
                         "save_update_failed",
@@ -30856,49 +30847,34 @@ class MainWindow(QMainWindow):
             return
         self._handle_agent_state_ui(data, session_id)
 
-    def _append_skill_change_conversation_event(self, event, session_id=None):
-        state = self.get_session(session_id) if session_id else self.get_current_session()
-        if not state:
-            return False
+    def _show_skill_change_system_notice(self, event):
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
-        event_id = str(payload.get("event_id") or "")
-        for message in getattr(state, "messages", []) or []:
-            meta = message.get("meta") if isinstance(message, dict) and isinstance(message.get("meta"), dict) else {}
-            if event_id and meta.get("skill_change_event_id") == event_id:
-                return True
+        event_id = str(payload.get("event_id") or "").strip()
+        if not event_id:
+            raise ValueError("Skill change notice requires an event_id.")
+        shown_event_ids = self._skill_change_toast_event_ids
+        if event_id in shown_event_ids:
+            shown_event_ids.move_to_end(event_id)
+            return False
+
         names = "、".join(payload.get("skill_names") or []) or "Skill"
-        action = str(payload.get("action") or "updated")
-        source = str(payload.get("source") or "system")
-        if source.strip().lower() == "ui" and action.strip().lower() in {"enabled", "disabled"}:
-            return True
-        if source == "ai" and action == "created":
-            text = f"AI 已创建能力：{names}，现已可用"
-        elif action == "enabled":
-            text = f"已启用能力：{names}，可被 AI 发现"
-        elif action == "disabled":
-            text = f"已关闭能力：{names}"
-        else:
-            text = f"能力已更新：{names}"
-        message = {
-            "id": uuid.uuid4().hex,
-            "role": "assistant",
-            "content": f"◈ {text}",
-            "meta": {
-                "ui_only": True,
-                "skill_change_event_id": event_id,
-                "skill_change": payload,
-            },
-        }
-        state.messages.append(message)
-        self.add_chat_bubble(
-            "Agent",
-            message["content"],
-            thinking=None,
-            source_message_id=message["id"],
-            session_id=state.session_id,
-        )
-        self.save_chat_history(session_id=state.session_id)
-        self.request_session_scroll_to_bottom(state.session_id, force=True)
+        action = str(payload.get("action") or "").strip().lower()
+        notice = {
+            "created": (f"能力已创建：{names}", "success"),
+            "updated": (f"能力已更新：{names}", "success"),
+            "enabled": (f"已启用能力：{names}，可被 AI 发现", "success"),
+            "disabled": (f"已关闭能力：{names}", "info"),
+            "deleted": (f"已删除能力：{names}", "info"),
+            "dependency_changed": (f"能力依赖已就绪：{names}", "success"),
+        }.get(action)
+        if notice is None:
+            raise ValueError(f"Unsupported Skill change action for notice: {action}")
+
+        text, tone = notice
+        self.add_system_toast(text, tone)
+        shown_event_ids[event_id] = None
+        while len(shown_event_ids) > 2048:
+            shown_event_ids.popitem(last=False)
         return True
 
     def _relay_local_skill_catalog_changed(self, event, snapshot):
@@ -30913,6 +30889,9 @@ class MainWindow(QMainWindow):
         if page is not None and hasattr(page, "refresh_list"):
             page.skill_manager = self.skill_manager
             page.refresh_list()
+        payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        if str(payload.get("source") or "").strip().lower() == "filesystem":
+            self._show_skill_change_system_notice(event)
 
     def publish_ui_skill_change(self, skill_name, action, session_id=None, source="ui"):
         return self.publish_ui_skill_changes([skill_name], action, session_id=session_id, source=source)
@@ -30957,13 +30936,13 @@ class MainWindow(QMainWindow):
                         auto_close_ms=8000,
                     )
                 else:
-                    self._append_skill_change_conversation_event(applied, target_session_id)
+                    self._show_skill_change_system_notice(applied)
 
             worker.completed.connect(finished, Qt.QueuedConnection)
             worker.finished.connect(worker.deleteLater)
             worker.start()
         else:
-            self._append_skill_change_conversation_event(applied, target_session_id)
+            self._show_skill_change_system_notice(applied)
         return True
 
     def retry_skill_dependencies(self, skill_name):
@@ -30986,7 +30965,6 @@ class MainWindow(QMainWindow):
             if current in self.skill_dependency_retry_workers:
                 self.skill_dependency_retry_workers.remove(current)
             if result.get("ok"):
-                self.add_system_toast(f"能力依赖已就绪：{name}", "success")
                 self.publish_ui_skill_change(name, "dependency_changed")
             else:
                 self.add_system_toast(
@@ -31005,7 +30983,7 @@ class MainWindow(QMainWindow):
         ui_event_seq = self._agent_state_ui_event_seq
         payload = dict(data) if isinstance(data, dict) else {}
         if payload.get("type") == "skill_changed":
-            self._append_skill_change_conversation_event(payload, session_id)
+            self._show_skill_change_system_notice(payload)
             self.start_background_skill_load(force=True)
             return
         status = payload.get("status") or ""

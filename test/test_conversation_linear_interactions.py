@@ -4,6 +4,7 @@ import inspect
 import subprocess
 import tempfile
 import unittest
+from collections import OrderedDict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from core.chat_storage import ChatStorage
+from core.conversation_render import is_legacy_skill_change_notice_message
 from core.theme import DesignTokens
 
 from main import (
@@ -32,7 +34,6 @@ from main import (
     SessionSkillPickerPopover,
     GuidanceTimelineEvent,
     ToolCallCard,
-    is_hidden_manual_skill_change_message,
     launch_daemon_subprocess,
 )
 from ui.primitives import ProductActionRow, ProductPopover
@@ -488,7 +489,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertFalse(hasattr(bubble, "update_sub_agent_log"))
         bubble.deleteLater()
 
-    def test_manual_skill_toggle_messages_are_hidden_but_ai_creation_is_visible(self):
+    def test_legacy_skill_change_messages_are_hidden_and_new_events_use_toasts(self):
         enabled = {
             "role": "assistant",
             "content": "◈ 已启用能力：visualize，可被 AI 发现",
@@ -505,30 +506,125 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                 "skill_change": {"source": "ai", "action": "created"},
             },
         }
-        self.assertTrue(is_hidden_manual_skill_change_message(enabled))
-        self.assertFalse(is_hidden_manual_skill_change_message(created))
-
-        state = SimpleNamespace(messages=[])
+        event_id_only = {
+            "role": "assistant",
+            "content": "◈ 能力已更新：demo",
+            "meta": {
+                "ui_only": True,
+                "skill_change_event_id": "legacy-event",
+            },
+        }
+        self.assertTrue(is_legacy_skill_change_notice_message(enabled))
+        self.assertTrue(is_legacy_skill_change_notice_message(created))
+        self.assertTrue(is_legacy_skill_change_notice_message(event_id_only))
+        self.assertFalse(
+            is_legacy_skill_change_notice_message(
+                {"role": "assistant", "content": "普通回复", "meta": {"ui_only": True}}
+            )
+        )
 
         class WindowStub:
-            def get_session(self, _session_id):
-                return state
+            def __init__(self):
+                self._skill_change_toast_event_ids = OrderedDict()
+                self.toasts = []
 
-            def add_chat_bubble(self, *_args, **_kwargs):
-                raise AssertionError("manual Skill toggles must not create a chat bubble")
+            def add_system_toast(self, text, tone):
+                self.toasts.append((text, tone))
 
-        applied = MainWindow._append_skill_change_conversation_event(
-            WindowStub(),
-            {
-                "event_id": "toggle-1",
-                "source": "ui",
-                "action": "enabled",
-                "skill_names": ["visualize"],
-            },
-            "session-1",
+        window = WindowStub()
+        cases = [
+            ("created", "能力已创建：demo", "success"),
+            ("updated", "能力已更新：demo", "success"),
+            ("enabled", "已启用能力：demo，可被 AI 发现", "success"),
+            ("disabled", "已关闭能力：demo", "info"),
+            ("deleted", "已删除能力：demo", "info"),
+            ("dependency_changed", "能力依赖已就绪：demo", "success"),
+        ]
+        for index, (action, expected_text, expected_tone) in enumerate(cases):
+            event = {
+                "event_id": f"event-{index}",
+                "source": ("ai", "ui", "filesystem")[index % 3],
+                "action": action,
+                "skill_names": ["demo"],
+            }
+            self.assertTrue(MainWindow._show_skill_change_system_notice(window, event))
+            self.assertEqual(window.toasts[-1], (expected_text, expected_tone))
+
+        self.assertFalse(
+            MainWindow._show_skill_change_system_notice(
+                window,
+                {
+                    "event_id": "event-0",
+                    "source": "ai",
+                    "action": "created",
+                    "skill_names": ["demo"],
+                },
+            )
         )
-        self.assertTrue(applied)
-        self.assertEqual(state.messages, [])
+        self.assertEqual(len(window.toasts), len(cases))
+
+        original_messages = [enabled, created]
+        render_stub = SimpleNamespace(get_session=lambda _session_id: SimpleNamespace())
+        self.assertEqual(
+            MainWindow.render_message_batch(
+                render_stub,
+                original_messages,
+                "session-1",
+                animate=False,
+            ),
+            0,
+        )
+        self.assertEqual(original_messages, [enabled, created])
+
+    def test_skill_change_notice_event_cache_is_bounded(self):
+        window = SimpleNamespace(
+            _skill_change_toast_event_ids=OrderedDict(),
+            add_system_toast=lambda *_args: None,
+        )
+        for index in range(2050):
+            self.assertTrue(
+                MainWindow._show_skill_change_system_notice(
+                    window,
+                    {
+                        "event_id": f"event-{index}",
+                        "source": "ui",
+                        "action": "updated",
+                        "skill_names": ["demo"],
+                    },
+                )
+            )
+        self.assertEqual(len(window._skill_change_toast_event_ids), 2048)
+        self.assertNotIn("event-0", window._skill_change_toast_event_ids)
+        self.assertIn("event-2049", window._skill_change_toast_event_ids)
+
+    def test_local_catalog_handler_only_notifies_filesystem_changes(self):
+        notices = []
+        page = SimpleNamespace(skill_manager=None, refresh_list=lambda: None)
+        window = SimpleNamespace(
+            PAGE_CAPABILITIES="capabilities",
+            product_pages={"capabilities": page},
+            _show_skill_change_system_notice=notices.append,
+        )
+        snapshot = SimpleNamespace(manager=object())
+        filesystem_event = {
+            "event_id": "filesystem-1",
+            "source": "filesystem",
+            "action": "updated",
+            "skill_names": ["demo"],
+        }
+        ui_event = {
+            "event_id": "ui-1",
+            "source": "ui",
+            "action": "updated",
+            "skill_names": ["demo"],
+        }
+
+        MainWindow._handle_local_skill_catalog_changed(window, ui_event, snapshot)
+        MainWindow._handle_local_skill_catalog_changed(window, filesystem_event, snapshot)
+
+        self.assertIs(window.skill_manager, snapshot.manager)
+        self.assertTrue(window.skill_manager_ready)
+        self.assertEqual(notices, [filesystem_event])
 
     def test_deep_thinking_fold_hides_reasoning_and_tools_together(self):
         bubble = ChatBubble("Agent", "")

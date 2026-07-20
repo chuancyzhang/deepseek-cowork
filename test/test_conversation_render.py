@@ -1,6 +1,10 @@
 import unittest
 
-from core.conversation_render import build_conversation_render_items, build_conversation_render_spans
+from core.conversation_render import (
+    build_conversation_render_items,
+    build_conversation_render_spans,
+    is_legacy_skill_change_notice_message,
+)
 
 
 class TestConversationRender(unittest.TestCase):
@@ -14,6 +18,53 @@ class TestConversationRender(unittest.TestCase):
         self.assertEqual([item["type"] for item in items], ["user", "assistant"])
         self.assertEqual(items[1]["content"], "world")
         self.assertEqual(items[1]["reasoning"], "thinking")
+
+    def test_legacy_skill_change_notices_do_not_enter_items_or_spans(self):
+        legacy_created = {
+            "id": "legacy-created",
+            "role": "assistant",
+            "content": "◈ AI 已创建能力：demo，现已可用",
+            "meta": {
+                "ui_only": True,
+                "skill_change_event_id": "event-created",
+                "skill_change": {
+                    "source": "ai",
+                    "action": "created",
+                    "skill_names": ["demo"],
+                },
+            },
+        }
+        legacy_enabled = {
+            "id": "legacy-enabled",
+            "role": "assistant",
+            "content": "◈ 已启用能力：demo，可被 AI 发现",
+            "meta": {
+                "ui_only": True,
+                "skill_change": {
+                    "source": "ui",
+                    "action": "enabled",
+                    "skill_names": ["demo"],
+                },
+            },
+        }
+        messages = [
+            {"id": "u1", "role": "user", "content": "hello"},
+            legacy_created,
+            legacy_enabled,
+            {"id": "a1", "role": "assistant", "content": "world"},
+        ]
+
+        self.assertTrue(is_legacy_skill_change_notice_message(legacy_created))
+        self.assertTrue(is_legacy_skill_change_notice_message(legacy_enabled))
+        self.assertEqual(
+            [item["type"] for item in build_conversation_render_items(messages)],
+            ["user", "assistant"],
+        )
+        self.assertEqual(
+            build_conversation_render_spans(messages),
+            [{"start": 0, "end": 1}, {"start": 3, "end": 4}],
+        )
+        self.assertEqual(len(messages), 4)
 
     def test_merges_tool_calls_and_results_into_same_assistant_item(self):
         items = build_conversation_render_items(

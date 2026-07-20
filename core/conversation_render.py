@@ -32,7 +32,20 @@ def _is_hidden_context_message(message):
     if not isinstance(message, dict):
         return False
     meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-    return bool(meta.get("hidden")) and meta.get("kind") in {"skill_context", "skill_context_update"}
+    return (
+        bool(meta.get("hidden"))
+        and meta.get("kind") in {"skill_context", "skill_context_update"}
+    ) or is_legacy_skill_change_notice_message(message)
+
+
+def is_legacy_skill_change_notice_message(message):
+    if not isinstance(message, dict):
+        return False
+    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+    return bool(meta.get("ui_only")) and (
+        isinstance(meta.get("skill_change"), dict)
+        or bool(str(meta.get("skill_change_event_id") or "").strip())
+    )
 
 
 def is_same_turn_guidance_message(message):

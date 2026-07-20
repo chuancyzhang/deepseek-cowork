@@ -62,9 +62,9 @@ For the release scope and acceptance checklist, see [RELEASE_NOTES_5.0.3.md](REL
 - Keep the release notes, user guide, and screenshots aligned with the shipped UI
 - Preserve behavior while making polish changes low-risk
 
-## 5.0.3 Release Baseline
+## 5.0.4 Release Baseline
 
-- Version source is centralized in `core/app_version.py` and currently reads `5.0.3`
+- Version source is centralized in `core/app_version.py` and currently reads `5.0.4`
 - Responses requests automatically send the conversation-scoped `prompt_cache_key`; Chat Completions retains its existing provider-configured behavior
 - The code-only read-only Linear theme can be extended by user JSON themes; a weak binding registry applies colors, type, icons, geometry, custom painting, and Markdown CSS across all native regions while preview recovery and diagnostics share one service boundary
 - README, product documentation, user guide, technical design, Skill system, and this roadmap link to the release notes and current baseline

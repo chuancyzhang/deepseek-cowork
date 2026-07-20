@@ -5,6 +5,8 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -624,6 +626,7 @@ class TestSkillFromConversation(unittest.TestCase):
 
         app = QApplication.instance() or QApplication([])
         self.addCleanup(app.processEvents)
+
         dialog = main.ConversationSkillEvidenceDialog(
             {
                 "confidence": "low",
@@ -648,6 +651,183 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertEqual(destination["selected_resources"], [])
         self.assertEqual(dialog.objectName(), "ConversationSkillEvidenceDialog")
         self.assertTrue(dialog.findChildren(main.ProductActionBar))
+
+    def test_conversation_skill_range_keeps_dialog_open_when_background_handoff_fails(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication, QDialog
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+
+        def fail_handoff(_messages):
+            raise RuntimeError("provider unavailable")
+
+        dialog = main.ConversationSkillRangeDialog(
+            [{"id": "m1", "role": "user", "content": "沉淀这个流程"}],
+            submit_handler=fail_handoff,
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        dialog._accept_if_valid()
+
+        self.assertNotEqual(dialog.result(), QDialog.Accepted)
+        self.assertFalse(dialog._submitting)
+        self.assertEqual(dialog.next_btn.text(), "开始复用分析")
+        self.assertFalse(dialog.submit_error.isHidden())
+        self.assertIn("provider unavailable", dialog.submit_error.text())
+
+    def test_conversation_skill_evidence_handoff_receives_confirmed_destination(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication, QDialog
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+        received = []
+        dialog = main.ConversationSkillEvidenceDialog(
+            {
+                "confidence": "high",
+                "task_goal": {"text": "Build reports", "source_message_ids": ["m1"]},
+                "reusable_patterns": [{"text": "Validate inputs", "source_message_ids": ["m1"]}],
+            },
+            [],
+            submit_handler=lambda destination: received.append(destination) or True,
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        dialog._accept_if_valid()
+
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+        self.assertEqual(received[0]["mode"], "create")
+        self.assertEqual(received[0]["selected_resources"], [])
+
+    def test_conversation_skill_evidence_keeps_dialog_open_when_compile_handoff_fails(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication, QDialog
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+
+        def fail_compile(_destination):
+            raise RuntimeError("compile unavailable")
+
+        dialog = main.ConversationSkillEvidenceDialog(
+            {
+                "confidence": "high",
+                "task_goal": {"text": "Build reports", "source_message_ids": ["m1"]},
+                "reusable_patterns": [{"text": "Validate inputs", "source_message_ids": ["m1"]}],
+            },
+            [],
+            submit_handler=fail_compile,
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        dialog._accept_if_valid()
+
+        self.assertNotEqual(dialog.result(), QDialog.Accepted)
+        self.assertFalse(dialog._submitting)
+        self.assertEqual(dialog.compile_btn.text(), "后台编译 Skill 草稿")
+        self.assertFalse(dialog.submit_error.isHidden())
+        self.assertIn("compile unavailable", dialog.submit_error.text())
+
+    def test_conversation_skill_status_row_exposes_running_and_pending_states(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+        row = main.ConversationSkillStatusRow()
+        self.addCleanup(row.deleteLater)
+
+        row.set_capture_state(
+            "正在分析复用价值",
+            detail="已转到后台，可继续对话",
+            running=True,
+        )
+        self.assertTrue(row.activity._running)
+        self.assertTrue(row.status_icon.isHidden())
+        self.assertTrue(row.review_btn.isHidden())
+        self.assertEqual(row.detail_label.text(), "已转到后台，可继续对话")
+
+        row.set_capture_state(
+            "复用分析已完成",
+            detail="待确认",
+            pending=True,
+            action_text="继续确认",
+        )
+        self.assertFalse(row.activity._running)
+        self.assertFalse(row.status_icon.isHidden())
+        self.assertFalse(row.review_btn.isHidden())
+        self.assertEqual(row.review_btn.text(), "继续确认")
+
+        sidebar_indicator = main.SessionSkillCaptureIndicator()
+        self.addCleanup(sidebar_indicator.deleteLater)
+        sidebar_indicator.set_phase("compiling")
+        self.assertFalse(sidebar_indicator.isHidden())
+        self.assertEqual(sidebar_indicator._phase, "compiling")
+        sidebar_indicator.set_phase("draft_ready")
+        self.assertEqual(sidebar_indicator._phase, "draft_ready")
+        sidebar_indicator.set_phase("")
+        self.assertTrue(sidebar_indicator.isHidden())
+
+    def test_conversation_skill_completion_toast_only_for_cross_session_and_deduplicates(self):
+        import main
+
+        add_toast = Mock()
+        window = SimpleNamespace(
+            current_session_id="source-session",
+            _conversation_skill_completion_toast_keys=set(),
+            _resolved_session_title=lambda _state: "客户流失分析",
+            add_system_toast=add_toast,
+        )
+        state = SimpleNamespace(session_id="source-session")
+
+        same_session = main.MainWindow._notify_cross_session_skill_completion(
+            window,
+            state,
+            "capture-1",
+            "analysis_ready",
+        )
+        self.assertFalse(same_session)
+        add_toast.assert_not_called()
+
+        window.current_session_id = "other-session"
+        first = main.MainWindow._notify_cross_session_skill_completion(
+            window,
+            state,
+            "capture-1",
+            "analysis_ready",
+        )
+        duplicate = main.MainWindow._notify_cross_session_skill_completion(
+            window,
+            state,
+            "capture-1",
+            "analysis_ready",
+        )
+        draft_ready = main.MainWindow._notify_cross_session_skill_completion(
+            window,
+            state,
+            "capture-1",
+            "draft_ready",
+        )
+        failed = main.MainWindow._notify_cross_session_skill_completion(
+            window,
+            state,
+            "capture-1",
+            "failed",
+        )
+
+        self.assertTrue(first)
+        self.assertFalse(duplicate)
+        self.assertTrue(draft_ready)
+        self.assertFalse(failed)
+        self.assertEqual(add_toast.call_count, 2)
+        self.assertIn("复用分析已完成", add_toast.call_args_list[0].args[0])
+        self.assertIn("Skill 草稿已生成", add_toast.call_args_list[1].args[0])
+        self.assertTrue(all(call.kwargs["session_id"] == "source-session" for call in add_toast.call_args_list))
 
     def test_session_skill_picker_uses_clear_checkable_selection(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

@@ -94,7 +94,7 @@ class LinearManagementNavigationTests(unittest.TestCase):
             self.assertEqual(wizard.stack.currentIndex(), 0)
             wizard._go_next()
             self.assertEqual(wizard.stack.currentIndex(), 1)
-            self.assertEqual(wizard.next_btn.text(), "生成草稿")
+            self.assertEqual(wizard.next_btn.text(), "开始复用分析")
         finally:
             wizard.deleteLater()
 

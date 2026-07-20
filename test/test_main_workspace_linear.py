@@ -10,7 +10,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QToolButton, QWidget
 
-from main import ConversationHistoryRow, MainWindow, ProjectHistoryRow, parse_tool_arguments
+from main import (
+    ConversationHistoryRow,
+    MainWindow,
+    ProjectHistoryRow,
+    SessionSkillCaptureIndicator,
+    parse_tool_arguments,
+)
 from ui.primitives import ProductCodeViewer, ProductResultViewer, ProductSegmentedControl, SidebarInlineNameEditor
 
 
@@ -209,6 +215,43 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             row.deleteLater()
         project_row.deleteLater()
         standalone_row.deleteLater()
+
+    def test_skill_capture_sidebar_indicator_tracks_source_session_and_returns_to_it(self):
+        state = self.window.get_current_session()
+        self.window.history_rows = {}
+        self.window.history_buttons = {}
+        self.window.history_age_labels = {}
+        self.window.history_activity_indicators = {}
+        self.window.history_skill_capture_indicators = {}
+        state.pending_conversation_skill_result = {
+            "capture_id": "capture-sidebar",
+            "phase": "compiling",
+        }
+        row = self.window._make_project_session_row(
+            {
+                "id": state.session_id,
+                "title": "来源会话",
+                "updated_at": 1,
+                "pinned": False,
+            },
+            compact=False,
+        )
+        indicator = self.window.history_skill_capture_indicators[state.session_id]
+        self.assertIsInstance(indicator, SessionSkillCaptureIndicator)
+        self.assertEqual(indicator._phase, "compiling")
+        self.assertFalse(indicator.isHidden())
+        self.assertIn("正在编译", indicator.toolTip())
+
+        state.pending_conversation_skill_result["phase"] = "draft_ready"
+        self.window.refresh_skill_capture_sidebar_indicator(state.session_id)
+        self.assertEqual(indicator._phase, "draft_ready")
+        self.assertIn("草稿待确认", indicator.toolTip())
+
+        with patch.object(self.window, "activate_session") as activate:
+            QTest.mouseClick(indicator, Qt.LeftButton)
+            self.app.processEvents()
+            activate.assert_called_once_with(state.session_id)
+        row.deleteLater()
 
     def test_sidebar_uses_chat_product_copy(self):
         labels = [button.text().strip() for button in self.window.findChildren(QPushButton)]

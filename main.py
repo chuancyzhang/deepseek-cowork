@@ -248,7 +248,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPi
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
-from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QEventLoop, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
 QWebEngineView = None
 WEBENGINE_AVAILABLE = None
@@ -10126,11 +10126,13 @@ class ConversationSkillOptionsDialog(QDialog):
 
 
 class ConversationSkillRangeDialog(QDialog):
-    def __init__(self, messages, parent=None, selected_message_ids=None):
+    def __init__(self, messages, parent=None, selected_message_ids=None, submit_handler=None):
         super().__init__(parent)
         self.setWindowTitle("选择会话片段")
         self.resize(720, 560)
         self.messages = [message for message in (messages or []) if isinstance(message, dict)]
+        self.submit_handler = submit_handler
+        self._submitting = False
         selected_message_ids = {str(value) for value in (selected_message_ids or []) if str(value)}
         apply_product_dialog(self, "ConversationSkillRangeDialog")
 
@@ -10182,19 +10184,33 @@ class ConversationSkillRangeDialog(QDialog):
         self.selection_hint.setStyleSheet(apple_caption_style())
         layout.addWidget(self.selection_hint)
 
+        self.submit_error = QLabel("")
+        self.submit_error.setObjectName("ConversationSkillSubmitError")
+        self.submit_error.setWordWrap(True)
+        self.submit_error.setStyleSheet(
+            f"color: {DesignTokens.error_text}; background: {DesignTokens.error_bg}; "
+            "border: none; border-radius: 7px; padding: 8px 10px; font-size: 11px;"
+        )
+        self.submit_error.hide()
+        layout.addWidget(self.submit_error)
+
         actions = QHBoxLayout()
         all_btn = QPushButton("全选")
         all_btn.setObjectName("SecondaryBtn")
+        self.all_btn = all_btn
         all_btn.clicked.connect(lambda: self._set_all(Qt.Checked))
         none_btn = QPushButton("清空")
         none_btn.setObjectName("SecondaryBtn")
+        self.none_btn = none_btn
         none_btn.clicked.connect(lambda: self._set_all(Qt.Unchecked))
         cancel_btn = QPushButton("取消")
         cancel_btn.setObjectName("SecondaryBtn")
+        self.cancel_btn = cancel_btn
         cancel_btn.clicked.connect(self.reject)
-        next_btn = QPushButton("生成草稿")
+        next_btn = QPushButton("开始复用分析")
         next_btn.setObjectName("PrimaryBtn")
         next_btn.clicked.connect(self._accept_if_valid)
+        self.next_btn = next_btn
         actions.addWidget(all_btn)
         actions.addWidget(none_btn)
         actions.addStretch()
@@ -10272,7 +10288,46 @@ class ConversationSkillRangeDialog(QDialog):
         if not self.selected_messages():
             QMessageBox.warning(self, "无法生成", "请至少选择一条会话消息。")
             return
+        if self._submitting:
+            return
+        if not callable(self.submit_handler):
+            self.accept()
+            return
+        self._set_submitting(True)
+        try:
+            started = self.submit_handler(self.selected_messages())
+            if started is False:
+                raise RuntimeError("后台复用分析未能启动，请重试。")
+        except Exception as exc:
+            self._set_submitting(False)
+            self.submit_error.setText(f"无法转入后台：{exc}")
+            self.submit_error.show()
+            log_conversation_skill_capture(
+                "analysis_handoff_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            return
         self.accept()
+
+    def _set_submitting(self, submitting):
+        self._submitting = bool(submitting)
+        self.next_btn.setText("正在转入后台…" if self._submitting else "开始复用分析")
+        for widget in (
+            self.range_control,
+            self.message_list,
+            self.all_btn,
+            self.none_btn,
+            self.cancel_btn,
+            self.next_btn,
+        ):
+            widget.setEnabled(not self._submitting)
+        if self._submitting:
+            self.submit_error.hide()
+        self.next_btn.repaint()
+        if self._submitting:
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
 
 class ConversationSkillWizardDialog(QDialog):
@@ -10317,7 +10372,7 @@ class ConversationSkillWizardDialog(QDialog):
                 if label.property("roleTitle") or label.property("roleSubtitle"):
                     label.hide()
             for button in page.findChildren(QPushButton):
-                if button.text().strip() in {"取消", "继续", "生成草稿"}:
+                if button.text().strip() in {"取消", "继续", "生成草稿", "开始复用分析"}:
                     button.hide()
             for action_bar in page.findChildren(ProductActionBar):
                 action_bar.hide()
@@ -10379,7 +10434,7 @@ class ConversationSkillWizardDialog(QDialog):
             self.stack.setCurrentWidget(self.range_page)
             self.step_label.setText("2 / 2 · 选择会话片段")
             self.back_btn.show()
-            self.next_btn.setText("生成草稿")
+            self.next_btn.setText("开始复用分析")
             self.resize(720, 600)
             log_conversation_skill_capture("wizard_next_done", step=2, mode=options.get("mode"))
             return
@@ -10396,9 +10451,11 @@ class ConversationSkillWizardDialog(QDialog):
 
 
 class ConversationSkillEvidenceDialog(QDialog):
-    def __init__(self, evidence, skills, parent=None):
+    def __init__(self, evidence, skills, parent=None, submit_handler=None):
         super().__init__(parent)
         self.evidence = dict(evidence or {})
+        self.submit_handler = submit_handler
+        self._submitting = False
         self.discard_requested = False
         self.resource_checks = []
         self.setObjectName("ConversationSkillEvidenceDialog")
@@ -10488,16 +10545,29 @@ class ConversationSkillEvidenceDialog(QDialog):
                 resource_layout.addWidget(check)
             layout.addWidget(resource_box)
 
+        self.submit_error = QLabel("")
+        self.submit_error.setObjectName("ConversationSkillSubmitError")
+        self.submit_error.setWordWrap(True)
+        self.submit_error.setStyleSheet(
+            f"color: {DesignTokens.error_text}; background: {DesignTokens.error_bg}; "
+            "border: none; border-radius: 7px; padding: 8px 10px; font-size: 11px;"
+        )
+        self.submit_error.hide()
+        layout.addWidget(self.submit_error)
+
         actions = ProductActionBar()
         discard_btn = QPushButton("丢弃")
         discard_btn.setStyleSheet(product_button_style("danger", radius=7))
+        self.discard_btn = discard_btn
         discard_btn.clicked.connect(self._discard)
         later_btn = QPushButton("稍后处理")
         later_btn.setObjectName("SecondaryBtn")
+        self.later_btn = later_btn
         later_btn.clicked.connect(self.reject)
-        compile_btn = QPushButton("编译 Skill 草稿")
+        compile_btn = QPushButton("后台编译 Skill 草稿")
         compile_btn.setObjectName("PrimaryBtn")
         compile_btn.clicked.connect(self._accept_if_valid)
+        self.compile_btn = compile_btn
         actions.layout.addWidget(discard_btn)
         actions.layout.addWidget(later_btn)
         actions.layout.addWidget(compile_btn)
@@ -10512,7 +10582,45 @@ class ConversationSkillEvidenceDialog(QDialog):
         if options["mode"] == "update" and not options.get("target_skill"):
             QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
             return
+        if self._submitting:
+            return
+        if not callable(self.submit_handler):
+            self.accept()
+            return
+        self._set_submitting(True)
+        try:
+            started = self.submit_handler(self.selected_destination())
+            if started is False:
+                raise RuntimeError("Skill 草稿编译未能启动，请重试。")
+        except Exception as exc:
+            self._set_submitting(False)
+            self.submit_error.setText(f"无法转入后台：{exc}")
+            self.submit_error.show()
+            log_conversation_skill_capture(
+                "compile_handoff_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            return
         self.accept()
+
+    def _set_submitting(self, submitting):
+        self._submitting = bool(submitting)
+        self.compile_btn.setText("正在转入后台…" if self._submitting else "后台编译 Skill 草稿")
+        for widget in (
+            self.options,
+            self.discard_btn,
+            self.later_btn,
+            self.compile_btn,
+            *self.resource_checks,
+        ):
+            widget.setEnabled(not self._submitting)
+        if self._submitting:
+            self.submit_error.hide()
+        self.compile_btn.repaint()
+        if self._submitting:
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     def selected_destination(self):
         options = self.options.selected_options()
@@ -15253,6 +15361,147 @@ class SessionActivityIndicator(QWidget):
         painter.drawArc(rect, self._angle * 16, 104 * 16)
 
 
+class ConversationSkillStatusRow(QFrame):
+    """Theme-aware inline status for a background conversation-to-Skill capture."""
+
+    reviewRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ConversationSkillStatusRow")
+        self._pending = False
+        self._failed = False
+        self._running = False
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 9, 10, 9)
+        layout.setSpacing(9)
+
+        self.activity = SessionActivityIndicator(self, size=20)
+        layout.addWidget(self.activity, 0, Qt.AlignVCenter)
+
+        self.status_icon = QLabel(self)
+        self.status_icon.setObjectName("ConversationSkillStatusIcon")
+        self.status_icon.setFixedSize(20, 20)
+        self.status_icon.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_icon, 0, Qt.AlignVCenter)
+
+        text_box = QWidget(self)
+        text_layout = QVBoxLayout(text_box)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(1)
+        self.status_label = QLabel(self)
+        self.status_label.setObjectName("ConversationSkillStatusText")
+        self.detail_label = QLabel(self)
+        self.detail_label.setObjectName("ConversationSkillStatusDetail")
+        self.detail_label.setWordWrap(True)
+        text_layout.addWidget(self.status_label)
+        text_layout.addWidget(self.detail_label)
+        layout.addWidget(text_box, 1)
+
+        self.review_btn = QPushButton("查看并保存", self)
+        self.review_btn.setObjectName("ConversationSkillReviewButton")
+        self.review_btn.clicked.connect(lambda _checked=False: self.reviewRequested.emit())
+        self.review_btn.hide()
+        layout.addWidget(self.review_btn, 0, Qt.AlignVCenter)
+
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def set_capture_state(
+        self,
+        text,
+        *,
+        detail="",
+        pending=False,
+        failed=False,
+        running=False,
+        action_text="查看并保存",
+    ):
+        self._pending = bool(pending)
+        self._failed = bool(failed)
+        self._running = bool(running)
+        self.status_label.setText(str(text or ""))
+        self.detail_label.setText(str(detail or ""))
+        self.detail_label.setVisible(bool(str(detail or "").strip()))
+        self.review_btn.setText(str(action_text or "查看并保存"))
+        self.review_btn.setVisible(bool(pending))
+        self.activity.setRunning(bool(running))
+        self.status_icon.setVisible(not running)
+        self.refresh_theme()
+        self.show()
+
+    def refresh_theme(self, _resolved=None):
+        set_stylesheet_if_changed(
+            self,
+            f"""
+            QFrame#ConversationSkillStatusRow {{
+                background: {DesignTokens.bg_main};
+                border: 1px solid {DesignTokens.border_subtle};
+                border-radius: 8px;
+            }}
+            QLabel#ConversationSkillStatusText {{
+                color: {DesignTokens.text_primary};
+                background: transparent;
+                border: none;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QLabel#ConversationSkillStatusDetail {{
+                color: {DesignTokens.text_secondary};
+                background: transparent;
+                border: none;
+                font-size: 11px;
+            }}
+            """,
+        )
+        color = (
+            DesignTokens.error_text
+            if self._failed
+            else (DesignTokens.primary if self._pending else DesignTokens.text_secondary)
+        )
+        icon_name = "fa5s.exclamation-circle" if self._failed else "fa5s.file-alt"
+        self.status_icon.setPixmap(qta.icon(icon_name, color=color).pixmap(16, 16))
+        self.review_btn.setStyleSheet(product_button_style("ghost", radius=6))
+
+
+class SessionSkillCaptureIndicator(QToolButton):
+    """Independent sidebar indicator for background Skill capture state."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._phase = ""
+        self.setObjectName("SessionSkillCaptureIndicator")
+        self.setAutoRaise(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setFixedSize(20, 20)
+        self._spin_animation = qta.Spin(self)
+        self.hide()
+        bind_theme(self, self.refresh_theme, surface="left_sidebar")
+
+    def set_phase(self, phase):
+        self._phase = str(phase or "")
+        self.setVisible(bool(self._phase))
+        self.refresh_theme()
+
+    def refresh_theme(self, _resolved=None):
+        phase = self._phase
+        if phase in {"analyzing", "compiling"}:
+            icon_name = "fa5s.spinner"
+            color = DesignTokens.primary
+            icon = qta.icon(icon_name, color=color, animation=self._spin_animation)
+        elif phase in {"analysis_ready", "draft_ready"}:
+            icon = qta.icon("fa5s.file-alt", color=DesignTokens.primary)
+        elif phase == "failed":
+            icon = qta.icon("fa5s.exclamation-circle", color=DesignTokens.error_text)
+        else:
+            icon = QIcon()
+        self.setIcon(icon)
+        self.setIconSize(QSize(13, 13))
+        self.setStyleSheet(apple_ghost_icon_button_style(radius=10))
+
+
 class StartupLoadingWindow(QWidget):
     """Small first-paint window shown while the full main window is built."""
 
@@ -16865,6 +17114,7 @@ class MainWindow(QMainWindow):
         self.messages = []
         self.history_rows = {}
         self.history_buttons = {}
+        self.history_skill_capture_indicators = {}
         self.project_rows = {}
         self.project_buttons = {}
         self.history_inline_hosts = {}
@@ -16900,6 +17150,8 @@ class MainWindow(QMainWindow):
         self._last_memory_update_scope = "global"
         self._last_memory_update_workspace_dir = ""
         self.conversation_skill_worker = None
+        self.conversation_skill_capture_repository = ConversationSkillCaptureRepository()
+        self._conversation_skill_completion_toast_keys = set()
         
         self.skill_catalog_service = SkillCatalogService(
             self.config_manager,
@@ -20473,16 +20725,43 @@ class MainWindow(QMainWindow):
     def refresh_session_activity_indicator(self, session_id):
         indicators = getattr(self, "history_activity_indicators", {})
         indicator = indicators.get(session_id)
-        if not indicator:
-            return
+        if indicator:
+            state = self.get_session(session_id)
+            waiting = bool(state and getattr(state, "pending_interactions", {}))
+            failed = bool(state and getattr(state, "session_status", "") == "error")
+            running = self._session_has_live_activity(session_id)
+            indicator.setState("waiting" if waiting else ("error" if failed else ("running" if running else "idle")))
+            age_label = getattr(self, "history_age_labels", {}).get(session_id)
+            if age_label:
+                age_label.setVisible(not (running or waiting or failed) and bool(age_label.text()))
+        self.refresh_skill_capture_sidebar_indicator(session_id)
+
+    def _conversation_skill_capture_phase(self, session_id):
         state = self.get_session(session_id)
-        waiting = bool(state and getattr(state, "pending_interactions", {}))
-        failed = bool(state and getattr(state, "session_status", "") == "error")
-        running = self._session_has_live_activity(session_id)
-        indicator.setState("waiting" if waiting else ("error" if failed else ("running" if running else "idle")))
-        age_label = getattr(self, "history_age_labels", {}).get(session_id)
-        if age_label:
-            age_label.setVisible(not (running or waiting or failed) and bool(age_label.text()))
+        pending = getattr(state, "pending_conversation_skill_result", None) if state else None
+        if isinstance(pending, dict) and pending.get("phase"):
+            return str(pending.get("phase") or "")
+        repository = getattr(self, "conversation_skill_capture_repository", None)
+        if repository is None:
+            return ""
+        captures = repository.list_for_session(session_id)
+        return str((captures[0] if captures else {}).get("phase") or "")
+
+    def refresh_skill_capture_sidebar_indicator(self, session_id):
+        indicator = getattr(self, "history_skill_capture_indicators", {}).get(session_id)
+        if indicator is None or not _qt_object_alive(indicator):
+            return
+        phase = self._conversation_skill_capture_phase(session_id)
+        labels = {
+            "analyzing": "正在分析复用价值",
+            "analysis_ready": "复用分析待确认",
+            "compiling": "正在编译 Skill 草稿",
+            "draft_ready": "Skill 草稿待确认",
+            "failed": "Skill 沉淀失败，返回会话查看",
+        }
+        indicator.set_phase(phase if phase in labels else "")
+        indicator.setToolTip(labels.get(phase, ""))
+        indicator.setAccessibleName(labels.get(phase, ""))
 
     def set_session_status(self, status, session_id=None, save=False):
         state = self.get_session(session_id)
@@ -22853,7 +23132,13 @@ class MainWindow(QMainWindow):
         )
         menu_btn.clicked.connect(lambda checked=False, sid=session_id, btn_ref=menu_btn: self.show_session_menu(sid, btn_ref))
 
+        skill_indicator = SessionSkillCaptureIndicator(row)
+        skill_indicator.clicked.connect(lambda _checked=False, sid=session_id: self.activate_session(sid))
+        self.history_skill_capture_indicators[session_id] = skill_indicator
+        self.refresh_skill_capture_sidebar_indicator(session_id)
+
         row_layout.addWidget(content, 1)
+        row_layout.addWidget(skill_indicator, 0, Qt.AlignTop)
         row_layout.addWidget(menu_btn, 0, Qt.AlignTop)
         return row, btn
 
@@ -22884,6 +23169,10 @@ class MainWindow(QMainWindow):
 
         activity_indicator = SessionActivityIndicator(row)
         row_layout.addWidget(activity_indicator, 0, Qt.AlignVCenter)
+
+        skill_indicator = SessionSkillCaptureIndicator(row)
+        skill_indicator.clicked.connect(lambda _checked=False, sid=session_id: self.activate_session(sid))
+        row_layout.addWidget(skill_indicator, 0, Qt.AlignVCenter)
 
         actions = QWidget(row)
         actions.setObjectName("ConversationActions")
@@ -22924,6 +23213,7 @@ class MainWindow(QMainWindow):
         self.history_buttons[session_id] = btn
         self.history_age_labels[session_id] = age_label
         self.history_activity_indicators[session_id] = activity_indicator
+        self.history_skill_capture_indicators[session_id] = skill_indicator
         self.refresh_session_activity_indicator(session_id)
         return row
 
@@ -23505,6 +23795,7 @@ class MainWindow(QMainWindow):
         self.history_buttons = {}
         self.history_age_labels = {}
         self.history_activity_indicators = {}
+        self.history_skill_capture_indicators = {}
         self.project_rows = {}
         self.project_buttons = {}
         while self.history_layout.count():
@@ -27312,18 +27603,33 @@ class MainWindow(QMainWindow):
                     "capture_id": capture.get("capture_id"),
                     "phase": capture.get("phase"),
                 }
+                capture_phase = str(capture.get("phase") or "")
                 phase_label = {
-                    "analysis_ready": "复用分析待确认",
-                    "draft_ready": "Skill 草稿待确认",
-                    "failed": "Skill 沉淀失败，可重试",
+                    "analysis_ready": "复用分析已完成",
+                    "draft_ready": "Skill 草稿已生成",
+                    "failed": "Skill 沉淀失败",
                     "analyzing": "正在分析复用价值",
                     "compiling": "正在编译 Skill 草稿",
-                }.get(str(capture.get("phase") or ""), "Skill 沉淀待处理")
+                }.get(capture_phase, "Skill 沉淀待处理")
+                phase_detail = {
+                    "analysis_ready": "待确认",
+                    "draft_ready": "待确认保存",
+                    "failed": "返回来源会话查看并重试",
+                    "analyzing": "已转到后台，可继续对话",
+                    "compiling": "已转到后台，可继续对话",
+                }.get(capture_phase, "")
                 self._update_skill_capture_status_card(
                     state,
                     phase_label,
-                    pending=capture.get("phase") in {"analysis_ready", "draft_ready", "failed"},
-                    failed=capture.get("phase") == "failed",
+                    detail=phase_detail,
+                    pending=capture_phase in {"analysis_ready", "draft_ready", "failed"},
+                    failed=capture_phase == "failed",
+                    running=capture_phase in {"analyzing", "compiling"},
+                    action_text=(
+                        "查看并重试"
+                        if capture_phase == "failed"
+                        else ("继续确认" if capture_phase == "analysis_ready" else "查看并保存")
+                    ),
                 )
         has_messages = bool(state and getattr(state, "messages", []))
         skills_available = bool(getattr(self, "skill_manager_ready", False))
@@ -27335,47 +27641,42 @@ class MainWindow(QMainWindow):
         else:
             self.sidebar_skill_capture_btn.setText(" 沉淀为 Skill")
 
-    def _update_skill_capture_status_card(self, state, text, *, pending=False, failed=False):
+    def _update_skill_capture_status_card(
+        self,
+        state,
+        text,
+        *,
+        detail="",
+        pending=False,
+        failed=False,
+        running=False,
+        action_text="查看并保存",
+        ensure_visible=False,
+    ):
         if not state:
             return None
         card = getattr(state, "skill_capture_status_card", None)
-        if card is None or not _qt_object_alive(card):
-            card = QFrame()
-            card.setObjectName("SkillCaptureStatusCard")
-            card.setStyleSheet(
-                f"QFrame#SkillCaptureStatusCard {{ background: {DesignTokens.bg_main}; "
-                f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
+        if card is None or not _qt_object_alive(card) or not isinstance(card, ConversationSkillStatusRow):
+            card = ConversationSkillStatusRow()
+            card.reviewRequested.connect(
+                lambda sid=state.session_id: self.review_pending_conversation_skill_draft(sid)
             )
-            layout = QHBoxLayout(card)
-            layout.setContentsMargins(12, 9, 10, 9)
-            layout.setSpacing(9)
-            icon = QLabel()
-            icon.setObjectName("SkillCaptureStatusIcon")
-            icon.setFixedSize(20, 20)
-            layout.addWidget(icon)
-            label = QLabel()
-            label.setObjectName("SkillCaptureStatusText")
-            label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 600;")
-            layout.addWidget(label, 1)
-            button = QPushButton("查看并保存")
-            button.setObjectName("SkillCaptureReviewButton")
-            button.setStyleSheet(product_button_style("ghost", radius=6))
-            button.clicked.connect(
-                lambda _checked=False, sid=state.session_id: self.review_pending_conversation_skill_draft(sid)
-            )
-            button.hide()
-            layout.addWidget(button)
             state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), card)
             state.skill_capture_status_card = card
-        icon = card.findChild(QLabel, "SkillCaptureStatusIcon")
-        label = card.findChild(QLabel, "SkillCaptureStatusText")
-        button = card.findChild(QPushButton, "SkillCaptureReviewButton")
-        color = DesignTokens.error_text if failed else (DesignTokens.primary if pending else DesignTokens.text_secondary)
-        icon_name = "fa5s.exclamation-circle" if failed else ("fa5s.file-alt" if pending else "fa5s.magic")
-        icon.setPixmap(qta.icon(icon_name, color=color).pixmap(16, 16))
-        label.setText(str(text or ""))
-        button.setVisible(bool(pending))
-        card.show()
+        card.set_capture_state(
+            text,
+            detail=detail,
+            pending=pending,
+            failed=failed,
+            running=running,
+            action_text=action_text,
+        )
+        self.refresh_skill_capture_sidebar_indicator(state.session_id)
+        if ensure_visible and state.session_id == self.current_session_id:
+            QTimer.singleShot(
+                0,
+                lambda sid=state.session_id: self.request_session_scroll_to_bottom(sid, force=True),
+            )
         return card
 
     def start_conversation_skill_flow(self, source_message_id="", session_id=None):
@@ -27430,11 +27731,79 @@ class MainWindow(QMainWindow):
             session_id=state.session_id,
             message_count=len(state.messages or []),
         )
+        analysis_started = {"value": False}
+
+        def begin_background_analysis(selected_messages):
+            selected_messages = [
+                message for message in (selected_messages or [])
+                if isinstance(message, dict)
+            ]
+            if not selected_messages:
+                raise RuntimeError("没有选择可沉淀的会话片段。")
+            title = self._compute_session_title(selected_messages)
+            meta = self._compose_session_meta(state)
+            selected_ids = [
+                str(message.get("id") or f"message-{index:04d}")
+                for index, message in enumerate(selected_messages, start=1)
+            ]
+            capture = self.conversation_skill_capture_repository.create(
+                state.session_id,
+                selected_ids,
+            )
+            capture_id = str(capture.get("capture_id") or "")
+            state.pending_conversation_skill_result = {
+                "capture_id": capture_id,
+                "phase": "analyzing",
+            }
+            self._update_skill_capture_status_card(
+                state,
+                "正在分析复用价值",
+                detail="已转到后台，可继续对话",
+                running=True,
+                ensure_visible=True,
+            )
+            worker = ConversationSkillDraftWorker(
+                self.config_manager,
+                state.session_id,
+                title,
+                selected_messages,
+                meta=meta,
+                phase="analyze",
+                capture_id=capture_id,
+                parent=self,
+            )
+            worker.progress_signal.connect(self.handle_conversation_skill_progress)
+            worker.finished_signal.connect(self.handle_conversation_skill_finished)
+            worker.finished.connect(worker.deleteLater)
+            self.conversation_skill_worker = worker
+            try:
+                worker.start()
+            except Exception:
+                self.conversation_skill_worker = None
+                state.pending_conversation_skill_result = None
+                self.conversation_skill_capture_repository.discard(capture_id)
+                status_card = getattr(state, "skill_capture_status_card", None)
+                if status_card is not None and _qt_object_alive(status_card):
+                    status_card.hide()
+                self.refresh_skill_capture_sidebar_indicator(state.session_id)
+                raise
+            analysis_started["value"] = True
+            log_conversation_skill_capture(
+                "analysis_handoff_completed",
+                session_id=state.session_id,
+                capture_id=capture_id,
+                selected_message_count=len(selected_messages),
+                current_session_id=str(self.current_session_id or ""),
+            )
+            self.update_skill_capture_button_state()
+            return True
+
         try:
             range_dialog = ConversationSkillRangeDialog(
                 state.messages,
                 self,
                 selected_message_ids=selected_message_ids,
+                submit_handler=begin_background_analysis,
             )
             log_conversation_skill_capture("range_construct_done", session_id=state.session_id)
             range_result = range_dialog.exec()
@@ -27450,55 +27819,67 @@ class MainWindow(QMainWindow):
         if range_result != QDialog.Accepted:
             log_conversation_skill_capture("range_cancelled", session_id=state.session_id)
             return
-
-        selected_messages = range_dialog.selected_messages()
-        if not selected_messages:
-            log_conversation_skill_capture("range_empty", session_id=state.session_id)
-            self.add_system_toast("没有选择可沉淀的会话片段", "info", auto_close_ms=4000)
-            return
-
-        title = self._compute_session_title(selected_messages) if selected_messages else "新任务"
-        meta = self._compose_session_meta(state)
-        selected_ids = [
-            str(message.get("id") or f"message-{index:04d}")
-            for index, message in enumerate(selected_messages, start=1)
-        ]
-        capture = self.conversation_skill_capture_repository.create(
-            state.session_id,
-            selected_ids,
-        )
-        capture_id = str(capture.get("capture_id") or "")
-        state.pending_conversation_skill_result = {
-            "capture_id": capture_id,
-            "phase": "analyzing",
-        }
-        log_conversation_skill_capture(
-            "evidence_worker_starting",
-            session_id=state.session_id,
-            capture_id=capture_id,
-            selected_message_count=len(selected_messages),
-        )
-
-        self.add_system_toast("正在分析当前会话的复用价值", "info", auto_close_ms=3500)
-        self._update_skill_capture_status_card(state, "正在分析复用价值")
-        self.conversation_skill_worker = ConversationSkillDraftWorker(
-            self.config_manager,
-            state.session_id,
-            title,
-            selected_messages,
-            meta=meta,
-            phase="analyze",
-            capture_id=capture_id,
-            parent=self,
-        )
-        self.conversation_skill_worker.progress_signal.connect(self.handle_conversation_skill_progress)
-        self.conversation_skill_worker.finished_signal.connect(self.handle_conversation_skill_finished)
-        self.conversation_skill_worker.finished.connect(self.conversation_skill_worker.deleteLater)
-        self.conversation_skill_worker.start()
-        self.update_skill_capture_button_state()
+        if not analysis_started["value"]:
+            raise RuntimeError("复用分析弹窗已关闭，但后台任务未启动。")
 
     def handle_conversation_skill_progress(self, text):
-        self.add_system_toast(text, "info", auto_close_ms=2500)
+        worker = self.conversation_skill_worker
+        session_id = str(getattr(worker, "session_id", "") or "")
+        log_conversation_skill_capture(
+            "capture_progress",
+            session_id=session_id,
+            capture_id=str(getattr(worker, "capture_id", "") or ""),
+            phase=str(getattr(worker, "phase", "") or ""),
+            progress=str(text or ""),
+        )
+
+    def _notify_cross_session_skill_completion(self, state, capture_id, phase):
+        source_session_id = str(getattr(state, "session_id", "") or "")
+        current_session_id = str(self.current_session_id or "")
+        phase = str(phase or "")
+        key = f"{capture_id}:{phase}"
+        toast_keys = getattr(self, "_conversation_skill_completion_toast_keys", None)
+        if not isinstance(toast_keys, set):
+            self._conversation_skill_completion_toast_keys = set()
+            toast_keys = self._conversation_skill_completion_toast_keys
+        eligible = (
+            bool(capture_id)
+            and phase in {"analysis_ready", "draft_ready"}
+            and bool(source_session_id)
+            and source_session_id != current_session_id
+            and key not in toast_keys
+        )
+        log_conversation_skill_capture(
+            "cross_session_completion_toast_checked",
+            capture_id=str(capture_id or ""),
+            phase=phase,
+            source_session_id=source_session_id,
+            current_session_id=current_session_id,
+            eligible=eligible,
+            duplicate=key in toast_keys,
+        )
+        if not eligible:
+            return False
+        title = self._resolved_session_title(state)
+        if phase == "analysis_ready":
+            message = f"“{title}”的复用分析已完成，回到原会话继续确认"
+        else:
+            message = f"“{title}”的 Skill 草稿已生成，回到原会话查看并保存"
+        toast_keys.add(key)
+        self.add_system_toast(
+            message,
+            "info",
+            session_id=source_session_id,
+            auto_close_ms=6000,
+        )
+        log_conversation_skill_capture(
+            "cross_session_completion_toast_shown",
+            capture_id=str(capture_id or ""),
+            phase=phase,
+            source_session_id=source_session_id,
+            current_session_id=current_session_id,
+        )
+        return True
 
     def handle_conversation_skill_finished(self, result):
         worker = self.conversation_skill_worker
@@ -27512,7 +27893,6 @@ class MainWindow(QMainWindow):
         if target_state is None:
             raise RuntimeError(f"Skill 草稿所属会话不存在：{target_session_id}")
         self.conversation_skill_worker = None
-        self.conversation_skill_capture_repository = ConversationSkillCaptureRepository()
         if worker:
             try:
                 worker.finished_signal.disconnect(self.handle_conversation_skill_finished)
@@ -27542,15 +27922,20 @@ class MainWindow(QMainWindow):
             self._update_skill_capture_status_card(
                 target_state,
                 f"Skill 沉淀失败：{result.get('error') or '未知错误'}",
+                detail="返回来源会话查看并重试",
                 pending=bool(capture_id),
                 failed=True,
+                action_text="查看并重试",
             )
-            self.add_system_toast(f"Skill 沉淀失败：{result.get('error') or '未知错误'}", "error", auto_close_ms=8000)
             return
 
         capture_id = str(result.get("capture_id") or "")
         phase = str(result.get("phase") or "compile")
         capture = self.conversation_skill_capture_repository.load(capture_id) if capture_id else None
+        if capture and str(capture.get("session_id") or "") != str(target_state.session_id or ""):
+            raise RuntimeError(
+                "Skill capture 来源会话与 worker 结果不一致，已停止投影完成状态。"
+            )
         if phase == "analyze":
             if not capture:
                 raise RuntimeError(f"Skill 复用分析记录不存在：{capture_id}")
@@ -27562,8 +27947,18 @@ class MainWindow(QMainWindow):
                 "capture_id": capture_id,
                 "phase": "analysis_ready",
             }
-            self._update_skill_capture_status_card(target_state, "复用分析待确认", pending=True)
-            self.add_system_toast("复用分析已完成，确认后再编译 Skill", "info", auto_close_ms=0)
+            self._update_skill_capture_status_card(
+                target_state,
+                "复用分析已完成",
+                detail="待确认",
+                pending=True,
+                action_text="继续确认",
+            )
+            self._notify_cross_session_skill_completion(
+                target_state,
+                capture_id,
+                "analysis_ready",
+            )
             return
 
         if phase == "compile" and capture:
@@ -27585,11 +27980,17 @@ class MainWindow(QMainWindow):
                 "capture_id": capture_id,
                 "phase": "draft_ready",
             }
-            self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
-            self.add_system_toast(
-                "Skill 草稿已生成，待你确认后保存",
-                "info",
-                auto_close_ms=0,
+            self._update_skill_capture_status_card(
+                target_state,
+                "Skill 草稿已生成",
+                detail="待确认保存",
+                pending=True,
+                action_text="查看并保存",
+            )
+            self._notify_cross_session_skill_completion(
+                target_state,
+                capture_id,
+                "draft_ready",
             )
             return
         target_state.pending_conversation_skill_result = None
@@ -27615,8 +28016,12 @@ class MainWindow(QMainWindow):
                 "capture_id": capture_id,
                 "phase": "draft_ready",
             }
-            self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
-            self.add_system_toast("Skill 草稿已保留，可稍后继续确认", "info", auto_close_ms=4000)
+            self._update_skill_capture_status_card(
+                target_state,
+                "Skill 草稿已生成",
+                detail="待确认保存",
+                pending=True,
+            )
             return
 
         draft = preview.draft()
@@ -27670,7 +28075,12 @@ class MainWindow(QMainWindow):
                         "capture_id": capture_id,
                         "phase": "draft_ready",
                     }
-                    self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
+                    self._update_skill_capture_status_card(
+                        target_state,
+                        "Skill 草稿已生成",
+                        detail="待确认保存",
+                        pending=True,
+                    )
                     return
             else:
                 log_conversation_skill_capture(
@@ -27719,14 +28129,21 @@ class MainWindow(QMainWindow):
                         self._update_skill_capture_status_card(
                             target_state,
                             "目标 Skill 已变化，请重新确认并编译",
+                            detail="待确认",
                             pending=True,
+                            action_text="继续确认",
                         )
                         return
                     target_state.pending_conversation_skill_result = {
                         "capture_id": capture_id,
                         "phase": "draft_ready",
                     }
-                    self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
+                    self._update_skill_capture_status_card(
+                        target_state,
+                        "Skill 草稿已生成",
+                        detail="待确认保存",
+                        pending=True,
+                    )
                     return
         except Exception as exc:
             log_conversation_skill_capture(
@@ -27741,7 +28158,12 @@ class MainWindow(QMainWindow):
                 "capture_id": capture_id,
                 "phase": "draft_ready",
             }
-            self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
+            self._update_skill_capture_status_card(
+                target_state,
+                "Skill 草稿已生成",
+                detail="待确认保存",
+                pending=True,
+            )
             return
         status_card = getattr(target_state, "skill_capture_status_card", None) if target_state else None
         if status_card is not None and _qt_object_alive(status_card):
@@ -27752,6 +28174,7 @@ class MainWindow(QMainWindow):
                 draft.get("skill_name") if mode == "create" else target_skill,
             )
         target_state.pending_conversation_skill_result = None
+        self.refresh_skill_capture_sidebar_indicator(target_state.session_id)
         self.update_skill_capture_button_state()
 
     def refresh_composer_action_state(self):
@@ -27833,7 +28256,13 @@ class MainWindow(QMainWindow):
                 capture["error"] = ""
                 self.conversation_skill_capture_repository.save(capture)
                 state.pending_conversation_skill_result = {"capture_id": capture_id, "phase": "analyzing"}
-                self._update_skill_capture_status_card(state, "正在重试复用分析")
+                self._update_skill_capture_status_card(
+                    state,
+                    "正在重试复用分析",
+                    detail="已转到后台，可继续对话",
+                    running=True,
+                    ensure_visible=True,
+                )
                 self.conversation_skill_worker = ConversationSkillDraftWorker(
                     self.config_manager,
                     state.session_id,
@@ -27873,7 +28302,85 @@ class MainWindow(QMainWindow):
                 skills_by_name[name] for name in matched_names
                 if name in skills_by_name and self.skill_manager.is_skill_editable(name)
             ]
-            dialog = ConversationSkillEvidenceDialog(evidence, matched_skills, self)
+            def begin_background_compile(destination):
+                destination = dict(destination or {})
+                target_skill = destination.get("target_skill") or ""
+                target_snapshot = {}
+                if destination.get("mode") == "update":
+                    target_record = self.skill_manager.skill_records.get(target_skill)
+                    if not target_record:
+                        raise RuntimeError("目标 Skill 已不可用，请重新选择。")
+                    target_snapshot = build_target_skill_snapshot(target_record)
+                previous_capture = copy.deepcopy(capture)
+                capture["destination"] = copy.deepcopy(destination)
+                capture["target_snapshot"] = copy.deepcopy(target_snapshot)
+                capture["phase"] = "compiling"
+                self.conversation_skill_capture_repository.save(capture)
+                state.pending_conversation_skill_result = {
+                    "capture_id": capture_id,
+                    "phase": "compiling",
+                }
+                self._update_skill_capture_status_card(
+                    state,
+                    "正在编译 Skill 草稿",
+                    detail="已转到后台，可继续对话",
+                    running=True,
+                    ensure_visible=True,
+                )
+                worker = ConversationSkillDraftWorker(
+                    self.config_manager,
+                    state.session_id,
+                    str((evidence.get("task_goal") or {}).get("text") or "Skill 草稿"),
+                    [],
+                    mode=destination.get("mode") or "create",
+                    target_skill=target_skill,
+                    update_strategy=destination.get("update_strategy") or "merge_guidance",
+                    phase="compile",
+                    capture_id=capture_id,
+                    evidence=evidence,
+                    target_snapshot=target_snapshot,
+                    selected_resources=destination.get("selected_resources") or [],
+                    parent=self,
+                )
+                worker.progress_signal.connect(self.handle_conversation_skill_progress)
+                worker.finished_signal.connect(self.handle_conversation_skill_finished)
+                worker.finished.connect(worker.deleteLater)
+                self.conversation_skill_worker = worker
+                try:
+                    worker.start()
+                except Exception:
+                    self.conversation_skill_worker = None
+                    self.conversation_skill_capture_repository.save(previous_capture)
+                    state.pending_conversation_skill_result = {
+                        "capture_id": capture_id,
+                        "phase": "analysis_ready",
+                    }
+                    self._update_skill_capture_status_card(
+                        state,
+                        "复用分析已完成",
+                        detail="待确认",
+                        pending=True,
+                        action_text="继续确认",
+                    )
+                    raise
+                log_conversation_skill_capture(
+                    "compile_handoff_completed",
+                    session_id=state.session_id,
+                    capture_id=capture_id,
+                    current_session_id=str(self.current_session_id or ""),
+                    mode=destination.get("mode") or "create",
+                    update_strategy=destination.get("update_strategy") or "merge_guidance",
+                    resource_count=len(destination.get("selected_resources") or []),
+                )
+                self.update_skill_capture_button_state()
+                return True
+
+            dialog = ConversationSkillEvidenceDialog(
+                evidence,
+                matched_skills,
+                self,
+                submit_handler=begin_background_compile,
+            )
             if dialog.exec() != QDialog.Accepted:
                 if dialog.discard_requested:
                     self.conversation_skill_capture_repository.discard(capture_id)
@@ -27881,6 +28388,7 @@ class MainWindow(QMainWindow):
                     card = getattr(state, "skill_capture_status_card", None)
                     if card is not None and _qt_object_alive(card):
                         card.hide()
+                    self.refresh_skill_capture_sidebar_indicator(state.session_id)
                     self.add_system_toast("已丢弃 Skill 沉淀草稿", "info", auto_close_ms=3200)
                 else:
                     state.pending_conversation_skill_result = {
@@ -27888,41 +28396,6 @@ class MainWindow(QMainWindow):
                         "phase": "analysis_ready",
                     }
                 return True
-            destination = dialog.selected_destination()
-            target_skill = destination.get("target_skill") or ""
-            target_snapshot = {}
-            if destination.get("mode") == "update":
-                target_record = self.skill_manager.skill_records.get(target_skill)
-                if not target_record:
-                    QMessageBox.warning(self, "无法编译", "目标 Skill 已不可用，请重新选择。")
-                    return False
-                target_snapshot = build_target_skill_snapshot(target_record)
-            capture["destination"] = copy.deepcopy(destination)
-            capture["target_snapshot"] = copy.deepcopy(target_snapshot)
-            capture["phase"] = "compiling"
-            self.conversation_skill_capture_repository.save(capture)
-            state.pending_conversation_skill_result = {"capture_id": capture_id, "phase": "compiling"}
-            self._update_skill_capture_status_card(state, "正在编译 Skill 草稿")
-            self.conversation_skill_worker = ConversationSkillDraftWorker(
-                self.config_manager,
-                state.session_id,
-                str((evidence.get("task_goal") or {}).get("text") or "Skill 草稿"),
-                [],
-                mode=destination.get("mode") or "create",
-                target_skill=target_skill,
-                update_strategy=destination.get("update_strategy") or "merge_guidance",
-                phase="compile",
-                capture_id=capture_id,
-                evidence=evidence,
-                target_snapshot=target_snapshot,
-                selected_resources=destination.get("selected_resources") or [],
-                parent=self,
-            )
-            self.conversation_skill_worker.progress_signal.connect(self.handle_conversation_skill_progress)
-            self.conversation_skill_worker.finished_signal.connect(self.handle_conversation_skill_finished)
-            self.conversation_skill_worker.finished.connect(self.conversation_skill_worker.deleteLater)
-            self.conversation_skill_worker.start()
-            self.update_skill_capture_button_state()
             return True
 
         if phase != "draft_ready":
@@ -27949,7 +28422,12 @@ class MainWindow(QMainWindow):
                 "capture_id": capture_id,
                 "phase": "draft_ready",
             }
-            self._update_skill_capture_status_card(state, "Skill 草稿待确认", pending=True)
+            self._update_skill_capture_status_card(
+                state,
+                "Skill 草稿已生成",
+                detail="待确认保存",
+                pending=True,
+            )
             log_conversation_skill_capture(
                 "review_open_error",
                 session_id=state.session_id,

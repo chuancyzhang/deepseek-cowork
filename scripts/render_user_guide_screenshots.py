@@ -205,6 +205,41 @@ def main_run():
             skill_analysis.resize(620, 560)
             save_widget(skill_analysis, "s32-skill-capture-small.png", 200)
             skill_analysis.hide()
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="skill_capture_guide")
+            window.add_chat_bubble(
+                "User",
+                "把这段周报整理流程沉淀为可复用的 Skill。",
+                animate=False,
+                source_message_id="skill-guide-user",
+            )
+            window.add_chat_bubble(
+                "Assistant",
+                "已完成流程梳理和结果校验。",
+                animate=False,
+                source_message_id="skill-guide-assistant",
+            )
+            state.pending_conversation_skill_result = {
+                "capture_id": "skill-guide-capture",
+                "phase": "analyzing",
+            }
+            window._update_skill_capture_status_card(
+                state,
+                "正在分析复用价值",
+                detail="已转到后台，可继续对话",
+                running=True,
+                ensure_visible=True,
+            )
+            window.resize(980, 640)
+            save_widget(window, "s33-skill-capture-background.png", 220)
+            state.pending_conversation_skill_result["phase"] = "draft_ready"
+            window._update_skill_capture_status_card(
+                state,
+                "Skill 草稿已生成",
+                detail="待确认保存",
+                pending=True,
+            )
+            save_widget(window, "s34-skill-capture-ready.png", 220)
             return
         if SCREENSHOT_SCOPE == "theme-acceptance":
             from unittest.mock import patch

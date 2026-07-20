@@ -152,11 +152,14 @@ from core.mcp_client import (
     test_mcp_server_connection,
 )
 from core.skill_from_conversation import (
-    extract_python_script_assets,
-    generate_skill_draft,
-    render_session_transcript,
+    ConversationSkillCaptureRepository,
+    build_evidence_source,
+    build_target_skill_snapshot,
+    compile_conversation_skill_draft,
+    extract_conversation_skill_evidence,
     save_new_skill,
     update_existing_skill_from_draft,
+    validate_conversation_skill_draft,
     validate_impl_py,
 )
 from core.automation_manager import (
@@ -9436,8 +9439,10 @@ class ComposerActionPopover(ProductPopover):
         state = window.get_current_session()
         pending = getattr(state, "pending_conversation_skill_result", None) if state else None
         if pending:
-            draft = pending.get("draft") if isinstance(pending, dict) else {}
-            self._add_row(layout, "Skill 草稿待确认", str((draft or {}).get("skill_name") or "草稿已生成"),
+            phase = str((pending or {}).get("phase") or "") if isinstance(pending, dict) else ""
+            title = "复用分析待确认" if phase == "analysis_ready" else "Skill 草稿待确认"
+            detail = "确认目标后继续编译" if phase == "analysis_ready" else "查看校验结果并保存"
+            self._add_row(layout, title, detail,
                           qta.icon("fa5s.file-alt", color=DesignTokens.primary),
                           lambda sid=state.session_id: window.review_pending_conversation_skill_draft(sid))
             layout.addWidget(self._divider())
@@ -10028,7 +10033,7 @@ class ConversationSkillOptionsDialog(QDialog):
         self.mode_buttons = {}
         for key, choice_title, choice_subtitle in (
             ("create", "创建新 Skill", "生成一个新的用户能力，不影响已有 Skill。"),
-            ("update", "更新已有 Skill", "把这次经验追加到一个可编辑的用户 Skill。"),
+            ("update", "更新已有 Skill", "把这次证据合并到一个可编辑的用户 Skill。"),
         ):
             button = ProductNavigationRow(choice_title, choice_subtitle)
             button.clicked.connect(lambda checked=False, value=key: self._set_mode(value))
@@ -10052,8 +10057,8 @@ class ConversationSkillOptionsDialog(QDialog):
 
         self.strategy_label = build_form_row_label("更新策略")
         self.strategy_combo = QComboBox()
-        self.strategy_combo.addItem("追加结构化经验", "append")
-        self.strategy_combo.addItem("重写 Skill 说明", "rewrite")
+        self.strategy_combo.addItem("合并增强指导", "merge_guidance")
+        self.strategy_combo.addItem("仅追加结构化经验", "append_experience")
         self.strategy_combo.setStyleSheet(apple_combo_style())
         mode_form.addRow(self.strategy_label, self.strategy_combo)
         layout.addWidget(mode_group)
@@ -10090,7 +10095,7 @@ class ConversationSkillOptionsDialog(QDialog):
             widget.setVisible(updating)
             widget.setEnabled(updating)
         if updating:
-            self.hint_label.setText("更新已有 Skill 会把这次经验追加到同一能力包，或按策略重写 Skill 说明。")
+            self.hint_label.setText("更新已有 Skill 会基于当前正文合并指导，或只追加去重后的经验。")
         else:
             self.hint_label.setText("创建新 Skill 会根据所选会话片段生成一个新的用户 Skill。")
 
@@ -10116,7 +10121,7 @@ class ConversationSkillOptionsDialog(QDialog):
         return {
             "mode": mode,
             "target_skill": self.target_combo.currentData() if mode == "update" else "",
-            "update_strategy": self.strategy_combo.currentData() if mode == "update" else "append",
+            "update_strategy": self.strategy_combo.currentData() if mode == "update" else "merge_guidance",
         }
 
 
@@ -10143,7 +10148,7 @@ class ConversationSkillRangeDialog(QDialog):
 
         self.range_control = ProductSegmentedControl(
             [("current", "当前问答"), ("recent", "最近 3 轮"), ("all", "全部会话"), ("custom", "自定义")],
-            current="custom" if selected_message_ids else "all",
+            current="custom" if selected_message_ids else "current",
         )
         self.range_control.currentChanged.connect(self._apply_quick_range)
         layout.addWidget(self.range_control)
@@ -10198,6 +10203,8 @@ class ConversationSkillRangeDialog(QDialog):
         layout.addLayout(actions)
 
         self.message_list.itemChanged.connect(lambda *_: self.refresh_selection_hint())
+        if not selected_message_ids:
+            self._apply_quick_range("current")
         self.refresh_selection_hint()
 
     def _apply_quick_range(self, key):
@@ -10209,9 +10216,28 @@ class ConversationSkillRangeDialog(QDialog):
         if key == "all":
             selected_indexes = set(range(len(visible_items)))
         elif key == "current":
-            selected_indexes = set(range(max(0, len(visible_items) - 2), len(visible_items)))
+            last_user_index = -1
+            for visible_index, item in enumerate(visible_items):
+                message_index = item.data(Qt.UserRole)
+                if (
+                    isinstance(message_index, int)
+                    and 0 <= message_index < len(self.messages)
+                    and str(self.messages[message_index].get("role") or "") == "user"
+                ):
+                    last_user_index = visible_index
+            selected_indexes = set(range(max(0, last_user_index), len(visible_items)))
         elif key == "recent":
-            selected_indexes = set(range(max(0, len(visible_items) - 6), len(visible_items)))
+            user_indexes = []
+            for visible_index, item in enumerate(visible_items):
+                message_index = item.data(Qt.UserRole)
+                if (
+                    isinstance(message_index, int)
+                    and 0 <= message_index < len(self.messages)
+                    and str(self.messages[message_index].get("role") or "") == "user"
+                ):
+                    user_indexes.append(visible_index)
+            start_index = user_indexes[-3] if len(user_indexes) >= 3 else (user_indexes[0] if user_indexes else 0)
+            selected_indexes = set(range(start_index, len(visible_items)))
         self.message_list.blockSignals(True)
         for index, item in enumerate(visible_items):
             item.setCheckState(Qt.Checked if index in selected_indexes else Qt.Unchecked)
@@ -10369,15 +10395,145 @@ class ConversationSkillWizardDialog(QDialog):
         return self.range_page.selected_messages()
 
 
+class ConversationSkillEvidenceDialog(QDialog):
+    def __init__(self, evidence, skills, parent=None):
+        super().__init__(parent)
+        self.evidence = dict(evidence or {})
+        self.discard_requested = False
+        self.resource_checks = []
+        self.setObjectName("ConversationSkillEvidenceDialog")
+        self.setWindowTitle("确认复用分析")
+        self.resize(760, 700)
+        self.setMinimumSize(620, 560)
+        apply_product_dialog(self, "ConversationSkillEvidenceDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        title = QLabel("确认复用分析")
+        title.setProperty("roleTitle", True)
+        confidence = str(self.evidence.get("confidence") or "low")
+        confidence_label = {"high": "高", "medium": "中", "low": "低"}.get(confidence, "低")
+        subtitle = QLabel(f"证据置信度：{confidence_label}。确认目标与资源后才会编译 Skill 草稿。")
+        subtitle.setProperty("roleSubtitle", True)
+        subtitle.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+
+        summary = QTextEdit()
+        summary.setReadOnly(True)
+        summary.setStyleSheet(apple_code_edit_style(subtle=True))
+        summary.setFixedHeight(150)
+        lines = []
+        goal = self.evidence.get("task_goal") if isinstance(self.evidence.get("task_goal"), dict) else {}
+        outcome = self.evidence.get("outcome") if isinstance(self.evidence.get("outcome"), dict) else {}
+        lines.append("目标")
+        lines.append(str(goal.get("text") or "未提取到明确目标"))
+        lines.append("")
+        lines.append("可复用规律")
+        patterns = self.evidence.get("reusable_patterns") or []
+        lines.extend(f"• {item.get('text')}" for item in patterns if isinstance(item, dict) and item.get("text"))
+        if not patterns:
+            lines.append("• 未提取到稳定规律")
+        if outcome.get("text"):
+            lines.extend(["", "结果", str(outcome.get("text"))])
+        missing = self.evidence.get("missing_evidence") or []
+        if missing:
+            lines.extend(["", "仍缺少", *[f"• {item}" for item in missing]])
+        privacy = self.evidence.get("privacy_findings") or []
+        if privacy:
+            lines.extend(["", f"隐私处理：已遮蔽 {len(privacy)} 项敏感或本地信息"])
+        summary.setPlainText("\n".join(lines))
+        layout.addWidget(summary)
+
+        self.options = ConversationSkillOptionsDialog(skills, self)
+        self.options.setParent(self)
+        self.options.setWindowFlags(Qt.Widget)
+        self.options.setModal(False)
+        for label in self.options.findChildren(QLabel):
+            if label.property("roleTitle") or label.property("roleSubtitle"):
+                label.hide()
+        for button in self.options.findChildren(QPushButton):
+            if button.text().strip() in {"取消", "继续"}:
+                button.hide()
+        for action_bar in self.options.findChildren(ProductActionBar):
+            action_bar.hide()
+        options_layout = self.options.layout()
+        if options_layout is not None:
+            options_layout.setContentsMargins(0, 0, 0, 0)
+            for index in range(options_layout.count() - 1, -1, -1):
+                item = options_layout.itemAt(index)
+                if item is not None and item.spacerItem() is not None:
+                    options_layout.takeAt(index)
+        self.options.setMinimumSize(0, 0)
+        self.options.setMaximumHeight(220)
+        layout.addWidget(self.options, 1)
+
+        resources = self.evidence.get("resource_candidates") or []
+        if resources:
+            resource_box, resource_layout = build_settings_surface(
+                "可选资源",
+                "默认不保存脚本或引用；勾选脚本后 AI 会按用途重新参数化编写，不会复制原始执行代码。",
+                radius=12,
+            )
+            for item in resources:
+                if not isinstance(item, dict):
+                    continue
+                check = QCheckBox(
+                    f"{item.get('kind') or 'reference'} · {item.get('description') or '未命名候选'}"
+                )
+                check.setChecked(False)
+                check._conversation_skill_resource = dict(item)
+                self.resource_checks.append(check)
+                resource_layout.addWidget(check)
+            layout.addWidget(resource_box)
+
+        actions = ProductActionBar()
+        discard_btn = QPushButton("丢弃")
+        discard_btn.setStyleSheet(product_button_style("danger", radius=7))
+        discard_btn.clicked.connect(self._discard)
+        later_btn = QPushButton("稍后处理")
+        later_btn.setObjectName("SecondaryBtn")
+        later_btn.clicked.connect(self.reject)
+        compile_btn = QPushButton("编译 Skill 草稿")
+        compile_btn.setObjectName("PrimaryBtn")
+        compile_btn.clicked.connect(self._accept_if_valid)
+        actions.layout.addWidget(discard_btn)
+        actions.layout.addWidget(later_btn)
+        actions.layout.addWidget(compile_btn)
+        layout.addWidget(actions)
+
+    def _discard(self):
+        self.discard_requested = True
+        self.reject()
+
+    def _accept_if_valid(self):
+        options = self.options.selected_options()
+        if options["mode"] == "update" and not options.get("target_skill"):
+            QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
+            return
+        self.accept()
+
+    def selected_destination(self):
+        options = self.options.selected_options()
+        resources = []
+        for check in self.resource_checks:
+            if check.isChecked():
+                resource = dict(getattr(check, "_conversation_skill_resource", {}) or {})
+                resource["selected"] = True
+                resources.append(resource)
+        return {**options, "selected_resources": resources}
+
+
 class ConversationSkillPreviewDialog(QDialog):
-    def __init__(self, draft, mode="create", target_skill=None, update_strategy="append", parent=None):
+    def __init__(self, draft, mode="create", target_skill=None, update_strategy="merge_guidance", parent=None):
         super().__init__(parent)
         self.setWindowTitle("确认 Skill 草稿")
         self.resize(820, 680)
         self._draft = dict(draft or {})
         self.mode = mode or "create"
         self.target_skill = target_skill or ""
-        self.update_strategy = update_strategy or "append"
+        self.update_strategy = update_strategy or "merge_guidance"
         self.script_asset_checks = []
         apply_product_dialog(self, "ConversationSkillPreviewDialog")
 
@@ -10389,7 +10545,12 @@ class ConversationSkillPreviewDialog(QDialog):
         title.setProperty("roleTitle", True)
         subtitle_text = "保存前可以编辑模型提炼的内容。"
         if self.mode == "update":
-            subtitle_text = f"即将更新 {self.target_skill}，策略：{'重写说明' if self.update_strategy == 'rewrite' else '追加经验'}。"
+            strategy_label = (
+                "仅追加结构化经验"
+                if self.update_strategy in {"append", "append_experience"}
+                else "合并增强指导"
+            )
+            subtitle_text = f"即将更新 {self.target_skill}，策略：{strategy_label}。"
         subtitle = QLabel(subtitle_text)
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
@@ -10401,9 +10562,14 @@ class ConversationSkillPreviewDialog(QDialog):
         self._build_basic_tab()
         self._build_guidance_tab()
         self._build_script_tab()
+        self._build_validation_tab()
         layout.addWidget(self.tabs, 1)
 
         action_bar = ProductActionBar()
+        self.low_confidence_ack = None
+        if str(self._draft.get("quality") or "low") == "low" or self._draft.get("missing_evidence"):
+            self.low_confidence_ack = QCheckBox("我已了解证据缺失，仍要保存")
+            action_bar.layout.addWidget(self.low_confidence_ack)
         cancel_btn = QPushButton("取消")
         cancel_btn.setObjectName("SecondaryBtn")
         cancel_btn.clicked.connect(self.reject)
@@ -10437,26 +10603,28 @@ class ConversationSkillPreviewDialog(QDialog):
         layout.addRow(build_form_row_label("中文说明"), self.description_cn_input)
         layout.addRow(build_form_row_label("标签"), self.tags_edit)
         layout.addRow(build_form_row_label("触发词"), self.triggers_edit)
-        self.tabs.addTab(tab, "基础")
+        self.tabs.addTab(tab, "概览")
 
     def _build_guidance_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
-        self.usage_edit = QTextEdit(str(self._draft.get("usage_guidelines") or ""))
+        self.usage_edit = QTextEdit(
+            str(self._draft.get("instructions_md") or self._draft.get("usage_guidelines") or "")
+        )
         self.usage_edit.setStyleSheet(apple_code_edit_style(subtle=True))
         self.experience_edit = QTextEdit("\n".join(_conversation_skill_text_list(self._draft.get("experience_items"))))
         self.experience_edit.setStyleSheet(apple_code_edit_style(subtle=True))
         self.workflow_edit = QTextEdit("\n".join(_conversation_skill_text_list(self._draft.get("workflow"))))
         self.workflow_edit.setStyleSheet(apple_code_edit_style(subtle=True))
-        layout.addWidget(QLabel("使用指南"))
+        layout.addWidget(QLabel("Skill 指导正文"))
         layout.addWidget(self.usage_edit, 1)
         layout.addWidget(QLabel("经验条目（每行一条）"))
         layout.addWidget(self.experience_edit, 1)
         layout.addWidget(QLabel("推荐流程（每行一步）"))
         layout.addWidget(self.workflow_edit, 1)
-        self.tabs.addTab(tab, "经验")
+        self.tabs.addTab(tab, "指导")
 
     def _build_script_tab(self):
         tab = QWidget()
@@ -10470,7 +10638,16 @@ class ConversationSkillPreviewDialog(QDialog):
         layout.addWidget(self.impl_edit, 1)
 
         assets = self._draft.get("script_assets") or []
-        asset_label = QLabel("脚本资产（勾选后保存到 scripts/）")
+        resources = self._draft.get("resources") or []
+        validation = self._draft.get("validation") if isinstance(self._draft.get("validation"), dict) else {}
+        invalid_resource_paths = {
+            str(item.get("resource_path") or "")
+            for item in validation.get("issues") or []
+            if isinstance(item, dict)
+            and item.get("severity") == "error"
+            and item.get("resource_path")
+        }
+        asset_label = QLabel("资源（取消勾选后不会写入 Skill）")
         asset_label.setStyleSheet(apple_caption_style())
         layout.addWidget(asset_label)
         if assets:
@@ -10483,11 +10660,54 @@ class ConversationSkillPreviewDialog(QDialog):
                 check._conversation_skill_asset = asset
                 self.script_asset_checks.append(check)
                 layout.addWidget(check)
-        else:
+        for resource in resources:
+            if not isinstance(resource, dict):
+                continue
+            check = QCheckBox(
+                f"{resource.get('kind') or 'reference'} · {resource.get('path') or '未命名资源'}"
+            )
+            check.setChecked(True)
+            check.setToolTip(str(resource.get("description") or ""))
+            if str(resource.get("path") or "") in invalid_resource_paths:
+                check.setChecked(False)
+                check.setEnabled(False)
+                check.setToolTip("该资源未通过静态校验，已从保存内容中移除。")
+            check._conversation_skill_resource = resource
+            self.script_asset_checks.append(check)
+            layout.addWidget(check)
+        if not assets and not resources:
             empty = QLabel("当前片段没有捕获到可保存脚本。")
             empty.setStyleSheet(apple_caption_style())
             layout.addWidget(empty)
-        self.tabs.addTab(tab, "脚本")
+        self.tabs.addTab(tab, "资源")
+
+    def _build_validation_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        change_summary = self._draft.get("change_summary") or []
+        validation = self._draft.get("validation") if isinstance(self._draft.get("validation"), dict) else {}
+        issues = validation.get("issues") or []
+        viewer = QTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setStyleSheet(apple_code_edit_style(subtle=True))
+        lines = ["变更摘要"]
+        lines.extend(f"• {item}" for item in change_summary)
+        if not change_summary:
+            lines.append("• 未提供变更摘要")
+        lines.extend(["", "静态校验"])
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            severity = str(issue.get("severity") or "info").upper()
+            path = f" · {issue.get('resource_path')}" if issue.get("resource_path") else ""
+            lines.append(f"[{severity}] {issue.get('message') or issue.get('code')}{path}")
+        if not issues:
+            lines.append("• 未发现静态校验问题")
+        viewer.setPlainText("\n".join(lines))
+        layout.addWidget(viewer)
+        self.tabs.addTab(tab, "变更与校验")
 
     def _accept_if_valid(self):
         draft = self.draft()
@@ -10501,29 +10721,52 @@ class ConversationSkillPreviewDialog(QDialog):
         if not ok:
             QMessageBox.warning(self, "无法保存", error)
             return
-        if self.mode == "update" and self.update_strategy == "append" and not draft.get("experience_items"):
+        if self.mode == "update" and self.update_strategy in {"append", "append_experience"} and not draft.get("experience_items"):
             QMessageBox.warning(self, "无法保存", "追加经验时至少保留一条经验条目。")
+            return
+        validation = validate_conversation_skill_draft(
+            draft,
+            allowed_source_ids=draft.get("source_message_ids"),
+        )
+        errors = [
+            item for item in validation.get("issues") or []
+            if item.get("severity") == "error"
+        ]
+        if errors:
+            QMessageBox.warning(
+                self,
+                "无法保存",
+                "\n".join(str(item.get("message") or "") for item in errors),
+            )
+            return
+        if self.low_confidence_ack is not None and not self.low_confidence_ack.isChecked():
+            QMessageBox.warning(self, "需要确认", "请确认你已了解证据缺失后再保存。")
             return
         self.accept()
 
     def draft(self):
         selected_assets = []
+        selected_resources = []
         for check in self.script_asset_checks:
-            if check.isChecked():
+            if check.isChecked() and hasattr(check, "_conversation_skill_asset"):
                 selected_assets.append(dict(getattr(check, "_conversation_skill_asset", {}) or {}))
+            if check.isChecked() and hasattr(check, "_conversation_skill_resource"):
+                selected_resources.append(dict(getattr(check, "_conversation_skill_resource", {}) or {}))
         return {
             **self._draft,
             "mode": self.mode,
             "skill_name": self.target_skill if self.mode == "update" else self.name_input.text().strip(),
             "description": self.description_input.text().strip(),
             "description_cn": self.description_cn_input.text().strip(),
-            "usage_guidelines": self.usage_edit.toPlainText().strip(),
+            "usage_guidelines": "",
+            "instructions_md": self.usage_edit.toPlainText().strip(),
             "tags": _conversation_skill_text_list(self.tags_edit.toPlainText()),
             "triggers": _conversation_skill_text_list(self.triggers_edit.toPlainText()),
             "workflow": _conversation_skill_text_list(self.workflow_edit.toPlainText()),
             "experience_items": _conversation_skill_text_list(self.experience_edit.toPlainText()),
             "impl_py": self.impl_edit.toPlainText().strip(),
             "script_assets": selected_assets,
+            "resources": selected_resources,
         }
 
 
@@ -15990,7 +16233,12 @@ class ConversationSkillDraftWorker(QThread):
         meta=None,
         mode="create",
         target_skill=None,
-        update_strategy="append",
+        update_strategy="merge_guidance",
+        phase="analyze",
+        capture_id="",
+        evidence=None,
+        target_snapshot=None,
+        selected_resources=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -16002,10 +16250,15 @@ class ConversationSkillDraftWorker(QThread):
         self.mode = mode
         self.target_skill = target_skill
         self.update_strategy = update_strategy
+        self.phase = str(phase or "analyze")
+        self.capture_id = str(capture_id or "")
+        self.evidence = dict(evidence or {})
+        self.target_snapshot = dict(target_snapshot or {})
+        self.selected_resources = list(selected_resources or [])
 
     def run(self):
         try:
-            if not self.messages:
+            if self.phase == "analyze" and not self.messages:
                 log_conversation_skill_capture(
                     "draft_skipped_empty_messages",
                     session_id=self.session_id,
@@ -16014,45 +16267,80 @@ class ConversationSkillDraftWorker(QThread):
                 )
                 self.finished_signal.emit({
                     "ok": False,
+                    "phase": "analyze",
+                    "capture_id": self.capture_id,
                     "error": "当前会话没有可沉淀的消息。",
                 })
                 return
             log_conversation_skill_capture(
                 "draft_started",
                 session_id=self.session_id,
+                capture_id=self.capture_id,
+                phase=self.phase,
                 mode=self.mode,
                 target_skill=self.target_skill,
                 update_strategy=self.update_strategy,
                 message_count=len(self.messages),
             )
-            self.progress_signal.emit("正在整理当前会话记录")
-            transcript = render_session_transcript(
-                self.session_id,
-                self.title,
-                self.messages,
-                meta=self.meta,
-            )
-            self.progress_signal.emit("正在让模型提炼 Skill 草稿")
             provider = LLMFactory.create_provider(self.config_manager)
-            draft = generate_skill_draft(
+            if self.phase == "analyze":
+                self.progress_signal.emit("正在整理并脱敏会话证据")
+                source_bundle = build_evidence_source(
+                    self.session_id,
+                    self.title,
+                    self.messages,
+                    meta=self.meta,
+                )
+                self.progress_signal.emit("正在分析可复用证据")
+                evidence = extract_conversation_skill_evidence(provider, source_bundle)
+                log_conversation_skill_capture(
+                    "evidence_finished",
+                    session_id=self.session_id,
+                    capture_id=self.capture_id,
+                    confidence=evidence.get("confidence"),
+                    omitted_message_count=len(evidence.get("omitted_message_ids") or []),
+                    privacy_finding_count=len(evidence.get("privacy_findings") or []),
+                )
+                self.finished_signal.emit({
+                    "ok": True,
+                    "phase": "analyze",
+                    "capture_id": self.capture_id,
+                    "session_id": self.session_id,
+                    "evidence": evidence,
+                })
+                return
+
+            self.progress_signal.emit("正在编译 Skill 草稿")
+            draft = compile_conversation_skill_draft(
                 provider,
-                transcript,
+                self.evidence,
                 mode=self.mode,
-                target_skill=self.target_skill,
+                target_skill_snapshot=self.target_snapshot,
                 update_strategy=self.update_strategy,
-                fallback_title=self.title,
+                selected_resources=self.selected_resources,
+                capture_id=self.capture_id,
+                source_session_id=self.session_id,
             )
-            draft["script_assets"] = extract_python_script_assets(self.messages)
+            validation = validate_conversation_skill_draft(
+                draft,
+                allowed_source_ids=self.evidence.get("source_message_ids"),
+            )
+            draft["validation"] = validation
             log_conversation_skill_capture(
                 "draft_finished",
                 session_id=self.session_id,
+                capture_id=self.capture_id,
+                phase=self.phase,
                 mode=self.mode,
                 target_skill=self.target_skill,
                 skill_name=draft.get("skill_name"),
-                script_asset_count=len(draft.get("script_assets") or []),
+                confidence=draft.get("quality"),
+                validation_issue_count=len(validation.get("issues") or []),
             )
             self.finished_signal.emit({
                 "ok": True,
+                "phase": "compile",
+                "capture_id": self.capture_id,
                 "session_id": self.session_id,
                 "draft": draft,
                 "mode": self.mode,
@@ -16063,12 +16351,16 @@ class ConversationSkillDraftWorker(QThread):
             log_conversation_skill_capture(
                 "draft_failed",
                 session_id=self.session_id,
+                capture_id=self.capture_id,
+                phase=self.phase,
                 mode=self.mode,
                 target_skill=self.target_skill,
                 error=str(exc),
             )
             self.finished_signal.emit({
                 "ok": False,
+                "phase": self.phase,
+                "capture_id": self.capture_id,
                 "session_id": self.session_id,
                 "error": str(exc),
             })
@@ -27003,11 +27295,41 @@ class MainWindow(QMainWindow):
             return
         worker_running = bool(self.conversation_skill_worker and self.conversation_skill_worker.isRunning())
         state = self.get_current_session()
+        if (
+            state
+            and not getattr(state, "pending_conversation_skill_result", None)
+            and hasattr(self, "conversation_skill_capture_repository")
+        ):
+            pending_captures = self.conversation_skill_capture_repository.list_for_session(state.session_id)
+            if pending_captures:
+                capture = pending_captures[0]
+                if capture.get("phase") in {"analyzing", "compiling"} and not worker_running:
+                    capture["failed_phase"] = capture.get("phase")
+                    capture["phase"] = "failed"
+                    capture["error"] = "应用在后台阶段完成前退出，请重试。"
+                    capture = self.conversation_skill_capture_repository.save(capture)
+                state.pending_conversation_skill_result = {
+                    "capture_id": capture.get("capture_id"),
+                    "phase": capture.get("phase"),
+                }
+                phase_label = {
+                    "analysis_ready": "复用分析待确认",
+                    "draft_ready": "Skill 草稿待确认",
+                    "failed": "Skill 沉淀失败，可重试",
+                    "analyzing": "正在分析复用价值",
+                    "compiling": "正在编译 Skill 草稿",
+                }.get(str(capture.get("phase") or ""), "Skill 沉淀待处理")
+                self._update_skill_capture_status_card(
+                    state,
+                    phase_label,
+                    pending=capture.get("phase") in {"analysis_ready", "draft_ready", "failed"},
+                    failed=capture.get("phase") == "failed",
+                )
         has_messages = bool(state and getattr(state, "messages", []))
         skills_available = bool(getattr(self, "skill_manager_ready", False))
         self.sidebar_skill_capture_btn.setEnabled(has_messages and not worker_running and skills_available)
         if worker_running:
-            self.sidebar_skill_capture_btn.setText(" 正在生成草稿")
+            self.sidebar_skill_capture_btn.setText(" 正在处理沉淀")
         elif not skills_available:
             self.sidebar_skill_capture_btn.setText(" 能力加载中")
         else:
@@ -27082,7 +27404,6 @@ class MainWindow(QMainWindow):
             return
 
         self.save_chat_history(session_id=state.session_id)
-        skills = self.skill_manager.get_all_skills()
         selected_message_ids = []
         source_message_id = str(source_message_id or "").strip()
         if source_message_id:
@@ -27094,48 +27415,43 @@ class MainWindow(QMainWindow):
                 -1,
             )
             if source_index >= 0:
-                selected_message_ids.append(source_message_id)
+                start_index = source_index
                 for index in range(source_index - 1, -1, -1):
                     message = state.messages[index]
                     if str(message.get("role") or "").strip() == "user":
-                        message_id = str(message.get("id") or "").strip()
-                        if message_id:
-                            selected_message_ids.insert(0, message_id)
+                        start_index = index
                         break
+                for index in range(start_index, source_index + 1):
+                    message_id = str(state.messages[index].get("id") or "").strip()
+                    if message_id:
+                        selected_message_ids.append(message_id)
         log_conversation_skill_capture(
-            "wizard_construct_begin",
+            "range_construct_begin",
             session_id=state.session_id,
-            skill_count=len(skills or []),
             message_count=len(state.messages or []),
         )
         try:
-            wizard = ConversationSkillWizardDialog(
-                skills,
+            range_dialog = ConversationSkillRangeDialog(
                 state.messages,
                 self,
                 selected_message_ids=selected_message_ids,
             )
-            log_conversation_skill_capture("wizard_construct_done", session_id=state.session_id)
-            wizard_result = wizard.exec()
+            log_conversation_skill_capture("range_construct_done", session_id=state.session_id)
+            range_result = range_dialog.exec()
         except Exception as exc:
             log_conversation_skill_capture(
-                "wizard_construct_error",
+                "range_construct_error",
                 session_id=state.session_id,
                 error=str(exc),
                 traceback=traceback.format_exc(),
             )
-            self.add_system_toast(f"无法打开 Skill 向导：{exc}", "error", auto_close_ms=8000)
+            self.add_system_toast(f"无法选择 Skill 证据：{exc}", "error", auto_close_ms=8000)
             return
-        if wizard_result != QDialog.Accepted:
-            log_conversation_skill_capture("options_cancelled", session_id=state.session_id)
-            return
-        options = wizard.selected_options()
-        if options["mode"] == "update" and not options.get("target_skill"):
-            log_conversation_skill_capture("options_invalid_missing_target", session_id=state.session_id)
-            QMessageBox.warning(self, "无法更新", "请选择要更新的 Skill。")
+        if range_result != QDialog.Accepted:
+            log_conversation_skill_capture("range_cancelled", session_id=state.session_id)
             return
 
-        selected_messages = wizard.selected_messages()
+        selected_messages = range_dialog.selected_messages()
         if not selected_messages:
             log_conversation_skill_capture("range_empty", session_id=state.session_id)
             self.add_system_toast("没有选择可沉淀的会话片段", "info", auto_close_ms=4000)
@@ -27143,26 +27459,36 @@ class MainWindow(QMainWindow):
 
         title = self._compute_session_title(selected_messages) if selected_messages else "新任务"
         meta = self._compose_session_meta(state)
+        selected_ids = [
+            str(message.get("id") or f"message-{index:04d}")
+            for index, message in enumerate(selected_messages, start=1)
+        ]
+        capture = self.conversation_skill_capture_repository.create(
+            state.session_id,
+            selected_ids,
+        )
+        capture_id = str(capture.get("capture_id") or "")
+        state.pending_conversation_skill_result = {
+            "capture_id": capture_id,
+            "phase": "analyzing",
+        }
         log_conversation_skill_capture(
-            "draft_worker_starting",
+            "evidence_worker_starting",
             session_id=state.session_id,
-            mode=options.get("mode"),
-            target_skill=options.get("target_skill"),
-            update_strategy=options.get("update_strategy"),
+            capture_id=capture_id,
             selected_message_count=len(selected_messages),
         )
 
-        self.add_system_toast("正在根据当前会话生成 Skill 草稿", "info", auto_close_ms=3500)
-        self._update_skill_capture_status_card(state, "正在生成 Skill 草稿")
+        self.add_system_toast("正在分析当前会话的复用价值", "info", auto_close_ms=3500)
+        self._update_skill_capture_status_card(state, "正在分析复用价值")
         self.conversation_skill_worker = ConversationSkillDraftWorker(
             self.config_manager,
             state.session_id,
             title,
             selected_messages,
             meta=meta,
-            mode=options["mode"],
-            target_skill=options.get("target_skill"),
-            update_strategy=options.get("update_strategy") or "append",
+            phase="analyze",
+            capture_id=capture_id,
             parent=self,
         )
         self.conversation_skill_worker.progress_signal.connect(self.handle_conversation_skill_progress)
@@ -27186,6 +27512,7 @@ class MainWindow(QMainWindow):
         if target_state is None:
             raise RuntimeError(f"Skill 草稿所属会话不存在：{target_session_id}")
         self.conversation_skill_worker = None
+        self.conversation_skill_capture_repository = ConversationSkillCaptureRepository()
         if worker:
             try:
                 worker.finished_signal.disconnect(self.handle_conversation_skill_finished)
@@ -27194,21 +27521,70 @@ class MainWindow(QMainWindow):
         self.update_skill_capture_button_state()
 
         if not result.get("ok"):
+            capture_id = str(result.get("capture_id") or "")
+            capture = self.conversation_skill_capture_repository.load(capture_id) if capture_id else None
+            if capture:
+                capture["phase"] = "failed"
+                capture["failed_phase"] = str(result.get("phase") or "analyze")
+                capture["error"] = str(result.get("error") or "未知错误")
+                self.conversation_skill_capture_repository.save(capture)
+                target_state.pending_conversation_skill_result = {
+                    "capture_id": capture_id,
+                    "phase": "failed",
+                }
             log_conversation_skill_capture(
-                "draft_result_failed",
+                "capture_result_failed",
                 session_id=self.current_session_id,
+                capture_id=capture_id,
+                phase=result.get("phase"),
                 error=result.get("error"),
             )
             self._update_skill_capture_status_card(
                 target_state,
-                f"Skill 草稿生成失败：{result.get('error') or '未知错误'}",
+                f"Skill 沉淀失败：{result.get('error') or '未知错误'}",
+                pending=bool(capture_id),
                 failed=True,
             )
-            self.add_system_toast(f"生成 Skill 草稿失败：{result.get('error') or '未知错误'}", "error", auto_close_ms=8000)
+            self.add_system_toast(f"Skill 沉淀失败：{result.get('error') or '未知错误'}", "error", auto_close_ms=8000)
             return
 
+        capture_id = str(result.get("capture_id") or "")
+        phase = str(result.get("phase") or "compile")
+        capture = self.conversation_skill_capture_repository.load(capture_id) if capture_id else None
+        if phase == "analyze":
+            if not capture:
+                raise RuntimeError(f"Skill 复用分析记录不存在：{capture_id}")
+            capture["phase"] = "analysis_ready"
+            capture["evidence"] = copy.deepcopy(result.get("evidence") or {})
+            capture["error"] = ""
+            self.conversation_skill_capture_repository.save(capture)
+            target_state.pending_conversation_skill_result = {
+                "capture_id": capture_id,
+                "phase": "analysis_ready",
+            }
+            self._update_skill_capture_status_card(target_state, "复用分析待确认", pending=True)
+            self.add_system_toast("复用分析已完成，确认后再编译 Skill", "info", auto_close_ms=0)
+            return
+
+        if phase == "compile" and capture:
+            capture["phase"] = "draft_ready"
+            capture["draft"] = copy.deepcopy(result.get("draft") or {})
+            capture["validation"] = copy.deepcopy((result.get("draft") or {}).get("validation") or {})
+            capture["error"] = ""
+            self.conversation_skill_capture_repository.save(capture)
+            result = {
+                **result,
+                "phase": "draft_ready",
+                "mode": (capture.get("destination") or {}).get("mode") or result.get("mode"),
+                "target_skill": (capture.get("destination") or {}).get("target_skill") or result.get("target_skill"),
+                "update_strategy": (capture.get("destination") or {}).get("update_strategy") or result.get("update_strategy"),
+            }
+
         if not bool(getattr(self, "_reviewing_pending_skill_draft", False)):
-            target_state.pending_conversation_skill_result = dict(result)
+            target_state.pending_conversation_skill_result = {
+                "capture_id": capture_id,
+                "phase": "draft_ready",
+            }
             self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             self.add_system_toast(
                 "Skill 草稿已生成，待你确认后保存",
@@ -27220,7 +27596,7 @@ class MainWindow(QMainWindow):
 
         mode = result.get("mode") or "create"
         target_skill = result.get("target_skill")
-        update_strategy = result.get("update_strategy") or "append"
+        update_strategy = result.get("update_strategy") or "merge_guidance"
         preview = ConversationSkillPreviewDialog(
             result.get("draft") or {},
             mode=mode,
@@ -27235,14 +27611,22 @@ class MainWindow(QMainWindow):
                 mode=mode,
                 target_skill=target_skill,
             )
-            target_state.pending_conversation_skill_result = dict(result)
+            target_state.pending_conversation_skill_result = {
+                "capture_id": capture_id,
+                "phase": "draft_ready",
+            }
             self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             self.add_system_toast("Skill 草稿已保留，可稍后继续确认", "info", auto_close_ms=4000)
             return
 
         draft = preview.draft()
-        pending_payload = dict(result)
-        pending_payload["draft"] = copy.deepcopy(draft)
+        if capture:
+            capture["draft"] = copy.deepcopy(draft)
+            capture["validation"] = validate_conversation_skill_draft(
+                draft,
+                allowed_source_ids=draft.get("source_message_ids"),
+            )
+            self.conversation_skill_capture_repository.save(capture)
         try:
             if mode == "create":
                 log_conversation_skill_capture(
@@ -27282,7 +27666,10 @@ class MainWindow(QMainWindow):
                         error=save_result.message,
                     )
                     QMessageBox.warning(self, "保存失败", save_result.message)
-                    target_state.pending_conversation_skill_result = pending_payload
+                    target_state.pending_conversation_skill_result = {
+                        "capture_id": capture_id,
+                        "phase": "draft_ready",
+                    }
                     self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
                     return
             else:
@@ -27319,7 +27706,26 @@ class MainWindow(QMainWindow):
                         error=save_result.message,
                     )
                     QMessageBox.warning(self, "更新失败", save_result.message)
-                    target_state.pending_conversation_skill_result = pending_payload
+                    if "changed after compilation" in str(save_result.message or "") and capture:
+                        capture["phase"] = "analysis_ready"
+                        capture["draft"] = {}
+                        capture["validation"] = {}
+                        capture["error"] = str(save_result.message or "")
+                        self.conversation_skill_capture_repository.save(capture)
+                        target_state.pending_conversation_skill_result = {
+                            "capture_id": capture_id,
+                            "phase": "analysis_ready",
+                        }
+                        self._update_skill_capture_status_card(
+                            target_state,
+                            "目标 Skill 已变化，请重新确认并编译",
+                            pending=True,
+                        )
+                        return
+                    target_state.pending_conversation_skill_result = {
+                        "capture_id": capture_id,
+                        "phase": "draft_ready",
+                    }
                     self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
                     return
         except Exception as exc:
@@ -27331,12 +27737,21 @@ class MainWindow(QMainWindow):
                 error=str(exc),
             )
             QMessageBox.warning(self, "保存失败", f"保存 Skill 时发生错误：{exc}")
-            target_state.pending_conversation_skill_result = pending_payload
+            target_state.pending_conversation_skill_result = {
+                "capture_id": capture_id,
+                "phase": "draft_ready",
+            }
             self._update_skill_capture_status_card(target_state, "Skill 草稿待确认", pending=True)
             return
         status_card = getattr(target_state, "skill_capture_status_card", None) if target_state else None
         if status_card is not None and _qt_object_alive(status_card):
             status_card.hide()
+        if capture_id:
+            self.conversation_skill_capture_repository.mark_saved(
+                capture_id,
+                draft.get("skill_name") if mode == "create" else target_skill,
+            )
+        target_state.pending_conversation_skill_result = None
         self.update_skill_capture_button_state()
 
     def refresh_composer_action_state(self):
@@ -27359,6 +27774,14 @@ class MainWindow(QMainWindow):
     def review_pending_conversation_skill_draft(self, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         result = getattr(state, "pending_conversation_skill_result", None) if state else None
+        if state and not result:
+            pending = self.conversation_skill_capture_repository.list_for_session(state.session_id)
+            if pending:
+                result = {
+                    "capture_id": pending[0].get("capture_id"),
+                    "phase": pending[0].get("phase"),
+                }
+                state.pending_conversation_skill_result = dict(result)
         if not result:
             log_conversation_skill_capture(
                 "review_missing_draft",
@@ -27366,17 +27789,171 @@ class MainWindow(QMainWindow):
             )
             self.add_system_toast("当前会话没有待确认的 Skill 草稿", "error", auto_close_ms=4000)
             return False
+        if isinstance(result, dict) and result.get("draft") and not result.get("capture_id"):
+            state.pending_conversation_skill_result = None
+            self._reviewing_pending_skill_draft = True
+            try:
+                self.handle_conversation_skill_finished(dict(result))
+            except Exception:
+                state.pending_conversation_skill_result = dict(result)
+                raise
+            finally:
+                self._reviewing_pending_skill_draft = False
+            return True
+        capture_id = str((result or {}).get("capture_id") or "")
+        capture = self.conversation_skill_capture_repository.load(capture_id) if capture_id else None
+        if not capture:
+            self.add_system_toast("Skill 沉淀记录不存在或已被移除", "error", auto_close_ms=5000)
+            state.pending_conversation_skill_result = None
+            return False
+
+        phase = str(capture.get("phase") or result.get("phase") or "")
+        log_conversation_skill_capture(
+            "review_open_begin",
+            session_id=state.session_id,
+            capture_id=capture_id,
+            phase=phase,
+        )
+        if phase == "failed":
+            if capture.get("evidence"):
+                capture["phase"] = "analysis_ready"
+                capture["error"] = ""
+                self.conversation_skill_capture_repository.save(capture)
+                phase = "analysis_ready"
+            else:
+                selected_ids = set(str(item) for item in capture.get("source_message_ids") or [])
+                selected_messages = [
+                    message for index, message in enumerate(state.messages or [], start=1)
+                    if str(message.get("id") or f"message-{index:04d}") in selected_ids
+                ]
+                if not selected_messages:
+                    self.add_system_toast("原始会话片段已不可用，无法重试分析", "error", auto_close_ms=6000)
+                    return False
+                capture["phase"] = "analyzing"
+                capture["error"] = ""
+                self.conversation_skill_capture_repository.save(capture)
+                state.pending_conversation_skill_result = {"capture_id": capture_id, "phase": "analyzing"}
+                self._update_skill_capture_status_card(state, "正在重试复用分析")
+                self.conversation_skill_worker = ConversationSkillDraftWorker(
+                    self.config_manager,
+                    state.session_id,
+                    self._compute_session_title(selected_messages),
+                    selected_messages,
+                    meta=self._compose_session_meta(state),
+                    phase="analyze",
+                    capture_id=capture_id,
+                    parent=self,
+                )
+                self.conversation_skill_worker.progress_signal.connect(self.handle_conversation_skill_progress)
+                self.conversation_skill_worker.finished_signal.connect(self.handle_conversation_skill_finished)
+                self.conversation_skill_worker.finished.connect(self.conversation_skill_worker.deleteLater)
+                self.conversation_skill_worker.start()
+                return True
+
+        if phase == "analysis_ready":
+            evidence = capture.get("evidence") if isinstance(capture.get("evidence"), dict) else {}
+            query_parts = [
+                str((evidence.get("task_goal") or {}).get("text") or ""),
+                *[
+                    str(item.get("text") or "")
+                    for item in evidence.get("reusable_patterns") or []
+                    if isinstance(item, dict)
+                ],
+            ]
+            matched_names = self.skill_manager.select_relevant_skills(
+                "\n".join(query_parts),
+                limit=3,
+            )
+            skills_by_name = {
+                str(item.get("name") or ""): item
+                for item in self.skill_manager.get_all_skills()
+                if isinstance(item, dict)
+            }
+            matched_skills = [
+                skills_by_name[name] for name in matched_names
+                if name in skills_by_name and self.skill_manager.is_skill_editable(name)
+            ]
+            dialog = ConversationSkillEvidenceDialog(evidence, matched_skills, self)
+            if dialog.exec() != QDialog.Accepted:
+                if dialog.discard_requested:
+                    self.conversation_skill_capture_repository.discard(capture_id)
+                    state.pending_conversation_skill_result = None
+                    card = getattr(state, "skill_capture_status_card", None)
+                    if card is not None and _qt_object_alive(card):
+                        card.hide()
+                    self.add_system_toast("已丢弃 Skill 沉淀草稿", "info", auto_close_ms=3200)
+                else:
+                    state.pending_conversation_skill_result = {
+                        "capture_id": capture_id,
+                        "phase": "analysis_ready",
+                    }
+                return True
+            destination = dialog.selected_destination()
+            target_skill = destination.get("target_skill") or ""
+            target_snapshot = {}
+            if destination.get("mode") == "update":
+                target_record = self.skill_manager.skill_records.get(target_skill)
+                if not target_record:
+                    QMessageBox.warning(self, "无法编译", "目标 Skill 已不可用，请重新选择。")
+                    return False
+                target_snapshot = build_target_skill_snapshot(target_record)
+            capture["destination"] = copy.deepcopy(destination)
+            capture["target_snapshot"] = copy.deepcopy(target_snapshot)
+            capture["phase"] = "compiling"
+            self.conversation_skill_capture_repository.save(capture)
+            state.pending_conversation_skill_result = {"capture_id": capture_id, "phase": "compiling"}
+            self._update_skill_capture_status_card(state, "正在编译 Skill 草稿")
+            self.conversation_skill_worker = ConversationSkillDraftWorker(
+                self.config_manager,
+                state.session_id,
+                str((evidence.get("task_goal") or {}).get("text") or "Skill 草稿"),
+                [],
+                mode=destination.get("mode") or "create",
+                target_skill=target_skill,
+                update_strategy=destination.get("update_strategy") or "merge_guidance",
+                phase="compile",
+                capture_id=capture_id,
+                evidence=evidence,
+                target_snapshot=target_snapshot,
+                selected_resources=destination.get("selected_resources") or [],
+                parent=self,
+            )
+            self.conversation_skill_worker.progress_signal.connect(self.handle_conversation_skill_progress)
+            self.conversation_skill_worker.finished_signal.connect(self.handle_conversation_skill_finished)
+            self.conversation_skill_worker.finished.connect(self.conversation_skill_worker.deleteLater)
+            self.conversation_skill_worker.start()
+            self.update_skill_capture_button_state()
+            return True
+
+        if phase != "draft_ready":
+            self.add_system_toast("Skill 沉淀任务仍在处理中", "info", auto_close_ms=3200)
+            return True
+
+        destination = capture.get("destination") if isinstance(capture.get("destination"), dict) else {}
+        preview_result = {
+            "ok": True,
+            "phase": "draft_ready",
+            "capture_id": capture_id,
+            "session_id": state.session_id,
+            "draft": copy.deepcopy(capture.get("draft") or {}),
+            "mode": destination.get("mode") or "create",
+            "target_skill": destination.get("target_skill") or "",
+            "update_strategy": destination.get("update_strategy") or "merge_guidance",
+        }
         state.pending_conversation_skill_result = None
         self._reviewing_pending_skill_draft = True
-        log_conversation_skill_capture("review_open_begin", session_id=state.session_id)
         try:
-            self.handle_conversation_skill_finished(dict(result))
+            self.handle_conversation_skill_finished(preview_result)
         except Exception as exc:
-            state.pending_conversation_skill_result = dict(result)
+            state.pending_conversation_skill_result = {
+                "capture_id": capture_id,
+                "phase": "draft_ready",
+            }
             self._update_skill_capture_status_card(state, "Skill 草稿待确认", pending=True)
             log_conversation_skill_capture(
                 "review_open_error",
                 session_id=state.session_id,
+                capture_id=capture_id,
                 error=str(exc),
                 traceback=traceback.format_exc(),
             )
@@ -27384,7 +27961,11 @@ class MainWindow(QMainWindow):
             return False
         finally:
             self._reviewing_pending_skill_draft = False
-        log_conversation_skill_capture("review_open_done", session_id=state.session_id)
+        log_conversation_skill_capture(
+            "review_open_done",
+            session_id=state.session_id,
+            capture_id=capture_id,
+        )
         return True
 
     def handle_skill_used(self, skill_name, session_id=None):

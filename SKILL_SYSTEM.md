@@ -187,7 +187,11 @@ There are two main update paths:
 - **Structured capture**: append reusable lessons into `experience/entries.jsonl`
 - **Manual consolidation**: sync high-value guidance back into `SKILL.md`
 
-For conversation-derived work, **沉淀为 Skill** is the review gate. It lets the user choose source messages, turns the selected segment into a draft, lets the user edit the draft, then creates a new user skill or appends structured lessons to an editable existing skill before hot-reloading discovery.
+For conversation-derived work, **沉淀为 Skill** is an evidence-driven compiler with two explicit model stages. The first stage redacts secrets and local paths, preserves message IDs, and extracts only cited goals, reusable patterns, constraints, decisions, failures, verification, and resource candidates. The user then confirms whether to create a Skill, merge guidance into an editable Skill, or append structured experience. The second stage receives the normalized evidence and a non-sensitive target snapshot—not the raw transcript—and compiles the final draft.
+
+Low-confidence evidence still produces a reviewable draft, but the UI exposes missing evidence and requires an explicit acknowledgement. Static validation blocks secrets, unsafe paths, invalid source references, invalid Python, top-level side effects, and stale target revisions. Capture state is persisted by conversation so analysis, compilation, retry, discard, and final review survive navigation and application restarts.
+
+Executed conversation code is never copied into a generated Skill. The evidence stage keeps only a resource purpose and cited message IDs; when the user selects a script candidate, the compiler writes a new parameterized implementation from that purpose. The rewritten script must pass the same static safety gate before it can be saved.
 
 ## 9. Compatibility
 

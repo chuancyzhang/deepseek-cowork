@@ -9,16 +9,36 @@ import unittest
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.skill_from_conversation import (
+    ConversationSkillCaptureRepository,
+    build_evidence_source,
     build_skill_json,
+    build_target_skill_snapshot,
+    compile_conversation_skill_draft,
+    compute_skill_revision,
+    extract_conversation_skill_evidence,
     extract_python_script_assets,
     extract_impl_tool_refs,
+    normalize_conversation_skill_evidence,
     normalize_skill_draft,
     render_session_transcript,
     save_new_skill,
     update_existing_skill_from_draft,
+    validate_conversation_skill_draft,
     validate_impl_py,
 )
 from core.skill_manager import SkillManager
+
+
+class FakeProvider:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def chat_stream(self, messages, tools=None):
+        self.calls.append(messages)
+        if not self.responses:
+            raise AssertionError("Unexpected third model call")
+        yield {"type": "content", "content": self.responses.pop(0)}
 
 
 class TestSkillFromConversation(unittest.TestCase):
@@ -232,6 +252,7 @@ class TestSkillFromConversation(unittest.TestCase):
                 "experience_items": ["Capture stderr before retrying."],
                 "tags": ["retry"],
                 "triggers": ["stderr retry"],
+                "anti_triggers": ["unrelated UI styling"],
             },
             strategy="append",
         )
@@ -245,6 +266,19 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertIn("existing", payload["tags"])
         self.assertIn("retry", payload["tags"])
         self.assertIn("stderr retry", payload["triggers"])
+        self.assertIn("unrelated UI styling", payload["anti_triggers"])
+
+        duplicate = update_existing_skill_from_draft(
+            manager,
+            "ops-guide",
+            {
+                "experience_items": ["Capture stderr before retrying."],
+                "tags": ["retry"],
+            },
+            strategy="append_experience",
+        )
+        self.assertTrue(duplicate.ok, duplicate.message)
+        self.assertEqual(len(manager.get_experience_entries("ops-guide")), 1)
 
     def test_update_existing_skill_appends_script_assets(self):
         self._create_existing_skill()
@@ -306,6 +340,209 @@ class TestSkillFromConversation(unittest.TestCase):
         self.assertIn("Rewritten operations guide", content)
         self.assertIn("New body guidance.", content)
 
+    def test_evidence_source_redacts_secrets_paths_and_reports_omissions(self):
+        source = build_evidence_source(
+            "session-1",
+            "Deploy",
+            [
+                {
+                    "id": f"m{index}",
+                    "role": "user" if index % 2 else "assistant",
+                    "content": (
+                        "password=super-secret "
+                        "D:\\code\\workspace\\project "
+                        + ("x" * 500)
+                    ),
+                }
+                for index in range(1, 9)
+            ],
+            meta={"workspace_dir": "D:\\code\\workspace\\project"},
+            char_limit=1800,
+        )
+
+        self.assertNotIn("super-secret", source["text"])
+        self.assertNotIn("D:\\code\\workspace\\project", source["text"])
+        self.assertIn("<redacted-secret>", source["text"])
+        self.assertIn("<workspace>", source["text"])
+        self.assertTrue(source["omitted_message_ids"])
+        self.assertIn("[明确裁剪]", source["text"])
+
+    def test_evidence_source_omits_executed_python_before_script_rewrite(self):
+        source = build_evidence_source(
+            "session-1",
+            "Process files",
+            [
+                {
+                    "id": "m1",
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "run_python_code",
+                                "arguments": json.dumps(
+                                    {
+                                        "code": "from pathlib import Path\nprint(Path('fixed').read_text())",
+                                        "cwd": "D:/work",
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.assertNotIn("Path('fixed')", source["text"])
+        self.assertNotIn("D:/work", source["text"])
+        self.assertIn("<executed-code-omitted; rewrite from purpose>", source["text"])
+
+    def test_evidence_normalization_rejects_unknown_refs_and_lowers_confidence(self):
+        evidence = normalize_conversation_skill_evidence(
+            {
+                "task_goal": {"text": "Build reports", "source_message_ids": ["m1"]},
+                "outcome": {"text": "Report passed", "source_message_ids": ["m2"]},
+                "reusable_patterns": [{"text": "Validate first", "source_message_ids": ["missing"]}],
+                "workflow_steps": [{"text": "Run validation", "source_message_ids": ["m2"]}],
+                "verification_methods": [{"text": "Check output", "source_message_ids": ["m2"]}],
+            },
+            {
+                "source_message_ids": ["m1", "m2"],
+                "included_message_ids": ["m1", "m2"],
+                "omitted_message_ids": [],
+                "privacy_findings": [],
+                "source_digest": "digest",
+            },
+        )
+
+        self.assertEqual(evidence["confidence"], "low")
+        self.assertEqual(evidence["invalid_source_refs"], ["missing"])
+        self.assertEqual(evidence["reusable_patterns"][0]["source_message_ids"], [])
+
+    def test_two_stage_generation_uses_exactly_two_calls_and_compiler_has_no_raw_transcript(self):
+        provider = FakeProvider(
+            [
+                json.dumps(
+                    {
+                        "task_goal": {"text": "Create a report", "source_message_ids": ["m1"]},
+                        "outcome": {"text": "Report verified", "source_message_ids": ["m2"]},
+                        "reusable_patterns": [{"text": "Validate inputs", "source_message_ids": ["m1"]}],
+                        "workflow_steps": [{"text": "Generate then validate", "source_message_ids": ["m2"]}],
+                        "verification_methods": [{"text": "Open output", "source_message_ids": ["m2"]}],
+                        "suggested_name": "create-report",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "skill_name": "create-report",
+                        "description": "Create verified reports when a user requests a repeatable reporting workflow.",
+                        "description_cn": "在需要可重复报告流程时创建并验证报告。",
+                        "tags": ["report"],
+                        "triggers": ["create report"],
+                        "anti_triggers": ["one-off chat summary"],
+                        "instructions_md": "1. Validate inputs.\\n2. Generate the report.\\n3. Verify the output.",
+                        "workflow": ["Validate inputs", "Generate report", "Verify output"],
+                        "experience_items": ["Verify generated files."],
+                        "resources": [],
+                        "change_summary": ["Create a knowledge-first Skill."],
+                    }
+                ),
+            ]
+        )
+        source = build_evidence_source(
+            "s1",
+            "Report",
+            [
+                {"id": "m1", "role": "user", "content": "RAW_TRANSCRIPT_MARKER create a report"},
+                {"id": "m2", "role": "assistant", "content": "Verified the report"},
+            ],
+        )
+        evidence = extract_conversation_skill_evidence(provider, source)
+        draft = compile_conversation_skill_draft(
+            provider,
+            evidence,
+            capture_id="capture-1",
+            source_session_id="s1",
+        )
+
+        self.assertEqual(len(provider.calls), 2)
+        compiler_input = provider.calls[1][1]["content"]
+        self.assertNotIn("RAW_TRANSCRIPT_MARKER", compiler_input)
+        self.assertEqual(draft["quality"], "high")
+        self.assertIn("when a user requests", draft["description"])
+
+    def test_static_validation_blocks_secrets_bad_resources_and_invalid_code(self):
+        validation = validate_conversation_skill_draft(
+            {
+                "mode": "create",
+                "skill_name": "unsafe-skill",
+                "description": "Use when processing reports.",
+                "instructions_md": "password=visible-secret",
+                "anti_triggers": ["unrelated tasks"],
+                "resources": [
+                    {
+                        "kind": "script",
+                        "path": "../escape.py",
+                        "content": "print('side effect')",
+                        "source_message_ids": ["outside"],
+                    },
+                    {
+                        "kind": "script",
+                        "path": "scripts/fetch.py",
+                        "content": "import requests\n\ndef fetch(url):\n    return requests.get(url).text",
+                        "source_message_ids": ["m1"],
+                    }
+                ],
+                "source_message_ids": ["m1"],
+            },
+            allowed_source_ids=["m1"],
+        )
+
+        self.assertFalse(validation["ok"])
+        codes = {item["code"] for item in validation["issues"]}
+        self.assertIn("secret_literal", codes)
+        self.assertIn("invalid_resource_path", codes)
+        self.assertIn("undeclared_python_dependency", codes)
+
+    def test_capture_repository_restores_pending_and_minimizes_saved_record(self):
+        repository = ConversationSkillCaptureRepository(
+            root_dir=os.path.join(self.temp_dir, "captures")
+        )
+        capture = repository.create("session-1", ["m1", "m2"])
+        capture["phase"] = "analysis_ready"
+        capture["evidence"] = {"task_goal": {"text": "Reusable goal"}}
+        repository.save(capture)
+
+        restored = repository.list_for_session("session-1")
+        self.assertEqual(restored[0]["phase"], "analysis_ready")
+        self.assertTrue(repository.mark_saved(capture["capture_id"], "saved-skill"))
+        saved = repository.load(capture["capture_id"])
+        self.assertEqual(saved["phase"], "saved")
+        self.assertEqual(saved["evidence"], {})
+        self.assertEqual(saved.get("target_snapshot"), {})
+        self.assertEqual(saved["saved_skill_name"], "saved-skill")
+
+    def test_update_rejects_target_revision_conflict(self):
+        skill_dir = self._create_existing_skill()
+        manager = self._manager()
+        snapshot = build_target_skill_snapshot(manager.skill_records["ops-guide"])
+        self.assertEqual(snapshot["revision"], compute_skill_revision(skill_dir))
+        with open(os.path.join(skill_dir, "SKILL.md"), "a", encoding="utf-8") as handle:
+            handle.write("\nExternal edit.\n")
+
+        result = update_existing_skill_from_draft(
+            manager,
+            "ops-guide",
+            {
+                "target_revision": snapshot["revision"],
+                "experience_items": ["New lesson"],
+            },
+            strategy="append_experience",
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("changed after compilation", result.message)
+
     def test_main_defines_conversation_skill_dialogs_used_by_flow(self):
         main_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
         with open(main_path, "r", encoding="utf-8") as handle:
@@ -314,6 +551,7 @@ class TestSkillFromConversation(unittest.TestCase):
 
         self.assertIn("ConversationSkillOptionsDialog", class_names)
         self.assertIn("ConversationSkillRangeDialog", class_names)
+        self.assertIn("ConversationSkillEvidenceDialog", class_names)
         self.assertIn("ConversationSkillPreviewDialog", class_names)
 
     def test_conversation_skill_options_hides_update_fields_when_creating(self):
@@ -378,6 +616,38 @@ class TestSkillFromConversation(unittest.TestCase):
         dialog.message_list.item(0).setCheckState(main.Qt.Unchecked)
         self.assertEqual(len(dialog.selected_messages()), 1)
         self.assertIn("已选择 1 条消息", dialog.selection_hint.text())
+
+    def test_conversation_skill_evidence_dialog_defaults_to_create_and_no_resources(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        import main
+
+        app = QApplication.instance() or QApplication([])
+        self.addCleanup(app.processEvents)
+        dialog = main.ConversationSkillEvidenceDialog(
+            {
+                "confidence": "low",
+                "task_goal": {"text": "Build reports", "source_message_ids": ["m1"]},
+                "reusable_patterns": [{"text": "Validate inputs", "source_message_ids": ["m1"]}],
+                "missing_evidence": ["Missing output verification"],
+                "resource_candidates": [
+                    {
+                        "id": "resource-1",
+                        "kind": "script",
+                        "description": "Parameterize report generation",
+                        "source_message_ids": ["m1"],
+                    }
+                ],
+            },
+            [{"name": "report-skill", "description": "Existing report skill"}],
+        )
+        self.addCleanup(dialog.deleteLater)
+
+        destination = dialog.selected_destination()
+        self.assertEqual(destination["mode"], "create")
+        self.assertEqual(destination["selected_resources"], [])
+        self.assertEqual(dialog.objectName(), "ConversationSkillEvidenceDialog")
+        self.assertTrue(dialog.findChildren(main.ProductActionBar))
 
     def test_session_skill_picker_uses_clear_checkable_selection(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

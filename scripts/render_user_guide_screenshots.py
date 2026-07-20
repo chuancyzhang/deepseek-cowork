@@ -169,6 +169,43 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "skill-capture":
+            skill_analysis = main.ConversationSkillEvidenceDialog(
+                {
+                    "confidence": "high",
+                    "task_goal": {
+                        "text": "把周报整理流程转成可重复执行的能力。",
+                        "source_message_ids": ["demo-user"],
+                    },
+                    "outcome": {
+                        "text": "已完成数据收集、结构整理和结果校验。",
+                        "source_message_ids": ["demo-agent"],
+                    },
+                    "reusable_patterns": [
+                        {
+                            "text": "先统一收集进展，再按结果、风险和下周行动组织内容。",
+                            "source_message_ids": ["demo-user", "demo-agent"],
+                        }
+                    ],
+                    "missing_evidence": [],
+                    "privacy_findings": [{"kind": "workspace_path"}],
+                    "resource_candidates": [
+                        {
+                            "id": "weekly-report-reference",
+                            "kind": "reference",
+                            "description": "保存稳定的周报栏目定义",
+                            "source_message_ids": ["demo-agent"],
+                        }
+                    ],
+                },
+                [],
+                parent=window,
+            )
+            save_widget(skill_analysis, "s32-skill-capture.png", 200)
+            skill_analysis.resize(620, 560)
+            save_widget(skill_analysis, "s32-skill-capture-small.png", 200)
+            skill_analysis.hide()
+            return
         if SCREENSHOT_SCOPE == "theme-acceptance":
             from unittest.mock import patch
 
@@ -365,17 +402,39 @@ def main_run():
         save_widget(window, "26-agent-center.png")
         window.agent_picker_btn.setStyleSheet(agent_style)
 
-        skill_wizard = main.ConversationSkillWizardDialog(
+        skill_analysis = main.ConversationSkillEvidenceDialog(
+            {
+                "confidence": "high",
+                "task_goal": {
+                    "text": "把周报整理流程转成可重复执行的能力。",
+                    "source_message_ids": ["demo-user"],
+                },
+                "outcome": {
+                    "text": "已完成数据收集、结构整理和结果校验。",
+                    "source_message_ids": ["demo-agent"],
+                },
+                "reusable_patterns": [
+                    {
+                        "text": "先统一收集进展，再按结果、风险和下周行动组织内容。",
+                        "source_message_ids": ["demo-user", "demo-agent"],
+                    }
+                ],
+                "missing_evidence": [],
+                "privacy_findings": [{"kind": "workspace_path"}],
+                "resource_candidates": [
+                    {
+                        "id": "weekly-report-reference",
+                        "kind": "reference",
+                        "description": "保存稳定的周报栏目定义",
+                        "source_message_ids": ["demo-agent"],
+                    }
+                ],
+            },
             [],
-            [
-                {"id": "demo-user", "role": "user", "content": "把这次整理周报的流程沉淀下来。"},
-                {"id": "demo-agent", "role": "assistant", "content": "已完成数据收集、结构整理和结果校验。"},
-            ],
             parent=window,
-            selected_message_ids=["demo-user", "demo-agent"],
         )
-        save_widget(skill_wizard, "31-skill-capture-wizard.png")
-        skill_wizard.hide()
+        save_widget(skill_analysis, "31-skill-capture-analysis.png")
+        skill_analysis.hide()
 
         ppt_agent = main.PptAgentModeDialog(str(workspace), parent=window)
         save_widget(ppt_agent, "27-ppt-agent.png")

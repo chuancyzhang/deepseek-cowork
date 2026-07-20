@@ -1,8 +1,8 @@
 # DeepSeek Cowork 技术设计
 
-当前应用版本：**5.0.4**
+当前应用版本：**5.0.5**
 
-本设计以 5.0.4 发布基线为准；面向用户的范围、兼容性和验收清单见 [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md)。
+本设计以 5.0.5 发布基线为准；面向用户的范围、兼容性和验收清单见 [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md)。
 
 ## 1. 设计目标
 
@@ -41,7 +41,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 
 UI 采用三层表面模型：应用画布、功能面板、控件或数据行。共享 QSS 必须通过明确控件类型、`objectName` 或动态属性限定作用域，避免父级边框和背景继承到子控件；普通控件保持 `30-32px` 高度和 `6-8px` 圆角。`ProductTooltipController` 拦截 QWidget 与 item view 的提示事件，在当前顶层窗口内绘制提示，避免 Windows 原生 Tooltip 黑窗。所有交互控件必须提供 hover、pressed、focus、disabled 等状态。
 
-`ui/primitives.py` 提供统一消息确认与文本输入弹层，业务层的 `QMessageBox/QInputDialog` 兼容入口均路由到这些应用内表面；Windows 原生 `QFileDialog` 保留。全局 Toast 在主窗口右下安全区最多堆叠三条，支持去重计数、手动关闭和悬停暂停。交付物分类由 `DELIVERABLE_TYPES` 的 kind 映射派生，排序以规范化相对路径作为稳定次级键。文件或目录定位统一调用 `core.process_utils.reveal_path_in_file_manager()`，Windows 通过 ShellExecute 显示 Explorer，不得复用隐藏控制台窗口参数。
+`ui/primitives.py` 提供统一消息确认与文本输入弹层，业务层的 `QMessageBox/QInputDialog` 兼容入口均路由到这些应用内表面；Windows 原生 `QFileDialog` 保留。全局 Toast 在主窗口右下安全区最多堆叠三条，支持去重计数、手动关闭和悬停暂停。交付物分类由 `DELIVERABLE_TYPES` 的 kind 映射派生，排序以规范化相对路径作为稳定次级键；历史消息恢复期间解析出的文件路径以 `history` 来源注册并刷新文件视图，不触发“已生成”Toast、页签提示或自动预览，只有当前运行新增的路径才进入生成反馈链路。文件或目录定位统一调用 `core.process_utils.reveal_path_in_file_manager()`，Windows 通过 ShellExecute 显示 Explorer，不得复用隐藏控制台窗口参数。
 
 `scripts/render_user_guide_screenshots.py` 使用隔离临时配置生成用户指南中的真实 PySide6 截图，并在 `1280x720`、`1440x900`、`1920x1080` 下检查输入区与右侧抽屉不重叠；HTML 截图依赖 `requirements.txt` 中声明的 `PySide6-Addons`，缺失时直接报错。
 

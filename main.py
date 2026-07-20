@@ -22317,20 +22317,25 @@ class MainWindow(QMainWindow):
             return 0
         current_index = insert_index
         inserted_total = 0
-        for span in spans:
-            start = span.get("start", 0)
-            end = span.get("end", start)
-            if end <= start:
-                continue
-            inserted = self.render_message_batch(
-                state.messages[start:end],
-                state.session_id,
-                insert_index=current_index,
-                animate=False,
-            )
-            inserted_total += int(inserted or 0)
-            if current_index is not None:
-                current_index += int(inserted or 0)
+        previous_history_rendering = bool(getattr(state, "rendering_history_bubbles", False))
+        state.rendering_history_bubbles = True
+        try:
+            for span in spans:
+                start = span.get("start", 0)
+                end = span.get("end", start)
+                if end <= start:
+                    continue
+                inserted = self.render_message_batch(
+                    state.messages[start:end],
+                    state.session_id,
+                    insert_index=current_index,
+                    animate=False,
+                )
+                inserted_total += int(inserted or 0)
+                if current_index is not None:
+                    current_index += int(inserted or 0)
+        finally:
+            state.rendering_history_bubbles = previous_history_rendering
         return inserted_total
 
     def _render_initial_session_history(self, state):
@@ -25950,7 +25955,7 @@ class MainWindow(QMainWindow):
         self.show_context_drawer(self.RIGHT_TAB_FILES)
         self.select_deliverable(normalized, render_html=True)
 
-    def handle_chat_deliverable_paths_changed(self, paths, session_id=None):
+    def handle_chat_deliverable_paths_changed(self, paths, session_id=None, notify_user=True):
         if session_id != getattr(self, "current_session_id", None):
             return
         state = self.get_session(session_id)
@@ -25965,8 +25970,14 @@ class MainWindow(QMainWindow):
         if not valid_paths:
             return
         self.register_deliverable_paths(
-            valid_paths, session_id=session_id, source="generated", workspace_dir=workspace_dir
+            valid_paths,
+            session_id=session_id,
+            source="generated" if notify_user else "history",
+            workspace_dir=workspace_dir,
         )
+        if not notify_user:
+            self.refresh_deliverables()
+            return
         if state and office_card is not None:
             self._sync_office_task_card_paths(state, valid_paths)
         if not office_enabled:
@@ -30135,6 +30146,9 @@ class MainWindow(QMainWindow):
             chat_storage=self.chat_storage,
             visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
         )
+        bubble._notify_deliverable_changes = not bool(
+            getattr(state, "rendering_history_bubbles", False)
+        )
         self._connect_chat_bubble_actions(bubble, state)
         if str(role or "").strip().lower() in {"agent", "assistant"} and getattr(bubble, "_deliverable_paths", None):
             self.register_deliverable_paths(
@@ -30232,7 +30246,11 @@ class MainWindow(QMainWindow):
             lambda path, sid=state.session_id: self.open_deliverable_from_chat(path, sid)
         )
         bubble.deliverablePathsChanged.connect(
-            lambda paths, sid=state.session_id: self.handle_chat_deliverable_paths_changed(paths, sid)
+            lambda paths, sid=state.session_id, source=bubble: self.handle_chat_deliverable_paths_changed(
+                paths,
+                sid,
+                notify_user=bool(getattr(source, "_notify_deliverable_changes", True)),
+            )
         )
         bubble.officeDraftRequested.connect(
             lambda profile, msg_id, text, sid=state.session_id: self.handle_office_draft_requested(profile, msg_id, text, sid)

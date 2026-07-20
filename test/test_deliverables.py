@@ -890,6 +890,69 @@ class TestDeliverableScanning(unittest.TestCase):
             window.add_system_toast.assert_called_once()
             window.select_deliverable.assert_not_called()
 
+    def test_history_deliverable_registration_does_not_show_generated_toast(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            historical = os.path.join(workspace, "historical.pdf")
+            with open(historical, "wb") as handle:
+                handle.write(b"x")
+            window = MainWindow.__new__(MainWindow)
+            state = type("_Session", (), {})()
+            window.current_session_id = "session-1"
+            window.get_session = MagicMock(return_value=state)
+            window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window._office_draft_card_for_state = MagicMock(return_value=None)
+            window._is_office_workflow_enabled = MagicMock(return_value=False)
+            window.register_deliverable_paths = MagicMock()
+            window.refresh_deliverables = MagicMock()
+            window.set_context_tab_hint = MagicMock()
+            window.add_system_toast = MagicMock()
+            window.select_deliverable = MagicMock()
+
+            window.handle_chat_deliverable_paths_changed(
+                [historical],
+                "session-1",
+                notify_user=False,
+            )
+
+            window.register_deliverable_paths.assert_called_once_with(
+                [os.path.normpath(historical)],
+                session_id="session-1",
+                source="history",
+                workspace_dir=workspace,
+            )
+            window.refresh_deliverables.assert_called_once_with()
+            window.set_context_tab_hint.assert_not_called()
+            window.add_system_toast.assert_not_called()
+            window.select_deliverable.assert_not_called()
+
+    def test_history_span_render_marks_bubbles_as_historical_until_complete(self):
+        window = MainWindow.__new__(MainWindow)
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "messages": [{"role": "assistant", "content": "report.pdf"}],
+                "rendering_history_bubbles": False,
+            },
+        )()
+        observed = []
+
+        def render_batch(*args, **kwargs):
+            observed.append(state.rendering_history_bubbles)
+            return 1
+
+        window.render_message_batch = render_batch
+
+        inserted = window._render_session_history_spans(
+            state,
+            [{"start": 0, "end": 1}],
+        )
+
+        self.assertEqual(inserted, 1)
+        self.assertEqual(observed, [True])
+        self.assertFalse(state.rendering_history_bubbles)
+
     def test_file_rail_entry_opens_browse_view(self):
         class Stack:
             def __init__(self):

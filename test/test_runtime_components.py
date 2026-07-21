@@ -74,6 +74,16 @@ class TestRuntimeComponents(unittest.TestCase):
             self.assertTrue(current_status["healthy"])
             self.assertEqual(current_status["missing_packages"], [])
 
+    def test_toolkit_status_skips_directory_size_until_explicitly_requested(self):
+        with patch.object(runtime_components, "_directory_size", return_value=321) as size_probe:
+            status = runtime_components.toolkit_status("documents")
+            self.assertEqual(status["size"], 0)
+            size_probe.assert_not_called()
+
+            status = runtime_components.toolkit_status("documents", include_size=True)
+            self.assertEqual(status["size"], 321)
+            size_probe.assert_called_once()
+
     def test_installed_toolkit_paths_require_verified_current_marker(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(runtime_components, "toolkits_root", return_value=temp_dir):
             target = runtime_components.toolkit_path("documents")

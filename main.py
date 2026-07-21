@@ -6489,14 +6489,50 @@ class RuntimeComponentWorker(QThread):
     progress_signal = Signal(str, int)
     finished_signal = Signal(dict)
 
-    def __init__(self, action, component_id, source=None, parent=None):
+    def __init__(self, action, component_id, source=None, expected_status=None, parent=None):
         super().__init__(parent)
         self.action = action
         self.component_id = component_id
         self.source = source or {}
+        self.expected_status = dict(expected_status or {})
+
+    def _status(self, include_size=False):
+        if self.component_id == "node":
+            return node_runtime_status()
+        if self.component_id == BROWSER_SKILL_COMPONENT_ID:
+            return browser_skill_status(run_diagnostics=False)
+        return toolkit_status(self.component_id, include_size=include_size)
+
+    def _validate_requested_action(self, current):
+        installed = bool(current.get("installed"))
+        needs_update = bool(current.get("needs_update"))
+        needs_repair = bool(current.get("needs_repair"))
+        expected_requires_repair = bool(
+            self.expected_status.get("needs_update") or self.expected_status.get("needs_repair")
+        )
+        valid = {
+            "install": not installed,
+            "uninstall": installed,
+            "repair": installed and (
+                not expected_requires_repair or needs_update or needs_repair
+            ),
+        }.get(self.action, True)
+        if valid:
+            return
+        raise ComponentStateChangedError(current)
 
     def run(self):
         try:
+            if self.action == "probe":
+                self.finished_signal.emit({
+                    "ok": True,
+                    "component_id": self.component_id,
+                    "action": self.action,
+                    "result": self._status(include_size=True),
+                })
+                return
+            if self.action not in {"check"}:
+                self._validate_requested_action(self._status(include_size=False))
             progress = lambda message, percent: self.progress_signal.emit(str(message), int(percent))
             if self.component_id == "node":
                 result = install_node_runtime(self.source, progress) if self.action in {"install", "repair"} else uninstall_node_runtime()
@@ -6523,15 +6559,44 @@ class RuntimeComponentWorker(QThread):
                     result = uninstall_browser_skill()
             else:
                 result = install_toolkit(self.component_id, self.source, progress, force=self.action == "repair") if self.action in {"install", "repair"} else uninstall_toolkit(self.component_id)
-            self.finished_signal.emit({"ok": True, "component_id": self.component_id, "result": result})
+            self.finished_signal.emit({
+                "ok": True,
+                "component_id": self.component_id,
+                "action": self.action,
+                "result": result,
+            })
+        except ComponentStateChangedError as exc:
+            self.finished_signal.emit({
+                "ok": False,
+                "conflict": True,
+                "component_id": self.component_id,
+                "action": self.action,
+                "result": exc.status,
+                "error": "组件状态已变化，请确认新的操作。",
+            })
         except Exception as exc:
-            self.finished_signal.emit({"ok": False, "component_id": self.component_id, "error": str(exc)})
+            self.finished_signal.emit({
+                "ok": False,
+                "component_id": self.component_id,
+                "action": self.action,
+                "error": str(exc),
+            })
+
+
+class ComponentStateChangedError(RuntimeError):
+    def __init__(self, status):
+        super().__init__("组件状态已变化，请确认新的操作。")
+        self.status = dict(status or {})
 
 
 class ComponentTaskManager(QObject):
     state_changed = Signal(dict)
     log_changed = Signal(str)
     notification_requested = Signal(str, str)
+    component_status_changed = Signal(str, dict)
+    component_probe_progress = Signal(dict)
+
+    STATUS_CACHE_SCHEMA = 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6541,6 +6606,99 @@ class ComponentTaskManager(QObject):
         self._pending_result = None
         self._tasks = {}
         self._logs = []
+        self._status_cache_path = os.path.join(get_app_data_dir(), "component_status_cache.json")
+        self._component_statuses = {}
+        self._status_cache_error = ""
+        self._load_status_cache()
+
+    def _load_status_cache(self):
+        if not os.path.exists(self._status_cache_path):
+            return
+        try:
+            with open(self._status_cache_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if int(payload.get("schema") or 0) != self.STATUS_CACHE_SCHEMA:
+                raise ValueError("组件状态缓存版本不受支持。")
+            components = payload.get("components")
+            if not isinstance(components, dict):
+                raise ValueError("组件状态缓存缺少 components。")
+            self._component_statuses = {
+                str(component_id): dict(status)
+                for component_id, status in components.items()
+                if isinstance(status, dict)
+            }
+        except Exception as exc:
+            self._status_cache_error = str(exc)
+            log_sub_agent_runtime("component_status_cache_read_error", error=str(exc))
+
+    def _save_status_cache(self):
+        payload = {
+            "schema": self.STATUS_CACHE_SCHEMA,
+            "components": copy.deepcopy(self._component_statuses),
+        }
+        os.makedirs(os.path.dirname(self._status_cache_path), exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".component-status-",
+            suffix=".json",
+            dir=os.path.dirname(self._status_cache_path),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self._status_cache_path)
+            self._status_cache_error = ""
+        except Exception as exc:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+            self._status_cache_error = str(exc)
+            log_sub_agent_runtime("component_status_cache_write_error", error=str(exc))
+            raise
+
+    def component_status_snapshot(self):
+        return {
+            "components": copy.deepcopy(self._component_statuses),
+            "cache_error": self._status_cache_error,
+        }
+
+    def _record_component_status(self, component_id, status):
+        value = dict(status or {})
+        value["known"] = True
+        value["updated_at"] = int(time.time())
+        self._component_statuses[str(component_id)] = value
+        try:
+            self._save_status_cache()
+        except Exception:
+            value["cache_write_error"] = self._status_cache_error
+        self.component_status_changed.emit(str(component_id), copy.deepcopy(value))
+        return value
+
+    def probe_component(self, component_id):
+        return self.enqueue("probe", component_id)
+
+    def refresh_all_component_statuses(self):
+        accepted = False
+        for component_id in [BROWSER_SKILL_COMPONENT_ID, "node", *TOOLKITS.keys()]:
+            accepted = self.enqueue("probe", component_id) or accepted
+        return accepted
+
+    def cancel_component_probes(self):
+        retained = []
+        cancelled = []
+        for task in self._queue:
+            if task.get("action") == "probe":
+                cancelled.append(task.get("component_id"))
+                self._tasks.pop(task.get("component_id"), None)
+            else:
+                retained.append(task)
+        self._queue = retained
+        if cancelled:
+            log_sub_agent_runtime("component_probe_cancelled", component_ids=cancelled)
+            self._emit_snapshot()
+        return len(cancelled)
 
     def enqueue(self, action, component_id, source=None):
         if component_id in self._tasks:
@@ -6580,6 +6738,7 @@ class ComponentTaskManager(QObject):
 
     def _action_label(self, action):
         return {
+            "probe": "检测",
             "install": "安装",
             "repair": "修复",
             "uninstall": "卸载",
@@ -6612,11 +6771,17 @@ class ComponentTaskManager(QObject):
         task["message"] = "正在准备环境…"
         task["progress"] = 1
         self._append_log(task["component_id"], f"开始{self._action_label(task['action'])}")
+        log_sub_agent_runtime(
+            "component_probe_start" if task.get("action") == "probe" else "component_action_start",
+            component_id=task["component_id"],
+            action=task.get("action"),
+        )
         worker = RuntimeComponentWorker(
             task["action"],
             task["component_id"],
             task["source"],
-            self,
+            expected_status=self._component_statuses.get(task["component_id"]),
+            parent=self,
         )
         self._worker = worker
         worker.progress_signal.connect(self._handle_progress)
@@ -6632,6 +6797,12 @@ class ComponentTaskManager(QObject):
         self._current["message"] = str(message or "")
         self._current["progress"] = max(0, min(100, int(percent)))
         self._append_log(self._current["component_id"], self._current["message"])
+        if self._current.get("action") == "probe":
+            self.component_probe_progress.emit({
+                "component_id": self._current["component_id"],
+                "message": self._current["message"],
+                "progress": self._current["progress"],
+            })
         self._emit_snapshot()
 
     def _capture_result(self, result):
@@ -6648,22 +6819,31 @@ class ComponentTaskManager(QObject):
             return
         component_id = task["component_id"]
         ok = bool(result.get("ok"))
+        action = str(task.get("action") or "")
+        if isinstance(result.get("result"), dict) and (ok or result.get("conflict")):
+            self._record_component_status(component_id, result["result"])
         if ok:
             task["state"] = "completed"
             task["message"] = "操作已完成"
             task["progress"] = 100
             self._append_log(component_id, "操作完成")
-            self.notification_requested.emit(
-                "组件操作完成",
-                f"{self._component_name(component_id)}已完成{self._action_label(task['action'])}。",
-            )
+            if action == "probe":
+                log_sub_agent_runtime("component_probe_done", component_id=component_id)
+            else:
+                log_sub_agent_runtime("component_action_done", component_id=component_id, action=action)
+                self.notification_requested.emit(
+                    "组件操作完成",
+                    f"{self._component_name(component_id)}已完成{self._action_label(task['action'])}。",
+                )
         else:
             task["state"] = "failed"
             task["error"] = result.get("error") or "组件操作失败。"
             task["message"] = "操作失败"
             self._append_log(component_id, f"失败：{task['error']}")
+            event = "component_probe_error" if action == "probe" else "component_action_error"
+            log_sub_agent_runtime(event, component_id=component_id, action=action, error=task["error"])
             self.notification_requested.emit(
-                "组件操作失败",
+                "组件检测失败" if action == "probe" else "组件操作失败",
                 f"{self._component_name(component_id)}：{task['error']}",
             )
         self._tasks.pop(component_id, None)
@@ -6718,6 +6898,44 @@ class AppUpdateWorker(QThread):
             })
 
 
+class SessionHistoryLoadWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, chat_storage, session_id, token, parent=None):
+        super().__init__(parent)
+        self.chat_storage = chat_storage
+        self.session_id = str(session_id or "")
+        self.token = int(token or 0)
+
+    def run(self):
+        started_at = time.perf_counter()
+        try:
+            conversation_meta = self.chat_storage.get_conversation_meta(self.session_id)
+            conversation_record = self.chat_storage.get_conversation_record(self.session_id)
+            messages = self.chat_storage.get_messages(self.session_id)
+            agents = self.chat_storage.list_agents(self.session_id)
+            spans = build_conversation_render_spans(messages)
+            self.finished_signal.emit({
+                "ok": True,
+                "session_id": self.session_id,
+                "token": self.token,
+                "conversation_meta": conversation_meta,
+                "conversation_record": conversation_record,
+                "messages": messages,
+                "agents": agents,
+                "spans": spans,
+                "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+            })
+        except Exception as exc:
+            self.finished_signal.emit({
+                "ok": False,
+                "session_id": self.session_id,
+                "token": self.token,
+                "error": str(exc),
+                "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+            })
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None, initial_page_label=None):
         super().__init__(parent)
@@ -6765,6 +6983,7 @@ class SettingsDialog(QDialog):
 
         self.content_stack = QStackedWidget()
         body_layout.addWidget(self.content_stack, 1)
+        self._settings_pages = []
 
         def make_scroll_page(title, intro=None):
             scroll_area = QScrollArea()
@@ -6785,7 +7004,7 @@ class SettingsDialog(QDialog):
             item = QListWidgetItem(qta.icon(icon_name, color=DesignTokens.text_secondary), label)
             self.nav_list.addItem(item)
             self.nav_combo.addItem(label)
-            self.content_stack.addWidget(page)
+            self._settings_pages.append(page)
             return item
 
         model_page, model_layout = make_scroll_page(
@@ -7090,7 +7309,29 @@ class SettingsDialog(QDialog):
         self.component_task_manager = getattr(self._main, "component_task_manager", None)
         self.source_test_worker = None
         self.component_rows = {}
+        component_status_snapshot = (
+            self.component_task_manager.component_status_snapshot()
+            if self.component_task_manager else {"components": {}, "cache_error": ""}
+        )
+        self.component_status_cache = component_status_snapshot.get("components", {})
         self.download_sources = normalize_download_sources(self.config_manager.get("download_sources", {}))
+
+        cache_error = str(component_status_snapshot.get("cache_error") or "")
+        if cache_error:
+            components_layout.addWidget(
+                ProductInlineNotice(
+                    f"组件状态缓存读取失败：{cache_error}。请手动刷新状态。",
+                    "error",
+                )
+            )
+
+        component_refresh_bar = QHBoxLayout()
+        component_refresh_bar.addStretch()
+        self.refresh_component_status_btn = QPushButton("手动刷新状态")
+        self.refresh_component_status_btn.setObjectName("SecondaryBtn")
+        self.refresh_component_status_btn.clicked.connect(self.refresh_all_component_statuses)
+        component_refresh_bar.addWidget(self.refresh_component_status_btn)
+        components_layout.addLayout(component_refresh_bar)
 
         source_group, source_group_layout = build_settings_surface(
             "下载源",
@@ -7207,7 +7448,7 @@ class SettingsDialog(QDialog):
             BROWSER_SKILL_COMPONENT_ID,
             "Tencent BrowserSkill",
             "让 AI 在独立 Agent 窗口中读取和操作真实登录态网页。插件默认关闭，启用后仍需完成此处安装。",
-            browser_skill_status(run_diagnostics=False),
+            self.component_status_cache.get(BROWSER_SKILL_COMPONENT_ID, {}),
         )
         browser_actions = QHBoxLayout()
         browser_actions.addStretch()
@@ -7226,14 +7467,25 @@ class SettingsDialog(QDialog):
         browser_group_layout.addLayout(browser_actions)
         self.update_component_row(
             BROWSER_SKILL_COMPONENT_ID,
-            browser_skill_status(run_diagnostics=False),
+            self.component_status_cache.get(BROWSER_SKILL_COMPONENT_ID, {}),
         )
-
-        add_component_row(runtime_group_layout, "node", "Node.js", "JavaScript 执行、npm / npx 与 Node Skill", node_runtime_status())
+        add_component_row(
+            runtime_group_layout,
+            "node",
+            "Node.js",
+            "JavaScript 执行、npm / npx 与 Node Skill",
+            self.component_status_cache.get("node", {}),
+        )
         for toolkit_id, spec in TOOLKITS.items():
             packages = "、".join(spec["packages"])
             skills = "、".join(spec["skills"]) or "通用 Python 任务"
-            add_component_row(toolkit_group_layout, toolkit_id, spec["name"], f"{spec['description']}\n关联：{skills} · 包：{packages}", toolkit_status(toolkit_id))
+            add_component_row(
+                toolkit_group_layout,
+                toolkit_id,
+                spec["name"],
+                f"{spec['description']}\n关联：{skills} · 包：{packages}",
+                self.component_status_cache.get(toolkit_id, {}),
+            )
         runtime_group_layout.addStretch()
         toolkit_group_layout.addStretch()
         components_layout.addWidget(browser_group)
@@ -7277,6 +7529,7 @@ class SettingsDialog(QDialog):
         components_layout.addStretch()
         if self.component_task_manager:
             self.component_task_manager.state_changed.connect(self.handle_component_task_state)
+            self.component_task_manager.component_status_changed.connect(self.handle_component_status_changed)
             self.handle_component_task_state(self.component_task_manager.snapshot())
 
         update_page, update_layout = make_scroll_page(
@@ -7492,7 +7745,15 @@ class SettingsDialog(QDialog):
         add_settings_page("权限", "fa5s.shield-alt", permission_page)
         add_settings_page("组件与依赖", "fa5s.puzzle-piece", components_page)
         self.update_nav_item = add_settings_page("更新", "fa5s.download", update_page)
-        self.nav_list.currentRowChanged.connect(self.content_stack.setCurrentIndex)
+        def show_settings_page(row):
+            if row < 0 or row >= len(self._settings_pages):
+                return
+            page = self._settings_pages[row]
+            if self.content_stack.indexOf(page) < 0:
+                self.content_stack.addWidget(page)
+            self.content_stack.setCurrentWidget(page)
+
+        self.nav_list.currentRowChanged.connect(show_settings_page)
         self.nav_list.currentRowChanged.connect(self.nav_combo.setCurrentIndex)
         self.nav_combo.currentIndexChanged.connect(self.nav_list.setCurrentRow)
         self.select_initial_page(initial_page_label)
@@ -7537,19 +7798,30 @@ class SettingsDialog(QDialog):
 
     def _connect_settings_dirty_tracking(self):
         callback = lambda *_args: self._refresh_settings_dirty_state()
-        for editor in self.findChildren(QLineEdit):
+        roots = [self] + list(getattr(self, "_settings_pages", []) or [])
+
+        def descendants(widget_type):
+            seen = set()
+            for root in roots:
+                for widget in root.findChildren(widget_type):
+                    if id(widget) in seen:
+                        continue
+                    seen.add(id(widget))
+                    yield widget
+
+        for editor in descendants(QLineEdit):
             editor.textChanged.connect(callback)
-        for editor in self.findChildren(QTextEdit):
+        for editor in descendants(QTextEdit):
             editor.textChanged.connect(callback)
-        for editor in self.findChildren(QPlainTextEdit):
+        for editor in descendants(QPlainTextEdit):
             editor.textChanged.connect(callback)
-        for combo in self.findChildren(QComboBox):
+        for combo in descendants(QComboBox):
             combo.currentIndexChanged.connect(callback)
-        for check in self.findChildren(QCheckBox):
+        for check in descendants(QCheckBox):
             check.toggled.connect(callback)
-        for spin in self.findChildren(QSpinBox):
+        for spin in descendants(QSpinBox):
             spin.valueChanged.connect(callback)
-        for date_edit in self.findChildren(QDateTimeEdit):
+        for date_edit in descendants(QDateTimeEdit):
             date_edit.dateTimeChanged.connect(callback)
         for manager in (self.model_channel_manager, self.agent_profile_manager, self.mcp_server_manager):
             manager.changed.connect(callback)
@@ -7828,12 +8100,8 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "下载源测试失败", result.get("error") or "无法连接下载源。")
         self.source_test_worker = None
 
-    def _component_status(self, component_id):
-        if component_id == "node":
-            return node_runtime_status()
-        if component_id == BROWSER_SKILL_COMPONENT_ID:
-            return browser_skill_status(run_diagnostics=False)
-        return toolkit_status(component_id)
+    def _cached_component_status(self, component_id):
+        return dict((getattr(self, "component_status_cache", {}) or {}).get(component_id) or {})
 
     def open_browser_skill_extension_page(self):
         if QDesktopServices.openUrl(QUrl(BROWSER_SKILL_EXTENSION_URL)):
@@ -7848,6 +8116,16 @@ class SettingsDialog(QDialog):
     def update_component_row(self, component_id, status):
         row = self.component_rows.get(component_id)
         if not row:
+            return
+        status = dict(status or {})
+        if not status.get("known"):
+            row["status"].setText("尚未检测")
+            row["action"].setText("检测状态")
+            row["repair"].setVisible(False)
+            row["progress"].setVisible(False)
+            if component_id == BROWSER_SKILL_COMPONENT_ID and hasattr(self, "browser_skill_extension_btn"):
+                self.browser_skill_extension_btn.setEnabled(False)
+                self.browser_skill_check_btn.setEnabled(False)
             return
         installed = bool(status.get("installed"))
         needs_update = bool(status.get("needs_update"))
@@ -7867,7 +8145,13 @@ class SettingsDialog(QDialog):
             state_text += f"：{status['health_error']}"
         elif component_id == BROWSER_SKILL_COMPONENT_ID and status.get("health_error"):
             state_text += f"：{status['health_error']}"
-        row["status"].setText(state_text + suffix + source_suffix)
+        updated_at = int(status.get("updated_at") or 0)
+        recorded_suffix = ""
+        if updated_at:
+            recorded_suffix = f" · 上次记录 {datetime.fromtimestamp(updated_at).strftime('%m-%d %H:%M')}"
+        cache_error = str(status.get("cache_write_error") or "")
+        error_suffix = f" · 状态缓存未保存：{cache_error}" if cache_error else ""
+        row["status"].setText(state_text + suffix + source_suffix + recorded_suffix + error_suffix)
         row["action"].setText("更新" if needs_update else ("卸载" if installed else "安装"))
         row["repair"].setVisible(installed)
         row["progress"].setVisible(False)
@@ -7876,7 +8160,13 @@ class SettingsDialog(QDialog):
             self.browser_skill_check_btn.setEnabled(installed)
 
     def toggle_component(self, component_id):
-        status = self._component_status(component_id)
+        if not self.component_task_manager:
+            QMessageBox.warning(self, "组件管理", "后台组件任务管理器不可用。")
+            return
+        status = self._cached_component_status(component_id)
+        if not status.get("known"):
+            self.component_task_manager.probe_component(component_id)
+            return
         action = "repair" if status.get("needs_update") or status.get("needs_repair") else ("uninstall" if status.get("installed") else "install")
         if action == "uninstall":
             uninstall_message = (
@@ -7913,13 +8203,31 @@ class SettingsDialog(QDialog):
             return
         self.component_task_manager.enqueue(action, component_id, source)
 
+    def refresh_all_component_statuses(self):
+        if not self.component_task_manager:
+            QMessageBox.warning(self, "组件管理", "后台组件任务管理器不可用。")
+            return
+        snapshot = self.component_task_manager.snapshot()
+        has_probes = any(
+            task.get("action") == "probe"
+            for task in (snapshot.get("tasks") or {}).values()
+        )
+        if has_probes:
+            self.component_task_manager.cancel_component_probes()
+            return
+        self.component_task_manager.refresh_all_component_statuses()
+
+    def handle_component_status_changed(self, component_id, status):
+        self.component_status_cache[str(component_id)] = dict(status or {})
+        self.update_component_row(str(component_id), status)
+
     def handle_component_task_state(self, snapshot):
         tasks = (snapshot or {}).get("tasks") or {}
         queue_lines = []
         for component_id, row in self.component_rows.items():
             task = tasks.get(component_id)
             if not task:
-                status = self._component_status(component_id)
+                status = self._cached_component_status(component_id)
                 self.update_component_row(component_id, status)
                 row["action"].setEnabled(True)
                 row["repair"].setEnabled(True)
@@ -7943,6 +8251,9 @@ class SettingsDialog(QDialog):
                 queue_lines.insert(0, f"正在处理：{component_id}")
             row["status"].setText(text)
             row["progress"].setVisible(True)
+        has_probes = any(task.get("action") == "probe" for task in tasks.values())
+        if hasattr(self, "refresh_component_status_btn"):
+            self.refresh_component_status_btn.setText("取消刷新" if has_probes else "手动刷新状态")
         self.component_queue_label.setText("\n".join(queue_lines) if queue_lines else "当前没有组件任务。")
         logs = (snapshot or {}).get("logs") or []
         self.component_log_edit.setPlainText("\n".join(logs))
@@ -13070,6 +13381,90 @@ class AssistantTurnGroup(QFrame):
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
 
 
+class HistoricalAssistantSummary(QFrame):
+    detailRequested = Signal(bool)
+
+    def __init__(self, stage_count=0, tool_count=0, parent=None):
+        super().__init__(parent)
+        self.setObjectName("HistoricalAssistantSummary")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.setStyleSheet(
+            "QFrame#HistoricalAssistantSummary { background: transparent; border: none; }"
+        )
+        self.stage_count = max(0, int(stage_count or 0))
+        self.tool_count = max(0, int(tool_count or 0))
+        self.detail_groups = []
+        self.detail_batches = []
+        self.detail_batch_index = 0
+        self.detail_loading = False
+        self.detail_error = ""
+        self.message_ids = []
+        self.span_start = 0
+        self.span_end = 0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.detail_button = QPushButton()
+        self.detail_button.setObjectName("HistoricalProcessDisclosure")
+        self.detail_button.setCheckable(True)
+        self.detail_button.setCursor(Qt.PointingHandCursor)
+        self.detail_button.setStyleSheet(apple_disclosure_button_style())
+        self.detail_button.toggled.connect(self._on_toggled)
+        layout.addWidget(self.detail_button)
+        self.retry_button = QPushButton("重试恢复")
+        self.retry_button.setObjectName("HistoricalProcessRetryButton")
+        self.retry_button.setCursor(Qt.PointingHandCursor)
+        self.retry_button.setStyleSheet(apple_button_style("secondary"))
+        self.retry_button.clicked.connect(self._retry_details)
+        self.retry_button.hide()
+        layout.addWidget(self.retry_button, 0, Qt.AlignLeft)
+        self.body = QWidget(self)
+        self.body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0)
+        self.body_layout.setSpacing(0)
+        layout.addWidget(self.body)
+        self._refresh_button_text()
+
+    def _refresh_button_text(self, progress_text=""):
+        parts = []
+        if self.stage_count:
+            parts.append(f"{self.stage_count} 个阶段")
+        if self.tool_count:
+            parts.append(f"{self.tool_count} 次 Tool 调用")
+        summary = " · ".join(parts) or "执行详情"
+        arrow = "▴" if self.detail_button.isChecked() else "▾"
+        suffix = f" · {progress_text}" if progress_text else ""
+        self.detail_button.setText(f" 执行过程 · {summary}{suffix}  {arrow}")
+        self.detail_button.setVisible(bool(self.stage_count or self.tool_count))
+
+    def _on_toggled(self, checked):
+        self._refresh_button_text()
+        self.detailRequested.emit(bool(checked))
+
+    def set_progress(self, completed, total):
+        self.retry_button.hide()
+        self._refresh_button_text(f"正在加载 {int(completed)}/{int(total)}")
+
+    def set_error(self, message):
+        self.detail_error = str(message or "")
+        self._refresh_button_text(f"加载失败：{self.detail_error}")
+        self.retry_button.show()
+
+    def _retry_details(self):
+        self.detail_error = ""
+        self.detail_loading = False
+        self.retry_button.hide()
+        self.detailRequested.emit(True)
+
+    def set_complete(self):
+        self.detail_loading = False
+        self.retry_button.hide()
+        self._refresh_button_text("已加载")
+
+
 class ChatBubble(QFrame):
     editSubmitRequested = Signal(str, str)
     deleteRequested = Signal(str)
@@ -15617,6 +16012,10 @@ class SessionState:
         self.prompt_files = []
         self.messages = []
         self.render_items = []
+        self.render_nodes = {}
+        self.render_node_by_message_id = {}
+        self.history_detail_summaries = []
+        self.history_office_cards = []
         self.tool_cards = {}
         self.step_records = []
         self.pending_tool_results = {}
@@ -15645,6 +16044,12 @@ class SessionState:
         self.history_loaded = False
         self.history_loading = False
         self.history_load_token = 0
+        self.history_load_worker = None
+        self.history_loading_widget = None
+        self.history_page_loading = False
+        self.history_page_anchor_widget = None
+        self.history_page_anchor_offset = 0
+        self.rendering_history_bubbles = False
         self.content_flush_timer = None
         self.thinking_flush_timer = None
         self.pending_thinking_delta = ""
@@ -17119,6 +17524,8 @@ class MainWindow(QMainWindow):
         self.sidebar_sort_mode = "recent"
         self.current_project_path = ""
         self._session_load_token_counter = 0
+        self._history_load_workers = set()
+        self._history_process_events_suppressed = 0
         self.tool_cards = {}
         self.pending_tool_results = {}
         self.current_content_buffer = ""
@@ -18586,6 +18993,8 @@ class MainWindow(QMainWindow):
         self.update()
 
     def process_ui_events(self, force=False):
+        if int(getattr(self, "_history_process_events_suppressed", 0) or 0) > 0:
+            return
         import time
         now = time.time()
         if force or (now - self.last_ui_update_time > 0.05):
@@ -19946,18 +20355,171 @@ class MainWindow(QMainWindow):
         return ""
 
     def _render_rewritten_session(self, state, messages):
-        if not state:
-            return
-        self.clear_chat_layout(state.chat_layout)
-        state.empty_state = None
-        state.messages = self.chat_storage.normalize_messages(copy.deepcopy(messages or []))
-        state.tool_cards = {}
-        state.pending_tool_results = {}
+        raise RuntimeError("全量历史重写已禁用；请使用渲染节点局部重写事务。")
+
+    def _capture_history_rewrite(self, state, message_id):
+        node = (getattr(state, "render_node_by_message_id", {}) or {}).get(str(message_id or ""))
+        widget = (node or {}).get("widget") if isinstance(node, dict) else None
+        if widget is None or not _qt_object_alive(widget):
+            raise RuntimeError("无法定位消息界面，请重新打开会话后重试。")
+        top_level = self._top_level_chat_widget(state, widget)
+        layout_index = state.chat_layout.indexOf(top_level) if top_level is not None else -1
+        if layout_index < 0:
+            raise RuntimeError("无法定位消息界面，请重新打开会话后重试。")
+        viewport_offset = 0
+        try:
+            viewport_offset = top_level.mapTo(state.chat_scroll.viewport(), QPoint(0, 0)).y()
+        except RuntimeError:
+            viewport_offset = 0
+        snapshot = {
+            "messages": copy.deepcopy(state.messages),
+            "render_items": copy.deepcopy(state.render_items),
+            "render_nodes": dict(state.render_nodes),
+            "render_node_by_message_id": dict(state.render_node_by_message_id),
+            "tool_cards": dict(state.tool_cards),
+            "pending_tool_results": copy.deepcopy(state.pending_tool_results),
+            "ui_timeline_events": copy.deepcopy(state.ui_timeline_events),
+            "pending_guidance_messages": copy.deepcopy(state.pending_guidance_messages),
+            "persisted_agents": copy.deepcopy(state.persisted_agents),
+            "history_detail_summaries": list(state.history_detail_summaries),
+            "history_office_cards": list(state.history_office_cards),
+            "displayed_render_count": int(state.displayed_render_count or 0),
+            "layout_index": layout_index,
+            "viewport_offset": viewport_offset,
+            "widgets": [],
+        }
+        while state.chat_layout.count() - 1 > layout_index:
+            item = state.chat_layout.takeAt(layout_index)
+            detached = item.widget() if item is not None else None
+            if detached is None:
+                continue
+            detached.hide()
+            snapshot["widgets"].append(detached)
+            for summary in detached.findChildren(HistoricalAssistantSummary):
+                summary.detail_button.setChecked(False)
+            if isinstance(detached, HistoricalAssistantSummary):
+                detached.detail_button.setChecked(False)
+        return snapshot
+
+    def _truncate_rewrite_state(self, state, target_index):
+        retained_messages = self.chat_storage.normalize_messages(
+            copy.deepcopy((state.messages or [])[:target_index])
+        )
+        retained_ids = {
+            str(message.get("id") or "")
+            for message in retained_messages
+            if isinstance(message, dict) and str(message.get("id") or "")
+        }
+        retained_tool_ids = {
+            str(tool_call.get("id") or "")
+            for message in retained_messages
+            if isinstance(message, dict)
+            for tool_call in (message.get("tool_calls") or [])
+            if isinstance(tool_call, dict) and str(tool_call.get("id") or "")
+        }
+        retained_group_ids = {
+            str((message.get("meta") or {}).get("ui_turn_group_id") or "")
+            for message in retained_messages
+            if isinstance(message, dict) and isinstance(message.get("meta"), dict)
+            and str((message.get("meta") or {}).get("ui_turn_group_id") or "")
+        }
+        state.messages = retained_messages
+        state.tool_cards = {
+            tool_id: card for tool_id, card in state.tool_cards.items()
+            if str(tool_id) in retained_tool_ids
+        }
+        state.pending_tool_results = {
+            tool_id: result for tool_id, result in state.pending_tool_results.items()
+            if str(tool_id) in retained_tool_ids
+        }
+        state.ui_timeline_events = [
+            event for event in state.ui_timeline_events
+            if (str(event.get("message_id") or "") and str(event.get("message_id") or "") in retained_ids)
+            or (str(event.get("tool_call_id") or "") and str(event.get("tool_call_id") or "") in retained_tool_ids)
+            or (str(event.get("group_id") or "") and str(event.get("group_id") or "") in retained_group_ids)
+        ]
+        state.pending_guidance_messages = [
+            message for message in state.pending_guidance_messages
+            if str(message.get("id") or "") in retained_ids
+        ]
+        state.persisted_agents = [
+            agent for agent in state.persisted_agents
+            if not str(agent.get("parent_message_id") or "")
+            or str(agent.get("parent_message_id") or "") in retained_ids
+        ]
+        state.render_nodes = {
+            key: node for key, node in state.render_nodes.items()
+            if int(node.get("end") or 0) <= int(target_index)
+        }
+        state.render_node_by_message_id = {
+            message_id: node for message_id, node in state.render_node_by_message_id.items()
+            if message_id in retained_ids and node.get("key") in state.render_nodes
+        }
+        state.history_detail_summaries = [
+            summary for summary in state.history_detail_summaries
+            if _qt_object_alive(summary) and int(getattr(summary, "span_end", 0) or 0) <= int(target_index)
+        ]
+        state.history_office_cards = [
+            card for card in state.history_office_cards
+            if _qt_object_alive(card) and int(getattr(card, "_history_span_end", 0) or 0) <= int(target_index)
+        ]
+        self._rebuild_session_render_spans(state)
+        state.displayed_render_count = min(state.displayed_render_count, len(state.render_items))
         state.last_agent_bubble = None
         state.temp_thinking_bubble = None
-        state.displayed_render_count = 0
-        self._rebuild_session_render_spans(state)
-        self._render_initial_session_history(state)
+        state.active_agent_turn_group = None
+        state.pending_guidance_messages = []
+        return retained_ids
+
+    def _restore_history_rewrite(self, state, snapshot):
+        start = int(snapshot.get("layout_index") or 0)
+        while state.chat_layout.count() - 1 > start:
+            item = state.chat_layout.takeAt(start)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.hide()
+                widget.deleteLater()
+        for offset, widget in enumerate(snapshot.get("widgets") or []):
+            state.chat_layout.insertWidget(start + offset, widget)
+            widget.show()
+        for field in (
+            "messages",
+            "render_items",
+            "render_nodes",
+            "render_node_by_message_id",
+            "tool_cards",
+            "pending_tool_results",
+            "ui_timeline_events",
+            "pending_guidance_messages",
+            "persisted_agents",
+            "history_detail_summaries",
+            "history_office_cards",
+            "displayed_render_count",
+        ):
+            setattr(state, field, snapshot[field])
+        QTimer.singleShot(0, lambda s=state, snap=snapshot: self._restore_rewrite_viewport(s, snap))
+
+    def _restore_rewrite_viewport(self, state, snapshot, message_id=""):
+        target = None
+        if message_id:
+            node = state.render_node_by_message_id.get(str(message_id))
+            target = (node or {}).get("widget") if isinstance(node, dict) else None
+        if target is None:
+            widgets = snapshot.get("widgets") or []
+            target = widgets[0] if widgets else None
+        if target is None or not _qt_object_alive(target):
+            return
+        try:
+            current_offset = target.mapTo(state.chat_scroll.viewport(), QPoint(0, 0)).y()
+            bar = state.chat_scroll.verticalScrollBar()
+            bar.setValue(bar.value() + current_offset - int(snapshot.get("viewport_offset") or 0))
+        except RuntimeError:
+            return
+
+    def _commit_history_rewrite(self, snapshot):
+        for widget in snapshot.get("widgets") or []:
+            if _qt_object_alive(widget):
+                widget.deleteLater()
 
     def edit_user_message_inline(self, session_id, message_id, edited_text):
         session_id = str(session_id or "").strip()
@@ -19996,6 +20558,13 @@ class MainWindow(QMainWindow):
             downstream_count=downstream_count,
             attachment_count=len(prompt_files),
         )
+        log_ui_navigation(
+            "history_rewrite_start",
+            session_id=session_id,
+            message_id=message_id,
+            target_index=target_index,
+            downstream_count=downstream_count,
+        )
         if downstream_count:
             dialog = ProductMessageDialog(
                 "从这里重新生成？",
@@ -20009,8 +20578,31 @@ class MainWindow(QMainWindow):
             )
             if dialog.exec_result(QMessageBox.No) != QMessageBox.Yes:
                 return False
-        old_scroll = state.chat_scroll.verticalScrollBar().value() if state.chat_scroll else 0
-        self._render_rewritten_session(state, messages[:target_index])
+        try:
+            rewrite_snapshot = self._capture_history_rewrite(state, message_id)
+        except Exception as exc:
+            self.add_system_toast(str(exc), "error", session_id=session_id, auto_close_ms=5000)
+            log_ui_navigation(
+                "history_rewrite_index_error",
+                session_id=session_id,
+                message_id=message_id,
+                error=str(exc),
+            )
+            return False
+        log_ui_navigation(
+            "history_rewrite_snapshot_ready",
+            session_id=session_id,
+            detached_widget_count=len(rewrite_snapshot.get("widgets") or []),
+            target_index=target_index,
+        )
+        self._truncate_rewrite_state(state, target_index)
+        log_ui_navigation(
+            "history_rewrite_downstream_detached",
+            session_id=session_id,
+            retained_message_count=len(state.messages),
+            downstream_count=downstream_count,
+        )
+        log_ui_navigation("history_rewrite_submit_started", session_id=session_id, target_index=target_index)
         submitted = self._submit_session_request(
             state,
             edited_text,
@@ -20019,25 +20611,49 @@ class MainWindow(QMainWindow):
             clear_current_input=False,
         )
         if not submitted:
-            self._render_rewritten_session(state, messages)
-            if state.chat_scroll:
-                QTimer.singleShot(0, lambda value=old_scroll, bar=state.chat_scroll.verticalScrollBar(): bar.setValue(value))
+            self._restore_history_rewrite(state, rewrite_snapshot)
             self.add_system_toast("编辑后的消息未能提交。", "warning", session_id=session_id, auto_close_ms=3200)
             log_ui_navigation("history_edit_failed", session_id=session_id, downstream_count=downstream_count)
+            log_ui_navigation("history_rewrite_rolled_back", session_id=session_id, target_index=target_index)
             return False
+        removed_agent_ids = {
+            str(agent.get("id") or "")
+            for agent in (rewrite_snapshot.get("persisted_agents") or [])
+            if str(agent.get("id") or "")
+        } - {
+            str(agent.get("id") or "")
+            for agent in state.persisted_agents
+            if str(agent.get("id") or "")
+        }
+        for agent_id in removed_agent_ids:
+            self.chat_storage.delete_agent(agent_id, hard=True)
+        self._commit_history_rewrite(rewrite_snapshot)
         if state.messages and (state.messages[-1].get("role") or "") == "user":
             state.messages[-1].setdefault("meta", {})["edited"] = True
-        for layout_index in range(state.chat_layout.count() - 1, -1, -1):
-            widget = state.chat_layout.itemAt(layout_index).widget()
-            if isinstance(widget, ChatBubble) and widget.role == "User":
-                widget.mark_edited()
-                break
-        if state.chat_scroll:
-            QTimer.singleShot(0, lambda value=old_scroll, bar=state.chat_scroll.verticalScrollBar(): bar.setValue(value))
+        edited_message_id = str((state.messages[-1] if state.messages else {}).get("id") or "")
+        edited_node = state.render_node_by_message_id.get(edited_message_id)
+        edited_widget = (edited_node or {}).get("widget") if isinstance(edited_node, dict) else None
+        if isinstance(edited_widget, ChatBubble):
+            edited_widget.mark_edited()
+        elif edited_widget is not None:
+            for bubble in edited_widget.findChildren(ChatBubble):
+                if bubble.role == "User" and bubble.source_message_id == edited_message_id:
+                    bubble.mark_edited()
+                    break
+        QTimer.singleShot(
+            0,
+            lambda s=state, snap=rewrite_snapshot, mid=edited_message_id: self._restore_rewrite_viewport(s, snap, mid),
+        )
         self.save_chat_history(session_id=session_id)
         self.refresh_history_list()
         self.add_system_toast("已从此处重新生成", "success", session_id=session_id, auto_close_ms=3200)
         log_ui_navigation("history_edit_done", session_id=session_id, downstream_count=downstream_count)
+        log_ui_navigation(
+            "history_rewrite_committed",
+            session_id=session_id,
+            target_index=target_index,
+            retained_message_count=len(state.messages),
+        )
         return True
 
     def delete_user_message_in_place(self, session_id, message_id):
@@ -20065,6 +20681,13 @@ class MainWindow(QMainWindow):
 
         self.save_chat_history(session_id=session_id, flush=True)
         messages = list(getattr(state, "messages", []) or [])
+        target_index = next(
+            (
+                index for index, item in enumerate(messages)
+                if str(item.get("id") or "").strip() == message_id
+            ),
+            -1,
+        )
         remaining_messages = [
             item for item in messages
             if str(item.get("id") or "").strip() != message_id
@@ -20072,8 +20695,118 @@ class MainWindow(QMainWindow):
         if len(remaining_messages) == len(messages):
             self.add_system_toast("找不到要删除的消息。", "warning", session_id=session_id, auto_close_ms=3200)
             return False
-        self._render_rewritten_session(state, remaining_messages)
-        self.save_chat_history(session_id=session_id, flush=True)
+        node = (state.render_node_by_message_id or {}).get(message_id)
+        widget = (node or {}).get("widget") if isinstance(node, dict) else None
+        top_level = self._top_level_chat_widget(state, widget) if widget is not None else None
+        layout_index = state.chat_layout.indexOf(top_level) if top_level is not None else -1
+        if layout_index < 0:
+            message = "无法定位消息界面，请重新打开会话后重试。"
+            self.add_system_toast(message, "error", session_id=session_id, auto_close_ms=5000)
+            log_ui_navigation(
+                "history_rewrite_index_error",
+                session_id=session_id,
+                message_id=message_id,
+                operation="delete",
+            )
+            return False
+        log_ui_navigation(
+            "history_rewrite_start",
+            session_id=session_id,
+            message_id=message_id,
+            target_index=target_index,
+            operation="delete",
+        )
+        state.chat_layout.removeWidget(top_level)
+        top_level.hide()
+        original_render_items = copy.deepcopy(state.render_items)
+        original_displayed_render_count = int(state.displayed_render_count or 0)
+        original_render_nodes = {
+            key: dict(value) for key, value in state.render_nodes.items()
+        }
+        original_render_node_by_message_id = {
+            key: original_render_nodes.get(str(value.get("key") or ""), value)
+            for key, value in state.render_node_by_message_id.items()
+        }
+        original_history_office_cards = list(state.history_office_cards)
+        state.history_office_cards = [
+            card for card in state.history_office_cards if card is not top_level
+        ]
+        state.messages = self.chat_storage.normalize_messages(copy.deepcopy(remaining_messages))
+        affected_message_ids = list((node or {}).get("message_ids") or [message_id])
+        for affected_id in affected_message_ids:
+            state.render_node_by_message_id.pop(str(affected_id), None)
+        state.render_nodes.pop(str((node or {}).get("key") or ""), None)
+        message_positions = {
+            str(message.get("id") or ""): index
+            for index, message in enumerate(state.messages)
+            if str(message.get("id") or "")
+        }
+        for existing in state.render_nodes.values():
+            positions = [
+                message_positions[mid]
+                for mid in existing.get("message_ids") or []
+                if mid in message_positions
+            ]
+            if positions:
+                existing["start"] = min(positions)
+                existing["end"] = max(positions) + 1
+        self._rebuild_session_render_spans(state)
+        state.displayed_render_count = min(state.displayed_render_count, len(state.render_items))
+        replacement_widget_count = 0
+        if len(affected_message_ids) > 1:
+            replacement_span = next(
+                (
+                    span for span in state.render_items
+                    if int(span.get("start") or 0) <= target_index < int(span.get("end") or 0)
+                ),
+                None,
+            )
+            if replacement_span is not None:
+                replacement_widget_count = int(
+                    self._render_session_history_spans(
+                        state,
+                        [replacement_span],
+                        insert_index=layout_index,
+                    ) or 0
+                )
+        try:
+            self.save_chat_history(session_id=session_id, flush=True)
+        except Exception as exc:
+            state.messages = messages
+            for _ in range(replacement_widget_count):
+                item = state.chat_layout.takeAt(layout_index)
+                replacement = item.widget() if item is not None else None
+                if replacement is not None:
+                    replacement.deleteLater()
+            state.chat_layout.insertWidget(layout_index, top_level)
+            top_level.show()
+            state.render_items = original_render_items
+            state.displayed_render_count = original_displayed_render_count
+            state.render_nodes = original_render_nodes
+            state.render_node_by_message_id = original_render_node_by_message_id
+            state.history_office_cards = original_history_office_cards
+            self.add_system_toast(
+                f"删除消息失败：{exc}",
+                "error",
+                session_id=session_id,
+                auto_close_ms=5000,
+            )
+            log_ui_navigation(
+                "history_rewrite_rolled_back",
+                session_id=session_id,
+                message_id=message_id,
+                operation="delete",
+                error=str(exc),
+            )
+            return False
+        top_level.deleteLater()
+        log_ui_navigation(
+            "history_rewrite_committed",
+            session_id=session_id,
+            message_id=message_id,
+            target_index=target_index,
+            operation="delete",
+        )
         self.refresh_history_list()
         self.add_system_toast("已删除消息，后续内容保持不变。", "success", session_id=session_id, auto_close_ms=3200)
         if hasattr(self, "input_field") and self.input_field:
@@ -22128,6 +22861,7 @@ class MainWindow(QMainWindow):
         chat_scroll = QScrollArea()
         chat_scroll.setObjectName("ChatScrollArea")
         chat_scroll.setWidgetResizable(True)
+        chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         chat_scroll.setStyleSheet(
             f"QScrollArea#ChatScrollArea {{ border: none; background: transparent; }}"
             f"QScrollArea#ChatScrollArea QScrollBar:vertical {{ width: 16px; background: transparent; margin: 0; }}"
@@ -22197,11 +22931,21 @@ class MainWindow(QMainWindow):
         return session_id
 
     def _reset_session_history_state(self, state):
+        loading_widget = getattr(state, "history_loading_widget", None)
+        if loading_widget is not None and _qt_object_alive(loading_widget):
+            state.chat_layout.removeWidget(loading_widget)
+            loading_widget.setParent(None)
         self.clear_chat_layout(state.chat_layout)
+        if loading_widget is not None and _qt_object_alive(loading_widget):
+            state.chat_layout.insertWidget(0, loading_widget)
         state.empty_state = None
         state.prompt_files = []
         state.messages = []
         state.render_items = []
+        state.render_nodes = {}
+        state.render_node_by_message_id = {}
+        state.history_detail_summaries = []
+        state.history_office_cards = []
         state.tool_cards = {}
         state.pending_tool_results = {}
         state.current_content_buffer = ""
@@ -22228,6 +22972,7 @@ class MainWindow(QMainWindow):
         state.displayed_count = 0
         state.displayed_render_count = 0
         state.load_more_btn = None
+        state.history_page_loading = False
         state.clarify_mode_enabled = False
         state.clarify_phase = CLARIFY_MODE_DISABLED
         state.clarify_mode_state = CLARIFY_MODE_EXPLORING
@@ -22275,6 +23020,7 @@ class MainWindow(QMainWindow):
             layout.addWidget(bar)
         layout.addStretch()
         state.chat_layout.insertWidget(0, wrapper)
+        state.history_loading_widget = wrapper
 
     def _show_session_load_error_state(self, state, text):
         self.clear_chat_layout(state.chat_layout)
@@ -22305,6 +23051,427 @@ class MainWindow(QMainWindow):
         added = max(0, total - int(previous_render_total or 0))
         state.displayed_render_count = min(total, previous + added)
 
+    def _register_render_node(self, state, widget, messages, start, end, key=""):
+        if not state or widget is None:
+            return
+        message_ids = [
+            str(message.get("id") or "")
+            for message in messages or []
+            if isinstance(message, dict) and str(message.get("id") or "")
+        ]
+        if not key:
+            first_id = message_ids[0] if message_ids else str(start)
+            last_id = message_ids[-1] if message_ids else str(end)
+            key = f"span:{first_id}:{last_id}"
+        node = {
+            "key": key,
+            "widget": widget,
+            "start": int(start),
+            "end": int(end),
+            "message_ids": message_ids,
+            "tool_call_ids": [
+                str(tool_call.get("id") or "")
+                for message in messages or []
+                if isinstance(message, dict)
+                for tool_call in (message.get("tool_calls") or [])
+                if isinstance(tool_call, dict) and str(tool_call.get("id") or "")
+            ],
+            "kind": str(key).split(":", 1)[0],
+            "owner_id": str(key).split(":", 1)[1] if ":" in str(key) else str(key),
+            "details_materialized": not isinstance(widget, HistoricalAssistantSummary),
+        }
+        state.render_nodes[key] = node
+        for message_id in message_ids:
+            state.render_node_by_message_id[message_id] = node
+
+    def _top_level_chat_widget(self, state, widget):
+        current = widget
+        while current is not None:
+            if state.chat_layout.indexOf(current) >= 0:
+                return current
+            current = current.parentWidget()
+        return None
+
+    def _history_process_batches(self, messages, final_message):
+        process_messages = []
+        final_id = str((final_message or {}).get("id") or "")
+        for message in messages or []:
+            if not isinstance(message, dict) or is_same_turn_guidance_message(message):
+                continue
+            if str(message.get("id") or "") == final_id:
+                reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+                tool_calls = message.get("tool_calls") or []
+                if reasoning or tool_calls:
+                    clone = copy.deepcopy(message)
+                    clone["content"] = ""
+                    clone.setdefault("meta", {})["ui_reply_kind"] = "stage"
+                    process_messages.append(clone)
+                continue
+            process_messages.append(copy.deepcopy(message))
+
+        batches = []
+        current = []
+        assistant_count = 0
+        for message in process_messages:
+            if message.get("role") == "assistant" and assistant_count >= 2 and current:
+                batches.append(current)
+                current = []
+                assistant_count = 0
+            current.append(message)
+            if message.get("role") == "assistant":
+                assistant_count += 1
+        if current:
+            batches.append(current)
+        return batches
+
+    def _render_history_assistant_summary(self, state, messages, start, end, insert_index=None):
+        assistant_messages = [
+            message for message in messages
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        ]
+        final_message = None
+        for message in reversed(assistant_messages):
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            if meta.get("ui_reply_kind") == "final" and str(message.get("content") or "").strip():
+                final_message = message
+                break
+        if final_message is None:
+            final_message = next(
+                (
+                    message for message in reversed(assistant_messages)
+                    if str(message.get("content") or "").strip() and not message.get("tool_calls")
+                ),
+                None,
+            )
+        tool_count = sum(len(message.get("tool_calls") or []) for message in assistant_messages)
+        process_stage_count = sum(
+            1 for message in assistant_messages
+            if message is not final_message
+            or message.get("reasoning_content")
+            or message.get("reasoning")
+            or message.get("tool_calls")
+        )
+        summary = HistoricalAssistantSummary(process_stage_count, tool_count)
+        summary.span_start = int(start)
+        summary.span_end = int(end)
+        summary.message_ids = [str(message.get("id") or "") for message in messages if message.get("id")]
+        summary.detail_batches = self._history_process_batches(messages, final_message)
+        summary.detailRequested.connect(
+            lambda checked, sid=state.session_id, widget=summary: self._toggle_history_details(sid, widget, checked)
+        )
+        target_index = state.chat_layout.count() - 1 if insert_index is None else int(insert_index)
+        state.chat_layout.insertWidget(target_index, summary)
+
+        for message in messages:
+            if not is_same_turn_guidance_message(message):
+                continue
+            self.add_turn_guidance_inline(
+                message,
+                display_content=self._message_display_content(message),
+                attachments=self._message_user_attachments(message),
+                status="applied",
+                session_id=state.session_id,
+                target_layout=summary.body_layout,
+            )
+
+        final_content = str((final_message or {}).get("content") or "")
+        if not final_content.strip():
+            final_content = "未收到最终答复：模型结束运行，但没有返回最终正文。"
+        final_bubble = self.add_chat_bubble(
+            "Agent",
+            "",
+            animate=False,
+            source_message_id=str((final_message or {}).get("id") or ""),
+            session_id=state.session_id,
+            target_layout=summary.body_layout,
+        )
+        if final_bubble is not None:
+            final_bubble.set_main_content(
+                final_content,
+                content_parts=(final_message or {}).get("content_parts")
+                if isinstance((final_message or {}).get("content_parts"), list) else None,
+                final=True,
+            )
+            final_bubble.update_thinking(duration=None, is_final=True)
+        group_id = next(
+            (
+                str((message.get("meta") or {}).get("ui_turn_group_id") or "")
+                for message in assistant_messages
+                if isinstance(message.get("meta"), dict)
+                and str((message.get("meta") or {}).get("ui_turn_group_id") or "")
+            ),
+            "",
+        )
+        span_ids = [
+            str(message.get("id") or "")
+            for message in messages
+            if message.get("id")
+        ]
+        node_key = (
+            f"assistant:{group_id}"
+            if group_id
+            else f"assistant:{span_ids[0] if span_ids else start}:{span_ids[-1] if span_ids else end}"
+        )
+        self._register_render_node(state, summary, messages, start, end, key=node_key)
+        state.render_nodes[node_key]["details_materialized"] = not bool(summary.detail_batches)
+        state.history_detail_summaries.append(summary)
+        return 1
+
+    def _render_history_office_summary(self, state, messages, start, end, insert_index=None):
+        request_message = messages[0]
+        card = self._create_office_draft_task_card(
+            state,
+            self._office_profile_label_from_message(request_message),
+            insert_index=insert_index,
+            running=False,
+            target_format=self._office_target_format_from_message(request_message),
+        )
+        assistant_text = "\n\n".join(
+            str(message.get("content") or "")
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        )
+        card.set_completed(self._collect_office_task_result_paths(state, content=assistant_text))
+        card._history_span_start = int(start)
+        card._history_span_end = int(end)
+        card._history_messages = copy.deepcopy(messages)
+        card._history_process_batches = []
+        current_batch = []
+        assistant_count = 0
+        for message in messages:
+            if message.get("role") == "assistant" and assistant_count >= 2 and current_batch:
+                card._history_process_batches.append(current_batch)
+                current_batch = []
+                assistant_count = 0
+            current_batch.append(copy.deepcopy(message))
+            if message.get("role") == "assistant":
+                assistant_count += 1
+        if current_batch:
+            card._history_process_batches.append(current_batch)
+        card._history_process_batch_index = 0
+        card._history_process_initialized = False
+        card._history_process_materialized = False
+        card._history_process_loading = False
+        card.toggle_btn.toggled.connect(
+            lambda checked, sid=state.session_id, widget=card: self._toggle_history_office_process(
+                sid, widget, checked
+            )
+        )
+        message_id = str(request_message.get("id") or "")
+        self._register_render_node(
+            state,
+            card,
+            messages,
+            start,
+            end,
+            key=f"office:{message_id}",
+        )
+        state.render_nodes[f"office:{message_id}"]["details_materialized"] = False
+        state.history_office_cards.append(card)
+        return 1
+
+    def _toggle_history_office_process(self, session_id, card, checked):
+        if not checked or card is None or not _qt_object_alive(card):
+            return
+        if bool(getattr(card, "_history_process_materialized", False)):
+            return
+        if bool(getattr(card, "_history_process_loading", False)):
+            return
+        card._history_process_loading = True
+        card.process_placeholder.setText("正在恢复历史执行过程…")
+        log_ui_navigation(
+            "history_details_expand_start",
+            session_id=session_id,
+            node_kind="office",
+            message_count=len(getattr(card, "_history_messages", []) or []),
+        )
+        QTimer.singleShot(
+            0,
+            lambda sid=session_id, widget=card: self._materialize_history_office_process(sid, widget),
+        )
+
+    def _materialize_history_office_process(self, session_id, card):
+        state = self.get_session(session_id)
+        if not state or card is None or not _qt_object_alive(card):
+            return
+        if str(session_id) != str(getattr(self, "current_session_id", "") or ""):
+            card._history_process_loading = False
+            return
+        try:
+            batches = list(getattr(card, "_history_process_batches", []) or [])
+            batch_index = int(getattr(card, "_history_process_batch_index", 0) or 0)
+            if batch_index >= len(batches):
+                card._history_process_materialized = True
+                card._history_process_loading = False
+                return
+            self.render_message_batch(
+                batches[batch_index],
+                session_id,
+                animate=False,
+                existing_office_card=card,
+            )
+            card._history_process_batch_index = batch_index + 1
+            log_ui_navigation(
+                "history_details_expand_progress",
+                session_id=session_id,
+                node_kind="office",
+                completed=card._history_process_batch_index,
+                total=len(batches),
+            )
+            if card._history_process_batch_index < len(batches):
+                QTimer.singleShot(
+                    0,
+                    lambda sid=session_id, widget=card: self._materialize_history_office_process(sid, widget),
+                )
+                return
+            card._history_process_materialized = True
+            card._history_process_loading = False
+            for node in state.render_nodes.values():
+                if node.get("widget") is card:
+                    node["details_materialized"] = True
+                    break
+            log_ui_navigation(
+                "history_details_expand_done",
+                session_id=session_id,
+                node_kind="office",
+            )
+        except Exception as exc:
+            card._history_process_loading = False
+            card.process_placeholder.setText(f"恢复失败：{exc}。收起后重新展开可重试。")
+            card.process_placeholder.show()
+            card.toggle_btn.setChecked(False)
+            log_ui_navigation(
+                "history_details_expand_error",
+                session_id=session_id,
+                node_kind="office",
+                error=str(exc),
+            )
+
+    def _toggle_history_details(self, session_id, summary, checked):
+        state = self.get_session(session_id)
+        if not state or summary is None:
+            return
+        for group in list(summary.detail_groups):
+            if _qt_object_alive(group):
+                group.setVisible(bool(checked))
+        if not checked or summary.detail_batch_index >= len(summary.detail_batches):
+            return
+        if summary.detail_loading:
+            return
+        summary.detail_loading = True
+        log_ui_navigation(
+            "history_details_expand_start",
+            session_id=session_id,
+            span_start=summary.span_start,
+            batch_count=len(summary.detail_batches),
+        )
+        QTimer.singleShot(0, lambda sid=session_id, widget=summary: self._render_next_history_detail_batch(sid, widget))
+
+    def _render_next_history_detail_batch(self, session_id, summary):
+        state = self.get_session(session_id)
+        if not state or summary is None or not _qt_object_alive(summary):
+            return
+        if str(session_id) != str(getattr(self, "current_session_id", "") or ""):
+            summary.detail_loading = False
+            return
+        if not summary.detail_button.isChecked():
+            summary.detail_loading = False
+            return
+        total = len(summary.detail_batches)
+        if summary.detail_batch_index >= total:
+            summary.set_complete()
+            for node in state.render_nodes.values():
+                if node.get("widget") is summary:
+                    node["details_materialized"] = True
+                    break
+            log_ui_navigation(
+                "history_details_expand_done",
+                session_id=session_id,
+                span_start=summary.span_start,
+                batch_count=total,
+            )
+            self.queue_session_bubble_virtualization(session_id)
+            return
+        batch = summary.detail_batches[summary.detail_batch_index]
+        try:
+            insert_index = state.chat_layout.indexOf(summary)
+            before_count = state.chat_layout.count()
+            previous_suppression = int(getattr(self, "_history_process_events_suppressed", 0) or 0)
+            self._history_process_events_suppressed = previous_suppression + 1
+            try:
+                self._render_unified_assistant_batch(
+                    batch,
+                    state,
+                    insert_index=insert_index,
+                    animate=False,
+                )
+            finally:
+                self._history_process_events_suppressed = previous_suppression
+            added = state.chat_layout.count() - before_count
+            for index in range(max(0, insert_index), max(0, insert_index + added)):
+                widget = state.chat_layout.itemAt(index).widget()
+                if widget is not None:
+                    summary.detail_groups.append(widget)
+            summary.detail_batch_index += 1
+            summary.set_progress(summary.detail_batch_index, total)
+            log_ui_navigation(
+                "history_details_expand_progress",
+                session_id=session_id,
+                span_start=summary.span_start,
+                completed=summary.detail_batch_index,
+                total=total,
+            )
+            if summary.detail_batch_index >= total:
+                summary.set_complete()
+                for node in state.render_nodes.values():
+                    if node.get("widget") is summary:
+                        node["details_materialized"] = True
+                        break
+                log_ui_navigation(
+                    "history_details_expand_done",
+                    session_id=session_id,
+                    span_start=summary.span_start,
+                    batch_count=total,
+                )
+                self.queue_session_bubble_virtualization(session_id)
+                return
+            QTimer.singleShot(0, lambda sid=session_id, widget=summary: self._render_next_history_detail_batch(sid, widget))
+        except Exception as exc:
+            summary.detail_loading = False
+            summary.set_error(str(exc))
+            log_ui_navigation(
+                "history_details_expand_error",
+                session_id=session_id,
+                span_start=summary.span_start,
+                error=str(exc),
+            )
+
+    def _render_history_span(self, state, span, insert_index=None):
+        start = int(span.get("start") or 0)
+        end = int(span.get("end") or start)
+        messages = state.messages[start:end]
+        if not messages:
+            return 0
+        if messages[0].get("role") == "user" and not self._message_is_office_draft_request(messages[0]):
+            before = state.chat_layout.count()
+            inserted = self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)
+            target_index = (state.chat_layout.count() - 2) if insert_index is None else int(insert_index)
+            widget = state.chat_layout.itemAt(target_index).widget() if state.chat_layout.count() > before else None
+            message_id = str(messages[0].get("id") or "")
+            self._register_render_node(state, widget, messages, start, end, key=f"user:{message_id}")
+            return int(inserted or 0)
+        if self._message_is_office_draft_request(messages[0]):
+            return self._render_history_office_summary(
+                state,
+                messages,
+                start,
+                end,
+                insert_index=insert_index,
+            )
+        if any(message.get("role") == "assistant" for message in messages):
+            return self._render_history_assistant_summary(state, messages, start, end, insert_index=insert_index)
+        return self.render_message_batch(messages, state.session_id, insert_index=insert_index, animate=False)
+
     def _render_session_history_spans(self, state, spans, insert_index=None):
         if not state or not spans:
             return 0
@@ -22312,43 +23479,85 @@ class MainWindow(QMainWindow):
         inserted_total = 0
         previous_history_rendering = bool(getattr(state, "rendering_history_bubbles", False))
         state.rendering_history_bubbles = True
+        previous_suppression = int(getattr(self, "_history_process_events_suppressed", 0) or 0)
+        self._history_process_events_suppressed = previous_suppression + 1
         try:
             for span in spans:
-                start = span.get("start", 0)
-                end = span.get("end", start)
+                start = int(span.get("start") or 0)
+                end = int(span.get("end") or start)
                 if end <= start:
                     continue
-                inserted = self.render_message_batch(
-                    state.messages[start:end],
-                    state.session_id,
-                    insert_index=current_index,
-                    animate=False,
-                )
+                inserted = self._render_history_span(state, span, insert_index=current_index)
                 inserted_total += int(inserted or 0)
                 if current_index is not None:
                     current_index += int(inserted or 0)
         finally:
+            self._history_process_events_suppressed = previous_suppression
             state.rendering_history_bubbles = previous_history_rendering
         return inserted_total
 
-    def _render_initial_session_history(self, state):
+    def _render_initial_session_history(self, state, completion=None):
         spans = getattr(state, "render_items", []) or []
         if not spans:
+            loading_widget = getattr(state, "history_loading_widget", None)
+            if loading_widget is not None and _qt_object_alive(loading_widget):
+                state.chat_layout.removeWidget(loading_widget)
+                loading_widget.deleteLater()
+            state.history_loading_widget = None
             empty_state = EmptyStateWidget(self)
             state.chat_layout.insertWidget(0, empty_state)
             state.empty_state = empty_state
             state.displayed_render_count = 0
+            if completion:
+                QTimer.singleShot(0, completion)
             return
         total = len(spans)
         start_idx = max(0, total - HISTORY_RENDER_PAGE_SIZE)
         initial_spans = spans[start_idx:]
         state.displayed_render_count = len(initial_spans)
-        inserted = self._render_session_history_spans(state, initial_spans)
-        if not inserted:
+        state.history_initial_render_queue = list(initial_spans)
+        state.history_initial_render_inserted = 0
+        state.history_page_loading = True
+        state.history_initial_render_started_at = time.perf_counter()
+        state.history_initial_render_completion = completion
+        QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_initial_history_span(sid))
+
+    def _render_next_initial_history_span(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        queue = getattr(state, "history_initial_render_queue", [])
+        if queue:
+            span = queue.pop(0)
+            state.history_initial_render_inserted += int(self._render_session_history_spans(state, [span]) or 0)
+            if int(state.history_initial_render_inserted or 0) > 0:
+                loading_widget = getattr(state, "history_loading_widget", None)
+                if loading_widget is not None and _qt_object_alive(loading_widget):
+                    state.chat_layout.removeWidget(loading_widget)
+                    loading_widget.deleteLater()
+                state.history_loading_widget = None
+            QTimer.singleShot(0, lambda sid=session_id: self._render_next_initial_history_span(sid))
+            return
+        state.history_page_loading = False
+        if not int(getattr(state, "history_initial_render_inserted", 0) or 0):
             empty_state = EmptyStateWidget(self)
             state.chat_layout.insertWidget(0, empty_state)
             state.empty_state = empty_state
-        self.queue_session_bubble_virtualization(state.session_id)
+        elapsed_ms = int(
+            (time.perf_counter() - float(getattr(state, "history_initial_render_started_at", time.perf_counter())))
+            * 1000
+        )
+        log_ui_navigation(
+            "history_initial_render_done",
+            session_id=session_id,
+            rendered_count=int(getattr(state, "history_initial_render_inserted", 0) or 0),
+            elapsed_ms=elapsed_ms,
+        )
+        self.queue_session_bubble_virtualization(session_id)
+        completion = getattr(state, "history_initial_render_completion", None)
+        state.history_initial_render_completion = None
+        if callable(completion):
+            completion()
 
     def activate_session(self, session_id, switch_tab=True, ensure_loaded=True):
         if getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION:
@@ -22380,6 +23589,22 @@ class MainWindow(QMainWindow):
             self.session_tabs.setCurrentIndex(index)
 
         self.set_current_session(session_id)
+        for summary in list(getattr(state, "history_detail_summaries", []) or []):
+            if (
+                _qt_object_alive(summary)
+                and summary.detail_button.isChecked()
+                and summary.detail_batch_index < len(summary.detail_batches)
+                and not summary.detail_loading
+            ):
+                self._toggle_history_details(session_id, summary, True)
+        for card in list(getattr(state, "history_office_cards", []) or []):
+            if (
+                _qt_object_alive(card)
+                and card.toggle_btn.isChecked()
+                and not bool(getattr(card, "_history_process_materialized", False))
+                and not bool(getattr(card, "_history_process_loading", False))
+            ):
+                self._toggle_history_office_process(session_id, card, True)
         if getattr(state, "drawer_open", False) and getattr(state, "drawer_tab", None) is not None:
             QTimer.singleShot(0, lambda tab=state.drawer_tab: self.show_context_drawer(tab))
         elif getattr(self, "right_drawer_open", False):
@@ -22432,22 +23657,54 @@ class MainWindow(QMainWindow):
         if not state or token != state.history_load_token:
             return
 
-        try:
-            conversation_meta = self.chat_storage.get_conversation_meta(session_id)
-            conversation_record = self.chat_storage.get_conversation_record(session_id)
-            loaded_messages = self.chat_storage.get_messages(session_id)
-            loaded_agents = self.chat_storage.list_agents(session_id)
-        except Exception as exc:
+        log_ui_navigation("history_load_start", session_id=session_id, token=token)
+        worker = SessionHistoryLoadWorker(self.chat_storage, session_id, token, self)
+        self._history_load_workers.add(worker)
+        worker.finished_signal.connect(self._handle_session_history_loaded)
+
+        def cleanup_worker():
+            self._history_load_workers.discard(worker)
+            worker.deleteLater()
+
+        worker.finished.connect(cleanup_worker)
+        worker.start()
+
+    def _handle_session_history_loaded(self, result):
+        session_id = str((result or {}).get("session_id") or "")
+        token = int((result or {}).get("token") or 0)
+        state = self.get_session(session_id)
+        if not state or token != state.history_load_token:
+            return
+        if not result.get("ok"):
+            exc = str(result.get("error") or "未知错误")
             state.history_loaded = False
             state.history_loading = False
             self._show_session_load_error_state(state, f"历史会话加载失败：{exc}")
             self.append_log(f"历史会话加载失败({session_id}): {exc}")
+            log_ui_navigation(
+                "history_load_error",
+                session_id=session_id,
+                token=token,
+                elapsed_ms=int(result.get("elapsed_ms") or 0),
+                error=exc,
+            )
             if session_id == self.current_session_id:
                 self.normalize_session_ui(state)
             return
 
-        if token != state.history_load_token:
-            return
+        conversation_meta = result.get("conversation_meta") or {}
+        conversation_record = result.get("conversation_record") or {}
+        loaded_messages = result.get("messages") or []
+        loaded_agents = result.get("agents") or []
+        loaded_spans = result.get("spans") or []
+        log_ui_navigation(
+            "history_load_io_done",
+            session_id=session_id,
+            token=token,
+            elapsed_ms=int(result.get("elapsed_ms") or 0),
+            message_count=len(loaded_messages),
+            span_count=len(loaded_spans),
+        )
 
         self._reset_session_history_state(state)
         state.messages = loaded_messages
@@ -22513,8 +23770,18 @@ class MainWindow(QMainWindow):
                 state.messages,
                 existing_meta=conversation_meta
             )
-        self._rebuild_session_render_spans(state)
-        self._render_initial_session_history(state)
+        state.render_items = loaded_spans
+        state.displayed_count = len(state.messages)
+        state.displayed_render_count = 0
+        self._render_initial_session_history(
+            state,
+            completion=lambda sid=session_id, load_token=token: self._complete_session_history_render(sid, load_token),
+        )
+
+    def _complete_session_history_render(self, session_id, token):
+        state = self.get_session(session_id)
+        if not state or int(token or 0) != int(getattr(state, "history_load_token", 0) or 0):
+            return
         if state.ui_timeline_warning:
             self.add_system_toast(
                 "部分对话过程无法按原顺序恢复，已按会话消息显示。",
@@ -24138,6 +25405,9 @@ class MainWindow(QMainWindow):
             widget = item.widget() if item is not None else None
             if isinstance(widget, ChatBubble):
                 widgets.append(widget)
+                continue
+            if isinstance(widget, (AssistantTurnGroup, HistoricalAssistantSummary)):
+                widgets.extend(widget.findChildren(ChatBubble))
         return widgets
 
     def virtualize_session_bubbles(self, session_id=None):
@@ -24168,13 +25438,19 @@ class MainWindow(QMainWindow):
 
         any_virtualized = False
         for index, bubble in enumerate(bubbles):
-            widget_top = bubble.y()
+            try:
+                widget_top = bubble.mapTo(viewport, QPoint(0, 0)).y() + int(vbar.value())
+            except RuntimeError:
+                continue
             widget_height = max(bubble.height(), bubble.sizeHint().height(), 1)
             widget_bottom = widget_top + widget_height
             intersects_viewport = widget_bottom >= int(vbar.value()) and widget_top <= int(vbar.value()) + int(viewport.height())
             layout_unstable = widget_height <= 32 or widget_top == 0
             if (
                 id(bubble) in active_bubbles
+                or bool(getattr(bubble, "edit_controls", None) and bubble.edit_controls.isVisible())
+                or isinstance(bubble.parentWidget(), HistoricalAssistantSummary)
+                and bool(getattr(bubble.parentWidget(), "detail_loading", False))
                 or index < head_keep
                 or index >= last_tail_index
                 or intersects_viewport
@@ -24241,26 +25517,83 @@ class MainWindow(QMainWindow):
         total = len(state.render_items or [])
         remaining = total - state.displayed_render_count
         if remaining <= 0: return
+        count_to_load = min(HISTORY_RENDER_PAGE_SIZE, remaining)
+        start_idx = total - state.displayed_render_count - count_to_load
+        end_idx = total - state.displayed_render_count
+        spans_to_load = list(state.render_items[start_idx:end_idx])
+        vbar = state.chat_scroll.verticalScrollBar()
+        anchor_widget = None
+        anchor_offset = 0
+        viewport = state.chat_scroll.viewport()
+        for index in range(state.chat_layout.count() - 1):
+            widget = state.chat_layout.itemAt(index).widget()
+            if widget is None or not _qt_object_alive(widget) or not widget.isVisible():
+                continue
+            try:
+                offset = widget.mapTo(viewport, QPoint(0, 0)).y()
+            except RuntimeError:
+                continue
+            if offset + max(widget.height(), widget.sizeHint().height(), 1) > 0:
+                anchor_widget = widget
+                anchor_offset = int(offset)
+                break
         state.auto_loading_history = True
-        try:
-            count_to_load = min(HISTORY_RENDER_PAGE_SIZE, remaining)
-            start_idx = total - state.displayed_render_count - count_to_load
-            end_idx = total - state.displayed_render_count
-            spans_to_load = state.render_items[start_idx:end_idx]
-            vbar = state.chat_scroll.verticalScrollBar()
-            old_max = vbar.maximum()
-            old_val = vbar.value()
-            self._render_session_history_spans(state, spans_to_load, insert_index=0)
-            self.process_ui_events(force=True)
-            new_max = vbar.maximum()
-            if old_val <= 5:
-                vbar.setValue(0)
-            else:
-                vbar.setValue(old_val + (new_max - old_max))
-            state.displayed_render_count += len(spans_to_load)
-            self.queue_session_bubble_virtualization(state.session_id)
-        finally:
-            state.auto_loading_history = False
+        state.history_page_loading = True
+        state.history_page_queue = spans_to_load
+        state.history_page_insert_index = 0
+        state.history_page_old_max = vbar.maximum()
+        state.history_page_old_value = vbar.value()
+        state.history_page_anchor_widget = anchor_widget
+        state.history_page_anchor_offset = anchor_offset
+        state.displayed_render_count += len(spans_to_load)
+        QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_history_page_span(sid))
+
+    def _render_next_history_page_span(self, session_id):
+        state = self.get_session(session_id)
+        if not state:
+            return
+        queue = getattr(state, "history_page_queue", [])
+        if queue:
+            span = queue.pop(0)
+            try:
+                inserted = int(
+                    self._render_session_history_spans(
+                        state,
+                        [span],
+                        insert_index=int(getattr(state, "history_page_insert_index", 0) or 0),
+                    ) or 0
+                )
+                state.history_page_insert_index += inserted
+                bar = state.chat_scroll.verticalScrollBar()
+                anchor_widget = getattr(state, "history_page_anchor_widget", None)
+                if anchor_widget is not None and _qt_object_alive(anchor_widget):
+                    current_offset = anchor_widget.mapTo(
+                        state.chat_scroll.viewport(), QPoint(0, 0)
+                    ).y()
+                    bar.setValue(
+                        bar.value()
+                        + int(current_offset)
+                        - int(getattr(state, "history_page_anchor_offset", 0) or 0)
+                    )
+            except Exception as exc:
+                unrendered = len(queue) + 1
+                state.displayed_render_count = max(0, state.displayed_render_count - unrendered)
+                state.history_page_queue = []
+                state.auto_loading_history = False
+                state.history_page_loading = False
+                self.add_system_toast(
+                    f"历史消息加载失败：{exc}",
+                    "error",
+                    session_id=session_id,
+                    auto_close_ms=6000,
+                )
+                log_ui_navigation("history_load_error", session_id=session_id, stage="page", error=str(exc))
+                return
+            QTimer.singleShot(0, lambda sid=session_id: self._render_next_history_page_span(sid))
+            return
+        state.auto_loading_history = False
+        state.history_page_loading = False
+        self.queue_session_bubble_virtualization(session_id)
 
     def _render_persisted_timeline_items(self, render_items, state, insert_index=None, animate=True):
         """Project a guided turn back into natural conversational order."""
@@ -24739,7 +26072,14 @@ class MainWindow(QMainWindow):
                 state.last_agent_bubble = backup_last_agent
             state.active_agent_turn_group = backup_group
 
-    def render_message_batch(self, messages, session_id, insert_index=None, animate=True):
+    def render_message_batch(
+        self,
+        messages,
+        session_id,
+        insert_index=None,
+        animate=True,
+        existing_office_card=None,
+    ):
         state = self.get_session(session_id)
         if not state: return 0
         
@@ -24769,24 +26109,31 @@ class MainWindow(QMainWindow):
         state.last_agent_bubble = None
         office_card = None
         target_layout = None
-        if messages and self._message_is_office_draft_request(messages[0]):
-            office_card = self._create_office_draft_task_card(
-                state,
-                self._office_profile_label_from_message(messages[0]),
-                insert_index=current_idx,
-                running=False,
-                target_format=self._office_target_format_from_message(messages[0]),
-            )
+        if existing_office_card is not None or (
+            messages and self._message_is_office_draft_request(messages[0])
+        ):
+            office_card = existing_office_card
+            if office_card is None:
+                office_card = self._create_office_draft_task_card(
+                    state,
+                    self._office_profile_label_from_message(messages[0]),
+                    insert_index=current_idx,
+                    running=False,
+                    target_format=self._office_target_format_from_message(messages[0]),
+                )
             target_layout = office_card.process_layout if office_card is not None else None
-            self._initialize_office_task_process(
-                office_card,
-                state,
-                messages[0],
-                runtime_note="已从会话记录恢复对话过程。",
-            )
-            inserted_count += 1
-            if current_idx is not None:
-                current_idx += 1
+            if not bool(getattr(office_card, "_history_process_initialized", False)):
+                self._initialize_office_task_process(
+                    office_card,
+                    state,
+                    messages[0] if messages and messages[0].get("role") == "user" else None,
+                    runtime_note="已从会话记录恢复对话过程。",
+                )
+                office_card._history_process_initialized = True
+            if existing_office_card is None:
+                inserted_count += 1
+                if current_idx is not None:
+                    current_idx += 1
         active_agent_bubble = None
         pending_content_parts = []
         pending_struct_parts = []
@@ -26765,7 +28112,7 @@ class MainWindow(QMainWindow):
         self.product_pages[route] = page
         return page
 
-    def _ensure_product_page(self, route):
+    def _ensure_product_page(self, route, section=None):
         page = self.product_pages.get(route)
         if page is not None and _qt_object_alive(page):
             return page
@@ -26778,7 +28125,7 @@ class MainWindow(QMainWindow):
         elif route == self.PAGE_AUTOMATION:
             page = AutomationDialog(self.config_manager, self)
         elif route == self.PAGE_SETTINGS:
-            page = SettingsDialog(self.config_manager, self)
+            page = SettingsDialog(self.config_manager, self, initial_page_label=section)
         else:
             return self.conversation_page
         return self._prepare_embedded_product_page(page, route)
@@ -26984,7 +28331,7 @@ class MainWindow(QMainWindow):
                 "drawer_tab": getattr(self, "right_drawer_tab", self.RIGHT_TAB_FILES),
                 "input_had_focus": bool(getattr(self, "input_field", None) and self.input_field.hasFocus()),
             }
-        page = self._ensure_product_page(route)
+        page = self._ensure_product_page(route, section=section)
         if page is None:
             return False
         if getattr(self, "right_drawer_open", False):
@@ -30158,6 +31505,28 @@ class MainWindow(QMainWindow):
                 layout.insertWidget(layout.count() - 1, bubble)
             else:
                 layout.addWidget(bubble)
+        if (
+            layout is state.chat_layout
+            and str(role or "").strip().lower() == "user"
+            and str(source_message_id or "").strip()
+        ):
+            top_level = self._top_level_chat_widget(state, bubble)
+            if top_level is not None:
+                message_index = next(
+                    (
+                        index for index, message in enumerate(state.messages)
+                        if str(message.get("id") or "") == str(source_message_id)
+                    ),
+                    max(0, len(state.messages) - 1),
+                )
+                self._register_render_node(
+                    state,
+                    top_level,
+                    [self._find_message_by_id(state.messages, source_message_id) or {"id": source_message_id}],
+                    message_index,
+                    message_index + 1,
+                    key=f"user:{source_message_id}",
+                )
         self.process_ui_events(force=False)
         
         # Keep latest message in view when appending.

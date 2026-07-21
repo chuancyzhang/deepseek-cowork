@@ -932,7 +932,7 @@ class TestDeliverableScanning(unittest.TestCase):
             (),
             {
                 "session_id": "session-1",
-                "messages": [{"role": "assistant", "content": "report.pdf"}],
+                "messages": [{"role": "system", "content": "report.pdf"}],
                 "rendering_history_bubbles": False,
             },
         )()

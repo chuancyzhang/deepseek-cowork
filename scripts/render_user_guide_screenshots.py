@@ -108,6 +108,101 @@ def render_assistant_turn_screens(window):
     save_widget(window, "38-guidance-timeline.png", 220)
 
 
+def render_history_performance_screens(window):
+    state = window.get_current_session()
+    window.clear_chat_layout(state.chat_layout)
+    state.empty_state = None
+    messages = [
+        {
+            "id": "history-guide-user",
+            "role": "user",
+            "content": "请分析这份长报告，并给出可以直接执行的优化方案。",
+        }
+    ]
+    group_id = "history-guide-group"
+    for index in range(6):
+        messages.extend(
+            [
+                {
+                    "id": f"history-stage-{index}",
+                    "role": "assistant",
+                    "content": f"阶段 {index + 1} 已完成。",
+                    "reasoning_content": "正在核对数据、结构与约束。",
+                    "tool_calls": [
+                        {
+                            "id": f"history-tool-{index}",
+                            "function": {"name": "analyze_document", "arguments": "{}"},
+                        }
+                    ],
+                    "meta": {
+                        "ui_turn_group_id": group_id,
+                        "ui_stage_id": f"{group_id}:{index}",
+                        "ui_reply_kind": "stage",
+                    },
+                },
+                {
+                    "id": f"history-result-{index}",
+                    "role": "tool",
+                    "tool_call_id": f"history-tool-{index}",
+                    "content": "检查完成",
+                },
+            ]
+        )
+    messages.append(
+        {
+            "id": "history-guide-final",
+            "role": "assistant",
+            "content": (
+                "## 优化结论\n\n"
+                "长历史已经改为**答案优先、执行详情按需加载**。"
+                "打开会话时先呈现最终结果，需要时再展开完整过程。"
+            ),
+            "meta": {
+                "ui_turn_group_id": group_id,
+                "ui_stage_id": f"{group_id}:final",
+                "ui_reply_kind": "final",
+            },
+        }
+    )
+    state.messages = messages
+    state.render_items = main.build_conversation_render_spans(messages)
+    state.displayed_render_count = len(state.render_items)
+    window._render_session_history_spans(state, state.render_items)
+    save_widget(window, "s37-history-on-demand.png", 260)
+
+    window.component_task_manager._component_statuses = {
+        "browser-skill": {
+            "known": True,
+            "installed": True,
+            "state_text": "已安装，等待用户检查连接",
+            "updated_at": 1784563200,
+        },
+        "node": {
+            "known": True,
+            "installed": True,
+            "version": "v24.14.1",
+            "updated_at": 1784563200,
+        },
+        "documents": {
+            "known": True,
+            "installed": True,
+            "healthy": True,
+            "size": 128 * 1024 * 1024,
+            "updated_at": 1784563200,
+        },
+    }
+    original_start_app_update = main.SettingsDialog.start_app_update
+    main.SettingsDialog.start_app_update = lambda *_args, **_kwargs: None
+    try:
+        window.open_settings("组件与依赖")
+    finally:
+        main.SettingsDialog.start_app_update = original_start_app_update
+    settings = window.product_pages[window.PAGE_SETTINGS]
+    settings._automatic_update_check_started = True
+    settings.components_scroll_area.ensureWidgetVisible(settings.browser_skill_component_section, 24, 24)
+    save_widget(window, "s38-component-status-cache.png", 260)
+
+
 def select_settings_page(dialog, label):
     for row in range(dialog.nav_list.count()):
         if dialog.nav_list.item(row).text() == label:
@@ -363,6 +458,9 @@ def main_run():
             return
         if SCREENSHOT_SCOPE == "assistant-turn":
             render_assistant_turn_screens(window)
+            return
+        if SCREENSHOT_SCOPE == "history-performance":
+            render_history_performance_screens(window)
             return
         save_widget(window, "04-home-screen.png", 250)
         model_style = window.model_select_btn.styleSheet()

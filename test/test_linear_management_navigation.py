@@ -79,6 +79,18 @@ class LinearManagementNavigationTests(unittest.TestCase):
         self.assertFalse(page.nav_combo.isHidden())
         self.assertTrue(page.nav_list.isHidden())
 
+    def test_opening_settings_does_not_probe_runtime_components(self):
+        with (
+            patch("main.toolkit_status", side_effect=AssertionError("toolkit status probed")),
+            patch("main.node_runtime_status", side_effect=AssertionError("node status probed")),
+            patch("main.browser_skill_status", side_effect=AssertionError("browser status probed")),
+        ):
+            self.assertTrue(self.window.open_settings("组件与依赖"))
+        page = self.window.product_pages["settings"]
+        self.assertTrue(
+            all(row["status"].text() for row in page.component_rows.values())
+        )
+
     def test_skill_wizard_preserves_message_origin_selection(self):
         messages = [
             {"id": "u1", "role": "user", "content": "整理这个流程"},

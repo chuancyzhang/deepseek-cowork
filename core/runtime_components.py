@@ -223,7 +223,7 @@ def _directory_size(path):
     return total
 
 
-def toolkit_status(toolkit_id):
+def toolkit_status(toolkit_id, include_size=False):
     spec = TOOLKITS[toolkit_id]
     root = os.path.dirname(toolkit_path(toolkit_id))
     marker = _read_toolkit_marker(toolkit_id)
@@ -252,7 +252,7 @@ def toolkit_status(toolkit_id):
         "health_error": health_error,
         "missing_packages": missing_packages if installed else [],
         "source": marker.get("source") or "",
-        "size": _directory_size(root),
+        "size": _directory_size(root) if include_size else 0,
     }
 
 
@@ -452,7 +452,7 @@ def install_toolkit(toolkit_id, python_source, progress_callback=None, force=Fal
     finally:
         if staged_root and os.path.isdir(staged_root):
             shutil.rmtree(staged_root, ignore_errors=True)
-    return toolkit_status(toolkit_id)
+    return toolkit_status(toolkit_id, include_size=True)
 
 
 def uninstall_toolkit(toolkit_id):
@@ -461,7 +461,7 @@ def uninstall_toolkit(toolkit_id):
     root = os.path.dirname(toolkit_path(toolkit_id))
     if os.path.isdir(root):
         shutil.rmtree(root)
-    return toolkit_status(toolkit_id)
+    return toolkit_status(toolkit_id, include_size=True)
 
 
 def node_runtime_status():

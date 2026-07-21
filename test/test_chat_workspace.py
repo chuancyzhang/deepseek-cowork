@@ -236,7 +236,7 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
                 workspace_dir=os.path.normpath(os.path.abspath(project_b))
             )
 
-    def test_rewritten_long_history_renders_only_initial_page(self):
+    def test_legacy_full_history_rewrite_is_explicitly_disabled(self):
         window = MainWindow.__new__(MainWindow)
         window.chat_storage = MagicMock()
         window.chat_storage.normalize_messages.side_effect = lambda messages: messages
@@ -249,32 +249,11 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             for index in range(HISTORY_RENDER_PAGE_SIZE + 5)
         ]
 
-        window._render_rewritten_session(state, messages)
+        with self.assertRaisesRegex(RuntimeError, "全量历史重写已禁用"):
+            window._render_rewritten_session(state, messages)
 
-        rendered_spans = window._render_session_history_spans.call_args.args[1]
-        self.assertEqual(len(rendered_spans), HISTORY_RENDER_PAGE_SIZE)
-        self.assertEqual(state.displayed_render_count, HISTORY_RENDER_PAGE_SIZE)
-        self.assertEqual(state.messages, messages)
-
-    def test_rewritten_short_history_renders_all_spans(self):
-        window = MainWindow.__new__(MainWindow)
-        window.chat_storage = MagicMock()
-        window.chat_storage.normalize_messages.side_effect = lambda messages: messages
-        window.clear_chat_layout = MagicMock()
-        window._render_session_history_spans = MagicMock()
-        window.queue_session_bubble_virtualization = MagicMock()
-        state = _State("session-1")
-        messages = [
-            {"id": f"u{index}", "role": "user", "content": f"message {index}"}
-            for index in range(3)
-        ]
-
-        window._render_rewritten_session(state, messages)
-
-        rendered_spans = window._render_session_history_spans.call_args.args[1]
-        self.assertEqual(len(rendered_spans), 3)
-        self.assertEqual(state.displayed_render_count, 3)
-
+        window.clear_chat_layout.assert_not_called()
+        window._render_session_history_spans.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QPushButton, QToolButton, QWidget
 
@@ -17,7 +17,14 @@ from main import (
     SessionSkillCaptureIndicator,
     parse_tool_arguments,
 )
-from ui.primitives import ProductCodeViewer, ProductResultViewer, ProductSegmentedControl, SidebarInlineNameEditor
+from core.theme import DesignTokens
+from ui.primitives import (
+    ProductCodeViewer,
+    ProductGrabScrollBar,
+    ProductResultViewer,
+    ProductSegmentedControl,
+    SidebarInlineNameEditor,
+)
 
 
 class MainWorkspaceLinearTests(unittest.TestCase):
@@ -51,6 +58,7 @@ class MainWorkspaceLinearTests(unittest.TestCase):
     def test_chat_scroll_drag_pauses_and_recomputes_auto_scroll(self):
         state = self.window.get_current_session()
         bar = state.chat_scroll.verticalScrollBar()
+        self.assertIsInstance(bar, ProductGrabScrollBar)
         bar.setRange(0, 100)
         bar.setValue(20)
         self.window.on_chat_scroll_drag_started(state.session_id)
@@ -62,6 +70,55 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         bar.setValue(100)
         self.window.on_chat_scroll_drag_finished(state.session_id)
         self.assertTrue(state.auto_scroll_enabled)
+
+    def test_chat_scrollbar_uses_thin_visual_and_forgiving_drag_target(self):
+        bar = ProductGrabScrollBar(Qt.Vertical)
+        bar.setRange(0, 1000)
+        bar.setPageStep(200)
+        bar.setValue(500)
+        bar.resize(14, 600)
+        bar.show()
+        self.app.processEvents()
+
+        self.assertEqual(bar.sizeHint().width(), 14)
+        self.assertIn("margin: 1px 3px", bar.styleSheet())
+        handle = bar._slider_rect()
+        pressed = []
+        released = []
+        bar.sliderPressed.connect(lambda: pressed.append(True))
+        bar.sliderReleased.connect(lambda: released.append(True))
+
+        edge = handle.center()
+        edge.setX(0)
+        QTest.mouseMove(bar, edge)
+        self.assertEqual(bar.cursor().shape(), Qt.OpenHandCursor)
+        QTest.mousePress(bar, Qt.LeftButton, pos=edge)
+        self.assertTrue(bar.isSliderDown())
+        self.assertEqual(bar.cursor().shape(), Qt.ClosedHandCursor)
+        QTest.mouseMove(bar, edge + QPoint(0, 40), delay=1)
+        QTest.mouseRelease(bar, Qt.LeftButton, pos=edge + QPoint(0, 40))
+        self.assertGreater(bar.value(), 500)
+        self.assertEqual(pressed, [True])
+        self.assertEqual(released, [True])
+
+        bar.setValue(500)
+        handle = bar._slider_rect()
+        near_handle = QPoint(handle.center().x(), min(bar.height() - 1, handle.bottom() + 4))
+        QTest.mousePress(bar, Qt.LeftButton, pos=near_handle)
+        self.assertTrue(bar.isSliderDown())
+        QTest.mouseRelease(bar, Qt.LeftButton, pos=near_handle)
+        bar.close()
+
+    def test_chat_scrollbar_theme_refresh_updates_visual_and_hit_widths(self):
+        bar = ProductGrabScrollBar(Qt.Vertical)
+        with patch.object(DesignTokens, "chat_scrollbar_visual_width", 6), patch.object(
+            DesignTokens, "chat_scrollbar_hit_width", 18
+        ):
+            bar.refresh_theme()
+            self.assertIn("width: 18px", bar.styleSheet())
+            self.assertIn("margin: 1px 6px", bar.styleSheet())
+            self.assertEqual(bar.sizeHint().width(), 18)
+        bar.close()
 
     def test_pending_skill_draft_is_owned_by_its_session(self):
         first = self.window.get_current_session()

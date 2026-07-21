@@ -75,6 +75,7 @@ from ui.primitives import (
     ProductNavigationRow,
     ProductPageHeader,
     ProductPopover,
+    ProductGrabScrollBar,
     ProductActionRow,
     ProductSegmentedControl,
     ProductSection,
@@ -22862,17 +22863,9 @@ class MainWindow(QMainWindow):
         chat_scroll.setObjectName("ChatScrollArea")
         chat_scroll.setWidgetResizable(True)
         chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        chat_scroll.setVerticalScrollBar(ProductGrabScrollBar(Qt.Vertical, chat_scroll))
         chat_scroll.setStyleSheet(
             f"QScrollArea#ChatScrollArea {{ border: none; background: transparent; }}"
-            f"QScrollArea#ChatScrollArea QScrollBar:vertical {{ width: 16px; background: transparent; margin: 0; }}"
-            f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical {{ background: {DesignTokens.border_strong}; "
-            f"min-height: 44px; border-radius: 7px; margin: 1px; }}"
-            f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical:hover {{ background: {DesignTokens.text_tertiary}; }}"
-            f"QScrollArea#ChatScrollArea QScrollBar::handle:vertical:pressed {{ background: {DesignTokens.primary}; }}"
-            "QScrollArea#ChatScrollArea QScrollBar::add-line:vertical, "
-            "QScrollArea#ChatScrollArea QScrollBar::sub-line:vertical { height: 0; }"
-            "QScrollArea#ChatScrollArea QScrollBar::add-page:vertical, "
-            "QScrollArea#ChatScrollArea QScrollBar::sub-page:vertical { background: transparent; }"
         )
         chat_container = QWidget()
         chat_container.setStyleSheet("background: transparent;")

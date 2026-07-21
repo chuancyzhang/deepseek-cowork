@@ -24,8 +24,11 @@ from PySide6.QtWidgets import (
     QPushButton,
     QButtonGroup,
     QScrollArea,
+    QScrollBar,
     QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyleOptionSlider,
     QToolButton,
     QSizePolicy,
     QVBoxLayout,
@@ -33,6 +36,121 @@ from PySide6.QtWidgets import (
 )
 
 from core.theme import DesignTokens, bind_theme
+
+
+class ProductGrabScrollBar(QScrollBar):
+    """A visually light scrollbar with a forgiving, explicit drag target."""
+
+    def __init__(self, orientation=Qt.Vertical, parent=None):
+        super().__init__(orientation, parent)
+        self.setObjectName("ProductGrabScrollBar")
+        self.setMouseTracking(True)
+        self._product_dragging = False
+        self._drag_anchor_coordinate = 0.0
+        self._drag_anchor_position = 0
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        visual_width = max(1, int(DesignTokens.chat_scrollbar_visual_width))
+        hit_width = max(visual_width, int(DesignTokens.chat_scrollbar_hit_width))
+        side_margin = max(0, (hit_width - visual_width) // 2)
+        radius = max(1, visual_width // 2)
+        self.setStyleSheet(
+            f"QScrollBar#ProductGrabScrollBar:vertical {{ width: {hit_width}px; background: transparent; "
+            "border: none; margin: 0; }}"
+            f"QScrollBar#ProductGrabScrollBar::handle:vertical {{ background: {DesignTokens.scrollbar_thumb}; "
+            f"min-height: 44px; border-radius: {radius}px; margin: 1px {side_margin}px; }}"
+            f"QScrollBar#ProductGrabScrollBar::handle:vertical:hover {{ background: {DesignTokens.scrollbar_thumb_hover}; }}"
+            f"QScrollBar#ProductGrabScrollBar::handle:vertical:pressed {{ background: {DesignTokens.primary}; }}"
+            "QScrollBar#ProductGrabScrollBar::add-line:vertical, "
+            "QScrollBar#ProductGrabScrollBar::sub-line:vertical { height: 0; background: transparent; }"
+            "QScrollBar#ProductGrabScrollBar::add-page:vertical, "
+            "QScrollBar#ProductGrabScrollBar::sub-page:vertical { background: transparent; }"
+        )
+
+    def _slider_rect(self):
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        return self.style().subControlRect(
+            QStyle.CC_ScrollBar,
+            option,
+            QStyle.SC_ScrollBarSlider,
+            self,
+        )
+
+    def _grab_rect(self):
+        padding = max(0, int(DesignTokens.chat_scrollbar_grab_padding))
+        rect = self._slider_rect()
+        if self.orientation() == Qt.Vertical:
+            rect.adjust(0, -padding, 0, padding)
+        else:
+            rect.adjust(-padding, 0, padding, 0)
+        return rect.intersected(self.rect())
+
+    def _event_coordinate(self, event):
+        position = event.position()
+        return position.y() if self.orientation() == Qt.Vertical else position.x()
+
+    def _update_hover_cursor(self, point):
+        if self._product_dragging:
+            self.setCursor(Qt.ClosedHandCursor)
+        elif self._grab_rect().contains(point):
+            self.setCursor(Qt.OpenHandCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._grab_rect().contains(event.position().toPoint()):
+            self._product_dragging = True
+            self._drag_anchor_coordinate = self._event_coordinate(event)
+            self._drag_anchor_position = self.sliderPosition()
+            self.setSliderDown(True)
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self._product_dragging:
+            self._update_hover_cursor(event.position().toPoint())
+            super().mouseMoveEvent(event)
+            return
+        option = QStyleOptionSlider()
+        self.initStyleOption(option)
+        groove = self.style().subControlRect(
+            QStyle.CC_ScrollBar,
+            option,
+            QStyle.SC_ScrollBarGroove,
+            self,
+        )
+        handle = self._slider_rect()
+        if self.orientation() == Qt.Vertical:
+            span = groove.height() - handle.height()
+        else:
+            span = groove.width() - handle.width()
+        value_span = self.maximum() - self.minimum()
+        if span > 0 and value_span > 0:
+            delta = self._event_coordinate(event) - self._drag_anchor_coordinate
+            if self.invertedAppearance():
+                delta = -delta
+            position = self._drag_anchor_position + int(round(delta * value_span / span))
+            self.setSliderPosition(max(self.minimum(), min(self.maximum(), position)))
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._product_dragging and event.button() == Qt.LeftButton:
+            self._product_dragging = False
+            self.setSliderDown(False)
+            self._update_hover_cursor(event.position().toPoint())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._product_dragging:
+            self.setCursor(Qt.ArrowCursor)
+        super().leaveEvent(event)
 
 
 class _ProductCodeHighlighter(QSyntaxHighlighter):

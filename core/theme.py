@@ -124,6 +124,9 @@ class DesignTokens:
     icon_size = 16
     icon_size_lg = 20
     scrollbar_width = 10
+    chat_scrollbar_visual_width = 8
+    chat_scrollbar_hit_width = 14
+    chat_scrollbar_grab_padding = 6
 
     font_size_caption = 11
     font_size_meta = 12

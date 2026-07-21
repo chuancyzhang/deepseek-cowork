@@ -249,7 +249,7 @@ import traceback
 import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
-                          QBrush, QPainterPath, QTextCursor, QPen, QPalette)
+                          QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
@@ -11265,6 +11265,38 @@ class ReadOnlyTextEdit(QTextEdit):
         populate_text_context_menu(menu, self)
         menu.exec(event.globalPos())
 
+
+def _forward_wheel_to_chat_scroll(widget, event):
+    """Route message-body wheel input to the single owning chat scroll area."""
+    parent = widget.parentWidget()
+    chat_scroll = None
+    while parent is not None:
+        if isinstance(parent, QScrollArea) and parent.objectName() == "ChatScrollArea":
+            chat_scroll = parent
+            break
+        parent = parent.parentWidget()
+    if chat_scroll is None:
+        event.ignore()
+        return
+
+    target = chat_scroll.viewport()
+    global_position = event.globalPosition()
+    local_position = QPointF(target.mapFromGlobal(global_position.toPoint()))
+    forwarded = QWheelEvent(
+        local_position,
+        global_position,
+        event.pixelDelta(),
+        event.angleDelta(),
+        event.buttons(),
+        event.modifiers(),
+        event.phase(),
+        event.inverted(),
+        event.source(),
+    )
+    QApplication.sendEvent(target, forwarded)
+    event.setAccepted(forwarded.isAccepted())
+
+
 class AutoResizingTextEdit(ReadOnlyTextEdit):
     linkActivated = Signal(str)
 
@@ -11291,6 +11323,9 @@ class AutoResizingTextEdit(ReadOnlyTextEdit):
         super().mouseReleaseEvent(event)
         if anchor and not self.textCursor().hasSelection():
             self.linkActivated.emit(anchor)
+
+    def wheelEvent(self, event):
+        _forward_wheel_to_chat_scroll(self, event)
 
     def scheduleAdjustHeight(self):
         if not _qt_object_alive(self):
@@ -11353,6 +11388,9 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
         self._height_adjust_pending = False
         self.textChanged.connect(self.scheduleAdjustHeight)
         self.setStyleSheet("background: transparent;")
+
+    def wheelEvent(self, event):
+        _forward_wheel_to_chat_scroll(self, event)
 
     def scheduleAdjustHeight(self):
         if not _qt_object_alive(self):

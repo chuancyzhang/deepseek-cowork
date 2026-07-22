@@ -36,7 +36,7 @@ from main import (
     ToolCallCard,
     launch_daemon_subprocess,
 )
-from ui.primitives import ProductActionRow, ProductPopover
+from ui.primitives import ProductActionRow, ProductEmptyState, ProductPopover
 
 
 class TopLevelShowTracker(QObject):
@@ -431,6 +431,29 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertFalse(label.isWindow())
             self.assertFalse(label.windowFlags() & Qt.Window)
         row.deleteLater()
+
+    def test_product_empty_state_never_shows_children_as_top_level_windows(self):
+        tracker = TopLevelShowTracker()
+        self.app.installEventFilter(tracker)
+        try:
+            empty_state = ProductEmptyState(
+                "还没有文件",
+                "选择工作区后，可以在这里查找文件并预览交付物。",
+                action_text="选择工作区",
+            )
+        finally:
+            self.app.removeEventFilter(tracker)
+
+        self.assertEqual(tracker.events, [])
+        children = [
+            empty_state.title_label,
+            empty_state.description_label,
+            empty_state.action_button,
+        ]
+        for child in children:
+            self.assertIs(child.parentWidget(), empty_state)
+            self.assertFalse(child.isWindow())
+        empty_state.deleteLater()
 
     def test_model_selection_updates_session_meta_and_refreshes_controls(self):
         state = SimpleNamespace(selected_model_id="model-a", persisted_conversation_meta={})

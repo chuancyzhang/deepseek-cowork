@@ -1537,7 +1537,7 @@ class ProductEmptyState(QFrame):
         layout.setAlignment(Qt.AlignCenter)
         self.icon_label = None
         if isinstance(icon, QIcon) and not icon.isNull():
-            self.icon_label = QLabel()
+            self.icon_label = QLabel(self)
             self.icon_label.setAlignment(Qt.AlignCenter)
             self.icon_label.setFixedSize(32, 32)
             self.icon_label.setPixmap(icon.pixmap(18, 18))
@@ -1545,13 +1545,13 @@ class ProductEmptyState(QFrame):
                 f"background: {DesignTokens.primary_soft}; border: none; border-radius: 8px;"
             )
             layout.addWidget(self.icon_label, 0, Qt.AlignCenter)
-        self.title_label = QLabel(title)
+        self.title_label = QLabel(title, self)
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet(
             f"font-size: {DesignTokens.font_size_section}px; font-weight: 600; color: {DesignTokens.text_primary};"
         )
         layout.addWidget(self.title_label)
-        self.description_label = QLabel(description)
+        self.description_label = QLabel(description, self)
         self.description_label.setAlignment(Qt.AlignCenter)
         self.description_label.setWordWrap(True)
         self.description_label.setMaximumWidth(280)
@@ -1562,7 +1562,7 @@ class ProductEmptyState(QFrame):
         layout.addWidget(self.description_label)
         self.action_button = None
         if action_text:
-            self.action_button = QPushButton(action_text)
+            self.action_button = QPushButton(action_text, self)
             self.action_button.setObjectName("PrimaryBtn" if action_kind == "primary" else "SecondaryBtn")
             self.action_button.setCursor(Qt.PointingHandCursor)
             self.action_button.setStyleSheet(product_button_style(action_kind))

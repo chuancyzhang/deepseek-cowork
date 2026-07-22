@@ -5,12 +5,13 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QObject
+from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid as is_qt_object_valid
 
 from core.theme import ThemeRuntimeManager
 from core.theme_service import ThemeRepository
+from core.conversation_render import build_conversation_render_spans
 from main import (
     ChatBubble,
     FileChip,
@@ -20,6 +21,22 @@ from main import (
     SessionSkillPickerPopover,
     SessionContextChip,
 )
+
+
+class TopLevelShowTracker(QObject):
+    def __init__(self):
+        super().__init__()
+        self.events = []
+
+    def eventFilter(self, obj, event):
+        if (
+            event.type() == QEvent.Show
+            and isinstance(obj, QWidget)
+            and obj.isWindow()
+            and obj.parentWidget() is None
+        ):
+            self.events.append((type(obj).__name__, obj.objectName()))
+        return False
 
 
 class ThemeRuntimeCoverageTests(unittest.TestCase):
@@ -237,6 +254,92 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         self.assertEqual(backdrop.layers[0]["type"], "grid")
         state = self.window.get_current_session()
         self.assertEqual(state.empty_state.title_label.text(), "选择一个起点")
+
+    def test_active_theme_does_not_flash_windows_for_new_or_historical_sessions(self):
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            self.assertTrue(
+                self.manager.apply_profile(
+                    {
+                        "id": "active-theme",
+                        "name": "Active theme",
+                        "schema_version": 2,
+                        "overrides": {},
+                        "assets": {},
+                    },
+                    preview=True,
+                    reason="active_theme_window_regression",
+                )
+            )
+        tracker = TopLevelShowTracker()
+        self.app.installEventFilter(tracker)
+        try:
+            session_id = self.window.create_new_session()
+            state = self.window.get_session(session_id)
+            cards = list(state.empty_state.action_cards)
+            for card in cards:
+                self.assertIs(card.parentWidget(), state.empty_state.grid_widget)
+                self.assertFalse(card.isWindow())
+            self.window.clear_chat_layout(state.chat_layout)
+            state.empty_state = None
+            state.messages = [
+                {"id": "u1", "role": "user", "content": "历史问题"},
+                {
+                    "id": "a1",
+                    "role": "assistant",
+                    "content": "历史回答",
+                    "meta": {
+                        "ui_turn_group_id": "history-turn",
+                        "ui_stage_id": "history-turn:final",
+                        "ui_reply_kind": "final",
+                    },
+                },
+            ]
+            state.render_items = build_conversation_render_spans(state.messages)
+            self.window._render_session_history_spans(state, state.render_items)
+            self.app.processEvents()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            self.app.processEvents()
+        finally:
+            self.app.removeEventFilter(tracker)
+
+        self.assertEqual(tracker.events, [])
+
+    def test_detached_message_theme_visibility_waits_for_layout_parent(self):
+        tracker = TopLevelShowTracker()
+        self.app.installEventFilter(tracker)
+        try:
+            bubble = ChatBubble("User", "待挂载消息")
+            self.app.processEvents()
+            self.assertFalse(bubble.isVisible())
+
+            state = self.window.get_current_session()
+            state.chat_layout.insertWidget(0, bubble)
+            self.app.processEvents()
+            self.assertFalse(bubble.isHidden())
+
+            hidden_profile = {
+                "id": "hidden-message",
+                "name": "Hidden message",
+                "schema_version": 2,
+                "overrides": {},
+                "assets": {},
+                "components": {"conversation.user_message": {"visible": False}},
+            }
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                self.assertTrue(
+                    self.manager.apply_profile(hidden_profile, preview=True, reason="hide_message")
+                )
+            self.assertTrue(bubble.isHidden())
+        finally:
+            self.app.removeEventFilter(tracker)
+
+        self.assertEqual(tracker.events, [])
 
 
 if __name__ == "__main__":

@@ -100,6 +100,7 @@ from ui.theme_workspace import (
     AppTitleBar,
     ThemeSurfaceBackdrop,
     WorkspaceThemeController,
+    apply_theme_component_visibility,
     handle_windows_native_hit_test,
 )
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
@@ -12146,12 +12147,12 @@ class EmptyStateWidget(QWidget):
         layout.setAlignment(Qt.AlignCenter)
         
         # Title
-        self.title_label = QLabel("从一个任务开始")
+        self.title_label = QLabel("从一个任务开始", self)
         self.title_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary};")
         self.title_label.setAlignment(Qt.AlignCenter)
         
         # Grid
-        self.grid_widget = QWidget()
+        self.grid_widget = QWidget(self)
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setSpacing(12)
         
@@ -12253,7 +12254,7 @@ class EmptyStateWidget(QWidget):
             visible_index += 1
             
     def create_action_card(self, title, desc, prompt, icon_name=""):
-        btn = QPushButton()
+        btn = QPushButton(self.grid_widget)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setMinimumHeight(58)
         btn.setMinimumWidth(220)
@@ -12316,7 +12317,7 @@ class EmptyStateWidget(QWidget):
         self.main_window.input_field.setText(prompt)
 
     def create_toolkit_hint(self):
-        hint = QFrame()
+        hint = QFrame(self)
         hint.setObjectName("ToolkitInstallHint")
         hint.setMaximumWidth(820)
         hint.setMinimumHeight(78)
@@ -12386,7 +12387,7 @@ class EmptyStateWidget(QWidget):
             button._theme_title_label.setText(content.get(f"home.card.{key}.title", title))
             button._theme_desc_label.setText(content.get(f"home.card.{key}.description", description))
             spec = (resolved.get("components") or {}).get(f"home.card.{key}") or {}
-            button.setVisible(bool(spec.get("visible", True)))
+            apply_theme_component_visibility(button, spec.get("visible", True))
             button.setStyleSheet(
                 WorkspaceThemeController._style_sheet(
                     button,
@@ -12416,7 +12417,10 @@ class EmptyStateWidget(QWidget):
             )
         )
         reminder_spec = (resolved.get("components") or {}).get("home.reminder") or {}
-        self.toolkit_hint.setVisible(bool(reminder_spec.get("visible", True)))
+        apply_theme_component_visibility(
+            self.toolkit_hint,
+            reminder_spec.get("visible", True),
+        )
         self.toolkit_hint.setStyleSheet(
             WorkspaceThemeController._style_sheet(
                 self.toolkit_hint,
@@ -12425,7 +12429,10 @@ class EmptyStateWidget(QWidget):
             )
         )
         title_spec = (resolved.get("components") or {}).get("home.title") or {}
-        self.title_label.setVisible(bool(title_spec.get("visible", True)))
+        apply_theme_component_visibility(
+            self.title_label,
+            title_spec.get("visible", True),
+        )
         self.title_label.setStyleSheet(
             WorkspaceThemeController._style_sheet(
                 self.title_label,
@@ -13637,6 +13644,15 @@ class ChatBubble(QFrame):
     geometryChanged = Signal()
 
     """Refined Chat Bubble component with Avatar and Better Thinking UI"""
+
+    def event(self, event):
+        result = super().event(event)
+        if event.type() == QEvent.ParentChange and self.parentWidget() is not None:
+            self.setVisible(
+                bool(getattr(self, "_theme_component_desired_visible", True))
+            )
+        return result
+
     def __init__(
         self,
         role,
@@ -14122,7 +14138,7 @@ class ChatBubble(QFrame):
         resolved = _resolved or getattr(getattr(QApplication.instance(), "theme_manager", None), "current", None) or {}
         component_id = "conversation.user_message" if self.role == "User" else "conversation.assistant_message"
         spec = (resolved.get("components") or {}).get(component_id) or {}
-        self.setVisible(bool(spec.get("visible", True)))
+        apply_theme_component_visibility(self, spec.get("visible", True))
         style = spec.get("style") or {}
         target = self.user_bubble_frame if self.role == "User" else self.content_col
         if target is not None and style:

@@ -41,6 +41,17 @@ def _color(value: str, opacity: float = 1.0) -> QColor:
     return result
 
 
+def apply_theme_component_visibility(widget: QWidget, visible: bool) -> None:
+    """Apply declarative visibility without promoting an unattached widget."""
+    visible = bool(visible)
+    widget._theme_component_desired_visible = visible
+    if widget.parentWidget() is None and widget.isWindow():
+        if not visible:
+            widget.setVisible(False)
+        return
+    widget.setVisible(visible)
+
+
 class ThemeSurfaceBackdrop(QWidget):
     """A non-interactive declarative background layer attached below host children."""
 

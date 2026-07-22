@@ -13,6 +13,8 @@
     "validate_ui_theme",
     "preview_ui_theme",
     "patch_ui_theme_preview",
+    "import_ui_theme_asset",
+    "remove_ui_theme_asset",
     "clear_ui_theme_preview",
     "save_ui_theme_preview",
     "activate_ui_theme",

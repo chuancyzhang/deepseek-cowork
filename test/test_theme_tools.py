@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from PySide6.QtGui import QColor, QImage
+
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
@@ -161,6 +163,51 @@ class ThemeToolTests(unittest.TestCase):
             context=self.context,
         )
         self.assertEqual(result["status"], "error")
+
+    def test_asset_tools_increment_revision_and_preserve_reference_safety(self):
+        image_path = os.path.join(self.temp_dir, "theme-bg.png")
+        image = QImage(24, 18, QImage.Format_ARGB32)
+        image.fill(QColor("#445588"))
+        self.assertTrue(image.save(image_path, "PNG"))
+        preview = self.manager.call_tool(
+            "preview_ui_theme",
+            {"name": "Assets", "overrides": {}},
+            context=self.context,
+        )
+        imported = self.manager.call_tool(
+            "import_ui_theme_asset",
+            {
+                "preview_id": preview["preview_id"],
+                "preview_revision": preview["preview_revision"],
+                "asset_id": "background",
+                "source_path": image_path,
+            },
+            context=self.context,
+        )
+        self.assertEqual(imported["preview_revision"], preview["preview_revision"] + 1)
+        patched = self.manager.call_tool(
+            "patch_ui_theme_preview",
+            {
+                "preview_id": preview["preview_id"],
+                "preview_revision": imported["preview_revision"],
+                "operations": [{
+                    "op": "set",
+                    "path": "/surfaces/conversation.canvas/background/layers",
+                    "value": [{"type": "image", "asset": "background", "fit": "cover"}],
+                }],
+            },
+            context=self.context,
+        )
+        referenced = self.manager.call_tool(
+            "remove_ui_theme_asset",
+            {
+                "preview_id": preview["preview_id"],
+                "preview_revision": patched["preview_revision"],
+                "asset_id": "background",
+            },
+            context=self.context,
+        )
+        self.assertEqual(referenced["status"], "error")
 
 
 if __name__ == "__main__":

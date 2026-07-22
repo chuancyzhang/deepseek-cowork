@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+import zipfile
 
 from core.theme import default_design_tokens
 from core.theme_service import (
@@ -136,7 +137,7 @@ class ThemeServiceTests(unittest.TestCase):
         self.assertNotEqual(imported["id"], created["id"])
         self.assertEqual(imported["overrides"], {"radius_scale": 0.8})
 
-    def test_store_write_is_valid_json(self):
+    def test_store_write_is_valid_theme_package(self):
         self.repository.upsert_theme(
             name="Persisted",
             overrides={},
@@ -147,20 +148,20 @@ class ThemeServiceTests(unittest.TestCase):
         self.assertEqual(payload, {})
         theme_files = [
             name for name in os.listdir(self.repository.themes_dir)
-            if name.endswith(".json") and not name.startswith("_")
+            if name.endswith(".cowork-theme") and not name.startswith("_")
         ]
         self.assertEqual(len(theme_files), 1)
-        with open(
-            os.path.join(self.repository.themes_dir, theme_files[0]),
-            "r",
-            encoding="utf-8",
-        ) as stream:
-            theme_payload = json.load(stream)
+        with zipfile.ZipFile(os.path.join(self.repository.themes_dir, theme_files[0])) as archive:
+            theme_payload = json.loads(archive.read("manifest.json").decode("utf-8"))
         self.assertEqual(
             set(theme_payload),
-            {"format", "id", "name", "overrides"},
+            {
+                "format", "schema_version", "id", "name", "overrides",
+                "assets", "surfaces", "components", "content",
+            },
         )
         self.assertFalse(os.path.exists(os.path.join(self.repository.themes_dir, "default.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.repository.themes_dir, "default.cowork-theme")))
 
     def test_portable_json_dropped_into_theme_folder_is_discovered(self):
         os.makedirs(self.repository.themes_dir, exist_ok=True)
@@ -179,6 +180,17 @@ class ThemeServiceTests(unittest.TestCase):
         self.assertEqual(len(snapshot.themes), 1)
         self.assertEqual(snapshot.themes[0]["id"], "portable")
         self.assertEqual(snapshot.themes[0]["name"], "Portable")
+
+        saved = self.repository.replace_state(
+            themes=list(snapshot.themes),
+            active_theme_id="portable",
+            default_tokens=self.defaults,
+            expected_revision=snapshot.revision,
+            expected_theme_ids={"portable"},
+        )
+        self.assertEqual(saved.active_theme_id, "portable")
+        self.assertFalse(os.path.exists(path))
+        self.assertTrue(os.path.exists(self.repository.theme_path("portable")))
 
     def test_preview_patch_requires_current_revision_and_commit_binds_revision(self):
         preview = self.repository.write_preview(

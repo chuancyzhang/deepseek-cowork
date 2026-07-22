@@ -189,6 +189,55 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         self.assertIn("已保存并启用", message)
         self.assertIn("建议重启应用", message)
 
+    def test_declarative_workspace_theme_changes_presentation_not_actions(self):
+        original_session_count = len(self.window.sessions)
+        profile = {
+            "id": "workspace-manifest",
+            "name": "Workspace manifest",
+            "schema_version": 2,
+            "overrides": {},
+            "assets": {},
+            "surfaces": {
+                "shell.left_sidebar": {
+                    "background": {
+                        "layers": [
+                            {
+                                "type": "grid",
+                                "color": "#6677aa",
+                                "opacity": 0.18,
+                                "spacing": 18,
+                                "line_width": 1,
+                            }
+                        ]
+                    }
+                }
+            },
+            "components": {
+                "left.capabilities": {"visible": False},
+                "left.automation": {"icon": {"source": "builtin", "name": "fa5s.clock"}},
+            },
+            "content": {
+                "brand.title": "My Cowork",
+                "home.title": "选择一个起点",
+            },
+        }
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            self.assertTrue(self.manager.apply_profile(profile, preview=True, reason="manifest"))
+        self.assertEqual(self.window.windowTitle(), "My Cowork")
+        self.assertTrue(self.window.product_nav_buttons[self.window.PAGE_CAPABILITIES].isHidden())
+        self.assertFalse(self.window.new_chat_btn.isHidden())
+        self.assertFalse(self.window.action_btn.isHidden())
+        self.window.new_chat_btn.click()
+        self.assertEqual(len(self.window.sessions), original_session_count + 1)
+        backdrop = self.window.workspace_theme_controller.surfaces["shell.left_sidebar"]
+        self.assertFalse(backdrop.isHidden())
+        self.assertEqual(backdrop.layers[0]["type"], "grid")
+        state = self.window.get_current_session()
+        self.assertEqual(state.empty_state.title_label.text(), "选择一个起点")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import weakref
@@ -407,9 +408,9 @@ class ThemeRuntimeManager(QObject):
         try:
             items = []
             for filename in sorted(os.listdir(self.repository.themes_dir)):
-                if not filename.lower().endswith(".json") or filename == os.path.basename(
-                    self.repository.preview_path
-                ):
+                if filename == os.path.basename(self.repository.preview_path):
+                    continue
+                if not filename.lower().endswith((".json", ".cowork-theme")):
                     continue
                 path = os.path.join(self.repository.themes_dir, filename)
                 stat = os.stat(path)
@@ -443,6 +444,11 @@ class ThemeRuntimeManager(QObject):
                     "name": preview.get("name") or "主题预览",
                     "base": DEFAULT_THEME_ID,
                     "overrides": preview.get("overrides") or {},
+                    "schema_version": int(preview.get("schema_version") or 2),
+                    "assets": preview.get("assets") or {},
+                    "surfaces": preview.get("surfaces") or {},
+                    "components": preview.get("components") or {},
+                    "content": preview.get("content") or {},
                     "preview_id": preview.get("preview_id"),
                     "preview_revision": int(preview.get("revision") or 1),
                 }
@@ -488,6 +494,13 @@ class ThemeRuntimeManager(QObject):
     ):
         append_theme_log(
             self.repository.data_dir,
+            "apply_submit",
+            reason=reason,
+            theme_id=(profile or {}).get("id", DEFAULT_THEME_ID),
+            preview=bool(preview),
+        )
+        append_theme_log(
+            self.repository.data_dir,
             "apply_start",
             reason=reason,
             theme_id=(profile or {}).get("id", DEFAULT_THEME_ID),
@@ -505,6 +518,31 @@ class ThemeRuntimeManager(QObject):
         previous_current = _json_theme_copy(self.current)
         try:
             resolved = resolve_theme(profile, default_design_tokens())
+            append_theme_log(
+                self.repository.data_dir,
+                "apply_run",
+                reason=reason,
+                theme_id=resolved["id"],
+                preview=bool(preview),
+                surface_count=len((profile or {}).get("surfaces") or {}),
+                component_count=len((profile or {}).get("components") or {}),
+            )
+            resolved["schema_version"] = int((profile or {}).get("schema_version") or 1)
+            resolved["surfaces"] = _json_theme_copy((profile or {}).get("surfaces") or {})
+            resolved["components"] = _json_theme_copy((profile or {}).get("components") or {})
+            resolved["content"] = _json_theme_copy((profile or {}).get("content") or {})
+            resolved["assets"] = _json_theme_copy((profile or {}).get("assets") or {})
+            if preview:
+                resolved["_asset_bytes"] = self.repository.get_preview_assets(
+                    default_design_tokens()
+                )
+            elif resolved["id"] != DEFAULT_THEME_ID:
+                resolved["_asset_bytes"] = self.repository.get_theme_assets(
+                    resolved["id"],
+                    default_design_tokens(),
+                )
+            else:
+                resolved["_asset_bytes"] = {}
             installed = {name.casefold(): name for name in QFontDatabase.families()}
             for field in ("font_family", "mono_font_family"):
                 family = str(resolved.get(field) or "").strip()
@@ -617,9 +655,7 @@ class ThemeRuntimeManager(QObject):
 
 
 def _json_theme_copy(value):
-    import json
-
-    return json.loads(json.dumps(value, ensure_ascii=False)) if value is not None else None
+    return copy.deepcopy(value) if value is not None else None
 
 
 class ThemeBindingRegistry:

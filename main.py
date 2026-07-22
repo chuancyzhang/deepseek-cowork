@@ -96,6 +96,12 @@ from ui.primitives import (
     product_surface_style,
 )
 from ui.theme_settings import ThemeSettingsPanel
+from ui.theme_workspace import (
+    AppTitleBar,
+    ThemeSurfaceBackdrop,
+    WorkspaceThemeController,
+    handle_windows_native_hit_test,
+)
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
 from core.app_version import APP_VERSION
@@ -12140,9 +12146,9 @@ class EmptyStateWidget(QWidget):
         layout.setAlignment(Qt.AlignCenter)
         
         # Title
-        title = QLabel("从一个任务开始")
-        title.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary};")
-        title.setAlignment(Qt.AlignCenter)
+        self.title_label = QLabel("从一个任务开始")
+        self.title_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {DesignTokens.text_primary};")
+        self.title_label.setAlignment(Qt.AlignCenter)
         
         # Grid
         self.grid_widget = QWidget()
@@ -12174,15 +12180,30 @@ class EmptyStateWidget(QWidget):
             self.action_cards.append(btn)
             
         layout.addStretch()
-        layout.addWidget(title)
+        layout.addWidget(self.title_label)
         layout.addSpacing(12)
         layout.addWidget(self.grid_widget)
         layout.addSpacing(12)
-        layout.addWidget(self.create_toolkit_hint(), 0, Qt.AlignHCenter)
+        self.toolkit_hint = self.create_toolkit_hint()
+        layout.addWidget(self.toolkit_hint)
         layout.addStretch()
         
         # Initial layout
         self.reflow_cards()
+        self._theme_backdrops = {
+            "home.hero": ThemeSurfaceBackdrop(self, "home.hero"),
+            "home.quick_actions": ThemeSurfaceBackdrop(self.grid_widget, "home.quick_actions"),
+            "home.reminder": ThemeSurfaceBackdrop(self.toolkit_hint, "home.reminder"),
+        }
+        self._theme_component_bases = {
+            "home.title": self.title_label.styleSheet(),
+            "home.card.ppt": self.action_cards[0].styleSheet(),
+            "home.card.files": self.action_cards[1].styleSheet(),
+            "home.card.images": self.action_cards[2].styleSheet(),
+            "home.card.office": self.action_cards[3].styleSheet(),
+            "home.reminder": self.toolkit_hint.styleSheet(),
+        }
+        bind_theme(self, self.refresh_theme, surface="conversation")
         
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -12211,14 +12232,32 @@ class EmptyStateWidget(QWidget):
             self.grid_layout.takeAt(0)
             
         # Re-add to grid
-        for i, btn in enumerate(self.action_cards):
-            self.grid_layout.addWidget(btn, i // cols, i % cols)
+        components = (getattr(self, "_resolved_theme", {}) or {}).get("components") or {}
+        keys = ("ppt", "files", "images", "office")
+        visible_index = 0
+        for i, (key, btn) in enumerate(zip(keys, self.action_cards)):
+            layout_spec = (components.get(f"home.card.{key}") or {}).get("layout") or {}
+            if btn.isHidden():
+                continue
+            if cols == 1:
+                row = visible_index
+                column = 0
+                row_span = 1
+                column_span = 1
+            else:
+                row = int(layout_spec.get("row", i // cols))
+                column = int(layout_spec.get("column", i % cols))
+                row_span = int(layout_spec.get("row_span", 1))
+                column_span = int(layout_spec.get("column_span", 1))
+            self.grid_layout.addWidget(btn, row, column, row_span, column_span)
+            visible_index += 1
             
     def create_action_card(self, title, desc, prompt, icon_name=""):
         btn = QPushButton()
         btn.setCursor(Qt.PointingHandCursor)
         btn.setMinimumHeight(58)
         btn.setMinimumWidth(220)
+        btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: {DesignTokens.bg_main};
@@ -12239,25 +12278,35 @@ class EmptyStateWidget(QWidget):
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(8)
-        if icon_name:
-            icon_label = QLabel()
-            icon_label.setPixmap(qta.icon(icon_name, color=DesignTokens.primary).pixmap(20, 20))
-            icon_label.setStyleSheet("background: transparent; border: none;")
-            title_row.addWidget(icon_label, 0, Qt.AlignVCenter)
+        default_icon_name = icon_name
+        if not default_icon_name and "整理文件" in title:
+            default_icon_name = "fa5s.folder"
+        elif not default_icon_name and "处理图片" in title:
+            default_icon_name = "fa5s.image"
+        icon_label = QLabel()
+        icon_label.setPixmap(qta.icon(default_icon_name, color=DesignTokens.primary).pixmap(20, 20))
+        icon_label.setStyleSheet("background: transparent; border: none;")
+        title_row.addWidget(icon_label, 0, Qt.AlignVCenter)
 
-        t_label = QLabel(title)
+        display_title = re.sub(r"^[^\w\u4e00-\u9fff]+\s*", "", title)
+        t_label = QLabel(display_title)
         t_label.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {DesignTokens.text_primary}; background: transparent; border: none;")
         title_row.addWidget(t_label, 1)
         
         d_label = QLabel(desc)
         d_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
         d_label.setWordWrap(True) # Ensure text is fully visible
+        d_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         
         layout.addLayout(title_row)
         layout.addWidget(d_label)
         layout.addStretch() # Push content to top
         
         btn.clicked.connect(lambda: self.activate_action_prompt(prompt, title))
+        btn._theme_title_label = t_label
+        btn._theme_desc_label = d_label
+        btn._theme_icon_label = icon_label
+        btn._theme_default_icon = default_icon_name
         return btn
 
     def activate_action_prompt(self, prompt, title=""):
@@ -12271,6 +12320,7 @@ class EmptyStateWidget(QWidget):
         hint.setObjectName("ToolkitInstallHint")
         hint.setMaximumWidth(820)
         hint.setMinimumHeight(78)
+        hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         hint.setStyleSheet(
             f"""
             QFrame#ToolkitInstallHint {{
@@ -12291,19 +12341,20 @@ class EmptyStateWidget(QWidget):
 
         text_box = QVBoxLayout()
         text_box.setSpacing(3)
-        title = QLabel("需要处理文档或数据？")
-        title.setStyleSheet(
+        self.toolkit_title_label = QLabel("需要处理文档或数据？")
+        self.toolkit_title_label.setStyleSheet(
             f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary}; "
             "background: transparent; border: none;"
         )
-        desc = QLabel("可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。")
-        desc.setWordWrap(True)
-        desc.setStyleSheet(
+        self.toolkit_desc_label = QLabel("可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。")
+        self.toolkit_desc_label.setWordWrap(True)
+        self.toolkit_desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.toolkit_desc_label.setStyleSheet(
             f"font-size: 12px; color: {DesignTokens.text_secondary}; "
             "background: transparent; border: none;"
         )
-        text_box.addWidget(title)
-        text_box.addWidget(desc)
+        text_box.addWidget(self.toolkit_title_label)
+        text_box.addWidget(self.toolkit_desc_label)
         hint_layout.addLayout(text_box, 1)
 
         open_btn = QPushButton("打开设置")
@@ -12318,6 +12369,78 @@ class EmptyStateWidget(QWidget):
 
     def open_toolkit_settings(self):
         self.main_window.open_settings("组件与依赖")
+
+    def refresh_theme(self, resolved=None):
+        resolved = resolved or getattr(getattr(QApplication.instance(), "theme_manager", None), "current", None) or {}
+        self._resolved_theme = resolved
+        content = resolved.get("content") or {}
+        self.title_label.setText(content.get("home.title", "从一个任务开始"))
+        defaults = {
+            "ppt": ("PPT Agent", "进入 PPT Mode"),
+            "files": ("整理文件", "按类型自动分类"),
+            "images": ("处理图片", "批量重命名/压缩"),
+            "office": ("办公交付物", "预览修改，再生成文件"),
+        }
+        for key, button in zip(("ppt", "files", "images", "office"), self.action_cards):
+            title, description = defaults[key]
+            button._theme_title_label.setText(content.get(f"home.card.{key}.title", title))
+            button._theme_desc_label.setText(content.get(f"home.card.{key}.description", description))
+            spec = (resolved.get("components") or {}).get(f"home.card.{key}") or {}
+            button.setVisible(bool(spec.get("visible", True)))
+            button.setStyleSheet(
+                WorkspaceThemeController._style_sheet(
+                    button,
+                    spec.get("style") or {},
+                    self._theme_component_bases[f"home.card.{key}"],
+                )
+            )
+            icon = spec.get("icon") or {}
+            if icon.get("source") == "builtin":
+                themed_icon = qta.icon(icon.get("name"), color=DesignTokens.icon_primary)
+                button._theme_icon_label.setPixmap(themed_icon.pixmap(20, 20))
+            elif icon.get("source") == "asset":
+                record = (resolved.get("assets") or {}).get(icon.get("asset")) or {}
+                pixmap = QPixmap()
+                if not pixmap.loadFromData((resolved.get("_asset_bytes") or {}).get(record.get("path"), b"")):
+                    raise ValueError(f"主题首页图标资产无法解码：{icon.get('asset')}")
+                button._theme_icon_label.setPixmap(pixmap.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                button._theme_icon_label.setPixmap(
+                    qta.icon(button._theme_default_icon, color=DesignTokens.primary).pixmap(20, 20)
+                )
+        self.toolkit_title_label.setText(content.get("home.reminder.title", "需要处理文档或数据？"))
+        self.toolkit_desc_label.setText(
+            content.get(
+                "home.reminder.description",
+                "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
+            )
+        )
+        reminder_spec = (resolved.get("components") or {}).get("home.reminder") or {}
+        self.toolkit_hint.setVisible(bool(reminder_spec.get("visible", True)))
+        self.toolkit_hint.setStyleSheet(
+            WorkspaceThemeController._style_sheet(
+                self.toolkit_hint,
+                reminder_spec.get("style") or {},
+                self._theme_component_bases["home.reminder"],
+            )
+        )
+        title_spec = (resolved.get("components") or {}).get("home.title") or {}
+        self.title_label.setVisible(bool(title_spec.get("visible", True)))
+        self.title_label.setStyleSheet(
+            WorkspaceThemeController._style_sheet(
+                self.title_label,
+                title_spec.get("style") or {},
+                self._theme_component_bases["home.title"],
+            )
+        )
+        assets = resolved.get("assets") or {}
+        asset_bytes = resolved.get("_asset_bytes") or {}
+        for surface_id, backdrop in self._theme_backdrops.items():
+            surface = (resolved.get("surfaces") or {}).get(surface_id) or {}
+            layers = ((surface.get("background") or {}).get("layers") or [])
+            backdrop.set_theme(layers, assets, asset_bytes)
+        self.current_cols = None
+        self.reflow_cards()
 
 
 class PptAgentModeDialog(QDialog):
@@ -12612,8 +12735,8 @@ class AgentModuleDialog(QDialog):
         desc = QLabel("从主题、资料或模板生成演示文稿 HTML 工作稿，再导出 PPTX、DOCX 或 PDF。")
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary}; background: transparent; border: none;")
-        text_box.addWidget(title)
-        text_box.addWidget(desc)
+        text_box.addWidget(self.toolkit_title_label)
+        text_box.addWidget(self.toolkit_desc_label)
         row.addLayout(text_box, 1)
         card.clicked.connect(self._select_ppt_agent)
         self.ppt_agent_button = card
@@ -13996,6 +14119,57 @@ class ChatBubble(QFrame):
                 content_parts=self._pending_main_content_parts,
                 final=was_final,
             )
+        resolved = _resolved or getattr(getattr(QApplication.instance(), "theme_manager", None), "current", None) or {}
+        component_id = "conversation.user_message" if self.role == "User" else "conversation.assistant_message"
+        spec = (resolved.get("components") or {}).get(component_id) or {}
+        self.setVisible(bool(spec.get("visible", True)))
+        style = spec.get("style") or {}
+        target = self.user_bubble_frame if self.role == "User" else self.content_col
+        if target is not None and style:
+            rules = []
+            for field, css_name in (
+                ("foreground", "color"),
+                ("background", "background-color"),
+                ("border_color", "border-color"),
+            ):
+                if field in style:
+                    rules.append(f"{css_name}: {style[field]}")
+            for field, css_name in (
+                ("border_width", "border-width"),
+                ("radius", "border-radius"),
+                ("padding", "padding"),
+            ):
+                if field in style:
+                    rules.append(f"{css_name}: {int(style[field])}px")
+            if "border_color" in style:
+                rules.append("border-style: solid")
+            selector = target.metaObject().className()
+            target.setStyleSheet(target.styleSheet() + f"\n{selector} {{ " + "; ".join(rules) + "; }")
+            if "max_width" in style:
+                target.setMaximumWidth(int(style["max_width"]))
+            if "min_width" in style:
+                target.setMinimumWidth(int(style["min_width"]))
+        alignment = (spec.get("layout") or {}).get("alignment")
+        if layout is not None and alignment in {"start", "center", "end"}:
+            qt_alignment = {
+                "start": Qt.AlignLeft | Qt.AlignTop,
+                "center": Qt.AlignHCenter | Qt.AlignTop,
+                "end": Qt.AlignRight | Qt.AlignTop,
+            }[alignment]
+            layout.setAlignment(qt_alignment)
+        action_spec = (resolved.get("components") or {}).get("conversation.message_actions") or {}
+        for button in self.message_action_buttons + [
+            item for item in (
+                getattr(self, "copy_result_btn", None),
+                getattr(self, "office_draft_btn", None),
+                getattr(self, "skill_capture_btn", None),
+            ) if item is not None
+        ]:
+            if action_spec.get("visible") is False:
+                button.hide()
+        thinking_spec = (resolved.get("components") or {}).get("conversation.thinking_stage") or {}
+        if thinking_spec.get("visible") is False and getattr(self, "thinking_widget", None) is not None:
+            self.thinking_widget.hide()
         self.updateGeometry()
 
     def set_virtualized(self, virtualized):
@@ -17381,6 +17555,8 @@ class MainWindow(QMainWindow):
         self.config_manager = config_manager or ConfigManager()
         self.theme_manager = theme_manager or getattr(QApplication.instance(), "theme_manager", None)
         self.setWindowTitle("DeepSeek Cowork")
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.workspace_theme_controller = WorkspaceThemeController()
         self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
         self.skill_catalog_changed_ui_signal.connect(self._handle_local_skill_catalog_changed, Qt.QueuedConnection)
         self.component_task_manager = ComponentTaskManager(self)
@@ -17654,6 +17830,8 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
+        self.app_title_bar = AppTitleBar(self, self.windowIcon())
+        root_layout.addWidget(self.app_title_bar)
         self.theme_preview_bar = ThemePreviewSafetyBar()
         self.theme_preview_bar.saveRequested.connect(self._save_theme_preview_from_bar)
         self.theme_preview_bar.restoreRequested.connect(self._restore_theme_preview_from_bar)
@@ -17701,6 +17879,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.history_search_input)
 
         project_header = ConversationHistoryRow()
+        self.project_header = project_header
         project_header.setFocusPolicy(Qt.StrongFocus)
         project_header_layout = QHBoxLayout(project_header)
         project_header_layout.setContentsMargins(0, 8, 0, 0)
@@ -18393,7 +18572,11 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
 
         # Top Bar
-        top_bar = QHBoxLayout()
+        self.top_bar_widget = QWidget()
+        self.top_bar_widget.setObjectName("AppWorkspaceHeader")
+        top_bar = QHBoxLayout(self.top_bar_widget)
+        self.top_bar_layout = top_bar
+        top_bar.setContentsMargins(0, 0, 0, 0)
         self.product_back_btn = QPushButton("返回")
         self.product_back_btn.setIcon(qta.icon("fa5s.arrow-left", color=DesignTokens.text_secondary))
         self.product_back_btn.setToolTip("返回会话 (Alt+Left)")
@@ -18473,7 +18656,7 @@ class MainWindow(QMainWindow):
             self.context_rail_buttons[tab_index] = btn
         top_bar.addWidget(self.context_rail)
 
-        layout.addLayout(top_bar)
+        layout.addWidget(self.top_bar_widget)
 
         self.content_area = QWidget()
         self.content_area_layout = QVBoxLayout(self.content_area)
@@ -18735,11 +18918,13 @@ class MainWindow(QMainWindow):
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
         self.sync_context_drawer_layout()
+        self._register_workspace_theme_components()
+        bind_theme(self, self._apply_runtime_theme, surface="global")
         if self.theme_manager is not None:
-            self.theme_manager.themeChanged.connect(self._apply_runtime_theme)
             self.theme_manager.themeApplyFailed.connect(self._handle_theme_apply_failed)
             self.theme_manager.previewStateChanged.connect(self._on_theme_preview_state)
-            self._apply_runtime_theme(self.theme_manager.current)
+            if self.theme_manager.current is None:
+                self._apply_runtime_theme({})
             if self.theme_manager.last_error:
                 QTimer.singleShot(
                     0,
@@ -18748,6 +18933,52 @@ class MainWindow(QMainWindow):
                     ),
                 )
         log_startup_stage("main_window_init_complete")
+
+    def _register_workspace_theme_components(self):
+        """Register stable presentation IDs without exposing application actions."""
+        controller = self.workspace_theme_controller
+        controller.register_surface("window.titlebar", self.app_title_bar)
+        controller.register_surface("shell.left_sidebar", self.sidebar)
+        controller.register_surface("shell.app_header", self.top_bar_widget)
+        controller.register_surface("conversation.canvas", self.conversation_page)
+        controller.register_surface("conversation.timeline", self.session_tabs)
+        controller.register_surface("conversation.composer", self.input_card)
+        controller.register_surface("shell.right_sidebar", self.right_sidebar)
+
+        controller.register_component("titlebar.brand", self.app_title_bar.brand)
+        controller.register_component("titlebar.logo", self.app_title_bar.logo)
+        controller.register_component("titlebar.minimize", self.app_title_bar.minimize_btn, self.app_title_bar.layout_row)
+        controller.register_component("titlebar.maximize", self.app_title_bar.maximize_btn, self.app_title_bar.layout_row)
+        controller.register_component("titlebar.close", self.app_title_bar.close_btn, self.app_title_bar.layout_row)
+        controller.register_component("left.new_chat", self.new_chat_btn, self.sidebar_layout)
+        controller.register_component("left.search", self.history_search_input, self.sidebar_layout)
+        controller.register_component("left.projects", self.project_header, self.sidebar_layout)
+        controller.register_component("left.history", self.history_scroll, self.sidebar_layout)
+        controller.register_component("left.capabilities", self.product_nav_buttons[self.PAGE_CAPABILITIES], self.sidebar_layout)
+        controller.register_component("left.automation", self.product_nav_buttons[self.PAGE_AUTOMATION], self.sidebar_layout)
+        controller.register_component("left.settings", self.product_nav_buttons[self.PAGE_SETTINGS], self.sidebar_layout)
+
+        controller.register_component("header.back", self.product_back_btn, self.top_bar_layout)
+        controller.register_component("header.title", self.workspace_title_label)
+        controller.register_component("header.subtitle", self.workspace_subtitle_label)
+        controller.register_component("header.workspace", self.ws_container, self.top_bar_layout)
+        controller.register_component("header.context_actions", self.context_rail, self.top_bar_layout)
+
+        controller.register_component("composer.input", self.input_field)
+        controller.register_component("composer.add_context", self.tool_menu_btn)
+        controller.register_component("composer.skills", self.selected_skills_badge)
+        controller.register_component("composer.agent", self.agent_picker_btn)
+        controller.register_component("composer.model", self.model_select_btn)
+        controller.register_component("composer.pause", self.pause_btn)
+        controller.register_component("composer.submit", self.action_btn)
+
+        controller.register_component("right.header", self.right_header)
+        controller.register_component("right.files", self.workspace_tab)
+        controller.register_component("right.observability", self.tool_details_tab)
+        controller.register_component("right.sub_agents", self.sub_agent_tab)
+        controller.register_content("brand.title", self.app_title_bar.set_brand)
+        controller.register_content("brand.tagline", self.app_title_bar.set_tagline)
+        controller.register_content("composer.placeholder", self.input_field.setPlaceholderText)
 
     def _handle_theme_apply_failed(self, error):
         failure = (
@@ -18815,6 +19046,7 @@ class MainWindow(QMainWindow):
 
     def _apply_runtime_theme(self, _resolved=None):
         """Refresh the persistent application shell after a theme change."""
+        self.workspace_theme_controller.restore_presentation()
         self.setStyleSheet(self._theme_stylesheet_factory())
         self.main_container.setStyleSheet(
             f"QWidget#MainContainer {{ background: {DesignTokens.bg_chat}; }}"
@@ -19029,7 +19261,15 @@ class MainWindow(QMainWindow):
         self.refresh_history_list()
         self.refresh_context_badges()
         self.sync_context_drawer_layout()
+        self.app_title_bar.refresh_theme()
+        self.workspace_theme_controller.apply(_resolved or {})
         self.update()
+
+    def nativeEvent(self, event_type, message):
+        handled = handle_windows_native_hit_test(self, event_type, message)
+        if handled is not None:
+            return handled
+        return super().nativeEvent(event_type, message)
 
     def process_ui_events(self, force=False):
         if int(getattr(self, "_history_process_events_suppressed", 0) or 0) > 0:

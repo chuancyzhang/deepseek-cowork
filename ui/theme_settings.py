@@ -6,8 +6,8 @@ import os
 import re
 import uuid
 
-from PySide6.QtCore import QEvent, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase
+from PySide6.QtCore import QEvent, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -19,12 +19,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
+from core.theme_package import THEME_PACKAGE_SUFFIX, build_asset_record
 
 from core.theme import bind_theme, default_design_tokens, DesignTokens
 from core.theme_service import (
@@ -137,9 +139,11 @@ class ThemeSettingsPanel(QWidget):
         root.addWidget(self._build_manager_section())
         root.addWidget(self._build_basic_section())
         root.addWidget(self._build_advanced_section())
+        root.addWidget(self._build_asset_section())
+        root.addWidget(self._build_structure_section())
         root.addWidget(
             ProductInlineNotice(
-                "也可以在对话中描述想要的字体、配色和密度，AI 会调用内置主题 Skill 生成临时预览，并在确认后保存。",
+                "也可以在对话中描述背景、图标、布局、字体和配色。AI 只能修改受验证的呈现层，预览确认后才会保存。",
                 "info",
             )
         )
@@ -225,8 +229,8 @@ class ThemeSettingsPanel(QWidget):
         layout.addLayout(row)
         file_row = QHBoxLayout()
         file_row.setSpacing(8)
-        self.import_btn = QPushButton("导入 JSON")
-        self.export_btn = QPushButton("导出 JSON")
+        self.import_btn = QPushButton("导入主题包")
+        self.export_btn = QPushButton("导出主题包")
         self.refresh_btn = QPushButton("刷新列表")
         self.open_folder_btn = QPushButton("打开主题文件夹")
         self.reset_btn = QPushButton("切回默认")
@@ -336,6 +340,38 @@ class ThemeSettingsPanel(QWidget):
         layout.addWidget(self.validation_label)
         return frame
 
+    def _build_asset_section(self):
+        frame, layout = self._section(
+            "主题图片资源",
+            "图片会复制进主题包；仅支持经过校验的静态 PNG、JPEG 和 WebP。",
+        )
+        self.asset_list = QListWidget()
+        self.asset_list.setMaximumHeight(132)
+        self.asset_list.setIconSize(QSize(48, 36))
+        layout.addWidget(self.asset_list)
+        row = QHBoxLayout()
+        self.asset_add_btn = QPushButton("导入图片")
+        self.asset_remove_btn = QPushButton("移除图片")
+        for button in (self.asset_add_btn, self.asset_remove_btn):
+            button.setObjectName("SecondaryBtn")
+            row.addWidget(button)
+        row.addStretch()
+        layout.addLayout(row)
+        return frame
+
+    def _build_structure_section(self):
+        frame, layout = self._section(
+            "工作台结构摘要",
+            "显示 AI 可配置的背景、组件呈现与白名单文案；动作和路由不属于主题。",
+        )
+        self.structure_summary = QPlainTextEdit()
+        self.structure_summary.setReadOnly(True)
+        self.structure_summary.setProperty("codeSurface", True)
+        self.structure_summary.setMaximumHeight(180)
+        self.structure_summary.setStyleSheet(product_code_style("QPlainTextEdit"))
+        layout.addWidget(self.structure_summary)
+        return frame
+
     def _connect_signals(self):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_selected)
         self.new_btn.clicked.connect(self._new_theme)
@@ -347,6 +383,8 @@ class ThemeSettingsPanel(QWidget):
         self.export_btn.clicked.connect(self._export_theme)
         self.refresh_btn.clicked.connect(self._reload_from_directory)
         self.open_folder_btn.clicked.connect(self._open_theme_folder)
+        self.asset_add_btn.clicked.connect(self._add_asset)
+        self.asset_remove_btn.clicked.connect(self._remove_asset)
         self.name_edit.textChanged.connect(self._on_editor_changed)
         self.font_combo.currentFontChanged.connect(self._on_editor_changed)
         self.mono_font_combo.currentFontChanged.connect(self._on_editor_changed)
@@ -366,7 +404,12 @@ class ThemeSettingsPanel(QWidget):
                 "id": DEFAULT_THEME_ID,
                 "name": "默认主题",
                 "base": DEFAULT_THEME_ID,
+                "schema_version": 2,
                 "overrides": {},
+                "assets": {},
+                "surfaces": {},
+                "components": {},
+                "content": {},
             }
         return next((item for item in self._themes if item.get("id") == theme_id), None)
 
@@ -425,6 +468,29 @@ class ThemeSettingsPanel(QWidget):
         self.token_editor.setPlainText(
             json.dumps(advanced_tokens, ensure_ascii=False, indent=2)
         )
+        self.asset_list.clear()
+        asset_bytes = self._ensure_profile_asset_bytes(profile) if profile.get("id") != DEFAULT_THEME_ID else {}
+        for asset_id, record in sorted((profile.get("assets") or {}).items()):
+            self.asset_list.addItem(
+                f"{asset_id}  ·  {record.get('width')}×{record.get('height')}  ·  {record.get('media_type')}"
+            )
+            item = self.asset_list.item(self.asset_list.count() - 1)
+            item.setData(Qt.UserRole, asset_id)
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(asset_bytes.get(record.get("path"), b"")):
+                raise ValueError(f"主题资产缩略图无法解码：{asset_id}")
+            item.setIcon(QIcon(pixmap))
+        self.structure_summary.setPlainText(
+            json.dumps(
+                {
+                    "surfaces": profile.get("surfaces") or {},
+                    "components": profile.get("components") or {},
+                    "content": profile.get("content") or {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         editable = profile["id"] != DEFAULT_THEME_ID
         for widget in (
             self.name_edit,
@@ -440,6 +506,8 @@ class ThemeSettingsPanel(QWidget):
             widget.setEnabled(editable)
         self.delete_btn.setEnabled(editable)
         self.export_btn.setEnabled(editable)
+        self.asset_add_btn.setEnabled(editable)
+        self.asset_remove_btn.setEnabled(editable)
         self._loading = False
         if not editable:
             self.validation_label.setText("默认主题为只读基线。")
@@ -505,6 +573,10 @@ class ThemeSettingsPanel(QWidget):
                 "id": profile.get("id"),
                 "name": profile.get("name"),
                 "overrides": profile.get("overrides") or {},
+                "assets": profile.get("assets") or {},
+                "surfaces": profile.get("surfaces") or {},
+                "components": profile.get("components") or {},
+                "content": profile.get("content") or {},
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -533,6 +605,11 @@ class ThemeSettingsPanel(QWidget):
                 default_tokens=default_design_tokens(),
                 session_id="settings",
                 replace_existing=True,
+                assets=profile.get("assets") or {},
+                surfaces=profile.get("surfaces") or {},
+                components=profile.get("components") or {},
+                content=profile.get("content") or {},
+                asset_bytes=self._ensure_profile_asset_bytes(profile),
             )
             if self.runtime_manager is not None and not self.runtime_manager.apply_repository_state(
                 reason="settings_preview"
@@ -619,13 +696,21 @@ class ThemeSettingsPanel(QWidget):
             index += 1
         return f"{base} {index}"
 
-    def _append_theme(self, name, overrides):
+    def _append_theme(self, name, overrides, source=None, asset_bytes=None):
+        source = source or {}
         item = {
             "id": uuid.uuid4().hex,
             "name": self._unique_name(name),
             "base": DEFAULT_THEME_ID,
+            "schema_version": 2,
             "overrides": copy.deepcopy(overrides),
+            "assets": copy.deepcopy(source.get("assets") or {}),
+            "surfaces": copy.deepcopy(source.get("surfaces") or {}),
+            "components": copy.deepcopy(source.get("components") or {}),
+            "content": copy.deepcopy(source.get("content") or {}),
         }
+        if asset_bytes:
+            item["_asset_bytes"] = dict(asset_bytes)
         self._themes.append(item)
         self._active_theme_id = item["id"]
         self._rebuild_theme_combo(item["id"])
@@ -642,9 +727,16 @@ class ThemeSettingsPanel(QWidget):
         try:
             self._store_current_editor()
             source = self._profile(self._current_theme_id)
+            asset_bytes = (
+                self._ensure_profile_asset_bytes(source)
+                if source.get("id") != DEFAULT_THEME_ID
+                else {}
+            )
             self._append_theme(
                 f"{source.get('name') or '主题'} 副本",
                 source.get("overrides") or {},
+                source=source,
+                asset_bytes=asset_bytes,
             )
         except Exception as exc:
             self.validation_label.setText(f"暂无法复制主题：{exc}")
@@ -680,20 +772,39 @@ class ThemeSettingsPanel(QWidget):
 
     def _import_theme(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "导入 Cowork 主题", "", "Cowork Theme (*.json);;JSON (*.json)"
+            self,
+            "导入 Cowork 主题",
+            "",
+            "Cowork Theme (*.cowork-theme);;旧版主题 JSON (*.json)",
         )
         if not path:
             return
+        append_theme_log(self.repository.data_dir, "settings_package_import_submit", source=path)
+        append_theme_log(self.repository.data_dir, "settings_package_import_start", source=path)
         try:
-            with open(path, "r", encoding="utf-8") as stream:
-                payload = json.load(stream)
-            normalized = validate_theme_document(
-                payload,
-                default_design_tokens(),
-            )
+            append_theme_log(self.repository.data_dir, "settings_package_import_run", source=path)
+            normalized, asset_bytes = self.repository.read_theme_file(path, default_design_tokens())
             self._store_current_editor()
-            self._append_theme(normalized["name"], normalized["overrides"])
+            self._append_theme(
+                normalized["name"],
+                normalized["overrides"],
+                source=normalized,
+                asset_bytes=asset_bytes,
+            )
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_import_finish",
+                source=path,
+                theme_id=normalized.get("id"),
+                asset_count=len(asset_bytes),
+            )
         except Exception as exc:
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_import_error",
+                source=path,
+                error=str(exc),
+            )
             ProductMessageBox.critical(self, "导入主题失败", str(exc))
 
     def _open_theme_folder(self):
@@ -703,6 +814,120 @@ class ThemeSettingsPanel(QWidget):
                 raise RuntimeError("系统未能打开主题文件夹。")
         except Exception as exc:
             ProductMessageBox.critical(self, "打开主题文件夹失败", str(exc))
+
+    def _ensure_profile_asset_bytes(self, profile):
+        if "_asset_bytes" not in profile:
+            if profile.get("id") and profile.get("id") != DEFAULT_THEME_ID:
+                profile["_asset_bytes"] = self.repository.get_theme_assets(
+                    profile["id"], default_design_tokens()
+                )
+            else:
+                profile["_asset_bytes"] = {}
+        return profile["_asset_bytes"]
+
+    def _add_asset(self):
+        if self._current_theme_id == DEFAULT_THEME_ID:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入主题图片",
+            "",
+            "主题图片 (*.png *.jpg *.jpeg *.webp)",
+        )
+        if not path:
+            return
+        append_theme_log(self.repository.data_dir, "settings_asset_import_submit", source=path)
+        append_theme_log(self.repository.data_dir, "settings_asset_import_start", source=path)
+        try:
+            profile = self._profile(self._current_theme_id)
+            stem = re.sub(r"[^a-zA-Z0-9_.-]+", "-", os.path.splitext(os.path.basename(path))[0]).strip("-.") or "image"
+            asset_id = stem[:72]
+            index = 2
+            while asset_id in (profile.get("assets") or {}):
+                asset_id = f"{stem[:68]}-{index}"
+                index += 1
+            record, data = build_asset_record(asset_id, path)
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_asset_import_run",
+                theme_id=profile.get("id"),
+                asset_id=asset_id,
+            )
+            profile.setdefault("assets", {})[asset_id] = record
+            asset_bytes = self._ensure_profile_asset_bytes(profile)
+            asset_bytes[record["path"]] = data
+            self._load_profile(self._current_theme_id)
+            self.validation_label.setText("图片已加入草稿；预览或保存后才会应用。")
+            self.changed.emit()
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_asset_import_finish",
+                theme_id=profile.get("id"),
+                asset_id=asset_id,
+                bytes=len(data),
+            )
+        except Exception as exc:
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_asset_import_error",
+                source=path,
+                error=str(exc),
+            )
+            ProductMessageBox.critical(self, "导入主题图片失败", str(exc))
+
+    def _remove_asset(self):
+        item = self.asset_list.currentItem()
+        if item is None or self._current_theme_id == DEFAULT_THEME_ID:
+            return
+        asset_id = str(item.data(Qt.UserRole) or "")
+        append_theme_log(
+            self.repository.data_dir,
+            "settings_asset_remove_submit",
+            theme_id=self._current_theme_id,
+            asset_id=asset_id,
+        )
+        append_theme_log(
+            self.repository.data_dir,
+            "settings_asset_remove_start",
+            theme_id=self._current_theme_id,
+            asset_id=asset_id,
+        )
+        try:
+            profile = self._profile(self._current_theme_id)
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_asset_remove_run",
+                theme_id=profile.get("id"),
+                asset_id=asset_id,
+            )
+            references = json.dumps(
+                {"surfaces": profile.get("surfaces") or {}, "components": profile.get("components") or {}},
+                ensure_ascii=False,
+            )
+            if f'"{asset_id}"' in references:
+                raise ValueError("该图片仍被背景或图标引用，请先让 AI 移除对应引用。")
+            record = (profile.get("assets") or {}).pop(asset_id, None)
+            if record is None:
+                raise ValueError("图片资源不存在。")
+            self._ensure_profile_asset_bytes(profile).pop(record.get("path"), None)
+            self._load_profile(self._current_theme_id)
+            self.validation_label.setText("图片已从草稿移除。")
+            self.changed.emit()
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_asset_remove_finish",
+                theme_id=profile.get("id"),
+                asset_id=asset_id,
+            )
+        except Exception as exc:
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_asset_remove_error",
+                theme_id=self._current_theme_id,
+                asset_id=asset_id,
+                error=str(exc),
+            )
+            ProductMessageBox.critical(self, "移除主题图片失败", str(exc))
 
     def _choose_color(self, editor):
         initial = QColor(editor.text().strip())
@@ -748,24 +973,46 @@ class ThemeSettingsPanel(QWidget):
                 raise ValueError("默认主题不能导出。")
             filename = re.sub(r'[\\/:*?"<>|]+', "-", profile.get("name") or "cowork-theme")
             path, _ = QFileDialog.getSaveFileName(
-                self, "导出 Cowork 主题", filename + ".json", "Cowork Theme (*.json)"
+                self,
+                "导出 Cowork 主题",
+                filename + THEME_PACKAGE_SUFFIX,
+                "Cowork Theme (*.cowork-theme)",
             )
             if not path:
                 return
-            with open(path, "w", encoding="utf-8") as stream:
-                json.dump(
-                    {
-                        "format": "cowork-theme",
-                        "id": profile.get("id"),
-                        "name": profile.get("name"),
-                        "overrides": profile.get("overrides") or {},
-                    },
-                    stream,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                stream.write("\n")
+            if not path.lower().endswith(THEME_PACKAGE_SUFFIX):
+                path += THEME_PACKAGE_SUFFIX
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_export_submit",
+                theme_id=profile.get("id"),
+                target=path,
+            )
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_export_start",
+                theme_id=profile.get("id"),
+                target=path,
+            )
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_export_run",
+                theme_id=profile.get("id"),
+            )
+            self.repository.write_theme_record(profile, path, default_design_tokens())
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_export_finish",
+                theme_id=profile.get("id"),
+                target=path,
+            )
         except Exception as exc:
+            append_theme_log(
+                self.repository.data_dir,
+                "settings_package_export_error",
+                theme_id=self._current_theme_id,
+                error=str(exc),
+            )
             ProductMessageBox.critical(self, "导出主题失败", str(exc))
 
     def state_signature(self):

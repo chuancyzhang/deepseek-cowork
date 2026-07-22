@@ -8,16 +8,34 @@ import re
 import tempfile
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass
 from typing import Any
 
 from .env_utils import get_app_data_dir
+from .theme_package import (
+    COMPONENT_CATALOG,
+    CONTENT_DEFAULTS,
+    PROTECTED_COMPONENTS,
+    SURFACE_CATALOG,
+    THEME_MANIFEST_NAME,
+    THEME_MAX_ASSET_BYTES,
+    THEME_MAX_MANIFEST_BYTES,
+    THEME_MAX_TOTAL_BYTES,
+    THEME_PACKAGE_SUFFIX,
+    THEME_SCHEMA_VERSION,
+    build_asset_record,
+    normalize_theme_manifest,
+    read_theme_package,
+    write_theme_package,
+)
 
 
 DEFAULT_THEME_ID = "default"
 THEME_DIRECTORY_NAME = "themes"
 THEME_STORE_FILENAME = "_state.json"
-THEME_PREVIEW_FILENAME = "_preview.json"
+THEME_PREVIEW_FILENAME = "_preview.cowork-theme"
+LEGACY_THEME_PREVIEW_FILENAME = "_preview.json"
 
 FONT_SIZE_TOKENS = (
     "font_size_caption",
@@ -610,9 +628,11 @@ def validate_theme_document(
     payload: Any,
     default_tokens: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate the portable JSON document shared by repository and import UI."""
+    """Validate a legacy portable JSON document or a v2 manifest object."""
     if not isinstance(payload, dict):
         raise ValueError("导入主题必须是 JSON 对象。")
+    if int(payload.get("schema_version") or 0) == THEME_SCHEMA_VERSION:
+        return validate_theme_manifest(payload, default_tokens)
     if payload.get("format") != "cowork-theme":
         raise ValueError("不是有效的 cowork-theme 文件。")
     unknown = sorted(set(payload) - {"format", "id", "name", "overrides"})
@@ -627,10 +647,59 @@ def validate_theme_document(
     return {
         "id": theme_id,
         "name": _normalize_name(payload.get("name")),
+        "schema_version": 1,
         "overrides": validate_theme_overrides(
             payload.get("overrides") or {},
             default_tokens,
         ),
+        "assets": {},
+        "surfaces": {},
+        "components": {},
+        "content": {},
+    }
+
+
+def validate_theme_manifest(
+    payload: Any,
+    default_tokens: dict[str, Any],
+    *,
+    asset_bytes: dict[str, bytes] | None = None,
+) -> dict[str, Any]:
+    """Validate the complete v2 declarative manifest."""
+    return normalize_theme_manifest(
+        payload,
+        validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
+        asset_bytes=asset_bytes,
+    )
+
+
+def default_theme_manifest() -> dict[str, Any]:
+    """Return the code-owned, immutable declarative baseline."""
+    return {
+        "format": "cowork-theme",
+        "schema_version": THEME_SCHEMA_VERSION,
+        "id": DEFAULT_THEME_ID,
+        "name": "默认主题",
+        "overrides": {},
+        "assets": {},
+        "surfaces": {},
+        "components": {},
+        "content": {},
+    }
+
+
+def theme_manifest_schema() -> dict[str, Any]:
+    """Public schema summary for AI theme tools and settings diagnostics."""
+    return {
+        "schema_version": THEME_SCHEMA_VERSION,
+        "surfaces": sorted(SURFACE_CATALOG),
+        "components": sorted(COMPONENT_CATALOG),
+        "protected_components": sorted(PROTECTED_COMPONENTS),
+        "content_keys": {key: value for key, value in CONTENT_DEFAULTS.items()},
+        "background_layer_types": ["solid", "image", "stripes", "grid", "dots", "noise"],
+        "image_fit": ["cover", "contain", "stretch", "center", "tile"],
+        "layout_fields": ["slot", "order", "row", "column", "row_span", "column_span", "alignment"],
+        "component_fields": ["visible", "icon", "style", "layout"],
     }
 
 
@@ -647,145 +716,170 @@ class ThemeStoreSnapshot:
 
 
 class ThemeRepository:
+    """Atomic repository for v2 theme packages with explicit v1 compatibility."""
+
     def __init__(self, data_dir: str | None = None):
         self.data_dir = os.path.abspath(data_dir or get_app_data_dir())
         self.themes_dir = os.path.join(self.data_dir, THEME_DIRECTORY_NAME)
         self.store_path = os.path.join(self.themes_dir, THEME_STORE_FILENAME)
         self.preview_path = os.path.join(self.themes_dir, THEME_PREVIEW_FILENAME)
+        self.legacy_preview_path = os.path.join(self.themes_dir, LEGACY_THEME_PREVIEW_FILENAME)
 
-    def theme_path(self, theme_id: str) -> str:
+    @staticmethod
+    def _validate_id(theme_id: str) -> str:
         normalized = str(theme_id or "").strip()
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", normalized):
             raise ValueError(f"主题 ID 不能用于文件名：{normalized}")
         if normalized == DEFAULT_THEME_ID:
-            raise ValueError("默认主题没有用户 JSON 文件。")
-        return os.path.join(self.themes_dir, normalized + ".json")
+            raise ValueError("默认主题没有用户主题包。")
+        return normalized
+
+    def theme_path(self, theme_id: str) -> str:
+        return os.path.join(self.themes_dir, self._validate_id(theme_id) + THEME_PACKAGE_SUFFIX)
+
+    def legacy_theme_path(self, theme_id: str) -> str:
+        return os.path.join(self.themes_dir, self._validate_id(theme_id) + ".json")
+
+    @staticmethod
+    def _manifest_from_record(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "format": "cowork-theme",
+            "schema_version": THEME_SCHEMA_VERSION,
+            "id": record.get("id"),
+            "name": record.get("name"),
+            "overrides": _json_copy(record.get("overrides") or {}),
+            "assets": _json_copy(record.get("assets") or {}),
+            "surfaces": _json_copy(record.get("surfaces") or {}),
+            "components": _json_copy(record.get("components") or {}),
+            "content": _json_copy(record.get("content") or {}),
+        }
+
+    @staticmethod
+    def _record_from_manifest(manifest: dict[str, Any], *, source_format: str = "package") -> dict[str, Any]:
+        return {
+            "id": manifest["id"],
+            "name": manifest["name"],
+            "base": DEFAULT_THEME_ID,
+            "schema_version": int(manifest.get("schema_version") or 1),
+            "overrides": _json_copy(manifest.get("overrides") or {}),
+            "assets": _json_copy(manifest.get("assets") or {}),
+            "surfaces": _json_copy(manifest.get("surfaces") or {}),
+            "components": _json_copy(manifest.get("components") or {}),
+            "content": _json_copy(manifest.get("content") or {}),
+            "source_format": source_format,
+        }
+
+    def _read_store(self) -> dict[str, Any]:
+        if not os.path.exists(self.store_path):
+            return {}
+        with open(self.store_path, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        if not isinstance(payload, dict):
+            raise ValueError("themes/_state.json 根节点必须是对象。")
+        unknown = sorted(set(payload) - {"active_theme_id"})
+        if unknown:
+            raise ValueError("themes/_state.json 包含未知字段：" + ", ".join(unknown))
+        return payload
+
+    def _read_package(self, path: str, default_tokens: dict[str, Any]) -> tuple[dict, dict[str, bytes]]:
+        return read_theme_package(
+            path,
+            validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
+        )
+
+    def _read_existing_assets(self, theme_id: str, default_tokens: dict[str, Any]) -> dict[str, bytes]:
+        path = self.theme_path(theme_id)
+        if not os.path.exists(path):
+            return {}
+        _manifest, assets = self._read_package(path, default_tokens)
+        return assets
 
     def load(self) -> ThemeStoreSnapshot:
-        payload = {}
-        if os.path.exists(self.store_path):
-            with open(self.store_path, "r", encoding="utf-8") as stream:
-                payload = json.load(stream)
-            if not isinstance(payload, dict):
-                raise ValueError("themes/_state.json 根节点必须是对象。")
-            unknown_state_fields = sorted(set(payload) - {"active_theme_id"})
-            if unknown_state_fields:
-                raise ValueError(
-                    "themes/_state.json 包含未知字段："
-                    + ", ".join(unknown_state_fields)
-                )
-        raw_themes = []
-        if os.path.isdir(self.themes_dir):
-            for filename in sorted(os.listdir(self.themes_dir)):
-                if filename.startswith("_") or not filename.lower().endswith(".json"):
-                    continue
-                path = os.path.join(self.themes_dir, filename)
-                with open(path, "r", encoding="utf-8") as stream:
-                    raw = json.load(stream)
-                if not isinstance(raw, dict) or raw.get("format") != "cowork-theme":
-                    raise ValueError(f"主题文件格式无效：{path}")
-                unknown_theme_fields = sorted(
-                    set(raw) - {"format", "id", "name", "overrides"}
-                )
-                if unknown_theme_fields:
-                    raise ValueError(
-                        f"主题文件包含未知字段 {', '.join(unknown_theme_fields)}：{path}"
-                    )
-                raw = dict(raw)
-                raw_themes.append(raw)
-        themes = []
-        seen_ids = set()
-        seen_names = set()
+        payload = self._read_store()
         from .theme import default_design_tokens
 
         defaults = default_design_tokens()
-        for raw in raw_themes:
-            if not isinstance(raw, dict):
-                raise ValueError("主题记录必须是对象。")
-            theme_id = str(raw.get("id") or "").strip()
-            if (
-                not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", theme_id)
-                or theme_id == DEFAULT_THEME_ID
-                or theme_id in seen_ids
-            ):
+        raw_themes: list[dict[str, Any]] = []
+        if os.path.isdir(self.themes_dir):
+            for filename in sorted(os.listdir(self.themes_dir)):
+                if filename.startswith("_"):
+                    continue
+                path = os.path.join(self.themes_dir, filename)
+                lower = filename.lower()
+                if lower.endswith(THEME_PACKAGE_SUFFIX):
+                    manifest, _assets = self._read_package(path, defaults)
+                    raw_themes.append(self._record_from_manifest(manifest, source_format="package"))
+                elif lower.endswith(".json"):
+                    with open(path, "r", encoding="utf-8") as stream:
+                        legacy = json.load(stream)
+                    normalized = validate_theme_document(legacy, defaults)
+                    if int(normalized.get("schema_version") or 1) != 1:
+                        raise ValueError(f"v2 主题必须使用 {THEME_PACKAGE_SUFFIX}：{path}")
+                    raw_themes.append(self._record_from_manifest(normalized, source_format="legacy_json"))
+        themes = []
+        seen_ids = set()
+        seen_names = set()
+        for item in raw_themes:
+            theme_id = str(item.get("id") or "")
+            name = _normalize_name(item.get("name"))
+            if theme_id in seen_ids:
                 raise ValueError(f"主题 ID 无效或重复：{theme_id or '<empty>'}")
-            name = _normalize_name(raw.get("name"))
-            name_key = name.casefold()
-            if name_key in seen_names:
+            if name.casefold() in seen_names:
                 raise ValueError(f"主题名称重复：{name}")
-            themes.append(
-                {
-                    "id": theme_id,
-                    "name": name,
-                    "base": DEFAULT_THEME_ID,
-                    "overrides": validate_theme_overrides(
-                        raw.get("overrides") or {},
-                        defaults,
-                    ),
-                    "created_at": int(raw.get("created_at") or 0),
-                    "updated_at": int(raw.get("updated_at") or 0),
-                }
-            )
+            themes.append(item)
             seen_ids.add(theme_id)
-            seen_names.add(name_key)
-        active_theme_id = str(payload.get("active_theme_id") or DEFAULT_THEME_ID)
-        if active_theme_id != DEFAULT_THEME_ID and active_theme_id not in seen_ids:
-            raise ValueError(f"活动主题不存在：{active_theme_id}")
+            seen_names.add(name.casefold())
+        active = str(payload.get("active_theme_id") or DEFAULT_THEME_ID)
+        if active != DEFAULT_THEME_ID and active not in seen_ids:
+            raise ValueError(f"活动主题不存在：{active}")
         canonical = {
-            "active_theme_id": active_theme_id,
-            "themes": [
-                {
-                    "id": item["id"],
-                    "name": item["name"],
-                    "overrides": item["overrides"],
-                }
-                for item in themes
-            ],
+            "active_theme_id": active,
+            "themes": [self._manifest_from_record(item) for item in themes],
         }
         revision = 0
         if payload or themes:
             digest = hashlib.sha256(
-                json.dumps(
-                    canonical,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
+                json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
             revision = int(digest[:15], 16)
-        return ThemeStoreSnapshot(
-            revision,
-            active_theme_id,
-            tuple(themes),
-        )
+        return ThemeStoreSnapshot(revision, active, tuple(themes))
 
-    def _save(self, snapshot: ThemeStoreSnapshot) -> ThemeStoreSnapshot:
-        next_snapshot = ThemeStoreSnapshot(
-            snapshot.revision,
-            snapshot.active_theme_id,
-            snapshot.themes,
-        )
+    def _save(self, snapshot: ThemeStoreSnapshot, *, default_tokens: dict[str, Any] | None = None) -> ThemeStoreSnapshot:
+        if default_tokens is None:
+            from .theme import default_design_tokens
+            default_tokens = default_design_tokens()
         os.makedirs(self.themes_dir, exist_ok=True)
-        desired_files = set()
-        for item in next_snapshot.themes:
-            path = self.theme_path(item.get("id"))
-            desired_files.add(os.path.normcase(os.path.abspath(path)))
-            _atomic_write_json(
-                path,
-                {
-                    "format": "cowork-theme",
-                    "id": item.get("id"),
-                    "name": item.get("name"),
-                    "overrides": _json_copy(item.get("overrides") or {}),
-                },
+        desired_ids = set()
+        for raw in snapshot.themes:
+            record = copy.deepcopy(raw)
+            theme_id = self._validate_id(record.get("id"))
+            desired_ids.add(theme_id)
+            assets = record.pop("_asset_bytes", None)
+            if assets is None:
+                assets = self._read_existing_assets(theme_id, default_tokens)
+            manifest = self._manifest_from_record(record)
+            write_theme_package(
+                self.theme_path(theme_id),
+                manifest,
+                assets,
+                validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
             )
+            legacy_path = self.legacy_theme_path(theme_id)
+            if os.path.exists(legacy_path):
+                os.unlink(legacy_path)
         for filename in os.listdir(self.themes_dir):
-            if filename.startswith("_") or not filename.lower().endswith(".json"):
+            if filename.startswith("_"):
                 continue
-            path = os.path.normcase(os.path.abspath(os.path.join(self.themes_dir, filename)))
-            if path not in desired_files:
-                os.unlink(path)
-        _atomic_write_json(self.store_path, next_snapshot.to_dict())
+            lower = filename.lower()
+            if lower.endswith(THEME_PACKAGE_SUFFIX):
+                theme_id = filename[: -len(THEME_PACKAGE_SUFFIX)]
+            elif lower.endswith(".json"):
+                theme_id = filename[:-5]
+            else:
+                continue
+            if theme_id not in desired_ids:
+                os.unlink(os.path.join(self.themes_dir, filename))
+        _atomic_write_json(self.store_path, snapshot.to_dict())
         return self.load()
 
     def replace_state(
@@ -802,56 +896,59 @@ class ThemeRepository:
             raise RuntimeError("主题目录已被其他操作更新，请刷新列表后重试。")
         if expected_theme_ids is not None:
             current_ids = {str(item.get("id") or "") for item in current.themes}
-            normalized_expected_ids = {str(item or "") for item in expected_theme_ids}
-            if current_ids != normalized_expected_ids:
+            if current_ids != {str(item or "") for item in expected_theme_ids}:
                 raise RuntimeError("主题文件夹内容已变化，请刷新列表后重试。")
-        normalized_themes = []
+        normalized = []
         seen_ids = set()
         seen_names = set()
-        now = int(time.time())
+        current_map = {item["id"]: item for item in current.themes}
         for raw in themes:
-            if not isinstance(raw, dict):
-                raise ValueError("主题记录必须是对象。")
             theme_id = str(raw.get("id") or uuid.uuid4().hex).strip()
             if theme_id == DEFAULT_THEME_ID or theme_id in seen_ids:
                 raise ValueError(f"主题 ID 无效或重复：{theme_id}")
             name = _normalize_name(raw.get("name"))
             if name.casefold() in seen_names:
                 raise ValueError(f"主题名称重复：{name}")
-            normalized_themes.append(
-                {
-                    "id": theme_id,
-                    "name": name,
-                    "base": DEFAULT_THEME_ID,
-                    "overrides": validate_theme_overrides(
-                        raw.get("overrides") or {},
-                        default_tokens,
-                    ),
-                    "created_at": int(raw.get("created_at") or now),
-                    "updated_at": now,
-                }
-            )
+            base = current_map.get(theme_id, {})
+            record = {
+                "id": theme_id,
+                "name": name,
+                "base": DEFAULT_THEME_ID,
+                "schema_version": THEME_SCHEMA_VERSION,
+                "overrides": validate_theme_overrides(raw.get("overrides") or {}, default_tokens),
+                "assets": _json_copy(raw.get("assets", base.get("assets", {})) or {}),
+                "surfaces": _json_copy(raw.get("surfaces", base.get("surfaces", {})) or {}),
+                "components": _json_copy(raw.get("components", base.get("components", {})) or {}),
+                "content": _json_copy(raw.get("content", base.get("content", {})) or {}),
+            }
+            if "_asset_bytes" in raw:
+                record["_asset_bytes"] = raw["_asset_bytes"]
+            validate_theme_manifest(self._manifest_from_record(record), default_tokens)
+            normalized.append(record)
             seen_ids.add(theme_id)
             seen_names.add(name.casefold())
         active = str(active_theme_id or DEFAULT_THEME_ID)
         if active != DEFAULT_THEME_ID and active not in seen_ids:
             raise ValueError(f"活动主题不存在：{active}")
         return self._save(
-            ThemeStoreSnapshot(current.revision, active, tuple(normalized_themes))
+            ThemeStoreSnapshot(current.revision, active, tuple(normalized)),
+            default_tokens=default_tokens,
         )
 
     def get_theme(self, theme_id: str) -> dict[str, Any] | None:
         if theme_id == DEFAULT_THEME_ID:
-            return {
-                "id": DEFAULT_THEME_ID,
-                "name": "默认主题",
-                "base": DEFAULT_THEME_ID,
-                "overrides": {},
-            }
+            result = default_theme_manifest()
+            result["base"] = DEFAULT_THEME_ID
+            return result
         for item in self.load().themes:
             if item.get("id") == theme_id:
                 return _json_copy(item)
         return None
+
+    def get_theme_assets(self, theme_id: str, default_tokens: dict[str, Any]) -> dict[str, bytes]:
+        if theme_id == DEFAULT_THEME_ID:
+            return {}
+        return self._read_existing_assets(theme_id, default_tokens)
 
     def upsert_theme(
         self,
@@ -860,53 +957,52 @@ class ThemeRepository:
         overrides: dict[str, Any],
         default_tokens: dict[str, Any],
         theme_id: str = "",
+        assets: dict[str, Any] | None = None,
+        surfaces: dict[str, Any] | None = None,
+        components: dict[str, Any] | None = None,
+        content: dict[str, Any] | None = None,
+        asset_bytes: dict[str, bytes] | None = None,
     ) -> dict[str, Any]:
         snapshot = self.load()
-        normalized_name = _normalize_name(name)
-        normalized_overrides = validate_theme_overrides(overrides, default_tokens)
         themes = [_json_copy(item) for item in snapshot.themes]
-        existing_index = next(
-            (index for index, item in enumerate(themes) if item.get("id") == theme_id),
-            -1,
-        )
+        existing_index = next((i for i, item in enumerate(themes) if item.get("id") == theme_id), -1)
+        normalized_name = _normalize_name(name)
         for index, item in enumerate(themes):
             if index != existing_index and str(item.get("name") or "").casefold() == normalized_name.casefold():
                 raise ValueError(f"主题名称已存在：{normalized_name}")
-        now = int(time.time())
+        existing = themes[existing_index] if existing_index >= 0 else {}
+        record = {
+            "id": existing.get("id") or uuid.uuid4().hex,
+            "name": normalized_name,
+            "base": DEFAULT_THEME_ID,
+            "schema_version": THEME_SCHEMA_VERSION,
+            "overrides": validate_theme_overrides(overrides, default_tokens),
+            "assets": _json_copy(assets if assets is not None else existing.get("assets", {})),
+            "surfaces": _json_copy(surfaces if surfaces is not None else existing.get("surfaces", {})),
+            "components": _json_copy(components if components is not None else existing.get("components", {})),
+            "content": _json_copy(content if content is not None else existing.get("content", {})),
+        }
+        if asset_bytes is not None:
+            record["_asset_bytes"] = asset_bytes
+        validate_theme_manifest(self._manifest_from_record(record), default_tokens)
         if existing_index >= 0:
-            existing = themes[existing_index]
-            record = {
-                **existing,
-                "name": normalized_name,
-                "overrides": normalized_overrides,
-                "updated_at": now,
-            }
             themes[existing_index] = record
         else:
-            record = {
-                "id": uuid.uuid4().hex,
-                "name": normalized_name,
-                "base": DEFAULT_THEME_ID,
-                "overrides": normalized_overrides,
-                "created_at": now,
-                "updated_at": now,
-            }
             themes.append(record)
         saved = self._save(
-            ThemeStoreSnapshot(snapshot.revision, snapshot.active_theme_id, tuple(themes))
+            ThemeStoreSnapshot(snapshot.revision, snapshot.active_theme_id, tuple(themes)),
+            default_tokens=default_tokens,
         )
-        return {
-            "theme": _json_copy(record),
-            "revision": saved.revision,
-        }
+        record.pop("_asset_bytes", None)
+        return {"theme": _json_copy(record), "revision": saved.revision}
 
     def activate_theme(self, theme_id: str) -> ThemeStoreSnapshot:
         snapshot = self.load()
         target = str(theme_id or DEFAULT_THEME_ID).strip()
-        valid_ids = {item.get("id") for item in snapshot.themes}
-        if target != DEFAULT_THEME_ID and target not in valid_ids:
+        if target != DEFAULT_THEME_ID and target not in {item.get("id") for item in snapshot.themes}:
             raise ValueError(f"主题不存在：{target}")
-        return self._save(ThemeStoreSnapshot(snapshot.revision, target, snapshot.themes))
+        _atomic_write_json(self.store_path, {} if target == DEFAULT_THEME_ID else {"active_theme_id": target})
+        return self.load()
 
     def delete_theme(self, theme_id: str) -> ThemeStoreSnapshot:
         target = str(theme_id or "").strip()
@@ -919,6 +1015,104 @@ class ThemeRepository:
         active = DEFAULT_THEME_ID if snapshot.active_theme_id == target else snapshot.active_theme_id
         return self._save(ThemeStoreSnapshot(snapshot.revision, active, themes))
 
+    @staticmethod
+    def _apply_patch_operations(document: dict[str, Any], operations: list[dict[str, Any]] | None) -> dict[str, Any]:
+        result = _json_copy(document)
+        for operation in operations or []:
+            if not isinstance(operation, dict) or set(operation) - {"op", "path", "value"}:
+                raise ValueError("主题补丁操作格式无效。")
+            op = str(operation.get("op") or "").lower()
+            path = str(operation.get("path") or "")
+            if op not in {"set", "remove"} or not path.startswith("/"):
+                raise ValueError("主题补丁只支持 set/remove 和绝对 JSON Pointer。")
+            parts = [item.replace("~1", "/").replace("~0", "~") for item in path[1:].split("/")]
+            if not parts or parts[0] not in {"surfaces", "components", "content"}:
+                raise ValueError("主题补丁只能修改 surfaces、components 或 content。")
+            cursor = result
+            for part in parts[:-1]:
+                if not isinstance(cursor, dict):
+                    raise ValueError(f"主题补丁路径无效：{path}")
+                cursor = cursor.setdefault(part, {})
+            if op == "set":
+                cursor[parts[-1]] = _json_copy(operation.get("value"))
+            else:
+                cursor.pop(parts[-1], None)
+        return result
+
+    def _write_preview_package(self, preview: dict[str, Any], asset_bytes: dict[str, bytes], default_tokens: dict[str, Any]) -> None:
+        manifest = {
+            key: _json_copy(preview.get(key))
+            for key in ("format", "schema_version", "id", "name", "overrides", "assets", "surfaces", "components", "content")
+        }
+        manifest["format"] = "cowork-theme"
+        manifest["schema_version"] = THEME_SCHEMA_VERSION
+        manifest["id"] = str(preview.get("id") or ("preview_" + str(preview.get("preview_id") or uuid.uuid4().hex)))
+        manifest = validate_theme_manifest(manifest, default_tokens, asset_bytes=asset_bytes)
+        metadata = {
+            "format": "cowork-theme-preview",
+            "preview_id": preview["preview_id"],
+            "revision": int(preview["revision"]),
+            "session_id": str(preview.get("session_id") or ""),
+            "created_at": int(preview.get("created_at") or time.time()),
+            "updated_at": int(preview.get("updated_at") or time.time()),
+        }
+        os.makedirs(self.themes_dir, exist_ok=True)
+        handle, temp_path = tempfile.mkstemp(prefix=".theme-preview-", suffix=".tmp", dir=self.themes_dir)
+        os.close(handle)
+        try:
+            with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+                archive.writestr(THEME_MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+                archive.writestr("preview.json", json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
+                for path, data in sorted(asset_bytes.items()):
+                    archive.writestr(path, data)
+            with open(temp_path, "r+b") as stream:
+                os.fsync(stream.fileno())
+            os.replace(temp_path, self.preview_path)
+        except Exception:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+
+    def _read_preview_package(self, default_tokens: dict[str, Any]) -> tuple[dict[str, Any], dict[str, bytes]]:
+        with zipfile.ZipFile(self.preview_path, "r") as archive:
+            names = set()
+            total = 0
+            for info in archive.infolist():
+                name = info.filename.replace("\\", "/")
+                if (
+                    name.startswith("/")
+                    or ".." in name.split("/")
+                    or name in names
+                    or info.is_dir()
+                    or (info.external_attr >> 16) & 0o170000 == 0o120000
+                ):
+                    raise ValueError(f"主题预览包包含不安全或重复路径：{name}")
+                if name not in {THEME_MANIFEST_NAME, "preview.json"} and not name.startswith("assets/"):
+                    raise ValueError(f"主题预览包包含未知文件：{name}")
+                if name in {THEME_MANIFEST_NAME, "preview.json"} and info.file_size > THEME_MAX_MANIFEST_BYTES:
+                    raise ValueError(f"主题预览元数据过大：{name}")
+                if name.startswith("assets/") and info.file_size > THEME_MAX_ASSET_BYTES:
+                    raise ValueError(f"主题预览资产超过 16 MiB：{name}")
+                total += int(info.file_size)
+                if total > THEME_MAX_TOTAL_BYTES:
+                    raise ValueError("主题预览包解压体积超过 64 MiB。")
+                names.add(name)
+            if THEME_MANIFEST_NAME not in names or "preview.json" not in names:
+                raise ValueError("主题预览包缺少 manifest.json 或 preview.json。")
+            manifest = json.loads(archive.read(THEME_MANIFEST_NAME).decode("utf-8"))
+            metadata = json.loads(archive.read("preview.json").decode("utf-8"))
+            asset_bytes = {
+                name: archive.read(name)
+                for name in names
+                if name.startswith("assets/") and not name.endswith("/")
+            }
+        normalized = validate_theme_manifest(manifest, default_tokens, asset_bytes=asset_bytes)
+        if metadata.get("format") != "cowork-theme-preview" or int(metadata.get("revision") or 0) < 1:
+            raise ValueError("主题预览元数据无效。")
+        return {**normalized, **metadata}, asset_bytes
+
     def write_preview(
         self,
         *,
@@ -927,30 +1121,35 @@ class ThemeRepository:
         default_tokens: dict[str, Any],
         session_id: str = "",
         replace_existing: bool = False,
+        surfaces: dict[str, Any] | None = None,
+        components: dict[str, Any] | None = None,
+        content: dict[str, Any] | None = None,
+        assets: dict[str, Any] | None = None,
+        asset_bytes: dict[str, bytes] | None = None,
     ) -> dict[str, Any]:
         existing = self.load_preview() if replace_existing else None
-        reuse_existing = bool(
-            existing
-            and str(existing.get("session_id") or "") == str(session_id or "")
-        )
+        reuse = bool(existing and str(existing.get("session_id") or "") == str(session_id or ""))
         now = int(time.time())
         payload = {
-            "format": "cowork-theme-preview",
-            "preview_id": (
-                existing["preview_id"] if reuse_existing else uuid.uuid4().hex
-            ),
-            "revision": (
-                int(existing.get("revision") or 0) + 1 if reuse_existing else 1
-            ),
+            "format": "cowork-theme",
+            "schema_version": THEME_SCHEMA_VERSION,
+            "id": "preview_" + (existing["preview_id"] if reuse else uuid.uuid4().hex),
             "name": _normalize_name(name),
             "overrides": validate_theme_overrides(overrides, default_tokens),
+            "assets": _json_copy(assets if assets is not None else (existing or {}).get("assets", {})),
+            "surfaces": _json_copy(surfaces if surfaces is not None else (existing or {}).get("surfaces", {})),
+            "components": _json_copy(components if components is not None else (existing or {}).get("components", {})),
+            "content": _json_copy(content if content is not None else (existing or {}).get("content", {})),
+            "preview_id": existing["preview_id"] if reuse else uuid.uuid4().hex,
+            "revision": int(existing.get("revision") or 0) + 1 if reuse else 1,
             "session_id": str(session_id or ""),
-            "created_at": (
-                int(existing.get("created_at") or now) if reuse_existing else now
-            ),
+            "created_at": int(existing.get("created_at") or now) if reuse else now,
             "updated_at": now,
         }
-        _atomic_write_json(self.preview_path, payload)
+        bytes_to_write = asset_bytes
+        if bytes_to_write is None and reuse:
+            _old, bytes_to_write = self._read_preview_package(default_tokens)
+        self._write_preview_package(payload, bytes_to_write or {}, default_tokens)
         return _json_copy(payload)
 
     def patch_preview(
@@ -961,17 +1160,17 @@ class ThemeRepository:
         set_overrides: dict[str, Any] | None,
         unset_tokens: list[str] | tuple[str, ...] | None,
         default_tokens: dict[str, Any],
+        operations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        current = self.load_preview()
-        if not current or current.get("preview_id") != str(preview_id or ""):
+        current, asset_bytes = self._read_preview_package(default_tokens)
+        if current.get("preview_id") != str(preview_id or ""):
             raise ValueError("主题预览不存在。")
         if int(current.get("revision") or 0) != int(preview_revision):
             raise RuntimeError("主题预览已被更新，请重新检查后再修改。")
         merged = _json_copy(current.get("overrides") or {})
         incoming = dict(set_overrides or {})
         incoming_tokens = dict(incoming.pop("tokens", {}) or {})
-        for name, value in incoming.items():
-            merged[name] = value
+        merged.update(incoming)
         tokens = dict(merged.get("tokens") or {})
         tokens.update(incoming_tokens)
         for name in unset_tokens or ():
@@ -981,32 +1180,92 @@ class ThemeRepository:
         else:
             merged.pop("tokens", None)
         current["overrides"] = validate_theme_overrides(merged, default_tokens)
-        current["revision"] = int(current.get("revision") or 0) + 1
+        current = self._apply_patch_operations(current, operations)
+        validate_theme_manifest(self._manifest_from_record(current), default_tokens, asset_bytes=asset_bytes)
+        current["revision"] = int(current["revision"]) + 1
         current["updated_at"] = int(time.time())
-        _atomic_write_json(self.preview_path, current)
+        self._write_preview_package(current, asset_bytes, default_tokens)
+        return _json_copy(current)
+
+    def import_preview_asset(
+        self,
+        *,
+        preview_id: str,
+        preview_revision: int,
+        asset_id: str,
+        source_path: str,
+        default_tokens: dict[str, Any],
+    ) -> dict[str, Any]:
+        current, asset_bytes = self._read_preview_package(default_tokens)
+        if current.get("preview_id") != preview_id or int(current.get("revision") or 0) != int(preview_revision):
+            raise RuntimeError("主题预览已更新，请重新检查后再导入资产。")
+        record, data = build_asset_record(asset_id, source_path)
+        assets = dict(current.get("assets") or {})
+        old = assets.get(asset_id)
+        assets[asset_id] = record
+        if old and old.get("path") != record["path"]:
+            asset_bytes.pop(old.get("path"), None)
+        asset_bytes[record["path"]] = data
+        current["assets"] = assets
+        current["revision"] = int(current["revision"]) + 1
+        current["updated_at"] = int(time.time())
+        self._write_preview_package(current, asset_bytes, default_tokens)
+        return _json_copy(current)
+
+    def remove_preview_asset(
+        self,
+        *,
+        preview_id: str,
+        preview_revision: int,
+        asset_id: str,
+        default_tokens: dict[str, Any],
+    ) -> dict[str, Any]:
+        current, asset_bytes = self._read_preview_package(default_tokens)
+        if current.get("preview_id") != preview_id or int(current.get("revision") or 0) != int(preview_revision):
+            raise RuntimeError("主题预览已更新，请重新检查后再删除资产。")
+        encoded = json.dumps({"surfaces": current.get("surfaces"), "components": current.get("components")}, ensure_ascii=False)
+        if f'"{asset_id}"' in encoded:
+            raise ValueError("主题资产仍被背景或图标引用，请先移除引用。")
+        assets = dict(current.get("assets") or {})
+        record = assets.pop(asset_id, None)
+        if record is None:
+            raise ValueError(f"主题资产不存在：{asset_id}")
+        asset_bytes.pop(record.get("path"), None)
+        current["assets"] = assets
+        current["revision"] = int(current["revision"]) + 1
+        current["updated_at"] = int(time.time())
+        self._write_preview_package(current, asset_bytes, default_tokens)
         return _json_copy(current)
 
     def load_preview(self) -> dict[str, Any] | None:
+        if os.path.exists(self.preview_path):
+            from .theme import default_design_tokens
+            preview, _assets = self._read_preview_package(default_design_tokens())
+            return preview
+        if os.path.exists(self.legacy_preview_path):
+            with open(self.legacy_preview_path, "r", encoding="utf-8") as stream:
+                payload = json.load(stream)
+            if not isinstance(payload, dict) or payload.get("format") != "cowork-theme-preview":
+                raise ValueError("themes/_preview.json 格式无效。")
+            return payload
+        return None
+
+    def get_preview_assets(self, default_tokens: dict[str, Any]) -> dict[str, bytes]:
         if not os.path.exists(self.preview_path):
-            return None
-        with open(self.preview_path, "r", encoding="utf-8") as stream:
-            payload = json.load(stream)
-        if not isinstance(payload, dict):
-            raise ValueError("themes/_preview.json 根节点必须是对象。")
-        if payload.get("format") != "cowork-theme-preview":
-            raise ValueError("themes/_preview.json 格式无效。")
-        if int(payload.get("revision") or 0) < 1:
-            raise ValueError("themes/_preview.json revision 无效。")
-        return payload
+            return {}
+        _preview, assets = self._read_preview_package(default_tokens)
+        return assets
 
     def clear_preview(self, preview_id: str = "") -> bool:
-        if not os.path.exists(self.preview_path):
+        paths = [path for path in (self.preview_path, self.legacy_preview_path) if os.path.exists(path)]
+        if not paths:
             return False
         if preview_id:
             current = self.load_preview()
             if current and current.get("preview_id") != preview_id:
                 raise ValueError("预览 ID 与当前主题预览不匹配。")
-        os.unlink(self.preview_path)
+        for path in paths:
+            os.unlink(path)
         return True
 
     def commit_preview(
@@ -1022,37 +1281,83 @@ class ThemeRepository:
         preview = self.load_preview()
         if not preview or preview.get("preview_id") != preview_id:
             raise ValueError("主题预览不存在。")
-        if preview_revision is not None and int(preview.get("revision") or 0) != int(
-            preview_revision
-        ):
+        if preview_revision is not None and int(preview.get("revision") or 0) != int(preview_revision):
             raise RuntimeError("主题预览已更新，需要重新确认后才能保存。")
         result = self.upsert_theme(
             name=name or preview.get("name") or "自定义主题",
             overrides=preview.get("overrides") or {},
             default_tokens=default_tokens,
             theme_id=theme_id,
+            assets=preview.get("assets") or {},
+            surfaces=preview.get("surfaces") or {},
+            components=preview.get("components") or {},
+            content=preview.get("content") or {},
+            asset_bytes=self.get_preview_assets(default_tokens),
         )
         if activate:
-            snapshot = self.activate_theme(result["theme"]["id"])
-            result["revision"] = snapshot.revision
+            result["revision"] = self.activate_theme(result["theme"]["id"]).revision
         self.clear_preview(preview_id)
         return result
 
-    def export_theme(self, theme_id: str, default_tokens: dict[str, Any]) -> dict[str, Any]:
+    def export_theme(self, theme_id: str, default_tokens: dict[str, Any], target_path: str = "") -> Any:
         theme = self.get_theme(theme_id)
         if not theme or theme.get("id") == DEFAULT_THEME_ID:
             raise ValueError("只能导出用户自定义主题。")
-        return {
-            "format": "cowork-theme",
-            "id": theme.get("id"),
-            "name": theme.get("name"),
-            "overrides": validate_theme_overrides(theme.get("overrides") or {}, default_tokens),
-        }
+        if target_path:
+            manifest = self._manifest_from_record(theme)
+            assets = self.get_theme_assets(theme_id, default_tokens)
+            write_theme_package(
+                target_path,
+                manifest,
+                assets,
+                validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
+            )
+            return os.path.abspath(target_path)
+        return self._manifest_from_record(theme)
 
     def import_theme(self, payload: Any, default_tokens: dict[str, Any]) -> dict[str, Any]:
-        normalized = validate_theme_document(payload, default_tokens)
+        asset_bytes = None
+        if isinstance(payload, (str, os.PathLike)):
+            manifest, asset_bytes = self._read_package(os.fspath(payload), default_tokens)
+            normalized = manifest
+        else:
+            normalized = validate_theme_document(payload, default_tokens)
         return self.upsert_theme(
             name=normalized["name"],
             overrides=normalized["overrides"],
             default_tokens=default_tokens,
+            assets=normalized.get("assets") or {},
+            surfaces=normalized.get("surfaces") or {},
+            components=normalized.get("components") or {},
+            content=normalized.get("content") or {},
+            asset_bytes=asset_bytes,
         )
+
+    def read_theme_file(self, path: str, default_tokens: dict[str, Any]) -> tuple[dict[str, Any], dict[str, bytes]]:
+        """Read a portable theme without mutating the repository."""
+        absolute = os.path.abspath(path)
+        if absolute.lower().endswith(THEME_PACKAGE_SUFFIX):
+            return self._read_package(absolute, default_tokens)
+        with open(absolute, "r", encoding="utf-8") as stream:
+            normalized = validate_theme_document(json.load(stream), default_tokens)
+        return normalized, {}
+
+    def write_theme_record(
+        self,
+        record: dict[str, Any],
+        target_path: str,
+        default_tokens: dict[str, Any],
+    ) -> str:
+        """Export an in-memory settings draft as a validated v2 package."""
+        theme_id = str(record.get("id") or uuid.uuid4().hex)
+        manifest = self._manifest_from_record({**record, "id": theme_id})
+        asset_bytes = record.get("_asset_bytes")
+        if asset_bytes is None:
+            asset_bytes = self._read_existing_assets(theme_id, default_tokens)
+        write_theme_package(
+            target_path,
+            manifest,
+            asset_bytes or {},
+            validate_overrides=lambda value: validate_theme_overrides(value, default_tokens),
+        )
+        return os.path.abspath(target_path)

@@ -8,7 +8,9 @@ from core.theme_service import (
     ThemeRepository,
     append_theme_log,
     theme_contrast_warnings,
+    theme_manifest_schema,
     theme_token_group,
+    validate_theme_manifest,
     validate_theme_overrides,
 )
 
@@ -46,6 +48,10 @@ def _summarize_theme(theme, *, active=False):
         "name": theme.get("name"),
         "active": bool(active),
         "overrides": json.loads(json.dumps(theme.get("overrides") or {}, ensure_ascii=False)),
+        "assets": json.loads(json.dumps(theme.get("assets") or {}, ensure_ascii=False)),
+        "surfaces": json.loads(json.dumps(theme.get("surfaces") or {}, ensure_ascii=False)),
+        "components": json.loads(json.dumps(theme.get("components") or {}, ensure_ascii=False)),
+        "content_overrides": json.loads(json.dumps(theme.get("content") or {}, ensure_ascii=False)),
     }
 
 
@@ -101,6 +107,7 @@ def inspect_ui_theme(theme_id="", include_schema=True, _context=None):
             "radius_scale": {"minimum": 0.5, "maximum": 1.5},
             "tokens": "Use token_schema keys only.",
         }
+        result["manifest_schema"] = theme_manifest_schema()
         try:
             from PySide6.QtGui import QFontDatabase
 
@@ -110,7 +117,7 @@ def inspect_ui_theme(theme_id="", include_schema=True, _context=None):
     return result
 
 
-def _validate_ui_theme(name, overrides):
+def _validate_ui_theme(name, overrides, surfaces=None, components=None, content=None, assets=None):
     normalized = validate_theme_overrides(overrides, default_design_tokens())
     requested_fonts = {
         str(normalized.get(field) or "").strip()
@@ -135,6 +142,20 @@ def _validate_ui_theme(name, overrides):
         },
         default_design_tokens(),
     )
+    normalized_manifest = validate_theme_manifest(
+        {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "validation",
+            "name": str(name or "主题校验"),
+            "overrides": normalized,
+            "assets": assets or {},
+            "surfaces": surfaces or {},
+            "components": components or {},
+            "content": content or {},
+        },
+        default_design_tokens(),
+    )
     warnings = theme_contrast_warnings(resolved)
     affected_areas = sorted(
         {
@@ -152,6 +173,7 @@ def _validate_ui_theme(name, overrides):
         "status": "ok",
         "name": str(name or "主题校验"),
         "normalized_overrides": normalized,
+        "normalized_manifest": normalized_manifest,
         "resolved": resolved,
         "contrast_warnings": warnings,
         "affected_areas": affected_areas,
@@ -159,12 +181,13 @@ def _validate_ui_theme(name, overrides):
     }
 
 
-def validate_ui_theme(name, overrides, _context=None):
+def validate_ui_theme(name, overrides, surfaces=None, components=None, content=None, assets=None, _context=None):
     repository = _repository(_context)
     append_theme_log(repository.data_dir, "tool_validate_submit", name=name)
     append_theme_log(repository.data_dir, "tool_validate_start", name=name)
     try:
-        result = _validate_ui_theme(name, overrides)
+        append_theme_log(repository.data_dir, "tool_validate_run", name=name)
+        result = _validate_ui_theme(name, overrides, surfaces, components, content, assets)
     except Exception as exc:
         append_theme_log(
             repository.data_dir,
@@ -183,17 +206,22 @@ def validate_ui_theme(name, overrides, _context=None):
     return result
 
 
-def preview_ui_theme(name, overrides, _context=None):
+def preview_ui_theme(name, overrides, surfaces=None, components=None, content=None, assets=None, _context=None):
     repository = _repository(_context)
     session_id = str((_context or {}).get("session_id") or "") if isinstance(_context, dict) else ""
     append_theme_log(repository.data_dir, "tool_preview_submit", session_id=session_id, name=name)
     append_theme_log(repository.data_dir, "tool_preview_start", session_id=session_id, name=name)
     try:
+        append_theme_log(repository.data_dir, "tool_preview_run", session_id=session_id, name=name)
         preview = repository.write_preview(
             name=name,
             overrides=overrides,
             default_tokens=default_design_tokens(),
             session_id=session_id,
+            surfaces=surfaces or {},
+            components=components or {},
+            content=content or {},
+            assets=assets or {},
         )
     except Exception as exc:
         append_theme_log(
@@ -217,6 +245,10 @@ def preview_ui_theme(name, overrides, _context=None):
         "preview_revision": preview["revision"],
         "preview_path": repository.preview_path,
         "normalized_overrides": preview["overrides"],
+        "manifest": {
+            key: preview.get(key) or {}
+            for key in ("overrides", "assets", "surfaces", "components", "content")
+        },
         "content": "Theme preview requested. It remains temporary until explicitly saved or restored.",
     }
 
@@ -226,6 +258,7 @@ def patch_ui_theme_preview(
     preview_revision,
     set_overrides=None,
     unset_tokens=None,
+    operations=None,
     _context=None,
 ):
     repository = _repository(_context)
@@ -235,13 +268,16 @@ def patch_ui_theme_preview(
         preview_id=preview_id,
         preview_revision=preview_revision,
     )
+    append_theme_log(repository.data_dir, "tool_patch_preview_start", preview_id=preview_id)
     try:
+        append_theme_log(repository.data_dir, "tool_patch_preview_run", preview_id=preview_id)
         preview = repository.patch_preview(
             preview_id=str(preview_id or ""),
             preview_revision=int(preview_revision),
             set_overrides=set_overrides or {},
             unset_tokens=unset_tokens or [],
             default_tokens=default_design_tokens(),
+            operations=operations or [],
         )
     except Exception as exc:
         append_theme_log(
@@ -263,7 +299,109 @@ def patch_ui_theme_preview(
         "preview_id": preview["preview_id"],
         "preview_revision": preview["revision"],
         "normalized_overrides": preview["overrides"],
+        "manifest": {
+            key: preview.get(key) or {}
+            for key in ("overrides", "assets", "surfaces", "components", "content")
+        },
         "content": "Theme preview patched. The new revision must be reviewed before saving.",
+    }
+
+
+def import_ui_theme_asset(
+    preview_id,
+    preview_revision,
+    asset_id,
+    source_path,
+    _context=None,
+):
+    repository = _repository(_context)
+    append_theme_log(
+        repository.data_dir,
+        "tool_asset_import_submit",
+        preview_id=preview_id,
+        preview_revision=preview_revision,
+        asset_id=asset_id,
+    )
+    append_theme_log(repository.data_dir, "tool_asset_import_start", preview_id=preview_id, asset_id=asset_id)
+    try:
+        append_theme_log(repository.data_dir, "tool_asset_import_run", preview_id=preview_id, asset_id=asset_id)
+        preview = repository.import_preview_asset(
+            preview_id=str(preview_id or ""),
+            preview_revision=int(preview_revision),
+            asset_id=str(asset_id or ""),
+            source_path=str(source_path or ""),
+            default_tokens=default_design_tokens(),
+        )
+    except Exception as exc:
+        append_theme_log(
+            repository.data_dir,
+            "tool_asset_import_error",
+            preview_id=preview_id,
+            asset_id=asset_id,
+            error=str(exc),
+        )
+        raise
+    append_theme_log(
+        repository.data_dir,
+        "tool_asset_import_finish",
+        preview_id=preview_id,
+        preview_revision=preview["revision"],
+        asset_id=asset_id,
+    )
+    return {
+        "status": "ok",
+        "preview_id": preview["preview_id"],
+        "preview_revision": preview["revision"],
+        "asset": (preview.get("assets") or {}).get(asset_id),
+        "content": "Theme image imported into the preview package. Patch a surface or icon to reference it.",
+    }
+
+
+def remove_ui_theme_asset(preview_id, preview_revision, asset_id, _context=None):
+    repository = _repository(_context)
+    append_theme_log(
+        repository.data_dir,
+        "tool_asset_remove_submit",
+        preview_id=preview_id,
+        preview_revision=preview_revision,
+        asset_id=asset_id,
+    )
+    append_theme_log(repository.data_dir, "tool_asset_remove_start", preview_id=preview_id, asset_id=asset_id)
+    try:
+        append_theme_log(repository.data_dir, "tool_asset_remove_run", preview_id=preview_id, asset_id=asset_id)
+        preview = repository.remove_preview_asset(
+            preview_id=str(preview_id or ""),
+            preview_revision=int(preview_revision),
+            asset_id=str(asset_id or ""),
+            default_tokens=default_design_tokens(),
+        )
+    except Exception as exc:
+        append_theme_log(
+            repository.data_dir,
+            "tool_asset_remove_error",
+            preview_id=preview_id,
+            asset_id=asset_id,
+            error=str(exc),
+        )
+        return {
+            "status": "error",
+            "error": str(exc),
+            "preview_id": str(preview_id or ""),
+            "preview_revision": int(preview_revision),
+            "asset_id": str(asset_id or ""),
+        }
+    append_theme_log(
+        repository.data_dir,
+        "tool_asset_remove_finish",
+        preview_id=preview_id,
+        preview_revision=preview["revision"],
+        asset_id=asset_id,
+    )
+    return {
+        "status": "ok",
+        "preview_id": preview["preview_id"],
+        "preview_revision": preview["revision"],
+        "content": "Theme image removed from the preview package.",
     }
 
 
@@ -280,6 +418,7 @@ def clear_ui_theme_preview(preview_id="", _context=None):
         preview_id=preview_id,
     )
     try:
+        append_theme_log(repository.data_dir, "tool_restore_run", preview_id=preview_id)
         cleared = repository.clear_preview(str(preview_id or ""))
     except Exception as exc:
         append_theme_log(
@@ -351,6 +490,7 @@ def save_ui_theme_preview(
         }
     append_theme_log(repository.data_dir, "tool_save_start", preview_id=preview_id)
     try:
+        append_theme_log(repository.data_dir, "tool_save_run", preview_id=preview_id)
         result = repository.commit_preview(
             preview_id=preview_id,
             preview_revision=int(preview_revision),
@@ -406,6 +546,7 @@ def activate_ui_theme(theme_id, _context=None):
         return {"status": "cancelled", "approval": approval, "content": "Theme activation cancelled."}
     append_theme_log(repository.data_dir, "tool_activate_start", theme_id=theme["id"])
     try:
+        append_theme_log(repository.data_dir, "tool_activate_run", theme_id=theme["id"])
         repository.clear_preview()
         snapshot = repository.activate_theme(theme["id"])
     except Exception as exc:
@@ -445,6 +586,7 @@ def delete_ui_theme(theme_id, _context=None):
         return {"status": "cancelled", "approval": approval, "content": "Theme deletion cancelled."}
     append_theme_log(repository.data_dir, "tool_delete_start", theme_id=theme["id"])
     try:
+        append_theme_log(repository.data_dir, "tool_delete_run", theme_id=theme["id"])
         snapshot = repository.delete_theme(theme["id"])
     except Exception as exc:
         append_theme_log(
@@ -467,7 +609,7 @@ TOOL_EXPORTS = [
     {
         "name": "inspect_ui_theme",
         "handler": inspect_ui_theme,
-        "description": "Inspect the active Cowork UI theme, custom themes, resolved values, and configurable token schema.",
+        "description": "Inspect the active Cowork UI theme package, declarative workspace manifest, assets, and token schema.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -488,7 +630,11 @@ TOOL_EXPORTS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Proposed theme name."},
-                "overrides": {"type": "object", "description": "Theme overrides using inspect_ui_theme schema."}
+                "overrides": {"type": "object", "description": "Theme overrides using inspect_ui_theme schema."},
+                "surfaces": {"type": "object", "description": "Declarative surface backgrounds and styles."},
+                "components": {"type": "object", "description": "Allowed component presentation overrides."},
+                "content": {"type": "object", "description": "Whitelisted display copy overrides."},
+                "assets": {"type": "object", "description": "Declared package asset metadata."}
             },
             "required": ["name", "overrides"]
         },
@@ -504,7 +650,10 @@ TOOL_EXPORTS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Preview name."},
-                "overrides": {"type": "object", "description": "Validated theme overrides."}
+                "overrides": {"type": "object", "description": "Validated theme overrides."},
+                "surfaces": {"type": "object", "description": "Declarative surface backgrounds and styles."},
+                "components": {"type": "object", "description": "Allowed component presentation overrides."},
+                "content": {"type": "object", "description": "Whitelisted display copy overrides."}
             },
             "required": ["name", "overrides"]
         },
@@ -516,14 +665,27 @@ TOOL_EXPORTS = [
     {
         "name": "patch_ui_theme_preview",
         "handler": patch_ui_theme_preview,
-        "description": "Incrementally set or remove validated overrides on the current theme preview.",
+        "description": "Incrementally patch tokens or the validated declarative manifest on the current preview.",
         "parameters": {
             "type": "object",
             "properties": {
                 "preview_id": {"type": "string", "description": "Current preview id."},
                 "preview_revision": {"type": "integer", "description": "Current preview revision."},
                 "set_overrides": {"type": "object", "description": "Top-level overrides and/or token values to merge."},
-                "unset_tokens": {"type": "array", "items": {"type": "string"}, "description": "Token names to remove from the preview."}
+                "unset_tokens": {"type": "array", "items": {"type": "string"}, "description": "Token names to remove from the preview."},
+                "operations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string", "enum": ["set", "remove"]},
+                            "path": {"type": "string"},
+                            "value": {}
+                        },
+                        "required": ["op", "path"]
+                    },
+                    "description": "Restricted JSON Pointer operations under /surfaces, /components, or /content."
+                }
             },
             "required": ["preview_id", "preview_revision"]
         },
@@ -531,6 +693,43 @@ TOOL_EXPORTS = [
         "destructive": False,
         "allowed_modes": ["execution"],
         "search_hint": "theme preview patch adjust incremental remove token"
+    },
+    {
+        "name": "import_ui_theme_asset",
+        "handler": import_ui_theme_asset,
+        "description": "Copy and validate an existing local PNG, JPEG, or WebP into the current theme preview package.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "preview_id": {"type": "string"},
+                "preview_revision": {"type": "integer"},
+                "asset_id": {"type": "string", "description": "Stable manifest asset id."},
+                "source_path": {"type": "string", "description": "Existing local image path."}
+            },
+            "required": ["preview_id", "preview_revision", "asset_id", "source_path"]
+        },
+        "read_only": False,
+        "destructive": False,
+        "allowed_modes": ["execution"],
+        "search_hint": "theme background icon image asset import package"
+    },
+    {
+        "name": "remove_ui_theme_asset",
+        "handler": remove_ui_theme_asset,
+        "description": "Remove an unreferenced image asset from the current theme preview package.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "preview_id": {"type": "string"},
+                "preview_revision": {"type": "integer"},
+                "asset_id": {"type": "string"}
+            },
+            "required": ["preview_id", "preview_revision", "asset_id"]
+        },
+        "read_only": False,
+        "destructive": False,
+        "allowed_modes": ["execution"],
+        "search_hint": "theme background icon image asset remove package"
     },
     {
         "name": "clear_ui_theme_preview",
@@ -564,7 +763,7 @@ TOOL_EXPORTS = [
             "required": ["preview_id", "preview_revision"]
         },
         "allowed_modes": ["execution"],
-        "search_hint": "theme save custom persist activate approval"
+        "search_hint": "customize UI theme colors font appearance save custom persist activate approval"
     },
     {
         "name": "activate_ui_theme",

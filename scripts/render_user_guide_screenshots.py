@@ -349,7 +349,7 @@ def main_run():
             theme_manager.themeChanged.connect(window._apply_runtime_theme)
             theme_manager.previewStateChanged.connect(window._on_theme_preview_state)
             repository.write_preview(
-                name="深夜验收",
+                name="星图工作台",
                 overrides={
                     "font_scale": 1.05,
                     "density": "compact",
@@ -358,6 +358,11 @@ def main_run():
                         "bg_app": "#101116",
                         "bg_main": "#15171d",
                         "bg_sidebar": "#12141a",
+                        "sidebar_text": "#eceef3",
+                        "sidebar_text_muted": "#aeb4c2",
+                        "sidebar_border": "#292d36",
+                        "bg_sidebar_hover": "#1c2029",
+                        "bg_sidebar_selected": "#23283a",
                         "bg_chat": "#15171d",
                         "text_primary": "#eceef3",
                         "text_secondary": "#b7bcc8",
@@ -366,6 +371,8 @@ def main_run():
                         "composer_text": "#eceef3",
                         "right_sidebar_bg": "#171920",
                         "right_sidebar_text": "#eceef3",
+                        "right_sidebar_text_muted": "#aeb4c2",
+                        "right_sidebar_header_bg": "#1c1f27",
                         "management_bg": "#101116",
                         "management_panel_bg": "#181b22",
                         "overlay_bg": "#181b22",
@@ -375,11 +382,52 @@ def main_run():
                         "border": "#343946",
                         "border_subtle": "#292d36",
                         "separator": "#292d36",
-                        "sidebar_border": "#292d36",
                         "chat_border": "#292d36",
                         "composer_border": "#343946",
                         "right_sidebar_border": "#292d36",
                     },
+                },
+                surfaces={
+                    "window.titlebar": {
+                        "background": {"layers": [
+                            {"type": "solid", "color": "#101116", "opacity": 1.0},
+                            {"type": "dots", "color": "#8b93ff", "spacing": 18, "line_width": 1, "opacity": 0.18},
+                        ]}
+                    },
+                    "shell.left_sidebar": {
+                        "background": {"layers": [
+                            {"type": "stripes", "color": "#8b93ff", "spacing": 22, "line_width": 1, "angle": 35, "size": 8, "opacity": 0.10}
+                        ]}
+                    },
+                    "home.hero": {
+                        "background": {"layers": [
+                            {"type": "grid", "color": "#8b93ff", "spacing": 28, "line_width": 1, "opacity": 0.10}
+                        ]}
+                    },
+                    "conversation.composer": {
+                        "background": {"layers": [
+                            {"type": "dots", "color": "#8b93ff", "spacing": 14, "line_width": 1, "opacity": 0.13}
+                        ]}
+                    },
+                },
+                components={
+                    "home.title": {"style": {"foreground": "#f3f4ff", "font_size": 23, "font_weight": 700}},
+                    "home.card.ppt": {"layout": {"row": 0, "column": 0, "column_span": 2}, "style": {"border_color": "#555e95", "border_width": 1}},
+                    "home.card.files": {"layout": {"row": 1, "column": 0}},
+                    "home.card.images": {"visible": False},
+                    "home.card.office": {"layout": {"row": 1, "column": 1}},
+                    "titlebar.logo": {"icon": {"source": "builtin", "name": "fa5s.satellite"}},
+                },
+                content={
+                    "brand.title": "DeepSeek Cowork · 星图",
+                    "brand.tagline": "AI configurable workspace",
+                    "home.title": "今晚，从一件重要的事开始",
+                    "home.card.ppt.title": "星图演示",
+                    "home.card.ppt.description": "进入固定行为的 PPT Mode",
+                    "home.card.files.title": "归档素材",
+                    "home.card.office.title": "生成交付物",
+                    "home.reminder.title": "主题改变呈现，不改变能力边界",
+                    "composer.placeholder": "描述目标，界面会保持动作与安全边界不变",
                 },
                 default_tokens=default_design_tokens(),
                 session_id="theme-acceptance",
@@ -390,6 +438,10 @@ def main_run():
             ):
                 if not theme_manager.apply_repository_state(reason="screenshot_acceptance"):
                     raise RuntimeError(theme_manager.last_error)
+            window.resize(1280, 800)
+            window.show()
+            process_events(260)
+            save_widget(window, "s39-ai-theme-package-home.png", 220)
             window.add_chat_bubble(
                 "User",
                 "请展示左右侧栏、聊天区、工具卡和输入区的完整主题覆盖。",

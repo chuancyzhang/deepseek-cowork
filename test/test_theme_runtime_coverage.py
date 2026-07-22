@@ -474,6 +474,33 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
 
         self.assertEqual(tracker.events, [])
 
+    def test_visible_chat_layout_keeps_multiple_user_messages_materialized(self):
+        with patch.object(self.window, "start_background_services", return_value=None):
+            self.window.resize(1200, 800)
+            self.window.show()
+            self.app.processEvents()
+        bubbles = [
+            self.window.add_chat_bubble(
+                "User",
+                f"连续用户消息 {index}",
+                animate=False,
+                source_message_id=f"visible-user-{index}",
+            )
+            for index in range(3)
+        ]
+        self.app.processEvents()
+        state = self.window.get_current_session()
+        chat_width = state.chat_layout.parentWidget().width()
+        for bubble in bubbles:
+            item_index = state.chat_layout.indexOf(bubble)
+            self.assertGreaterEqual(item_index, 0)
+            self.assertFalse(state.chat_layout.itemAt(item_index).isEmpty())
+            self.assertFalse(bubble.isHidden())
+            self.assertTrue(bubble.user_bubble_frame.isVisible())
+            self.assertTrue(bubble.user_content_edit.isVisible())
+            self.assertLessEqual(bubble.geometry().width(), chat_width)
+            self.assertLess(bubble.geometry().height(), 200)
+
 
 if __name__ == "__main__":
     unittest.main()

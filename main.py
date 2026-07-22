@@ -13656,10 +13656,24 @@ class ChatBubble(QFrame):
     def event(self, event):
         result = super().event(event)
         if event.type() == QEvent.ParentChange and self.parentWidget() is not None:
-            self.setVisible(
-                bool(getattr(self, "_theme_component_desired_visible", True))
-            )
+            # Reparenting into an already visible scroll layout is not a safe
+            # point to call setVisible(): Qt can leave WA_WState_Hidden set
+            # while reporting the widget as visible, and QLayout then treats
+            # the message item as empty. Apply the desired state after the
+            # ParentChange transaction has completed.
+            QTimer.singleShot(0, self._apply_deferred_theme_visibility)
         return result
+
+    def _apply_deferred_theme_visibility(self):
+        if not _qt_object_alive(self) or self.parentWidget() is None:
+            return
+        self.setVisible(
+            bool(getattr(self, "_theme_component_desired_visible", True))
+        )
+        self.updateGeometry()
+        parent = self.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().invalidate()
 
     def __init__(
         self,

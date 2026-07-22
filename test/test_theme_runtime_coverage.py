@@ -22,6 +22,7 @@ from main import (
     SessionSkillPickerPopover,
     SessionContextChip,
 )
+from ui.theme_workspace import WorkspaceSceneCanvas
 
 
 class TopLevelShowTracker(QObject):
@@ -233,19 +234,21 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             "schema_version": 2,
             "overrides": {},
             "assets": {},
+            "workspace_scene": {
+                "attachment": "fixed",
+                "layers": [
+                    {"type": "solid", "color": "#e9efea"},
+                    {
+                        "type": "grid",
+                        "color": "rgba(102,119,170,0.18)",
+                        "spacing": 18,
+                        "line_width": 1,
+                    },
+                ],
+            },
             "surfaces": {
                 "shell.left_sidebar": {
-                    "background": {
-                        "layers": [
-                            {
-                                "type": "grid",
-                                "color": "#6677aa",
-                                "opacity": 0.18,
-                                "spacing": 18,
-                                "line_width": 1,
-                            }
-                        ]
-                    }
+                    "material": {"kind": "transparent"}
                 }
             },
             "components": {
@@ -268,9 +271,11 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         self.assertFalse(self.window.action_btn.isHidden())
         self.window.new_chat_btn.click()
         self.assertEqual(len(self.window.sessions), original_session_count + 1)
-        backdrop = self.window.workspace_theme_controller.surfaces["shell.left_sidebar"]
-        self.assertFalse(backdrop.isHidden())
-        self.assertEqual(backdrop.layers[0]["type"], "grid")
+        canvas = self.window.workspace_theme_controller.scene_canvas
+        self.assertIsNotNone(canvas)
+        self.assertFalse(canvas.isHidden())
+        self.assertEqual(canvas.layers[1]["type"], "grid")
+        self.assertEqual(len(self.window.findChildren(type(canvas))), 1)
         state = self.window.get_current_session()
         self.assertEqual(state.empty_state.title_label.text(), "选择一个起点")
         with patch(
@@ -279,6 +284,100 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         ):
             self.assertTrue(self.manager.restore_saved_theme(reason="brand_title_restore"))
         self.assertEqual(self.window.windowTitle(), "DeepSeek Cowork")
+
+    def test_workspace_scene_canvas_uses_one_global_grid_and_revision_cache(self):
+        host = QWidget()
+        host.resize(130, 98)
+        canvas = WorkspaceSceneCanvas(host)
+        canvas.set_scene(
+            {
+                "attachment": "fixed",
+                "layers": [
+                    {"type": "solid", "color": "#ffffff", "opacity": 1, "blend": "source_over"},
+                    {
+                        "type": "grid",
+                        "color": "#d8d8d8",
+                        "opacity": 1,
+                        "blend": "source_over",
+                        "spacing": 32,
+                        "line_width": 1,
+                        "major_every": 4,
+                        "major_color": "#ff0000",
+                        "major_line_width": 1,
+                    },
+                ],
+            },
+            {},
+            {},
+            revision="7",
+        )
+        host.show()
+        self.app.processEvents()
+        try:
+            self.assertEqual(canvas.geometry(), host.rect())
+            first = canvas._rendered_scene()
+            second = canvas._rendered_scene()
+            self.assertEqual(first.cacheKey(), second.cacheKey())
+            image = first.toImage()
+            self.assertGreater(image.pixelColor(0, 20).red(), 240)
+            self.assertLess(image.pixelColor(32, 20).red(), 245)
+            host.resize(162, 98)
+            self.app.processEvents()
+            resized = canvas._rendered_scene()
+            self.assertEqual(resized.width() / resized.devicePixelRatio(), 162)
+            self.assertNotEqual(first.cacheKey(), resized.cacheKey())
+        finally:
+            host.close()
+            host.deleteLater()
+
+    def test_workspace_scene_decode_failure_restores_previous_scene_and_objects(self):
+        state = self.window.get_current_session()
+        original_input = self.window.input_field
+        valid = {
+            "id": "scene-before-failure",
+            "name": "Scene before failure",
+            "schema_version": 2,
+            "overrides": {},
+            "assets": {},
+            "workspace_scene": {
+                "attachment": "fixed",
+                "layers": [{"type": "solid", "color": "#e9efea"}],
+            },
+            "surfaces": {},
+            "components": {},
+            "content": {},
+        }
+        broken = {
+            **valid,
+            "id": "scene-broken-asset",
+            "name": "Broken asset",
+            "assets": {
+                "missing": {
+                    "path": "assets/missing.png",
+                    "media_type": "image/png",
+                    "sha256": "0" * 64,
+                    "width": 32,
+                    "height": 32,
+                }
+            },
+            "workspace_scene": {
+                "attachment": "fixed",
+                "layers": [{"type": "image", "asset": "missing", "fit": "cover"}],
+            },
+        }
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            self.assertTrue(self.manager.apply_profile(valid, preview=True, reason="scene_valid"))
+            self.assertFalse(self.manager.apply_profile(broken, preview=True, reason="scene_broken"))
+        self.assertIn("无法解码", self.manager.last_error)
+        self.assertEqual(
+            self.window.workspace_theme_controller.scene_canvas.layers[0]["type"],
+            "solid",
+        )
+        self.assertIs(self.window.input_field, original_input)
+        self.assertEqual(self.window.get_current_session().session_id, state.session_id)
         self.window._set_theme_brand_title("")
         self.assertEqual(self.window.windowTitle(), "DeepSeek Cowork")
 
@@ -295,6 +394,10 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
                         "schema_version": 2,
                         "overrides": {},
                         "assets": {},
+                        "workspace_scene": {"attachment": "fixed", "layers": []},
+                        "surfaces": {},
+                        "components": {},
+                        "content": {},
                     },
                     preview=True,
                     reason="active_theme_window_regression",
@@ -353,7 +456,10 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
                 "schema_version": 2,
                 "overrides": {},
                 "assets": {},
+                "workspace_scene": {"attachment": "fixed", "layers": []},
+                "surfaces": {},
                 "components": {"conversation.user_message": {"visible": False}},
+                "content": {},
             }
             with patch(
                 "core.theme.QFontDatabase.families",

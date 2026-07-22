@@ -97,7 +97,6 @@ from ui.primitives import (
 )
 from ui.theme_settings import ThemeSettingsPanel
 from ui.theme_workspace import (
-    ThemeSurfaceBackdrop,
     WorkspaceThemeController,
     apply_theme_component_visibility,
 )
@@ -12189,10 +12188,14 @@ class EmptyStateWidget(QWidget):
         
         # Initial layout
         self.reflow_cards()
-        self._theme_backdrops = {
-            "home.hero": ThemeSurfaceBackdrop(self, "home.hero"),
-            "home.quick_actions": ThemeSurfaceBackdrop(self.grid_widget, "home.quick_actions"),
-            "home.reminder": ThemeSurfaceBackdrop(self.toolkit_hint, "home.reminder"),
+        self._theme_surfaces = {
+            "home.hero": self,
+            "home.quick_actions": self.grid_widget,
+            "home.reminder": self.toolkit_hint,
+        }
+        self._theme_surface_bases = {
+            surface_id: widget.styleSheet()
+            for surface_id, widget in self._theme_surfaces.items()
         }
         self._theme_component_bases = {
             "home.title": self.title_label.styleSheet(),
@@ -12372,6 +12375,19 @@ class EmptyStateWidget(QWidget):
     def refresh_theme(self, resolved=None):
         resolved = resolved or getattr(getattr(QApplication.instance(), "theme_manager", None), "current", None) or {}
         self._resolved_theme = resolved
+        scene_active = bool(((resolved.get("workspace_scene") or {}).get("layers") or []))
+        resolved_surface_styles = {}
+        for surface_id, widget in self._theme_surfaces.items():
+            surface = (resolved.get("surfaces") or {}).get(surface_id) or {}
+            if scene_active and not surface.get("material"):
+                surface = {**surface, "material": {"kind": "transparent"}}
+            resolved_surface_styles[surface_id] = WorkspaceThemeController.surface_style_sheet(
+                widget,
+                surface,
+                self._theme_surface_bases[surface_id],
+            )
+        self.setStyleSheet(resolved_surface_styles["home.hero"])
+        self.grid_widget.setStyleSheet(resolved_surface_styles["home.quick_actions"])
         content = resolved.get("content") or {}
         self.title_label.setText(content.get("home.title", "从一个任务开始"))
         defaults = {
@@ -12423,7 +12439,7 @@ class EmptyStateWidget(QWidget):
             WorkspaceThemeController._style_sheet(
                 self.toolkit_hint,
                 reminder_spec.get("style") or {},
-                self._theme_component_bases["home.reminder"],
+                resolved_surface_styles["home.reminder"],
             )
         )
         title_spec = (resolved.get("components") or {}).get("home.title") or {}
@@ -12438,12 +12454,6 @@ class EmptyStateWidget(QWidget):
                 self._theme_component_bases["home.title"],
             )
         )
-        assets = resolved.get("assets") or {}
-        asset_bytes = resolved.get("_asset_bytes") or {}
-        for surface_id, backdrop in self._theme_backdrops.items():
-            surface = (resolved.get("surfaces") or {}).get(surface_id) or {}
-            layers = ((surface.get("background") or {}).get("layers") or [])
-            backdrop.set_theme(layers, assets, asset_bytes)
         self.current_cols = None
         self.reflow_cards()
 
@@ -17848,9 +17858,16 @@ class MainWindow(QMainWindow):
         self.theme_preview_bar.restoreRequested.connect(self._restore_theme_preview_from_bar)
         root_layout.addWidget(self.theme_preview_bar)
         
+        self.workspace_scene_host = QWidget()
+        self.workspace_scene_host.setObjectName("WorkspaceSceneHost")
+        workspace_scene_layout = QVBoxLayout(self.workspace_scene_host)
+        workspace_scene_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_scene_layout.setSpacing(0)
         self.main_splitter = SmartSplitter(Qt.Horizontal)
         self.main_splitter.splitterMoved.connect(lambda *_: self.sync_context_drawer_layout())
-        root_layout.addWidget(self.main_splitter)
+        workspace_scene_layout.addWidget(self.main_splitter)
+        root_layout.addWidget(self.workspace_scene_host)
+        self.workspace_theme_controller.register_scene_host(self.workspace_scene_host)
 
         # --- Sidebar ---
         sidebar = QWidget()
@@ -19054,9 +19071,12 @@ class MainWindow(QMainWindow):
     def _apply_runtime_theme(self, _resolved=None):
         """Refresh the persistent application shell after a theme change."""
         self.workspace_theme_controller.restore_presentation()
+        _resolved = _resolved or {}
+        scene_active = bool(((_resolved.get("workspace_scene") or {}).get("layers") or []))
+        workspace_background = "transparent" if scene_active else DesignTokens.bg_chat
         self.setStyleSheet(self._theme_stylesheet_factory())
         self.main_container.setStyleSheet(
-            f"QWidget#MainContainer {{ background: {DesignTokens.bg_chat}; }}"
+            f"QWidget#MainContainer {{ background: {workspace_background}; }}"
         )
         self.sidebar.setMinimumWidth(DesignTokens.sidebar_min_width)
         self.sidebar.setMaximumWidth(DesignTokens.sidebar_max_width)
@@ -19118,13 +19138,13 @@ class MainWindow(QMainWindow):
             f"color: {DesignTokens.chat_text}; }}"
         )
         self.conversation_column.setStyleSheet(
-            f"QWidget#ConversationColumn {{ background: {DesignTokens.bg_chat}; "
+            f"QWidget#ConversationColumn {{ background: {workspace_background}; "
             f"color: {DesignTokens.chat_text}; }}"
         )
         self.session_tabs.setMinimumWidth(DesignTokens.conversation_compact_min_width)
         self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
         self.session_tabs.setStyleSheet(
-            f"QTabWidget#SessionTabs::pane {{ background: {DesignTokens.bg_chat}; "
+            f"QTabWidget#SessionTabs::pane {{ background: {workspace_background}; "
             f"color: {DesignTokens.chat_text}; border: none; }}"
         )
         self.input_card.setStyleSheet(

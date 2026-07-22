@@ -387,21 +387,30 @@ def main_run():
                         "right_sidebar_border": "#292d36",
                     },
                 },
+                workspace_scene={
+                    "attachment": "fixed",
+                    "layers": [
+                        {"type": "solid", "color": "#171a21"},
+                        {
+                            "type": "stripes", "color": "#8b93ff", "spacing": 22,
+                            "line_width": 1, "angle": 35, "size": 8, "opacity": 0.10,
+                        },
+                        {
+                            "type": "grid", "color": "#8b93ff", "spacing": 28,
+                            "line_width": 1, "major_every": 4,
+                            "major_color": "rgba(139,147,255,0.16)", "opacity": 0.10,
+                        },
+                    ],
+                },
                 surfaces={
                     "shell.left_sidebar": {
-                        "background": {"layers": [
-                            {"type": "stripes", "color": "#8b93ff", "spacing": 22, "line_width": 1, "angle": 35, "size": 8, "opacity": 0.10}
-                        ]}
+                        "material": {"kind": "tint", "color": "#11131a", "opacity": 0.88}
                     },
                     "home.hero": {
-                        "background": {"layers": [
-                            {"type": "grid", "color": "#8b93ff", "spacing": 28, "line_width": 1, "opacity": 0.10}
-                        ]}
+                        "material": {"kind": "transparent"}
                     },
                     "conversation.composer": {
-                        "background": {"layers": [
-                            {"type": "dots", "color": "#8b93ff", "spacing": 14, "line_width": 1, "opacity": 0.13}
-                        ]}
+                        "material": {"kind": "tint", "color": "#171a21", "opacity": 0.94}
                     },
                 },
                 components={

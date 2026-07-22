@@ -37,6 +37,7 @@ class ThemePackageTests(unittest.TestCase):
             "name": "Safe",
             "overrides": {},
             "assets": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
             "surfaces": {},
             "components": {"composer.submit": {"visible": False}},
             "content": {},
@@ -55,6 +56,7 @@ class ThemePackageTests(unittest.TestCase):
             "name": "Native titlebar",
             "overrides": {},
             "assets": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
             "surfaces": {},
             "components": {},
             "content": {},
@@ -78,6 +80,7 @@ class ThemePackageTests(unittest.TestCase):
             "name": "Brand title",
             "overrides": {},
             "assets": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
             "surfaces": {},
             "components": {},
             "content": {"brand.title": "My Cowork"},
@@ -106,7 +109,7 @@ class ThemePackageTests(unittest.TestCase):
             operations=[
                 {
                     "op": "set",
-                    "path": "/surfaces/conversation.canvas/background/layers",
+                    "path": "/workspace_scene/layers",
                     "value": [{"type": "image", "asset": "main-bg", "fit": "cover"}],
                 }
             ],
@@ -124,7 +127,7 @@ class ThemePackageTests(unittest.TestCase):
             self.assertIn(manifest["assets"]["main-bg"]["path"], archive.namelist())
         loaded = self.repository.get_theme(result["theme"]["id"])
         self.assertEqual(
-            loaded["surfaces"]["conversation.canvas"]["background"]["layers"][0]["asset"],
+            loaded["workspace_scene"]["layers"][0]["asset"],
             "main-bg",
         )
 
@@ -155,6 +158,7 @@ class ThemePackageTests(unittest.TestCase):
                 "one": record,
                 "two": {**record, "path": "assets/duplicate.png"},
             },
+            "workspace_scene": {"attachment": "fixed", "layers": []},
             "surfaces": {},
             "components": {},
             "content": {},
@@ -162,14 +166,70 @@ class ThemePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "重复图片"):
             validate_theme_manifest(payload, self.defaults)
         payload["assets"] = {}
-        payload["surfaces"] = {
-            "home.hero": {
-                "background": {
-                    "layers": [{"type": "solid", "color": "rgb(999, 0, 0)"}]
-                }
-            }
+        payload["workspace_scene"] = {
+            "attachment": "fixed",
+            "layers": [{"type": "solid", "color": "rgb(999, 0, 0)"}],
         }
         with self.assertRaisesRegex(ValueError, "0–255"):
+            validate_theme_manifest(payload, self.defaults)
+
+    def test_workspace_scene_is_required_and_rejects_nested_backgrounds(self):
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "scene-owner",
+            "name": "Scene owner",
+            "overrides": {},
+            "assets": {},
+            "surfaces": {},
+            "components": {},
+            "content": {},
+        }
+        with self.assertRaisesRegex(ValueError, "必须声明 workspace_scene"):
+            validate_theme_manifest(payload, self.defaults)
+        payload["workspace_scene"] = {"attachment": "fixed", "layers": []}
+        payload["surfaces"] = {
+            "conversation.timeline": {"background": {"layers": []}}
+        }
+        with self.assertRaisesRegex(ValueError, "未知字段.*background"):
+            validate_theme_manifest(payload, self.defaults)
+
+    def test_workspace_scene_validates_order_unique_image_and_major_grid(self):
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "scene-grid",
+            "name": "Scene grid",
+            "overrides": {},
+            "assets": {},
+            "workspace_scene": {
+                "attachment": "fixed",
+                "layers": [
+                    {"type": "solid", "color": "#f4f1e8"},
+                    {
+                        "type": "grid",
+                        "color": "rgba(166,116,24,0.10)",
+                        "spacing": 32,
+                        "major_every": 4,
+                        "major_color": "rgba(200,63,104,0.12)",
+                    },
+                ],
+            },
+            "surfaces": {
+                "conversation.timeline": {
+                    "material": {"kind": "tint", "color": "#ffffff", "opacity": 0.9}
+                }
+            },
+            "components": {},
+            "content": {},
+        }
+        normalized = validate_theme_manifest(payload, self.defaults)
+        self.assertEqual(normalized["workspace_scene"]["layers"][1]["major_every"], 4)
+        payload["workspace_scene"]["layers"] = [
+            payload["workspace_scene"]["layers"][1],
+            payload["workspace_scene"]["layers"][0],
+        ]
+        with self.assertRaisesRegex(ValueError, "图层顺序"):
             validate_theme_manifest(payload, self.defaults)
 
 

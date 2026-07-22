@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 import random
 from dataclasses import dataclass
@@ -51,17 +53,18 @@ def apply_theme_component_visibility(widget: QWidget, visible: bool) -> None:
     widget.setVisible(visible)
 
 
-class ThemeSurfaceBackdrop(QWidget):
-    """A non-interactive declarative background layer attached below host children."""
+class WorkspaceSceneCanvas(QWidget):
+    """The only image and procedural-background owner in the workspace."""
 
-    def __init__(self, host: QWidget, surface_id: str):
+    def __init__(self, host: QWidget):
         super().__init__(host)
         self.host = host
-        self.surface_id = surface_id
         self.layers: list[dict[str, Any]] = []
         self.asset_bytes: dict[str, bytes] = {}
         self.asset_records: dict[str, dict[str, Any]] = {}
         self._pixmap_cache: dict[str, QPixmap] = {}
+        self._render_cache: dict[tuple, QPixmap] = {}
+        self.revision = ""
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -78,11 +81,17 @@ class ThemeSurfaceBackdrop(QWidget):
             self.lower()
         return super().eventFilter(watched, event)
 
-    def set_theme(self, layers, asset_records, asset_bytes):
+    def set_scene(self, scene, asset_records, asset_bytes, *, revision=""):
+        layers = (scene or {}).get("layers") or []
         self.layers = copy.deepcopy(list(layers or []))
         self.asset_records = copy.deepcopy(dict(asset_records or {}))
         self.asset_bytes = dict(asset_bytes or {})
+        self.revision = str(revision or "")
         self._pixmap_cache.clear()
+        self._render_cache.clear()
+        for layer in self.layers:
+            if layer.get("type") == "image":
+                self._pixmap(str(layer.get("asset") or ""))
         self.setVisible(bool(self.layers))
         self.lower()
         self.update()
@@ -97,7 +106,6 @@ class ThemeSurfaceBackdrop(QWidget):
         pixmap = QPixmap()
         if not data or not pixmap.loadFromData(data):
             raise ValueError(f"主题背景资产无法解码：{asset_id}")
-        pixmap.setDevicePixelRatio(max(1.0, self.devicePixelRatioF()))
         self._pixmap_cache[digest] = pixmap
         return pixmap
 
@@ -140,19 +148,16 @@ class ThemeSurfaceBackdrop(QWidget):
         pixmap = self._pixmap(layer["asset"])
         target = self.rect()
         fit = layer.get("fit", "cover")
-        if fit == "tile" or layer.get("repeat"):
-            painter.drawTiledPixmap(target, pixmap)
-        else:
-            destination, source = self._image_target(
-                pixmap.size() / pixmap.devicePixelRatio(),
-                target,
-                fit,
-                float(layer.get("focal_x", 0.5)),
-                float(layer.get("focal_y", 0.5)),
-            )
-            painter.drawPixmap(destination, pixmap, source)
+        destination, source = self._image_target(
+            pixmap.size(),
+            target,
+            fit,
+            float(layer.get("focal_x", 0.5)),
+            float(layer.get("focal_y", 0.5)),
+        )
+        painter.drawPixmap(destination, pixmap, source)
         if layer.get("tint"):
-            painter.fillRect(target, _color(layer["tint"], float(layer.get("opacity", 1)) * 0.35))
+            painter.fillRect(target, _color(layer["tint"], 0.35))
 
     def _paint_pattern(self, painter: QPainter, layer: dict):
         pattern_type = layer["type"]
@@ -164,9 +169,22 @@ class ThemeSurfaceBackdrop(QWidget):
         if pattern_type == "solid":
             painter.fillRect(rect, color)
         elif pattern_type == "grid":
-            for x in range(rect.left(), rect.right() + 1, spacing):
+            major_every = max(0, int(layer.get("major_every", 0)))
+            major_color = _color(layer.get("major_color") or layer.get("color"))
+            major_width = max(1, int(layer.get("major_line_width", line_width)))
+            for index, x in enumerate(range(0, rect.right() + 1, spacing)):
+                painter.setPen(
+                    QPen(major_color, major_width)
+                    if major_every and index % major_every == 0
+                    else QPen(color, line_width)
+                )
                 painter.drawLine(x, rect.top(), x, rect.bottom())
-            for y in range(rect.top(), rect.bottom() + 1, spacing):
+            for index, y in enumerate(range(0, rect.bottom() + 1, spacing)):
+                painter.setPen(
+                    QPen(major_color, major_width)
+                    if major_every and index % major_every == 0
+                    else QPen(color, line_width)
+                )
                 painter.drawLine(rect.left(), y, rect.right(), y)
         elif pattern_type == "dots":
             radius = max(1, line_width)
@@ -187,7 +205,9 @@ class ThemeSurfaceBackdrop(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             size = max(1, int(layer.get("size", 8)))
-            generator = random.Random(f"{self.surface_id}:{rect.width()}:{rect.height()}:{size}")
+            generator = random.Random(
+                json.dumps(layer, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
             count = min(12000, max(100, rect.width() * rect.height() // max(8, size * size)))
             for _ in range(count):
                 painter.drawRect(
@@ -197,10 +217,22 @@ class ThemeSurfaceBackdrop(QWidget):
                     1,
                 )
 
-    def paintEvent(self, event):
-        if not self.layers:
-            return
-        painter = QPainter(self)
+    def _rendered_scene(self) -> QPixmap:
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        assets_key = tuple(
+            sorted((asset_id, str(record.get("sha256") or "")) for asset_id, record in self.asset_records.items())
+        )
+        scene_digest = hashlib.sha256(
+            json.dumps(self.layers, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        key = (self.revision, assets_key, scene_digest, self.width(), self.height(), round(dpr, 3))
+        cached = self._render_cache.get(key)
+        if cached is not None:
+            return cached
+        pixmap = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+        pixmap.setDevicePixelRatio(dpr)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing, True)
         try:
             for layer in self.layers:
@@ -214,6 +246,23 @@ class ThemeSurfaceBackdrop(QWidget):
                 painter.restore()
         finally:
             painter.end()
+        self._render_cache = {key: pixmap}
+        return pixmap
+
+    def paintEvent(self, event):
+        if not self.layers:
+            return
+        painter = QPainter(self)
+        try:
+            painter.drawPixmap(0, 0, self._rendered_scene())
+        finally:
+            painter.end()
+
+
+@dataclass
+class _SurfaceBinding:
+    widget: QWidget
+    default_stylesheet: str
 
 
 @dataclass
@@ -234,17 +283,22 @@ class WorkspaceThemeController:
     """Applies declarative presentation without owning behavior or QObject lifetime."""
 
     def __init__(self):
-        self.surfaces: dict[str, ThemeSurfaceBackdrop] = {}
-        self.surface_styles: dict[str, str] = {}
+        self.scene_canvas: WorkspaceSceneCanvas | None = None
+        self.surfaces: dict[str, _SurfaceBinding] = {}
         self.components: dict[str, _ComponentBinding] = {}
         self.content_handlers: dict[str, Callable[[str], None]] = {}
         self._last_resolved: dict[str, Any] | None = None
 
+    def register_scene_host(self, widget: QWidget):
+        if self.scene_canvas is not None:
+            raise ValueError("工作区场景宿主只能注册一次。")
+        self.scene_canvas = WorkspaceSceneCanvas(widget)
+        return widget
+
     def register_surface(self, surface_id: str, widget: QWidget):
         if surface_id in self.surfaces:
             raise ValueError(f"主题区域重复注册：{surface_id}")
-        self.surfaces[surface_id] = ThemeSurfaceBackdrop(widget, surface_id)
-        self.surface_styles[surface_id] = widget.styleSheet()
+        self.surfaces[surface_id] = _SurfaceBinding(widget, widget.styleSheet())
         return widget
 
     def register_component(self, component_id: str, widget: QWidget, layout: QLayout | None = None):
@@ -307,6 +361,23 @@ class WorkspaceThemeController:
         if "{" not in base:
             return base.rstrip().rstrip(";") + "; " + "; ".join(declarations) + ";"
         return base + f"\n{selector} {{ {'; '.join(declarations)}; }}"
+
+    @classmethod
+    def surface_style_sheet(cls, widget: QWidget, surface: dict, base: str) -> str:
+        result = cls._style_sheet(widget, surface.get("style") or {}, base)
+        material = surface.get("material") or {}
+        if not material:
+            return result
+        if not widget.objectName():
+            widget.setObjectName("ThemeSurface_" + str(id(widget)))
+        selector = f"{widget.metaObject().className()}#{widget.objectName()}"
+        kind = material.get("kind", "transparent")
+        if kind == "transparent":
+            color = "transparent"
+        else:
+            parsed = _color(material.get("color"), float(material.get("opacity", 1)))
+            color = f"rgba({parsed.red()}, {parsed.green()}, {parsed.blue()}, {parsed.alpha()})"
+        return result + f"\n{selector} {{ background-color: {color}; }}"
 
     @staticmethod
     def _apply_size(
@@ -379,11 +450,12 @@ class WorkspaceThemeController:
         surface_bases: dict[str, str] | None = None,
         component_bases: dict[str, dict[str, Any]] | None = None,
     ):
-        for surface_id, backdrop in self.surfaces.items():
-            backdrop.host.setStyleSheet(
-                (surface_bases or {}).get(surface_id, self.surface_styles.get(surface_id, ""))
+        if self.scene_canvas is not None:
+            self.scene_canvas.set_scene({}, {}, {}, revision="reset")
+        for surface_id, binding in self.surfaces.items():
+            binding.widget.setStyleSheet(
+                (surface_bases or {}).get(surface_id, binding.default_stylesheet)
             )
-            backdrop.set_theme([], {}, {})
         for component_id, binding in self.components.items():
             self._restore_layout(binding)
             base = (component_bases or {}).get(component_id) or {}
@@ -411,18 +483,22 @@ class WorkspaceThemeController:
         self._reset(surface_bases, component_bases)
         assets = resolved.get("assets") or {}
         asset_bytes = resolved.get("_asset_bytes") or {}
-        for surface_id, backdrop in self.surfaces.items():
+        scene = resolved.get("workspace_scene") or {}
+        scene_active = bool(scene.get("layers"))
+        if self.scene_canvas is None and scene_active:
+            raise ValueError("工作区场景宿主尚未注册。")
+        if self.scene_canvas is not None:
+            revision = resolved.get("preview_revision") or resolved.get("id") or "theme"
+            self.scene_canvas.set_scene(scene, assets, asset_bytes, revision=revision)
+        for surface_id, binding in self.surfaces.items():
             surface = (resolved.get("surfaces") or {}).get(surface_id) or {}
-            layers = ((surface.get("background") or {}).get("layers") or [])
-            backdrop.set_theme(layers, assets, asset_bytes)
-            backdrop.host.setStyleSheet(
-                self._style_sheet(
-                    backdrop.host,
-                    surface.get("style") or {},
-                    (surface_bases or {}).get(
-                        surface_id,
-                        self.surface_styles.get(surface_id, ""),
-                    ),
+            if scene_active and not surface.get("material"):
+                surface = {**surface, "material": {"kind": "transparent"}}
+            binding.widget.setStyleSheet(
+                self.surface_style_sheet(
+                    binding.widget,
+                    surface,
+                    (surface_bases or {}).get(surface_id, binding.default_stylesheet),
                 )
             )
         content = resolved.get("content") or {}
@@ -472,8 +548,8 @@ class WorkspaceThemeController:
     def apply(self, resolved: dict[str, Any]):
         previous = copy.deepcopy(self._last_resolved)
         surface_snapshot = {
-            surface_id: backdrop.host.styleSheet()
-            for surface_id, backdrop in self.surfaces.items()
+            surface_id: binding.widget.styleSheet()
+            for surface_id, binding in self.surfaces.items()
         }
         component_snapshot = {}
         for component_id, binding in self.components.items():
@@ -504,11 +580,15 @@ class WorkspaceThemeController:
     def restore_presentation(self):
         """Remove the previous declarative layer before semantic QSS is rebuilt."""
         previous = self._last_resolved or {}
-        for surface_id in (previous.get("surfaces") or {}):
-            backdrop = self.surfaces.get(surface_id)
-            if backdrop is not None:
-                backdrop.host.setStyleSheet(self.surface_styles.get(surface_id, ""))
-                backdrop.set_theme([], {}, {})
+        if self.scene_canvas is not None:
+            self.scene_canvas.set_scene({}, {}, {}, revision="restore")
+        surface_ids = set((previous.get("surfaces") or {}).keys())
+        if ((previous.get("workspace_scene") or {}).get("layers") or []):
+            surface_ids.update(self.surfaces)
+        for surface_id in surface_ids:
+            binding = self.surfaces.get(surface_id)
+            if binding is not None:
+                binding.widget.setStyleSheet(binding.default_stylesheet)
         for component_id, spec in (previous.get("components") or {}).items():
             binding = self.components.get(component_id)
             if binding is None:

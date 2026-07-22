@@ -16,6 +16,7 @@ from .env_utils import get_app_data_dir
 from .theme_package import (
     COMPONENT_CATALOG,
     CONTENT_DEFAULTS,
+    DEFAULT_WORKSPACE_SCENE,
     PROTECTED_COMPONENTS,
     SURFACE_CATALOG,
     THEME_MANIFEST_NAME,
@@ -653,6 +654,7 @@ def validate_theme_document(
             default_tokens,
         ),
         "assets": {},
+        "workspace_scene": _json_copy(DEFAULT_WORKSPACE_SCENE),
         "surfaces": {},
         "components": {},
         "content": {},
@@ -682,6 +684,7 @@ def default_theme_manifest() -> dict[str, Any]:
         "name": "默认主题",
         "overrides": {},
         "assets": {},
+        "workspace_scene": _json_copy(DEFAULT_WORKSPACE_SCENE),
         "surfaces": {},
         "components": {},
         "content": {},
@@ -696,8 +699,15 @@ def theme_manifest_schema() -> dict[str, Any]:
         "components": sorted(COMPONENT_CATALOG),
         "protected_components": sorted(PROTECTED_COMPONENTS),
         "content_keys": {key: value for key, value in CONTENT_DEFAULTS.items()},
+        "workspace_scene": {
+            "required": True,
+            "attachment": ["fixed"],
+            "maximum_layers": 4,
+            "unique_background_owner": True,
+        },
         "background_layer_types": ["solid", "image", "stripes", "grid", "dots", "noise"],
-        "image_fit": ["cover", "contain", "stretch", "center", "tile"],
+        "image_fit": ["cover", "contain", "stretch", "center"],
+        "surface_material_kinds": ["transparent", "tint", "opaque"],
         "layout_fields": ["slot", "order", "row", "column", "row_span", "column_span", "alignment"],
         "component_fields": ["visible", "icon", "style", "layout"],
     }
@@ -749,6 +759,7 @@ class ThemeRepository:
             "name": record.get("name"),
             "overrides": _json_copy(record.get("overrides") or {}),
             "assets": _json_copy(record.get("assets") or {}),
+            "workspace_scene": _json_copy(record.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE),
             "surfaces": _json_copy(record.get("surfaces") or {}),
             "components": _json_copy(record.get("components") or {}),
             "content": _json_copy(record.get("content") or {}),
@@ -763,6 +774,7 @@ class ThemeRepository:
             "schema_version": int(manifest.get("schema_version") or 1),
             "overrides": _json_copy(manifest.get("overrides") or {}),
             "assets": _json_copy(manifest.get("assets") or {}),
+            "workspace_scene": _json_copy(manifest.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE),
             "surfaces": _json_copy(manifest.get("surfaces") or {}),
             "components": _json_copy(manifest.get("components") or {}),
             "content": _json_copy(manifest.get("content") or {}),
@@ -917,6 +929,9 @@ class ThemeRepository:
                 "schema_version": THEME_SCHEMA_VERSION,
                 "overrides": validate_theme_overrides(raw.get("overrides") or {}, default_tokens),
                 "assets": _json_copy(raw.get("assets", base.get("assets", {})) or {}),
+                "workspace_scene": _json_copy(
+                    raw.get("workspace_scene", base.get("workspace_scene", DEFAULT_WORKSPACE_SCENE))
+                ),
                 "surfaces": _json_copy(raw.get("surfaces", base.get("surfaces", {})) or {}),
                 "components": _json_copy(raw.get("components", base.get("components", {})) or {}),
                 "content": _json_copy(raw.get("content", base.get("content", {})) or {}),
@@ -958,6 +973,7 @@ class ThemeRepository:
         default_tokens: dict[str, Any],
         theme_id: str = "",
         assets: dict[str, Any] | None = None,
+        workspace_scene: dict[str, Any] | None = None,
         surfaces: dict[str, Any] | None = None,
         components: dict[str, Any] | None = None,
         content: dict[str, Any] | None = None,
@@ -978,6 +994,11 @@ class ThemeRepository:
             "schema_version": THEME_SCHEMA_VERSION,
             "overrides": validate_theme_overrides(overrides, default_tokens),
             "assets": _json_copy(assets if assets is not None else existing.get("assets", {})),
+            "workspace_scene": _json_copy(
+                workspace_scene
+                if workspace_scene is not None
+                else existing.get("workspace_scene", DEFAULT_WORKSPACE_SCENE)
+            ),
             "surfaces": _json_copy(surfaces if surfaces is not None else existing.get("surfaces", {})),
             "components": _json_copy(components if components is not None else existing.get("components", {})),
             "content": _json_copy(content if content is not None else existing.get("content", {})),
@@ -1026,8 +1047,8 @@ class ThemeRepository:
             if op not in {"set", "remove"} or not path.startswith("/"):
                 raise ValueError("主题补丁只支持 set/remove 和绝对 JSON Pointer。")
             parts = [item.replace("~1", "/").replace("~0", "~") for item in path[1:].split("/")]
-            if not parts or parts[0] not in {"surfaces", "components", "content"}:
-                raise ValueError("主题补丁只能修改 surfaces、components 或 content。")
+            if not parts or parts[0] not in {"workspace_scene", "surfaces", "components", "content"}:
+                raise ValueError("主题补丁只能修改 workspace_scene、surfaces、components 或 content。")
             cursor = result
             for part in parts[:-1]:
                 if not isinstance(cursor, dict):
@@ -1042,7 +1063,7 @@ class ThemeRepository:
     def _write_preview_package(self, preview: dict[str, Any], asset_bytes: dict[str, bytes], default_tokens: dict[str, Any]) -> None:
         manifest = {
             key: _json_copy(preview.get(key))
-            for key in ("format", "schema_version", "id", "name", "overrides", "assets", "surfaces", "components", "content")
+            for key in ("format", "schema_version", "id", "name", "overrides", "assets", "workspace_scene", "surfaces", "components", "content")
         }
         manifest["format"] = "cowork-theme"
         manifest["schema_version"] = THEME_SCHEMA_VERSION
@@ -1121,6 +1142,7 @@ class ThemeRepository:
         default_tokens: dict[str, Any],
         session_id: str = "",
         replace_existing: bool = False,
+        workspace_scene: dict[str, Any] | None = None,
         surfaces: dict[str, Any] | None = None,
         components: dict[str, Any] | None = None,
         content: dict[str, Any] | None = None,
@@ -1137,6 +1159,11 @@ class ThemeRepository:
             "name": _normalize_name(name),
             "overrides": validate_theme_overrides(overrides, default_tokens),
             "assets": _json_copy(assets if assets is not None else (existing or {}).get("assets", {})),
+            "workspace_scene": _json_copy(
+                workspace_scene
+                if workspace_scene is not None
+                else (existing or {}).get("workspace_scene", DEFAULT_WORKSPACE_SCENE)
+            ),
             "surfaces": _json_copy(surfaces if surfaces is not None else (existing or {}).get("surfaces", {})),
             "components": _json_copy(components if components is not None else (existing or {}).get("components", {})),
             "content": _json_copy(content if content is not None else (existing or {}).get("content", {})),
@@ -1223,7 +1250,14 @@ class ThemeRepository:
         current, asset_bytes = self._read_preview_package(default_tokens)
         if current.get("preview_id") != preview_id or int(current.get("revision") or 0) != int(preview_revision):
             raise RuntimeError("主题预览已更新，请重新检查后再删除资产。")
-        encoded = json.dumps({"surfaces": current.get("surfaces"), "components": current.get("components")}, ensure_ascii=False)
+        encoded = json.dumps(
+            {
+                "workspace_scene": current.get("workspace_scene"),
+                "surfaces": current.get("surfaces"),
+                "components": current.get("components"),
+            },
+            ensure_ascii=False,
+        )
         if f'"{asset_id}"' in encoded:
             raise ValueError("主题资产仍被背景或图标引用，请先移除引用。")
         assets = dict(current.get("assets") or {})
@@ -1289,6 +1323,7 @@ class ThemeRepository:
             default_tokens=default_tokens,
             theme_id=theme_id,
             assets=preview.get("assets") or {},
+            workspace_scene=preview.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
             surfaces=preview.get("surfaces") or {},
             components=preview.get("components") or {},
             content=preview.get("content") or {},
@@ -1327,6 +1362,7 @@ class ThemeRepository:
             overrides=normalized["overrides"],
             default_tokens=default_tokens,
             assets=normalized.get("assets") or {},
+            workspace_scene=normalized.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
             surfaces=normalized.get("surfaces") or {},
             components=normalized.get("components") or {},
             content=normalized.get("content") or {},

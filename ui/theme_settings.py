@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from core.theme_package import THEME_PACKAGE_SUFFIX, build_asset_record
+from core.theme_package import DEFAULT_WORKSPACE_SCENE, THEME_PACKAGE_SUFFIX, build_asset_record
 
 from core.theme import bind_theme, default_design_tokens, DesignTokens
 from core.theme_service import (
@@ -139,6 +139,7 @@ class ThemeSettingsPanel(QWidget):
         root.addWidget(self._build_manager_section())
         root.addWidget(self._build_basic_section())
         root.addWidget(self._build_advanced_section())
+        root.addWidget(self._build_scene_section())
         root.addWidget(self._build_asset_section())
         root.addWidget(self._build_structure_section())
         root.addWidget(
@@ -372,6 +373,18 @@ class ThemeSettingsPanel(QWidget):
         layout.addWidget(self.structure_summary)
         return frame
 
+    def _build_scene_section(self):
+        frame, layout = self._section(
+            "统一工作区场景",
+            "图片和网格只在这里绘制一次；各区域只能使用 transparent、tint 或 opaque 材质。",
+        )
+        self.scene_editor = QPlainTextEdit()
+        self.scene_editor.setProperty("codeSurface", True)
+        self.scene_editor.setMaximumHeight(240)
+        self.scene_editor.setStyleSheet(product_code_style("QPlainTextEdit"))
+        layout.addWidget(self.scene_editor)
+        return frame
+
     def _connect_signals(self):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_selected)
         self.new_btn.clicked.connect(self._new_theme)
@@ -392,6 +405,7 @@ class ThemeSettingsPanel(QWidget):
         self.density_combo.currentIndexChanged.connect(self._on_editor_changed)
         self.radius_scale_spin.valueChanged.connect(self._on_editor_changed)
         self.token_editor.textChanged.connect(self._on_editor_changed)
+        self.scene_editor.textChanged.connect(self._on_editor_changed)
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
         for editor in self.color_edits.values():
             editor.textChanged.connect(self._on_editor_changed)
@@ -407,6 +421,7 @@ class ThemeSettingsPanel(QWidget):
                 "schema_version": 2,
                 "overrides": {},
                 "assets": {},
+                "workspace_scene": copy.deepcopy(DEFAULT_WORKSPACE_SCENE),
                 "surfaces": {},
                 "components": {},
                 "content": {},
@@ -468,6 +483,16 @@ class ThemeSettingsPanel(QWidget):
         self.token_editor.setPlainText(
             json.dumps(advanced_tokens, ensure_ascii=False, indent=2)
         )
+        self.scene_editor.setPlainText(
+            json.dumps(
+                {
+                    "workspace_scene": profile.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
+                    "surfaces": profile.get("surfaces") or {},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         self.asset_list.clear()
         asset_bytes = self._ensure_profile_asset_bytes(profile) if profile.get("id") != DEFAULT_THEME_ID else {}
         for asset_id, record in sorted((profile.get("assets") or {}).items()):
@@ -483,7 +508,7 @@ class ThemeSettingsPanel(QWidget):
         self.structure_summary.setPlainText(
             json.dumps(
                 {
-                    "surfaces": profile.get("surfaces") or {},
+                    "background_owner": "workspace_scene",
                     "components": profile.get("components") or {},
                     "content": profile.get("content") or {},
                 },
@@ -500,6 +525,7 @@ class ThemeSettingsPanel(QWidget):
             self.density_combo,
             self.radius_scale_spin,
             self.token_editor,
+            self.scene_editor,
             *self.color_edits.values(),
             *self.geometry_spins.values(),
         ):
@@ -566,6 +592,15 @@ class ThemeSettingsPanel(QWidget):
         overrides = self._collect_overrides()
         profile["name"] = name
         profile["overrides"] = overrides
+        scene_document = json.loads(self.scene_editor.toPlainText().strip() or "{}")
+        if not isinstance(scene_document, dict) or set(scene_document) - {"workspace_scene", "surfaces"}:
+            raise ValueError("统一工作区场景必须是仅含 workspace_scene 和 surfaces 的 JSON 对象。")
+        workspace_scene = scene_document.get("workspace_scene")
+        surfaces = scene_document.get("surfaces", {})
+        if not isinstance(workspace_scene, dict) or not isinstance(surfaces, dict):
+            raise ValueError("workspace_scene 和 surfaces 必须是 JSON 对象。")
+        profile["workspace_scene"] = workspace_scene
+        profile["surfaces"] = surfaces
 
     def _draft_signature(self, profile):
         return json.dumps(
@@ -574,6 +609,7 @@ class ThemeSettingsPanel(QWidget):
                 "name": profile.get("name"),
                 "overrides": profile.get("overrides") or {},
                 "assets": profile.get("assets") or {},
+                "workspace_scene": profile.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
                 "surfaces": profile.get("surfaces") or {},
                 "components": profile.get("components") or {},
                 "content": profile.get("content") or {},
@@ -606,6 +642,7 @@ class ThemeSettingsPanel(QWidget):
                 session_id="settings",
                 replace_existing=True,
                 assets=profile.get("assets") or {},
+                workspace_scene=profile.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE,
                 surfaces=profile.get("surfaces") or {},
                 components=profile.get("components") or {},
                 content=profile.get("content") or {},
@@ -705,6 +742,7 @@ class ThemeSettingsPanel(QWidget):
             "schema_version": 2,
             "overrides": copy.deepcopy(overrides),
             "assets": copy.deepcopy(source.get("assets") or {}),
+            "workspace_scene": copy.deepcopy(source.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE),
             "surfaces": copy.deepcopy(source.get("surfaces") or {}),
             "components": copy.deepcopy(source.get("components") or {}),
             "content": copy.deepcopy(source.get("content") or {}),
@@ -901,7 +939,11 @@ class ThemeSettingsPanel(QWidget):
                 asset_id=asset_id,
             )
             references = json.dumps(
-                {"surfaces": profile.get("surfaces") or {}, "components": profile.get("components") or {}},
+                {
+                    "workspace_scene": profile.get("workspace_scene") or {},
+                    "surfaces": profile.get("surfaces") or {},
+                    "components": profile.get("components") or {},
+                },
                 ensure_ascii=False,
             )
             if f'"{asset_id}"' in references:

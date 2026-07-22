@@ -17,6 +17,7 @@ from .theme_service import (
     resolve_theme,
     theme_token_bounds,
     theme_token_group,
+    validate_theme_manifest,
 )
 
 
@@ -446,6 +447,7 @@ class ThemeRuntimeManager(QObject):
                     "overrides": preview.get("overrides") or {},
                     "schema_version": int(preview.get("schema_version") or 2),
                     "assets": preview.get("assets") or {},
+                    "workspace_scene": preview.get("workspace_scene") or {},
                     "surfaces": preview.get("surfaces") or {},
                     "components": preview.get("components") or {},
                     "content": preview.get("content") or {},
@@ -517,6 +519,24 @@ class ThemeRuntimeManager(QObject):
         previous_palette = self.app.palette()
         previous_current = _json_theme_copy(self.current)
         try:
+            if int((profile or {}).get("schema_version") or 1) == 2 and (profile or {}).get("id") != DEFAULT_THEME_ID:
+                runtime_profile_id = str((profile or {}).get("id") or "")
+                manifest = {
+                    key: _json_theme_copy((profile or {}).get(key))
+                    for key in (
+                        "format", "schema_version", "id", "name", "overrides", "assets",
+                        "workspace_scene", "surfaces", "components", "content",
+                    )
+                }
+                manifest["format"] = "cowork-theme"
+                if runtime_profile_id.startswith("preview:"):
+                    manifest["id"] = "preview_" + runtime_profile_id.split(":", 1)[1]
+                validated_manifest = validate_theme_manifest(manifest, default_design_tokens())
+                validated_manifest["id"] = runtime_profile_id
+                profile = {
+                    **(profile or {}),
+                    **validated_manifest,
+                }
             resolved = resolve_theme(profile, default_design_tokens())
             append_theme_log(
                 self.repository.data_dir,
@@ -525,9 +545,16 @@ class ThemeRuntimeManager(QObject):
                 theme_id=resolved["id"],
                 preview=bool(preview),
                 surface_count=len((profile or {}).get("surfaces") or {}),
+                scene_layer_count=len(
+                    (((profile or {}).get("workspace_scene") or {}).get("layers") or [])
+                ),
+                preview_revision=int((profile or {}).get("preview_revision") or 0),
                 component_count=len((profile or {}).get("components") or {}),
             )
             resolved["schema_version"] = int((profile or {}).get("schema_version") or 1)
+            resolved["workspace_scene"] = _json_theme_copy(
+                (profile or {}).get("workspace_scene") or {}
+            )
             resolved["surfaces"] = _json_theme_copy((profile or {}).get("surfaces") or {})
             resolved["components"] = _json_theme_copy((profile or {}).get("components") or {})
             resolved["content"] = _json_theme_copy((profile or {}).get("content") or {})

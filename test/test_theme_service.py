@@ -157,7 +157,7 @@ class ThemeServiceTests(unittest.TestCase):
             set(theme_payload),
             {
                 "format", "schema_version", "id", "name", "overrides",
-                "assets", "surfaces", "components", "content",
+                "assets", "workspace_scene", "surfaces", "components", "content",
             },
         )
         self.assertFalse(os.path.exists(os.path.join(self.repository.themes_dir, "default.json")))

@@ -192,7 +192,7 @@ class ThemeToolTests(unittest.TestCase):
                 "preview_revision": imported["preview_revision"],
                 "operations": [{
                     "op": "set",
-                    "path": "/surfaces/conversation.canvas/background/layers",
+                    "path": "/workspace_scene/layers",
                     "value": [{"type": "image", "asset": "background", "fit": "cover"}],
                 }],
             },

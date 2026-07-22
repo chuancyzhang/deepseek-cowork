@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -45,6 +46,41 @@ class ThemeSettingsUiTests(unittest.TestCase):
         self.assertEqual(len(snapshot.themes), 1)
         self.assertEqual(snapshot.active_theme_id, draft["active_theme_id"])
         self.assertIn("建议重启应用", self.panel.last_commit_warning)
+
+    def test_scene_editor_persists_single_scene_and_surface_materials(self):
+        self.panel._new_theme()
+        self.panel.scene_editor.setPlainText(
+            json.dumps(
+                {
+                    "workspace_scene": {
+                        "attachment": "fixed",
+                        "layers": [
+                            {"type": "solid", "color": "#f4f1e8"},
+                            {
+                                "type": "grid",
+                                "color": "rgba(166,116,24,0.10)",
+                                "spacing": 32,
+                                "major_every": 4,
+                                "major_color": "rgba(200,63,104,0.12)",
+                            },
+                        ],
+                    },
+                    "surfaces": {
+                        "conversation.composer": {
+                            "material": {"kind": "tint", "color": "#ffffff", "opacity": 0.92}
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        self.panel.commit()
+        theme = self.repository.get_theme(self.repository.load().active_theme_id)
+        self.assertEqual(theme["workspace_scene"]["layers"][1]["major_every"], 4)
+        self.assertEqual(
+            theme["surfaces"]["conversation.composer"]["material"]["kind"],
+            "tint",
+        )
 
     def test_unchanged_appearance_save_does_not_recommend_restart(self):
         self.panel.commit()

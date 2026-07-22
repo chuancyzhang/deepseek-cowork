@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from core.theme import default_design_tokens, resolve_theme, theme_token_schema
+from core.theme_package import DEFAULT_WORKSPACE_SCENE
 from core.theme_service import (
     DEFAULT_THEME_ID,
     ThemeRepository,
@@ -49,6 +50,9 @@ def _summarize_theme(theme, *, active=False):
         "active": bool(active),
         "overrides": json.loads(json.dumps(theme.get("overrides") or {}, ensure_ascii=False)),
         "assets": json.loads(json.dumps(theme.get("assets") or {}, ensure_ascii=False)),
+        "workspace_scene": json.loads(
+            json.dumps(theme.get("workspace_scene") or DEFAULT_WORKSPACE_SCENE, ensure_ascii=False)
+        ),
         "surfaces": json.loads(json.dumps(theme.get("surfaces") or {}, ensure_ascii=False)),
         "components": json.loads(json.dumps(theme.get("components") or {}, ensure_ascii=False)),
         "content_overrides": json.loads(json.dumps(theme.get("content") or {}, ensure_ascii=False)),
@@ -117,7 +121,9 @@ def inspect_ui_theme(theme_id="", include_schema=True, _context=None):
     return result
 
 
-def _validate_ui_theme(name, overrides, surfaces=None, components=None, content=None, assets=None):
+def _validate_ui_theme(
+    name, overrides, workspace_scene=None, surfaces=None, components=None, content=None, assets=None
+):
     normalized = validate_theme_overrides(overrides, default_design_tokens())
     requested_fonts = {
         str(normalized.get(field) or "").strip()
@@ -150,6 +156,7 @@ def _validate_ui_theme(name, overrides, surfaces=None, components=None, content=
             "name": str(name or "主题校验"),
             "overrides": normalized,
             "assets": assets or {},
+            "workspace_scene": workspace_scene or DEFAULT_WORKSPACE_SCENE,
             "surfaces": surfaces or {},
             "components": components or {},
             "content": content or {},
@@ -181,13 +188,17 @@ def _validate_ui_theme(name, overrides, surfaces=None, components=None, content=
     }
 
 
-def validate_ui_theme(name, overrides, surfaces=None, components=None, content=None, assets=None, _context=None):
+def validate_ui_theme(
+    name, overrides, workspace_scene=None, surfaces=None, components=None, content=None, assets=None, _context=None
+):
     repository = _repository(_context)
     append_theme_log(repository.data_dir, "tool_validate_submit", name=name)
     append_theme_log(repository.data_dir, "tool_validate_start", name=name)
     try:
         append_theme_log(repository.data_dir, "tool_validate_run", name=name)
-        result = _validate_ui_theme(name, overrides, surfaces, components, content, assets)
+        result = _validate_ui_theme(
+            name, overrides, workspace_scene, surfaces, components, content, assets
+        )
     except Exception as exc:
         append_theme_log(
             repository.data_dir,
@@ -206,7 +217,9 @@ def validate_ui_theme(name, overrides, surfaces=None, components=None, content=N
     return result
 
 
-def preview_ui_theme(name, overrides, surfaces=None, components=None, content=None, assets=None, _context=None):
+def preview_ui_theme(
+    name, overrides, workspace_scene=None, surfaces=None, components=None, content=None, assets=None, _context=None
+):
     repository = _repository(_context)
     session_id = str((_context or {}).get("session_id") or "") if isinstance(_context, dict) else ""
     append_theme_log(repository.data_dir, "tool_preview_submit", session_id=session_id, name=name)
@@ -218,6 +231,7 @@ def preview_ui_theme(name, overrides, surfaces=None, components=None, content=No
             overrides=overrides,
             default_tokens=default_design_tokens(),
             session_id=session_id,
+            workspace_scene=workspace_scene or DEFAULT_WORKSPACE_SCENE,
             surfaces=surfaces or {},
             components=components or {},
             content=content or {},
@@ -247,7 +261,7 @@ def preview_ui_theme(name, overrides, surfaces=None, components=None, content=No
         "normalized_overrides": preview["overrides"],
         "manifest": {
             key: preview.get(key) or {}
-            for key in ("overrides", "assets", "surfaces", "components", "content")
+            for key in ("overrides", "assets", "workspace_scene", "surfaces", "components", "content")
         },
         "content": "Theme preview requested. It remains temporary until explicitly saved or restored.",
     }
@@ -301,7 +315,7 @@ def patch_ui_theme_preview(
         "normalized_overrides": preview["overrides"],
         "manifest": {
             key: preview.get(key) or {}
-            for key in ("overrides", "assets", "surfaces", "components", "content")
+            for key in ("overrides", "assets", "workspace_scene", "surfaces", "components", "content")
         },
         "content": "Theme preview patched. The new revision must be reviewed before saving.",
     }
@@ -353,7 +367,7 @@ def import_ui_theme_asset(
         "preview_id": preview["preview_id"],
         "preview_revision": preview["revision"],
         "asset": (preview.get("assets") or {}).get(asset_id),
-        "content": "Theme image imported into the preview package. Patch a surface or icon to reference it.",
+        "content": "Theme image imported into the preview package. Reference it from workspace_scene or an icon.",
     }
 
 
@@ -631,7 +645,8 @@ TOOL_EXPORTS = [
             "properties": {
                 "name": {"type": "string", "description": "Proposed theme name."},
                 "overrides": {"type": "object", "description": "Theme overrides using inspect_ui_theme schema."},
-                "surfaces": {"type": "object", "description": "Declarative surface backgrounds and styles."},
+                "workspace_scene": {"type": "object", "description": "The single fixed workspace background scene."},
+                "surfaces": {"type": "object", "description": "Declarative surface materials and styles."},
                 "components": {"type": "object", "description": "Allowed component presentation overrides."},
                 "content": {"type": "object", "description": "Whitelisted display copy overrides."},
                 "assets": {"type": "object", "description": "Declared package asset metadata."}
@@ -651,7 +666,8 @@ TOOL_EXPORTS = [
             "properties": {
                 "name": {"type": "string", "description": "Preview name."},
                 "overrides": {"type": "object", "description": "Validated theme overrides."},
-                "surfaces": {"type": "object", "description": "Declarative surface backgrounds and styles."},
+                "workspace_scene": {"type": "object", "description": "The single fixed workspace background scene."},
+                "surfaces": {"type": "object", "description": "Declarative surface materials and styles."},
                 "components": {"type": "object", "description": "Allowed component presentation overrides."},
                 "content": {"type": "object", "description": "Whitelisted display copy overrides."}
             },
@@ -684,7 +700,7 @@ TOOL_EXPORTS = [
                         },
                         "required": ["op", "path"]
                     },
-                    "description": "Restricted JSON Pointer operations under /surfaces, /components, or /content."
+                    "description": "Restricted JSON Pointer operations under /workspace_scene, /surfaces, /components, or /content."
                 }
             },
             "required": ["preview_id", "preview_revision"]

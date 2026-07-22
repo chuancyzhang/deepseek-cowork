@@ -100,6 +100,11 @@ CONTENT_DEFAULTS = {
     "composer.placeholder": "描述你要完成的任务，例如：整理本周截图并生成周报摘要",
 }
 
+DEFAULT_WORKSPACE_SCENE = {
+    "attachment": "fixed",
+    "layers": [],
+}
+
 RETIRED_SYSTEM_TITLEBAR_SURFACES = {"window.titlebar"}
 RETIRED_SYSTEM_TITLEBAR_COMPONENTS = {
     "titlebar.brand",
@@ -148,8 +153,9 @@ def _normalize_background_layer(raw: Any, *, surface_id: str, index: int, assets
     if not isinstance(raw, dict):
         raise ValueError(f"{surface_id} 的背景层 {index + 1} 必须是对象。")
     allowed = {
-        "type", "color", "asset", "opacity", "blend", "fit", "repeat",
+        "type", "color", "asset", "opacity", "blend", "fit",
         "focal_x", "focal_y", "tint", "size", "spacing", "angle", "line_width",
+        "major_every", "major_color", "major_line_width",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
@@ -164,10 +170,9 @@ def _normalize_background_layer(raw: Any, *, surface_id: str, index: int, assets
             raise ValueError(f"{surface_id} 引用了不存在的主题资产：{asset_id}")
         result["asset"] = asset_id
         fit = str(raw.get("fit") or "cover").strip().lower()
-        if fit not in {"cover", "contain", "stretch", "center", "tile"}:
+        if fit not in {"cover", "contain", "stretch", "center"}:
             raise ValueError(f"{surface_id} 的图片 fit 无效：{fit}")
         result["fit"] = fit
-        result["repeat"] = bool(raw.get("repeat", fit == "tile"))
         result["focal_x"] = _bounded_number(raw.get("focal_x", 0.5), "focal_x", 0, 1)
         result["focal_y"] = _bounded_number(raw.get("focal_y", 0.5), "focal_y", 0, 1)
     else:
@@ -175,6 +180,17 @@ def _normalize_background_layer(raw: Any, *, surface_id: str, index: int, assets
         if layer_type in {"stripes", "grid", "dots"}:
             result["spacing"] = int(_bounded_number(raw.get("spacing", 16), "spacing", 2, 256))
             result["line_width"] = int(_bounded_number(raw.get("line_width", 1), "line_width", 1, 16))
+        if layer_type == "grid":
+            result["major_every"] = int(
+                _bounded_number(raw.get("major_every", 0), "major_every", 0, 16)
+            )
+            if result["major_every"]:
+                result["major_color"] = _normalize_color(
+                    raw.get("major_color") or result["color"], "major_color"
+                )
+                result["major_line_width"] = int(
+                    _bounded_number(raw.get("major_line_width", 1), "major_line_width", 1, 16)
+                )
         if layer_type in {"stripes", "noise"}:
             result["size"] = int(_bounded_number(raw.get("size", 8), "size", 1, 256))
         if layer_type == "stripes":
@@ -187,6 +203,63 @@ def _normalize_background_layer(raw: Any, *, surface_id: str, index: int, assets
     if raw.get("tint") not in (None, ""):
         result["tint"] = _normalize_color(raw.get("tint"), "tint")
     return result
+
+
+def _normalize_workspace_scene(raw: Any, *, assets: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("workspace_scene 必须是对象。")
+    unknown = sorted(set(raw) - {"attachment", "layers"})
+    if unknown:
+        raise ValueError("workspace_scene 包含未知字段：" + ", ".join(unknown))
+    attachment = str(raw.get("attachment") or "fixed").strip().lower()
+    if attachment != "fixed":
+        raise ValueError("workspace_scene.attachment 只能是 fixed。")
+    layers = raw.get("layers")
+    if not isinstance(layers, list) or len(layers) > 4:
+        raise ValueError("workspace_scene.layers 必须是数组且不能超过 4 层。")
+    normalized = [
+        _normalize_background_layer(
+            layer,
+            surface_id="workspace_scene",
+            index=index,
+            assets=assets,
+        )
+        for index, layer in enumerate(layers)
+    ]
+    order = {"solid": 0, "image": 1, "stripes": 2, "grid": 2, "dots": 2, "noise": 2}
+    ranks = [order[layer["type"]] for layer in normalized]
+    if ranks != sorted(ranks):
+        raise ValueError("workspace_scene 图层顺序必须是底色、图片、程序化纹理。")
+    if sum(layer["type"] == "solid" for layer in normalized) > 1:
+        raise ValueError("workspace_scene 最多只能有一个底色层。")
+    if sum(layer["type"] == "image" for layer in normalized) > 1:
+        raise ValueError("workspace_scene 最多只能有一个图片层。")
+    return {"attachment": "fixed", "layers": normalized}
+
+
+def _normalize_surface_material(raw: Any, *, surface_id: str) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{surface_id}.material 必须是对象。")
+    unknown = sorted(set(raw) - {"kind", "color", "opacity"})
+    if unknown:
+        raise ValueError(f"{surface_id}.material 包含未知字段：{', '.join(unknown)}")
+    kind = str(raw.get("kind") or "transparent").strip().lower()
+    if kind not in {"transparent", "tint", "opaque"}:
+        raise ValueError(f"{surface_id}.material.kind 无效：{kind}")
+    if kind == "transparent":
+        if raw.get("color") not in (None, "") or "opacity" in raw:
+            raise ValueError(f"{surface_id} 的 transparent 材质不能设置颜色或透明度。")
+        return {"kind": "transparent"}
+    color = _normalize_color(raw.get("color"), f"{surface_id}.material.color")
+    if kind == "opaque":
+        if "opacity" in raw and float(raw.get("opacity")) != 1.0:
+            raise ValueError(f"{surface_id} 的 opaque 材质透明度必须为 1。")
+        return {"kind": "opaque", "color": color, "opacity": 1.0}
+    return {
+        "kind": "tint",
+        "color": color,
+        "opacity": _bounded_number(raw.get("opacity", 0.9), f"{surface_id}.material.opacity", 0, 1),
+    }
 
 
 def _normalize_style(raw: Any, *, field: str) -> dict:
@@ -267,7 +340,7 @@ def normalize_theme_manifest(
         raise ValueError("主题 manifest 必须是对象。")
     allowed = {
         "format", "schema_version", "id", "name", "overrides", "assets",
-        "surfaces", "components", "content",
+        "workspace_scene", "surfaces", "components", "content",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -336,6 +409,10 @@ def normalize_theme_manifest(
         paths.add(path)
         hashes.add(sha256)
 
+    if "workspace_scene" not in payload:
+        raise ValueError("v2 主题必须声明 workspace_scene。")
+    workspace_scene = _normalize_workspace_scene(payload.get("workspace_scene"), assets=assets)
+
     raw_surfaces = payload.get("surfaces") or {}
     if not isinstance(raw_surfaces, dict):
         raise ValueError("主题 surfaces 必须是对象。")
@@ -345,25 +422,17 @@ def normalize_theme_manifest(
             raise ValueError(f"系统标题栏不支持主题覆盖：{surface_id}")
         if surface_id not in SURFACE_CATALOG or not isinstance(raw, dict):
             raise ValueError(f"未知或无效的主题区域：{surface_id}")
-        unknown_surface = sorted(set(raw) - {"background", "style"})
+        unknown_surface = sorted(set(raw) - {"material", "style"})
         if unknown_surface:
             raise ValueError(f"{surface_id} 包含未知字段：{', '.join(unknown_surface)}")
         item = {}
-        if "background" in raw:
-            background = raw.get("background") or {}
-            if not isinstance(background, dict) or set(background) - {"layers"}:
-                raise ValueError(f"{surface_id}.background 仅支持 layers。")
-            layers = background.get("layers") or []
-            if not isinstance(layers, list) or len(layers) > 4:
-                raise ValueError(f"{surface_id} 的背景层不能超过 4 层。")
-            item["background"] = {
-                "layers": [
-                    _normalize_background_layer(layer, surface_id=surface_id, index=index, assets=assets)
-                    for index, layer in enumerate(layers)
-                ]
-            }
+        if "material" in raw:
+            item["material"] = _normalize_surface_material(raw.get("material"), surface_id=surface_id)
         if "style" in raw:
-            item["style"] = _normalize_style(raw.get("style"), field=f"{surface_id}.style")
+            style = _normalize_style(raw.get("style"), field=f"{surface_id}.style")
+            if "background" in style:
+                raise ValueError(f"{surface_id}.style.background 已由 material 取代。")
+            item["style"] = style
         surfaces[surface_id] = item
 
     raw_components = payload.get("components") or {}
@@ -450,6 +519,7 @@ def normalize_theme_manifest(
         "name": name,
         "overrides": validate_overrides(payload.get("overrides") or {}),
         "assets": assets,
+        "workspace_scene": workspace_scene,
         "surfaces": surfaces,
         "components": components,
         "content": content,

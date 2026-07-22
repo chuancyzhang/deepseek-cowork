@@ -28,6 +28,7 @@ Each saved user theme is one validated `.cowork-theme` package. Its manifest may
 - Keep body text readable. Treat contrast warnings as actionable, although the user may choose to save.
 - Do not style document, PDF, Office, HTML deliverable, image, or visualization content. You may style their Cowork toolbar, tab, loading/error state, and preview shell.
 - Only use surface and component IDs returned by `inspect_ui_theme`. Controlled visibility, icon replacement, and within-region layout are allowed; protected components cannot be hidden.
+- The Windows title bar is system-owned. `brand.title` may change only its displayed caption; do not generate `window.titlebar`, `titlebar.*`, or `brand.tagline` overrides.
 - Never add action, route, command, signal, prompt, arbitrary QSS, absolute positioning, overlap, or cross-region movement. Display-copy overrides do not change card prompts or dedicated actions.
 - Only import an image the user supplied or explicitly identified on the local filesystem. If the requested visual needs a raster source and none exists, ask for one instead of claiming it was generated.
 - Do not use file tools or Python to write theme JSON directly; use theme tools so the file is validated and indexed.

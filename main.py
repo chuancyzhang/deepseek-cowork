@@ -97,11 +97,9 @@ from ui.primitives import (
 )
 from ui.theme_settings import ThemeSettingsPanel
 from ui.theme_workspace import (
-    AppTitleBar,
     ThemeSurfaceBackdrop,
     WorkspaceThemeController,
     apply_theme_component_visibility,
-    handle_windows_native_hit_test,
 )
 from core.daemon import DaemonClient, run_daemon, DEFAULT_HOST, DEFAULT_PORT, get_runtime_signature
 from core.agent_manager import AGENT_LIVE_STATUSES, get_agent_manager_registry
@@ -17571,7 +17569,6 @@ class MainWindow(QMainWindow):
         self.config_manager = config_manager or ConfigManager()
         self.theme_manager = theme_manager or getattr(QApplication.instance(), "theme_manager", None)
         self.setWindowTitle("DeepSeek Cowork")
-        self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.workspace_theme_controller = WorkspaceThemeController()
         self.agent_state_ui_signal.connect(self._handle_agent_state_ui, Qt.QueuedConnection)
         self.skill_catalog_changed_ui_signal.connect(self._handle_local_skill_catalog_changed, Qt.QueuedConnection)
@@ -17846,8 +17843,6 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        self.app_title_bar = AppTitleBar(self, self.windowIcon())
-        root_layout.addWidget(self.app_title_bar)
         self.theme_preview_bar = ThemePreviewSafetyBar()
         self.theme_preview_bar.saveRequested.connect(self._save_theme_preview_from_bar)
         self.theme_preview_bar.restoreRequested.connect(self._restore_theme_preview_from_bar)
@@ -18953,7 +18948,6 @@ class MainWindow(QMainWindow):
     def _register_workspace_theme_components(self):
         """Register stable presentation IDs without exposing application actions."""
         controller = self.workspace_theme_controller
-        controller.register_surface("window.titlebar", self.app_title_bar)
         controller.register_surface("shell.left_sidebar", self.sidebar)
         controller.register_surface("shell.app_header", self.top_bar_widget)
         controller.register_surface("conversation.canvas", self.conversation_page)
@@ -18961,11 +18955,6 @@ class MainWindow(QMainWindow):
         controller.register_surface("conversation.composer", self.input_card)
         controller.register_surface("shell.right_sidebar", self.right_sidebar)
 
-        controller.register_component("titlebar.brand", self.app_title_bar.brand)
-        controller.register_component("titlebar.logo", self.app_title_bar.logo)
-        controller.register_component("titlebar.minimize", self.app_title_bar.minimize_btn, self.app_title_bar.layout_row)
-        controller.register_component("titlebar.maximize", self.app_title_bar.maximize_btn, self.app_title_bar.layout_row)
-        controller.register_component("titlebar.close", self.app_title_bar.close_btn, self.app_title_bar.layout_row)
         controller.register_component("left.new_chat", self.new_chat_btn, self.sidebar_layout)
         controller.register_component("left.search", self.history_search_input, self.sidebar_layout)
         controller.register_component("left.projects", self.project_header, self.sidebar_layout)
@@ -18992,9 +18981,11 @@ class MainWindow(QMainWindow):
         controller.register_component("right.files", self.workspace_tab)
         controller.register_component("right.observability", self.tool_details_tab)
         controller.register_component("right.sub_agents", self.sub_agent_tab)
-        controller.register_content("brand.title", self.app_title_bar.set_brand)
-        controller.register_content("brand.tagline", self.app_title_bar.set_tagline)
+        controller.register_content("brand.title", self._set_theme_brand_title)
         controller.register_content("composer.placeholder", self.input_field.setPlaceholderText)
+
+    def _set_theme_brand_title(self, text):
+        self.setWindowTitle(str(text or "").strip() or "DeepSeek Cowork")
 
     def _handle_theme_apply_failed(self, error):
         failure = (
@@ -19277,15 +19268,8 @@ class MainWindow(QMainWindow):
         self.refresh_history_list()
         self.refresh_context_badges()
         self.sync_context_drawer_layout()
-        self.app_title_bar.refresh_theme()
         self.workspace_theme_controller.apply(_resolved or {})
         self.update()
-
-    def nativeEvent(self, event_type, message):
-        handled = handle_windows_native_hit_test(self, event_type, message)
-        if handled is not None:
-            return handled
-        return super().nativeEvent(event_type, message)
 
     def process_ui_events(self, force=False):
         if int(getattr(self, "_history_process_events_suppressed", 0) or 0) > 0:

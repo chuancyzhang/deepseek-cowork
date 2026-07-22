@@ -29,7 +29,6 @@ ALLOWED_IMAGE_MEDIA = {
 }
 
 SURFACE_CATALOG = {
-    "window.titlebar",
     "shell.left_sidebar",
     "shell.app_header",
     "conversation.canvas",
@@ -42,11 +41,6 @@ SURFACE_CATALOG = {
 }
 
 COMPONENT_CATALOG = {
-    "titlebar.brand",
-    "titlebar.logo",
-    "titlebar.minimize",
-    "titlebar.maximize",
-    "titlebar.close",
     "left.new_chat",
     "left.search",
     "left.projects",
@@ -84,9 +78,6 @@ COMPONENT_CATALOG = {
 }
 
 PROTECTED_COMPONENTS = {
-    "titlebar.minimize",
-    "titlebar.maximize",
-    "titlebar.close",
     "left.new_chat",
     "left.settings",
     "composer.input",
@@ -95,7 +86,6 @@ PROTECTED_COMPONENTS = {
 
 CONTENT_DEFAULTS = {
     "brand.title": "DeepSeek Cowork",
-    "brand.tagline": "",
     "home.title": "从一个任务开始",
     "home.card.ppt.title": "PPT Agent",
     "home.card.ppt.description": "进入 PPT Mode",
@@ -109,6 +99,16 @@ CONTENT_DEFAULTS = {
     "home.reminder.description": "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
     "composer.placeholder": "描述你要完成的任务，例如：整理本周截图并生成周报摘要",
 }
+
+RETIRED_SYSTEM_TITLEBAR_SURFACES = {"window.titlebar"}
+RETIRED_SYSTEM_TITLEBAR_COMPONENTS = {
+    "titlebar.brand",
+    "titlebar.logo",
+    "titlebar.minimize",
+    "titlebar.maximize",
+    "titlebar.close",
+}
+RETIRED_SYSTEM_TITLEBAR_CONTENT = {"brand.tagline"}
 
 _COLOR_RE = re.compile(
     r"^(?:#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0(?:\.\d+)?|1(?:\.0+)?))?\s*\))$"
@@ -341,6 +341,8 @@ def normalize_theme_manifest(
         raise ValueError("主题 surfaces 必须是对象。")
     surfaces = {}
     for surface_id, raw in raw_surfaces.items():
+        if surface_id in RETIRED_SYSTEM_TITLEBAR_SURFACES:
+            raise ValueError(f"系统标题栏不支持主题覆盖：{surface_id}")
         if surface_id not in SURFACE_CATALOG or not isinstance(raw, dict):
             raise ValueError(f"未知或无效的主题区域：{surface_id}")
         unknown_surface = sorted(set(raw) - {"background", "style"})
@@ -369,6 +371,8 @@ def normalize_theme_manifest(
         raise ValueError("主题 components 必须是对象。")
     components = {}
     for component_id, raw in raw_components.items():
+        if component_id in RETIRED_SYSTEM_TITLEBAR_COMPONENTS:
+            raise ValueError(f"系统标题栏不支持主题覆盖：{component_id}")
         if component_id not in COMPONENT_CATALOG or not isinstance(raw, dict):
             raise ValueError(f"未知或无效的主题组件：{component_id}")
         unknown_component = sorted(set(raw) - {"visible", "icon", "style", "layout"})
@@ -426,6 +430,9 @@ def normalize_theme_manifest(
     raw_content = payload.get("content") or {}
     if not isinstance(raw_content, dict):
         raise ValueError("主题 content 必须是对象。")
+    retired_content = sorted(set(raw_content) & RETIRED_SYSTEM_TITLEBAR_CONTENT)
+    if retired_content:
+        raise ValueError(f"系统标题栏不支持主题覆盖：{', '.join(retired_content)}")
     unknown_content = sorted(set(raw_content) - set(CONTENT_DEFAULTS))
     if unknown_content:
         raise ValueError(f"主题包含不可替换的文案：{', '.join(unknown_content)}")

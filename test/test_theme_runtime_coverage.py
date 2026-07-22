@@ -1,11 +1,12 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid as is_qt_object_valid
 
@@ -144,6 +145,24 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             ):
                 widget.deleteLater()
 
+    def test_main_window_uses_native_frame(self):
+        self.assertFalse(bool(self.window.windowFlags() & Qt.FramelessWindowHint))
+        self.assertFalse(hasattr(self.window, "app_title_bar"))
+
+    def test_native_close_keeps_existing_tray_behavior(self):
+        tray = MagicMock()
+        event = QCloseEvent()
+        self.window.tray_icon = tray
+        self.window.show()
+        self.app.processEvents()
+        try:
+            self.window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+            self.assertFalse(self.window.isVisible())
+            tray.showMessage.assert_called_once()
+        finally:
+            self.window.tray_icon = None
+
     def test_closed_skill_picker_is_removed_before_theme_refresh(self):
         picker = SessionSkillPickerPopover([], parent=self.window)
         self.window.session_skill_popover = picker
@@ -254,6 +273,14 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         self.assertEqual(backdrop.layers[0]["type"], "grid")
         state = self.window.get_current_session()
         self.assertEqual(state.empty_state.title_label.text(), "选择一个起点")
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            self.assertTrue(self.manager.restore_saved_theme(reason="brand_title_restore"))
+        self.assertEqual(self.window.windowTitle(), "DeepSeek Cowork")
+        self.window._set_theme_brand_title("")
+        self.assertEqual(self.window.windowTitle(), "DeepSeek Cowork")
 
     def test_active_theme_does_not_flash_windows_for_new_or_historical_sessions(self):
         with patch(

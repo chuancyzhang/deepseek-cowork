@@ -47,6 +47,44 @@ class ThemePackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "禁止|未知"):
             validate_theme_manifest(base, self.defaults)
 
+    def test_manifest_rejects_retired_system_titlebar_fields_explicitly(self):
+        base = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "native-titlebar",
+            "name": "Native titlebar",
+            "overrides": {},
+            "assets": {},
+            "surfaces": {},
+            "components": {},
+            "content": {},
+        }
+        cases = (
+            ("surfaces", "window.titlebar", {"style": {"background": "#ffffff"}}),
+            ("components", "titlebar.close", {"visible": True}),
+            ("content", "brand.tagline", "AI workspace"),
+        )
+        for section, field, value in cases:
+            with self.subTest(field=field):
+                payload = {**base, section: {field: value}}
+                with self.assertRaisesRegex(ValueError, "系统标题栏不支持主题覆盖"):
+                    validate_theme_manifest(payload, self.defaults)
+
+    def test_manifest_keeps_brand_title_as_window_copy(self):
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "brand-title",
+            "name": "Brand title",
+            "overrides": {},
+            "assets": {},
+            "surfaces": {},
+            "components": {},
+            "content": {"brand.title": "My Cowork"},
+        }
+        validated = validate_theme_manifest(payload, self.defaults)
+        self.assertEqual(validated["content"]["brand.title"], "My Cowork")
+
     def test_preview_asset_import_and_background_package_round_trip(self):
         preview = self.repository.write_preview(
             name="Asset theme",

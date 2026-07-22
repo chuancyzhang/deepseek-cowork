@@ -388,12 +388,6 @@ def main_run():
                     },
                 },
                 surfaces={
-                    "window.titlebar": {
-                        "background": {"layers": [
-                            {"type": "solid", "color": "#101116", "opacity": 1.0},
-                            {"type": "dots", "color": "#8b93ff", "spacing": 18, "line_width": 1, "opacity": 0.18},
-                        ]}
-                    },
                     "shell.left_sidebar": {
                         "background": {"layers": [
                             {"type": "stripes", "color": "#8b93ff", "spacing": 22, "line_width": 1, "angle": 35, "size": 8, "opacity": 0.10}
@@ -416,11 +410,9 @@ def main_run():
                     "home.card.files": {"layout": {"row": 1, "column": 0}},
                     "home.card.images": {"visible": False},
                     "home.card.office": {"layout": {"row": 1, "column": 1}},
-                    "titlebar.logo": {"icon": {"source": "builtin", "name": "fa5s.satellite"}},
                 },
                 content={
                     "brand.title": "DeepSeek Cowork · 星图",
-                    "brand.tagline": "AI configurable workspace",
                     "home.title": "今晚，从一件重要的事开始",
                     "home.card.ppt.title": "星图演示",
                     "home.card.ppt.description": "进入固定行为的 PPT Mode",
@@ -441,7 +433,7 @@ def main_run():
             window.resize(1280, 800)
             window.show()
             process_events(260)
-            save_widget(window, "s39-ai-theme-package-home.png", 220)
+            save_window_with_popups(window, "s39-ai-theme-package-home.png", 220)
             window.add_chat_bubble(
                 "User",
                 "请展示左右侧栏、聊天区、工具卡和输入区的完整主题覆盖。",

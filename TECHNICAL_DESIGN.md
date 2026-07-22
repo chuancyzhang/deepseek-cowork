@@ -18,7 +18,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 系统由五层组成：
 
 1. **UI 层**
-   `main.py` 提供对话界面、项目侧栏、右侧上下文抽屉，以及 `conversation / capabilities / automation / settings` 主内容区页面路由；`core/theme.py` 的 `DesignTokens` 是颜色、状态、排版和基础几何的运行时主题来源，`core/theme_package.py` 负责 v2 声明与 ZIP/图片安全边界，`core/theme_service.py` 负责与 Qt 解耦的主题解析、预览和文件仓库，`ui/theme_workspace.py` 提供自绘标题栏、背景宿主与主工作台事务控制器，`ui/primitives.py` 提供通用共享组件。
+   `main.py` 提供对话界面、项目侧栏、右侧上下文抽屉，以及 `conversation / capabilities / automation / settings` 主内容区页面路由；`core/theme.py` 的 `DesignTokens` 是颜色、状态、排版和基础几何的运行时主题来源，`core/theme_package.py` 负责 v2 声明与 ZIP/图片安全边界，`core/theme_service.py` 负责与 Qt 解耦的主题解析、预览和文件仓库，`ui/theme_workspace.py` 提供背景宿主与主工作台事务控制器，`ui/primitives.py` 提供通用共享组件。
 2. **Agent 层**
    `core/agent.py` 负责推理循环、工具调度、模式约束和结果汇总。
 3. **能力层**
@@ -137,7 +137,7 @@ Cowork 采用交错式推理流程：
 - **包与 Schema 安全**：`core/theme_package.py` 限制 32 个资产、单文件 16 MiB、总解压 64 MiB、最长边 8192、总像素 2000 万，并验证魔数、实际解码结果、哈希、声明/文件对应、重复路径、路径穿越和 ZIP 解压体积；只接收静态 PNG/JPEG/WebP，不接收 SVG、动画、URL、字体或可执行内容。Schema 拒绝未知区域、组件、动作字段、任意 QSS、跨区移动、绝对坐标、重叠首页网格与隐藏受保护控件
 - **语义与工作台注册表**：语义令牌继续按 global、left_sidebar、conversation、composer、right_sidebar、management、feedback、controls、preview_shell 分组。主工作台另有稳定 Surface/Component ID；`BackgroundLayer` 最多四层，支持纯色、图片、条纹、网格、点阵和噪点，`ComponentSpec` 只含 visible/icon/style/layout，文案只允许 `ContentSpec` 白名单
 - **事务应用**：`ThemeRuntimeManager` 先完整解析令牌与资产，更新 `DesignTokens`、字体、QSS、Palette 和聊天 Markdown CSS，再由 `WorkspaceThemeController` 在不重建 QObject、不重绑信号的前提下应用表面背景、区域内布局、显隐、图标和文案。背景按资产哈希与 DPR 缓存；每次 revision 切换清空旧缓存。任何阶段失败都会恢复上一份令牌、样式、布局与组件状态，并记录失败组件和区域耗时；损坏的活动主题显示默认基线和原始错误，但不静默改写活动状态。主题绑定会在控件构造期同步刷新，内部子控件必须先绑定父级；尚未挂入消息布局的动态控件只记录目标显隐状态，禁止以无父级顶层窗口执行显示，完成 `ParentChange` 后再应用该状态
-- **自绘标题栏与固定边界**：Windows 主窗口使用固定行为的自绘标题栏，品牌标题/图标/背景/间距可配置，默认标题为 “DeepSeek Cowork”；窗口按钮不可隐藏，拖动、边缘缩放、Snap、双击最大化、系统菜单和 DPI 命中区由代码维护。PDF、Office、HTML、图片、Visualize 内容、固定安全恢复条和原生文件选择器不进入声明式主题范围
+- **原生标题栏与固定边界**：Windows 主窗口使用系统原生标题栏，由操作系统维护最小化、最大化、关闭、拖动、边缘缩放、Snap、双击最大化、系统菜单和 DPI 行为。主题只可通过 `brand.title` 修改窗口标题文字，默认值为 “DeepSeek Cowork”；标题栏样式、系统按钮、PDF、Office、HTML、图片、Visualize 内容、固定安全恢复条和原生文件选择器不进入声明式主题范围
 - **设置与 AI 预览**：设置页只维护内存草稿，显式“预览”才校验并一次性刷新，统一保存才原子写入。`inspect_ui_theme` 返回 manifest/区域/组件/保护字段/资产目录；`validate_ui_theme` 只校验；`preview_ui_theme` 与受限 JSON Pointer 补丁保持旧 token 参数兼容；`import_ui_theme_asset` / `remove_ui_theme_asset` 每次递增 revision。审批与保存必须绑定精确 revision，保存、启用和删除均需用户确认
 
 ## 8. 运行环境

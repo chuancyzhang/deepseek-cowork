@@ -68,6 +68,119 @@ class ThemeSettingsUiTests(unittest.TestCase):
         self.assertNotIn("_asset_bytes", signature["themes"][0])
         json.dumps(signature, ensure_ascii=False, sort_keys=True)
 
+    def test_state_signature_projects_editor_values_without_mutating_draft(self):
+        self.panel._new_theme()
+        profile = self.panel._profile(self.panel._current_theme_id)
+        original_name = profile["name"]
+
+        self.panel.name_edit.blockSignals(True)
+        self.panel.name_edit.setText("仅用于状态签名")
+        self.panel.name_edit.blockSignals(False)
+
+        signature = self.panel.state_signature()
+
+        self.assertEqual(profile["name"], original_name)
+        self.assertEqual(signature["themes"][0]["name"], "仅用于状态签名")
+        self.assertEqual(signature["editor_error"], "")
+
+    def test_switching_from_image_theme_to_legacy_theme_does_not_copy_scene(self):
+        self.panel.deleteLater()
+        image_path = os.path.join(self.temp_dir.name, "sakura.png")
+        image = QImage(48, 32, QImage.Format_RGB32)
+        image.fill(0xFFF8F2)
+        self.assertTrue(image.save(image_path))
+        record, data = build_asset_record("sakura_magic_background", image_path)
+        image_theme = self.repository.upsert_theme(
+            name="贴图主题",
+            overrides={},
+            default_tokens=default_design_tokens(),
+            assets={"sakura_magic_background": record},
+            workspace_scene={
+                "attachment": "fixed",
+                "layers": [
+                    {
+                        "type": "image",
+                        "asset": "sakura_magic_background",
+                    }
+                ],
+            },
+            asset_bytes={record["path"]: data},
+        )["theme"]
+        os.makedirs(self.repository.themes_dir, exist_ok=True)
+        legacy_paths = {}
+        for legacy_id, legacy_name in (
+            ("legacy", "旧版 JSON 主题"),
+            ("legacy_two", "旧版 JSON 主题二"),
+        ):
+            legacy_path = os.path.join(
+                self.repository.themes_dir,
+                f"{legacy_id}.json",
+            )
+            legacy_paths[legacy_id] = legacy_path
+            with open(legacy_path, "w", encoding="utf-8") as stream:
+                json.dump(
+                    {
+                        "format": "cowork-theme",
+                        "id": legacy_id,
+                        "name": legacy_name,
+                        "overrides": {"font_scale": 1.05},
+                    },
+                    stream,
+                    ensure_ascii=False,
+                )
+
+        self.panel = ThemeSettingsPanel(self.repository)
+        observed_signatures = []
+        self.panel.name_edit.textChanged.connect(
+            lambda: observed_signatures.append(self.panel.state_signature())
+        )
+
+        self.panel.theme_combo.setCurrentIndex(
+            self.panel.theme_combo.findData(image_theme["id"])
+        )
+        self.panel.theme_combo.setCurrentIndex(
+            self.panel.theme_combo.findData("legacy")
+        )
+        self.panel.theme_combo.setCurrentIndex(
+            self.panel.theme_combo.findData(DEFAULT_THEME_ID)
+        )
+        self.panel.theme_combo.setCurrentIndex(
+            self.panel.theme_combo.findData(image_theme["id"])
+        )
+        self.panel.theme_combo.setCurrentIndex(
+            self.panel.theme_combo.findData("legacy_two")
+        )
+
+        for legacy_id in legacy_paths:
+            legacy_draft = self.panel._profile(legacy_id)
+            self.assertEqual(legacy_draft["assets"], {})
+            self.assertEqual(
+                legacy_draft["workspace_scene"],
+                {"attachment": "fixed", "layers": []},
+            )
+        self.assertNotIn("sakura_magic_background", self.panel.scene_editor.toPlainText())
+        self.assertTrue(observed_signatures)
+
+        self.panel._preview_current()
+        self.assertNotIn("预览失败", self.panel.validation_label.text())
+        self.assertEqual(self.repository.load_preview()["workspace_scene"]["layers"], [])
+
+        self.panel.commit()
+        for legacy_path in legacy_paths.values():
+            self.assertFalse(os.path.exists(legacy_path))
+        saved_legacy = self.repository.get_theme("legacy")
+        saved_legacy_two = self.repository.get_theme("legacy_two")
+        saved_image = self.repository.get_theme(image_theme["id"])
+        self.assertEqual(saved_legacy["assets"], {})
+        self.assertEqual(saved_legacy["workspace_scene"]["layers"], [])
+        self.assertEqual(saved_legacy_two["assets"], {})
+        self.assertEqual(saved_legacy_two["workspace_scene"]["layers"], [])
+        self.assertIn("sakura_magic_background", saved_image["assets"])
+        self.assertEqual(
+            saved_image["workspace_scene"]["layers"][0]["asset"],
+            "sakura_magic_background",
+        )
+
     def test_scene_editor_persists_single_scene_and_surface_materials(self):
         self.panel._new_theme()
         self.panel.scene_editor.setPlainText(

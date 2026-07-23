@@ -582,16 +582,12 @@ class ThemeSettingsPanel(QWidget):
             base_tokens,
         )
 
-    def _store_current_editor(self):
-        if self._current_theme_id == DEFAULT_THEME_ID:
-            return
-        profile = self._profile(self._current_theme_id)
+    def _collect_current_editor_values(self):
+        """Validate and return editor-backed fields without mutating the draft."""
         name = self.name_edit.text().strip()
         if not name:
             raise ValueError("主题名称不能为空。")
         overrides = self._collect_overrides()
-        profile["name"] = name
-        profile["overrides"] = overrides
         scene_document = json.loads(self.scene_editor.toPlainText().strip() or "{}")
         if not isinstance(scene_document, dict) or set(scene_document) - {"workspace_scene", "surfaces"}:
             raise ValueError("统一工作区场景必须是仅含 workspace_scene 和 surfaces 的 JSON 对象。")
@@ -599,8 +595,20 @@ class ThemeSettingsPanel(QWidget):
         surfaces = scene_document.get("surfaces", {})
         if not isinstance(workspace_scene, dict) or not isinstance(surfaces, dict):
             raise ValueError("workspace_scene 和 surfaces 必须是 JSON 对象。")
-        profile["workspace_scene"] = workspace_scene
-        profile["surfaces"] = surfaces
+        return {
+            "name": name,
+            "overrides": overrides,
+            "workspace_scene": workspace_scene,
+            "surfaces": surfaces,
+        }
+
+    def _store_current_editor(self):
+        if self._current_theme_id == DEFAULT_THEME_ID:
+            return
+        profile = self._profile(self._current_theme_id)
+        if profile is None:
+            raise ValueError(f"主题不存在：{self._current_theme_id}")
+        profile.update(self._collect_current_editor_values())
 
     def _draft_signature(self, profile):
         return json.dumps(
@@ -1058,16 +1066,28 @@ class ThemeSettingsPanel(QWidget):
             ProductMessageBox.critical(self, "导出主题失败", str(exc))
 
     def state_signature(self):
-        try:
-            self._store_current_editor()
-            error = ""
-        except Exception as exc:
-            error = str(exc)
         themes = []
         for theme in self._themes:
             persisted_theme = copy.deepcopy(theme)
             persisted_theme.pop("_asset_bytes", None)
             themes.append(persisted_theme)
+        error = ""
+        if not self._loading and self._current_theme_id != DEFAULT_THEME_ID:
+            try:
+                editor_values = self._collect_current_editor_values()
+                current = next(
+                    (
+                        theme
+                        for theme in themes
+                        if theme.get("id") == self._current_theme_id
+                    ),
+                    None,
+                )
+                if current is None:
+                    raise ValueError(f"主题不存在：{self._current_theme_id}")
+                current.update(editor_values)
+            except Exception as exc:
+                error = str(exc)
         return {
             "active_theme_id": self._active_theme_id,
             "themes": themes,

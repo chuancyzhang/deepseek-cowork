@@ -16,11 +16,12 @@ class ChatSaveRequest:
     status: str
     meta: dict
     ready_at: float
+    revision: int = 0
 
 
 class ChatSaveWorker(QThread):
-    save_failed = Signal(str, str)
-    save_completed = Signal(str)
+    save_failed = Signal(str, int, str)
+    save_completed = Signal(str, int)
 
     def __init__(self, db_path, debounce_ms=500, parent=None):
         super().__init__(parent)
@@ -33,11 +34,14 @@ class ChatSaveWorker(QThread):
 
     def enqueue(self, request):
         if not isinstance(request, ChatSaveRequest):
-            return
+            return False
         request.ready_at = time.monotonic() + self.debounce_seconds
         with self._condition:
-            self._pending[request.session_id] = request
+            current = self._pending.get(request.session_id)
+            if current is None or int(request.revision or 0) >= int(current.revision or 0):
+                self._pending[request.session_id] = request
             self._condition.notify_all()
+        return True
 
     def flush(self, session_id=None, timeout_ms=3000):
         timeout_seconds = max(0, int(timeout_ms or 0)) / 1000.0
@@ -128,10 +132,10 @@ class ChatSaveWorker(QThread):
                         request.ready_at = time.monotonic() + self.debounce_seconds
                         self._pending[request.session_id] = request
                     self._condition.notify_all()
-                self.save_failed.emit(request.session_id, str(exc))
+                self.save_failed.emit(request.session_id, int(request.revision or 0), str(exc))
                 continue
 
             with self._condition:
                 self._inflight.discard(request.session_id)
                 self._condition.notify_all()
-            self.save_completed.emit(request.session_id)
+            self.save_completed.emit(request.session_id, int(request.revision or 0))

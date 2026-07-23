@@ -264,6 +264,118 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "sidebar-activity":
+            project_dir = TEMP_ROOT / "sidebar-activity-project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            project_path = str(project_dir)
+            window.config_manager.upsert_project(project_path)
+            for index in range(6):
+                window.chat_storage.save_conversation(
+                    f"sidebar-history-{index}",
+                    [
+                        {
+                            "id": f"sidebar-history-message-{index}",
+                            "role": "user",
+                            "content": f"历史会话 {index}",
+                        }
+                    ],
+                    title=f"历史会话 {index}",
+                    status="completed",
+                    meta={
+                        "workspace_dir": project_path,
+                        "workspace_source": "project",
+                    },
+                )
+            session_id = window.create_new_session(
+                make_current=True,
+                workspace_dir=project_path,
+            )
+            state = window.get_session(session_id)
+            state.messages = [
+                {
+                    "id": "sidebar-activity-user",
+                    "role": "user",
+                    "content": "这是一个非常长的会话标题，用来验证后台运行状态始终留在侧栏可视范围内",
+                }
+            ]
+            state.session_status = "running"
+            state.live_activity = True
+            window.chat_storage.save_conversation(
+                session_id,
+                state.messages,
+                title="这是一个非常长的会话标题，用来验证后台运行状态始终留在侧栏可视范围内",
+                status="running",
+                meta={
+                    "workspace_dir": project_path,
+                    "workspace_source": "project",
+                },
+            )
+            window.project_preview_paths.add(project_path)
+            window.refresh_history_list()
+            window.resize(900, 650)
+            window.show()
+            window.main_splitter.setSizes([main.DesignTokens.sidebar_min_width, 696])
+            process_events(220)
+            scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+            status = window.history_activity_statuses[session_id]
+            row = window.history_rows[session_id]
+            status_right = status.mapTo(
+                window.history_scroll.viewport(),
+                status.rect().topRight(),
+            ).x()
+            if (
+                status.isHidden()
+                or status.geometry().right() > row.rect().right()
+                or status_right >= window.history_scroll.viewport().width()
+            ):
+                raise RuntimeError(
+                    "Sidebar activity status is clipped: "
+                    f"row={row.geometry().getRect()} status={status.geometry().getRect()} "
+                    f"hidden={status.isHidden()} viewport_right={status_right}/"
+                    f"{window.history_scroll.viewport().width()}"
+                )
+            save_widget(
+                window.sidebar,
+                f"sidebar-activity-min-width-{scale_label}x.png",
+                220,
+            )
+            row._set_actions_visible(True)
+            process_events(120)
+            status_right = status.mapTo(
+                window.history_scroll.viewport(),
+                status.rect().topRight(),
+            ).x()
+            if (
+                status.isHidden()
+                or status.geometry().right() > row.rect().right()
+                or status_right >= window.history_scroll.viewport().width()
+            ):
+                raise RuntimeError(
+                    "Sidebar activity status is clipped on hover: "
+                    f"row={row.geometry().getRect()} status={status.geometry().getRect()} "
+                    f"hidden={status.isHidden()} viewport_right={status_right}/"
+                    f"{window.history_scroll.viewport().width()}"
+                )
+            save_widget(
+                window.sidebar,
+                f"sidebar-activity-hover-{scale_label}x.png",
+                180,
+            )
+            original_status_color = main.DesignTokens.status_running
+            try:
+                main.DesignTokens.status_running = "#3157c8"
+                window._apply_runtime_theme()
+                window.history_activity_statuses[session_id].refresh_theme()
+                process_events(120)
+                save_widget(
+                    window.sidebar,
+                    f"sidebar-activity-theme-{scale_label}x.png",
+                    180,
+                )
+            finally:
+                main.DesignTokens.status_running = original_status_color
+                window._apply_runtime_theme()
+            return
         if SCREENSHOT_SCOPE == "skill-capture":
             skill_analysis = main.ConversationSkillEvidenceDialog(
                 {

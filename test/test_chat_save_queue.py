@@ -17,6 +17,10 @@ class TestChatSaveQueue(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = ChatStorage(os.path.join(temp_dir, "chat_history.sqlite"))
             worker = ChatSaveWorker(storage.db_path, debounce_ms=20)
+            completed = []
+            worker.save_completed.connect(
+                lambda session_id, revision: completed.append((session_id, revision))
+            )
             worker.start()
             try:
                 worker.enqueue(
@@ -27,6 +31,7 @@ class TestChatSaveQueue(unittest.TestCase):
                         status="draft",
                         meta={"workspace_dir": "A"},
                         ready_at=0.0,
+                        revision=1,
                     )
                 )
                 worker.enqueue(
@@ -37,6 +42,7 @@ class TestChatSaveQueue(unittest.TestCase):
                         status="running",
                         meta={"workspace_dir": "B"},
                         ready_at=0.0,
+                        revision=2,
                     )
                 )
                 self.assertTrue(worker.flush(session_id="session-1", timeout_ms=2000))
@@ -54,6 +60,7 @@ class TestChatSaveQueue(unittest.TestCase):
         self.assertEqual(record.get("status"), "running")
         self.assertEqual((record.get("meta") or {}).get("workspace_dir"), "B")
         self.assertEqual([message.get("content") for message in messages], ["second"])
+        self.assertEqual(completed[-1], ("session-1", 2))
 
     def test_worker_saves_multiple_sessions(self):
         with tempfile.TemporaryDirectory() as temp_dir:

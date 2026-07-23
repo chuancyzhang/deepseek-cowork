@@ -26,7 +26,7 @@ DeepSeek Cowork 的目标不是做一个“会聊天的 IDE”，而是做一个
 4. **运行层**
    `core/daemon.py`、`core/sandbox_runtime.py` 与相关 provider 代码负责模型请求、后台执行和运行时环境。
 5. **数据层**
-   `core/chat_storage.py`、`core/config_manager.py`、`core/memory_store.py`、`core/automation_manager.py` 负责会话、配置、记忆和自动化状态持久化。
+   `core/chat_storage.py`、`core/chat_save_queue.py`、`core/chat_recovery_journal.py`、`core/config_manager.py`、`core/memory_store.py`、`core/automation_manager.py` 负责会话、恢复日志、配置、记忆和自动化状态持久化。
 
 ## 3. 关键界面结构
 
@@ -74,7 +74,7 @@ Cowork 采用交错式推理流程：
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
 - OpenAI 兼容模型在模型级保存 `api_protocol=chat_completions|responses`；旧配置缺少字段时保持 Chat Completions，新建 GPT‑5.6 默认 Responses。Responses provider 将消息、函数调用和函数结果转换为 typed Items，把 Worker 提供的会话级 key 直接写入顶层 `prompt_cache_key`，并把流式正文、reasoning summary、函数参数、用量和错误重新投影为现有统一事件协议；Chat Completions 继续仅按原有 `prompt_cache_key_param` 配置注入缓存字段；GPT‑5.6 可配置 `none/low/medium/high/xhigh/max` 推理强度。
 - Composer 使用 `ProductPopover` 作为主窗口内 overlay：`+` 动作、指定能力和模型选择都在同一 Qt 窗口中锚定、约束边界并处理外部点击，不创建顶层 `Qt.Popup`。浮层通过鼠标全局坐标命中自身与锚点，不能依赖事件接收对象一定是 `QWidget`，以兼容 Windows 原生事件分发。指定能力以会话态 `selected_skill_names` 为唯一数据源。
-- 新会话首次发送在完成全部提交预检后、插入用户消息前，同步把空状态从布局移除、隐藏并 `deleteLater()`；后续布局重排和 `processEvents` 不得再次绘制它。普通发送和模型提问只使用会话内交互卡，旧模态入口显式报错而不创建 `QDialog`。Windows daemon/网关进程统一通过 `core.process_utils` 设置 `CREATE_NO_WINDOW` 与隐藏启动信息；首次提交记录 submit/start/run/finish/error 及 committed/rejected，延迟检查任何新增可见顶层窗口并记录具体窗口类名、对象名和标题。
+- 新会话首次发送完成预检后，先把包含用户消息的版本化快照原子写入恢复日志，再更新内存、侧栏和输入区并启动模型；恢复日志失败时保留输入且不得派发。空状态从布局移除、隐藏并 `deleteLater()`，后续布局重排不得再次绘制。首次提交记录 submit/start/run/finish/error、侧栏投影及 committed/rejected。
 - 会话级 `ui_timeline_v1` 事件账本继续按原顺序保存 Thinking、工具、正文片段和运行中引导，并记录 `group_id`、`stage_id` 和 `reply_kind` 以便实时恢复。所有历史消息都由投影层直接根据标准 OpenAI-compatible 顺序 `assistant.tool_calls → tool → assistant` 重建统一轮次：每个阶段保留独立的思考开关，`AssistantTurnGroup` 统一管理短细分隔线、空阶段可见性与最终操作栏；展开区没有推理或工具时不绘制时间线，也不保留布局高度。携带 `tool_calls` 的 assistant 正文属于阶段回复且不显示消息动作，终止工具循环且正文非空的 assistant 属于最终回复并独占操作栏；引导关闭当前容器并开启新的容器。停止、错误或最终正文为空时显示明确状态并关闭消息动作，不能把前一阶段正文提升为最终答复。工具开始与结果仍通过同一 `tool_call_id` 原位更新，UI 投影字段在进入 Worker 前剥离，原始角色与工具消息结构保持不变。
 - 历史会话加载由 `SessionHistoryLoadWorker` 在工作线程读取 SQLite、解析消息并构建 render spans；结果携带 `session_id + load_token`，切换或重试后到达的旧结果直接丢弃。UI 首屏保留最近 12 个 span，并以每个事件循环一个摘要的节奏创建。`HistoricalAssistantSummary` 只立即物化最终答复和同轮引导，思考、阶段正文、工具参数及结果在用户展开后按“每批最多 2 个阶段、达到 12ms 让出 UI”的预算恢复；Office 历史先创建任务卡和结果入口，过程区直到用户展开才物化。历史批量路径禁止调用 `QApplication.processEvents()`。向上分页在渲染前预留范围，失败回滚，并以首个可见控件的视口偏移恢复锚点。
 - `SessionState.render_nodes` 与 `render_node_by_message_id` 维护消息区间到顶层 QWidget、轮次/Office 归属、工具 ID 和详情物化状态的稳定索引。历史编辑以该索引执行局部重写事务：先摘除并隐藏目标节点及下游控件，截断消息、timeline、Agent 和工具运行态，再走现有提交链路；同步失败恢复原对象与锚点，成功后才销毁旧分支。索引缺失时明确阻止操作，禁止退回清空布局全量重建。删除用户消息复用局部节点机制，只在分组边界变化时重建相邻 span。
@@ -127,7 +127,7 @@ Cowork 采用交错式推理流程：
 
 ## 7. 数据与持久化
 
-- **会话**：`core/chat_storage.py` 负责本地消息历史、归档、置顶和项目归属；项目活动排序只使用真实会话 `updated_at`，空项目使用稳定创建时间，浏览和展开项目不更新时间。历史读取失败保持错误占位。
+- **会话**：`core/chat_storage.py` 在单一事务内提交会话摘要与规范化消息；`ChatSaveWorker` 合并同会话快照但用单调 revision 区分待写入与正在写入版本；`ChatRecoveryJournal` 在 SQLite 确认前保留每个会话的最新校验快照，并在启动时按消息 ID 对账。跨会话冲突的旧消息 ID 会确定性重建并保留原 ID 元数据；损坏日志不删除。项目活动排序只使用真实会话 `updated_at`。
 - **模型配置**：显式 `model_channels=[]` 是合法持久化状态，只有缺少该字段的旧配置才迁移默认渠道；空配置使用空 `selected_model_id`，提交预检负责引导用户重新配置。
 - **配置**：`core/config_manager.py` 统一管理模型、MCP、Skill 运行配置、工作区、智能体和 UI 偏好；项目归档保存在项目元数据中，左侧栏和项目选择器默认过滤已归档项目，设置中心负责恢复入口
 - **记忆**：`core/memory_store.py` 与 `core/memory_update.py` 管理灵魂提示词、全局摘要和工作区摘要
@@ -158,6 +158,7 @@ Cowork 采用交错式推理流程：
 - **优先显式边界**：工作区、模式、人工确认和技能披露都尽量显式可见。
 - **优先可演进性**：用户技能、MCP 工具、提示词自动化和长期记忆都可以持续扩展。
 - **会话显示标题**：自动标题继续由首条用户消息生成；用户在侧栏就地重命名后，conversation `meta.manual_title` 标记标题来源，后续异步保存、历史迁移和重新加载必须保留该标题，且不修改数据库表结构。
+- **侧栏运行投影**：空白会话不进入历史；首次有效提交立即合并内存会话与 SQLite 摘要。会话行的标题是可压缩区，运行状态是固定区；项目收起时聚合真实 `SessionState.live_activity`，展开时显示最近 5 条与全部运行/等待输入会话的并集。
 - **任务观测展示**：`ProductSegmentedControl` 承载执行上下文、调用记录和技术详情；调用记录是工具选择源，技术详情使用共享代码与结果查看器按 Python、Shell、JSON、stdout、stderr 和 Traceback 呈现。
 - **UI 导航诊断**：侧栏新建聊天、项目点击、输入栏项目切换和主内容路由向 `ui_navigation.log` 写入 begin/done 阶段；正式 UI 进程通过 `faulthandler` 把原生崩溃线程栈写入 `native_crash.log`。
 

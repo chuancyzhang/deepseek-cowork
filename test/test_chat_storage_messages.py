@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import json
 from contextlib import closing
+from unittest.mock import patch
 
 from core.chat_storage import ChatStorage
 
@@ -16,6 +17,43 @@ class TestChatStorageMessages(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_save_conversation_rolls_back_summary_when_message_write_fails(self):
+        storage = ChatStorage(self.db_path)
+        with patch.object(
+            storage,
+            "_replace_messages_in_connection",
+            side_effect=RuntimeError("simulated message failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated message failure"):
+                storage.save_conversation(
+                    "atomic-conversation",
+                    [{"id": "m1", "role": "user", "content": "must be atomic"}],
+                    title="Atomic",
+                )
+        self.assertIsNone(storage.get_conversation_record("atomic-conversation"))
+
+    def test_cross_conversation_message_id_conflict_is_remapped(self):
+        storage = ChatStorage(self.db_path)
+        storage.save_conversation(
+            "first-conversation",
+            [{"id": "shared-id", "role": "assistant", "content": "first"}],
+            title="First",
+        )
+        storage.save_conversation(
+            "second-conversation",
+            [{"id": "shared-id", "role": "assistant", "content": "second"}],
+            title="Second",
+        )
+        first = storage.get_messages("first-conversation")[0]
+        second = storage.get_messages("second-conversation")[0]
+        self.assertEqual(first.get("id"), "shared-id")
+        self.assertNotEqual(second.get("id"), "shared-id")
+        self.assertEqual(
+            (second.get("meta") or {}).get("original_message_id"),
+            "shared-id",
+        )
+        self.assertTrue((second.get("meta") or {}).get("message_id_remapped"))
 
     def test_message_roundtrip_preserves_structured_fields(self):
         storage = ChatStorage(self.db_path)

@@ -35,6 +35,7 @@ from core.single_instance import (
 )
 from core.chat_storage import ChatStorage
 from core.chat_save_queue import ChatSaveRequest, ChatSaveWorker
+from core.chat_recovery_journal import ChatRecoveryJournal
 from core.conversation_render import (
     build_conversation_render_spans,
     is_legacy_skill_change_notice_message,
@@ -15999,6 +16000,54 @@ class SessionActivityIndicator(QWidget):
         painter.drawArc(rect, self._angle * 16, 104 * 16)
 
 
+class SidebarActivityStatus(QWidget):
+    """Persistent sidebar status slot whose activity signal cannot be elided by the title."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._state = "idle"
+        self._count = 0
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.indicator = SessionActivityIndicator(self)
+        layout.addWidget(self.indicator, 0, Qt.AlignVCenter)
+        self.label = QLabel(self)
+        self.label.setObjectName("SidebarActivityStatusText")
+        layout.addWidget(self.label, 0, Qt.AlignVCenter)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.hide()
+        bind_theme(self, self.refresh_theme, surface="left_sidebar")
+
+    def setState(self, state, count=1):
+        state = str(state or "idle")
+        self._state = state
+        self._count = max(0, int(count or 0))
+        self.indicator.setState(state)
+        labels = {
+            "running": "运行中" if self._count <= 1 else f"{self._count} 个运行中",
+            "waiting": "待输入" if self._count <= 1 else f"{self._count} 个待输入",
+            "error": "失败",
+        }
+        text = labels.get(state, "")
+        self.label.setText(text)
+        color = (
+            DesignTokens.warning_text
+            if state == "waiting"
+            else (DesignTokens.error_text if state == "error" else DesignTokens.status_running)
+        )
+        self.label.setStyleSheet(
+            f"color: {color}; font-size: 11px; font-weight: 600; "
+            "background: transparent; border: none;"
+        )
+        self.setToolTip(text)
+        self.setAccessibleName(text)
+        self.setVisible(state != "idle")
+
+    def refresh_theme(self, _resolved=None):
+        self.setState(self._state, count=self._count)
+
+
 class ConversationSkillStatusRow(QFrame):
     """Theme-aware inline status for a background conversation-to-Skill capture."""
 
@@ -16367,6 +16416,8 @@ class SessionState:
         self.deliverable_preview_rendered = False
         self.token_usage_summary = normalize_token_usage_summary({})
         self.last_token_usage = {}
+        self.chat_save_revision = 0
+        self.last_chat_recovery_checkpoint_at = 0.0
         self.composer_draft = ""
         self.saved_scroll_position = None
         self.drawer_open = False
@@ -17764,7 +17815,11 @@ class MainWindow(QMainWindow):
         self.messages = []
         self.history_rows = {}
         self.history_buttons = {}
+        self.history_age_labels = {}
+        self.history_activity_indicators = {}
+        self.history_activity_statuses = {}
         self.history_skill_capture_indicators = {}
+        self.project_activity_statuses = {}
         self.project_rows = {}
         self.project_buttons = {}
         self.history_inline_hosts = {}
@@ -17966,6 +18021,8 @@ class MainWindow(QMainWindow):
         self.history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.history_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.history_container = QWidget()
+        self.history_container.setMinimumWidth(0)
+        self.history_container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.history_container.setStyleSheet("background: transparent; border: none;")
         self.history_layout = QVBoxLayout(self.history_container)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
@@ -18944,6 +19001,16 @@ class MainWindow(QMainWindow):
         self.chat_history_dir = self.config_manager.get_chat_history_dir()
         os.makedirs(self.chat_history_dir, exist_ok=True)
         self.chat_storage = ChatStorage(os.path.join(self.chat_history_dir, "chat_history.sqlite"))
+        self.chat_recovery_journal = ChatRecoveryJournal(self.chat_history_dir)
+        (
+            self.recovered_chat_session_ids,
+            self.chat_recovery_errors,
+        ) = self.chat_recovery_journal.recover_into(self.chat_storage)
+        log_startup_stage(
+            "chat_recovery_done",
+            recovered=len(self.recovered_chat_session_ids),
+            errors=len(self.chat_recovery_errors),
+        )
         self._cleanup_orphan_attachment_dirs()
         self.chat_save_worker = ChatSaveWorker(self.chat_storage.db_path, parent=self)
         self.chat_save_worker.save_failed.connect(self.handle_chat_save_failed)
@@ -18952,6 +19019,22 @@ class MainWindow(QMainWindow):
         self.refresh_model_selector()
         self.create_new_session()
         self.update_skill_capture_button_state()
+        if self.recovered_chat_session_ids:
+            self.add_system_toast(
+                f"已恢复 {len(self.recovered_chat_session_ids)} 个未完成保存的对话",
+                "success",
+                auto_close_ms=5000,
+            )
+        if self.chat_recovery_errors:
+            self.add_system_toast(
+                "部分对话恢复记录无法读取，原文件已保留。请查看日志。",
+                "error",
+                auto_close_ms=0,
+            )
+            for item in self.chat_recovery_errors:
+                self.append_log(
+                    f"会话恢复记录读取失败: {item.get('path')} | {item.get('error')}"
+                )
 
         # Initialize Drag Overlay
         self.drag_overlay = DragOverlay(self)
@@ -21764,16 +21847,51 @@ class MainWindow(QMainWindow):
     def refresh_session_activity_indicator(self, session_id):
         indicators = getattr(self, "history_activity_indicators", {})
         indicator = indicators.get(session_id)
-        if indicator:
+        status_widget = getattr(self, "history_activity_statuses", {}).get(session_id)
+        if indicator or status_widget:
             state = self.get_session(session_id)
             waiting = bool(state and getattr(state, "pending_interactions", {}))
             failed = bool(state and getattr(state, "session_status", "") == "error")
             running = self._session_has_live_activity(session_id)
-            indicator.setState("waiting" if waiting else ("error" if failed else ("running" if running else "idle")))
+            status = "waiting" if waiting else ("error" if failed else ("running" if running else "idle"))
+            if status_widget:
+                status_widget.setState(status)
+            elif indicator:
+                indicator.setState(status)
             age_label = getattr(self, "history_age_labels", {}).get(session_id)
             if age_label:
                 age_label.setVisible(not (running or waiting or failed) and bool(age_label.text()))
+            workspace_dir = self._workspace_dir_for_state(state) if state else ""
+            if workspace_dir and self._session_workspace_source(state) == "project":
+                self.refresh_project_activity_indicator(workspace_dir)
         self.refresh_skill_capture_sidebar_indicator(session_id)
+
+    def _project_activity_summary(self, path):
+        project_key = self._project_key(path)
+        running = 0
+        waiting = 0
+        for state in (getattr(self, "sessions", {}) or {}).values():
+            if self._session_workspace_source(state) != "project":
+                continue
+            if self._project_key(self._workspace_dir_for_state(state)) != project_key:
+                continue
+            if getattr(state, "pending_interactions", {}):
+                waiting += 1
+            elif self._session_has_live_activity(state.session_id):
+                running += 1
+        if waiting:
+            return "waiting", waiting
+        if running:
+            return "running", running
+        return "idle", 0
+
+    def refresh_project_activity_indicator(self, path):
+        normalized = self._normalize_project_path(path)
+        indicator = getattr(self, "project_activity_statuses", {}).get(normalized)
+        if indicator is None or not _qt_object_alive(indicator):
+            return
+        state, count = self._project_activity_summary(normalized)
+        indicator.setState(state, count=count)
 
     def _conversation_skill_capture_phase(self, session_id):
         state = self.get_session(session_id)
@@ -23267,6 +23385,7 @@ class MainWindow(QMainWindow):
         state.ui_timeline_warning = ""
         state.llm_worker = None
         state.live_activity = False
+        state.last_chat_recovery_checkpoint_at = 0.0
         state.auto_scroll_enabled = True
         state.scroll_dragging = False
         state.pending_scroll_force = False
@@ -24737,8 +24856,9 @@ class MainWindow(QMainWindow):
         )
         row_layout.addWidget(age_label)
 
-        activity_indicator = SessionActivityIndicator(row)
-        row_layout.addWidget(activity_indicator, 0, Qt.AlignVCenter)
+        activity_status = SidebarActivityStatus(row)
+        activity_indicator = activity_status.indicator
+        row_layout.addWidget(activity_status, 0, Qt.AlignVCenter)
 
         skill_indicator = SessionSkillCaptureIndicator(row)
         skill_indicator.clicked.connect(lambda _checked=False, sid=session_id: self.activate_session(sid))
@@ -24783,6 +24903,7 @@ class MainWindow(QMainWindow):
         self.history_buttons[session_id] = btn
         self.history_age_labels[session_id] = age_label
         self.history_activity_indicators[session_id] = activity_indicator
+        self.history_activity_statuses[session_id] = activity_status
         self.history_skill_capture_indicators[session_id] = skill_indicator
         self.refresh_session_activity_indicator(session_id)
         return row
@@ -24796,6 +24917,8 @@ class MainWindow(QMainWindow):
         fully_expanded = query_active or path in self.project_full_expanded_paths
         row = QFrame()
         row.setObjectName("ProjectRow")
+        row.setMinimumWidth(0)
+        row.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.setStyleSheet("QFrame#ProjectRow { background: transparent; border: none; }")
         outer = QVBoxLayout(row)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -24846,6 +24969,8 @@ class MainWindow(QMainWindow):
         menu_btn.setStyleSheet(apple_sidebar_action_button_style(selected))
         menu_btn.clicked.connect(lambda checked=False, p=path, btn_ref=menu_btn: self.show_project_menu(p, btn_ref))
         actions_layout.addWidget(menu_btn)
+        project_activity_status = SidebarActivityStatus(header)
+        header_layout.addWidget(project_activity_status, 0, Qt.AlignVCenter)
         header_layout.addWidget(actions, 0, Qt.AlignVCenter)
         header.setFocusPolicy(Qt.StrongFocus)
         header.set_hover_actions([actions])
@@ -24866,7 +24991,25 @@ class MainWindow(QMainWindow):
         if fully_expanded:
             visible_sessions = sessions
         elif previewed:
-            visible_sessions = sessions[:5]
+            recent_ids = {item.get("id") for item in sessions[:5]}
+            live_ids = {
+                item.get("id")
+                for item in sessions
+                if (
+                    self._session_has_live_activity(item.get("id"))
+                    or bool(
+                        getattr(
+                            self.get_session(item.get("id")),
+                            "pending_interactions",
+                            {},
+                        )
+                    )
+                )
+            }
+            visible_ids = recent_ids | live_ids
+            visible_sessions = [
+                item for item in sessions if item.get("id") in visible_ids
+            ]
         else:
             visible_sessions = []
         for session in visible_sessions:
@@ -24886,6 +25029,8 @@ class MainWindow(QMainWindow):
 
         self.project_rows[path] = row
         self.project_buttons[path] = project_btn
+        self.project_activity_statuses[path] = project_activity_status
+        self.refresh_project_activity_indicator(path)
         return row
 
     def handle_project_click(self, path, query_active=False):
@@ -25365,7 +25510,9 @@ class MainWindow(QMainWindow):
         self.history_buttons = {}
         self.history_age_labels = {}
         self.history_activity_indicators = {}
+        self.history_activity_statuses = {}
         self.history_skill_capture_indicators = {}
+        self.project_activity_statuses = {}
         self.project_rows = {}
         self.project_buttons = {}
         while self.history_layout.count():
@@ -26911,30 +27058,136 @@ class MainWindow(QMainWindow):
             meta.pop("ui_timeline_v1", None)
         return meta
 
-    def _build_chat_save_request(self, state):
+    def _build_chat_save_request(
+        self,
+        state,
+        *,
+        messages=None,
+        status=None,
+        revision=0,
+    ):
         if not state:
             return None
         if not session_history_ready(state):
             return None
+        messages = copy.deepcopy(
+            list(messages if messages is not None else state.messages)
+        )
         has_clarify_state = bool(
             bool(getattr(state, "pending_clarify_questions", []))
         )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not state.messages and not has_clarify_state and not has_selected_skills:
+        if not messages and not has_clarify_state and not has_selected_skills:
             return None
-        title = self._resolved_session_title(state) if state.messages else (
+        title = self._resolved_session_title(state, messages) if messages else (
             self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
         )
         meta = self._compose_session_meta(state)
         state.persisted_conversation_meta = copy.deepcopy(meta)
         return ChatSaveRequest(
             session_id=state.session_id,
-            messages=copy.deepcopy(state.messages),
+            messages=messages,
             title=title,
-            status=getattr(state, "session_status", "draft"),
+            status=status or getattr(state, "session_status", "draft"),
             meta=copy.deepcopy(meta),
             ready_at=time.monotonic(),
+            revision=max(0, int(revision or 0)),
         )
+
+    def _stage_chat_save_request(self, state, *, messages=None, status=None):
+        if not state:
+            return None
+        state.chat_save_revision = max(0, int(getattr(state, "chat_save_revision", 0) or 0)) + 1
+        request = self._build_chat_save_request(
+            state,
+            messages=messages,
+            status=status,
+            revision=state.chat_save_revision,
+        )
+        if request is None:
+            return None
+        try:
+            self.chat_recovery_journal.record(request)
+        except Exception as exc:
+            self.handle_chat_save_failed(
+                state.session_id,
+                request.revision,
+                f"恢复日志写入失败：{exc}",
+            )
+            return None
+        log_ui_navigation(
+            "chat_save_journal_staged",
+            session_id=state.session_id,
+            revision=request.revision,
+            message_count=len(request.messages),
+        )
+        return request
+
+    def _enqueue_staged_chat_save(self, request):
+        if request is None:
+            return False
+        worker = getattr(self, "chat_save_worker", None)
+        if worker:
+            accepted = bool(worker.enqueue(request))
+            if not accepted:
+                self.handle_chat_save_failed(
+                    request.session_id,
+                    request.revision,
+                    "保存队列拒绝了会话快照",
+                )
+            else:
+                log_ui_navigation(
+                    "chat_save_enqueued",
+                    session_id=request.session_id,
+                    revision=request.revision,
+                )
+            return accepted
+        try:
+            self.chat_storage.save_conversation(
+                request.session_id,
+                request.messages,
+                title=request.title,
+                status=request.status,
+                meta=request.meta,
+            )
+            self.handle_chat_save_completed(request.session_id, request.revision)
+            return True
+        except Exception as exc:
+            self.handle_chat_save_failed(
+                request.session_id,
+                request.revision,
+                str(exc),
+            )
+            return False
+
+    def _checkpoint_live_chat(self, state):
+        if not state or not getattr(state, "live_activity", False):
+            return False
+        content = str(getattr(state, "current_content_buffer", "") or "")
+        reasoning = str(getattr(state, "current_thinking_buffer", "") or "")
+        if not content.strip() and not reasoning.strip():
+            return False
+        now = time.monotonic()
+        last = float(getattr(state, "last_chat_recovery_checkpoint_at", 0.0) or 0.0)
+        if now - last < 1.0:
+            return False
+        state.last_chat_recovery_checkpoint_at = now
+        checkpoint = {
+            "id": f"recovery-{state.session_id}-{int(getattr(state, 'active_turn_id', 0) or 0)}",
+            "role": "assistant",
+            "content": content,
+            "reasoning": reasoning,
+            "meta": {
+                "recovery_checkpoint": True,
+                "active_turn_id": int(getattr(state, "active_turn_id", 0) or 0),
+            },
+        }
+        request = self._stage_chat_save_request(
+            state,
+            messages=list(state.messages) + [checkpoint],
+            status="running",
+        )
+        return request is not None
 
     def flush_pending_chat_saves(self, session_id=None, timeout_ms=3000):
         worker = getattr(self, "chat_save_worker", None)
@@ -26942,9 +27195,11 @@ class MainWindow(QMainWindow):
             return True
         return worker.flush(session_id=session_id, timeout_ms=timeout_ms)
 
-    def handle_chat_save_failed(self, session_id, error):
+    def handle_chat_save_failed(self, session_id, revision, error):
         session_id = str(session_id or "").strip()
-        self.append_log(f"会话保存失败({session_id or 'unknown'}): {error}")
+        self.append_log(
+            f"会话保存失败({session_id or 'unknown'}, revision={int(revision or 0)}): {error}"
+        )
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if not isinstance(notified, dict):
             self._chat_save_failure_notified_at = {}
@@ -26958,35 +27213,36 @@ class MainWindow(QMainWindow):
         if state:
             self.add_system_toast("会话保存失败，稍后自动重试。", "warning", session_id=session_id, auto_close_ms=3500)
 
-    def handle_chat_save_completed(self, session_id):
+    def handle_chat_save_completed(self, session_id, revision):
         session_id = str(session_id or "").strip()
         notified = getattr(self, "_chat_save_failure_notified_at", None)
         if isinstance(notified, dict):
             notified.pop(session_id, None)
+        acknowledged = False
+        try:
+            acknowledged = self.chat_recovery_journal.acknowledge(session_id, revision)
+        except Exception as exc:
+            self.append_log(
+                f"会话恢复记录确认失败({session_id}, revision={int(revision or 0)}): {exc}"
+            )
         optimistic_ids = getattr(self, "optimistic_history_session_ids", None)
-        if isinstance(optimistic_ids, set) and session_id in optimistic_ids:
+        if acknowledged and isinstance(optimistic_ids, set) and session_id in optimistic_ids:
             optimistic_ids.discard(session_id)
             self.refresh_history_list()
+        log_ui_navigation(
+            "chat_save_acknowledged",
+            session_id=session_id,
+            revision=int(revision or 0),
+            journal_cleared=bool(acknowledged),
+        )
 
     def save_chat_history(self, session_id=None, flush=False):
         state = self.get_session(session_id)
         if state:
-            request = self._build_chat_save_request(state)
+            request = self._stage_chat_save_request(state)
             if request:
-                worker = getattr(self, "chat_save_worker", None)
-                if worker:
-                    worker.enqueue(request)
-                else:
-                    try:
-                        self.chat_storage.save_conversation(
-                            request.session_id,
-                            request.messages,
-                            title=request.title,
-                            status=request.status,
-                            meta=request.meta,
-                        )
-                    except Exception:
-                        pass
+                if not self._enqueue_staged_chat_save(request):
+                    return False
         self.update_skill_capture_button_state()
         if flush:
             target_session_id = state.session_id if state else session_id
@@ -31200,6 +31456,20 @@ class MainWindow(QMainWindow):
                         message_meta["ppt_agent_template_file"] = ppt_agent_template_file
         if message_meta:
             message_payload["meta"] = message_meta
+        staged_save_request = self._stage_chat_save_request(
+            state,
+            messages=list(state.messages) + [message_payload],
+            status="running",
+        )
+        if staged_save_request is None:
+            if state.session_id == self.current_session_id:
+                self.add_system_toast(
+                    "消息无法安全保存，已保留输入且未启动任务。请检查磁盘空间和目录权限。",
+                    "error",
+                    session_id=state.session_id,
+                    auto_close_ms=0,
+                )
+            return False
         is_first_submit = bool(
             state.session_id == self.current_session_id
             and getattr(state, "empty_state", None) is not None
@@ -31294,7 +31564,9 @@ class MainWindow(QMainWindow):
             previous_render_count,
             previous_render_total,
         )
-        self.save_chat_history(session_id=state.session_id)
+        if not self._enqueue_staged_chat_save(staged_save_request):
+            return False
+        self._ensure_session_visible_in_history(state)
         self.update_session_tab_title(state.session_id)
         run_mode = RUN_MODE_EXECUTION
         state.pending_clarify_questions = []
@@ -32910,6 +33182,8 @@ class MainWindow(QMainWindow):
         elif state.last_agent_bubble:
             state.last_agent_bubble.set_main_content(state.current_content_buffer, final=final)
         state.last_flushed_content_buffer = state.current_content_buffer
+        if not final:
+            self._checkpoint_live_chat(state)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
     def flush_session_thinking(self, session_id):

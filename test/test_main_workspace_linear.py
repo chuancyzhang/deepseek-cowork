@@ -14,6 +14,7 @@ from main import (
     ConversationHistoryRow,
     MainWindow,
     ProjectHistoryRow,
+    SidebarActivityStatus,
     SessionSkillCaptureIndicator,
     parse_tool_arguments,
 )
@@ -178,6 +179,62 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.assertIn("展开显示", disclosure)
             row.deleteLater()
 
+    def test_project_preview_includes_live_conversation_outside_recent_five(self):
+        with tempfile.TemporaryDirectory() as project_dir:
+            live_id = self.window.create_new_session(
+                make_current=False,
+                workspace_dir=project_dir,
+            )
+            live_state = self.window.get_session(live_id)
+            live_state.live_activity = True
+            sessions = [
+                {"id": f"recent-{index}", "title": f"最近 {index}", "updated_at": 100 - index}
+                for index in range(6)
+            ]
+            sessions.append({"id": live_id, "title": "后台运行", "updated_at": 1})
+            self.window.project_preview_paths.add(project_dir)
+            row = self.window._make_project_row(
+                {"path": project_dir, "name": "项目", "pinned": False},
+                sessions,
+            )
+            self.assertIn(live_id, self.window.history_rows)
+            project_status = self.window.project_activity_statuses[project_dir]
+            self.assertEqual(project_status._state, "running")
+            self.assertFalse(project_status.isHidden())
+            row.deleteLater()
+
+    def test_sidebar_running_status_survives_long_title_min_width_hover_and_theme_refresh(self):
+        state = self.window.get_current_session()
+        state.live_activity = True
+        self.window.history_rows = {}
+        self.window.history_buttons = {}
+        self.window.history_age_labels = {}
+        self.window.history_activity_indicators = {}
+        self.window.history_activity_statuses = {}
+        self.window.history_skill_capture_indicators = {}
+        row = self.window._make_project_session_row(
+            {
+                "id": state.session_id,
+                "title": "这是一个非常长的会话标题，用来验证运行状态不会被标题挤出侧栏",
+                "updated_at": 1,
+                "pinned": False,
+            },
+            compact=True,
+        )
+        row.resize(DesignTokens.sidebar_min_width - 20, 34)
+        row.show()
+        self.app.processEvents()
+        status = self.window.history_activity_statuses[state.session_id]
+        self.assertIsInstance(status, SidebarActivityStatus)
+        self.assertFalse(status.isHidden())
+        self.assertLessEqual(status.geometry().right(), row.rect().right())
+        row._set_actions_visible(True)
+        status.refresh_theme()
+        self.app.processEvents()
+        self.assertFalse(status.isHidden())
+        self.assertLessEqual(status.geometry().right(), row.rect().right())
+        row.deleteLater()
+
     def test_manual_title_wins_over_generated_title(self):
         state = SimpleNamespace(
             session_id="manual-title-session",
@@ -314,6 +371,75 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         labels = [button.text().strip() for button in self.window.findChildren(QPushButton)]
         self.assertIn("新建聊天", labels)
         self.assertNotIn("新建对话", labels)
+
+    def test_first_valid_submit_projects_session_into_sidebar_before_worker_runs(self):
+        state = self.window.get_current_session()
+        staged = SimpleNamespace(
+            session_id=state.session_id,
+            revision=1,
+        )
+        with patch.object(
+            self.window,
+            "_model_profile_for_state",
+            return_value={"id": "test-model"},
+        ), patch.object(
+            self.window,
+            "_selected_model_supports_vision",
+            return_value=False,
+        ), patch.object(
+            self.window,
+            "_ensure_vision_attachment_support",
+            return_value=True,
+        ), patch.object(
+            self.window,
+            "_stage_chat_save_request",
+            return_value=staged,
+        ), patch.object(
+            self.window,
+            "_enqueue_staged_chat_save",
+            return_value=True,
+        ), patch.object(
+            self.window,
+            "_ensure_session_visible_in_history",
+        ) as ensure_visible, patch.object(
+            self.window,
+            "_build_run_context",
+            return_value={},
+        ), patch.object(
+            self.window,
+            "queue_daemon_connection",
+        ), patch.object(
+            self.window,
+            "process_agent_logic",
+        ) as process:
+            self.assertTrue(
+                self.window._submit_session_request(
+                    state,
+                    "首次提交立即显示",
+                    [],
+                    clear_current_input=False,
+                )
+            )
+        ensure_visible.assert_called_once_with(state)
+        process.assert_called_once()
+
+    def test_staged_chat_save_is_really_enqueued(self):
+        state = self.window.get_current_session()
+        request = SimpleNamespace(
+            session_id=state.session_id,
+            revision=7,
+            messages=[{"id": "m1", "role": "user", "content": "enqueue"}],
+            title="Enqueue",
+            status="running",
+            meta={},
+        )
+        with patch.object(
+            self.window.chat_save_worker,
+            "enqueue",
+            return_value=True,
+        ) as enqueue:
+            self.assertTrue(self.window._enqueue_staged_chat_save(request))
+        enqueue.assert_called_once_with(request)
 
     def test_conversation_header_has_no_more_menu_button(self):
         self.assertFalse(hasattr(self.window, "conversation_more_btn"))

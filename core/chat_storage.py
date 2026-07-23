@@ -570,33 +570,49 @@ class ChatStorage:
         return normalized
 
     def upsert_conversation(self, conversation_id, title=None, status="active", meta=None):
+        with self._connect() as conn:
+            self._upsert_conversation_in_connection(
+                conn,
+                conversation_id,
+                title=title,
+                status=status,
+                meta=meta,
+            )
+
+    def _upsert_conversation_in_connection(
+        self,
+        conn,
+        conversation_id,
+        title=None,
+        status="active",
+        meta=None,
+    ):
         now = int(time.time())
         meta = self._strip_legacy_plan_meta(meta)
         meta_json = json.dumps(meta, ensure_ascii=False) if meta is not None else None
-        with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT id, created_at, meta FROM conversations WHERE id = ?",
-                (conversation_id,),
-            ).fetchone()
-            if existing:
-                if meta is None:
-                    meta_json = existing["meta"]
-                conn.execute(
-                    """
-                    UPDATE conversations
-                    SET title = ?, updated_at = ?, status = ?, meta = ?
-                    WHERE id = ?
-                    """,
-                    (title, now, status, meta_json, conversation_id),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO conversations (id, title, created_at, updated_at, status, meta)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (conversation_id, title, now, now, status, meta_json),
-                )
+        existing = conn.execute(
+            "SELECT id, created_at, meta FROM conversations WHERE id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if existing:
+            if meta is None:
+                meta_json = existing["meta"]
+            conn.execute(
+                """
+                UPDATE conversations
+                SET title = ?, updated_at = ?, status = ?, meta = ?
+                WHERE id = ?
+                """,
+                (title, now, status, meta_json, conversation_id),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO conversations (id, title, created_at, updated_at, status, meta)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (conversation_id, title, now, now, status, meta_json),
+            )
 
     def get_conversation_meta(self, conversation_id):
         with self._connect() as conn:
@@ -638,6 +654,19 @@ class ChatStorage:
             "status": row["status"] or "active",
             "meta": meta,
         }
+
+    def get_message_owners(self, message_ids):
+        normalized = [str(item or "").strip() for item in message_ids or []]
+        normalized = list(dict.fromkeys(item for item in normalized if item))
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id, conversation_id FROM messages WHERE id IN ({placeholders})",
+                normalized,
+            ).fetchall()
+        return {str(row["id"]): str(row["conversation_id"]) for row in rows}
 
     def update_conversation_meta(self, conversation_id, meta_patch):
         if not isinstance(meta_patch, dict):
@@ -947,33 +976,88 @@ class ChatStorage:
 
     def replace_messages(self, conversation_id, messages):
         normalized_messages = self.normalize_messages(messages)
-        now = int(time.time())
         with self._connect() as conn:
+            normalized_messages = self._remap_cross_conversation_message_ids(
+                conn,
+                conversation_id,
+                normalized_messages,
+            )
+            self._replace_messages_in_connection(conn, conversation_id, normalized_messages)
+
+    def _remap_cross_conversation_message_ids(
+        self,
+        conn,
+        conversation_id,
+        normalized_messages,
+    ):
+        message_ids = [
+            str(message.get("id") or "").strip()
+            for message in normalized_messages
+            if isinstance(message, dict) and str(message.get("id") or "").strip()
+        ]
+        owners = {}
+        if message_ids:
+            unique_ids = list(dict.fromkeys(message_ids))
+            placeholders = ",".join("?" for _ in unique_ids)
             rows = conn.execute(
-                """
-                SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
-                       result_obj, token_count, tool_call_id, created_at
-                FROM messages
-                WHERE conversation_id = ?
-                ORDER BY position ASC
-                """,
-                (conversation_id,),
+                f"SELECT id, conversation_id FROM messages WHERE id IN ({placeholders})",
+                unique_ids,
             ).fetchall()
-            if rows and self._existing_messages_are_prefix(rows, normalized_messages):
-                start = len(rows)
-                for index, msg in enumerate(normalized_messages[start:], start=start):
-                    self._insert_message_row(
-                        conn,
-                        "messages",
-                        "conversation_id",
-                        conversation_id,
-                        msg,
-                        index,
-                        now,
-                    )
-                return
-            conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
-            for index, msg in enumerate(normalized_messages):
+            owners = {str(row["id"]): str(row["conversation_id"]) for row in rows}
+        remapped = []
+        seen = set()
+        for index, message in enumerate(normalized_messages):
+            normalized_message = dict(message)
+            message_id = str(normalized_message.get("id") or "").strip()
+            owner = owners.get(message_id)
+            conflict = bool(
+                message_id
+                and (
+                    (owner and owner != conversation_id)
+                    or message_id in seen
+                )
+            )
+            if conflict:
+                original_id = message_id
+                suffix = index if message_id in seen else 0
+                message_id = uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"deepseek-cowork-message:{conversation_id}:{original_id}:{suffix}",
+                ).hex
+                while message_id in seen:
+                    suffix += 1
+                    message_id = uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"deepseek-cowork-message:{conversation_id}:{original_id}:{suffix}",
+                    ).hex
+                meta = (
+                    dict(normalized_message.get("meta") or {})
+                    if isinstance(normalized_message.get("meta"), dict)
+                    else {}
+                )
+                meta["original_message_id"] = original_id
+                meta["message_id_remapped"] = True
+                normalized_message["meta"] = meta
+                normalized_message["id"] = message_id
+            seen.add(message_id)
+            remapped.append(normalized_message)
+        return remapped
+
+    def _replace_messages_in_connection(self, conn, conversation_id, normalized_messages):
+        now = int(time.time())
+        rows = conn.execute(
+            """
+            SELECT id, role, content, tool_calls, reasoning_content, content_parts, meta,
+                   result_obj, token_count, tool_call_id, created_at
+            FROM messages
+            WHERE conversation_id = ?
+            ORDER BY position ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
+        if rows and self._existing_messages_are_prefix(rows, normalized_messages):
+            start = len(rows)
+            for index, msg in enumerate(normalized_messages[start:], start=start):
                 self._insert_message_row(
                     conn,
                     "messages",
@@ -983,10 +1067,35 @@ class ChatStorage:
                     index,
                     now,
                 )
+            return
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        for index, msg in enumerate(normalized_messages):
+            self._insert_message_row(
+                conn,
+                "messages",
+                "conversation_id",
+                conversation_id,
+                msg,
+                index,
+                now,
+            )
 
     def save_conversation(self, conversation_id, messages, title=None, status="active", meta=None):
-        self.upsert_conversation(conversation_id, title=title, status=status, meta=meta)
-        self.replace_messages(conversation_id, self.normalize_messages(messages))
+        normalized_messages = self.normalize_messages(messages)
+        with self._connect() as conn:
+            normalized_messages = self._remap_cross_conversation_message_ids(
+                conn,
+                conversation_id,
+                normalized_messages,
+            )
+            self._upsert_conversation_in_connection(
+                conn,
+                conversation_id,
+                title=title,
+                status=status,
+                meta=meta,
+            )
+            self._replace_messages_in_connection(conn, conversation_id, normalized_messages)
 
     def _conversation_rows_to_dicts(self, rows):
         conversations = []

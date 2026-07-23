@@ -1063,9 +1063,14 @@ class ThemeSettingsPanel(QWidget):
             error = ""
         except Exception as exc:
             error = str(exc)
+        themes = []
+        for theme in self._themes:
+            persisted_theme = copy.deepcopy(theme)
+            persisted_theme.pop("_asset_bytes", None)
+            themes.append(persisted_theme)
         return {
             "active_theme_id": self._active_theme_id,
-            "themes": copy.deepcopy(self._themes),
+            "themes": themes,
             "editor_error": error,
         }
 
@@ -1076,9 +1081,10 @@ class ThemeSettingsPanel(QWidget):
         self._preview_active = False
         self._preview_signature = None
         previous = self._snapshot
+        persisted_themes = self.state_signature()["themes"]
         theme_changed = (
             self._active_theme_id != previous.active_theme_id
-            or self._themes != [copy.deepcopy(item) for item in previous.themes]
+            or persisted_themes != [copy.deepcopy(item) for item in previous.themes]
         )
         append_theme_log(
             self.repository.data_dir,

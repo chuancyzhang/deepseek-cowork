@@ -7,11 +7,12 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QImage, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
+from core.theme_package import build_asset_record
 from core.theme_service import DEFAULT_THEME_ID, ThemeRepository
 from ui.theme_settings import ThemeSettingsPanel
 
@@ -46,6 +47,26 @@ class ThemeSettingsUiTests(unittest.TestCase):
         self.assertEqual(len(snapshot.themes), 1)
         self.assertEqual(snapshot.active_theme_id, draft["active_theme_id"])
         self.assertIn("建议重启应用", self.panel.last_commit_warning)
+
+    def test_saved_image_theme_can_reopen_with_serializable_dirty_state(self):
+        self.panel._new_theme()
+        profile = self.panel._profile(self.panel._current_theme_id)
+        image_path = os.path.join(self.temp_dir.name, "background.png")
+        image = QImage(1672, 941, QImage.Format_RGB32)
+        image.fill(0xFFF8F2)
+        self.assertTrue(image.save(image_path))
+        record, data = build_asset_record("background", image_path)
+        profile["assets"] = {"background": record}
+        profile["_asset_bytes"] = {record["path"]: data}
+        self.panel.commit()
+
+        reopened = ThemeSettingsPanel(self.repository)
+        self.addCleanup(reopened.deleteLater)
+        signature = reopened.state_signature()
+
+        self.assertEqual(signature["themes"][0]["assets"]["background"]["sha256"], record["sha256"])
+        self.assertNotIn("_asset_bytes", signature["themes"][0])
+        json.dumps(signature, ensure_ascii=False, sort_keys=True)
 
     def test_scene_editor_persists_single_scene_and_surface_materials(self):
         self.panel._new_theme()

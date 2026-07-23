@@ -1,11 +1,17 @@
 import os
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QDialog
 
+from core.theme import default_design_tokens
+from core.theme_package import build_asset_record
+from core.theme_service import ThemeRepository
 from main import MainWindow, ConversationSkillWizardDialog
 
 
@@ -47,6 +53,42 @@ class LinearManagementNavigationTests(unittest.TestCase):
             self.window.skill_manager_ready = True
             self.assertTrue(self.window.open_skills_center())
             self.assertEqual(self.window.current_product_route, "capabilities")
+
+    def test_sidebar_reopens_settings_after_image_theme_is_saved(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            repository = ThemeRepository(data_dir)
+            image_path = os.path.join(data_dir, "background.png")
+            image = QImage(1672, 941, QImage.Format_RGB32)
+            image.fill(0xFFF8F2)
+            self.assertTrue(image.save(image_path))
+            record, data = build_asset_record("background", image_path)
+            saved = repository.upsert_theme(
+                name="图片主题",
+                overrides={},
+                default_tokens=default_design_tokens(),
+                assets={"background": record},
+                asset_bytes={record["path"]: data},
+                workspace_scene={
+                    "attachment": "fixed",
+                    "layers": [
+                        {
+                            "type": "image",
+                            "asset": "background",
+                            "fit": "cover",
+                            "opacity": 1,
+                        }
+                    ],
+                },
+            )
+            repository.activate_theme(saved["theme"]["id"])
+            self.window.theme_manager = SimpleNamespace(repository=repository)
+
+            self.assertTrue(self.window.open_settings())
+            self.assertEqual(self.window.current_product_route, "settings")
+            self.assertIs(
+                self.window.main_page_stack.currentWidget(),
+                self.window.product_pages["settings"],
+            )
 
     def test_automation_editor_is_embedded_and_dirty_aware(self):
         self.window.open_automation_center()
@@ -90,6 +132,27 @@ class LinearManagementNavigationTests(unittest.TestCase):
         self.assertTrue(
             all(row["status"].text() for row in page.component_rows.values())
         )
+
+    def test_product_page_construction_failure_is_visible_and_logged(self):
+        with (
+            patch.object(
+                self.window,
+                "_ensure_product_page",
+                side_effect=TypeError("主题状态包含不可序列化数据"),
+            ),
+            patch("main.log_ui_navigation") as navigation_log,
+            patch.object(self.window, "add_system_toast") as toast,
+        ):
+            self.assertFalse(self.window.open_settings())
+
+        navigation_log.assert_any_call(
+            "product_page_open_error",
+            route="settings",
+            section="",
+            error="主题状态包含不可序列化数据",
+        )
+        toast.assert_called_once()
+        self.assertIn("无法打开设置", toast.call_args.args[0])
 
     def test_skill_wizard_preserves_message_origin_selection(self):
         messages = [

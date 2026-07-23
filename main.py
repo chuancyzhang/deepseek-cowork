@@ -28636,7 +28636,21 @@ class MainWindow(QMainWindow):
                 "drawer_tab": getattr(self, "right_drawer_tab", self.RIGHT_TAB_FILES),
                 "input_had_focus": bool(getattr(self, "input_field", None) and self.input_field.hasFocus()),
             }
-        page = self._ensure_product_page(route, section=section)
+        try:
+            page = self._ensure_product_page(route, section=section)
+        except Exception as exc:
+            log_ui_navigation(
+                "product_page_open_error",
+                route=route,
+                section=str(section or ""),
+                error=str(exc),
+            )
+            self.add_system_toast(
+                f"无法打开{('设置' if route == self.PAGE_SETTINGS else '管理页面')}：{exc}",
+                "error",
+                auto_close_ms=8000,
+            )
+            return False
         if page is None:
             return False
         if getattr(self, "right_drawer_open", False):

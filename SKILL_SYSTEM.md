@@ -157,6 +157,11 @@ Cowork loads capabilities from:
 - `ai_skills/`: bundled optional plugins and user-created skills
 - MCP servers: exposed as synthetic tool providers
 
+A capability directory is discoverable only when it contains a root `SKILL.md`,
+`skill.json`, or `impl.py`. Empty directories and cache-only remnants such as
+`__pycache__` are ignored, so removed built-in skills cannot reappear in the
+Skill Center as synthesized legacy packages.
+
 Bundled optional plugins are read-only, ship disabled by default, and can be enabled from the UI. Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, and official Superset MCP ship as separate optional skills with independent config fields, script entries, and managed MCP presets where applicable. Managed MCP entries remain visible for diagnostics but are configured and enabled through their owning Skill. User-created skills remain editable, importable, exportable, and deletable.
 
 ## 7. Import, Export, and Editing

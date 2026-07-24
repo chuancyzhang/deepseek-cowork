@@ -169,6 +169,15 @@ class SkillManager:
 
     SYSTEM_SKILLS = {"skill_builder", "skill-importer"}
     BUNDLED_PLUGIN_SOURCE_TYPE = "bundled_plugin"
+    SKILL_ENTRY_FILES = ("SKILL.md", "skill.json", "impl.py")
+
+    @classmethod
+    def _is_skill_directory(cls, path):
+        return bool(
+            path
+            and os.path.isdir(path)
+            and any(os.path.isfile(os.path.join(path, name)) for name in cls.SKILL_ENTRY_FILES)
+        )
 
     def _append_skill_dir(self, path):
         if path and os.path.isdir(path) and path not in self.skills_dirs:
@@ -2516,7 +2525,7 @@ class SkillManager:
                 if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
-                if not os.path.isdir(skill_path):
+                if not self._is_skill_directory(skill_path):
                     continue
                 record = self.skill_records.get(skill_name) or self._load_skill_record(skill_name, skill_path)
                 info = {
@@ -2805,7 +2814,7 @@ class SkillManager:
                 if skill_name.startswith(".") or skill_name == "__pycache__" or skill_name in seen:
                     continue
                 skill_path = os.path.join(skills_dir, skill_name)
-                if not os.path.isdir(skill_path):
+                if not self._is_skill_directory(skill_path):
                     continue
                 if not self._is_skill_enabled_for_path(skill_name, skill_path):
                     continue

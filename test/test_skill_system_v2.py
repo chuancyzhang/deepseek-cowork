@@ -884,6 +884,17 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertNotIn("portable-guide/__pycache__/cached.pyc", names)
         self.assertNotIn("portable-guide/build/artifact.txt", names)
 
+    def test_cache_only_skill_directory_is_not_shown_or_loaded(self):
+        stale_dir = os.path.join(self.skills_dir, "plan-manager", "__pycache__")
+        os.makedirs(stale_dir, exist_ok=True)
+        with open(os.path.join(stale_dir, "impl.cpython-314.pyc"), "wb") as f:
+            f.write(b"stale bytecode")
+
+        manager = self._build_manager()
+
+        self.assertNotIn("plan-manager", manager.skill_records)
+        self.assertNotIn("plan-manager", {item["name"] for item in manager.get_all_skills()})
+
     def test_export_skill_collection_creates_importable_multi_skill_zip(self):
         for skill_name in ("portable-guide", "claim-helper"):
             skill_dir = os.path.join(self.skills_dir, skill_name)

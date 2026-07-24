@@ -262,6 +262,61 @@ class TestImGatewayPendingInteraction(unittest.TestCase):
         self.assertEqual(run_context.get("im_provider"), "feishu")
         self.assertEqual(run_context.get("channel"), "feishu")
 
+    def test_feishu_stream_does_not_receive_wecom_streaming_keyword(self):
+        class _StrictFeishuProvider:
+            name = "feishu"
+
+            def __init__(self):
+                self.initial_reply = None
+
+            def send_card_reply(
+                self,
+                event=None,
+                card_content="",
+                title="",
+                thinking=None,
+                collapse_thinking=False,
+                content_parts=None,
+                interactive_actions=None,
+            ):
+                self.initial_reply = {
+                    "event": event,
+                    "card_content": card_content,
+                    "thinking": thinking,
+                    "content_parts": content_parts,
+                }
+                return "feishu-card-1"
+
+            def update_card_message(
+                self,
+                message_id,
+                content,
+                title="",
+                thinking=None,
+                collapse_thinking=False,
+                content_parts=None,
+                interactive_actions=None,
+            ):
+                return True
+
+        provider = _StrictFeishuProvider()
+        event = {
+            "provider": "feishu",
+            "text": "你好",
+            "message_id": "msg-feishu-1",
+        }
+        result = im_gateway._stream_im_response(
+            "conversation-feishu",
+            event,
+            provider,
+            _StreamDaemonClientStub(),
+            "D:\\code\\cowork",
+            config_manager=_ConfigStub(),
+        )
+
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(provider.initial_reply["card_content"], "正在处理...")
+
     def test_enabled_provider_names_normalizes_to_one_channel(self):
         cfg = _ConfigStub(
             {

@@ -1202,14 +1202,15 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
         or bool(getattr(provider, "supports_stream_updates", False))
     ) and hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
         card_attempted = True
-        card_message_id = provider.send_card_reply(
-            event,
-            card_content="正在处理...",
-            title="🤖 AI 助手",
-            thinking="思考中...",
-            content_parts=[{"type": "text", "text": "正在处理..."}],
-            streaming=True,
-        )
+        initial_card_kwargs = {
+            "card_content": "正在处理...",
+            "title": "🤖 AI 助手",
+            "thinking": "思考中...",
+            "content_parts": [{"type": "text", "text": "正在处理..."}],
+        }
+        if bool(getattr(provider, "supports_stream_updates", False)):
+            initial_card_kwargs["streaming"] = True
+        card_message_id = provider.send_card_reply(event, **initial_card_kwargs)
         if card_message_id:
             use_card = True
             with _CARD_CONTEXT_LOCK:

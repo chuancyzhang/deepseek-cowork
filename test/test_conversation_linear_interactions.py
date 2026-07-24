@@ -60,8 +60,24 @@ class ConversationLinearInteractionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        self._save_chat_patch = patch.object(
+            MainWindow,
+            "save_chat_history",
+            new=lambda self, session_id=None, flush=False: True,
+        )
+        self._checkpoint_patch = patch.object(
+            MainWindow,
+            "_checkpoint_live_chat",
+            new=lambda self, state: False,
+        )
+        self._save_chat_patch.start()
+        self._checkpoint_patch.start()
+
     def tearDown(self):
         self.app.processEvents()
+        self._checkpoint_patch.stop()
+        self._save_chat_patch.stop()
 
     def test_skill_picker_searches_description_and_preserves_hidden_selection(self):
         skills = [

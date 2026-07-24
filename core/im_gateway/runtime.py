@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import hashlib
 import hmac
 import json
@@ -15,6 +16,8 @@ from core.env_utils import ensure_package_installed, get_app_data_dir, get_pytho
 from core.interaction import parse_interaction_reply
 from core.im_session_key import build_im_session_key, resolve_date_key
 from core.clarify_mode import RUN_MODE_EXECUTION
+from core.im_gateway_config import normalize_im_gateway_config
+from core.im_gateway_status import write_im_gateway_status
 
 _RECENT_MESSAGE_IDS = {}
 _RECENT_LOCK = threading.Lock()
@@ -49,6 +52,7 @@ def _sanitize(value):
     sensitive_keys = {
         "app_secret",
         "bot_key",
+        "bot_id",
         "client_secret",
         "tenant_access_token",
         "Authorization",
@@ -258,22 +262,8 @@ def _provider_config(config_manager, provider_name):
 
 
 def _enabled_provider_names(config_manager):
-    cfg = _im_gateway_config(config_manager)
-    enabled = cfg.get("enabled_providers")
-    if isinstance(enabled, list):
-        return [
-            str(item or "").strip().lower()
-            for item in enabled
-            if str(item or "").strip()
-        ]
-    providers = cfg.get("providers")
-    if not isinstance(providers, dict):
-        return []
-    names = []
-    for name, item in providers.items():
-        if isinstance(item, dict) and item.get("enabled"):
-            names.append(str(name or "").strip().lower())
-    return [name for name in names if name]
+    cfg = normalize_im_gateway_config(_im_gateway_config(config_manager))
+    return list(cfg.get("enabled_providers") or [])
 
 
 def _build_model_input(event, provider_name=None):
@@ -344,6 +334,20 @@ def _load_lark_sdk():
         return False
     _extend_lark_sys_path()
     return _try_import_lark()
+
+
+def _load_wecom_sdk():
+    try:
+        from aibot import WSClient, WSClientOptions, generate_req_id
+        return WSClient, WSClientOptions, generate_req_id
+    except Exception as first_error:
+        _log_gateway(f"wecom sdk import failed: {first_error}")
+    try:
+        ensure_package_installed("wecom-aibot-python-sdk>=1.0.2", "aibot")
+        from aibot import WSClient, WSClientOptions, generate_req_id
+        return WSClient, WSClientOptions, generate_req_id
+    except Exception as exc:
+        raise RuntimeError(f"企业微信 SDK 不可用：{exc}") from exc
 
 
 class IMProvider:
@@ -848,39 +852,56 @@ class WeComProvider(IMProvider):
 
     def __init__(self, config_manager):
         super().__init__(config_manager)
-        self.bot_key = str(self.config_value("bot_key", "") or self.config_value("key", "") or "")
-        self.webhook_url = str(self.config_value("webhook_url", "") or "")
-        self.ws_url = str(self.config_value("ws_url", "") or "")
+        self.bot_id = str(self.config_value("bot_id", "") or "")
+        self.secret = str(self.config_value("secret", "") or "")
+        self.supports_stream_updates = True
+        self._ws_client = None
+        self._event_loop = None
+        self._generate_req_id = None
+        self._stream_frames = {}
+
+    def attach_client(self, client, event_loop, generate_req_id):
+        self._ws_client = client
+        self._event_loop = event_loop
+        self._generate_req_id = generate_req_id
 
     def parse_event(self, payload):
         _log_gateway(f"wecom parse_event payload={_safe_json_dump(payload)}")
         if not isinstance(payload, dict):
             return None
-        event_type = payload.get("event_type") or payload.get("event") or payload.get("type") or "im.message.receive"
+        body = payload.get("body")
+        body = body if isinstance(body, dict) else payload
+        event_type = "message"
         text = ""
-        raw_text = payload.get("text")
+        raw_text = body.get("text")
         if isinstance(raw_text, dict):
             text = raw_text.get("content") or raw_text.get("text") or ""
         elif isinstance(raw_text, str):
             text = raw_text
         if not text:
-            content = payload.get("content")
+            content = body.get("content")
             if isinstance(content, dict):
                 text = content.get("content") or content.get("text") or ""
             elif isinstance(content, str):
                 text = content
-        sender = payload.get("from") if isinstance(payload.get("from"), dict) else {}
+        sender = body.get("from") if isinstance(body.get("from"), dict) else {}
         user_id = (
-            payload.get("from_user_id")
-            or payload.get("user_id")
-            or payload.get("userid")
+            body.get("from_user_id")
+            or body.get("user_id")
+            or body.get("userid")
             or sender.get("userid")
             or sender.get("user_id")
             or "unknown"
         )
-        chat_id = payload.get("chat_id") or payload.get("chatid") or payload.get("group_id") or ""
-        message_id = payload.get("msgid") or payload.get("msg_id") or payload.get("message_id") or payload.get("event_id")
-        create_time = payload.get("create_time") or payload.get("timestamp")
+        chat_id = body.get("chat_id") or body.get("chatid") or body.get("group_id") or ""
+        headers = payload.get("headers") if isinstance(payload.get("headers"), dict) else {}
+        message_id = (
+            body.get("msgid")
+            or body.get("msg_id")
+            or body.get("message_id")
+            or headers.get("req_id")
+        )
+        create_time = body.get("create_time") or body.get("timestamp")
         if not text:
             _log_gateway(f"wecom event without text type={event_type}")
             return None
@@ -894,26 +915,65 @@ class WeComProvider(IMProvider):
             "create_time": create_time,
             "raw_event": payload,
             "event": payload,
-            "reply_url": payload.get("response_url") or payload.get("reply_url"),
-            "message_type": payload.get("msgtype") or payload.get("message_type") or "text",
+            "sdk_frame": payload,
+            "message_type": body.get("msgtype") or body.get("message_type") or "text",
             "sender_type": "user",
         }
 
     def build_reply(self, text):
         return {"msgtype": "markdown", "markdown": {"content": text or ""}}
 
-    def send_message(self, text, event=None):
-        url = (event or {}).get("reply_url") or self.webhook_url
-        payload = self.build_reply(text)
-        if not url:
-            return payload
+    def _submit_reply(self, frame, stream_id, content, finish):
+        if not self._ws_client or not self._event_loop:
+            raise RuntimeError("企业微信长连接尚未就绪。")
         try:
-            resp = requests.post(url, json=payload, timeout=8)
-            _log_gateway(f"wecom send status={resp.status_code} ok={resp.ok}")
-            return {"code": 0 if resp.ok else resp.status_code, "ok": bool(resp.ok)}
-        except Exception as e:
-            _log_gateway(f"wecom send failed: {e}")
-            return {"code": -1, "error": str(e)}
+            future = asyncio.run_coroutine_threadsafe(
+                self._ws_client.reply_stream(
+                    frame,
+                    stream_id,
+                    content or " ",
+                    bool(finish),
+                ),
+                self._event_loop,
+            )
+            future.result(timeout=15)
+            _log_gateway(f"wecom stream reply ok stream_id={stream_id} finish={bool(finish)}")
+            return True
+        except Exception as exc:
+            _log_gateway(f"wecom stream reply failed stream_id={stream_id} error={exc}")
+            write_im_gateway_status("wecom", "error", f"企业微信回复失败：{exc}")
+            raise RuntimeError(f"企业微信回复失败：{exc}") from exc
+
+    def send_card_reply(
+        self,
+        event=None,
+        card_content="",
+        title="AI 助手",
+        streaming=False,
+        **kwargs,
+    ):
+        frame = (event or {}).get("sdk_frame")
+        if not isinstance(frame, dict) or not callable(self._generate_req_id):
+            raise RuntimeError("企业微信消息帧不可用，无法回复。")
+        stream_id = self._generate_req_id("stream")
+        content = card_content or " "
+        self._submit_reply(frame, stream_id, content, finish=not streaming)
+        if streaming:
+            self._stream_frames[stream_id] = frame
+        return stream_id
+
+    def update_card_message(self, message_id, content, collapse_thinking=False, **kwargs):
+        frame = self._stream_frames.get(message_id)
+        if not frame:
+            return False
+        finish = bool(collapse_thinking)
+        self._submit_reply(frame, message_id, content or " ", finish=finish)
+        if finish:
+            self._stream_frames.pop(message_id, None)
+        return True
+
+    def send_message(self, text, event=None):
+        return self.send_card_reply(event, card_content=text)
 
 class SessionMapper:
     def __init__(self, chat_storage):
@@ -1137,9 +1197,19 @@ def _stream_im_response(conversation_id, event, provider, daemon_client, workspa
         pending_thinking = ""
         last_send_time = time.time()
         return bool(updated)
-    if provider_name == "feishu" and hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
+    if (
+        provider_name == "feishu"
+        or bool(getattr(provider, "supports_stream_updates", False))
+    ) and hasattr(provider, "send_card_reply") and hasattr(provider, "update_card_message"):
         card_attempted = True
-        card_message_id = provider.send_card_reply(event, card_content="正在处理...", title="🤖 AI 助手", thinking="思考中...", content_parts=[{"type": "text", "text": "正在处理..."}])
+        card_message_id = provider.send_card_reply(
+            event,
+            card_content="正在处理...",
+            title="🤖 AI 助手",
+            thinking="思考中...",
+            content_parts=[{"type": "text", "text": "正在处理..."}],
+            streaming=True,
+        )
         if card_message_id:
             use_card = True
             with _CARD_CONTEXT_LOCK:
@@ -1577,10 +1647,12 @@ def build_context():
 def _start_feishu_long_connection(context):
     if not _load_lark_sdk():
         _log_gateway("lark_oapi unavailable")
+        write_im_gateway_status("feishu", "error", "飞书 SDK 不可用。")
         return None
     config_manager, session_mapper, daemon_client, provider = context
     if not provider or not provider.app_id or not provider.app_secret:
         _log_gateway("feishu app_id/app_secret missing")
+        write_im_gateway_status("feishu", "error", "飞书 App ID 或 App Secret 未配置。")
         return None
     enabled = provider.config_value("long_connection", True)
     if isinstance(enabled, str) and enabled.strip().lower() in ("0", "false", "no"):
@@ -1621,11 +1693,16 @@ def _start_feishu_long_connection(context):
         log_level=larkcore.LogLevel.INFO,
         event_handler=handler
     )
+    if not provider._get_tenant_token():
+        write_im_gateway_status("feishu", "error", "飞书应用认证失败，请重新扫码接入。")
+        raise RuntimeError("飞书应用认证失败，请重新扫码接入。")
     _log_gateway("feishu long connection starting")
+    write_im_gateway_status("feishu", "connected")
     try:
         client.start()
     except Exception as e:
         _log_gateway(f"feishu long connection failed: {e}")
+        write_im_gateway_status("feishu", "error", str(e))
     return None
 
 
@@ -1635,6 +1712,7 @@ def _start_websocket_provider(context):
     ws_url = getattr(provider, "ws_url", "") or ""
     if not ws_url:
         _log_gateway(f"{provider_name} websocket url missing; provider waits for outbound/webhook-style test events only")
+        write_im_gateway_status(provider_name, "error", "Stream / WS URL 未配置。")
         return None
     try:
         import websocket
@@ -1656,12 +1734,19 @@ def _start_websocket_provider(context):
 
     def on_error(_ws, error):
         _log_gateway(f"{provider_name} websocket error: {error}")
+        write_im_gateway_status(provider_name, "error", str(error))
 
     def on_close(_ws, status_code, message):
         _log_gateway(f"{provider_name} websocket closed status={status_code} message={message}")
+        write_im_gateway_status(provider_name, "disconnected", str(message or "连接已关闭。"))
+
+    def on_open(_ws):
+        _log_gateway(f"{provider_name} websocket connected")
+        write_im_gateway_status(provider_name, "connected")
 
     app = websocket.WebSocketApp(
         ws_url,
+        on_open=on_open,
         on_message=on_message,
         on_error=on_error,
         on_close=on_close,
@@ -1674,12 +1759,75 @@ def _start_websocket_provider(context):
     return None
 
 
+def _start_wecom_connection(context):
+    config_manager, session_mapper, daemon_client, provider = context
+    if not provider.bot_id or not provider.secret:
+        write_im_gateway_status("wecom", "error", "企业微信 Bot ID 或 Secret 未配置。")
+        raise RuntimeError("企业微信 Bot ID 或 Secret 未配置。")
+    WSClient, WSClientOptions, generate_req_id = _load_wecom_sdk()
+
+    async def run_client():
+        loop = asyncio.get_running_loop()
+        client = WSClient(
+            WSClientOptions(
+                bot_id=provider.bot_id,
+                secret=provider.secret,
+            )
+        )
+        provider.attach_client(client, loop, generate_req_id)
+
+        @client.on("authenticated")
+        def on_authenticated():
+            _log_gateway("wecom authenticated")
+            write_im_gateway_status("wecom", "connected")
+
+        @client.on("reconnecting")
+        def on_reconnecting(attempt):
+            _log_gateway(f"wecom reconnecting attempt={attempt}")
+            write_im_gateway_status("wecom", "reconnecting")
+
+        @client.on("disconnected")
+        def on_disconnected(reason):
+            _log_gateway(f"wecom disconnected reason={reason}")
+            write_im_gateway_status("wecom", "disconnected", str(reason or "连接已断开。"))
+
+        @client.on("error")
+        def on_error(error):
+            _log_gateway(f"wecom sdk error={error}")
+            write_im_gateway_status("wecom", "error", str(error))
+
+        @client.on("message.text")
+        async def on_text(frame):
+            await asyncio.to_thread(
+                _handle_im_event,
+                frame,
+                provider,
+                session_mapper,
+                config_manager,
+                daemon_client,
+            )
+
+        _log_gateway("wecom connection starting")
+        write_im_gateway_status("wecom", "connecting")
+        await client.connect()
+        await asyncio.Event().wait()
+
+    try:
+        asyncio.run(run_client())
+    except Exception as exc:
+        _log_gateway(f"wecom connection failed: {exc}")
+        write_im_gateway_status("wecom", "error", str(exc))
+        raise
+
+
 def _start_provider(context):
     _config_manager, _session_mapper, _daemon_client, provider = context
     provider_name = getattr(provider, "name", "")
     if provider_name == "feishu":
         return _start_feishu_long_connection(context)
-    if provider_name in {"dingtalk", "wecom"}:
+    if provider_name == "wecom":
+        return _start_wecom_connection(context)
+    if provider_name == "dingtalk":
         return _start_websocket_provider(context)
     _log_gateway(f"provider start ignored: {provider_name}")
     return None
@@ -1690,12 +1838,12 @@ def run():
     _log_gateway("im_gateway start")
     if not providers:
         _log_gateway("im_gateway has no enabled providers in im_gateway.enabled_providers")
-    for provider in providers:
-        context = (config_manager, session_mapper, daemon_client, provider)
-        thread = threading.Thread(target=_start_provider, args=(context,), daemon=True)
-        thread.start()
-    while True:
-        time.sleep(3600)
+        write_im_gateway_status("", "stopped")
+        return
+    provider = providers[0]
+    context = (config_manager, session_mapper, daemon_client, provider)
+    write_im_gateway_status(getattr(provider, "name", ""), "connecting")
+    _start_provider(context)
 
 
 if __name__ == "__main__":

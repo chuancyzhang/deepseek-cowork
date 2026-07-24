@@ -21,6 +21,14 @@ from urllib.parse import unquote
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from core.config_manager import ConfigManager, normalize_mcp_servers, parse_mcp_servers_json
+from core.im_gateway_config import (
+    IM_PROVIDER_ORDER,
+    disable_im_gateway,
+    normalize_im_gateway_config,
+    update_selected_provider,
+)
+from core.im_gateway_registration import register_feishu_app
+from core.im_gateway_status import read_im_gateway_status, write_im_gateway_status
 from core.skill_manager import SkillManager
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
@@ -252,7 +260,7 @@ from core.ppt_agent import (
 import shutil
 import traceback
 import qtawesome as qta
-from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QPixmap, 
+from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QImage, QPixmap,
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -6942,6 +6950,244 @@ class SessionHistoryLoadWorker(QThread):
             })
 
 
+class FeishuRegistrationWorker(QThread):
+    qr_ready = Signal(str, int)
+    status_changed = Signal(str)
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, existing_app_id="", parent=None):
+        super().__init__(parent)
+        self.existing_app_id = str(existing_app_id or "").strip()
+        self.cancel_event = threading.Event()
+
+    def cancel(self):
+        self.cancel_event.set()
+
+    def run(self):
+        append_background_process_log(
+            "im_gateway.log",
+            "feishu registration start mode="
+            + ("update" if self.existing_app_id else "create"),
+        )
+
+        def on_qr_code(info):
+            url = str((info or {}).get("url") or "")
+            expire_in = int((info or {}).get("expire_in") or 0)
+            self.qr_ready.emit(url, expire_in)
+
+        def on_status_change(info):
+            status = str((info or {}).get("status") or "")
+            self.status_changed.emit(status)
+            append_background_process_log(
+                "im_gateway.log",
+                f"feishu registration status={status or 'unknown'}",
+            )
+
+        try:
+            result = register_feishu_app(
+                on_qr_code=on_qr_code,
+                on_status_change=on_status_change,
+                cancel_event=self.cancel_event,
+                existing_app_id=self.existing_app_id,
+            )
+            append_background_process_log("im_gateway.log", "feishu registration completed")
+            self.completed.emit(result)
+        except Exception as exc:
+            if self.cancel_event.is_set():
+                message = "已取消飞书扫码接入。"
+                event = "cancelled"
+            else:
+                error_name = type(exc).__name__
+                messages = {
+                    "AppAccessDeniedError": "你拒绝了飞书授权，请重新扫码并确认授权。",
+                    "AppExpiredError": "二维码已过期，请刷新后重新扫码。",
+                }
+                message = messages.get(error_name, str(exc) or "飞书扫码接入失败。")
+                event = error_name
+            append_background_process_log(
+                "im_gateway.log",
+                f"feishu registration failed type={event}",
+            )
+            self.failed.emit(message)
+
+
+class FeishuQrDialog(QDialog):
+    def __init__(self, existing_app_id="", parent=None):
+        super().__init__(parent)
+        self.setObjectName("FeishuQrDialog")
+        self.setWindowTitle("扫码接入飞书")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.credentials = {}
+        self._qr_url = ""
+        self._expires_at = 0
+        self._worker = None
+        apply_product_dialog(self, "FeishuQrDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+        self.title_label = QLabel("使用飞书扫码创建应用")
+        self.description_label = QLabel("使用飞书或 Lark 扫码并确认，Cowork 会自动创建应用并完成长连接配置。")
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.description_label)
+
+        self.qr_label = QLabel("正在生成二维码…")
+        self.qr_label.setAlignment(Qt.AlignCenter)
+        self.qr_label.setFixedSize(252, 252)
+        qr_row = QHBoxLayout()
+        qr_row.addStretch()
+        qr_row.addWidget(self.qr_label)
+        qr_row.addStretch()
+        layout.addLayout(qr_row)
+
+        self.status_notice = ProductInlineNotice("正在向飞书申请二维码…", "info")
+        layout.addWidget(self.status_notice)
+        self.open_link_btn = QPushButton("在浏览器中打开")
+        self.open_link_btn.setObjectName("SecondaryBtn")
+        self.open_link_btn.setEnabled(False)
+        self.open_link_btn.clicked.connect(self._open_qr_url)
+        self.retry_btn = QPushButton("重新生成二维码")
+        self.retry_btn.setObjectName("PrimaryBtn")
+        self.retry_btn.hide()
+        self.retry_btn.clicked.connect(self._restart)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("SecondaryBtn")
+        cancel_btn.clicked.connect(self.reject)
+        actions = QHBoxLayout()
+        actions.addWidget(self.open_link_btn)
+        actions.addStretch()
+        actions.addWidget(self.retry_btn)
+        actions.addWidget(cancel_btn)
+        layout.addLayout(actions)
+
+        self._existing_app_id = str(existing_app_id or "").strip()
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._update_countdown)
+        self._refresh_theme()
+        bind_theme(self, self._refresh_theme, surface="dialogs")
+        self._start_worker()
+
+    def _refresh_theme(self, _resolved=None):
+        self.title_label.setStyleSheet(
+            f"font-size:{DesignTokens.font_size_page}px;"
+            f"font-weight:{DesignTokens.font_weight_bold};color:{DesignTokens.text_primary};"
+        )
+        self.description_label.setStyleSheet(apple_settings_inline_note_style())
+        self.qr_label.setStyleSheet(
+            f"QLabel {{ background:{DesignTokens.bg_main}; border:1px solid {DesignTokens.border_subtle};"
+            f"border-radius:{DesignTokens.radius_md}px; color:{DesignTokens.text_secondary}; }}"
+        )
+        if self._qr_url:
+            self._render_qr(self._qr_url)
+
+    def _render_qr(self, url):
+        try:
+            import qrcode
+        except Exception as exc:
+            raise RuntimeError("二维码组件未安装，请安装 qrcode 8.2 或更高版本。") from exc
+        qr = qrcode.QRCode(version=None, box_size=1, border=3)
+        qr.add_data(url)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        count = len(matrix)
+        image_size = 232
+        cell = max(1, image_size // count)
+        painted_size = cell * count
+        image = QImage(painted_size, painted_size, QImage.Format_RGB32)
+        image.fill(QColor(DesignTokens.bg_main))
+        painter = QPainter(image)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(DesignTokens.text_primary))
+        for row_index, row in enumerate(matrix):
+            for col_index, enabled in enumerate(row):
+                if enabled:
+                    painter.drawRect(col_index * cell, row_index * cell, cell, cell)
+        painter.end()
+        self.qr_label.setPixmap(
+            QPixmap.fromImage(image).scaled(
+                232,
+                232,
+                Qt.KeepAspectRatio,
+                Qt.FastTransformation,
+            )
+        )
+
+    def _start_worker(self):
+        self.retry_btn.hide()
+        self.open_link_btn.setEnabled(False)
+        self.qr_label.setPixmap(QPixmap())
+        self.qr_label.setText("正在生成二维码…")
+        self.status_notice.set_text("正在向飞书申请二维码…", "info")
+        self._worker = FeishuRegistrationWorker(self._existing_app_id, self)
+        self._worker.qr_ready.connect(self._on_qr_ready)
+        self._worker.status_changed.connect(self._on_status_changed)
+        self._worker.completed.connect(self._on_completed)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _restart(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            if not self._worker.wait(3000):
+                self.status_notice.set_text("正在取消上一轮扫码，请稍候再试。", "warning")
+                return
+        self._start_worker()
+
+    def _on_qr_ready(self, url, expire_in):
+        try:
+            self._render_qr(url)
+        except Exception as exc:
+            self._on_failed(str(exc))
+            return
+        self._qr_url = url
+        self._expires_at = time.time() + max(0, int(expire_in or 0))
+        self.open_link_btn.setEnabled(bool(url))
+        self._timer.start()
+        self._update_countdown()
+
+    def _on_status_changed(self, status):
+        if status == "slow_down":
+            self.status_notice.set_text("仍在等待扫码确认，请稍候…", "warning")
+        elif status == "domain_switched":
+            self.status_notice.set_text("已切换到匹配当前租户的飞书域名。", "info")
+
+    def _update_countdown(self):
+        remaining = max(0, int(self._expires_at - time.time()))
+        if remaining:
+            self.status_notice.set_text(f"请扫码并确认授权，二维码将在 {remaining} 秒后过期。", "info")
+        else:
+            self._timer.stop()
+            if self._worker and self._worker.isRunning():
+                self._worker.cancel()
+            self.status_notice.set_text("二维码已过期，请重新生成。", "warning")
+            self.retry_btn.show()
+
+    def _on_completed(self, credentials):
+        self._timer.stop()
+        self.credentials = dict(credentials or {})
+        self.status_notice.set_text("飞书应用创建成功，正在保存并接入…", "success")
+        QTimer.singleShot(100, self.accept)
+
+    def _on_failed(self, message):
+        self._timer.stop()
+        self.status_notice.set_text(str(message or "飞书扫码接入失败。"), "error")
+        self.retry_btn.show()
+
+    def _open_qr_url(self):
+        if self._qr_url:
+            QDesktopServices.openUrl(QUrl(self._qr_url))
+
+    def reject(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(3000)
+        super().reject()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, config_manager, parent=None, initial_page_label=None):
         super().__init__(parent)
@@ -7622,122 +7868,194 @@ class SettingsDialog(QDialog):
             "把助手接入飞书、钉钉或企业微信后，就能直接在企业消息里分发任务并沿用同一套工作区边界。",
         )
 
-        im_cfg = self.config_manager.get("im_gateway", {})
-        if not isinstance(im_cfg, dict):
-            im_cfg = {}
-        im_providers = im_cfg.get("providers")
-        if not isinstance(im_providers, dict):
-            im_providers = {}
-        enabled_providers = im_cfg.get("enabled_providers")
-        if not isinstance(enabled_providers, list):
-            enabled_providers = []
+        im_cfg = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
+        im_providers = im_cfg["providers"]
+        enabled_providers = im_cfg["enabled_providers"]
+        self.im_selected_provider = enabled_providers[0] if enabled_providers else "feishu"
+        self.im_provider_buttons = {}
+        self.im_provider_statuses = {}
+        self.im_provider_panels = {}
+        self.im_provider_fields = {}
         self.im_provider_checks = {}
+        self.im_runtime_errors = {}
 
-        def provider_cfg(name):
-            value = im_providers.get(name)
-            return value if isinstance(value, dict) else {}
+        channel_section = ProductSection(
+            "选择接入方式",
+            "同一时间只运行一个渠道。切换后，其他渠道的凭据会保留但保持停用。",
+            kind="plain",
+        )
+        channel_grid = QGridLayout()
+        channel_grid.setContentsMargins(0, 2, 0, 0)
+        channel_grid.setHorizontalSpacing(8)
+        channel_group = QButtonGroup(self)
+        channel_group.setExclusive(True)
+        channel_meta = {
+            "feishu": ("飞书", "扫码创建应用", "fa5s.paper-plane"),
+            "dingtalk": ("钉钉", "机器人与 Stream", "fa5s.comment-dots"),
+            "wecom": ("企业微信", "Bot ID 与 Secret", "fa5s.comments"),
+        }
+        for column, provider_name in enumerate(IM_PROVIDER_ORDER):
+            title_text, subtitle_text, icon_name = channel_meta[provider_name]
+            button = QPushButton(f"{title_text}\n{subtitle_text}")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setMinimumHeight(62)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setIcon(qta.icon(icon_name, color=DesignTokens.icon_secondary))
+            button.setProperty("imProviderIcon", icon_name)
+            button.clicked.connect(
+                lambda checked=False, name=provider_name: self._select_im_provider(name)
+            )
+            channel_group.addButton(button)
+            channel_grid.addWidget(button, 0, column)
+            self.im_provider_buttons[provider_name] = button
+        self._refresh_im_channel_theme()
+        bind_theme(channel_section, self._refresh_im_channel_theme, surface="management")
+        channel_section.layout.addLayout(channel_grid)
+        im_layout.addWidget(channel_section)
 
-        def add_provider_group(name, title_text, intro_text, rows):
-            cfg = provider_cfg(name)
-            group, group_layout = build_settings_surface(title_text, intro_text, radius=18, show_subtitle=False)
-            form = QFormLayout()
-            form.setSpacing(10)
-            configure_responsive_form_layout(form)
-            enabled_check = QCheckBox("启用该渠道")
-            enabled_check.setChecked(name in enabled_providers or bool(cfg.get("enabled")))
-            form.addRow(build_form_row_label("状态"), enabled_check)
-            self.im_provider_checks[name] = enabled_check
-            fields = {}
-            for key, label, secret in rows:
-                editor = QLineEdit()
-                if secret:
-                    editor.setEchoMode(QLineEdit.Password)
-                editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                editor.setText(str(cfg.get(key, "") or ""))
-                form.addRow(build_form_row_label(label), editor)
-                fields[key] = editor
-            group_layout.addLayout(form)
-            im_layout.addWidget(group)
-            return fields
+        self.im_provider_stack = QStackedWidget()
+        self.im_provider_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self.feishu_fields = add_provider_group("feishu", "飞书", "适合把内部问答、代码协作和自动化任务接进飞书会话。", [
-            ("app_id", "App ID", False),
-            ("app_secret", "App Secret", True),
-            ("verification_token", "Verification Token", True),
-            ("encrypt_key", "Encrypt Key", True),
-        ])
-        self.dingtalk_fields = add_provider_group("dingtalk", "钉钉", "支持机器人凭据、Webhook 和 Stream / WS 入口。", [
+        def make_provider_panel(name, title_text, intro_text):
+            panel = ProductSection(title_text, intro_text, kind="panel")
+            self.im_provider_panels[name] = panel
+            self.im_provider_stack.addWidget(panel)
+            status = ProductInlineNotice("", "neutral")
+            status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.im_provider_statuses[name] = status
+            panel.layout.addWidget(status)
+            return panel
+
+        feishu_panel = make_provider_panel(
+            "feishu",
+            "飞书",
+            "使用飞书扫码创建或更新应用，无需手动复制 App ID、Secret、Token 或 Encrypt Key。",
+        )
+        feishu_actions = QHBoxLayout()
+        self.feishu_connect_btn = QPushButton()
+        self.feishu_connect_btn.setObjectName("PrimaryBtn")
+        self.feishu_connect_btn.clicked.connect(self._connect_feishu)
+        self.feishu_restart_btn = QPushButton("使用现有配置启动")
+        self.feishu_restart_btn.setObjectName("SecondaryBtn")
+        self.feishu_restart_btn.clicked.connect(self._restart_existing_feishu)
+        feishu_actions.addWidget(self.feishu_connect_btn)
+        feishu_actions.addWidget(self.feishu_restart_btn)
+        feishu_actions.addStretch()
+        feishu_panel.layout.addLayout(feishu_actions)
+        feishu_panel.layout.addStretch()
+        self.feishu_fields = {}
+        self.im_provider_fields["feishu"] = self.feishu_fields
+
+        dingtalk_panel = make_provider_panel(
+            "dingtalk",
+            "钉钉",
+            "保留现有机器人凭据、Webhook 与 Stream / WS 接入方式。",
+        )
+        dingtalk_form = QFormLayout()
+        dingtalk_form.setSpacing(10)
+        configure_responsive_form_layout(dingtalk_form)
+        self.dingtalk_fields = {}
+        for key, label, secret in [
             ("client_id", "Client ID / App Key", False),
             ("client_secret", "Client Secret", True),
             ("robot_code", "Robot Code", False),
             ("webhook_url", "Webhook URL", True),
             ("ws_url", "Stream / WS URL", False),
             ("secret", "Webhook Secret", True),
-        ])
-        self.wecom_fields = add_provider_group("wecom", "企业微信", "适合直接把助手作为群内智能机器人接入。", [
-            ("bot_key", "Bot Key", True),
-            ("webhook_url", "Webhook URL", True),
-            ("ws_url", "WS URL", False),
-        ])
-
-        gateway_group, gateway_group_layout = build_settings_surface(
-            "网关控制",
-            "保存后可直接启动或停止企业消息网关，日志会持续写到本地。",
-            radius=18,
-            show_subtitle=False,
+        ]:
+            editor = QLineEdit(str(im_providers["dingtalk"].get(key) or ""))
+            editor.setEchoMode(QLineEdit.Password if secret else QLineEdit.Normal)
+            editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            dingtalk_form.addRow(build_form_row_label(label), editor)
+            self.dingtalk_fields[key] = editor
+        dingtalk_panel.layout.addLayout(dingtalk_form)
+        dingtalk_connect_btn = QPushButton("保存并立即接入钉钉")
+        dingtalk_connect_btn.setObjectName("PrimaryBtn")
+        dingtalk_connect_btn.clicked.connect(
+            lambda: self._connect_form_im_provider("dingtalk")
         )
+        dingtalk_actions = QHBoxLayout()
+        dingtalk_actions.addWidget(dingtalk_connect_btn)
+        dingtalk_actions.addStretch()
+        dingtalk_panel.layout.addLayout(dingtalk_actions)
+        dingtalk_panel.layout.addStretch()
+        self.im_provider_fields["dingtalk"] = self.dingtalk_fields
+
+        wecom_panel = make_provider_panel(
+            "wecom",
+            "企业微信智能机器人",
+            "使用企业微信官方 WebSocket 长连接，只需机器人后台提供的 Bot ID 和 Secret。",
+        )
+        legacy_wecom = any(
+            str(im_providers["wecom"].get(key) or "").strip()
+            for key in ("bot_key", "webhook_url", "ws_url")
+        ) and not (
+            str(im_providers["wecom"].get("bot_id") or "").strip()
+            and str(im_providers["wecom"].get("secret") or "").strip()
+        )
+        if legacy_wecom:
+            wecom_panel.layout.addWidget(
+                ProductInlineNotice(
+                    "检测到旧版企微配置。旧 Bot Key、Webhook 和 WS URL 不再使用，请重新填写 Bot ID 与 Secret。",
+                    "warning",
+                )
+            )
+        wecom_form = QFormLayout()
+        wecom_form.setSpacing(10)
+        configure_responsive_form_layout(wecom_form)
+        self.wecom_fields = {}
+        for key, label, secret in [
+            ("bot_id", "Bot ID", False),
+            ("secret", "Secret", True),
+        ]:
+            editor = QLineEdit(str(im_providers["wecom"].get(key) or ""))
+            editor.setEchoMode(QLineEdit.Password if secret else QLineEdit.Normal)
+            editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            wecom_form.addRow(build_form_row_label(label), editor)
+            self.wecom_fields[key] = editor
+        wecom_panel.layout.addLayout(wecom_form)
+        wecom_connect_btn = QPushButton("保存并立即接入企业微信")
+        wecom_connect_btn.setObjectName("PrimaryBtn")
+        wecom_connect_btn.clicked.connect(
+            lambda: self._connect_form_im_provider("wecom")
+        )
+        wecom_actions = QHBoxLayout()
+        wecom_actions.addWidget(wecom_connect_btn)
+        wecom_actions.addStretch()
+        wecom_panel.layout.addLayout(wecom_actions)
+        wecom_panel.layout.addStretch()
+        self.im_provider_fields["wecom"] = self.wecom_fields
+
+        im_layout.addWidget(self.im_provider_stack)
+
+        gateway_actions = ProductSection("", "", kind="plain")
+        gateway_actions.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         gateway_bar = QHBoxLayout()
-        log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
-        running = bool(getattr(self._main, "gateway_process", None) and self._main.gateway_process.poll() is None)
-        gateway_info = QLabel(("网关状态：运行中" if running else "网关状态：未运行") + f"\n日志：{log_path}")
-        gateway_info.setStyleSheet(apple_settings_inline_note_style())
-        gateway_btn = QPushButton("启动企业消息网关")
-        gateway_btn.setObjectName("PrimaryBtn")
-        gateway_btn.setIcon(qta.icon('fa5s.play', color='white'))
-        stop_gateway_btn = QPushButton("停止网关")
-        stop_gateway_btn.setObjectName("SecondaryBtn")
-        stop_gateway_btn.setIcon(qta.icon('fa5s.stop', color=DesignTokens.icon_secondary))
-        log_btn = QPushButton("打开日志")
-        log_btn.setObjectName("SecondaryBtn")
-        log_btn.setIcon(qta.icon('fa5s.file-alt', color=DesignTokens.icon_secondary))
-
-        def start_gateway():
-            try:
-                self._save_im_gateway_config()
-                if hasattr(self._main, "queue_daemon_connection"):
-                    self._main.queue_daemon_connection(allow_start=True, retries=6)
-                elif hasattr(self._main, "try_connect_daemon"):
-                    self._main.try_connect_daemon(allow_start=True, retries=6)
-                if hasattr(self._main, "start_gateway_process"):
-                    self._main.start_gateway_process()
-                gateway_info.setText("网关状态：运行中\n日志：" + log_path)
-                QMessageBox.information(self, "企业消息网关", "已启动企业消息网关。")
-            except Exception:
-                QMessageBox.warning(self, "企业消息网关", "启动失败，请检查环境与依赖是否完整。")
-
-        def stop_gateway():
-            if hasattr(self._main, "stop_gateway_process"):
-                self._main.stop_gateway_process()
-            gateway_info.setText("网关状态：未运行\n日志：" + log_path)
-
-        def open_gateway_log():
-            try:
-                if not os.path.exists(log_path):
-                    with open(log_path, "a", encoding="utf-8"):
-                        pass
-                os.startfile(log_path)
-            except Exception:
-                QMessageBox.information(self, "企业消息网关日志", log_path)
-
-        gateway_btn.clicked.connect(start_gateway)
-        stop_gateway_btn.clicked.connect(stop_gateway)
-        log_btn.clicked.connect(open_gateway_log)
-        gateway_bar.addWidget(gateway_info, 1)
-        gateway_bar.addWidget(gateway_btn)
-        gateway_bar.addWidget(stop_gateway_btn)
-        gateway_bar.addWidget(log_btn)
-        gateway_group_layout.addLayout(gateway_bar)
-        im_layout.addWidget(gateway_group)
+        self.im_gateway_status_badge = ProductStatusBadge("未运行", "neutral")
+        self.im_gateway_status_detail = QLabel("")
+        self.im_gateway_status_detail.setWordWrap(True)
+        self.im_gateway_status_detail.setStyleSheet(apple_settings_inline_note_style())
+        self.im_stop_gateway_btn = QPushButton("停止接入")
+        self.im_stop_gateway_btn.setObjectName("SecondaryBtn")
+        self.im_stop_gateway_btn.clicked.connect(self._stop_im_gateway)
+        self.im_log_btn = QPushButton("打开日志")
+        self.im_log_btn.setObjectName("SecondaryBtn")
+        self.im_log_btn.clicked.connect(self._open_im_gateway_log)
+        gateway_bar.addWidget(self.im_gateway_status_badge)
+        gateway_bar.addWidget(self.im_gateway_status_detail, 1)
+        gateway_bar.addWidget(self.im_stop_gateway_btn)
+        gateway_bar.addWidget(self.im_log_btn)
+        gateway_actions.layout.addLayout(gateway_bar)
+        self._refresh_im_action_theme()
+        bind_theme(gateway_actions, self._refresh_im_action_theme, surface="management")
+        im_layout.addWidget(gateway_actions)
+        self._select_im_provider(self.im_selected_provider)
+        self._refresh_im_provider_states()
+        self._im_gateway_status_timer = QTimer(self)
+        self._im_gateway_status_timer.setInterval(1500)
+        self._im_gateway_status_timer.timeout.connect(self._refresh_im_provider_states)
+        self._im_gateway_status_timer.start()
         im_layout.addStretch()
 
         add_settings_page("外观", "fa5s.palette", appearance_page)
@@ -7788,6 +8106,8 @@ class SettingsDialog(QDialog):
             self.nav_combo.setVisible(compact)
         if hasattr(self, "nav_list"):
             self.nav_list.setVisible(not compact)
+        if hasattr(self, "im_provider_stack"):
+            QTimer.singleShot(0, self._resize_im_provider_stack)
 
     def _start_memory_generation(self, scope):
         if not self._main or not hasattr(self._main, "start_memory_update"):
@@ -7846,22 +8166,6 @@ class SettingsDialog(QDialog):
         return value
 
     def _settings_state_signature(self):
-        provider_fields = {
-            "feishu": self.feishu_fields,
-            "dingtalk": self.dingtalk_fields,
-            "wecom": self.wecom_fields,
-        }
-        im_providers = {}
-        im_enabled = []
-        for name, fields in provider_fields.items():
-            values = {key: editor.text().strip() for key, editor in fields.items()}
-            enabled = bool(self.im_provider_checks.get(name) and self.im_provider_checks[name].isChecked())
-            values["enabled"] = enabled
-            if name == "feishu":
-                values["long_connection"] = True
-            if enabled:
-                im_enabled.append(name)
-            im_providers[name] = values
         source_state = {}
         for kind in ("python", "node"):
             combo = getattr(self, f"{kind}_source_combo")
@@ -7879,7 +8183,6 @@ class SettingsDialog(QDialog):
             "chat_workspace_root": self.chat_workspace_root_input.text().strip(),
             "god_mode": self.god_mode_check.isChecked(),
             "download_sources": source_state,
-            "im_gateway": {"enabled_providers": im_enabled, "providers": im_providers},
             "appearance": self.theme_settings_panel.state_signature(),
             "memory": {
                 "soul": self.memory_soul_edit.toPlainText(),
@@ -7939,6 +8242,8 @@ class SettingsDialog(QDialog):
         if not self._allow_close_without_prompt and not self._confirm_discard_settings():
             event.ignore()
             return
+        if hasattr(self, "_im_gateway_status_timer"):
+            self._im_gateway_status_timer.stop()
         if self._settings_dirty:
             self._clear_settings_dirty()
         event.accept()
@@ -8473,27 +8778,338 @@ class SettingsDialog(QDialog):
             self.append_app_update_log(f"启动更新安装失败：{exc}")
             QMessageBox.warning(self, "应用更新", f"启动更新安装失败：{exc}")
 
-    def _save_im_gateway_config(self):
-        provider_fields = {
-            "feishu": self.feishu_fields,
-            "dingtalk": self.dingtalk_fields,
-            "wecom": self.wecom_fields,
+    def _select_im_provider(self, provider_name):
+        name = str(provider_name or "").strip().lower()
+        if name not in IM_PROVIDER_ORDER:
+            return
+        self.im_selected_provider = name
+        button = self.im_provider_buttons.get(name)
+        if button:
+            button.setChecked(True)
+        panel = self.im_provider_panels.get(name)
+        if panel:
+            self.im_provider_stack.setCurrentWidget(panel)
+            QTimer.singleShot(0, self._resize_im_provider_stack)
+        self._refresh_im_provider_states()
+
+    def _refresh_im_channel_theme(self, _resolved=None):
+        style = (
+            f"QPushButton {{ text-align:left; padding:9px 12px; background:transparent;"
+            f"color:{DesignTokens.text_primary}; border:1px solid {DesignTokens.border_subtle};"
+            f"border-radius:{DesignTokens.radius_md}px; }}"
+            f"QPushButton:hover {{ background:{DesignTokens.bg_hover}; }}"
+            f"QPushButton:checked {{ background:{DesignTokens.primary_soft};"
+            f"color:{DesignTokens.primary}; border-color:{DesignTokens.primary_focus}; }}"
+            f"QPushButton:focus {{ border:{DesignTokens.focus_ring_width}px solid {DesignTokens.primary_focus}; }}"
+        )
+        for button in getattr(self, "im_provider_buttons", {}).values():
+            button.setStyleSheet(style)
+            icon_name = str(button.property("imProviderIcon") or "fa5s.comments")
+            button.setIcon(qta.icon(icon_name, color=DesignTokens.icon_secondary))
+
+    def _refresh_im_action_theme(self, _resolved=None):
+        if hasattr(self, "im_stop_gateway_btn"):
+            self.im_stop_gateway_btn.setIcon(
+                qta.icon("fa5s.stop", color=DesignTokens.icon_secondary)
+            )
+        if hasattr(self, "im_log_btn"):
+            self.im_log_btn.setIcon(
+                qta.icon("fa5s.file-alt", color=DesignTokens.icon_secondary)
+            )
+
+    def _resize_im_provider_stack(self):
+        if not hasattr(self, "im_provider_stack"):
+            return
+        panel = self.im_provider_panels.get(getattr(self, "im_selected_provider", ""))
+        if panel is None:
+            return
+        target_height = max(panel.minimumSizeHint().height(), panel.sizeHint().height(), 180)
+        self.im_provider_stack.setFixedHeight(target_height + 4)
+
+    @staticmethod
+    def _im_provider_is_configured(provider_name, config):
+        cfg = config if isinstance(config, dict) else {}
+        if provider_name == "feishu":
+            return bool(str(cfg.get("app_id") or "").strip() and str(cfg.get("app_secret") or "").strip())
+        if provider_name == "wecom":
+            return bool(str(cfg.get("bot_id") or "").strip() and str(cfg.get("secret") or "").strip())
+        return bool(
+            str(cfg.get("client_id") or "").strip()
+            and str(cfg.get("client_secret") or "").strip()
+            and str(cfg.get("ws_url") or "").strip()
+        )
+
+    def _refresh_im_provider_states(self):
+        if not hasattr(self, "im_provider_buttons"):
+            return
+        cfg = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
+        providers = cfg["providers"]
+        active = (cfg.get("enabled_providers") or [""])[0]
+        running = bool(
+            self._main
+            and getattr(self._main, "gateway_process", None)
+            and self._main.gateway_process.poll() is None
+        )
+        runtime_status = read_im_gateway_status()
+        runtime_state = (
+            runtime_status.get("state")
+            if runtime_status.get("provider") == active
+            else ""
+        )
+        runtime_error = str(runtime_status.get("error") or "")
+        if runtime_state == "error" and runtime_error:
+            self.im_runtime_errors[active] = runtime_error
+        labels = {
+            "feishu": ("飞书", "扫码创建应用"),
+            "dingtalk": ("钉钉", "机器人与 Stream"),
+            "wecom": ("企业微信", "Bot ID 与 Secret"),
         }
-        providers = {}
-        enabled = []
-        for name, fields in provider_fields.items():
-            provider_cfg = {
-                key: editor.text().strip()
-                for key, editor in fields.items()
-            }
-            is_enabled = bool(self.im_provider_checks.get(name) and self.im_provider_checks[name].isChecked())
-            provider_cfg["enabled"] = is_enabled
-            if name == "feishu":
-                provider_cfg["long_connection"] = True
-            if is_enabled:
-                enabled.append(name)
-            providers[name] = provider_cfg
-        self.config_manager.set("im_gateway", {"enabled_providers": enabled, "providers": providers})
+        for name in IM_PROVIDER_ORDER:
+            configured = self._im_provider_is_configured(name, providers.get(name))
+            if name == active and running and runtime_state == "connected":
+                status_text = "已接入"
+                tone = "success"
+            elif name == active and running and runtime_state == "reconnecting":
+                status_text = "重连中"
+                tone = "warning"
+            elif name == active and running:
+                status_text = "连接中"
+                tone = "primary"
+            elif name == active:
+                status_text = "已配置，未运行"
+                tone = "warning"
+            elif configured:
+                status_text = "已停用"
+                tone = "neutral"
+            else:
+                status_text = "未配置"
+                tone = "neutral"
+            title, subtitle = labels[name]
+            button = self.im_provider_buttons[name]
+            button.setText(f"{title} · {status_text}\n{subtitle}")
+            notice = self.im_provider_statuses[name]
+            if name == active and running and runtime_state == "connected":
+                notice.set_text(f"{title}已接入，企业消息将由默认主助手处理。", "success")
+            elif name == active and running and runtime_state == "reconnecting":
+                notice.set_text(f"{title}连接已中断，官方 SDK 正在自动重连。", "warning")
+            elif name == active and running and runtime_state == "error":
+                notice.set_text(
+                    f"配置已保存，接入失败：{runtime_error or '平台认证或连接失败。'}",
+                    "error",
+                )
+            elif name == active and running:
+                notice.set_text(f"{title}网关已启动，正在等待平台认证…", "info")
+            elif name == active and self.im_runtime_errors.get(name):
+                notice.set_text(
+                    f"配置已保存，接入失败：{self.im_runtime_errors[name]}",
+                    "error",
+                )
+            elif name == active and configured:
+                notice.set_text(f"{title}配置已保存，但网关当前未运行。可重新执行接入。", "warning")
+            elif configured:
+                notice.set_text(f"{title}凭据已保留，当前处于停用状态。", "neutral")
+            else:
+                notice.set_text(f"{title}尚未配置。", tone)
+        feishu_cfg = providers.get("feishu") or {}
+        feishu_configured = self._im_provider_is_configured("feishu", feishu_cfg)
+        self.feishu_connect_btn.setText("重新扫码接入" if feishu_configured else "扫码接入飞书")
+        self.feishu_restart_btn.setVisible(feishu_configured)
+        if active and running and runtime_state == "connected":
+            active_title = labels.get(active, (active, ""))[0]
+            self.im_gateway_status_badge.setText("运行中")
+            self.im_gateway_status_badge.set_tone("success")
+            self.im_gateway_status_detail.setText(f"当前渠道：{active_title}")
+        elif active and running and runtime_state == "reconnecting":
+            self.im_gateway_status_badge.setText("重连中")
+            self.im_gateway_status_badge.set_tone("warning")
+            self.im_gateway_status_detail.setText("连接已中断，正在自动重连。")
+        elif active and running and runtime_state == "error":
+            self.im_gateway_status_badge.setText("连接失败")
+            self.im_gateway_status_badge.set_tone("error")
+            self.im_gateway_status_detail.setText(runtime_error or "平台认证或连接失败。")
+        elif active and running:
+            self.im_gateway_status_badge.setText("正在连接")
+            self.im_gateway_status_badge.set_tone("primary")
+            self.im_gateway_status_detail.setText("网关已启动，正在等待平台认证…")
+        elif active:
+            self.im_gateway_status_badge.setText("未运行")
+            self.im_gateway_status_badge.set_tone("warning")
+            self.im_gateway_status_detail.setText("配置已保存，可重新执行接入。")
+        else:
+            self.im_gateway_status_badge.setText("未接入")
+            self.im_gateway_status_badge.set_tone("neutral")
+            self.im_gateway_status_detail.setText("选择一个渠道并完成接入。")
+
+    def _connect_feishu(self):
+        cfg = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
+        existing_app_id = str(cfg["providers"]["feishu"].get("app_id") or "")
+        dialog = FeishuQrDialog(existing_app_id=existing_app_id, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        credentials = dict(dialog.credentials or {})
+        self._commit_im_provider(
+            "feishu",
+            {
+                "app_id": credentials.get("app_id") or "",
+                "app_secret": credentials.get("app_secret") or "",
+                "long_connection": True,
+            },
+        )
+
+    def _restart_existing_feishu(self):
+        cfg = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
+        feishu = cfg["providers"]["feishu"]
+        self._commit_im_provider(
+            "feishu",
+            {
+                "app_id": str(feishu.get("app_id") or ""),
+                "app_secret": str(feishu.get("app_secret") or ""),
+                "long_connection": True,
+            },
+        )
+
+    def _connect_form_im_provider(self, provider_name):
+        fields = self.im_provider_fields.get(provider_name) or {}
+        values = {key: editor.text().strip() for key, editor in fields.items()}
+        if provider_name == "wecom":
+            missing = [
+                label
+                for key, label in (("bot_id", "Bot ID"), ("secret", "Secret"))
+                if not values.get(key)
+            ]
+        else:
+            missing = [
+                label
+                for key, label in (
+                    ("client_id", "Client ID / App Key"),
+                    ("client_secret", "Client Secret"),
+                    ("ws_url", "Stream / WS URL"),
+                )
+                if not values.get(key)
+            ]
+        if missing:
+            message = "请填写：" + "、".join(missing)
+            self.im_provider_statuses[provider_name].set_text(message, "error")
+            return
+        self._commit_im_provider(provider_name, values)
+
+    def _commit_im_provider(self, provider_name, provider_values):
+        name = str(provider_name or "").strip().lower()
+        try:
+            current = normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
+            current["providers"][name] = dict(provider_values or {})
+            target = update_selected_provider(current, name, provider_values)
+            self.config_manager.set("im_gateway", target)
+        except Exception as exc:
+            self.im_provider_statuses[name].set_text(f"保存失败：{exc}", "error")
+            return
+        append_background_process_log("im_gateway.log", f"{name} connect requested")
+        self.im_runtime_errors.pop(name, None)
+        write_im_gateway_status(name, "connecting")
+        self.im_provider_statuses[name].set_text("配置已保存，正在启动接入…", "info")
+        self.im_gateway_status_badge.setText("正在连接")
+        self.im_gateway_status_badge.set_tone("primary")
+        self.im_gateway_status_detail.setText("正在停止旧渠道并启动新渠道…")
+        if not self._main:
+            self.im_provider_statuses[name].set_text("配置已保存，但当前窗口无法启动网关。", "error")
+            return
+        try:
+            if hasattr(self._main, "stop_gateway_process"):
+                self._main.stop_gateway_process()
+            if hasattr(self._main, "queue_daemon_connection"):
+                self._main.queue_daemon_connection(allow_start=True, retries=6)
+            elif hasattr(self._main, "try_connect_daemon"):
+                self._main.try_connect_daemon(allow_start=True, retries=6)
+            if not hasattr(self._main, "start_gateway_process"):
+                raise RuntimeError("当前窗口没有企业消息网关启动能力。")
+            started = self._main.start_gateway_process()
+            if started is False:
+                raise RuntimeError(
+                    str(getattr(self._main, "gateway_last_error", "") or "无法启动企业消息网关进程。")
+                )
+            QTimer.singleShot(
+                GATEWAY_START_SETTLE_DELAY_MS + 500,
+                lambda selected=name: self._verify_im_gateway_start(selected),
+            )
+        except Exception as exc:
+            append_background_process_log(
+                "im_gateway.log",
+                f"{name} connect launch failed error={exc}",
+            )
+            self.im_provider_statuses[name].set_text(
+                f"配置已保存，接入失败：{exc}",
+                "error",
+            )
+
+    def _latest_im_gateway_error(self):
+        log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()[-60:]
+        except Exception:
+            return ""
+        markers = (" failed", " error=", " missing", " unavailable", "不可用", "未配置")
+        for line in reversed(lines):
+            text = line.strip()
+            lowered = text.lower()
+            if any(marker in lowered for marker in markers):
+                return text.split("] ", 1)[-1]
+        return ""
+
+    def _verify_im_gateway_start(self, provider_name):
+        running = bool(
+            self._main
+            and getattr(self._main, "gateway_process", None)
+            and self._main.gateway_process.poll() is None
+        )
+        if running:
+            runtime_status = read_im_gateway_status()
+            if (
+                runtime_status.get("provider") == provider_name
+                and runtime_status.get("state") == "error"
+            ):
+                reason = runtime_status.get("error") or "平台认证或连接失败。"
+                self.im_runtime_errors[provider_name] = reason
+            else:
+                self.im_runtime_errors.pop(provider_name, None)
+        else:
+            reason = self._latest_im_gateway_error() or "网关进程未能保持运行，请打开日志查看详情。"
+            self.im_runtime_errors[provider_name] = reason
+            self.im_provider_statuses[provider_name].set_text(
+                f"配置已保存，接入失败：{reason}",
+                "error",
+            )
+        self._refresh_im_provider_states()
+
+    def _stop_im_gateway(self):
+        try:
+            target = disable_im_gateway(self.config_manager.get("im_gateway", {}))
+            self.config_manager.set("im_gateway", target)
+            if self._main and hasattr(self._main, "stop_gateway_process"):
+                self._main.stop_gateway_process()
+            append_background_process_log("im_gateway.log", "enterprise message gateway stopped by user")
+            write_im_gateway_status("", "stopped")
+            self.im_runtime_errors.clear()
+        except Exception as exc:
+            self.im_gateway_status_detail.setText(f"停止失败：{exc}")
+            self.im_gateway_status_badge.setText("停止失败")
+            self.im_gateway_status_badge.set_tone("error")
+            return
+        self._refresh_im_provider_states()
+
+    def _open_im_gateway_log(self):
+        log_path = os.path.join(get_app_data_dir(), "im_gateway.log")
+        try:
+            if not os.path.exists(log_path):
+                with open(log_path, "a", encoding="utf-8"):
+                    pass
+            os.startfile(log_path)
+        except Exception:
+            QMessageBox.information(self, "企业消息网关日志", log_path)
+
+    def _save_im_gateway_config(self):
+        """Enterprise-message settings are committed by their local action."""
+        return normalize_im_gateway_config(self.config_manager.get("im_gateway", {}))
 
     def save_settings(self):
         self.requires_skill_reload = False
@@ -22712,12 +23328,13 @@ class MainWindow(QMainWindow):
     def start_gateway_process(self):
         try:
             if getattr(self, "gateway_starting", False):
-                return
+                return True
             if self.gateway_process and self.gateway_process.poll() is None:
-                return
+                return True
             cmd, cwd = build_gateway_launch_command()
             env = os.environ.copy()
             self.gateway_starting = True
+            self.gateway_last_error = ""
             if self.gateway_log_file:
                 try:
                     self.gateway_log_file.close()
@@ -22735,19 +23352,31 @@ class MainWindow(QMainWindow):
                 **subprocess_kwargs_no_window(),
             )
             QTimer.singleShot(GATEWAY_START_SETTLE_DELAY_MS, self._finalize_gateway_startup_state)
-        except Exception:
+            return True
+        except Exception as exc:
             self.gateway_starting = False
             self.gateway_process = None
+            self.gateway_last_error = str(exc)
+            append_background_process_log(
+                "im_gateway.log",
+                f"gateway process launch failed error={exc}",
+            )
             if self.gateway_log_file:
                 try:
                     self.gateway_log_file.close()
                 except Exception:
                     pass
                 self.gateway_log_file = None
+            return False
 
     def _finalize_gateway_startup_state(self):
         process = getattr(self, "gateway_process", None)
         if process and process.poll() is not None:
+            self.gateway_last_error = f"网关进程退出，返回码 {process.returncode}。"
+            append_background_process_log(
+                "im_gateway.log",
+                f"gateway process exited returncode={process.returncode}",
+            )
             self.gateway_process = None
             if self.gateway_log_file:
                 try:

@@ -12,7 +12,15 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QToolB
 
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
-from main import AutoResizingInputEdit, CapabilityWorkbenchDialog, FileChip, MainWindow, QMessageBox, SettingsDialog
+from main import (
+    AutoResizingInputEdit,
+    CapabilityWorkbenchDialog,
+    FeishuQrDialog,
+    FileChip,
+    MainWindow,
+    QMessageBox,
+    SettingsDialog,
+)
 from ui.primitives import ProductTooltipController
 
 
@@ -41,6 +49,69 @@ class ProductExperienceFixTests(unittest.TestCase):
             self.assertFalse(dialog.save_settings_btn.isEnabled())
         finally:
             dialog._allow_close_without_prompt = True
+            dialog.close()
+
+    def test_enterprise_message_has_local_save_boundary_and_single_channel(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            config.set(
+                "im_gateway",
+                {
+                    "enabled_providers": ["feishu"],
+                    "providers": {
+                        "feishu": {
+                            "enabled": True,
+                            "app_id": "cli-a",
+                            "app_secret": "secret-a",
+                        },
+                        "dingtalk": {"enabled": False},
+                        "wecom": {"enabled": False},
+                    },
+                },
+            )
+            host = QWidget()
+            host.gateway_process = None
+            host.stop_gateway_process = MagicMock()
+            host.queue_daemon_connection = MagicMock()
+            host.start_gateway_process = MagicMock(return_value=True)
+            with patch("main.write_im_gateway_status"), patch(
+                "main.read_im_gateway_status",
+                return_value={},
+            ):
+                dialog = SettingsDialog(config, parent=host, initial_page_label="企业消息")
+                try:
+                    dialog._select_im_provider("wecom")
+                    dialog.wecom_fields["bot_id"].setText("bot-a")
+                    dialog.wecom_fields["secret"].setText("secret-b")
+                    self.app.processEvents()
+                    self.assertFalse(dialog._settings_dirty)
+                    dialog._connect_form_im_provider("wecom")
+                    saved = config.get("im_gateway")
+                    self.assertEqual(saved["enabled_providers"], ["wecom"])
+                    self.assertEqual(saved["providers"]["wecom"]["bot_id"], "bot-a")
+                    self.assertEqual(saved["providers"]["feishu"]["app_id"], "cli-a")
+                    self.assertFalse(saved["providers"]["feishu"]["enabled"])
+                    host.stop_gateway_process.assert_called_once()
+                    host.start_gateway_process.assert_called_once()
+                finally:
+                    dialog._allow_close_without_prompt = True
+                    dialog.close()
+
+    def test_feishu_qr_dialog_renders_local_qr_and_countdown(self):
+        with patch.object(FeishuQrDialog, "_start_worker", new=lambda self: None):
+            dialog = FeishuQrDialog()
+        try:
+            dialog._on_qr_ready("https://accounts.feishu.cn/device?code=test", 120)
+            self.app.processEvents()
+            self.assertFalse(dialog.qr_label.pixmap().isNull())
+            self.assertTrue(dialog.open_link_btn.isEnabled())
+            self.assertIn("秒", dialog.status_notice.label.text())
+            dialog._refresh_theme()
+            self.assertFalse(dialog.qr_label.pixmap().isNull())
+        finally:
+            dialog._timer.stop()
             dialog.close()
 
     def test_model_edit_delete_channel_and_empty_save_are_semantic_changes(self):

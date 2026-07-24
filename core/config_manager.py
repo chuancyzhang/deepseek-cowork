@@ -32,6 +32,7 @@ from .mcp_client import (
     normalize_mcp_transport,
 )
 from .runtime_components import default_download_sources, normalize_download_sources
+from .im_gateway_config import normalize_im_gateway_config
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
@@ -419,6 +420,10 @@ class ConfigManager:
         normalized_projects = self._normalize_projects(self.config.get("projects"))
         if normalized_projects != self.config.get("projects"):
             self.config["projects"] = normalized_projects
+            updated = True
+        normalized_im_gateway = normalize_im_gateway_config(self.config.get("im_gateway"))
+        if normalized_im_gateway != self.config.get("im_gateway"):
+            self.config["im_gateway"] = normalized_im_gateway
             updated = True
         updated = self._sync_legacy_model_fields(save=False) or updated
         if updated:

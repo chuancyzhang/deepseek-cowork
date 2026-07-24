@@ -506,6 +506,8 @@ a = Analysis(
         'anthropic',
         'openai',
         'lark_oapi',
+        'aibot',
+        'qrcode',
         'httpx',
     ],
     hookspath=[],

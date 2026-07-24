@@ -108,6 +108,8 @@ _RUNTIME_IMPORT_CHECKS = [
     ("anthropic", "anthropic"),
     ("openai", "openai"),
     ("lark-oapi", "lark_oapi"),
+    ("wecom-aibot-python-sdk", "aibot"),
+    ("qrcode", "qrcode"),
 ]
 
 

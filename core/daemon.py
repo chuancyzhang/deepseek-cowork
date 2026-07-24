@@ -1124,7 +1124,6 @@ def run_daemon(host=DEFAULT_HOST, port=DEFAULT_PORT):
         while not server.shutdown_requested:
             server.handle_request()
         server.server_close()
-        QTimer.singleShot(0, app.quit)
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
@@ -1134,4 +1133,27 @@ def run_daemon(host=DEFAULT_HOST, port=DEFAULT_PORT):
     timer.timeout.connect(state.maybe_suspend)
     timer.start()
 
-    app.exec()
+    shutdown_timer = QTimer()
+    shutdown_timer.setInterval(100)
+    shutdown_timer.timeout.connect(
+        lambda: _poll_daemon_shutdown(app, server)
+    )
+    shutdown_timer.start()
+
+    try:
+        app.exec()
+    finally:
+        shutdown_timer.stop()
+        timer.stop()
+        server.shutdown_requested = True
+        state.skill_catalog.stop_watching()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def _poll_daemon_shutdown(app, server):
+    """Quit from the Qt thread once the socket server accepts shutdown."""
+    if not bool(getattr(server, "shutdown_requested", False)):
+        return False
+    app.quit()
+    return True

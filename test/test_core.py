@@ -23,6 +23,7 @@ from core import env_utils
 from core import sandbox_runtime
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.agent import LLMWorker
+from core import daemon as daemon_module
 from core.daemon import DaemonClient, DaemonRequestHandler, DaemonServer, DaemonState
 from core.mcp_client import (
     McpOperationError,
@@ -1325,6 +1326,18 @@ class TestInteractionService(unittest.TestCase):
 
 
 class TestDaemonState(unittest.TestCase):
+    def test_daemon_shutdown_is_handled_by_qt_thread_poll(self):
+        app = MagicMock()
+        server = types.SimpleNamespace(shutdown_requested=True)
+        self.assertTrue(daemon_module._poll_daemon_shutdown(app, server))
+        app.quit.assert_called_once_with()
+
+    def test_daemon_shutdown_poll_is_inert_while_running(self):
+        app = MagicMock()
+        server = types.SimpleNamespace(shutdown_requested=False)
+        self.assertFalse(daemon_module._poll_daemon_shutdown(app, server))
+        app.quit.assert_not_called()
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.state = DaemonState(_DaemonConfigStub(self.temp_dir))

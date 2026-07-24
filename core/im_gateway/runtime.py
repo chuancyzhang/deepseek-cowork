@@ -5,6 +5,7 @@ import hmac
 import json
 import requests
 import os
+import re
 import uuid
 import time
 import threading
@@ -62,6 +63,8 @@ def _sanitize(value):
         "secret",
         "verification_token",
         "webhook_url",
+        "response_url",
+        "response_code",
         "ws_url"
     }
     if isinstance(value, dict):
@@ -94,6 +97,33 @@ def _safe_json_dump(value):
             return str(_sanitize(value))
         except Exception:
             return "<unserializable>"
+
+
+def _redact_log_text(value):
+    text = str(value or "")
+    text = re.sub(r"(?:https?|wss?)://\S+", "<redacted-url>", text)
+    text = re.sub(
+        r"(?i)\b(secret|token|authorization|response_code)\b\s*[:=]\s*[^\s,;]+",
+        r"\1=<redacted>",
+        text,
+    )
+    return _truncate_text(text, limit=800)
+
+
+class _WeComGatewayLogger:
+    """Keep SDK diagnostics while suppressing raw frames and reply credentials."""
+
+    def debug(self, message, *args):
+        return None
+
+    def info(self, message, *args):
+        _log_gateway(f"wecom sdk info: {_redact_log_text(message)}")
+
+    def warn(self, message, *args):
+        _log_gateway(f"wecom sdk warning: {_redact_log_text(message)}")
+
+    def error(self, message, *args):
+        _log_gateway(f"wecom sdk error: {_redact_log_text(message)}")
 
 
 def _is_context_overflow_error(error_text):
@@ -1773,6 +1803,7 @@ def _start_wecom_connection(context):
             WSClientOptions(
                 bot_id=provider.bot_id,
                 secret=provider.secret,
+                logger=_WeComGatewayLogger(),
             )
         )
         provider.attach_client(client, loop, generate_req_id)

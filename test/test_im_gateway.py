@@ -113,6 +113,21 @@ class TestImGatewayPendingInteraction(unittest.TestCase):
         self.assertNotIn("xyz", status["error"])
         self.assertNotIn("example.test", status["error"])
 
+    def test_wecom_logs_redact_reply_url_and_suppress_sdk_debug_frames(self):
+        payload = {
+            "response_url": "https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=private",
+            "text": {"content": "hello"},
+        }
+        dumped = im_gateway_runtime._safe_json_dump(payload)
+        self.assertNotIn("private", dumped)
+        self.assertIn("<redacted>", dumped)
+        logger = im_gateway_runtime._WeComGatewayLogger()
+        with patch.object(im_gateway_runtime, "_log_gateway") as log_gateway:
+            logger.debug(f"Received push message: {payload}")
+            logger.info("Connecting to WebSocket: wss://openws.work.weixin.qq.com")
+        self.assertEqual(log_gateway.call_count, 1)
+        self.assertNotIn("openws.work.weixin.qq.com", log_gateway.call_args.args[0])
+
     def test_feishu_registration_uses_qr_flow_and_bot_addons(self):
         captured = {}
 

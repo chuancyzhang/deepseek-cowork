@@ -144,7 +144,7 @@ Cowork 采用交错式推理流程：
 
 - 桌面 UI 基于 PySide6
 - 模型接入支持 OpenAI-compatible 与 Anthropic
-- 打包模式保留 Python 基础运行时和 Git Bash
+- 打包模式保留 Python 基础运行时和完整 Git Bash；PyInstaller 隐藏导入只覆盖 Qt Widgets、Network、Positioning、PDF、WebChannel 与 WebEngine 的真实依赖，收集完成后拒绝 QML 树、Qt debug 资源、非中英文翻译及沙箱 Python 的 IDE/测试/缓存文件。`scripts/package_release.py` 在发布前校验必需运行时，执行 850 MB 目录与 375 MB ZIP 门禁，以固定时间戳、排序路径和标准 Deflate level 9 生成根目录为 `deepseek-cowork/` 的可复现 ZIP，同时输出按组件统计的 JSON 报告。
 - Node.js、文档读取和金融数据等 Python/Node 依赖改为设置中的可选组件；浏览器自动化独立使用应用管理的 Tencent BrowserSkill `bsk` CLI 与用户确认安装的 Chrome/Edge 扩展，不再依赖 Playwright/UIAutomation
 - `ComponentTaskManager` 是组件状态的唯一读写边界：设置页构造与页面进入只消费应用数据目录中的版本化状态快照，不调用目录遍历、版本进程或 BrowserSkill。设置中心只把当前选择的子页挂载到 `QStackedWidget`，其余页面首次访问再挂载。只有单项检测、用户发起的全量刷新、安装/更新/修复/卸载和 BrowserSkill 连接检查会创建后台任务；变更动作先核对真实状态，若与缓存所表达的操作冲突则停止并要求重新确认。成功只回写目标组件，缓存通过临时文件、`fsync` 与原子替换落盘，损坏或写入失败均外显。
 - BrowserSkill CLI 固定版本与 SHA-256，采用临时目录下载、路径安全解压、候选验证和原子目录替换；`browser_skill_cli` 仅接受参数数组并统一处理 JSON、超时、取消、截图路径和敏感 `evaluate` 拒绝，组件缺失或扩展未通过 `doctor` 时明确失败

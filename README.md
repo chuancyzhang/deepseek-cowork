@@ -93,6 +93,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 
 This prepares the packaged Git Bash runtime. Node.js is installed as an optional runtime component from Settings.
 
+Create release artifacts with a clean build and the shared audit/packaging command:
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe --clean .\deepseek-cowork.spec
+.\.venv\Scripts\python.exe .\scripts\package_release.py
+```
+
+The spec collects only the Qt Widgets, WebEngine, PDF, and Chinese/English runtime resources used by the desktop application, excluding Qt debug/QML payloads, extra translations, and sandbox-Python development files. `package_release.py` verifies the required Python, Git Bash, WebEngine, and PDF files; enforces 850 MB distribution and 375 MB ZIP budgets; creates a reproducible standard-Deflate level 9 archive rooted at `deepseek-cowork/`; and writes `dist/deepseek-cowork-package-report.json`.
+
 ## Basic Usage
 
 1. Open **Settings** and configure a model service.

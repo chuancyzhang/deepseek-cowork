@@ -95,6 +95,79 @@ def _collect_tree_for_analysis(src_root, dest_root, exclude_dirs=None, exclude_g
     return collected
 
 
+QT_TRANSLATION_ALLOWLIST = {
+    "qt_en.qm",
+    "qt_zh_CN.qm",
+    "qtbase_en.qm",
+    "qtbase_zh_CN.qm",
+}
+QTWEBENGINE_LOCALE_ALLOWLIST = {
+    "en-GB.pak",
+    "en-US.pak",
+    "zh-CN.pak",
+    "zh-TW.pak",
+}
+
+
+def _normalized_bundle_path(path):
+    return str(path or "").replace("\\", "/").lstrip("./")
+
+
+def _allow_qt_bundle_entry(entry):
+    dest = _normalized_bundle_path(entry[0])
+    lowered = dest.lower()
+    if not lowered.startswith("pyside6/"):
+        return True
+    if lowered.startswith("pyside6/qml/"):
+        return False
+    if lowered.startswith("pyside6/resources/"):
+        basename = os.path.basename(dest).lower()
+        if ".debug." in basename or basename.endswith(".debug"):
+            return False
+    if lowered.startswith("pyside6/translations/qtwebengine_locales/"):
+        return os.path.basename(dest) in QTWEBENGINE_LOCALE_ALLOWLIST
+    if lowered.startswith("pyside6/translations/"):
+        return os.path.basename(dest) in QT_TRANSLATION_ALLOWLIST
+    return True
+
+
+def _allow_python_env_entry(entry):
+    dest = _normalized_bundle_path(entry[0])
+    lowered = dest.lower()
+    if not lowered.startswith("python_env/"):
+        return True
+    if lowered.endswith((".pyc", ".pyo", ".chm")):
+        return False
+    site_prefix = "python_env/lib/site-packages/"
+    if not lowered.startswith(site_prefix):
+        return True
+    relative = lowered[len(site_prefix):]
+    if relative == "pythonwin" or relative.startswith("pythonwin/"):
+        return False
+    excluded_segments = (
+        "/__pycache__/",
+        "/demos/",
+        "/demo/",
+        "/tests/",
+        "/test/",
+    )
+    padded = f"/{relative}"
+    return not any(segment in padded for segment in excluded_segments)
+
+
+def _filter_entries(entries, predicate, label):
+    kept = []
+    removed = []
+    for entry in entries:
+        if predicate(entry):
+            kept.append(entry)
+        else:
+            removed.append(_normalized_bundle_path(entry[0]))
+    if removed:
+        print(f"Excluded {len(removed)} {label} entries from packaged runtime.")
+    return kept
+
+
 def _canonical_dist_name(name):
     return re.sub(r"[-_.]+", "-", str(name or "").strip()).lower()
 
@@ -354,7 +427,11 @@ def _collect_minimal_python_env(prefix):
     return datas
 
 
-python_env = _collect_minimal_python_env(python_runtime_prefix)
+python_env = _filter_entries(
+    _collect_minimal_python_env(python_runtime_prefix),
+    _allow_python_env_entry,
+    "sandbox Python",
+)
 
 
 ALLOW_MISSING_RUNTIMES = _env_flag("COWORK_ALLOW_MISSING_RUNTIMES", False)
@@ -477,6 +554,21 @@ def _collect_minimal_pyside6():
 
 qt_minimal_datas = _collect_minimal_pyside6()
 
+application_datas = []
+for source_name in ("skills", "ai_skills", "images"):
+    application_datas.extend(
+        _collect_tree_for_analysis(
+            os.path.join(SPEC_DIR, source_name),
+            source_name,
+        )
+    )
+application_datas.extend(
+    [
+        (os.path.join(SPEC_DIR, "config.json"), "."),
+        (os.path.join(SPEC_DIR, "qt.conf"), "."),
+    ]
+)
+
 pyside6_hidden = [
     "PySide6.QtCore",
     "PySide6.QtGui",
@@ -484,9 +576,6 @@ pyside6_hidden = [
     "PySide6.QtPositioning",
     "PySide6.QtPdf",
     "PySide6.QtPdfWidgets",
-    "PySide6.QtQml",
-    "PySide6.QtQuick",
-    "PySide6.QtQuickWidgets",
     "PySide6.QtWebChannel",
     "PySide6.QtWidgets",
     "PySide6.QtWebEngineCore",
@@ -497,7 +586,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('skills', 'skills'), ('ai_skills', 'ai_skills'), ('config.json', '.'), ('images', 'images'), ('qt.conf', '.')] + qt_minimal_datas + MCP_ANALYSIS_METADATA,
+    datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA,
     hiddenimports=pyside6_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
         'bs4',
         'requests',
@@ -571,6 +660,8 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+a.datas = _filter_entries(a.datas, _allow_qt_bundle_entry, "Qt data")
+a.binaries = _filter_entries(a.binaries, _allow_qt_bundle_entry, "Qt binary")
 print(f"Bundled minimal python env entries: {len(python_env)}")
 print(f"Runtime slim mode: {'ON' if RUNTIME_SLIM else 'OFF'}")
 print(f"Bundled node env entries: {len(node_env)}")

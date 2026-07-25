@@ -92,6 +92,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 
 该脚本会准备打包所需的 Git Bash 运行时。Node.js 改为在设置中按需安装的可选组件。
 
+正式发行包使用干净构建和统一的审计/压缩脚本生成：
+
+```powershell
+.\.venv\Scripts\pyinstaller.exe --clean .\deepseek-cowork.spec
+.\.venv\Scripts\python.exe .\scripts\package_release.py
+```
+
+打包配置只收集桌面端实际使用的 Qt Widgets、WebEngine、PDF 与中英文运行资源，并排除 Qt debug/QML、多余翻译和沙箱 Python 开发文件。`package_release.py` 会验证 Python、Git Bash、WebEngine、PDF 等必需文件，执行 850 MB 目录与 375 MB ZIP 体积门禁，使用标准 Deflate level 9 生成根目录固定为 `deepseek-cowork/` 的可复现 ZIP，并写出 `dist/deepseek-cowork-package-report.json`。
+
 ## 基本使用
 
 1. 打开 **设置**，先配置模型服务。

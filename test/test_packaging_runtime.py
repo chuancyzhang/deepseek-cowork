@@ -28,9 +28,6 @@ class TestPackagedRuntimeContract(unittest.TestCase):
             "PySide6.QtPositioning",
             "PySide6.QtPdf",
             "PySide6.QtPdfWidgets",
-            "PySide6.QtQml",
-            "PySide6.QtQuick",
-            "PySide6.QtQuickWidgets",
             "PySide6.QtWebChannel",
             "PySide6.QtWebEngineCore",
             "PySide6.QtWebEngineWidgets",
@@ -40,6 +37,26 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         for module_name in required_modules:
             self.assertIn(f'"{module_name}"', hidden_imports)
             self.assertNotIn(f"'{module_name}'", excludes)
+        for module_name in (
+            "PySide6.QtQml",
+            "PySide6.QtQuick",
+            "PySide6.QtQuickWidgets",
+        ):
+            self.assertNotIn(f'"{module_name}"', hidden_imports)
+
+    def test_packaging_filters_debug_qt_resources_locales_and_python_development_files(self):
+        with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
+            spec_text = handle.read()
+
+        self.assertIn("QT_TRANSLATION_ALLOWLIST", spec_text)
+        self.assertIn("QTWEBENGINE_LOCALE_ALLOWLIST", spec_text)
+        self.assertIn('lowered.startswith("pyside6/qml/")', spec_text)
+        self.assertIn('".debug." in basename', spec_text)
+        self.assertIn('relative.startswith("pythonwin/")', spec_text)
+        self.assertIn('for source_name in ("skills", "ai_skills", "images")', spec_text)
+        self.assertIn("datas=application_datas + qt_minimal_datas", spec_text)
+        self.assertIn("a.datas = _filter_entries", spec_text)
+        self.assertIn("a.binaries = _filter_entries", spec_text)
 
     def test_office_preview_does_not_require_qtaxcontainer(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:

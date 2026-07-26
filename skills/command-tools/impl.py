@@ -370,13 +370,6 @@ def run_skill_script(
     if not record:
         return f"Error: Skill '{skill_name}' not found."
 
-    dependency_status = record.get("dependency_status") or {"ok": True}
-    if not dependency_status.get("ok"):
-        dependency_status = skill_manager._prepare_skill_dependencies(skill_name, record["path"])
-        record["dependency_status"] = dependency_status
-        if not dependency_status.get("ok"):
-            return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
-
     args_list = []
     if isinstance(args, str) and args.strip():
         try:
@@ -405,6 +398,16 @@ def run_skill_script(
     script_abs_path = os.path.abspath(os.path.join(record["path"], script_rel_path))
     if not os.path.isfile(script_abs_path):
         return f"Error: Script path '{script_rel_path}' not found for skill '{skill_name}'."
+
+    dependency_status = record.get("dependency_status") or {"ok": True}
+    if not dependency_status.get("ok"):
+        dependency_status = skill_manager.ensure_skill_dependencies_ready(
+            skill_name,
+            progress=(_context or {}).get("step_signal") if isinstance(_context, dict) else None,
+            observability=(_context or {}).get("observability_signal") if isinstance(_context, dict) else None,
+        )
+        if not dependency_status.get("ok"):
+            return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
 
     default_args = target.get("default_args") if isinstance(target.get("default_args"), list) else []
     runtime = str(target.get("runtime") or "bash").strip().lower() or "bash"

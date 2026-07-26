@@ -1999,6 +1999,62 @@ class SkillManager:
             print(f"[SkillManager] Dependencies for '{skill_name}' are not ready: {status.get('message')}")
         return status
 
+    def ensure_skill_dependencies_ready(self, skill_name, progress=None, observability=None, retry=False):
+        """Prepare one loaded Skill's declared dependencies through the process coordinator."""
+        normalized_name = str(skill_name or "").strip()
+        record = self.skill_records.get(normalized_name)
+        if not record:
+            return {"ok": False, "message": f"Skill '{normalized_name}' not found."}
+
+        spec = record.get("spec") or {}
+        python_dependencies = self._coerce_string_list(spec.get("python_dependencies"))
+        node_dependencies = self._coerce_string_list(spec.get("node_dependencies"))
+        if not python_dependencies and not node_dependencies:
+            result = {"ok": True, "message": "No dependencies declared.", "installed": False}
+            record["dependency_status"] = result
+            return result
+
+        coordinator = self.dependency_coordinator
+        if coordinator is None:
+            result = {
+                "ok": False,
+                "message": f"Dependency coordinator is unavailable for skill '{normalized_name}'.",
+            }
+            record["dependency_status"] = result
+            return result
+
+        def progress_callback(message):
+            if hasattr(progress, "emit"):
+                progress.emit(message)
+            if hasattr(observability, "emit"):
+                observability.emit(
+                    {
+                        "type": "skill_dependency",
+                        "status": "installing",
+                        "skill_name": normalized_name,
+                        "message": message,
+                    }
+                )
+
+        result = coordinator.ensure_ready(
+            normalized_name,
+            python_dependencies=python_dependencies,
+            node_dependencies=node_dependencies,
+            retry=bool(retry),
+            progress=progress_callback,
+        )
+        record["dependency_status"] = result
+        if hasattr(observability, "emit"):
+            observability.emit(
+                {
+                    "type": "skill_dependency",
+                    "status": "ready" if result.get("ok") else "failed",
+                    "skill_name": normalized_name,
+                    "message": result.get("message") or "",
+                }
+            )
+        return result
+
     def _default_writable_skill_root(self):
         for candidate in self.skills_dirs:
             if os.path.basename(candidate) == "ai_skills":
@@ -3205,42 +3261,13 @@ class SkillManager:
             record = self.skill_records.get(skill_name)
             dependency_status = (record or {}).get("dependency_status") or {"ok": True}
             if not dependency_status.get("ok") and record:
-                spec = record.get("spec") or {}
-                coordinator = self.dependency_coordinator
                 progress = effective_context.get("step_signal")
                 observability = effective_context.get("observability_signal")
-
-                def progress_callback(message):
-                    if hasattr(progress, "emit"):
-                        progress.emit(message)
-                    if hasattr(observability, "emit"):
-                        observability.emit(
-                            {
-                                "type": "skill_dependency",
-                                "status": "installing",
-                                "skill_name": skill_name,
-                                "message": message,
-                            }
-                        )
-
-                if coordinator is None:
-                    return f"Error: Dependency coordinator is unavailable for skill '{skill_name}'."
-                dependency_status = coordinator.ensure_ready(
+                dependency_status = self.ensure_skill_dependencies_ready(
                     skill_name,
-                    python_dependencies=self._coerce_string_list(spec.get("python_dependencies")),
-                    node_dependencies=self._coerce_string_list(spec.get("node_dependencies")),
-                    progress=progress_callback,
+                    progress=progress,
+                    observability=observability,
                 )
-                record["dependency_status"] = dependency_status
-                if hasattr(observability, "emit"):
-                    observability.emit(
-                        {
-                            "type": "skill_dependency",
-                            "status": "ready" if dependency_status.get("ok") else "failed",
-                            "skill_name": skill_name,
-                            "message": dependency_status.get("message") or "",
-                        }
-                    )
                 if not dependency_status.get("ok"):
                     return f"Error: Dependencies for skill '{skill_name}' are not ready: {dependency_status.get('message')}"
             effective_context["skill_config"] = self._skill_config_values(skill_name)

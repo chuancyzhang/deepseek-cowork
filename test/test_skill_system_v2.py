@@ -7,7 +7,7 @@ import tempfile
 import types
 import unittest
 import zipfile
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1366,32 +1366,36 @@ class TestSkillSystemV2(unittest.TestCase):
 
         diagnostic_events = []
         observability = types.SimpleNamespace(emit=lambda payload: diagnostic_events.append(payload))
-        with patch.object(sm, "_prepare_skill_dependencies", return_value={"ok": True, "message": "ready"}) as prepare_mock:
-            with patch.object(
-                module,
-                "run_skill_script_in_sandbox",
-                return_value={
-                    "ok": True,
-                    "exit_code": 0,
-                    "stdout": "hello\n",
-                    "stderr": "",
-                    "runtime": "python",
-                    "command": "python hello.py",
-                    "cwd": skill_dir,
-                },
-            ) as run_mock:
-                payload = module.run_skill_script(
-                    "scripted-skill",
-                    "hello",
-                    args=["--flag"],
-                    _context={"skill_manager": sm, "observability_signal": observability},
-                )
+        prepare_mock = MagicMock(return_value={"ok": True, "message": "ready"})
+        sm.dependency_coordinator = types.SimpleNamespace(ensure_ready=prepare_mock)
+        with patch.object(
+            module,
+            "run_skill_script_in_sandbox",
+            return_value={
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "hello\n",
+                "stderr": "",
+                "runtime": "python",
+                "command": "python hello.py",
+                "cwd": skill_dir,
+            },
+        ) as run_mock:
+            payload = module.run_skill_script(
+                "scripted-skill",
+                "hello",
+                args=["--flag"],
+                _context={"skill_manager": sm, "observability_signal": observability},
+            )
 
         result = json.loads(payload)
         self.assertTrue(result["ok"])
         self.assertEqual(result["runtime"], "python")
         self.assertEqual(result["script_path"], os.path.normpath("scripts\\hello.py"))
-        prepare_mock.assert_called_once_with("scripted-skill", skill_dir)
+        prepare_mock.assert_called_once()
+        self.assertEqual(prepare_mock.call_args.args[0], "scripted-skill")
+        self.assertEqual(prepare_mock.call_args.kwargs["python_dependencies"], ["requests"])
+        self.assertEqual(prepare_mock.call_args.kwargs["node_dependencies"], [])
         run_mock.assert_called_once()
         called_args, called_kwargs = run_mock.call_args
         self.assertEqual(called_args[0], "scripted-skill")
@@ -1403,8 +1407,17 @@ class TestSkillSystemV2(unittest.TestCase):
             called_kwargs["extra_env"]["COWORK_WORKSPACE_DIR"],
             os.path.abspath(self.temp_dir),
         )
-        self.assertEqual([event["status"] for event in diagnostic_events], ["start", "finish"])
+        script_events = [event for event in diagnostic_events if event["type"] == "skill_script"]
+        self.assertEqual([event["status"] for event in script_events], ["start", "finish"])
         self.assertTrue(all("args" not in event for event in diagnostic_events))
+        self.assertTrue(
+            any(
+                event["type"] == "skill_dependency"
+                and event["status"] == "ready"
+                and event["skill_name"] == "scripted-skill"
+                for event in diagnostic_events
+            )
+        )
 
     def test_import_skill_installs_standard_agent_skill_with_original_skill_md(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)

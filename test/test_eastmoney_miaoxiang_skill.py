@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from core.skill_manager import SkillManager
 
@@ -110,6 +111,65 @@ class TestEastmoneyMiaoxiangSkill(unittest.TestCase):
         missing_manager = self.build_manager()
         with self.assertRaisesRegex(ValueError, "MX_APIKEY"):
             missing_manager.build_skill_config_env("eastmoney-miaoxiang")
+
+    def test_first_script_call_prepares_pending_bundle_dependencies(self):
+        manager = self.build_manager(
+            {
+                "eastmoney-miaoxiang": {
+                    "MX_APIKEY": "secret-test-key",
+                }
+            }
+        )
+        manager.skill_records["eastmoney-miaoxiang"]["dependency_status"] = {
+            "ok": False,
+            "pending": True,
+            "message": "Dependencies will be prepared on first use.",
+        }
+        command_tools = load_module(
+            "eastmoney_command_tools_first_use_test",
+            os.path.join("..", "..", "skills", "command-tools", "impl.py"),
+        )
+
+        ensure_mock = MagicMock(return_value={"ok": True, "message": "ready", "installed": True})
+        manager.dependency_coordinator = SimpleNamespace(ensure_ready=ensure_mock)
+        with patch.object(
+            command_tools,
+            "run_skill_script_in_sandbox",
+            return_value={
+                "ok": True,
+                "exit_code": 0,
+                "stdout": "usage",
+                "stderr": "",
+                "runtime": "python",
+                "command": "python mx_poster.py --help",
+                "cwd": SKILL_ROOT,
+            },
+        ):
+            invalid = command_tools.run_skill_script(
+                "eastmoney-miaoxiang",
+                "missing-script",
+                workspace_dir=self.workspace_dir,
+                _context={"skill_manager": manager},
+            )
+            self.assertIn("not found", invalid)
+            ensure_mock.assert_not_called()
+            payload = json.loads(
+                command_tools.run_skill_script(
+                    "eastmoney-miaoxiang",
+                    "mx_poster",
+                    args=["--help"],
+                    workspace_dir=self.workspace_dir,
+                    _context={"skill_manager": manager},
+                )
+            )
+
+        self.assertTrue(payload["ok"])
+        ensure_mock.assert_called_once()
+        self.assertEqual(
+            ensure_mock.call_args.kwargs["python_dependencies"],
+            ["requests>=2.31,<3", "pandas>=2,<3", "openpyxl>=3.1,<4"],
+        )
+        self.assertTrue(manager.skill_records["eastmoney-miaoxiang"]["dependency_status"]["ok"])
 
     def test_runtime_output_defaults_to_active_workspace_and_requires_explicit_context(self):
         runtime = load_module("eastmoney_runtime_support_test", "runtime_support.py")

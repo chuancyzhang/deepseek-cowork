@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.app_version import compare_versions, is_newer_version, normalize_version
+from core.app_version import APP_VERSION, compare_versions, is_newer_version, normalize_version
 from core.updater import (
     APP_EXE_NAME,
     INTERNAL_DIR_NAME,
@@ -27,6 +27,9 @@ from core.updater import (
 
 
 class TestAppVersion(unittest.TestCase):
+    def test_current_app_version_matches_508_release(self):
+        self.assertEqual(APP_VERSION, "5.0.8")
+
     def test_normalize_version_accepts_release_tags(self):
         self.assertEqual(normalize_version("V4.7"), (4, 7, 0))
         self.assertEqual(normalize_version("v4.7.2"), (4, 7, 2))

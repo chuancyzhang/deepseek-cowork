@@ -120,11 +120,13 @@ class TestDeliverableScanning(unittest.TestCase):
 
     def test_invalid_workspace_hides_controls_and_action(self):
         with tempfile.TemporaryDirectory() as parent:
-            window = self._file_empty_state_window(os.path.join(parent, "missing-workspace"))
+            unavailable = os.path.join(parent, "missing-workspace")
+            window = self._file_empty_state_window(unavailable)
 
             window._sync_file_browser_empty_state()
 
-            self.assertEqual(window.file_browser_empty_state.title_label.text(), "还没有选择工作区")
+            self.assertEqual(window.file_browser_empty_state.title_label.text(), "当前工作区不可用")
+            self.assertIn(unavailable, window.file_browser_empty_state.description_label.text())
             self.assertEqual(window.file_browser_empty_action, "")
             self.assertTrue(window.file_browser_empty_state.action_button.isHidden())
             self.assertTrue(window.file_product_toolbar.isHidden())
@@ -970,6 +972,7 @@ class TestDeliverableScanning(unittest.TestCase):
         window.file_browse_page = object()
         window.file_detail_page = object()
         window.config_manager = MagicMock()
+        window._sync_file_workspace_for_current_session = MagicMock()
         window.show_context_drawer = MagicMock()
 
         window.open_file_workspace_from_rail()
@@ -977,7 +980,114 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertEqual(window.file_workspace_view_mode, "browse")
         self.assertEqual(window.file_workspace_route_origin, "browse")
         self.assertIs(window.file_workspace_stack.current, window.file_browse_page)
+        window._sync_file_workspace_for_current_session.assert_called_once_with("files_rail")
         window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
+
+    def test_workspace_label_and_files_rail_use_shared_reconciled_entry(self):
+        source = inspect.getsource(MainWindow.__init__)
+
+        self.assertIn('self.open_file_workspace_from_rail("workspace_label")', source)
+        self.assertIn('self.open_file_workspace_from_rail("files_rail")', source)
+
+    def test_file_workspace_entry_reconciles_stale_root_for_chat_and_project(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            previous = os.path.join(base_dir, "previous")
+            os.makedirs(previous)
+            for source in ("chat", "project"):
+                with self.subTest(source=source):
+                    target = os.path.join(base_dir, source)
+                    os.makedirs(target)
+                    state = type(
+                        "_Session",
+                        (),
+                        {
+                            "session_id": f"{source}-session",
+                            "workspace_dir": target,
+                            "workspace_source": source,
+                            "persisted_conversation_meta": {},
+                        },
+                    )()
+                    window = MainWindow.__new__(MainWindow)
+                    window.sessions = {state.session_id: state}
+                    window.current_session_id = state.session_id
+                    window.workspace_dir = previous
+                    window.file_model = MagicMock()
+                    window.file_model.rootPath.return_value = previous
+                    window._apply_workspace_to_ui = MagicMock()
+
+                    with patch("main.log_ui_navigation"):
+                        changed = window._sync_file_workspace_for_current_session("workspace_label")
+
+                    self.assertTrue(changed)
+                    window._apply_workspace_to_ui.assert_called_once_with(
+                        os.path.normpath(os.path.abspath(target)),
+                        refresh_sidebar=False,
+                        remember_workspace=False,
+                        persist_default=False,
+                    )
+
+    def test_file_workspace_entry_preserves_state_when_root_is_current(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            state = type(
+                "_Session",
+                (),
+                {
+                    "session_id": "session-1",
+                    "workspace_dir": workspace,
+                    "workspace_source": "chat",
+                    "persisted_conversation_meta": {},
+                },
+            )()
+            navigation_state = {
+                "section": MainWindow.FILE_SECTION_ALL,
+                "tree_scroll": 37,
+                "expanded_paths": {os.path.join(workspace, "folder")},
+            }
+            window = MainWindow.__new__(MainWindow)
+            window.sessions = {state.session_id: state}
+            window.current_session_id = state.session_id
+            window.workspace_dir = workspace
+            window.file_workspace_navigation_state = navigation_state
+            window.file_model = MagicMock()
+            window.file_model.rootPath.return_value = workspace
+            window._apply_workspace_to_ui = MagicMock()
+
+            with patch("main.log_ui_navigation"):
+                changed = window._sync_file_workspace_for_current_session("files_rail")
+
+            self.assertFalse(changed)
+            self.assertIs(window.file_workspace_navigation_state, navigation_state)
+            window._apply_workspace_to_ui.assert_not_called()
+
+    def test_file_workspace_entry_clears_stale_root_without_current_workspace(self):
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-1",
+                "workspace_dir": "",
+                "workspace_source": "",
+                "persisted_conversation_meta": {},
+            },
+        )()
+        window = MainWindow.__new__(MainWindow)
+        window.sessions = {state.session_id: state}
+        window.current_session_id = state.session_id
+        window.workspace_dir = r"D:\previous"
+        window.file_model = MagicMock()
+        window.file_model.rootPath.return_value = r"D:\previous"
+        window._apply_workspace_to_ui = MagicMock()
+
+        with patch("main.log_ui_navigation"):
+            changed = window._sync_file_workspace_for_current_session("files_rail")
+
+        self.assertTrue(changed)
+        window._apply_workspace_to_ui.assert_called_once_with(
+            "",
+            refresh_sidebar=False,
+            remember_workspace=False,
+            persist_default=False,
+        )
 
     def test_deliverable_section_does_not_show_unmounted_legacy_buttons(self):
         class Stack:

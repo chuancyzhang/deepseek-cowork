@@ -19362,7 +19362,9 @@ class MainWindow(QMainWindow):
         self.ws_label = QPushButton("独立聊天")
         self.ws_label.setStyleSheet(apple_inline_project_chip_style(False))
         self.ws_label.setCursor(Qt.PointingHandCursor)
-        self.ws_label.clicked.connect(self.open_file_workspace_from_rail)
+        self.ws_label.clicked.connect(
+            lambda checked=False: self.open_file_workspace_from_rail("workspace_label")
+        )
         self.security_badge = QLabel("安全范围：仅工作区")
         self.security_badge.setStyleSheet(f"background: {DesignTokens.success_bg}; color: {DesignTokens.success_text}; border-radius: 12px; padding: 4px 10px; font-size: 11px; font-weight: 600;")
         self.security_badge.hide()
@@ -19406,7 +19408,9 @@ class MainWindow(QMainWindow):
             btn.setCheckable(True)
             btn.setStyleSheet(apple_tool_button_style(False))
             if tab_index == self.RIGHT_TAB_FILES:
-                btn.clicked.connect(lambda checked=False: self.open_file_workspace_from_rail())
+                btn.clicked.connect(
+                    lambda checked=False: self.open_file_workspace_from_rail("files_rail")
+                )
             else:
                 btn.clicked.connect(lambda checked=False, tab=tab_index: self.show_context_drawer(tab))
             context_rail_layout.addWidget(btn)
@@ -20386,8 +20390,11 @@ class MainWindow(QMainWindow):
         elif error:
             title, description, visible = "无法读取文件", str(error), True
             controls_visible = False
-        elif not workspace or not os.path.isdir(workspace):
+        elif not workspace:
             title, description, visible = "还没有选择工作区", "从左侧选择项目后，可以在这里查找和预览文件。", True
+            controls_visible = False
+        elif not os.path.isdir(workspace):
+            title, description, visible = "当前工作区不可用", f"目录不存在或无法访问：{workspace}", True
             controls_visible = False
         elif section == self.FILE_SECTION_DELIVERABLES and not self._filtered_deliverable_items():
             has_filters = bool(str(getattr(self, "file_browser_search_text", "") or "").strip()) or str(
@@ -20754,8 +20761,67 @@ class MainWindow(QMainWindow):
     def position_context_drawer(self):
         self.sync_context_drawer_layout()
 
-    def open_file_workspace_from_rail(self):
+    def _sync_file_workspace_for_current_session(self, entrypoint="files_rail"):
+        state = self.get_current_session()
+        target_workspace = self._workspace_dir_for_state(state) if state else ""
+        target_workspace = self._normalize_project_path(target_workspace)
+        window_workspace = self._normalize_project_path(getattr(self, "workspace_dir", ""))
+        model = getattr(self, "file_model", None)
+        model_workspace = window_workspace
+        if model is not None and hasattr(model, "rootPath"):
+            model_workspace = self._normalize_project_path(model.rootPath())
+        target_key = self._project_key(target_workspace)
+        window_key = self._project_key(window_workspace)
+        model_key = self._project_key(model_workspace)
+        requires_sync = target_key != window_key or target_key != model_key
+        log_ui_navigation(
+            "file_workspace_reconcile_begin",
+            entrypoint=str(entrypoint or "files_rail"),
+            session_id=str(getattr(state, "session_id", "") or ""),
+            window_workspace=window_workspace,
+            model_workspace=model_workspace,
+            target_workspace=target_workspace,
+            requires_sync=requires_sync,
+        )
+        if not requires_sync:
+            log_ui_navigation(
+                "file_workspace_reconcile_done",
+                entrypoint=str(entrypoint or "files_rail"),
+                session_id=str(getattr(state, "session_id", "") or ""),
+                workspace_dir=target_workspace,
+                changed=False,
+                available=bool(target_workspace and os.path.isdir(target_workspace)),
+            )
+            return False
+        try:
+            self._apply_workspace_to_ui(
+                target_workspace,
+                refresh_sidebar=False,
+                remember_workspace=False,
+                persist_default=False,
+            )
+        except Exception as exc:
+            log_ui_navigation(
+                "file_workspace_reconcile_error",
+                entrypoint=str(entrypoint or "files_rail"),
+                session_id=str(getattr(state, "session_id", "") or ""),
+                target_workspace=target_workspace,
+                error=str(exc),
+            )
+            raise
+        log_ui_navigation(
+            "file_workspace_reconcile_done",
+            entrypoint=str(entrypoint or "files_rail"),
+            session_id=str(getattr(state, "session_id", "") or ""),
+            workspace_dir=target_workspace,
+            changed=True,
+            available=bool(target_workspace and os.path.isdir(target_workspace)),
+        )
+        return True
+
+    def open_file_workspace_from_rail(self, entrypoint="files_rail"):
         self._set_file_workspace_view_mode("browse", origin="browse")
+        self._sync_file_workspace_for_current_session(entrypoint)
         self.set_file_workspace_section(
             self._file_navigation_state().get(
                 "section", getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL)

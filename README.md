@@ -6,9 +6,9 @@ DeepSeek Cowork is a Windows desktop agent workspace built around DeepSeek-style
 
 This project is a personal exploration and is not an official DeepSeek product.
 
-Current app version: **5.0.3**
+Current app version: **5.0.8**
 
-The 5.0.3 release baseline is documented here and in [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md).
+The 5.0.8 release baseline is documented here and in [RELEASE_NOTES_5.0.8.md](RELEASE_NOTES_5.0.8.md).
 
 ## What It Does
 
@@ -35,7 +35,7 @@ The 5.0.3 release baseline is documented here and in [RELEASE_NOTES_5.0.3.md](RE
 - **Prompt attachments**: paste clipboard images directly into the composer, review or remove their thumbnails, and send them as vision parts on vision-capable models. Text-only models block submission and guide model switching instead of silently dropping images. Small text files are inlined; large or non-text files retain explicit path/size guidance.
 - **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
 - **PPT Mode / PPT Agent**: a home card and the composer Agent picker provide the presentation workflow. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
-- **Right-side context drawer**: when explicit outputs exist, the drawer opens on a compact Deliverables view with an on-demand **Browse workspace** route; otherwise it opens directly on the real folder tree. Empty chat or project folders use a centered, low-noise state that hides irrelevant search controls and can open the actual directory in Explorer; filtered no-result states retain their controls and clear action. Search/filter state and navigation position are restored, while detail mode keeps Preview/Source and **Generate file…** actions.
+- **Right-side context drawer**: the project-name/direct-chat chip and adjacent Files & Deliverables button always open the active conversation workspace instead of retaining the last browsed project. When explicit outputs exist, the drawer opens on a compact Deliverables view with an on-demand **Browse workspace** route; otherwise it opens directly on the real folder tree. Empty folders use a centered, low-noise state, while unavailable workspaces show the actual failure without falling back to a stale directory. Search/filter state and navigation position are preserved when the root is unchanged, and detail mode keeps Preview/Source and **Generate file…** actions.
 - **Linear project sidebar**: projects preview the five most recent conversations plus every live or input-blocked conversation. Collapsed projects aggregate background activity, and conversation rows reserve a fixed status slot so long titles, hover actions, narrow widths, scaling, and theme changes cannot clip the running indicator.
 - **Structured observability**: runtime context, tool calls, and technical details remain first-level views, with readable Python/Shell/JSON arguments and separated output, error, and traceback rendering.
 - **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.

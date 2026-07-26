@@ -70,6 +70,7 @@ Cowork 采用交错式推理流程：
 - 直接执行面只有 `tool`
 - `skill` 只负责经验和边界，不作为独立调用协议
 - `skill.json` 可声明 `config_fields`；配置保存到本地 `skill_configs`，支持文本、密钥和带默认值的固定选项，运行脚本或工具时按字段声明显式注入环境变量。`mcp_server_presets` 由 `SkillManager` 渲染为 `stdio` 或 Streamable HTTP server 并按 ID upsert；`skill_python` runtime 复用 Skill 隔离依赖目录，托管认证只持久化配置引用，access/refresh token 留在进程内存并在请求前解析。
+- `eastmoney-miaoxiang` 作为一个默认关闭的父 Skill 内置 6 个官方子 Skill；父级配置一次保存 `MX_APIKEY`/`MX_API_URL` 并注入全部脚本。`run_skill_script` 的模型可见参数不变，内部额外把会话工作区注入 `COWORK_WORKSPACE_DIR`，脚本包目录继续作为 cwd。妙想脚本只记录入口、接口路径、耗时、状态和错误码，不记录密钥或请求正文；自选、模拟组合和社区写操作必须显式触发，发文不会隐式串联互动。
 - 标准 Agent Skill 安装保留上游根目录 `SKILL.md`，由系统生成 `skill.json` 作为本地检索、能力工作台和调试索引
 - 模型选择是对话级的下一轮输入参数，不是底层全局运行态；UI 提交时把当前对话的 `selected_model_id` 和完整 `selected_model_profile` 写入 `run_context`，本地 worker、daemon 和子智能体均优先使用该快照创建 provider。运行中切换模型只更新会话下一轮选择，不会影响已启动流程。
 - OpenAI 兼容模型在模型级保存 `api_protocol=chat_completions|responses`；旧配置缺少字段时保持 Chat Completions，新建 GPT‑5.6 默认 Responses。Responses provider 将消息、函数调用和函数结果转换为 typed Items，把 Worker 提供的会话级 key 直接写入顶层 `prompt_cache_key`，并把流式正文、reasoning summary、函数参数、用量和错误重新投影为现有统一事件协议；Chat Completions 继续仅按原有 `prompt_cache_key_param` 配置注入缓存字段；GPT‑5.6 可配置 `none/low/medium/high/xhigh/max` 推理强度。

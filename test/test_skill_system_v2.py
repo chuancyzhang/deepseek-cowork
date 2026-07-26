@@ -1364,6 +1364,8 @@ class TestSkillSystemV2(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
+        diagnostic_events = []
+        observability = types.SimpleNamespace(emit=lambda payload: diagnostic_events.append(payload))
         with patch.object(sm, "_prepare_skill_dependencies", return_value={"ok": True, "message": "ready"}) as prepare_mock:
             with patch.object(
                 module,
@@ -1382,7 +1384,7 @@ class TestSkillSystemV2(unittest.TestCase):
                     "scripted-skill",
                     "hello",
                     args=["--flag"],
-                    _context={"skill_manager": sm},
+                    _context={"skill_manager": sm, "observability_signal": observability},
                 )
 
         result = json.loads(payload)
@@ -1397,6 +1399,12 @@ class TestSkillSystemV2(unittest.TestCase):
         self.assertEqual(called_args[2], "python")
         self.assertEqual(called_kwargs["args"], ["--flag"])
         self.assertEqual(called_kwargs["cwd"], skill_dir)
+        self.assertEqual(
+            called_kwargs["extra_env"]["COWORK_WORKSPACE_DIR"],
+            os.path.abspath(self.temp_dir),
+        )
+        self.assertEqual([event["status"] for event in diagnostic_events], ["start", "finish"])
+        self.assertTrue(all("args" not in event for event in diagnostic_events))
 
     def test_import_skill_installs_standard_agent_skill_with_original_skill_md(self):
         source_root = tempfile.mkdtemp(dir=self.temp_dir)

@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 
 from PySide6.QtCore import QObject, Qt
 
@@ -342,7 +343,15 @@ def grep(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=
     )
 
 
-def run_skill_script(skill_name, script_name, args=None, input_text=None, timeout_seconds=120, _context=None):
+def run_skill_script(
+    skill_name,
+    script_name,
+    args=None,
+    input_text=None,
+    timeout_seconds=120,
+    _context=None,
+    workspace_dir=None,
+):
     """
     执行目标 skill 在 script_entries 中声明的脚本入口。
     """
@@ -399,8 +408,30 @@ def run_skill_script(skill_name, script_name, args=None, input_text=None, timeou
 
     default_args = target.get("default_args") if isinstance(target.get("default_args"), list) else []
     runtime = str(target.get("runtime") or "bash").strip().lower() or "bash"
+    observability = (_context or {}).get("observability_signal") if isinstance(_context, dict) else None
+    started_at = time.time()
+
+    def emit_diagnostic(status, *, exit_code=None, error_type=""):
+        if not hasattr(observability, "emit"):
+            return
+        observability.emit({
+            "type": "skill_script",
+            "status": status,
+            "skill_name": skill_name,
+            "script_name": target.get("name") or script_name,
+            "runtime": runtime,
+            "exit_code": exit_code,
+            "error_type": error_type,
+            "duration_seconds": round(max(0.0, time.time() - started_at), 3),
+            "timestamp": time.time(),
+        })
+
+    emit_diagnostic("start")
     try:
         extra_env = skill_manager.build_skill_config_env(skill_name) if hasattr(skill_manager, "build_skill_config_env") else {}
+        effective_workspace = workspace_dir or getattr(skill_manager, "workspace_dir", "") or ""
+        if effective_workspace:
+            extra_env["COWORK_WORKSPACE_DIR"] = os.path.abspath(effective_workspace)
         result = run_skill_script_in_sandbox(
             skill_name,
             script_abs_path,
@@ -423,10 +454,17 @@ def run_skill_script(skill_name, script_name, args=None, input_text=None, timeou
             "command": result.get("command", ""),
             "cwd": result.get("cwd", record["path"]),
         }
+        emit_diagnostic(
+            "finish" if payload["ok"] else "error",
+            exit_code=payload["exit_code"],
+            error_type="" if payload["ok"] else "nonzero_exit",
+        )
         return json.dumps(payload, ensure_ascii=False)
     except subprocess.TimeoutExpired:
+        emit_diagnostic("error", error_type="timeout")
         return f"Error: Script '{script_name}' timed out after {timeout_seconds} seconds."
     except Exception as e:
+        emit_diagnostic("error", error_type=type(e).__name__)
         return f"Error executing skill script '{script_name}': {str(e)}"
 
 

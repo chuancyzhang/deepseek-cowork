@@ -57,6 +57,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 - 支持安装符合标准的 Agent Skill 包，原始 `SKILL.md` 保留为权威说明，`skill.json` 仅作为本地检索、工作台和调试元数据
 - MCP 服务器可通过 `stdio` 或 Streamable HTTP 接入
 - 腾讯文档、飞书文档、钉钉文档、WeKnora、ShowDoc MCP、Airflow 与官方 Superset MCP 以独立可选 skill 内置。保存 Skill 配置会自动生成、更新并启用其托管 MCP，测试连接作为独立诊断动作。WeKnora、Airflow 复用隔离的 Skill Python 运行环境并按需启动 stdio；Superset 只连接运行在远端 Superset 环境中的官方 MCP 服务，并使用用户账号密码在内存中获取和刷新 JWT，不把 access/refresh token 写入 MCP 配置
+- `eastmoney-miaoxiang` 是默认关闭的东方财富妙想能力包，以一个能力中心入口共享 `MX_APIKEY` 和 `MX_API_URL`，内部提供金融数据、资讯搜索、智能选股、自选股、模拟组合和 AI 社区 6 个脚本入口。产物写入当前会话工作区；自选股变更、模拟买卖/撤单和社区发文/互动均要求用户明确提出，不在发文后隐式追加点赞或评论
 - `browser-automation` 是默认关闭的随包插件，执行后端为 Tencent BrowserSkill。启用时若环境未就绪，应用提供“前往设置”入口；“组件与依赖”中的“可选浏览器能力”负责下载并校验固定版本 `bsk` CLI、引导用户安装 Chrome/Edge 扩展，并在 `bsk doctor` 后通过临时 Agent Window 验证真实执行通道。插件不使用 Playwright/UIAutomation，也不在缺失组件时静默回退
 - `web-search` 是默认关闭的随包插件，保留 `search_web` 与 `read_web_article` 兼容接口，以 AnySearch v3.0.1 或 `tavily-python==0.7.26` 提供搜索和正文提取。两个 API Key 均为可选配置，无 Key 时明确标记匿名/Keyless 限额；供应商失败后只返回根因和可选服务，不自动切换。AnySearch 邮箱注册属于外部账户创建，必须取得用户确认，完整 Key 仅写入本地 Skill 配置且不进入聊天或日志
 - `tool` 是直接执行面，`skill` 是经验包

@@ -1,0 +1,137 @@
+{
+  "version": 2,
+  "name": "eastmoney-miaoxiang",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "Eastmoney Miaoxiang financial skill pack for market data, financial search, stock screening, watchlists, simulated portfolios, and AI community operations.",
+  "description_cn": "东方财富妙想金融能力包，支持金融数据、资讯搜索、智能选股、自选股、模拟组合和 AI 社区。",
+  "tags": [
+    "eastmoney",
+    "miaoxiang",
+    "mxskills",
+    "finance",
+    "stock",
+    "market-data",
+    "东方财富",
+    "妙想",
+    "金融数据",
+    "资讯搜索",
+    "智能选股",
+    "自选股",
+    "模拟组合"
+  ],
+  "triggers": [
+    "东方财富",
+    "东方财富妙想",
+    "妙想Skills",
+    "妙想金融数据",
+    "妙想资讯搜索",
+    "妙想智能选股",
+    "东方财富自选股",
+    "东方财富模拟组合",
+    "妙想AI社区"
+  ],
+  "anti_triggers": [
+    "AKShare",
+    "Superset",
+    "Airflow"
+  ],
+  "tool_refs": [
+    "run_skill_script"
+  ],
+  "references": [
+    "SOURCE.md",
+    "mx-data/SKILL.md",
+    "mx-search/SKILL.md",
+    "mx-xuangu/SKILL.md",
+    "mx-zixuan/SKILL.md",
+    "mx-moni/SKILL.md",
+    "mx-poster/SKILL.md"
+  ],
+  "script_refs": [
+    "mx-data/mx_data.py",
+    "mx-search/mx_search.py",
+    "mx-xuangu/mx_xuangu.py",
+    "mx-zixuan/mx_zixuan.py",
+    "mx-moni/mx_moni.py",
+    "mx-poster/mx_poster.py"
+  ],
+  "script_entries": [
+    {
+      "name": "mx_data",
+      "path": "mx-data/mx_data.py",
+      "runtime": "python",
+      "description": "Query Eastmoney financial market, company, and relationship data."
+    },
+    {
+      "name": "mx_search",
+      "path": "mx-search/mx_search.py",
+      "runtime": "python",
+      "description": "Search Eastmoney financial news, announcements, research, policies, and rules."
+    },
+    {
+      "name": "mx_xuangu",
+      "path": "mx-xuangu/mx_xuangu.py",
+      "runtime": "python",
+      "description": "Screen stocks from natural-language conditions."
+    },
+    {
+      "name": "mx_zixuan",
+      "path": "mx-zixuan/mx_zixuan.py",
+      "runtime": "python",
+      "description": "Query or explicitly modify the user's Eastmoney watchlist."
+    },
+    {
+      "name": "mx_moni",
+      "path": "mx-moni/mx_moni.py",
+      "runtime": "python",
+      "description": "Query or explicitly operate an Eastmoney simulated portfolio."
+    },
+    {
+      "name": "mx_poster",
+      "path": "mx-poster/mx_poster.py",
+      "runtime": "python",
+      "description": "Query or explicitly operate Eastmoney Miaoxiang AI community content."
+    }
+  ],
+  "config_fields": [
+    {
+      "name": "MX_APIKEY",
+      "label": "妙想 API Key",
+      "kind": "secret",
+      "required": true,
+      "env": "MX_APIKEY",
+      "help": "仅保存在 Cowork 本地能力配置中，运行脚本时临时注入。",
+      "placeholder": "请输入妙想 Skills API Key",
+      "action_label": "获取 API Key",
+      "action_url": "https://dl.dfcfs.com/m/itc4"
+    },
+    {
+      "name": "MX_API_URL",
+      "label": "妙想 API 地址",
+      "kind": "text",
+      "required": false,
+      "env": "MX_API_URL",
+      "default": "https://mkapi2.dfcfs.com/finskillshub",
+      "help": "默认使用东方财富妙想官方 API 地址。",
+      "placeholder": "https://mkapi2.dfcfs.com/finskillshub"
+    }
+  ],
+  "python_dependencies": [
+    "requests>=2.31,<3",
+    "pandas>=2,<3",
+    "openpyxl>=3.1,<4"
+  ],
+  "node_dependencies": [],
+  "workflow": [
+    "Read the matching vendored sub-skill reference before choosing arguments.",
+    "Use run_skill_script with one of the six declared script entries.",
+    "Use the Cowork-managed MX_APIKEY and MX_API_URL configuration only.",
+    "Require an explicit user request before watchlist changes, simulated trades or cancellation, publishing, liking, or replying.",
+    "Never add automatic community interaction after publishing unless every action was explicitly requested."
+  ]
+}
+

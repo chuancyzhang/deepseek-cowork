@@ -15975,7 +15975,7 @@ class ToolCallCard(QFrame):
             
         if agent_id not in self.sub_agent_widgets:
             # Create new row for agent
-            row_widget = QWidget()
+            row_widget = QWidget(self.sub_agents_container)
             row_layout = QVBoxLayout(row_widget)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(2)
@@ -15984,19 +15984,19 @@ class ToolCallCard(QFrame):
             head_layout.setContentsMargins(0, 0, 0, 0)
             head_layout.setSpacing(6)
             
-            icon = QLabel()
+            icon = QLabel(row_widget)
             icon.setPixmap(qta.icon('fa5s.robot', color=DesignTokens.text_secondary).pixmap(12, 12))
             
             display_name = agent_name or agent_id
             if agent_name and agent_name != agent_id:
                 display_name = f"{agent_name} ({agent_id[:8]})"
-            name = QLabel(display_name)
+            name = QLabel(display_name, row_widget)
             name.setStyleSheet(f"font-weight: 700; color: {DesignTokens.text_primary}; font-size: 11px;")
             
-            status_label = QLabel(status)
+            status_label = QLabel(status, row_widget)
             status_label.setStyleSheet(apple_status_chip_style(status, subtle=True))
 
-            detail_label = QLabel("")
+            detail_label = QLabel("", row_widget)
             detail_label.setWordWrap(True)
             detail_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 10px;")
             
@@ -16205,7 +16205,7 @@ class SubAgentEventTile(QFrame):
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(2)
 
-        self.title_label = QLabel(sub_agent_event_title(self.event_payload))
+        self.title_label = QLabel(sub_agent_event_title(self.event_payload), self)
         self.title_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 700;")
 
         self.summary_label = QLabel(sub_agent_event_summary(self.event_payload))
@@ -16356,7 +16356,7 @@ class SubAgentEventSummaryRow(QFrame):
         time_text = sub_agent_event_time_text(self.event_payload)
         if time_text:
             meta_bits.append(time_text)
-        self.meta_label = QLabel(" · ".join(bit for bit in meta_bits if bit))
+        self.meta_label = QLabel(" · ".join(bit for bit in meta_bits if bit), self)
         self.meta_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.meta_label.setStyleSheet(
             f"color: {status_color(self.event_payload.get('status'))}; font-size: 10px; font-weight: 600;"
@@ -16365,7 +16365,7 @@ class SubAgentEventSummaryRow(QFrame):
         layout.addLayout(top_row)
 
         summary_text = sub_agent_event_summary(self.event_payload)
-        self.summary_label = QLabel(preview_text(summary_text, limit=280))
+        self.summary_label = QLabel(preview_text(summary_text, limit=280), self)
         self.summary_label.setWordWrap(True)
         self.summary_label.setStyleSheet(
             f"color: {DesignTokens.text_secondary}; font-size: 11px; line-height: 1.4;"
@@ -16394,25 +16394,25 @@ class SubAgentTimelineCard(QFrame):
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
 
-        icon = QLabel("●")
+        icon = QLabel("●", self)
         icon.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 12px; font-weight: 700;")
         head.addWidget(icon)
 
-        self.name_label = QLabel(self.agent_name)
+        self.name_label = QLabel(self.agent_name, self)
         self.name_label.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 13px; font-weight: 700;")
         head.addWidget(self.name_label)
 
-        self.count_label = QLabel("0 步")
+        self.count_label = QLabel("0 步", self)
         self.count_label.setStyleSheet(f"color: {DesignTokens.text_tertiary}; font-size: 11px;")
         head.addWidget(self.count_label)
         head.addStretch()
 
-        self.status_label = QLabel("等待")
+        self.status_label = QLabel("等待", self)
         self.status_label.setStyleSheet(apple_status_chip_style("pending", subtle=True))
         head.addWidget(self.status_label)
         layout.addLayout(head)
 
-        self.notice_label = QLabel()
+        self.notice_label = QLabel(self)
         self.notice_label.setWordWrap(True)
         self.notice_label.setVisible(False)
         self.notice_label.setStyleSheet(
@@ -16441,7 +16441,7 @@ class SubAgentTimelineCard(QFrame):
         self.status_label.setText(status_label_text(event.get("status")))
         self.status_label.setStyleSheet(apple_status_chip_style(event.get("status"), subtle=True))
         try:
-            tile = SubAgentEventSummaryRow(event)
+            tile = SubAgentEventSummaryRow(event, parent=self)
         except Exception:
             log_sub_agent_runtime(
                 "ui_sub_agent_event_row_failed",
@@ -16450,7 +16450,10 @@ class SubAgentTimelineCard(QFrame):
                 content_len=_sub_agent_payload_content_len(event),
                 traceback=traceback.format_exc(),
             )
-            fallback = QLabel(sub_agent_event_title(event) + " | " + sub_agent_event_summary(event))
+            fallback = QLabel(
+                sub_agent_event_title(event) + " | " + sub_agent_event_summary(event),
+                self,
+            )
             fallback.setWordWrap(True)
             fallback.setStyleSheet(
                 f"color: {DesignTokens.text_secondary}; font-size: 11px; "
@@ -16475,7 +16478,7 @@ class SubAgentMonitor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        self.notice_label = QLabel()
+        self.notice_label = QLabel(self)
         self.notice_label.setWordWrap(True)
         self.notice_label.setVisible(False)
         self.notice_label.setStyleSheet(
@@ -16484,12 +16487,12 @@ class SubAgentMonitor(QWidget):
         )
         layout.addWidget(self.notice_label)
 
-        self.scroll = QScrollArea()
+        self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
         self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         layout.addWidget(self.scroll)
 
-        self.content = QWidget()
+        self.content = QWidget(self.scroll)
         self.content_layout = QVBoxLayout(self.content)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(10)
@@ -16534,7 +16537,11 @@ class SubAgentMonitor(QWidget):
 
             card = self.agents.get(agent_id)
             if card is None or not _qt_object_alive(card):
-                card = SubAgentTimelineCard(agent_id, agent_name=payload.get("agent_name") or agent_id)
+                card = SubAgentTimelineCard(
+                    agent_id,
+                    agent_name=payload.get("agent_name") or agent_id,
+                    parent=self.content,
+                )
                 self.agents[agent_id] = card
                 self.content_layout.insertWidget(max(0, self.content_layout.count() - 1), card)
             else:
@@ -16576,7 +16583,7 @@ class SubAgentMonitorWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
-        self.monitor = SubAgentMonitor()
+        self.monitor = SubAgentMonitor(self)
         layout.addWidget(self.monitor)
 
 class SessionActivityIndicator(QWidget):
@@ -19303,11 +19310,11 @@ class MainWindow(QMainWindow):
         self.right_stack.addWidget(self.tool_details_tab)
 
         # Sub-Agent Monitor
-        self.sub_agent_tab = QWidget()
+        self.sub_agent_tab = QWidget(self.right_stack)
         sub_agent_layout = QVBoxLayout(self.sub_agent_tab)
         sub_agent_layout.setContentsMargins(14, 12, 14, 14)
         sub_agent_layout.setSpacing(8)
-        self.sub_agent_monitor = SubAgentMonitor()
+        self.sub_agent_monitor = SubAgentMonitor(self.sub_agent_tab)
         sub_agent_layout.addWidget(self.sub_agent_monitor, 1)
         self.right_stack.addWidget(self.sub_agent_tab)
 

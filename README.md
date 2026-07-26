@@ -1,81 +1,72 @@
 # DeepSeek Cowork
 
-[中文文档](README_CN.md) | [English](README.md)
+[中文](README_CN.md) | [English](README.md) | [Documentation](docs/index.md)
 
-DeepSeek Cowork is a Windows desktop agent workspace built around DeepSeek-style reasoning plus tool use. It combines chat, project-scoped file work, skill-based capability extension, automation, and optional daemon execution in one PySide6 app.
+DeepSeek Cowork is a Windows desktop agent workspace that brings chat, project
+files, tool execution, skills, automation, long-term context, and deliverable
+preview into one observable and recoverable workflow.
 
-This project is a personal exploration and is not an official DeepSeek product.
+This is a personal exploration project, not an official DeepSeek product.
 
 Current app version: **5.0.8**
 
-The 5.0.8 release baseline is documented here and in [RELEASE_NOTES_5.0.8.md](RELEASE_NOTES_5.0.8.md).
+## Three Product Ideas
 
-## What It Does
+### Everything is Tool
 
-- Run a local desktop agent that can read files, use tools, and complete multi-step tasks.
-- Keep project work inside a selected workspace boundary.
-- Extend capabilities through built-in skills, bundled optional plugins, user skills, and MCP tools.
-- Manage reusable agents, prompt-based automation tasks, scheduled runs, and long-term memory from the UI.
-- Work in a light, compact Linear-inspired desktop surface with flat navigation, clear focus states, and an on-demand context drawer.
-- Preview common deliverables directly inside the app, including Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX.
-- Optionally enable the default-off `visualize` plugin to embed sandboxed interactive charts, explorers, simulations, and UI previews in replies. Fragments remain self-contained by default and may load version-pinned static resources only from the built-in trusted CDN allowlist; runtime data requests stay blocked. When disabled, the plugin registers no generation tools and only verified historical artifacts can load lazily in read-only mode.
-- Use **PPT Agent** from PPT Mode to turn topics, source files, templates, existing conversations, or visual-slide requests into presentation-shaped HTML drafts before exporting.
-- Turn any assistant reply into a previewable office draft, with Free, PPT, Design, and DOCX output profiles; office-draft generation turns are collapsed into a task card by default while result files stay visible below the card.
-- Generate PPTX, DOCX, or PDF from an HTML draft in a folded task card with local action feedback; the drawer stays usable or closable while completion returns through toast and refreshed deliverable shortcuts.
-- Filter deliverables by registered file category and sort them by modified time, name, or size from two explicit controls. In-app notices and confirmations use Linear-style surfaces, while closable notifications stack at the bottom right and pause on hover.
+Every model-executable action enters the Agent Loop through one Tool interface.
+File operations, commands, MCP, user interaction, theme configuration, and
+external services share the same schema, permission, observability, and result
+protocol.
 
-## Product Surface
+Skills provide guidance and experience, Agents provide roles and run context,
+and automation provides triggers. None of them creates a second execution
+protocol.
 
-- **Conversation + project model**: direct chats get their own workspace under a configurable application-data root (`%APPDATA%\DeepSeekCowork` when installed or `user_data` in portable mode), or you can explicitly bind an empty conversation to a project workspace. Empty chats stay out of history; the first accepted message is journaled for recovery and projected into the sidebar immediately while the versioned background save queue catches up.
-- **OpenAI protocols**: each OpenAI-compatible model can use Chat Completions or Responses independently. Newly added GPT-5.6 models default to Responses; other models remain on Chat Completions unless changed explicitly. Responses requests automatically send the stable conversation-scoped `prompt_cache_key`; Chat Completions keeps its existing provider-configured behavior.
-- **Conversation-scoped model choice**: the model selector is saved per conversation and applies to the next turn. All model channels may be removed and saved; an unconfigured composer routes the user to Model services.
-- **Natural conversational reasoning**: without in-flight guidance, every reasoning/tool round and stage reply stays inside one assistant-turn container in real execution order. Each stage keeps its own compact “deep thinking · duration” disclosure and a short hairline divider; empty process areas neither draw a timeline nor reserve height. Stage replies remain readable but have no copy, office-draft, or other message actions; only the final answer exposes those actions. In-flight guidance remains a dedicated conversational boundary and starts a new assistant container at its actual send position.
-- **Compact composer tools**: the anchored `+` popover is a single in-window overlay that adds files, prioritizes skills, or captures experience as a Skill. Only one product popover remains active at a time, closed popovers are released, and every action-row label is parented before it becomes visible so opening the panel cannot flash native helper windows.
-- **Restorable conversation state**: switching conversations preserves drafts, scroll position, drawer state, and expanded process nodes. Editing an earlier user message replaces only that node and its downstream branch, preserving earlier widgets and the reading anchor without deleting workspace files.
-- **Prompt attachments**: paste clipboard images directly into the composer, review or remove their thumbnails, and send them as vision parts on vision-capable models. Text-only models block submission and guide model switching instead of silently dropping images. Small text files are inlined; large or non-text files retain explicit path/size guidance.
-- **Office draft actions**: generate Free, PPT, Design, or DOCX-style HTML drafts from an assistant reply, with the generation process folded into a compact task card and deliverable shortcuts kept outside the folded process.
-- **PPT Mode / PPT Agent**: a home card and the composer Agent picker provide the presentation workflow. PPT Agent selects between the default PPT HTML draft flow and built-in html-ppt strategies for Guizang PPT Skill, Frontend Slides, and Huashu Design, then registers the result as an HTML deliverable for the existing PPTX/DOCX/PDF conversion path.
-- **Right-side context drawer**: the project-name/direct-chat chip and adjacent Files & Deliverables button always open the active conversation workspace instead of retaining the last browsed project. When explicit outputs exist, the drawer opens on a compact Deliverables view with an on-demand **Browse workspace** route; otherwise it opens directly on the real folder tree. Empty folders use a centered, low-noise state, while unavailable workspaces show the actual failure without falling back to a stale directory. Search/filter state and navigation position are preserved when the root is unchanged, and detail mode keeps Preview/Source and **Generate file…** actions.
-- **Linear project sidebar**: projects preview the five most recent conversations plus every live or input-blocked conversation. Collapsed projects aggregate background activity, and conversation rows reserve a fixed status slot so long titles, hover actions, narrow widths, scaling, and theme changes cannot clip the running indicator.
-- **Structured observability**: runtime context, tool calls, and technical details remain first-level views, with readable Python/Shell/JSON arguments and separated output, error, and traceback rendering.
-- **Token usage chip**: view accumulated conversation tokens and cached input usage from a light click-to-open detail popover.
-- **Stable prompt cache prefix**: automatic skill-context matches are used only during the active turn and are not persisted into conversation history, keeping later prompt prefixes easier for providers to cache.
-- **Immediate Skill availability**: message submission reads an immutable process catalog snapshot and never scans Skill folders, imports implementations, or installs dependencies. Explicit change events refresh the UI and daemon, while active turns switch snapshots at the next model-request boundary.
-- **First-use dependencies**: declared Python and Node dependencies are prepared only before the first actual tool call. Matching dependency hashes share a single flight; failures persist and require an explicit retry or declaration change.
-- **Lightweight startup**: the main workspace becomes interactive before the Skill catalog snapshot, MCP tool probing, deliverable WebEngine preview creation, and deeper sidebar history pages finish in the background or on first use.
-- **Durable history restore**: conversation metadata and messages commit in one SQLite transaction. A checksummed latest-snapshot journal protects accepted messages and throttled streaming checkpoints until the matching save revision is acknowledged; startup reconciles unfinished snapshots and marks recovered live runs as interrupted.
-- **Answer-first long history**: stored conversations are read and grouped off the UI thread; the latest 12 turns appear incrementally with final answers first, while reasoning and tool details materialize in bounded batches only when expanded.
-- **Main-content management pages**: the sidebar keeps only Capabilities, Automation, and Settings as stable destinations. They switch inside the main content area and restore the prior conversation instead of opening large blocking dialogs.
-- **Settings center**: manage appearance, models, agents, personality and memory, workspace defaults, archived projects and conversations, MCP servers, enterprise messaging, and runtime components through consistent list/detail pages. Enterprise messaging runs one selected channel at a time: Feishu can create or update its app through a QR flow, while WeCom requires only Bot ID and Secret; connecting saves this subsection and restarts the gateway immediately. Image-backed custom themes use their asset manifests for dirty-state tracking instead of serializing binary image caches. Component status uses the last successful snapshot and is probed only after an explicit user action; opening or saving Settings never triggers a scan.
-- **AI-configurable workspace theme packages**: Cowork keeps its built-in Linear light theme as a code-only, read-only baseline. Each validated `.cowork-theme` v2 package has one fixed `workspace_scene` that paints raster imagery, grids, and textures once across the left/center/right workspace below the native title bar. Sidebars, chat, composer, and home add only transparent, tinted, or opaque materials, so scrolling and route changes cannot restart or rescale the scene. `brand.title` may change the native caption while Windows retains the title-bar appearance and controls. Actions, accessibility text, region ownership, and protected controls remain code-defined; legacy v1 JSON migrates only on explicit save, and preview revisions remain isolated and approval-bound.
-- **Home toolkit prompt**: new conversations point users to Settings for the document and data-analysis toolkits before Office/PDF, spreadsheet, analysis, and visualization work.
-- **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
-- **Skill center**: search, filter, enable, configure, and debug skills without restarting. Skill catalog changes use bottom-right system Toasts instead of chat messages and do not alter the conversation's explicitly selected Skills.
-- **Real-browser automation**: the default-off `browser-automation` plugin uses Tencent BrowserSkill. After enabling it, install the pinned and SHA-256-verified `bsk` CLI from **Settings → Components & Dependencies → Optional Browser Capability**, install the Chrome/Edge extension, and run the temporary Agent Window execution probe before the AI reads or operates logged-in pages.
-- **Two-provider web search**: the default-off `web-search` plugin uses AnySearch v3.0.1 or Tavily. Its configuration page selects a default provider, stores either optional API key, and links to official registration pages. Without a key it uses the provider's lower-limit anonymous/keyless mode; provider failures remain explicit and never trigger an automatic switch.
+### AI-Designed UI
 
-## Skill Model
+Cowork lets AI design the interface without letting AI take over application
+code. AI can configure theme tokens, the workspace scene, surface materials,
+component styles, constrained layout, icons, and allowlisted display copy.
 
-Cowork treats tools as the only direct execution surface.
+Every theme passes schema validation, revision-bound isolated preview, and user
+confirmation. Critical controls, region ownership, actions, and recovery paths
+remain protected by code.
 
-- `tool`: executable capability the model can call directly
-- `skill`: structured experience package that guides when and how to use tools
+### Experience System
 
-Skills can provide guidance only, or guidance plus tools. Built-in skills live in `skills/`. Bundled optional plugins and user-created skills live in `ai_skills/`. Cowork can install standard Agent Skill packages as user AI skills, preserving the original root `SKILL.md` and generating `skill.json` only for local discovery, workbench, and debug metadata. PPT Agent's Guizang PPT Skill, Frontend Slides, and Huashu Design strategies are bundled as real `ai_skills` packages, so their upstream `SKILL.md`, resources, and source metadata can enter the runtime context and observability view when selected. The default-off Eastmoney Miaoxiang bundle exposes six vendored financial sub-skills through one Skill Center entry and one local `MX_APIKEY` configuration. Skills may declare text, secret, or fixed-option configuration fields and inject saved values into scripts, tools, or isolated Skill Python MCP runtimes. Saving a Skill-owned MCP configuration automatically materializes and enables its managed server; connection testing remains a separate diagnostic action. Managed MCP authentication persists only a Skill configuration reference; short-lived tokens are not written into server headers.
+After a task, the Agent can record tool techniques, failure patterns, and
+recovery methods as structured experience. Experience belongs to a specific
+Skill or `general-experience` and is disclosed only for relevant work.
 
-See [SKILL_SYSTEM.md](SKILL_SYSTEM.md) for the detailed model.
+This is not model fine-tuning. History provides evidence, memory keeps durable
+facts and preferences, experience improves operating methods, and Skills package
+reusable capability.
 
-## Installation
+See the [product document](docs/product.md) for the full model.
 
-### Windows executable
+## Capabilities
+
+- Run a local Agent inside a conversation workspace or explicit project boundary.
+- Interleave reasoning, Tool calls, stage replies, and the final answer.
+- Steer or stop running work, answer approval requests, and inspect observability.
+- Preview Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX deliverables.
+- Generate office drafts and convert HTML work products to PPTX, DOCX, or PDF.
+- Extend the runtime with built-in, bundled, user, and standard Agent Skills.
+- Connect MCP Tools over `stdio` or Streamable HTTP.
+- Manage models, Agents, automation, memory, themes, enterprise messaging, and optional components.
+
+## Install
+
+### Windows release
 
 1. Download the latest package from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
-2. Unzip it.
+2. Extract the ZIP.
 3. Run `deepseek-cowork.exe`.
 
 ### Run from source
 
-Prerequisite: Python 3.10+
+Requires Python 3.10+.
 
 ```bash
 git clone https://github.com/chuancyzhang/deepseek-cowork.git
@@ -84,58 +75,39 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-### Packaging runtime bootstrap
+### Build a release
 
-Before running `pyinstaller deepseek-cowork.spec`, fetch the pinned runtime bundle:
+Prepare the pinned runtime first:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 ```
 
-This prepares the packaged Git Bash runtime. Node.js is installed as an optional runtime component from Settings.
-
-Create release artifacts with a clean build and the shared audit/packaging command:
+Then run the clean build and package audit:
 
 ```powershell
 .\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
 .\.venv\Scripts\python.exe .\scripts\package_release.py
 ```
 
-The spec collects only the Qt Widgets, WebEngine, PDF, and Chinese/English runtime resources used by the desktop application, excluding Qt debug/QML payloads, extra translations, and sandbox-Python development files. `package_release.py` verifies the required Python, Git Bash, WebEngine, and PDF files; enforces 850 MB distribution and 375 MB ZIP budgets; creates a reproducible standard-Deflate level 9 archive rooted at `deepseek-cowork/`; and writes `dist/deepseek-cowork-package-report.json`.
+## Quick Start
 
-## Basic Usage
+1. Configure and test a model under **Settings → Models & Services**.
+2. Start a standalone conversation or create one from a project.
+3. Describe the goal and attach files or select capabilities when needed.
+4. Follow Tool activity and observability; review any approval before submitting.
+5. Preview results in **Files & Deliverables** and continue converting if needed.
+6. Store durable preferences as memory and reusable methods as experience or a Skill.
 
-1. Open **Settings** and configure a model service.
-2. Start a direct chat with its auto-created conversation workspace, or explicitly attach an empty conversation to a project.
-3. Ask the agent to inspect files, edit code, generate reports, or run automation.
-4. For document, spreadsheet, or data-analysis tasks, use the home prompt to open **Settings → Components & dependencies** and install the document and data-analysis toolkits.
-5. Enable optional skills from **Skill Center** or install a standard Agent Skill with `install_agent_skill`. Browser automation directs you to **Settings → Components & Dependencies → Optional Browser Capability** to install BrowserSkill and its Chrome/Edge extension. Tencent Docs, Feishu Docs, DingTalk Docs, WeKnora, ShowDoc MCP, Airflow, official Superset MCP, and the Eastmoney Miaoxiang financial bundle are included as optional skills. Eastmoney requires its API Key in the Skill configuration; remote watchlist changes, simulated trades, posts, likes, and replies require an explicit request. For Skill-owned MCP capabilities, saving the Skill configuration automatically enables the managed MCP entry; use the separate connection test only when you need to verify tools or diagnose the endpoint.
-6. Use the home **PPT Agent** card or the built-in **PPT Agent** inside the Agent module when you want a focused presentation workflow; choose automatic strategy selection, a web/technical/business/template preference, optional source files, and an optional PPTX template.
-7. Use the drawer to browse files, preview deliverables, convert HTML drafts, and inspect tool activity.
-8. Maintain long-term context under **Settings → Personality & Memory**, or choose **沉淀为 Skill** from the `+` popover or an assistant response. Both evidence analysis and draft compilation are handed off to the background only after a persistent task row is visible in the source conversation. The sidebar keeps the source conversation's Skill status observable while normal chat continues; a bottom-right Toast is shown only when a stage finishes after the user has switched to another conversation.
+## Documentation
 
-## Architecture
-
-- `main.py`: PySide6 desktop UI
-- `core/agent.py`: reasoning loop and tool orchestration
-- `core/daemon.py`: optional headless execution path
-- `core/skill_manager.py`: skill loading, disclosure, and tool registry
-- `core/mcp_client.py`: MCP `stdio` and Streamable HTTP integration
-- `core/automation_manager.py`: prompt-based scheduled automation, referenced skills, optional Agent binding, and run history
-- `core/chat_storage.py`, `core/chat_save_queue.py`, `core/chat_recovery_journal.py`: atomic conversation persistence, versioned saves, and crash recovery
-
-See [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md) for the technical design and [PRODUCT_DOC.md](PRODUCT_DOC.md) for the product-facing summary.
-
-## Related Docs
-
-- [README_CN.md](README_CN.md): Chinese overview
-- [TECHNICAL_DESIGN.md](TECHNICAL_DESIGN.md): architecture and runtime design
-- [SKILL_SYSTEM.md](SKILL_SYSTEM.md): skill and tool model
-- [PRODUCT_DOC.md](PRODUCT_DOC.md): product positioning and user flow
-- [USER_GUIDE.md](USER_GUIDE.md): illustrated user guide
-- [ROADMAP.md](ROADMAP.md): current project status
-- [RELEASE_NOTES_5.0.0.md](RELEASE_NOTES_5.0.0.md): 5.0.0 release scope and compatibility
-- [RELEASE_NOTES_5.0.3.md](RELEASE_NOTES_5.0.3.md): 5.0.3 user-theme scope and validation checklist
+- [User guide](docs/user-guide.md) (Chinese)
+- [Product document](docs/product.md) (Chinese)
+- [Technical design: from Agent Loop to desktop runtime](docs/technical-design.md) (Chinese)
+- [Skill system](docs/skill-system.md) (Chinese)
+- [AI themes and Visualize](docs/guides/ai-theme-and-visualize.md) (Chinese)
+- [Roadmap](docs/roadmap.md)
+- [5.0.8 release notes](docs/releases/5.0.8.md)
 
 ## License
 

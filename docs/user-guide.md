@@ -1,18 +1,10 @@
-# DeepSeek Cowork 使用指南
+# DeepSeek Cowork 用户指南
 
-> 本文档根据 [USER_GUIDE.docx](USER_GUIDE.docx) 同步整理。
+从第一次打开，到让 AI 帮你完成真实工作。
 
-零基础用户手册
+适用版本：**5.0.8**
 
-DeepSeek Cowork 使用指南
-
-从第一次打开，到让 AI 帮你完成真实工作
-
-适用版本：5.0.8
-
-面向不懂编程、第一次使用桌面 AI 工具的普通用户
-
-编制日期：2026-07-26
+本手册面向第一次使用桌面 Agent 的普通用户。
 
 ## 先看这一页：你只需要记住三件事
 
@@ -84,7 +76,7 @@ DeepSeek Cowork 使用指南
 
 - 在下载区域选择 Windows ZIP 压缩包并保存到电脑。
 
-![在 Releases 页面下载最新版](images/user-guide/s01-download-release.png)
+![在 Releases 页面下载最新版](../images/user-guide/s01-download-release.png)
 
 *截图 S01 在 Releases 页面下载最新版*
 
@@ -100,11 +92,11 @@ DeepSeek Cowork 使用指南
 
 - 如果 Windows 显示安全提醒，先核对文件来源和版本，再决定是否继续。
 
-![解压下载的 ZIP](images/user-guide/s02-extract-zip.png)
+![解压下载的 ZIP](../images/user-guide/s02-extract-zip.png)
 
 *截图 S02 解压下载的 ZIP*
 
-![启动 DeepSeek Cowork](images/user-guide/s03-launch-application.png)
+![启动 DeepSeek Cowork](../images/user-guide/s03-launch-application.png)
 
 *截图 S03 启动 DeepSeek Cowork*
 
@@ -136,15 +128,15 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 点击页面底部固定的“保存设置”。
 
-![主界面和设置入口](images/user-guide/s04-home-and-settings.png)
+![主界面和设置入口](../images/user-guide/s04-home-and-settings.png)
 
 *截图 S04 主界面和设置入口*
 
-![模型与服务页面](images/user-guide/s05-model-services.png)
+![模型与服务页面](../images/user-guide/s05-model-services.png)
 
 *截图 S05 模型与服务页面*
 
-![新增模型](images/user-guide/s06-add-model.png)
+![新增模型](../images/user-guide/s06-add-model.png)
 
 *截图 S06 新增模型*
 
@@ -157,7 +149,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 | 思考强度 | AI 在回答前投入多少推理。 | 普通任务从“中”开始；越高通常越慢、用量也可能更大。 |
 | 支持图片理解 | 模型能否看懂你粘贴的图片。 | 只有服务商明确支持图片时才打开。 |
 
-![填写模型配置](images/user-guide/s07-model-configuration.png)
+![填写模型配置](../images/user-guide/s07-model-configuration.png)
 
 *截图 S07 填写模型配置*
 
@@ -171,7 +163,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 能收到完整回答，说明基础配置成功。
 
-![切换模型并设置思考强度](images/user-guide/s08-model-and-reasoning.png)
+![切换模型并设置思考强度](../images/user-guide/s08-model-and-reasoning.png)
 
 *截图 S08 切换模型并设置思考强度*
 
@@ -181,7 +173,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 主界面可以理解成四个区域：左边找任务，中间聊天，下面输入，右边看文件和过程。
 
-![主界面区域总览](images/user-guide/s09-interface-overview.png)
+![主界面区域总览](../images/user-guide/s09-interface-overview.png)
 
 *截图 S09 主界面区域总览*
 
@@ -212,7 +204,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 等待最终回答出现。
 
-![独立聊天界面](images/user-guide/s10-direct-chat.png)
+![独立聊天界面](../images/user-guide/s10-direct-chat.png)
 
 *截图 S10 独立聊天界面*
 
@@ -232,7 +224,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 沉淀为 Skill：把反复使用的做法保存成可复用能力；新手可先跳过。
 
-![一轮完整对话](images/user-guide/s11-complete-conversation.png)
+![一轮完整对话](../images/user-guide/s11-complete-conversation.png)
 
 *截图 S11 一轮完整对话*
 
@@ -261,15 +253,15 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 告诉 AI 要处理哪个文件、要得到什么结果，以及哪些内容不能改。
 
-![添加新项目](images/user-guide/s12-add-project.png)
+![添加新项目](../images/user-guide/s12-add-project.png)
 
 *截图 S12 添加新项目*
 
-![项目选择器](images/user-guide/s13-project-picker.png)
+![项目选择器](../images/user-guide/s13-project-picker.png)
 
 *截图 S13 项目选择器*
 
-![已连接项目的工作区](images/user-guide/s14-project-workspace.png)
+![已连接项目的工作区](../images/user-guide/s14-project-workspace.png)
 
 *截图 S14 已连接项目的工作区*
 
@@ -289,7 +281,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 项目和对话都可以重命名；聚焦对应行后按 F2 也可以开始重命名。
 
-![侧栏后台运行状态](images/user-guide/sidebar-activity-min-width-1x.png)
+![侧栏后台运行状态](../images/user-guide/sidebar-activity-min-width-1x.png)
 
 *长标题和最小侧栏宽度下，项目及会话的运行状态仍保持可见*
 
@@ -317,7 +309,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 在文字要求里说明每个文件的用途，例如“以 A 为模板，以 B 为内容来源”。
 
-![输入区“+”菜单](images/user-guide/s15-composer-add-menu.png)
+![输入区“+”菜单](../images/user-guide/s15-composer-add-menu.png)
 
 *截图 S15 输入区“+”菜单*
 
@@ -335,7 +327,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 - 输入你希望 AI 对图片做什么，再发送。
 
-![粘贴图片后的输入区](images/user-guide/s16-pasted-image.png)
+![粘贴图片后的输入区](../images/user-guide/s16-pasted-image.png)
 
 *截图 S16 粘贴图片后的输入区*
 
@@ -343,7 +335,7 @@ Cowork 是工作台，真正负责回答问题的是你配置的模型服务。�
 
 ## 7. 把要求说清楚
 
-AI 不是只靠“聪明”完成任务，更依赖你给出的上下文、目标和边界。
+AI 完成任务的质量取决于模型能力，也取决于你给出的上下文、目标和边界。
 
 ### 7.1 万用任务公式
 
@@ -381,7 +373,7 @@ AI 不是只靠“聪明”完成任务，更依赖你给出的上下文、目�
 
 “深度思考 · 用时”表示模型在分析任务。工具行表示应用正在读取文件、运行命令、生成文件或调用某项能力。一般情况下，你只需要看最终回答；需要核对时再展开过程。
 
-![展开深度思考和工具](images/user-guide/s17-thinking-and-tools.png)
+![展开深度思考和工具](../images/user-guide/s17-thinking-and-tools.png)
 
 *截图 S17 展开深度思考和工具*
 
@@ -395,9 +387,9 @@ AI 不是只靠“聪明”完成任务，更依赖你给出的上下文、目�
 | 完成当前步骤后应用 | 某个工具已经启动，当前步骤结束后再应用。 |
 | 已应用 | 补充要求已经进入后续处理。 |
 
-![运行中补充引导](images/user-guide/s18-guidance-running.png)
+![运行中补充引导](../images/user-guide/s18-guidance-running.png)
 
-![补充引导已应用](images/user-guide/s18-guidance-applied.png)
+![补充引导已应用](../images/user-guide/s18-guidance-applied.png)
 
 *截图 S18 运行中补充引导*
 
@@ -407,7 +399,7 @@ AI 不是只靠“聪明”完成任务，更依赖你给出的上下文、目�
 
 编辑确认后，界面只替换这条消息及其后续分支；目标之前已经显示的消息、展开状态和阅读位置会保持不变，不会从会话开头重新回放。若界面无法可靠定位这条历史消息，应用会阻止替换并提示重新打开会话，不会用全量重载掩盖问题。
 
-![编辑历史用户消息](images/user-guide/s19-edit-history-message.png)
+![编辑历史用户消息](../images/user-guide/s19-edit-history-message.png)
 
 *截图 S19 编辑历史用户消息*
 
@@ -417,7 +409,7 @@ AI 不是只靠“聪明”完成任务，更依赖你给出的上下文、目�
 
 打开长会话时，Cowork 会先在后台读取记录，再逐条呈现最近 12 个对话摘要。历史 AI 轮次优先显示最终答复；只有该轮包含思考、阶段回复或工具调用时，才会出现“执行过程”入口。展开后完整过程会按原顺序分批恢复，折叠不会销毁已经加载的内容。
 
-![长历史答案优先与执行详情按需加载](images/user-guide/s37-history-on-demand.png)
+![长历史答案优先与执行详情按需加载](../images/user-guide/s37-history-on-demand.png)
 
 *截图 S37 长历史答案优先与执行详情按需加载*
 
@@ -425,7 +417,7 @@ AI 不是只靠“聪明”完成任务，更依赖你给出的上下文、目�
 
 需要了解 AI 调用了什么工具时，打开右侧“任务观测”。“调用记录”适合普通核对；“技术详情”主要给排错人员使用，包含参数、代码、输出和错误。
 
-![任务观测](images/user-guide/s20-task-observability.png)
+![任务观测](../images/user-guide/s20-task-observability.png)
 
 *截图 S20 任务观测*
 
@@ -454,11 +446,11 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 需要在 Windows 中处理时，选择在资源管理器中打开。
 
-![交付物列表](images/user-guide/s21-deliverables-list.png)
+![交付物列表](../images/user-guide/s21-deliverables-list.png)
 
 *截图 S21 交付物列表*
 
-![交付物预览](images/user-guide/s22-deliverable-preview.png)
+![交付物预览](../images/user-guide/s22-deliverable-preview.png)
 
 *截图 S22 交付物预览*
 
@@ -494,9 +486,9 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 在右侧预览工作稿，并继续提出修改要求。
 
-![生成办公稿](images/user-guide/s23-generate-office-draft.png)
+![生成办公稿](../images/user-guide/s23-generate-office-draft.png)
 
-![生成办公稿操作入口](images/user-guide/s23-generate-office-draft-action.png)
+![生成办公稿操作入口](../images/user-guide/s23-generate-office-draft-action.png)
 
 *截图 S23 生成办公稿*
 
@@ -514,7 +506,7 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 提交后先检查 HTML 演示工作稿。
 
-![PPT Agent](images/user-guide/s24-ppt-agent.png)
+![PPT Agent](../images/user-guide/s24-ppt-agent.png)
 
 *截图 S24 PPT Agent*
 
@@ -534,17 +526,17 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 等待完成通知，再从交付物列表打开最终文件。
 
-![从 HTML 生成文件](images/user-guide/s25-generate-from-html.png)
+![从 HTML 生成文件](../images/user-guide/s25-generate-from-html.png)
 
 *截图 S25 从 HTML 生成文件*
 
-![生成完成后的文件](images/user-guide/s26-generated-file.png)
+![生成完成后的文件](../images/user-guide/s26-generated-file.png)
 
-![生成文件的完整路径](images/user-guide/s26-generated-file-path.png)
+![生成文件的完整路径](../images/user-guide/s26-generated-file-path.png)
 
 *截图 S26 生成完成后的文件*
 
-![在 PowerPoint 中继续编辑](images/user-guide/s27-powerpoint-edit.png)
+![在 PowerPoint 中继续编辑](../images/user-guide/s27-powerpoint-edit.png)
 
 *截图 S27 在 PowerPoint 中继续编辑*
 
@@ -597,11 +589,11 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 - 金融数据、资讯和选股查询不会修改账户。添加/删除自选股、模拟买卖或撤单、发文、点赞和评论只会在你明确提出对应动作后执行。
 - 发文成功不会自动点赞或评论；如需互动，请单独说明目标和内容。
 
-![能力中心](images/user-guide/s28-capability-center.png)
+![能力中心](../images/user-guide/s28-capability-center.png)
 
 *截图 S28 能力中心*
 
-![能力详情与配置](images/user-guide/s29-capability-settings.png)
+![能力详情与配置](../images/user-guide/s29-capability-settings.png)
 
 *截图 S29 能力详情与配置*
 
@@ -611,13 +603,13 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 点击输入工具栏的“+”可以指定本会话优先能力；点击“Agent”可以加入内置或自定义智能体。当前选择会显示在输入区附近，任务结束后可以调整。
 
-![为当前会话指定能力](images/user-guide/s30-specified-capability.png)
+![为当前会话指定能力](../images/user-guide/s30-specified-capability.png)
 
 *截图 S30 为当前会话指定能力*
 
-![Agent 选择器](images/user-guide/s31-agent-picker.png)
+![Agent 选择器](../images/user-guide/s31-agent-picker.png)
 
-![Agent 设置](images/user-guide/s31-agent-settings.png)
+![Agent 设置](../images/user-guide/s31-agent-settings.png)
 
 *截图 S31 Agent 选择器*
 
@@ -637,15 +629,15 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 分析和草稿会按会话保存。左侧会话栏使用独立图标显示运行、待确认或失败；点击图标可返回来源会话。只有阶段完成时正在查看其他会话，右下角才会显示一次完成 Toast。同会话完成、开始、进度和失败不会弹出额外 Toast。
 
-![Skill 复用分析确认](images/user-guide/s32-skill-capture.png)
+![Skill 复用分析确认](../images/user-guide/s32-skill-capture.png)
 
 *截图 S32 Skill 复用分析确认*
 
-![Skill 后台分析状态](images/user-guide/s33-skill-capture-background.png)
+![Skill 后台分析状态](../images/user-guide/s33-skill-capture-background.png)
 
 *截图 S33 Skill 后台分析状态*
 
-![Skill 草稿待确认状态](images/user-guide/s34-skill-capture-ready.png)
+![Skill 草稿待确认状态](../images/user-guide/s34-skill-capture-ready.png)
 
 *截图 S34 Skill 草稿待确认状态*
 
@@ -671,11 +663,11 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 保存任务。
 
-![自动化中心](images/user-guide/s33-automation-center.png)
+![自动化中心](../images/user-guide/s33-automation-center.png)
 
 *截图 S33 自动化中心*
 
-![自动化任务编辑器](images/user-guide/s34-automation-editor.png)
+![自动化任务编辑器](../images/user-guide/s34-automation-editor.png)
 
 *截图 S34 自动化任务编辑器*
 
@@ -756,7 +748,7 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 > 图片边界 Cowork 不在主题流程中调用图片模型。需要写实背景时，请先提供已有本地图片；没有图片来源会明确报错。主题包不接受 SVG、动画、字体、网络资源或可执行内容。
 
-![AI 配置的主工作台主题包预览](images/user-guide/s39-ai-theme-package-home.png)
+![AI 配置的主工作台主题包预览](../images/user-guide/s39-ai-theme-package-home.png)
 
 *截图 S39 声明式背景、首页文案、卡片布局与原生窗口品牌文字共同预览；系统窗口行为保持不变*
 
@@ -766,7 +758,7 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 “个性与记忆”用于保存长期稳定的信息，例如你喜欢的回答风格、固定称呼、公司背景或当前项目长期约定。一次性任务细节不要放进长期记忆。
 
-![个性与记忆](images/user-guide/s35-personality-memory.png)
+![个性与记忆](../images/user-guide/s35-personality-memory.png)
 
 *截图 S35 个性与记忆*
 
@@ -790,7 +782,7 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 - 重要项目先备份，再按页面提示下载或安装。
 
-![更新页面](images/user-guide/s36-update.png)
+![更新页面](../images/user-guide/s36-update.png)
 
 *截图 S36 更新页面*
 
@@ -800,7 +792,7 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 打开设置页不会自动扫描目录、检查版本或启动 BrowserSkill。页面只显示“上次记录”；没有记录时显示“尚未检测”。只有点击单项“检测状态”、“手动刷新状态”、BrowserSkill“检查连接”，或执行安装、更新、修复、卸载后，相关状态才会更新。执行变更前应用会重新核对目标组件；如果真实状态与上次记录冲突，本次操作会停止并要求重新确认。
 
-![组件状态使用上次记录](images/user-guide/s38-component-status-cache.png)
+![组件状态使用上次记录](../images/user-guide/s38-component-status-cache.png)
 
 *截图 S38 组件状态使用上次记录*
 

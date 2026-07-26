@@ -16510,7 +16510,7 @@ class SubAgentMonitor(QWidget):
                 item = self.content_layout.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
-                    widget.setParent(None)
+                    widget.hide()
                     widget.deleteLater()
             self.content_layout.addStretch()
             self.agents = {}

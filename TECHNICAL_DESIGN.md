@@ -106,7 +106,10 @@ Cowork 采用交错式推理流程：
 - 技能负责经验
 - 技能按需披露，默认只给最小摘要
 - 技能运行配置由工作台表单维护，缺少必填配置时直接失败，不走静默降级
+- 配置字段可声明 `action_label` 与 `action_url`，工作台只为不含凭据的 HTTPS 地址渲染主题化次级操作按钮；打开失败直接显示原因
 - 用户可以通过“沉淀为 Skill”把会话经验转为可复用能力。入口先选择当前问答、最近三轮、全部或自定义片段；第一阶段按完整用户任务链组织消息、遮蔽密钥和本地路径，并输出带消息 ID 引用的复用证据。用户在 Linear 风格的分析页确认创建新 Skill、合并增强已有 Skill 或仅追加经验，并显式选择资源候选；第二阶段只接收证据和非敏感目标快照，编译最终草稿。分析与草稿状态持久化到应用数据目录，只有用户主动确认并通过静态校验后才进入能力中心数据源。
+
+`web-search` 通过同一适配层标准化 AnySearch JSON-RPC 与 Tavily SDK的搜索、提取结果。缓存键包含供应商、认证模式和业务参数，但不包含 API Key；两个供应商都支持显式 Keyless 模式。适配层不会捕获一个供应商的错误后调用另一个供应商，结果只提供 `retryable_with` 供 AI 在用户同意后重新发起显式调用。AnySearch 注册工具标记为 destructive 且 requires user interaction，注册成功后通过 `ConfigManager.set_skill_config` 保存一次性 Key，再发布 Skill 目录更新事件；诊断日志只记录 provider、阶段、耗时和错误码。
 
 详细模型见 [SKILL_SYSTEM.md](SKILL_SYSTEM.md)。
 

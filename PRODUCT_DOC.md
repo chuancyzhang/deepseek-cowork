@@ -58,6 +58,7 @@ DeepSeek Cowork 是一个面向专业用户和开发者的 Windows 桌面 Agent 
 - MCP 服务器可通过 `stdio` 或 Streamable HTTP 接入
 - 腾讯文档、飞书文档、钉钉文档、WeKnora、ShowDoc MCP、Airflow 与官方 Superset MCP 以独立可选 skill 内置。保存 Skill 配置会自动生成、更新并启用其托管 MCP，测试连接作为独立诊断动作。WeKnora、Airflow 复用隔离的 Skill Python 运行环境并按需启动 stdio；Superset 只连接运行在远端 Superset 环境中的官方 MCP 服务，并使用用户账号密码在内存中获取和刷新 JWT，不把 access/refresh token 写入 MCP 配置
 - `browser-automation` 是默认关闭的随包插件，执行后端为 Tencent BrowserSkill。启用时若环境未就绪，应用提供“前往设置”入口；“组件与依赖”中的“可选浏览器能力”负责下载并校验固定版本 `bsk` CLI、引导用户安装 Chrome/Edge 扩展，并在 `bsk doctor` 后通过临时 Agent Window 验证真实执行通道。插件不使用 Playwright/UIAutomation，也不在缺失组件时静默回退
+- `web-search` 是默认关闭的随包插件，保留 `search_web` 与 `read_web_article` 兼容接口，以 AnySearch v3.0.1 或 `tavily-python==0.7.26` 提供搜索和正文提取。两个 API Key 均为可选配置，无 Key 时明确标记匿名/Keyless 限额；供应商失败后只返回根因和可选服务，不自动切换。AnySearch 邮箱注册属于外部账户创建，必须取得用户确认，完整 Key 仅写入本地 Skill 配置且不进入聊天或日志
 - `tool` 是直接执行面，`skill` 是经验包
 - 自动工具发现命中的技能全文只参与当前轮推理，不进入会话历史，避免临时技能上下文降低后续 prompt cache 命中稳定性
 - `visualize` 是默认关闭的随包插件。启用后可通过受限 Python 计算生成 HTML Fragment，默认自包含，并可按固定白名单加载受信 CDN 的静态脚本、样式、字体或图片；发布后以按产物 CSP 隔离的沙箱 iframe 嵌入 AI 回复，运行时数据请求保持禁用，资源加载失败直接显示原因。关闭时不暴露工具、不创建新产物，已登记且哈希有效的历史产物只读可见

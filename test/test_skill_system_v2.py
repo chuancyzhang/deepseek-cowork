@@ -96,6 +96,37 @@ class TestSkillSystemV2(unittest.TestCase):
             {"run_visualization_python", "finalize_inline_visualization"},
         )
 
+    def test_web_search_plugin_loads_provider_config_and_registration_metadata(self):
+        self._copy_repo_ai_skill("web-search")
+        disabled_manager = self._build_manager()
+        self.assertNotIn("web-search", disabled_manager.skill_records)
+
+        manager = self._build_manager_with_enabled({"web-search"})
+        self.assertIn("web-search", manager.skill_records)
+        fields = {
+            field["name"]: field
+            for field in manager.get_skill_config_fields("web-search")
+        }
+        self.assertEqual(fields["SEARCH_PROVIDER"]["default"], "anysearch")
+        self.assertEqual(
+            fields["TAVILY_API_KEY"]["action_url"],
+            "https://www.tavily.com/",
+        )
+        self.assertEqual(
+            set(manager.get_tools_for_skill("web-search")),
+            {
+                "search_web",
+                "read_web_article",
+                "read_article",
+                "batch_search_web",
+                "get_web_search_sub_domains",
+                "register_anysearch_api_key",
+            },
+        )
+        registration = manager.tool_records["register_anysearch_api_key"]
+        self.assertTrue(registration["requires_user_interaction"])
+        self.assertTrue(registration["destructive"])
+
     def test_knowledge_skill_is_discoverable_without_registering_new_tools(self):
         skill_dir = os.path.join(self.skills_dir, "http-guide")
         os.makedirs(skill_dir, exist_ok=True)
@@ -140,7 +171,14 @@ class TestSkillSystemV2(unittest.TestCase):
                     "description": "Docs",
                     "config_fields": [
                         {"name": "app_id", "label": "App ID", "required": True, "env": "DOC_APP_ID"},
-                        {"name": "secret", "kind": "secret", "required": True, "env": "DOC_SECRET"},
+                        {
+                            "name": "secret",
+                            "kind": "secret",
+                            "required": True,
+                            "env": "DOC_SECRET",
+                            "action_label": "Get key",
+                            "action_url": "https://example.com/keys",
+                        },
                     ],
                 },
                 f,
@@ -162,6 +200,8 @@ class TestSkillSystemV2(unittest.TestCase):
 
         fields = sm.get_skill_config_fields("doc-skill")
         self.assertEqual(fields[0]["env"], "DOC_APP_ID")
+        self.assertEqual(fields[1]["action_label"], "Get key")
+        self.assertEqual(fields[1]["action_url"], "https://example.com/keys")
         status = sm.get_skill_config_status("doc-skill")
         self.assertFalse(status["complete"])
         self.assertEqual(status["missing_required"], ["secret"])

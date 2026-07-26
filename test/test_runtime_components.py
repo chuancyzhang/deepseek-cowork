@@ -43,6 +43,11 @@ class TestRuntimeComponents(unittest.TestCase):
         self.assertIn("reportlab", runtime_components.TOOLKITS["documents"]["packages"])
         self.assertIn("Pillow", runtime_components.TOOLKITS["documents"]["packages"])
         self.assertIn("PIL.Image", runtime_components.TOOLKITS["documents"]["imports"])
+        self.assertEqual(
+            runtime_components.TOOLKITS["web-research"]["packages"],
+            ["tavily-python==0.7.26"],
+        )
+        self.assertEqual(runtime_components.TOOLKITS["web-research"]["imports"], ["tavily"])
 
     def test_toolkit_status_marks_stale_package_catalog_for_update(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(runtime_components, "toolkits_root", return_value=temp_dir):

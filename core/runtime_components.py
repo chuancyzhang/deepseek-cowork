@@ -55,8 +55,8 @@ TOOLKITS = {
     "web-research": {
         "name": "网页研究工具包",
         "description": "网页搜索、解析与结构化采集",
-        "packages": ["beautifulsoup4", "duckduckgo-search", "scrapling"],
-        "imports": ["bs4", "duckduckgo_search", "scrapling"],
+        "packages": ["tavily-python==0.7.26"],
+        "imports": ["tavily"],
         "skills": ["web-search"],
     },
 }

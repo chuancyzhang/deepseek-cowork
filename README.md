@@ -52,6 +52,7 @@ The 5.0.3 release baseline is documented here and in [RELEASE_NOTES_5.0.3.md](RE
 - **Automation center**: manage prompt-based tasks, schedules, run history, referenced skills, and optional Agent bindings with a compact empty state and an embedded task editor; each task saves independently.
 - **Skill center**: search, filter, enable, configure, and debug skills without restarting. Skill catalog changes use bottom-right system Toasts instead of chat messages and do not alter the conversation's explicitly selected Skills.
 - **Real-browser automation**: the default-off `browser-automation` plugin uses Tencent BrowserSkill. After enabling it, install the pinned and SHA-256-verified `bsk` CLI from **Settings → Components & Dependencies → Optional Browser Capability**, install the Chrome/Edge extension, and run the temporary Agent Window execution probe before the AI reads or operates logged-in pages.
+- **Two-provider web search**: the default-off `web-search` plugin uses AnySearch v3.0.1 or Tavily. Its configuration page selects a default provider, stores either optional API key, and links to official registration pages. Without a key it uses the provider's lower-limit anonymous/keyless mode; provider failures remain explicit and never trigger an automatic switch.
 
 ## Skill Model
 
@@ -96,7 +97,7 @@ This prepares the packaged Git Bash runtime. Node.js is installed as an optional
 Create release artifacts with a clean build and the shared audit/packaging command:
 
 ```powershell
-.\.venv\Scripts\pyinstaller.exe --clean .\deepseek-cowork.spec
+.\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
 .\.venv\Scripts\python.exe .\scripts\package_release.py
 ```
 

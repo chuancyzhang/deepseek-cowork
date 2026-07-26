@@ -51,6 +51,7 @@ DeepSeek Cowork 是一个 Windows 桌面 Agent 工作台，把对话、项目工
 - **自动化中心**：在主内容区用任务列表、页面内编辑器和执行历史管理提示词任务、定时计划、引用能力和可选 Agent 绑定；任务独立保存，不再依赖中心级保存。
 - **能力中心**：在主内容区搜索、筛选、启用、配置、调试和校验能力，无需重启；创建、更新、启停、删除和依赖就绪统一使用右下角系统 Toast，不向对话插入提示，也不会自动加入该会话的“指定能力”。
 - **真实浏览器自动化**：默认关闭的 `browser-automation` 改用 Tencent BrowserSkill。启用后可在 **设置 → 组件与依赖 → 可选浏览器能力** 下载经过固定 SHA-256 校验的 `bsk` CLI，再由用户安装 Chrome/Edge 扩展；连接检查会用临时 Agent Window 验证真实执行通道，AI 随后可读取登录态网页、提取数据、填写表单和执行经确认的网页操作。
+- **双服务网页搜索**：默认关闭的 `web-search` 使用 AnySearch v3.0.1 或 Tavily。能力配置页可选择默认服务、保存两个可选 API Key并打开官方注册链接；无 Key 时使用供应商限额更低的匿名/Keyless 模式。服务失败会暴露根因，不会自动切换或产生不可见的额度消耗。
 
 ## 技能模型
 
@@ -95,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 正式发行包使用干净构建和统一的审计/压缩脚本生成：
 
 ```powershell
-.\.venv\Scripts\pyinstaller.exe --clean .\deepseek-cowork.spec
+.\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
 .\.venv\Scripts\python.exe .\scripts\package_release.py
 ```
 

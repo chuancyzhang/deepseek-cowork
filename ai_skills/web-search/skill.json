@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "name": "web-search",
+  "kind": "knowledge",
+  "capability_group": "file-information-interaction",
+  "source_type": "bundled_plugin",
+  "source_format": "agent_skill",
+  "default_enabled": false,
+  "description": "Real-time web search and article extraction through AnySearch or Tavily.",
+  "description_cn": "通过 AnySearch 或 Tavily 提供实时网页搜索和正文提取。",
+  "tags": ["web search", "anysearch", "tavily", "网页搜索", "实时信息", "文章提取"],
+  "triggers": ["网页搜索", "搜索互联网", "最新信息", "读取网页", "AnySearch", "Tavily"],
+  "tool_refs": [],
+  "references": ["SOURCE.md", "LICENSE.anysearch", "NOTICE.anysearch"],
+  "config_fields": [
+    {
+      "name": "SEARCH_PROVIDER",
+      "label": "默认搜索服务",
+      "kind": "select",
+      "required": false,
+      "env": "SEARCH_PROVIDER",
+      "default": "anysearch",
+      "help": "AI 可在单次调用中显式覆盖；服务失败时不会自动切换。",
+      "options": [
+        {"value": "anysearch", "label": "AnySearch"},
+        {"value": "tavily", "label": "Tavily"}
+      ]
+    },
+    {
+      "name": "ANYSEARCH_API_KEY",
+      "label": "AnySearch API Key",
+      "kind": "secret",
+      "required": false,
+      "env": "ANYSEARCH_API_KEY",
+      "placeholder": "as_sk_...",
+      "help": "选填；未配置时使用限额更低的匿名访问。",
+      "action_label": "获取 API Key",
+      "action_url": "https://anysearch.com/console/api-keys"
+    },
+    {
+      "name": "TAVILY_API_KEY",
+      "label": "Tavily API Key",
+      "kind": "secret",
+      "required": false,
+      "env": "TAVILY_API_KEY",
+      "placeholder": "tvly-...",
+      "help": "选填；未配置时使用限额更低的 Keyless 模式。",
+      "action_label": "前往 Tavily 注册",
+      "action_url": "https://www.tavily.com/"
+    }
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "workflow": [
+    "Use the configured provider unless the call explicitly selects another provider.",
+    "Never switch providers automatically after a failure.",
+    "Obtain explicit user consent before registering an AnySearch account and saving its API key."
+  ]
+}

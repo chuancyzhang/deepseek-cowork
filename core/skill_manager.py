@@ -565,6 +565,8 @@ class SkillManager:
                 "placeholder": str(item.get("placeholder") or "").strip(),
                 "default": str(item.get("default") if item.get("default") is not None else ""),
                 "options": options,
+                "action_label": str(item.get("action_label") or "").strip(),
+                "action_url": str(item.get("action_url") or "").strip(),
             })
         return normalized
 

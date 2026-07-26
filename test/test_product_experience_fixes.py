@@ -213,6 +213,74 @@ class ProductExperienceFixTests(unittest.TestCase):
             finally:
                 dialog.close()
 
+    def test_web_search_config_renders_secure_provider_links_and_keyless_notice(self):
+        config = MagicMock()
+        config.get_skill_config.return_value = {"SEARCH_PROVIDER": "anysearch"}
+        manager = MagicMock()
+        manager.is_skill_editable.return_value = False
+        manager.list_skill_files.return_value = {"ok": False, "error": "read only"}
+        manager.get_tool_record.return_value = None
+        manager.get_skill_config_status.return_value = {
+            "missing_required": [],
+            "config_errors": [],
+            "complete": True,
+        }
+        skill = {
+            "name": "web-search",
+            "display_name": "网页搜索",
+            "config_fields": [
+                {
+                    "name": "SEARCH_PROVIDER",
+                    "label": "默认搜索服务",
+                    "kind": "select",
+                    "default": "anysearch",
+                    "options": [
+                        {"value": "anysearch", "label": "AnySearch"},
+                        {"value": "tavily", "label": "Tavily"},
+                    ],
+                },
+                {
+                    "name": "ANYSEARCH_API_KEY",
+                    "label": "AnySearch API Key",
+                    "kind": "secret",
+                    "action_label": "获取 API Key",
+                    "action_url": "https://anysearch.com/console/api-keys",
+                },
+                {
+                    "name": "TAVILY_API_KEY",
+                    "label": "Tavily API Key",
+                    "kind": "secret",
+                    "action_label": "前往 Tavily 注册",
+                    "action_url": "https://www.tavily.com/",
+                },
+            ],
+            "tools": [],
+            "script_entries": [],
+        }
+        dialog = CapabilityWorkbenchDialog(skill, manager, config)
+        try:
+            button_texts = {button.text() for button in dialog.findChildren(QPushButton)}
+            label_texts = [label.text() for label in dialog.findChildren(QLabel)]
+            self.assertIn("获取 API Key", button_texts)
+            self.assertIn("前往 Tavily 注册", button_texts)
+            self.assertTrue(any("Keyless" in text for text in label_texts))
+            with patch("main.QDesktopServices.openUrl", return_value=True) as open_url:
+                self.assertTrue(
+                    dialog._open_skill_config_action_url(
+                        "https://www.tavily.com/"
+                    )
+                )
+            self.assertEqual(open_url.call_args.args[0].scheme(), "https")
+            with patch("main.QMessageBox.warning") as warning:
+                self.assertFalse(
+                    dialog._open_skill_config_action_url(
+                        "https://user:secret@example.com/path"
+                    )
+                )
+            warning.assert_called_once()
+        finally:
+            dialog.close()
+
     def test_deliverable_registry_only_returns_registered_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = ChatStorage(os.path.join(temp_dir, "history.sqlite"))

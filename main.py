@@ -3040,7 +3040,14 @@ class CapabilityWorkbenchDialog(QDialog):
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(12)
 
-        hint = QLabel("这些配置会在运行该能力的脚本或工具时提供给它。必填项缺失时会直接报错。")
+        if self.skill_name == "web-search":
+            hint_text = (
+                "选择默认搜索服务并配置可选 API Key。未配置 Key 时将使用供应商官方的匿名/Keyless 模式，"
+                "速率与额度较低；服务失败时不会自动切换供应商。"
+            )
+        else:
+            hint_text = "这些配置会在运行该能力的脚本或工具时提供给它。必填项缺失时会直接报错。"
+        hint = QLabel(hint_text)
         hint.setWordWrap(True)
         hint.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(hint)
@@ -3081,7 +3088,26 @@ class CapabilityWorkbenchDialog(QDialog):
             help_text = str(field.get("help") or "").strip()
             if help_text:
                 editor.setToolTip(help_text)
-            form.addRow(build_form_row_label(label), editor)
+            action_label = str(field.get("action_label") or "").strip()
+            action_url = str(field.get("action_url") or "").strip()
+            if action_label or action_url:
+                field_row = QWidget()
+                field_row.setObjectName("SkillConfigFieldRow")
+                field_layout = QHBoxLayout(field_row)
+                field_layout.setContentsMargins(0, 0, 0, 0)
+                field_layout.setSpacing(8)
+                field_layout.addWidget(editor, 1)
+                action_btn = QPushButton(action_label or "打开")
+                action_btn.setObjectName("SkillConfigActionButton")
+                action_btn.setStyleSheet(apple_button_style("secondary", radius=10))
+                action_btn.setEnabled(bool(action_label and action_url))
+                action_btn.clicked.connect(
+                    lambda _checked=False, url=action_url: self._open_skill_config_action_url(url)
+                )
+                field_layout.addWidget(action_btn)
+                form.addRow(build_form_row_label(label), field_row)
+            else:
+                form.addRow(build_form_row_label(label), editor)
             self.config_editors[name] = editor
         card_layout.addLayout(form)
         layout.addWidget(card)
@@ -3136,6 +3162,22 @@ class CapabilityWorkbenchDialog(QDialog):
         layout.addStretch()
         self.tabs.addTab(page, "配置")
         self._refresh_config_status()
+
+    def _open_skill_config_action_url(self, value):
+        url = QUrl(str(value or "").strip())
+        if (
+            not url.isValid()
+            or url.scheme().lower() != "https"
+            or not url.host()
+            or url.userName()
+            or url.password()
+        ):
+            QMessageBox.warning(self, "打开链接", "配置链接无效，仅支持不包含凭据的 HTTPS 地址。")
+            return False
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(self, "打开链接", "无法打开浏览器，请检查系统默认浏览器设置。")
+            return False
+        return True
 
     def _refresh_config_status(self):
         label = getattr(self, "config_status", None)

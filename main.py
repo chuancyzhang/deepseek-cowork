@@ -2235,6 +2235,15 @@ def skill_center_is_builtin(skill):
     return skill_center_tab_key(skill) == "builtin"
 
 
+def skill_center_config_state(skill):
+    if not isinstance(skill, dict):
+        return ""
+    status = skill.get("config_status")
+    if not isinstance(status, dict) or not status.get("has_config"):
+        return ""
+    return "ready" if status.get("complete") else "needs_config"
+
+
 def skill_center_matches_filters(skill, query="", status_filter="all"):
     if not isinstance(skill, dict):
         return False
@@ -9738,6 +9747,11 @@ class SkillsCenterDialog(QDialog):
         risk_badge = ProductStatusBadge(risk_text, "error" if "高" in risk_text else "warning" if "中" in risk_text else "primary")
         meta_row = QHBoxLayout()
         meta_row.addWidget(risk_badge, 0, Qt.AlignLeft)
+        config_state = skill_center_config_state(skill)
+        if config_state == "needs_config":
+            meta_row.addWidget(ProductStatusBadge("待配置", "warning"), 0, Qt.AlignLeft)
+        elif config_state == "ready":
+            meta_row.addWidget(ProductStatusBadge("配置完整", "primary"), 0, Qt.AlignLeft)
         source_label = QLabel({
             "builtin": "内置能力",
             "optional": "可选插件",
@@ -9871,6 +9885,19 @@ class SkillsCenterDialog(QDialog):
         risk_label = QLabel(risk_text)
         risk_label.setStyleSheet(self._chip_style(risk_color, risk_bg, risk_border))
         meta_row.addWidget(risk_label, 0, Qt.AlignLeft)
+        config_state = skill_center_config_state(skill)
+        if config_state:
+            config_label = QLabel("待配置" if config_state == "needs_config" else "配置完整")
+            if config_state == "needs_config":
+                config_fg = DesignTokens.warning_text
+                config_bg = DesignTokens.warning_bg
+                config_border = DesignTokens.warning_border
+            else:
+                config_fg = DesignTokens.primary
+                config_bg = DesignTokens.primary_soft
+                config_border = DesignTokens.primary
+            config_label.setStyleSheet(self._chip_style(config_fg, config_bg, config_border))
+            meta_row.addWidget(config_label, 0, Qt.AlignLeft)
         if tools:
             tool_label = QLabel(summarize_skill_terms(tools, max_items=3, max_chars=36))
             tool_label.setStyleSheet(f"font-size: 11px; color: {DesignTokens.text_tertiary};")

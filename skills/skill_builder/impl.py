@@ -7,6 +7,7 @@ import ast
 import threading
 
 from core.env_utils import get_app_data_dir
+from core.remote_skill_installer import run_remote_skill_installer_agent
 from core.skill_adapter import adapt_skill_directory, parse_skill_md_content, resolve_agent_skill_source
 
 
@@ -581,3 +582,73 @@ def install_agent_skill(source_path, skill_name=None, _context=None):
         if "temp_dir" in locals() and temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
         _SKILL_MUTATION_LOCK.release()
+
+
+def remote_skill_installer_agent(
+    request="",
+    continuation_id="",
+    decision="",
+    config_overrides=None,
+    _context=None,
+):
+    """Inspect and install remote Agent Skills through a constrained specialist agent."""
+    context = _context if isinstance(_context, dict) else {}
+    return run_remote_skill_installer_agent(
+        request=request,
+        continuation_id=continuation_id,
+        decision=decision,
+        config_overrides=config_overrides,
+        app_data_dir=get_app_data_dir(),
+        context=context,
+        runner=context.get("remote_skill_installer_agent_runner"),
+        mutation_lock=_SKILL_MUTATION_LOCK,
+    )
+
+
+TOOL_EXPORTS = [
+    {
+        "name": "remote_skill_installer_agent",
+        "handler": remote_skill_installer_agent,
+        "description": (
+            "Delegate remote Skill installation to a constrained specialist agent. "
+            "Use when the user provides an HTTPS skill.md or remote Skill installation URL. "
+            "The first call returns a fixed preview requiring user approval; after approval, "
+            "call again with the returned continuation_id and decision='confirm'."
+        ),
+        "search_hint": (
+            "read remote skill.md install skill URL API key token credential "
+            "安装远程Skill 阅读skill.md 带Key能力"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "Initial user request containing the remote HTTPS Skill entry URL.",
+                },
+                "continuation_id": {
+                    "type": "string",
+                    "description": "Opaque continuation ID returned by the inspection call.",
+                },
+                "decision": {
+                    "type": "string",
+                    "enum": ["", "confirm", "cancel"],
+                    "description": "Leave empty for inspection; use confirm or cancel only after user approval.",
+                },
+                "config_overrides": {
+                    "type": "object",
+                    "description": "Optional complete config_fields replacement keyed by Skill name.",
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                    },
+                },
+            },
+            "required": [],
+        },
+        "destructive": True,
+        "requires_user_interaction": True,
+        "should_defer": True,
+        "result_format": "json",
+    },
+]

@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QMimeData, QPoint, Qt
 from PySide6.QtGui import QHelpEvent, QImage
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
 
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
@@ -20,6 +20,7 @@ from main import (
     MainWindow,
     QMessageBox,
     SettingsDialog,
+    skill_center_config_state,
 )
 from ui.primitives import ProductTooltipController
 
@@ -28,6 +29,28 @@ class ProductExperienceFixTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_skill_center_reports_remote_required_config_as_pending(self):
+        self.assertEqual(
+            skill_center_config_state({
+                "config_status": {
+                    "has_config": True,
+                    "complete": False,
+                    "missing_required": ["WIND_API_KEY"],
+                }
+            }),
+            "needs_config",
+        )
+        self.assertEqual(
+            skill_center_config_state({
+                "config_status": {
+                    "has_config": True,
+                    "complete": True,
+                    "missing_required": [],
+                }
+            }),
+            "ready",
+        )
 
     def test_settings_dirty_state_ignores_background_logs_and_reverts(self):
         dialog = SettingsDialog(ConfigManager())
@@ -263,6 +286,10 @@ class ProductExperienceFixTests(unittest.TestCase):
             label_texts = [label.text() for label in dialog.findChildren(QLabel)]
             self.assertIn("获取 API Key", button_texts)
             self.assertIn("前往 Tavily 注册", button_texts)
+            self.assertEqual(
+                dialog.config_editors["ANYSEARCH_API_KEY"].echoMode(),
+                QLineEdit.Password,
+            )
             self.assertTrue(any("Keyless" in text for text in label_texts))
             with patch("main.QDesktopServices.openUrl", return_value=True) as open_url:
                 self.assertTrue(

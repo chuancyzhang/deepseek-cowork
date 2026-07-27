@@ -851,16 +851,37 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["skills"], [])
 
-    def test_skill_builder_exposes_only_install_agent_skill_for_agent_skill_install(self):
+    def test_skill_builder_exposes_local_and_remote_agent_skill_install_tools(self):
         self._copy_repo_skill("skill_builder")
 
         sm = self._build_manager()
         tool_names = [item["function"]["name"] for item in sm.get_tool_definitions()]
 
         self.assertIn("install_agent_skill", tool_names)
+        self.assertIn("remote_skill_installer_agent", tool_names)
+        remote_record = sm.tool_records["remote_skill_installer_agent"]
+        self.assertTrue(remote_record["destructive"])
+        self.assertTrue(remote_record["requires_user_interaction"])
+        self.assertNotIn("inspect_remote_skill_install", tool_names)
+        self.assertNotIn("install_remote_agent_skills", tool_names)
         self.assertNotIn("convert_claude_skill", tool_names)
         self.assertNotIn("convert_openclaw_skill", tool_names)
         self.assertNotIn("convert_external_skill", tool_names)
+
+        discovered = set()
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "阅读 skill.md 安装远程带 Key 能力"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": discovered,
+            },
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertIn(
+            "remote_skill_installer_agent",
+            [item["name"] for item in result["tools"]],
+        )
 
     def test_tool_search_skill_results_respect_allowed_skill_scope(self):
         skill_dir = os.path.join(self.skills_dir, "claim-expert")

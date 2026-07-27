@@ -204,11 +204,28 @@ Worker 只在下一次模型请求边界应用最新快照。文件监听只负�
 - 导入包含多个 Skill 的目录；
 - 导入 ZIP；
 - 安装标准 Agent Skill；
+- 通过专用安装 Agent 检查并安装 HTTPS 远程 Skill 入口；
 - 导出单个或多个 Skill；
 - 校验文件并调试 Tool、脚本和 MCP。
 
 ZIP 先解压到临时目录并检查路径穿越。最终名称来自元数据；已有目标不会被
 静默覆盖。
+
+远程入口由 `remote_skill_installer_agent` 统一处理。主 Agent 不执行入口
+文档中的 `npx`、Git 或 Shell 命令；专用 Agent 只读取经过限制的 Markdown
+和仓库材料，并输出带文件证据的结构化安装清单。Cowork 内核负责 HTTPS 与
+SSRF 校验、浅克隆、固定 commit、文件摘要、配置字段校验和原子发布。
+
+首次调用只生成安装预览和 30 分钟有效的 `continuation_id`。预览包含来源、
+commit、Skill 列表、脚本风险和待生成的 `config_fields`。主 Agent 必须通过
+`request_user_approval` 取得确认，再用同一 `continuation_id` 和
+`decision="confirm"` 调用专用 Tool。安装阶段不重新联网或重新解析文档；
+计划绑定来源会话，过期、已消费或摘要变化都会明确失败。
+
+远程 Skill 中明确声明的 `skill.json.config_fields` 优先。未声明时，专用
+Agent 只能从确定性扫描发现的环境变量中生成候选；`KEY`、`TOKEN`、
+`SECRET`、`PASSWORD` 和 `CREDENTIAL` 默认作为 `secret`，且禁止默认值。
+确认后的字段进入正常能力配置 UI，执行时继续通过环境变量临时注入。
 
 只有 `impl.py` 的旧 Skill 继续受支持，系统会生成最小发现记录。空目录、
 缓存目录和已经删除实现留下的残片不会重新出现在能力中心。

@@ -994,7 +994,7 @@ class LLMWorker(QThread):
             "1. 工具发现: 需要额外能力时先用 'tool_search'，匹配到的延迟工具会在下一轮可用。",
             "2. 并行只读: 多个独立只读调用可使用 'parallel_tools' 合并为一次显式并发执行。",
             "3. 通用执行: 优先使用 'run_python_code' 或 'run_node_code'，需要 shell/CLI 时使用 'bash'。",
-            "4. 技能创建/维护: 使用 'create_new_skill'、'update_skill'、'install_agent_skill'、'analyze_skill_source_folder'、'generate_skill_from_folder'、'run_skill_script'。",
+            "4. 技能创建/维护: 使用 'create_new_skill'、'update_skill'、'install_agent_skill'、'remote_skill_installer_agent'、'analyze_skill_source_folder'、'generate_skill_from_folder'、'run_skill_script'。用户提供 HTTPS skill.md 或远程 Skill 安装入口时，必须委派给 'remote_skill_installer_agent'，不要使用 bash、npx、手工 Git 或本地 'install_agent_skill'。该 Tool 返回 needs_confirmation 时，先用 'request_user_approval' 转交固定预览；用户明确确认后再携带 continuation_id 和 decision='confirm' 调用同一 Tool。",
             "5. 经验/记忆/历史: 使用 'update_experience'、'read_memories'、'write_memories'、'query_history'、'query_history_vector'。",
             "6. 用户交互: 使用 'request_user_input'、'request_user_approval'。",
             "7. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。",

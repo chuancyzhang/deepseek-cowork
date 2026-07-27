@@ -65,6 +65,13 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         hidden_imports = spec_text.split("pyside6_hidden = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"PySide6.QtAxContainer"', hidden_imports)
 
+    def test_remote_skill_installer_core_module_is_packaged(self):
+        with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
+            spec_text = handle.read()
+
+        analysis_hidden_imports = spec_text.split("hiddenimports=", 1)[1].split("],", 1)[0]
+        self.assertIn("'core.remote_skill_installer'", analysis_hidden_imports)
+
 
 if __name__ == "__main__":
     unittest.main()

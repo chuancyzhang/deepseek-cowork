@@ -598,6 +598,9 @@ a = Analysis(
         'aibot',
         'qrcode',
         'httpx',
+        # skill-builder/impl.py is loaded dynamically from packaged data, so
+        # PyInstaller cannot discover this core module through static imports.
+        'core.remote_skill_installer',
     ],
     hookspath=[],
     hooksconfig={},

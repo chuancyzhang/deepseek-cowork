@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from core.remote_skill_installer import (
     RemoteSkillInstallService,
+    _request_urls,
     _redact_untrusted_text,
     run_remote_skill_installer_agent,
     validate_public_https_url,
@@ -78,6 +79,22 @@ class LowConfidenceRunner(FakeRunner):
     def analyze_package(self, package_payload):
         payload = super().analyze_package(package_payload)
         payload["config_candidates"][0]["confidence"] = "low"
+        return payload
+
+
+class NoisyOutOfScopeRunner(FakeRunner):
+    def analyze_entry(self, entry_url, entry_text, request):
+        payload = super().analyze_entry(entry_url, entry_text, request)
+        payload["ambiguities"] = [
+            "入口没有提供 commit SHA。",
+            "入口没有提供 Skill 在仓库中的实际目录。",
+            "用户没有选择项目或全局安装范围。",
+        ]
+        return payload
+
+    def analyze_package(self, package_payload):
+        payload = super().analyze_package(package_payload)
+        payload["ambiguities"] = ["模型不确定是否应生成 needs_confirmation。"]
         return payload
 
 
@@ -183,6 +200,35 @@ class TestRemoteSkillInstaller(unittest.TestCase):
         self.assertEqual(plan["commit"], "a" * 40)
         self.assertFalse(plan["consumed"])
 
+    def test_kernel_resolves_commit_and_paths_instead_of_blocking_on_agent_noise(self):
+        service = RemoteSkillInstallService(
+            self.temp_dir,
+            context=self.context,
+            runner=NoisyOutOfScopeRunner(),
+        )
+        with patch(
+            "core.remote_skill_installer.fetch_markdown_entry",
+            return_value={
+                "url": "https://aifinmarket.wind.com.cn/skill.md",
+                "text": ENTRY_TEXT,
+            },
+        ), patch.object(
+            service,
+            "_clone_candidates",
+            side_effect=lambda candidates, destination: self._clone_fixture(service, candidates, destination),
+        ):
+            result = service.inspect(
+                "阅读 https://aifinmarket.wind.com.cn/skill.md 安装万得金融能力"
+            )
+
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertRegex(result["continuation_id"], r"^install_[a-f0-9]{32}$")
+        self.assertEqual(result["preview"]["source"]["commit"], "a" * 40)
+        self.assertEqual(
+            result["preview"]["skills"],
+            ["wind-find-finance-skill", "wind-mcp-skill"],
+        )
+
     def test_confirm_installs_same_snapshot_and_publishes_once(self):
         service, preview = self._inspect()
         result = service.install(preview["continuation_id"])
@@ -265,6 +311,55 @@ class TestRemoteSkillInstaller(unittest.TestCase):
         )
         self.assertEqual(invalid_decision["status"], "error")
         self.assertIn("decision", invalid_decision["error"])
+
+    def test_initial_request_url_stops_before_chinese_explanation(self):
+        urls = _request_urls(
+            "请安装：https://aifinmarket.wind.com.cn/skill.md。用户已选择官方 GitHub"
+        )
+        self.assertEqual(urls, ["https://aifinmarket.wind.com.cn/skill.md"])
+
+    def test_rephrased_inspection_loop_is_stopped_after_two_attempts(self):
+        prior_calls = []
+        for index in range(3):
+            prior_calls.append(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": f"call-{index}",
+                            "type": "function",
+                            "function": {
+                                "name": "remote_skill_installer_agent",
+                                "arguments": json.dumps(
+                                    {
+                                        "request": (
+                                            "阅读 https://aifinmarket.wind.com.cn/skill.md "
+                                            f"安装万得金融能力，第 {index + 1} 次改写"
+                                        ),
+                                        "continuation_id": "",
+                                        "decision": "",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                    ],
+                }
+            )
+        result = run_remote_skill_installer_agent(
+            request="阅读 https://aifinmarket.wind.com.cn/skill.md 安装万得金融能力",
+            app_data_dir=self.temp_dir,
+            context={
+                **self.context,
+                "current_messages_snapshot": [
+                    {"role": "user", "content": "安装万得金融能力"},
+                    *prior_calls,
+                ],
+            },
+            runner=FakeRunner(),
+        )
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "inspection_retry_limit")
 
     def test_existing_target_blocks_entire_install(self):
         service, preview = self._inspect()

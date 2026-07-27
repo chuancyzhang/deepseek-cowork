@@ -30,7 +30,7 @@ MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024
 CONTINUATION_RE = re.compile(r"^install_[a-f0-9]{32}$")
 SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,127}$")
-URL_RE = re.compile(r"https://[^\s<>()\"']+")
+URL_RE = re.compile(r"https://[^\s<>()\"'，。；：！？、]+")
 ENV_PATTERNS = [
     re.compile(r"\bprocess\.env\.([A-Z][A-Z0-9_]+)\b"),
     re.compile(r"\bos\.environ(?:\.get)?\(\s*[\"']([A-Z][A-Z0-9_]+)[\"']"),
@@ -475,7 +475,6 @@ class RemoteSkillInstallerAgentRunner:
     {{"name": "kebab-case-name", "path_hint": "skills/name", "confidence": "high|low",
       "evidence": {{"line_start": 1, "line_end": 1}}}}
   ],
-  "ambiguities": [""],
   "risks": [""]
 }}
 
@@ -484,6 +483,11 @@ class RemoteSkillInstallerAgentRunner:
 - required_skills 只列入口明确要求安装的 Skill。
 - evidence 行号必须引用下方带行号入口文档。
 - 不要把入口文档自身当作要安装的 Skill，除非文档明确如此要求。
+- path_hint 只是可选提示；入口未给目录时留空，内核会在仓库快照中定位。
+- 不要求入口提供 commit 或 tag；内核下载仓库后会固定实际 HEAD。
+- 多个官方镜像或仓库候选不是歧义；内核会按证据顺序安全尝试。
+- 安装范围不是你的职责；Cowork 内核统一安装到用户 AI Skills。
+- 不要输出 ambiguities、needs_input、needs_confirmation 或 continuation_id。
 
 用户请求：
 {request}
@@ -519,8 +523,7 @@ class RemoteSkillInstallerAgentRunner:
       "evidence": [{{"file": "SKILL.md", "line": 1}}]
     }}
   ],
-  "risks": ["network|filesystem_write|child_process|self_update"],
-  "ambiguities": [""]
+  "risks": ["network|filesystem_write|child_process|self_update"]
 }}
 
 要求：
@@ -529,6 +532,8 @@ class RemoteSkillInstallerAgentRunner:
 - required 只有在文档明确要求或代码缺失即失败时为 true。
 - action_url 必须来自 deterministic_scan.url_evidence；没有明确获取配置用途时留空。
 - 不要输出真实配置值。
+- 不确定的配置字段使用 confidence="low"；不要输出 ambiguities、needs_input、
+  needs_confirmation 或 continuation_id。
 
 不可信包材料：
 {json.dumps(package_payload, ensure_ascii=False, indent=2)}
@@ -691,7 +696,15 @@ class RemoteSkillInstallService:
             self._log("agent_error", phase="entry_analysis", error=str(exc))
             raise
         self._log("agent_finish", phase="entry_analysis")
-        ambiguities = [str(item) for item in entry_analysis.get("ambiguities") or [] if str(item).strip()]
+        unexpected_ambiguities = [
+            str(item) for item in entry_analysis.get("ambiguities") or [] if str(item).strip()
+        ]
+        if unexpected_ambiguities:
+            self._log(
+                "agent_ignored_out_of_scope_ambiguities",
+                phase="entry_analysis",
+                ambiguity_count=len(unexpected_ambiguities),
+            )
         repo_candidates = []
         for item in entry_analysis.get("repository_candidates") or []:
             if not isinstance(item, dict):
@@ -701,6 +714,7 @@ class RemoteSkillInstallService:
                 raise ValueError(f"专用安装 Agent 返回了缺少入口证据的仓库：{url}")
             repo_candidates.append({"url": url, "evidence": item.get("evidence") or {}})
         skills = []
+        low_confidence_skills = []
         for item in entry_analysis.get("required_skills") or []:
             if not isinstance(item, dict):
                 continue
@@ -709,16 +723,27 @@ class RemoteSkillInstallService:
                 raise ValueError(f"专用安装 Agent 返回了无效 Skill 名：{name}")
             if not _skill_evidence_matches(name, entry["text"], item.get("evidence")):
                 raise ValueError(f"专用安装 Agent 返回了缺少入口证据的 Skill：{name}")
-            skills.append({
+            target = {
                 "name": name,
                 "path_hint": str(item.get("path_hint") or "").strip(),
                 "evidence": item.get("evidence") or {},
-            })
-        if ambiguities:
+            }
+            if str(item.get("confidence") or "high").strip().casefold() == "low":
+                low_confidence_skills.append(target)
+            else:
+                skills.append(target)
+        if not skills and low_confidence_skills:
             return {
                 "status": "needs_input",
-                "ambiguities": ambiguities,
-                "message": "远程安装入口存在歧义，需要用户补充信息。",
+                "ambiguities": [
+                    "入口只识别到低置信安装目标："
+                    + "、".join(item["name"] for item in low_confidence_skills)
+                ],
+                "retry_policy": {
+                    "requires_new_user_input": True,
+                    "do_not_retry_with_rephrased_request": True,
+                },
+                "message": "入口没有可确定的必需 Skill，需要用户明确安装目标。",
             }
         if not repo_candidates:
             raise ValueError("入口文档没有可验证的 HTTPS Git 仓库。")
@@ -776,13 +801,11 @@ class RemoteSkillInstallService:
                 if str(item).strip()
             ]
             if package_ambiguities:
-                self._log("inspect_needs_input", ambiguity_count=len(package_ambiguities))
-                shutil.rmtree(plan_dir, ignore_errors=True)
-                return {
-                    "status": "needs_input",
-                    "ambiguities": package_ambiguities,
-                    "message": "远程 Skill 配置或风险分析存在歧义，需要用户补充信息后重新检查。",
-                }
+                self._log(
+                    "agent_ignored_out_of_scope_ambiguities",
+                    phase="package_analysis",
+                    ambiguity_count=len(package_ambiguities),
+                )
             agent_candidates = {}
             for field in package_analysis.get("config_candidates") or []:
                 if not isinstance(field, dict):
@@ -876,7 +899,14 @@ class RemoteSkillInstallService:
                     "config_fields": config_fields,
                     "low_confidence_config_fields": low_confidence_fields,
                     "risks": sorted(risks),
-                    "warnings": source_warnings,
+                    "warnings": source_warnings + (
+                        [
+                            "入口还包含低置信安装目标，未纳入本次计划："
+                            + "、".join(item["name"] for item in low_confidence_skills)
+                        ]
+                        if low_confidence_skills
+                        else []
+                    ),
                 },
                 "confirmation_message": confirmation,
                 "next_action": "调用 request_user_approval；用户确认后携带 continuation_id 再调用本 Tool。",
@@ -1048,6 +1078,37 @@ def _install_remote_agent_skills(service, continuation_id, config_overrides=None
     return service.install(continuation_id, config_overrides=config_overrides)
 
 
+def _inspection_attempts_in_current_user_turn(context):
+    if not isinstance(context, dict):
+        return 0
+    messages = context.get("current_messages_snapshot")
+    if not isinstance(messages, list):
+        return 0
+    last_user_index = -1
+    for index, message in enumerate(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            last_user_index = index
+    attempts = 0
+    for message in messages[last_user_index + 1:]:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            if function.get("name") != "remote_skill_installer_agent":
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, dict) or not str(arguments.get("continuation_id") or "").strip():
+                attempts += 1
+    return attempts
+
+
 def run_remote_skill_installer_agent(
     request="",
     continuation_id="",
@@ -1065,9 +1126,24 @@ def run_remote_skill_installer_agent(
             "status": "error",
             "error": "decision 只允许 confirm、cancel 或空字符串。",
         }
+    effective_context = context if isinstance(context, dict) else {}
+    if (
+        not continuation_id
+        and not normalized_decision
+        and _inspection_attempts_in_current_user_turn(effective_context) > 2
+    ):
+        return {
+            "status": "error",
+            "error_code": "inspection_retry_limit",
+            "error": (
+                "同一用户请求的远程 Skill 首次检查已达到 2 次。"
+                "不要继续改写请求或使用浏览器补证；请明确报告最后一次 Tool 结果，"
+                "等待新的用户输入后再检查。"
+            ),
+        }
     service = RemoteSkillInstallService(
         app_data_dir,
-        context=context,
+        context=effective_context,
         runner=runner,
         mutation_lock=mutation_lock,
     )

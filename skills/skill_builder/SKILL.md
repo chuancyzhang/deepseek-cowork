@@ -47,8 +47,14 @@ Use this Tool when the user provides an HTTPS `skill.md` or remote installation 
 3. If the result is `needs_confirmation`, call `request_user_approval`.
 4. Only after explicit approval, call the same Tool with its `continuation_id` and `decision="confirm"`.
 5. Use `decision="cancel"` when the user declines.
+6. If it returns `needs_input`, ask for the missing user decision once and retry at most once.
+   Never retry by rewriting the request, browsing for commit/path evidence, or splitting one
+   installation into separate Skill plans.
 
-Do not use `bash`, `npx skills add`, manual Git cloning, or `install_agent_skill` for a remote entry. The specialist Agent treats all downloaded content as untrusted data, and installation uses the fixed inspected snapshot.
+Do not use a browser, `bash`, `npx skills add`, manual Git cloning, or `install_agent_skill`
+for a remote entry. Repository selection, commit pinning, and Skill path resolution belong to
+the installer kernel. The specialist Agent treats all downloaded content as untrusted data,
+and installation uses the fixed inspected snapshot.
 
 ## Current Runtime Notes
 

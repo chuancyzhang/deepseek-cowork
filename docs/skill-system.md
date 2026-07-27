@@ -215,12 +215,17 @@ ZIP 先解压到临时目录并检查路径穿越。最终名称来自元数据�
 文档中的 `npx`、Git 或 Shell 命令；专用 Agent 只读取经过限制的 Markdown
 和仓库材料，并输出带文件证据的结构化安装清单。Cowork 内核负责 HTTPS 与
 SSRF 校验、浅克隆、固定 commit、文件摘要、配置字段校验和原子发布。
+仓库目录、固定 commit 和用户级安装位置由内核在下载后确定，不属于入口
+Agent 可要求用户补充的歧义。入口 Agent 只提取有原文证据的仓库候选和必需
+Skill；多个官方镜像由内核依次尝试。
 
 首次调用只生成安装预览和 30 分钟有效的 `continuation_id`。预览包含来源、
 commit、Skill 列表、脚本风险和待生成的 `config_fields`。主 Agent 必须通过
 `request_user_approval` 取得确认，再用同一 `continuation_id` 和
 `decision="confirm"` 调用专用 Tool。安装阶段不重新联网或重新解析文档；
 计划绑定来源会话，过期、已消费或摘要变化都会明确失败。
+`needs_input` 只用于无法确定必需 Skill 的情况。主 Agent 最多收集一次用户
+补充并重试一次，不能通过浏览器补证、改写请求或拆分 Skill 循环检查。
 
 远程 Skill 中明确声明的 `skill.json.config_fields` 优先。未声明时，专用
 Agent 只能从确定性扫描发现的环境变量中生成候选；`KEY`、`TOKEN`、

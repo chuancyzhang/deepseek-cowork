@@ -613,7 +613,9 @@ TOOL_EXPORTS = [
             "Delegate remote Skill installation to a constrained specialist agent. "
             "Use when the user provides an HTTPS skill.md or remote Skill installation URL. "
             "The first call returns a fixed preview requiring user approval; after approval, "
-            "call again with the returned continuation_id and decision='confirm'."
+            "call again with the returned continuation_id and decision='confirm'. Pass the "
+            "original user request unchanged. Do not retry by rephrasing, browsing, adding a "
+            "commit/path, or splitting Skills."
         ),
         "search_hint": (
             "read remote skill.md install skill URL API key token credential "

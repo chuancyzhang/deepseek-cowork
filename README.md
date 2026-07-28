@@ -8,7 +8,7 @@ preview into one observable and recoverable workflow.
 
 This is a personal exploration project, not an official DeepSeek product.
 
-Current app version: **5.0.8**
+Current app version: **5.0.9**
 
 ## Three Product Ideas
 
@@ -108,7 +108,7 @@ Then run the clean build and package audit:
 - [Skill system](docs/skill-system.md) (Chinese)
 - [AI themes and Visualize](docs/guides/ai-theme-and-visualize.md) (Chinese)
 - [Roadmap](docs/roadmap.md)
-- [5.0.8 release notes](docs/releases/5.0.8.md)
+- [5.0.9 release notes](docs/releases/5.0.9.md)
 
 ## License
 

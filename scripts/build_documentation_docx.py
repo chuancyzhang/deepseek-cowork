@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - dependency contract requires Pillow
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_VERSION = "5.0.8"
+APP_VERSION = "5.0.9"
 PRESET_NAME = "compact_reference_guide"
 
 BODY_ASCII_FONT = "Calibri"

@@ -11,7 +11,7 @@ from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_VERSION = "5.0.8"
+APP_VERSION = "5.0.9"
 
 CURRENT_DOCS = (
     ROOT / "README.md",

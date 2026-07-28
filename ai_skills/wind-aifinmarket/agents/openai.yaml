@@ -1,0 +1,4 @@
+interface:
+  display_name: "万得金融能力"
+  short_description: "聚合万得数据、研究、选股、风控、复盘与量化分析工作流"
+  default_prompt: "Use $wind-aifinmarket to find the right financial workflow and complete this market research request."

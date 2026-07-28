@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "name": "wind-aifinmarket",
+  "kind": "knowledge",
+  "capability_group": "optional-plugin",
+  "source_type": "bundled_plugin",
+  "source_format": "cowork",
+  "default_enabled": false,
+  "display_name": "万得金融能力",
+  "description": "Wind AIFin Market aggregate plugin with 78 financial data, research, screening, trading-plan, risk, and quantitative workflows.",
+  "description_cn": "万得 AIFin Market 聚合能力，内置 78 个金融数据、研究、选股、交易计划、风控和量化工作流。",
+  "tags": ["wind", "aifinmarket", "finance", "alice", "tushare", "finviz", "股票", "基金", "估值", "选股", "复盘", "金融数据"],
+  "triggers": ["万得", "Wind", "AIFin Market", "Wind Alice", "金融数据", "股票行情", "基金分析", "市场主题", "投资研究", "选股", "回测"],
+  "anti_triggers": ["真实下单", "自动交易", "账户转账"],
+  "tool_refs": ["search_wind_subskills", "load_wind_subskill", "run_skill_script"],
+  "references": ["SOURCE.md"],
+  "script_refs": [
+    "scripts/wind_mcp.mjs",
+    "scripts/wind_alice.mjs",
+    "scripts/tushare_query.py",
+    "scripts/backtest_evaluate.py",
+    "scripts/dcf_validate.py",
+    "scripts/position_size.py",
+    "scripts/market_environment.py",
+    "scripts/theme_detect.py"
+  ],
+  "script_entries": [
+    {"name": "wind_mcp", "path": "scripts/wind_mcp.mjs", "runtime": "node", "description": "Call an allowlisted Wind MCP data server and tool."},
+    {"name": "wind_alice", "path": "scripts/wind_alice.mjs", "runtime": "node", "description": "Run Wind Alice with the original user prompt and optional Alice Skill."},
+    {"name": "tushare_query", "path": "scripts/tushare_query.py", "runtime": "python", "description": "Call a Tushare Pro API by api_name with JSON params and optional fields."},
+    {"name": "backtest_evaluate", "path": "scripts/backtest_evaluate.py", "runtime": "python", "description": "Evaluate a backtest result with the bundled methodology."},
+    {"name": "dcf_validate", "path": "scripts/dcf_validate.py", "runtime": "python", "description": "Validate DCF model inputs or outputs."},
+    {"name": "position_size", "path": "scripts/position_size.py", "runtime": "python", "description": "Calculate risk-based position sizing."},
+    {"name": "market_environment", "path": "scripts/market_environment.py", "runtime": "python", "description": "Run the bundled market-environment utilities."},
+    {"name": "theme_detect", "path": "scripts/theme_detect.py", "runtime": "python", "description": "Run the configured FINVIZ/FMP theme detector."}
+  ],
+  "config_fields": [
+    {"name": "WIND_API_KEY", "label": "Wind API Key", "kind": "secret", "required": false, "env": "WIND_API_KEY", "help": "用于 Wind MCP 与 Alice，只在运行时注入。", "placeholder": "请输入 Wind API Key", "action_label": "获取 API Key", "action_url": "https://aifinmarket.wind.com.cn/#/user/overview"},
+    {"name": "WIND_ALICE_API_URL", "label": "Wind Alice API 地址", "kind": "text", "required": false, "env": "WIND_ALICE_API_URL", "default": "https://mcp.wind.com.cn/skills/alice", "help": "默认使用 Wind Alice 官方接口。"},
+    {"name": "TUSHARE_TOKEN", "label": "Tushare Token", "kind": "secret", "required": false, "env": "TUSHARE_TOKEN", "help": "仅在调用 Tushare 子能力时使用。", "action_label": "获取 Token", "action_url": "https://tushare.pro"},
+    {"name": "FINVIZ_MODE", "label": "FINVIZ 模式", "kind": "select", "required": false, "env": "FINVIZ_MODE", "default": "public", "options": [{"value": "public", "label": "Public"}, {"value": "elite", "label": "Elite"}]},
+    {"name": "FINVIZ_API_KEY", "label": "FINVIZ Elite API Key", "kind": "secret", "required": false, "env": "FINVIZ_API_KEY", "help": "仅在 FINVIZ_MODE=elite 时使用。"},
+    {"name": "FMP_API_KEY", "label": "FMP API Key", "kind": "secret", "required": false, "env": "FMP_API_KEY", "help": "Financial Modeling Prep，可选。"}
+  ],
+  "python_dependencies": [],
+  "node_dependencies": [],
+  "asset_refs": [],
+  "disclosure_level_defaults": {
+    "default_prompt_level": "brief",
+    "include_references": false,
+    "include_experience_entries": false
+  },
+  "workflow": [
+    "Search the bundled catalog before choosing a sub-skill.",
+    "Load only the selected sub-skill and references needed for the current task.",
+    "Use the declared script entry for data access or deterministic calculation.",
+    "Keep each sub-skill's declared data source and surface errors without silent source switching.",
+    "State the actual data source, query time, limitations, and financial-research disclaimer."
+  ]
+}
+

@@ -9219,73 +9219,122 @@ class SettingsDialog(QDialog):
         except ValueError as exc:
             QMessageBox.warning(self, "下载源", str(exc))
             return
+        current_state = self._settings_state()
+        baseline_state = self._settings_baseline_state
+        current_config_state = current_state["config"]
+        baseline_config_state = baseline_state["config"]
+        config_changed = current_config_state != baseline_config_state
+        appearance_changed = (
+            current_state["appearance"] != baseline_state["appearance"]
+            or self.theme_settings_panel.has_active_preview()
+        )
         target_history_dir = self.history_dir_input.text().strip()
-        target_memory_store = MemoryStore(target_history_dir)
-        previous_memory = {
-            "soul": target_memory_store.read_soul(),
-            "global": target_memory_store.read_summary("global", ""),
-            "workspace": (
-                target_memory_store.read_summary("workspace", self.memory_workspace_dir)
-                if self.memory_workspace_dir else ""
-            ),
-        }
-        previous_config = {
-            "model_channels": self.config_manager.get_model_channels(),
-            "selected_model_id": self.config_manager.get_selected_model_id(),
-            "agent_profiles": self.config_manager.get_agent_profiles(),
-            "mcp_servers": self.config_manager.get_mcp_servers(),
-            "default_workspace": self.config_manager.get("default_workspace", ""),
-            "history_dir": self.config_manager.get_chat_history_dir(),
-            "chat_workspace_root": self.config_manager.get_chat_workspace_root(),
-            "god_mode": self.config_manager.get_god_mode(),
-            "download_sources": self.config_manager.get("download_sources", {}),
-            "im_gateway": self.config_manager.get("im_gateway", {}),
-        }
-        try:
-            target_memory_store.save_soul(self.memory_soul_edit.toPlainText())
-            target_memory_store.save_summary(self.memory_global_edit.toPlainText(), "global", "")
-            if self.memory_workspace_dir:
-                target_memory_store.save_summary(
-                    self.memory_workspace_edit.toPlainText(),
+        history_dir_changed = (
+            current_config_state["history_dir"] != baseline_config_state["history_dir"]
+        )
+        current_memory_state = current_state["memory"]
+        baseline_memory_state = baseline_state["memory"]
+        memory_write_scopes = set()
+        if history_dir_changed or current_memory_state["soul"] != baseline_memory_state["soul"]:
+            memory_write_scopes.add("soul")
+        if history_dir_changed or current_memory_state["global"] != baseline_memory_state["global"]:
+            memory_write_scopes.add("global")
+        if self.memory_workspace_dir and (
+            history_dir_changed
+            or current_memory_state["workspace"] != baseline_memory_state["workspace"]
+        ):
+            memory_write_scopes.add("workspace")
+        target_memory_store = self.memory_store
+        previous_memory = {}
+        if memory_write_scopes:
+            if history_dir_changed:
+                target_memory_store = MemoryStore(target_history_dir)
+            if "soul" in memory_write_scopes:
+                previous_memory["soul"] = target_memory_store.read_soul()
+            if "global" in memory_write_scopes:
+                previous_memory["global"] = target_memory_store.read_summary("global", "")
+            if "workspace" in memory_write_scopes:
+                previous_memory["workspace"] = target_memory_store.read_summary(
                     "workspace",
                     self.memory_workspace_dir,
                 )
-            with self.config_manager.batch_save():
-                self.config_manager.set_model_channels(model_channels, selected_model_id)
-                self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
-                self.config_manager.set_mcp_servers(mcp_servers)
-                self.config_manager.set("default_workspace", self.default_ws_input.text().strip())
-                self.config_manager.set_chat_history_dir(target_history_dir)
-                self.config_manager.set_chat_workspace_root(self.chat_workspace_root_input.text().strip())
-                self.config_manager.set_god_mode(self.god_mode_check.isChecked())
-                self.download_sources = pending_download_sources
-                self.config_manager.set("download_sources", self.download_sources)
-                self._save_im_gateway_config()
-            self.theme_settings_panel.commit()
+        previous_config = {}
+        if config_changed:
+            previous_config = {
+                "model_channels": self.config_manager.get_model_channels(),
+                "selected_model_id": self.config_manager.get_selected_model_id(),
+                "agent_profiles": self.config_manager.get_agent_profiles(),
+                "mcp_servers": self.config_manager.get_mcp_servers(),
+                "default_workspace": self.config_manager.get("default_workspace", ""),
+                "history_dir": self.config_manager.get_chat_history_dir(),
+                "chat_workspace_root": self.config_manager.get_chat_workspace_root(),
+                "god_mode": self.config_manager.get_god_mode(),
+                "download_sources": self.config_manager.get("download_sources", {}),
+            }
+        try:
+            if "soul" in memory_write_scopes:
+                target_memory_store.save_soul(current_memory_state["soul"])
+            if "global" in memory_write_scopes:
+                target_memory_store.save_summary(current_memory_state["global"], "global", "")
+            if "workspace" in memory_write_scopes:
+                target_memory_store.save_summary(
+                    current_memory_state["workspace"],
+                    "workspace",
+                    self.memory_workspace_dir,
+                )
+            if config_changed:
+                with self.config_manager.batch_save():
+                    self.config_manager.set_model_channels(model_channels, selected_model_id)
+                    self.config_manager.set_agent_profiles(self.agent_profile_manager.get_profiles())
+                    self.config_manager.set_mcp_servers(mcp_servers)
+                    self.config_manager.set(
+                        "default_workspace",
+                        current_config_state["default_workspace"],
+                    )
+                    self.config_manager.set_chat_history_dir(target_history_dir)
+                    self.config_manager.set_chat_workspace_root(
+                        current_config_state["chat_workspace_root"]
+                    )
+                    self.config_manager.set_god_mode(current_config_state["god_mode"])
+                    self.download_sources = pending_download_sources
+                    self.config_manager.set("download_sources", self.download_sources)
+            if appearance_changed:
+                self.theme_settings_panel.commit()
         except Exception as exc:
             try:
-                self.theme_settings_panel.restore_saved_theme()
-                target_memory_store.save_soul(previous_memory["soul"])
-                target_memory_store.save_summary(previous_memory["global"], "global", "")
-                if self.memory_workspace_dir:
+                if appearance_changed:
+                    self.theme_settings_panel.restore_saved_theme()
+                if "soul" in memory_write_scopes:
+                    target_memory_store.save_soul(previous_memory["soul"])
+                if "global" in memory_write_scopes:
+                    target_memory_store.save_summary(previous_memory["global"], "global", "")
+                if "workspace" in memory_write_scopes:
                     target_memory_store.save_summary(
                         previous_memory["workspace"],
                         "workspace",
                         self.memory_workspace_dir,
                     )
-                with self.config_manager.batch_save():
-                    self.config_manager.set_model_channels(
-                        previous_config["model_channels"],
-                        previous_config["selected_model_id"],
-                    )
-                    self.config_manager.set_agent_profiles(previous_config["agent_profiles"])
-                    self.config_manager.set_mcp_servers(previous_config["mcp_servers"])
-                    self.config_manager.set("default_workspace", previous_config["default_workspace"])
-                    self.config_manager.set_chat_history_dir(previous_config["history_dir"])
-                    self.config_manager.set_chat_workspace_root(previous_config["chat_workspace_root"])
-                    self.config_manager.set_god_mode(previous_config["god_mode"])
-                    self.config_manager.set("download_sources", previous_config["download_sources"])
-                    self.config_manager.set("im_gateway", previous_config["im_gateway"])
+                if config_changed:
+                    with self.config_manager.batch_save():
+                        self.config_manager.set_model_channels(
+                            previous_config["model_channels"],
+                            previous_config["selected_model_id"],
+                        )
+                        self.config_manager.set_agent_profiles(previous_config["agent_profiles"])
+                        self.config_manager.set_mcp_servers(previous_config["mcp_servers"])
+                        self.config_manager.set(
+                            "default_workspace",
+                            previous_config["default_workspace"],
+                        )
+                        self.config_manager.set_chat_history_dir(previous_config["history_dir"])
+                        self.config_manager.set_chat_workspace_root(
+                            previous_config["chat_workspace_root"]
+                        )
+                        self.config_manager.set_god_mode(previous_config["god_mode"])
+                        self.config_manager.set(
+                            "download_sources",
+                            previous_config["download_sources"],
+                        )
             except Exception as rollback_exc:
                 QMessageBox.critical(
                     self,
@@ -9295,9 +9344,14 @@ class SettingsDialog(QDialog):
                 return
             QMessageBox.critical(self, "保存设置失败", f"所有修改已回滚：{exc}")
             return
-        self.memory_store = target_memory_store
+        if memory_write_scopes:
+            self.memory_store = target_memory_store
         self.requires_skill_reload = mcp_servers != current_mcp_servers
-        theme_commit_warning = self.theme_settings_panel.last_commit_warning
+        theme_commit_warning = (
+            self.theme_settings_panel.last_commit_warning
+            if appearance_changed
+            else ""
+        )
         self._clear_settings_dirty()
         self._allow_close_without_prompt = True
         if self.property("embeddedProductPage"):

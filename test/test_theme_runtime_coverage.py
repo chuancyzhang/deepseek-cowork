@@ -207,6 +207,25 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
 
         add_toast.assert_not_called()
 
+    def test_acknowledged_local_theme_write_does_not_trigger_external_refresh(self):
+        self.manager.repository.replace_state(
+            themes=[],
+            active_theme_id="default",
+            default_tokens={},
+        )
+        self.manager.acknowledge_repository_state()
+        with patch.object(self.manager, "apply_repository_state") as apply_state:
+            self.manager.poll_external_changes()
+            apply_state.assert_not_called()
+
+            with open(self.manager.repository.store_path, "a", encoding="utf-8") as stream:
+                stream.write(" ")
+            self.manager.poll_external_changes()
+            apply_state.assert_called_once_with(
+                reason="external_change",
+                persisted_on_failure=True,
+            )
+
     def test_preview_bar_save_recommends_restart_after_success(self):
         self.manager.repository.write_preview(
             name="AI 主题",

@@ -237,6 +237,7 @@ class ThemeSettingsUiTests(unittest.TestCase):
             self.assertEqual(len(snapshot.themes), 1)
             self.assertIn("设置和主题已保存", panel.last_commit_warning)
             self.assertIn("请重启应用", panel.last_commit_warning)
+            manager.acknowledge_repository_state.assert_called_once_with()
             manager.apply_repository_state.assert_called_once_with(
                 reason="settings_save",
                 persisted_on_failure=True,

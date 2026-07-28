@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushBut
 
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
+from core.memory_store import MemoryStore
 from main import (
     AutoResizingInputEdit,
     CapabilityWorkbenchDialog,
@@ -174,6 +175,145 @@ class ProductExperienceFixTests(unittest.TestCase):
                 self.assertEqual(config.get_model_channels(), [])
                 self.assertEqual(config.get_selected_model_id(), "")
                 self.assertFalse(dialog._settings_dirty)
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_settings_mixed_save_failure_rolls_back_touched_config_and_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            original_workspace = config.get("default_workspace", "")
+            dialog = SettingsDialog(config)
+            try:
+                original_soul = dialog.memory_store.read_soul()
+                dialog.default_ws_input.setText(os.path.join(temp_dir, "changed-workspace"))
+                dialog.memory_soul_edit.setPlainText("尚未成功保存的记忆")
+                dialog.theme_settings_panel._new_theme()
+                self.app.processEvents()
+
+                with patch.object(
+                    dialog.theme_settings_panel,
+                    "commit",
+                    side_effect=RuntimeError("主题提交失败"),
+                ), patch.object(
+                    dialog.theme_settings_panel,
+                    "restore_saved_theme",
+                ) as restore_theme, patch.object(
+                    QMessageBox,
+                    "critical",
+                ) as critical:
+                    dialog.save_settings()
+
+                self.assertEqual(config.get("default_workspace", ""), original_workspace)
+                self.assertEqual(dialog.memory_store.read_soul(), original_soul)
+                restore_theme.assert_called_once_with()
+                critical.assert_called_once()
+                self.assertTrue(dialog._settings_dirty)
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_settings_config_only_save_skips_memory_and_theme_side_effects(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            dialog = SettingsDialog(config)
+            try:
+                dialog.default_ws_input.setText(os.path.join(temp_dir, "workspace"))
+                self.app.processEvents()
+                with patch.object(
+                    dialog.memory_store,
+                    "save_soul",
+                    wraps=dialog.memory_store.save_soul,
+                ) as save_soul, patch.object(
+                    dialog.memory_store,
+                    "save_summary",
+                    wraps=dialog.memory_store.save_summary,
+                ) as save_summary, patch.object(
+                    dialog.theme_settings_panel,
+                    "commit",
+                    wraps=dialog.theme_settings_panel.commit,
+                ) as theme_commit, patch.object(
+                    config,
+                    "_write_config",
+                    wraps=config._write_config,
+                ) as write_config:
+                    dialog.save_settings()
+
+                write_config.assert_called_once()
+                save_soul.assert_not_called()
+                save_summary.assert_not_called()
+                theme_commit.assert_not_called()
+                self.assertFalse(dialog._settings_dirty)
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_settings_memory_only_save_writes_only_changed_scope(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            dialog = SettingsDialog(config)
+            try:
+                dialog.memory_soul_edit.setPlainText("只更新灵魂记忆")
+                self.app.processEvents()
+                with patch.object(
+                    dialog.memory_store,
+                    "save_soul",
+                    wraps=dialog.memory_store.save_soul,
+                ) as save_soul, patch.object(
+                    dialog.memory_store,
+                    "save_summary",
+                    wraps=dialog.memory_store.save_summary,
+                ) as save_summary, patch.object(
+                    dialog.theme_settings_panel,
+                    "commit",
+                    wraps=dialog.theme_settings_panel.commit,
+                ) as theme_commit, patch.object(
+                    config,
+                    "_write_config",
+                    wraps=config._write_config,
+                ) as write_config:
+                    dialog.save_settings()
+
+                save_soul.assert_called_once_with("只更新灵魂记忆")
+                save_summary.assert_not_called()
+                theme_commit.assert_not_called()
+                write_config.assert_not_called()
+                self.assertFalse(dialog._settings_dirty)
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_settings_history_directory_change_migrates_all_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            source_store = MemoryStore(config.get_chat_history_dir())
+            source_store.save_soul("灵魂记忆")
+            source_store.save_summary("全局摘要", "global", "")
+            dialog = SettingsDialog(config)
+            try:
+                target_history_dir = os.path.join(temp_dir, "new-history")
+                dialog.history_dir_input.setText(target_history_dir)
+                self.app.processEvents()
+                with patch.object(
+                    dialog.theme_settings_panel,
+                    "commit",
+                    wraps=dialog.theme_settings_panel.commit,
+                ) as theme_commit:
+                    dialog.save_settings()
+
+                target_store = MemoryStore(target_history_dir)
+                self.assertEqual(target_store.read_soul(), "灵魂记忆\n")
+                self.assertEqual(target_store.read_summary("global", ""), "全局摘要\n")
+                self.assertEqual(config.get_chat_history_dir(), target_history_dir)
+                theme_commit.assert_not_called()
             finally:
                 dialog._allow_close_without_prompt = True
                 dialog.close()

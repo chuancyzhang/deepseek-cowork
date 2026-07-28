@@ -7271,6 +7271,7 @@ class SettingsDialog(QDialog):
         self._settings_dirty = False
         self._allow_close_without_prompt = False
         self._settings_baseline = ""
+        self._settings_baseline_state = {}
         apply_product_dialog(self, "SettingsDialog")
 
         layout = QVBoxLayout(self)
@@ -8164,7 +8165,8 @@ class SettingsDialog(QDialog):
         action_bar.layout.addWidget(cancel_btn)
         action_bar.layout.addWidget(self.save_settings_btn)
         layout.addWidget(action_bar)
-        self._settings_baseline = self._settings_state_signature()
+        self._settings_baseline_state = self._settings_state()
+        self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
         self._connect_settings_dirty_tracking()
 
     def resizeEvent(self, event):
@@ -8233,7 +8235,7 @@ class SettingsDialog(QDialog):
             return [SettingsDialog._strip_settings_state_metadata(item) for item in value]
         return value
 
-    def _settings_state_signature(self):
+    def _settings_state(self):
         source_state = {}
         for kind in ("python", "node"):
             combo = getattr(self, f"{kind}_source_combo")
@@ -8243,14 +8245,16 @@ class SettingsDialog(QDialog):
                 "url": editor.text().strip(),
             }
         state = {
-            "model_channels": self.model_channel_manager.get_channels(),
-            "agent_profiles": self.agent_profile_manager.get_profiles(),
-            "mcp_servers": normalize_mcp_servers(self.mcp_server_manager.get_servers()),
-            "default_workspace": self.default_ws_input.text().strip(),
-            "history_dir": self.history_dir_input.text().strip(),
-            "chat_workspace_root": self.chat_workspace_root_input.text().strip(),
-            "god_mode": self.god_mode_check.isChecked(),
-            "download_sources": source_state,
+            "config": {
+                "model_channels": self.model_channel_manager.get_channels(),
+                "agent_profiles": self.agent_profile_manager.get_profiles(),
+                "mcp_servers": normalize_mcp_servers(self.mcp_server_manager.get_servers()),
+                "default_workspace": self.default_ws_input.text().strip(),
+                "history_dir": self.history_dir_input.text().strip(),
+                "chat_workspace_root": self.chat_workspace_root_input.text().strip(),
+                "god_mode": self.god_mode_check.isChecked(),
+                "download_sources": source_state,
+            },
             "appearance": self.theme_settings_panel.state_signature(),
             "memory": {
                 "soul": self.memory_soul_edit.toPlainText(),
@@ -8259,8 +8263,14 @@ class SettingsDialog(QDialog):
                 "workspace_dir": self.memory_workspace_dir,
             },
         }
-        state = self._strip_settings_state_metadata(state)
+        return self._strip_settings_state_metadata(state)
+
+    @staticmethod
+    def _serialize_settings_state(state):
         return json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _settings_state_signature(self):
+        return self._serialize_settings_state(self._settings_state())
 
     def _refresh_settings_dirty_state(self):
         dirty = self._settings_state_signature() != self._settings_baseline
@@ -8275,7 +8285,8 @@ class SettingsDialog(QDialog):
 
     def _clear_settings_dirty(self):
         self._settings_dirty = False
-        self._settings_baseline = self._settings_state_signature()
+        self._settings_baseline_state = self._settings_state()
+        self._settings_baseline = self._serialize_settings_state(self._settings_baseline_state)
         if hasattr(self, "save_settings_btn"):
             self.save_settings_btn.setEnabled(False)
         if hasattr(self, "settings_dirty_label"):

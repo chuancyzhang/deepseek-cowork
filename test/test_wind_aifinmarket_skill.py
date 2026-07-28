@@ -85,6 +85,7 @@ class TestWindAIFinMarketSkill(unittest.TestCase):
     def test_loader_applies_cowork_rules_and_blocks_path_traversal(self):
         loaded = json.loads(self.impl.load_wind_subskill("wind-mcp-skill"))
         self.assertTrue(loaded["ok"])
+        self.assertEqual(loaded["reference"], "SKILL.md")
         self.assertIn("Cowork 强制适配规则", loaded["content"])
         reference = json.loads(
             self.impl.load_wind_subskill("wind-mcp-skill", "references/error-codes.json")
@@ -97,8 +98,33 @@ class TestWindAIFinMarketSkill(unittest.TestCase):
             self.impl.load_wind_subskill("wind-mcp-skill", "scripts/cli.mjs")
         )
         self.assertEqual(script["error"], "reference_not_allowed")
+        self.assertIn("SKILL.md", script["allowed_references"])
+        self.assertIn("without reference", script["recovery"])
         unknown = json.loads(self.impl.load_wind_subskill("not-a-real-skill"))
         self.assertEqual(unknown["error"], "unknown_subskill")
+
+    def test_loader_recovers_from_aggregate_source_reference(self):
+        loaded = json.loads(
+            self.impl.load_wind_subskill(
+                "a-share-primary-theme-identification",
+                "SOURCE.md",
+            )
+        )
+        self.assertTrue(loaded["ok"])
+        self.assertEqual(loaded["reference"], "SKILL.md")
+        self.assertEqual(loaded["requested_reference"], "SOURCE.md")
+        self.assertIn("belongs to the aggregate Wind skill", loaded["notice"])
+        self.assertIn("# A股市场主线识别", loaded["content"])
+
+    def test_tool_contract_requires_first_call_to_omit_reference(self):
+        export = next(
+            item for item in self.impl.TOOL_EXPORTS if item["name"] == "load_wind_subskill"
+        )
+        self.assertIn("omit reference", export["description"])
+        self.assertIn(
+            "Do not pass SOURCE.md",
+            export["parameters"]["properties"]["reference"]["description"],
+        )
 
     def test_tools_are_read_only_and_non_destructive(self):
         exports = {item["name"]: item for item in self.impl.TOOL_EXPORTS}

@@ -52,10 +52,9 @@
   },
   "workflow": [
     "Search the bundled catalog before choosing a sub-skill.",
-    "Load only the selected sub-skill and references needed for the current task.",
+    "First load the selected sub-skill with skill_name only; omit reference so SKILL.md is loaded. Pass a reference only when that SKILL.md explicitly names the exact sub-skill-local path, and never pass the aggregate SOURCE.md.",
     "Use the declared script entry for data access or deterministic calculation.",
     "Keep each sub-skill's declared data source and surface errors without silent source switching.",
     "State the actual data source, query time, limitations, and financial-research disclaimer."
   ]
 }
-

@@ -424,6 +424,10 @@ class ThemeRuntimeManager(QObject):
         self._last_store_stamp = self._directory_stamp()
         self._last_preview_stamp = self._path_stamp(self.repository.preview_path)
 
+    def acknowledge_repository_state(self):
+        """Mark the current repository files as an app-local, already observed change."""
+        self._capture_stamps()
+
     def poll_external_changes(self):
         store_stamp = self._directory_stamp()
         preview_stamp = self._path_stamp(self.repository.preview_path)

@@ -79,7 +79,7 @@ Cowork 从以下来源构建能力目录：
 
 ### 聚合型内置 Skill
 
-`wind-aifinmarket` 是一个默认关闭的聚合型内置 Skill。能力中心只展示一个“万得金融能力”条目，插件内部包含固定上游提交的 78 个独立子 Skill。根 Skill 通过只读的 `search_wind_subskills` 和 `load_wind_subskill` 工具进行分类检索与渐进加载，嵌套的 `skills/` 目录不会被注册为 78 个独立能力中心条目。
+`wind-aifinmarket` 是一个默认关闭的聚合型内置 Skill。能力中心只展示一个“万得金融能力”条目，插件内部包含固定上游提交的 78 个独立子 Skill。根 Skill 通过只读的 `search_wind_subskills` 和 `load_wind_subskill` 工具进行分类检索与渐进加载，嵌套的 `skills/` 目录不会被注册为 78 个独立能力中心条目。首次加载子 Skill 时只传 `skill_name`，工具默认读取该目录的 `SKILL.md`；后续只有在其正文明确引用资料时才传对应的子 Skill 本地 `reference`。根插件的 `SOURCE.md` 仅记录聚合快照来源，不属于任何子 Skill 的引用；为兼容旧提示造成的误传，加载器会明确标注纠正并加载所选子 Skill 的 `SKILL.md`。
 
 该快照不在运行时安装或更新，也不会从用户目录读取凭据。Wind、Alice、Tushare、FINVIZ/FMP 等数据源保持各自语义和配置边界；执行入口只校验自身需要的配置，失败时返回明确根因，不会静默换源。所有生成物必须位于 `COWORK_WORKSPACE_DIR/wind-aifinmarket/` 下，交易类能力仅输出分析和计划，不执行真实账户操作。固定来源、目录清单与 Cowork 改造说明见插件内的 `SOURCE.md`。
 - 标准 Agent Skill：由安装工具写入用户能力目录；

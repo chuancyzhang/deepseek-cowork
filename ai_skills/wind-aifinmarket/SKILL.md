@@ -11,7 +11,10 @@ description: 聚合 Wind AIFin Market 的金融数据、Alice 分析、Tushare�
 ## 工作流
 
 1. 调用 `search_wind_subskills`，按用户原始问题检索 1–5 个候选。
-2. 选择最具体的工作流；需要详细步骤时调用 `load_wind_subskill`。
+2. 选择最具体的工作流；首次调用 `load_wind_subskill` 时只传
+   `skill_name`，不要传 `reference`，由工具加载该子 Skill 的 `SKILL.md`。
+   只有已加载的 `SKILL.md` 明确要求某个子 Skill 本地引用时，才再次传入
+   其中逐字给出的 `reference` 路径。根插件的 `SOURCE.md` 不是子 Skill 引用。
 3. 取数或计算时只调用已声明入口：
    - `wind_mcp`：Wind MCP 数据。
    - `wind_alice`：Wind Alice 专业分析。
@@ -49,4 +52,3 @@ description: 聚合 Wind AIFin Market 的金融数据、Alice 分析、Tushare�
 - `FMP_API_KEY`：Financial Modeling Prep。
 
 配置均为插件级可选项；每个执行入口只校验自己需要的字段。
-

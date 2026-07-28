@@ -1131,6 +1131,7 @@ class ThemeSettingsPanel(QWidget):
             self._snapshot = snapshot
             runtime_applied = True
             if self.runtime_manager is not None:
+                self.runtime_manager.acknowledge_repository_state()
                 runtime_applied = self.runtime_manager.apply_repository_state(
                     reason="settings_save",
                     persisted_on_failure=True,
@@ -1168,8 +1169,12 @@ class ThemeSettingsPanel(QWidget):
                     default_tokens=default_design_tokens(),
                 )
             if self.runtime_manager is not None:
+                self.runtime_manager.acknowledge_repository_state()
                 self.runtime_manager.apply_repository_state(reason="settings_save_rollback")
             raise
+
+    def has_active_preview(self):
+        return bool(self._preview_active)
 
     def restore_saved_theme(self):
         self._snapshot = self.repository.load()

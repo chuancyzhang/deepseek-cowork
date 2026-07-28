@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from collections import OrderedDict
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,6 +21,7 @@ from core.theme import DesignTokens
 
 from main import (
     AssistantTurnGroup,
+    SummonedAgentProcessBlock,
     ChatBubble,
     ComposerActionPopover,
     ConversationSkillOptionsDialog,
@@ -34,6 +35,7 @@ from main import (
     SessionSkillPickerPopover,
     GuidanceTimelineEvent,
     ToolCallCard,
+    build_sub_agent_history_events,
     launch_daemon_subprocess,
 )
 from ui.primitives import ProductActionRow, ProductEmptyState, ProductPopover
@@ -527,6 +529,197 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertFalse(hasattr(bubble, "sub_agent_logs"))
         self.assertFalse(hasattr(bubble, "update_sub_agent_log"))
         bubble.deleteLater()
+
+    def test_summoned_agent_process_blocks_scope_same_tool_id_per_agent(self):
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.addStretch()
+        state = SimpleNamespace(
+            session_id="session-1",
+            chat_layout=layout,
+            summoned_agent_projections={},
+            workspace_dir="",
+        )
+        window = MainWindow.__new__(MainWindow)
+        window.dynamic_message_width = 760
+        window.dynamic_user_bubble_width = 760
+        window.chat_storage = None
+        window.config_manager = SimpleNamespace(
+            is_skill_enabled=lambda *_args, **_kwargs: False,
+        )
+        window._workspace_dir_for_state = lambda _state: ""
+        window._connect_chat_bubble_actions = MagicMock()
+        window.request_session_scroll_to_bottom = MagicMock()
+        window.show_tool_details = MagicMock()
+
+        first = MainWindow._create_summoned_agent_process(
+            window,
+            state,
+            {"agent_id": "agent-1", "agent_profile_name": "分析一"},
+        )
+        second = MainWindow._create_summoned_agent_process(
+            window,
+            state,
+            {"agent_id": "agent-2", "agent_profile_name": "分析二"},
+        )
+        for agent_id in ("agent-1", "agent-2"):
+            MainWindow._project_summoned_agent_event(
+                window,
+                state,
+                {
+                    "agent_id": agent_id,
+                    "status": "thinking",
+                    "reasoning_delta": f"{agent_id} 正在分析",
+                },
+            )
+            MainWindow._project_summoned_agent_event(
+                window,
+                state,
+                {
+                    "agent_id": agent_id,
+                    "status": "tool_use",
+                    "tool_call_id": "shared-tool-id",
+                    "tool_name": "workspace_list_files",
+                    "tool_args": {"path": "."},
+                },
+            )
+            MainWindow._project_summoned_agent_event(
+                window,
+                state,
+                {
+                    "agent_id": agent_id,
+                    "status": "tool_result",
+                    "tool_call_id": "shared-tool-id",
+                    "tool_result": f"{agent_id} ok",
+                },
+            )
+
+        self.assertIsInstance(first["block"], SummonedAgentProcessBlock)
+        self.assertIsNot(first["tool_cards"]["shared-tool-id"], second["tool_cards"]["shared-tool-id"])
+        self.assertEqual(first["tool_cards"]["shared-tool-id"].tool_id, "agent-1:shared-tool-id")
+        self.assertEqual(second["tool_cards"]["shared-tool-id"].tool_id, "agent-2:shared-tool-id")
+        self.assertEqual(first["tool_cards"]["shared-tool-id"].result, "agent-1 ok")
+        self.assertEqual(second["tool_cards"]["shared-tool-id"].result, "agent-2 ok")
+        host.deleteLater()
+
+    def test_sub_agent_history_events_restore_reasoning_before_tools_and_final(self):
+        events = build_sub_agent_history_events(
+            {"id": "agent-1", "name": "审查助手", "status": "completed", "updated_at": 10},
+            [
+                {"role": "user", "content": "检查方案", "created_at": 1},
+                {
+                    "role": "assistant",
+                    "reasoning": "先检查结构",
+                    "tool_calls": [
+                        {
+                            "id": "tool-1",
+                            "function": {"name": "text_file_read", "arguments": {"path": "a.md"}},
+                        }
+                    ],
+                    "created_at": 2,
+                },
+                {"role": "tool", "tool_call_id": "tool-1", "content": "内容", "created_at": 3},
+                {"role": "assistant", "reasoning": "整理结论", "content": "检查完成", "created_at": 4},
+            ],
+        )
+
+        self.assertEqual(
+            [event["status"] for event in events],
+            ["input", "thinking", "tool_use", "tool_result", "thinking", "completed"],
+        )
+        self.assertEqual(events[1]["reasoning_delta"], "先检查结构")
+        self.assertEqual(events[-1]["output_text"], "检查完成")
+
+    def test_summoned_agent_history_restore_preserves_declared_order(self):
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.addStretch()
+        state = SimpleNamespace(
+            session_id="session-history",
+            chat_layout=layout,
+            summoned_agent_projections={},
+            summoned_agent_pending_events={},
+            workspace_dir="",
+        )
+        rows = {
+            "agent-1": {"id": "agent-1", "name": "实例一", "status": "completed", "updated_at": 2},
+            "agent-2": {"id": "agent-2", "name": "实例二", "status": "failed", "last_error": "失败原因", "updated_at": 3},
+        }
+        messages = {
+            "agent-1": [
+                {"role": "user", "content": "任务一", "created_at": 1},
+                {"role": "assistant", "reasoning": "分析一", "content": "结果一", "created_at": 2},
+            ],
+            "agent-2": [],
+        }
+        window = MainWindow.__new__(MainWindow)
+        window.dynamic_message_width = 760
+        window.dynamic_user_bubble_width = 760
+        window.chat_storage = SimpleNamespace(
+            get_agent=lambda agent_id: rows[agent_id],
+            get_agent_messages=lambda agent_id: messages[agent_id],
+        )
+        window.config_manager = SimpleNamespace(is_skill_enabled=lambda *_args, **_kwargs: False)
+        window._workspace_dir_for_state = lambda _state: ""
+        window._connect_chat_bubble_actions = MagicMock()
+        window.request_session_scroll_to_bottom = MagicMock()
+        window.show_tool_details = MagicMock()
+        message = {
+            "role": "user",
+            "meta": {
+                "summoned_agents": [
+                    {"agent_id": "agent-1", "agent_profile_name": "分析一"},
+                    {"agent_id": "agent-2", "agent_profile_name": "分析二"},
+                ]
+            },
+        }
+
+        inserted = MainWindow._render_summoned_agent_processes(window, state, message, insert_index=0)
+
+        self.assertEqual(inserted, 2)
+        self.assertEqual(
+            [layout.itemAt(index).widget().agent_id for index in range(2)],
+            ["agent-1", "agent-2"],
+        )
+        self.assertEqual(state.summoned_agent_projections["agent-1"]["block"].status, "completed")
+        self.assertEqual(state.summoned_agent_projections["agent-2"]["block"].status, "failed")
+        host.deleteLater()
+
+    def test_summoned_agent_result_stays_in_context_without_duplicate_bubble(self):
+        state = SimpleNamespace(
+            session_id="session-1",
+            messages=[],
+            completed_agent_result_ids=set(),
+            displayed_count=0,
+            displayed_render_count=0,
+            render_items=[],
+        )
+        window = MainWindow.__new__(MainWindow)
+        window.chat_storage = SimpleNamespace(
+            get_agent=lambda _agent_id: {"parent_message_id": "user-1"},
+            normalize_messages=lambda messages: messages,
+        )
+        window._new_message_id = lambda: "result-1"
+        window._rebuild_session_render_spans = lambda current: setattr(current, "render_items", [])
+        window.add_chat_bubble = MagicMock()
+
+        MainWindow._append_summoned_agent_result(
+            window,
+            state,
+            {
+                "agent_id": "agent-1",
+                "agent_profile_name": "审查助手",
+                "summon_source": "mention",
+                "status": "completed",
+                "content": "检查完成",
+            },
+        )
+
+        self.assertEqual(len(state.messages), 1)
+        self.assertEqual(state.messages[0]["content"], "[审查助手] 检查完成")
+        self.assertTrue(state.messages[0]["meta"]["embedded_agent_result"])
+        self.assertEqual(state.messages[0]["meta"]["agent_parent_message_id"], "user-1")
+        window.add_chat_bubble.assert_not_called()
 
     def test_legacy_skill_change_messages_are_hidden_and_new_events_use_toasts(self):
         enabled = {

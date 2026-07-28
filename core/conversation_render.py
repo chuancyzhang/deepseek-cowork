@@ -35,7 +35,7 @@ def _is_hidden_context_message(message):
     return (
         bool(meta.get("hidden"))
         and meta.get("kind") in {"skill_context", "skill_context_update"}
-    ) or is_legacy_skill_change_notice_message(message)
+    ) or bool(meta.get("embedded_agent_result")) or is_legacy_skill_change_notice_message(message)
 
 
 def is_legacy_skill_change_notice_message(message):

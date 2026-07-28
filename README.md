@@ -49,6 +49,7 @@ See the [product document](docs/product.md) for the full model.
 
 - Run a local Agent inside a conversation workspace or explicit project boundary.
 - Interleave reasoning, Tool calls, stage replies, and the final answer.
+- Mention one or more configured Agents and follow each independent reasoning, Tool, stage, and final-answer stream directly in the chat; the full process is restored from history.
 - Steer or stop running work, answer approval requests, and inspect observability.
 - Preview Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX deliverables.
 - Generate office drafts and convert HTML work products to PPTX, DOCX, or PDF.

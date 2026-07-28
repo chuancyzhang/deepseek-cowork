@@ -66,6 +66,34 @@ class TestConversationRender(unittest.TestCase):
         )
         self.assertEqual(len(messages), 4)
 
+    def test_embedded_agent_result_stays_out_of_chat_projection(self):
+        messages = [
+            {
+                "id": "u1",
+                "role": "user",
+                "content": "@审查助手 检查方案",
+                "meta": {
+                    "agent_delegation": True,
+                    "summoned_agents": [{"agent_id": "agent-1", "agent_profile_name": "审查助手"}],
+                },
+            },
+            {
+                "id": "a1",
+                "role": "assistant",
+                "content": "[审查助手] 已完成",
+                "meta": {"agent_id": "agent-1", "embedded_agent_result": True},
+            },
+        ]
+
+        self.assertEqual(
+            [item["type"] for item in build_conversation_render_items(messages)],
+            ["user"],
+        )
+        self.assertEqual(
+            build_conversation_render_spans(messages),
+            [{"start": 0, "end": 1}],
+        )
+
     def test_merges_tool_calls_and_results_into_same_assistant_item(self):
         items = build_conversation_render_items(
             [

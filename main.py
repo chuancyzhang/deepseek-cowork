@@ -2323,6 +2323,9 @@ def summarize_tool_action(tool_name, args):
         return "删除文件", path or "删除项目"
     if name in {"workspace_list_files", "search_files", "glob", "grep", "search_codebase"}:
         return "扫描工作区", path or "查找相关文件"
+    if name in {"web_search", "browser_search"}:
+        query = args.get("query") or args.get("q") or ""
+        return "搜索网页", str(query)[:64] if query else "查找相关信息"
     if name in {"bash", "run_command"}:
         cmd = args.get("command") or args.get("cmd") or ""
         return "执行命令", cmd[:48] if cmd else "运行系统命令"
@@ -2495,6 +2498,20 @@ def build_sub_agent_history_events(agent_row, messages):
                 }
             )
         elif role == "assistant":
+            reasoning = str(msg.get("reasoning_content") or msg.get("reasoning") or "").strip()
+            if reasoning:
+                events.append(
+                    {
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "status": "thinking",
+                        "event_type": "thinking",
+                        "reasoning_delta": reasoning,
+                        "content": reasoning,
+                        "ts": created_at,
+                        "from_history": True,
+                    }
+                )
             tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
             for call in tool_calls:
                 if not isinstance(call, dict):
@@ -14244,6 +14261,99 @@ class AssistantTurnGroup(QFrame):
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
 
 
+class SummonedAgentProcessBlock(QFrame):
+    """Named, independently updating assistant process embedded in the chat."""
+
+    STATUS_COPY = {
+        "input": "已接收",
+        "pending": "等待中",
+        "running": "运行中",
+        "active": "运行中",
+        "thinking": "思考中",
+        "content": "输出中",
+        "tool_use": "调用工具",
+        "tool_result": "运行中",
+        "waiting_input": "等待输入",
+        "completed": "已完成",
+        "failed": "失败",
+        "failed_recovered": "恢复失败",
+        "provider_error": "异常",
+        "closed": "已关闭",
+        "killed": "已终止",
+    }
+
+    def __init__(self, agent_id, agent_name, group_id="", parent=None):
+        super().__init__(parent)
+        self.agent_id = str(agent_id or "")
+        self.agent_name = str(agent_name or "智能体").strip() or "智能体"
+        self.status = "pending"
+        self.setObjectName("SummonedAgentProcessBlock")
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(
+            DesignTokens.assistant_stage_separator_indent,
+            DesignTokens.spacing_sm,
+            DesignTokens.assistant_stage_separator_right_margin,
+            DesignTokens.spacing_sm,
+        )
+        layout.setSpacing(DesignTokens.spacing_sm)
+        layout.setAlignment(Qt.AlignTop)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(DesignTokens.spacing_sm)
+        self.icon_label = QLabel(self)
+        self.icon_label.setFixedSize(DesignTokens.icon_size_lg, DesignTokens.icon_size_lg)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        self.name_label = QLabel(self.agent_name, self)
+        self.name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.status_label = QLabel(self)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        header.addWidget(self.icon_label)
+        header.addWidget(self.name_label)
+        header.addStretch()
+        header.addWidget(self.status_label)
+        layout.addLayout(header)
+
+        self.turn_group = AssistantTurnGroup(group_id or f"summoned-agent-{self.agent_id}", self)
+        layout.addWidget(self.turn_group)
+        bind_theme(self, self.refresh_theme, surface="conversation")
+        self.refresh_theme()
+        self.set_status("pending")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#SummonedAgentProcessBlock {{ background: transparent; border: none; "
+            f"border-left: 2px solid {DesignTokens.chat_border}; }}"
+        )
+        self.icon_label.setPixmap(
+            qta.icon("fa5s.user-astronaut", color=DesignTokens.primary).pixmap(
+                DesignTokens.icon_size_sm,
+                DesignTokens.icon_size_sm,
+            )
+        )
+        self.name_label.setStyleSheet(
+            f"color: {DesignTokens.chat_text}; font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; background: transparent; border: none;"
+        )
+        self.set_status(self.status)
+
+    def set_status(self, status):
+        self.status = str(status or "pending").strip().lower()
+        label = self.STATUS_COPY.get(self.status, status_label_text(self.status))
+        self.status_label.setText(label)
+        self.status_label.setStyleSheet(apple_status_chip_style(self.status, subtle=True))
+        self.status_label.setAccessibleName(f"{self.agent_name} {label}")
+
+    def add_stage(self, bubble, stage_id=None):
+        return self.turn_group.add_stage(bubble, stage_id=stage_id)
+
+    def apply_dynamic_widths(self, message_width, user_bubble_width):
+        self.turn_group.apply_dynamic_widths(message_width, user_bubble_width)
+
+
 class HistoricalAssistantSummary(QFrame):
     detailRequested = Signal(bool)
 
@@ -14375,8 +14485,9 @@ class ChatBubble(QFrame):
         session_id="",
         chat_storage=None,
         visualize_enabled=False,
+        parent=None,
     ):
-        super().__init__()
+        super().__init__(parent)
         self.role = role
         self.content_wrapper = None
         self.user_bubble_frame = None
@@ -15802,8 +15913,8 @@ class OfficeDraftTaskCard(QFrame):
 class ToolCallCard(QFrame):
     clicked = Signal(str, str, str, dict) # tool_id, args, result, meta
 
-    def __init__(self, tool_name, args, tool_id, meta=None):
-        super().__init__()
+    def __init__(self, tool_name, args, tool_id, meta=None, parent=None):
+        super().__init__(parent)
         self.tool_id = tool_id
         self.args = args
         self.result = ""
@@ -17072,6 +17183,8 @@ class SessionState:
         self.sub_agent_events = []
         self.sub_agent_history_loaded = False
         self.sub_agent_render_queued = False
+        self.summoned_agent_projections = {}
+        self.summoned_agent_pending_events = {}
         self.observability_events = []
         self.system_prompt_text = ""
         self.runtime_context_text = ""
@@ -20739,6 +20852,8 @@ class MainWindow(QMainWindow):
                     yield widget
                 elif isinstance(widget, AssistantTurnGroup):
                     yield from widget.stage_bubbles
+                elif isinstance(widget, SummonedAgentProcessBlock):
+                    yield from widget.turn_group.stage_bubbles
 
     def sync_conversation_widths(self, drawer_geometry=None):
         metrics = self._compute_conversation_shell_metrics(drawer_geometry)
@@ -24192,6 +24307,8 @@ class MainWindow(QMainWindow):
         state.persisted_agents = []
         state.sub_agent_events = []
         state.sub_agent_history_loaded = False
+        state.summoned_agent_projections = {}
+        state.summoned_agent_pending_events = {}
         state.virtualization_active = False
         state.token_usage_summary = normalize_token_usage_summary({})
         state.last_token_usage = {}
@@ -24958,6 +25075,8 @@ class MainWindow(QMainWindow):
         )
         state.sub_agent_events = []
         state.sub_agent_history_loaded = False
+        state.summoned_agent_projections = {}
+        state.summoned_agent_pending_events = {}
 
         if state.messages:
             state.messages = self._normalize_and_persist_session_messages(
@@ -26629,7 +26748,7 @@ class MainWindow(QMainWindow):
             if isinstance(widget, ChatBubble):
                 widgets.append(widget)
                 continue
-            if isinstance(widget, (AssistantTurnGroup, HistoricalAssistantSummary)):
+            if isinstance(widget, (AssistantTurnGroup, SummonedAgentProcessBlock, HistoricalAssistantSummary)):
                 widgets.extend(widget.findChildren(ChatBubble))
         return widgets
 
@@ -27017,6 +27136,13 @@ class MainWindow(QMainWindow):
                 )
                 if current_idx is not None:
                     current_idx += 1
+                added_processes = self._render_summoned_agent_processes(
+                    state,
+                    message,
+                    insert_index=current_idx,
+                )
+                if current_idx is not None:
+                    current_idx += added_processes
                 state.last_agent_bubble = None
                 continue
 
@@ -27462,6 +27588,14 @@ class MainWindow(QMainWindow):
                 if current_idx is not None and target_layout is None: current_idx += 1
                 if target_layout is None:
                     inserted_count += 1
+                    added_processes = self._render_summoned_agent_processes(
+                        state,
+                        msg,
+                        insert_index=current_idx,
+                    )
+                    inserted_count += added_processes
+                    if current_idx is not None:
+                        current_idx += added_processes
                 state.last_agent_bubble = None
                 
             elif role == 'assistant':
@@ -31507,6 +31641,273 @@ class MainWindow(QMainWindow):
         base_name = str(profile.get("name") or "智能体").strip() or "智能体"
         return f"{base_name}-{uuid.uuid4().hex[:4]}"
 
+    def _create_summoned_agent_process(
+        self,
+        state,
+        descriptor,
+        insert_index=None,
+        replay_pending=True,
+    ):
+        if not state or not isinstance(descriptor, dict):
+            return None
+        agent_id = str(descriptor.get("agent_id") or descriptor.get("id") or "").strip()
+        if not agent_id:
+            raise ValueError("创建智能体过程块需要 agent_id。")
+        existing = (getattr(state, "summoned_agent_projections", {}) or {}).get(agent_id)
+        if existing and _qt_object_alive(existing.get("block")):
+            return existing
+        agent_name = str(
+            descriptor.get("agent_profile_name")
+            or descriptor.get("agent_name")
+            or descriptor.get("name")
+            or "智能体"
+        ).strip() or "智能体"
+        block_parent = state.chat_layout.parentWidget() if hasattr(state.chat_layout, "parentWidget") else None
+        block = SummonedAgentProcessBlock(
+            agent_id,
+            agent_name,
+            group_id=f"summoned-{state.session_id}-{agent_id}",
+            parent=block_parent,
+        )
+        block.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
+        if insert_index is None:
+            state.chat_layout.insertWidget(state.chat_layout.count() - 1, block)
+        else:
+            state.chat_layout.insertWidget(int(insert_index), block)
+        projection = {
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "descriptor": dict(descriptor),
+            "block": block,
+            "bubble": None,
+            "stage_sequence": 0,
+            "stage_closed": False,
+            "content_buffer": "",
+            "tool_cards": {},
+            "pending_tool_results": {},
+            "terminal": False,
+        }
+        state.summoned_agent_projections[agent_id] = projection
+        if replay_pending:
+            pending_events = (getattr(state, "summoned_agent_pending_events", {}) or {}).pop(agent_id, [])
+            for pending_event in pending_events:
+                self._project_summoned_agent_event(state, pending_event)
+        log_sub_agent_runtime(
+            "ui_summoned_process_created",
+            session_id=state.session_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            insert_index=insert_index,
+        )
+        return projection
+
+    def _ensure_summoned_agent_stage(self, state, projection):
+        if not state or not projection:
+            return None
+        bubble = projection.get("bubble")
+        if bubble is not None and _qt_object_alive(bubble) and not projection.get("stage_closed"):
+            return bubble
+        projection["stage_sequence"] = int(projection.get("stage_sequence") or 0) + 1
+        projection["content_buffer"] = ""
+        block = projection.get("block")
+        bubble = self._create_agent_chat_bubble(
+            state,
+            thinking="...",
+            parent=block.turn_group if block is not None else None,
+        )
+        self._connect_chat_bubble_actions(bubble, state)
+        bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
+        block.add_stage(
+            bubble,
+            stage_id=f"summoned-{projection['agent_id']}:stage-{projection['stage_sequence']}",
+        )
+        projection["bubble"] = bubble
+        projection["stage_closed"] = False
+        return bubble
+
+    def _close_summoned_agent_stage(self, projection):
+        bubble = (projection or {}).get("bubble")
+        if bubble is None or not _qt_object_alive(bubble):
+            return
+        bubble.freeze_content_fragment()
+        bubble.update_thinking(duration=None, is_final=True)
+        bubble.set_message_actions_enabled(False)
+        projection["stage_closed"] = True
+
+    def _project_summoned_agent_event(self, state, payload):
+        if not state or not isinstance(payload, dict):
+            return False
+        agent_id = str(payload.get("agent_id") or "").strip()
+        projection = (getattr(state, "summoned_agent_projections", {}) or {}).get(agent_id)
+        if not projection:
+            return False
+        block = projection.get("block")
+        if block is None or not _qt_object_alive(block):
+            return False
+        status = str(payload.get("status") or "").strip().lower()
+        if status and status not in {"log", "provider_log"}:
+            block.set_status(status)
+
+        if status == "thinking":
+            delta = str(payload.get("reasoning_delta") or "")
+            if delta:
+                self._ensure_summoned_agent_stage(state, projection).update_thinking(delta)
+        elif status == "content":
+            delta = str(payload.get("content_delta") or payload.get("content") or "")
+            if delta:
+                bubble = self._ensure_summoned_agent_stage(state, projection)
+                projection["content_buffer"] += delta
+                bubble.set_main_content(projection["content_buffer"], final=False)
+        elif status == "tool_use":
+            bubble = self._ensure_summoned_agent_stage(state, projection)
+            tool_call_id = str(payload.get("tool_call_id") or uuid.uuid4().hex)
+            scoped_id = f"{agent_id}:{tool_call_id}"
+            args = payload.get("tool_args") if payload.get("tool_args") is not None else {}
+            card = ToolCallCard(
+                payload.get("tool_name") or "unknown_tool",
+                args,
+                scoped_id,
+                meta={"agent_id": agent_id, "source_tool_call_id": tool_call_id},
+                parent=bubble.think_container,
+            )
+            card.clicked.connect(self.show_tool_details)
+            projection["tool_cards"][tool_call_id] = card
+            bubble.add_tool_card(card)
+            pending = projection["pending_tool_results"].pop(tool_call_id, None)
+            if pending:
+                card.set_result(
+                    pending.get("result") or "",
+                    result_obj=pending.get("result_obj"),
+                )
+                if isinstance(pending.get("meta"), dict):
+                    card.meta.update(pending["meta"])
+            self._close_summoned_agent_stage(projection)
+        elif status == "tool_result":
+            tool_call_id = str(payload.get("tool_call_id") or "")
+            card = projection["tool_cards"].get(tool_call_id)
+            if card is None:
+                projection["pending_tool_results"][tool_call_id] = {
+                    "result": payload.get("tool_result") or "",
+                    "result_obj": payload.get("tool_result_obj"),
+                    "meta": {"duration": payload.get("duration")},
+                }
+            else:
+                card.set_result(
+                    payload.get("tool_result") or "",
+                    result_obj=payload.get("tool_result_obj"),
+                )
+                if payload.get("duration") is not None:
+                    card.meta["duration"] = payload.get("duration")
+        elif status == "completed":
+            bubble = self._ensure_summoned_agent_stage(state, projection)
+            final_text = str(payload.get("output_text") or payload.get("content") or "").strip()
+            bubble.update_thinking(duration=None, is_final=True)
+            bubble.set_main_content(final_text or "已完成。", final=True)
+            projection["content_buffer"] = final_text
+            projection["stage_closed"] = True
+            projection["terminal"] = True
+        elif status in {"failed", "failed_recovered", "killed", "closed", "provider_error"}:
+            detail = str(
+                payload.get("error")
+                or payload.get("provider_message")
+                or payload.get("content")
+                or "任务未成功完成。"
+            ).strip()
+            bubble = self._ensure_summoned_agent_stage(state, projection)
+            bubble.update_thinking(duration=None, is_final=True)
+            bubble.set_main_content(f"⚠️ {detail}", final=True)
+            bubble.set_message_actions_enabled(False)
+            projection["stage_closed"] = True
+            projection["terminal"] = status != "provider_error"
+
+        block.turn_group.sync_stage_visibility()
+        block.updateGeometry()
+        if status in {
+            "input",
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "failed_recovered",
+            "killed",
+            "closed",
+            "provider_error",
+        }:
+            log_sub_agent_runtime(
+                "ui_summoned_process_event",
+                session_id=state.session_id,
+                agent_id=agent_id,
+                status=status,
+                stage_count=int(projection.get("stage_sequence") or 0),
+                tool_count=len(projection.get("tool_cards") or {}),
+                terminal=bool(projection.get("terminal")),
+            )
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
+        return True
+
+    def _summoned_agent_descriptors(self, message):
+        meta = message.get("meta") if isinstance(message, dict) and isinstance(message.get("meta"), dict) else {}
+        descriptors = meta.get("summoned_agents")
+        return [dict(item) for item in descriptors or [] if isinstance(item, dict) and item.get("agent_id")]
+
+    def _render_summoned_agent_processes(self, state, message, insert_index=None):
+        descriptors = self._summoned_agent_descriptors(message)
+        if not state or not descriptors:
+            return 0
+        current_index = insert_index
+        inserted = 0
+        for descriptor in descriptors:
+            agent_id = str(descriptor.get("agent_id") or "")
+            existing = (getattr(state, "summoned_agent_projections", {}) or {}).get(agent_id)
+            if existing and _qt_object_alive(existing.get("block")):
+                continue
+            projection = self._create_summoned_agent_process(
+                state,
+                descriptor,
+                insert_index=current_index,
+                replay_pending=False,
+            )
+            if projection is None:
+                continue
+            inserted += 1
+            if current_index is not None:
+                current_index += 1
+            try:
+                agent_row = self.chat_storage.get_agent(agent_id) or {}
+                agent_messages = self.chat_storage.get_agent_messages(agent_id)
+                for event in build_sub_agent_history_events(agent_row, agent_messages):
+                    self._project_summoned_agent_event(state, event)
+                pending_events = (
+                    getattr(state, "summoned_agent_pending_events", {}) or {}
+                ).pop(agent_id, [])
+                if str(agent_row.get("status") or "") not in {
+                    "completed",
+                    "failed",
+                    "failed_recovered",
+                    "killed",
+                    "closed",
+                }:
+                    for pending_event in pending_events:
+                        self._project_summoned_agent_event(state, pending_event)
+                if not agent_messages:
+                    projection["block"].set_status(agent_row.get("status") or descriptor.get("status") or "pending")
+            except Exception as exc:
+                self._project_summoned_agent_event(
+                    state,
+                    {
+                        "agent_id": agent_id,
+                        "status": "failed_recovered",
+                        "error": f"智能体过程恢复失败：{exc}",
+                    },
+                )
+                log_sub_agent_runtime(
+                    "ui_summoned_process_restore_failed",
+                    session_id=state.session_id,
+                    agent_id=agent_id,
+                    error=str(exc),
+                )
+        return inserted
+
     def _dispatch_agent_profiles(self, state, original_text, task_text, profiles, summon_source="mention"):
         log_sub_agent_runtime(
             "ui_dispatch_profiles_begin",
@@ -31517,6 +31918,35 @@ class MainWindow(QMainWindow):
             task_len=len(task_text or ""),
             log_path=sub_agent_log_path(),
         )
+        parent_message = next(
+            (
+                message for message in reversed(state.messages)
+                if isinstance(message, dict) and message.get("role") == "user"
+                and not is_same_turn_guidance_message(message)
+            ),
+            None,
+        )
+        if parent_message is None:
+            parent_message = {
+                "id": self._new_message_id(),
+                "role": "user",
+                "content": str(original_text or task_text or "").strip(),
+                "meta": {"automation_task": summon_source == "automation_task"},
+            }
+            state.messages.append(parent_message)
+            self._rebuild_session_render_spans(state)
+            state.displayed_count = len(state.messages)
+            state.displayed_render_count = len(state.render_items)
+            if state.session_id == self.current_session_id:
+                self.add_chat_bubble(
+                    "User",
+                    self._message_display_content(parent_message),
+                    animate=False,
+                    force_scroll=True,
+                    source_message_id=parent_message["id"],
+                    session_id=state.session_id,
+                )
+        parent_message_id = str(parent_message.get("id") or "")
         agent_state_proxy = type(
             "_AgentStateProxy",
             (),
@@ -31542,6 +31972,7 @@ class MainWindow(QMainWindow):
             return False
 
         started_profiles = []
+        started_descriptors = []
         state.current_content_buffer = ""
         state.current_thinking_buffer = ""
         state.last_flushed_content_buffer = ""
@@ -31577,7 +32008,7 @@ class MainWindow(QMainWindow):
                     name=agent_name,
                     fork_context=True,
                     current_messages_snapshot=state.messages[:-1],
-                    parent_message_id="",
+                    parent_message_id=parent_message_id,
                     run_context=run_context,
                     meta=meta,
                 )
@@ -31591,6 +32022,17 @@ class MainWindow(QMainWindow):
                     status=(result or {}).get("status") if isinstance(result, dict) else "",
                 )
                 started_profiles.append(profile)
+                descriptor = {
+                    "agent_id": (result or {}).get("agent_id") if isinstance(result, dict) else "",
+                    "agent_name": agent_name,
+                    "agent_profile_id": profile.get("id") or "",
+                    "agent_profile_name": profile.get("name") or "智能体",
+                    "summon_source": summon_source,
+                    "status": (result or {}).get("status") if isinstance(result, dict) else "pending",
+                }
+                started_descriptors.append(descriptor)
+                if state.session_id == self.current_session_id:
+                    self._create_summoned_agent_process(state, descriptor)
             except Exception as exc:
                 log_sub_agent_runtime(
                     "ui_dispatch_spawn_failed",
@@ -31618,10 +32060,12 @@ class MainWindow(QMainWindow):
             self.set_session_status("error", state.session_id, save=True)
             return False
 
-        summary_names = "、".join([str(item.get("name") or "") for item in started_profiles])
-        summary_prefix = "已按自动化任务启动" if summon_source == "automation_task" else "已召唤"
-        summary_text = f"{summary_prefix} {len(started_profiles)} 个智能体：{summary_names}\n任务：{task_text}"
-        state.last_agent_bubble = self.add_chat_bubble("agent", summary_text, animate=False, force_scroll=True)
+        parent_meta = parent_message.get("meta") if isinstance(parent_message.get("meta"), dict) else {}
+        parent_meta["agent_delegation"] = True
+        parent_meta["agent_delegation_source"] = summon_source
+        parent_meta["summoned_agents"] = started_descriptors
+        parent_message["meta"] = parent_meta
+        self._rebuild_session_render_spans(state)
         self.add_system_toast(
             f"已启动 {len(started_profiles)} 个智能体，结果会自动回填",
             "success",
@@ -31638,6 +32082,7 @@ class MainWindow(QMainWindow):
             session_id=state.session_id,
             started_count=len(started_profiles),
             summon_source=summon_source,
+            parent_message_id=parent_message_id,
             log_path=sub_agent_log_path(),
         )
         return True
@@ -31662,6 +32107,18 @@ class MainWindow(QMainWindow):
         state.completed_agent_result_ids.add(agent_id)
         if data.get("summon_source") == "automation_task":
             text = f"[自动化任务] {text}"
+        try:
+            agent_parent_message_id = str(
+                (self.chat_storage.get_agent(agent_id) or {}).get("parent_message_id") or ""
+            )
+        except Exception as exc:
+            agent_parent_message_id = ""
+            log_sub_agent_runtime(
+                "ui_summoned_result_parent_lookup_failed",
+                session_id=state.session_id,
+                agent_id=agent_id,
+                error=str(exc),
+            )
         message_id = self._new_message_id()
         state.messages.append(
             {
@@ -31674,6 +32131,8 @@ class MainWindow(QMainWindow):
                     "agent_profile_name": profile_name,
                     "summon_source": data.get("summon_source") or "mention",
                     "agent_status": status,
+                    "embedded_agent_result": True,
+                    "agent_parent_message_id": agent_parent_message_id,
                 },
             }
         )
@@ -31681,14 +32140,6 @@ class MainWindow(QMainWindow):
         self._rebuild_session_render_spans(state)
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
-        if state.session_id == self.current_session_id:
-            self.add_chat_bubble(
-                "agent",
-                text,
-                animate=False,
-                force_scroll=False,
-                source_message_id=message_id,
-            )
         self.save_chat_history(session_id=state.session_id)
 
     def _restore_rejected_guidance(self, state, raw_user_text, prompt_files):
@@ -31748,7 +32199,15 @@ class MainWindow(QMainWindow):
             )
         return rejected_messages
 
-    def _create_agent_chat_bubble(self, state, text="", thinking=None, duration=None, workspace_dir=""):
+    def _create_agent_chat_bubble(
+        self,
+        state,
+        text="",
+        thinking=None,
+        duration=None,
+        workspace_dir="",
+        parent=None,
+    ):
         if state is None:
             raise ValueError("创建 Agent 消息需要有效的会话状态。")
         return ChatBubble(
@@ -31760,6 +32219,7 @@ class MainWindow(QMainWindow):
             session_id=state.session_id,
             chat_storage=self.chat_storage,
             visualize_enabled=self.config_manager.is_skill_enabled("visualize", default_enabled=False),
+            parent=parent,
         )
 
     def _next_agent_turn_group_id(self, state):
@@ -33832,6 +34292,30 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             _log_stage("record_event", "ui_agent_state_stage_failed", session_id=state.session_id, traceback=traceback.format_exc())
+            raise
+
+        try:
+            _log_stage("chat_process_projection", "ui_agent_state_stage_begin", session_id=state.session_id)
+            projected = self._project_summoned_agent_event(state, payload)
+            if not projected and payload.get("summon_source") in {"mention", "automation_task"} and agent_id:
+                pending_by_agent = getattr(state, "summoned_agent_pending_events", {})
+                pending = pending_by_agent.setdefault(str(agent_id), [])
+                pending.append(dict(payload))
+                if len(pending) > 600:
+                    del pending[:-600]
+            _log_stage(
+                "chat_process_projection",
+                "ui_agent_state_stage_done",
+                session_id=state.session_id,
+                projected=bool(projected),
+            )
+        except Exception:
+            _log_stage(
+                "chat_process_projection",
+                "ui_agent_state_stage_failed",
+                session_id=state.session_id,
+                traceback=traceback.format_exc(),
+            )
             raise
 
         try:

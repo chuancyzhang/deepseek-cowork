@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "weknora",
+  "display_name": "WeKnora 知识库",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Official WeKnora MCP skill for knowledge-base import, browsing, and retrieval.",
   "description_cn": "WeKnora 官方 MCP 知识库能力，支持知识导入、浏览和检索。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "WeKnora",
+    "summary": "连接 WeKnora，导入、浏览和检索知识库内容。",
+    "examples": ["搜索知识库", "导入网页资料", "浏览知识集合"],
+    "access_note": "会连接你配置的 WeKnora 服务；导入或修改知识库内容前仍需明确确认。"
+  },
   "tags": ["weknora", "knowledge base", "retrieval", "hybrid search", "知识库", "mcp"],
   "triggers": ["WeKnora", "知识库检索", "上传知识库", "导入网页到知识库", "hybrid search", "知识库搜索"],
   "anti_triggers": ["Superset", "Airflow", "ShowDoc", "腾讯文档"],

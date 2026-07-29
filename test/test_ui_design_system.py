@@ -1,16 +1,21 @@
 import os
+import json
 import unittest
 import main as main_module
+from pathlib import Path
+from unittest.mock import MagicMock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QRawFont
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from core.theme import DesignTokens
 from main import (
     AgentModuleDialog,
     AgentProfileManager,
+    AdvancedSkillsCenterDialog,
+    CAPABILITY_SCENES,
     MemoryUpdateDialog,
     SkillsCenterDialog,
     apple_button_style,
@@ -150,9 +155,138 @@ class UiDesignSystemTests(unittest.TestCase):
             dialog.deleteLater()
 
     def test_capability_master_detail_methods_belong_to_capability_center(self):
-        self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_master_detail"))
-        self.assertTrue(hasattr(SkillsCenterDialog, "_build_skill_detail"))
+        self.assertFalse(hasattr(SkillsCenterDialog, "_build_skill_master_detail"))
+        self.assertTrue(hasattr(AdvancedSkillsCenterDialog, "_build_skill_master_detail"))
+        self.assertTrue(hasattr(AdvancedSkillsCenterDialog, "_build_skill_detail"))
         self.assertFalse(hasattr(AgentModuleDialog, "_build_skill_master_detail"))
+
+    def test_capability_library_uses_five_scenes_and_keeps_user_skills_separate(self):
+        manager = MagicMock()
+        manager.get_all_skills.return_value = [
+            {
+                "name": "web-search",
+                "display_name": "网页搜索",
+                "source_type": "bundled_plugin",
+                "enabled": False,
+                "presentation": {
+                    "category": "search_browse",
+                    "short_name": "网页搜索",
+                    "summary": "搜索实时网页信息。",
+                    "examples": ["查询最新信息"],
+                    "access_note": "搜索词会发送到搜索服务。",
+                },
+            },
+            {
+                "name": "my-skill",
+                "display_name": "我的整理助手",
+                "description_cn": "整理我的项目资料。",
+                "enabled": True,
+            },
+        ]
+        manager.is_skill_editable.side_effect = lambda name: name == "my-skill"
+        config = MagicMock()
+        page = SkillsCenterDialog(manager, config)
+        try:
+            self.assertEqual(
+                list(CAPABILITY_SCENES.values()),
+                ["查找资料", "处理文档", "分析数据", "制作内容", "金融研究"],
+            )
+            self.assertIn("my-skill", page._user_owned_names)
+            self.assertEqual([item["name"] for item in page._official_skills()], ["web-search"])
+            page.show()
+            page.resize(879, 680)
+            self.app.processEvents()
+            self.assertEqual(page._column_count, 1)
+            page.resize(900, 680)
+            self.app.processEvents()
+            self.assertEqual(page._column_count, 2)
+            page._set_mode("mine")
+            labels = {label.text() for label in page.findChildren(QLabel)}
+            self.assertIn("我的能力", labels)
+            self.assertIn("整理我的项目资料。", labels)
+            visible_copy = " ".join(
+                [label.text() for label in page.findChildren(QLabel)]
+                + [button.text() for button in page.findChildren(QPushButton)]
+            )
+            for technical_term in ("MCP", "Tool", "Script", "Medium Risk"):
+                self.assertNotIn(technical_term, visible_copy)
+        finally:
+            page.deleteLater()
+
+    def test_capability_store_card_exposes_enabled_state_and_direct_close(self):
+        manager = MagicMock()
+        manager.get_all_skills.return_value = [
+            {
+                "name": "capability-one",
+                "display_name": "能力一",
+                "source_type": "bundled_plugin",
+                "enabled": True,
+                "presentation": {
+                    "category": "search_browse",
+                    "short_name": "能力一",
+                    "summary": "用于测试状态区域。",
+                    "examples": ["任务一", "任务二"],
+                    "access_note": "测试说明。",
+                },
+            }
+        ]
+        manager.is_skill_editable.return_value = False
+        config = MagicMock()
+
+        def update_enabled(name, enabled):
+            manager.get_all_skills.return_value[0]["enabled"] = bool(enabled)
+
+        config.set_skill_enabled.side_effect = update_enabled
+        page = SkillsCenterDialog(manager, config)
+        try:
+            self.assertFalse(
+                [
+                    switch
+                    for switch in page.findChildren(main_module.AppleSwitch)
+                    if switch.objectName() == "CapabilityEnableSwitch"
+                ]
+            )
+            state_labels = [
+                label.text()
+                for label in page.findChildren(QLabel)
+                if label.objectName() == "CapabilityStateLabel"
+            ]
+            self.assertIn("✓ 已开启", state_labels)
+            close_buttons = [
+                button
+                for button in page.findChildren(QPushButton)
+                if button.objectName() == "CapabilityDisableAction"
+            ]
+            self.assertEqual(len(close_buttons), 1)
+            close_buttons[0].click()
+            self.app.processEvents()
+            config.set_skill_enabled.assert_called_once_with("capability-one", False)
+            enable_buttons = [
+                button
+                for button in page.findChildren(QPushButton)
+                if button.objectName() == "CapabilityEnableAction"
+            ]
+            self.assertEqual([button.text() for button in enable_buttons], ["开启"])
+        finally:
+            page.deleteLater()
+
+    def test_bundled_capabilities_have_complete_linear_presentation_metadata(self):
+        root = Path(__file__).resolve().parents[1] / "ai_skills"
+        bundled = []
+        for manifest_path in root.glob("*/skill.json"):
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if payload.get("source_type") != "bundled_plugin":
+                continue
+            bundled.append(payload["name"])
+            self.assertTrue(str(payload.get("display_name") or "").strip(), payload["name"])
+            presentation = payload.get("presentation")
+            self.assertIsInstance(presentation, dict, payload["name"])
+            self.assertIn(presentation.get("category"), CAPABILITY_SCENES, payload["name"])
+            self.assertTrue(str(presentation.get("short_name") or "").strip(), payload["name"])
+            self.assertTrue(str(presentation.get("summary") or "").strip(), payload["name"])
+            self.assertGreaterEqual(len(presentation.get("examples") or []), 2, payload["name"])
+            self.assertTrue(str(presentation.get("access_note") or "").strip(), payload["name"])
+        self.assertGreaterEqual(len(bundled), 14)
 
     def test_empty_agent_settings_create_a_disabled_template(self):
         manager = AgentProfileManager([], lambda: [])

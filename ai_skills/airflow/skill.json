@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "airflow",
+  "display_name": "Airflow 数据工作流",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Apache Airflow operations skill using Astronomer Agents, astro-airflow-mcp, and the af CLI.",
   "description_cn": "Apache Airflow 运维能力，基于 Astronomer Agents、astro-airflow-mcp 与 af CLI 查询、诊断和管理 DAG。",
+  "presentation": {
+    "category": "data_analysis",
+    "short_name": "Airflow",
+    "summary": "查询、诊断和管理 Airflow 数据工作流。",
+    "examples": ["检查 DAG 状态", "定位任务失败原因", "查看运行日志"],
+    "access_note": "使用时会连接你配置的 Airflow 环境；可能改变运行状态的操作仍需明确确认。"
+  },
   "tags": ["airflow", "astronomer", "astro-airflow-mcp", "af", "dag", "mcp"],
   "triggers": ["Airflow", "DAG", "af dags", "airflow health", "DAG run", "task logs", "为什么 DAG 失败"],
   "anti_triggers": ["Superset", "ShowDoc", "WeKnora", "warehouse SQL analytics"],

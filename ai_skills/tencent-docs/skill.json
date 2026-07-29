@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "tencent-docs",
+  "display_name": "腾讯文档",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Tencent Docs MCP skill for creating, editing, searching, importing, exporting, and reading Tencent Docs content through the upstream tencent-docs MCP workflow.",
   "description_cn": "腾讯文档 MCP 能力，支持通过上游 tencent-docs MCP 工作流创建、编辑、搜索、导入导出和读取腾讯文档内容。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "腾讯文档",
+    "summary": "读取、搜索、创建和编辑腾讯文档内容。",
+    "examples": ["读取腾讯文档", "导入本地文件", "创建在线演示"],
+    "access_note": "会访问你授权的腾讯文档空间；创建、导入或修改内容前仍需明确确认。"
+  },
   "tags": ["tencent docs", "docs.qq.com", "mcp", "document", "腾讯文档"],
   "triggers": ["腾讯文档", "docs.qq.com", "Tencent Docs", "新建腾讯文档", "编辑腾讯文档", "搜索腾讯文档", "文档上云"],
   "anti_triggers": [],

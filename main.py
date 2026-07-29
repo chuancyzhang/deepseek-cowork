@@ -2244,6 +2244,78 @@ def skill_center_config_state(skill):
     return "ready" if status.get("complete") else "needs_config"
 
 
+CAPABILITY_SCENES = OrderedDict(
+    [
+        ("search_browse", "查找资料"),
+        ("docs_knowledge", "处理文档"),
+        ("data_analysis", "分析数据"),
+        ("content_creation", "制作内容"),
+        ("financial_research", "金融研究"),
+    ]
+)
+
+
+def capability_presentation(skill):
+    presentation = skill.get("presentation") if isinstance(skill, dict) else None
+    return presentation if isinstance(presentation, dict) else {}
+
+
+def capability_scene(skill):
+    category = str(capability_presentation(skill).get("category") or "").strip()
+    return category if category in CAPABILITY_SCENES else ""
+
+
+def capability_presentation_errors(skill):
+    if not capability_is_official(skill):
+        return []
+    presentation = skill.get("presentation") if isinstance(skill, dict) else None
+    if not isinstance(presentation, dict):
+        return ["缺少 presentation"]
+    errors = []
+    if str(presentation.get("category") or "").strip() not in CAPABILITY_SCENES:
+        errors.append("category 不是受支持的场景")
+    if not str(presentation.get("short_name") or "").strip():
+        errors.append("缺少 short_name")
+    if not str(presentation.get("summary") or "").strip():
+        errors.append("缺少 summary")
+    examples = presentation.get("examples")
+    if not isinstance(examples, list) or len([item for item in examples if str(item).strip()]) < 2:
+        errors.append("examples 至少需要 2 项")
+    if not str(presentation.get("access_note") or "").strip():
+        errors.append("缺少 access_note")
+    return errors
+
+
+def capability_summary(skill, *, user_owned=False):
+    if not user_owned and capability_is_official(skill) and capability_presentation_errors(skill):
+        return "能力信息不完整"
+    presentation = capability_presentation(skill)
+    if presentation:
+        summary = str(presentation.get("summary") or "").strip()
+        if summary:
+            return summary
+    if user_owned:
+        summary = str(
+            skill.get("description_cn")
+            or skill.get("user_description")
+            or skill.get("description")
+            or ""
+        ).strip()
+        return summary or "尚未提供用途说明"
+    return "能力信息不完整"
+
+
+def capability_short_name(skill):
+    short_name = str(capability_presentation(skill).get("short_name") or "").strip()
+    return short_name or readable_skill_name(skill) or str(skill.get("name") or "未命名能力")
+
+
+def capability_is_official(skill):
+    if not isinstance(skill, dict):
+        return False
+    return str(skill.get("source_type") or "").strip() == SkillManager.BUNDLED_PLUGIN_SOURCE_TYPE
+
+
 def skill_center_matches_filters(skill, query="", status_filter="all"):
     if not isinstance(skill, dict):
         return False
@@ -2261,6 +2333,7 @@ def skill_center_matches_filters(skill, query="", status_filter="all"):
             str(skill.get("name") or ""),
             str(skill.get("user_description") or ""),
             str(skill.get("description") or ""),
+            json.dumps(capability_presentation(skill), ensure_ascii=False),
             " ".join(str(item) for item in (skill.get("tools") or [])),
             " ".join(str(item) for item in (skill.get("use_cases") or [])),
         ]
@@ -2912,14 +2985,19 @@ class AppleSwitch(QCheckBox):
         track = QRect(2, 3, 48, 24)
         is_enabled = self.isEnabled()
         if not is_enabled:
-            track_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.24))
+            track_color = QColor(DesignTokens.text_tertiary)
+            track_color.setAlphaF(0.24)
         else:
             track_color = QColor(
                 DesignTokens.success_accent if checked else DesignTokens.border
             )
         if self.underMouse() and not checked and is_enabled:
             track_color = QColor(DesignTokens.border_strong)
-        border_color = QColor(rgba_from_hex(DesignTokens.text_tertiary, 0.42)) if not is_enabled else QColor(DesignTokens.success_accent if checked else DesignTokens.border_strong)
+        if not is_enabled:
+            border_color = QColor(DesignTokens.text_tertiary)
+            border_color.setAlphaF(0.42)
+        else:
+            border_color = QColor(DesignTokens.success_accent if checked else DesignTokens.border_strong)
         painter.setPen(QPen(border_color, 1))
         painter.setBrush(QBrush(track_color))
         painter.drawRoundedRect(track, 12, 12)
@@ -2959,19 +3037,20 @@ class AppleSelectionCheck(QCheckBox):
 
 
 class CapabilityWorkbenchDialog(QDialog):
-    def __init__(self, skill, skill_manager, config_manager, parent=None):
+    def __init__(self, skill, skill_manager, config_manager, parent=None, simple_mode=False):
         super().__init__(parent)
         self.skill = dict(skill or {})
         self.skill_manager = skill_manager
         self.config_manager = config_manager
         self.skill_name = str(self.skill.get("name") or "").strip()
+        self.simple_mode = bool(simple_mode)
         self.current_file_path = ""
         self.tool_worker = None
         self.mcp_worker = None
         self.mcp_tools = []
         self.managed_mcp_server = None
         self.config_editors = {}
-        self.setWindowTitle("能力工作台")
+        self.setWindowTitle("能力设置" if self.simple_mode else "能力工作台")
         self.resize(980, 680)
         apply_product_dialog(self, "CapabilityWorkbenchDialog")
 
@@ -2984,7 +3063,11 @@ class CapabilityWorkbenchDialog(QDialog):
         title_box.setSpacing(4)
         title = QLabel(self.skill.get("display_name") or self.skill_name or "能力工作台")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel(self._subtitle_text())
+        subtitle = QLabel(
+            "查看用途、配置并管理这项能力。"
+            if self.simple_mode
+            else self._subtitle_text()
+        )
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
         title_box.addWidget(title)
@@ -2996,12 +3079,116 @@ class CapabilityWorkbenchDialog(QDialog):
         header.addWidget(close_btn)
         layout.addLayout(header)
 
+        if self.simple_mode:
+            self._build_simple_intro(layout)
+
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
-        if self._is_mcp_skill():
+        if self.simple_mode:
+            self._build_config_tab()
+            self.tabs.tabBar().hide()
+            if not self.tabs.count():
+                self.tabs.hide()
+                layout.addStretch()
+            self._build_simple_actions(layout)
+        elif self._is_mcp_skill():
             self._build_mcp_tabs()
         else:
             self._build_skill_tabs()
+
+    def _build_simple_intro(self, root_layout):
+        presentation = capability_presentation(self.skill)
+        user_owned = False
+        try:
+            user_owned = bool(self.skill_manager.is_skill_editable(self.skill_name))
+        except Exception:
+            user_owned = False
+        summary = QLabel(capability_summary(self.skill, user_owned=user_owned))
+        summary.setWordWrap(True)
+        summary.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_body}px; color: {DesignTokens.text_secondary};"
+        )
+        root_layout.addWidget(summary)
+        examples = [
+            str(item).strip()
+            for item in (presentation.get("examples") or [])
+            if str(item).strip()
+        ]
+        if examples:
+            examples_section = ProductSection("适合完成", "", kind="subtle")
+            examples_label = QLabel(" · ".join(examples))
+            examples_label.setWordWrap(True)
+            examples_label.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+            )
+            examples_section.layout.addWidget(examples_label)
+            root_layout.addWidget(examples_section)
+        access_note = str(presentation.get("access_note") or "").strip()
+        if access_note:
+            root_layout.addWidget(ProductInlineNotice(access_note, "neutral"))
+
+    def _build_simple_actions(self, root_layout):
+        actions = ProductActionBar()
+        user_owned = False
+        try:
+            user_owned = bool(self.skill_manager.is_skill_editable(self.skill_name))
+        except Exception as exc:
+            log_ui_navigation(
+                "capability_ownership_error",
+                skill_name=self.skill_name,
+                error=str(exc),
+            )
+        if user_owned:
+            advanced_btn = QPushButton("编辑与管理")
+            advanced_btn.setStyleSheet(product_button_style("secondary"))
+            advanced_btn.clicked.connect(self._open_advanced_workbench)
+            actions.layout.insertWidget(actions.layout.count() - 1, advanced_btn)
+        if self.skill.get("enabled"):
+            disable_btn = QPushButton("关闭能力")
+            disable_btn.setStyleSheet(product_button_style("secondary"))
+            disable_btn.clicked.connect(lambda checked=False: self._set_simple_enabled(False))
+            actions.layout.addWidget(disable_btn)
+        elif not self._skill_config_fields():
+            enable_btn = QPushButton("开启能力")
+            enable_btn.setObjectName("PrimaryBtn")
+            enable_btn.setStyleSheet(product_button_style("primary"))
+            enable_btn.clicked.connect(lambda checked=False: self._set_simple_enabled(True))
+            actions.layout.addWidget(enable_btn)
+        root_layout.addWidget(actions)
+
+    def _open_advanced_workbench(self):
+        window = self.window()
+        if hasattr(window, "show_advanced_capabilities"):
+            window.show_advanced_capabilities()
+        if hasattr(window, "show_capability_workbench"):
+            window.show_capability_workbench(self.skill)
+
+    def _set_simple_enabled(self, enabled):
+        name = self.skill_name
+        log_ui_navigation("capability_enable_begin", skill_name=name, enabled=bool(enabled))
+        try:
+            self.config_manager.set_skill_enabled(name, bool(enabled))
+            window = self.window()
+            if hasattr(window, "publish_ui_skill_change"):
+                if not window.publish_ui_skill_change(name, "enabled" if enabled else "disabled"):
+                    raise RuntimeError("能力目录刷新失败")
+                self.skill_manager = window.skill_manager
+            self.skill["enabled"] = bool(enabled)
+            if hasattr(window, "add_system_toast"):
+                window.add_system_toast("能力已开启" if enabled else "能力已关闭", "success", auto_close_ms=3200)
+            log_ui_navigation("capability_enable_done", skill_name=name, enabled=bool(enabled))
+            if hasattr(window, "handle_product_back"):
+                window.handle_product_back()
+            return True
+        except Exception as exc:
+            log_ui_navigation(
+                "capability_enable_error",
+                skill_name=name,
+                enabled=bool(enabled),
+                error=str(exc),
+            )
+            QMessageBox.warning(self, "能力", f"无法更新能力状态：{exc}")
+            return False
 
     def _subtitle_text(self):
         if self._is_mcp_skill():
@@ -3071,6 +3258,8 @@ class CapabilityWorkbenchDialog(QDialog):
                 "选择默认搜索服务并配置可选 API Key。未配置 Key 时将使用供应商官方的匿名/Keyless 模式，"
                 "速率与额度较低；服务失败时不会自动切换供应商。"
             )
+        elif self.simple_mode:
+            hint_text = "填写这项能力需要的设置。必填项缺失时会明确提示，不会静默忽略。"
         else:
             hint_text = "这些配置会在运行该能力的脚本或工具时提供给它。必填项缺失时会直接报错。"
         hint = QLabel(hint_text)
@@ -3078,7 +3267,13 @@ class CapabilityWorkbenchDialog(QDialog):
         hint.setStyleSheet(apple_settings_inline_note_style())
         layout.addWidget(hint)
 
-        card, card_layout = build_settings_surface("运行配置", "保存后下次调试或调用该能力时生效。", radius=18)
+        card, card_layout = build_settings_surface(
+            "能力设置" if self.simple_mode else "运行配置",
+            "保存后，Cowork 下次使用这项能力时生效。"
+            if self.simple_mode
+            else "保存后下次调试或调用该能力时生效。",
+            radius=18,
+        )
         form = QFormLayout()
         form.setSpacing(12)
         configure_responsive_form_layout(form)
@@ -3145,7 +3340,13 @@ class CapabilityWorkbenchDialog(QDialog):
 
         row = QHBoxLayout()
         row.addStretch()
-        save_btn = QPushButton("保存配置")
+        save_btn = QPushButton(
+            "保存并开启"
+            if self.simple_mode and not self.skill.get("enabled")
+            else "保存设置"
+            if self.simple_mode
+            else "保存配置"
+        )
         save_btn.setStyleSheet(apple_button_style("primary", radius=14))
         save_btn.clicked.connect(self.save_skill_config)
         row.addWidget(save_btn)
@@ -3237,6 +3438,19 @@ class CapabilityWorkbenchDialog(QDialog):
             QMessageBox.warning(self, "能力配置", "当前配置管理器不支持能力配置。")
             return False
         values = self._current_skill_config_values()
+        missing_labels = []
+        for field in self._skill_config_fields():
+            if not isinstance(field, dict) or not field.get("required"):
+                continue
+            name = str(field.get("name") or "").strip()
+            if name and not str(values.get(name) or "").strip():
+                missing_labels.append(str(field.get("label") or name))
+        if missing_labels:
+            message = "还缺少必填配置：" + "、".join(missing_labels)
+            if getattr(self, "config_status", None) is not None:
+                self.config_status.setText(message)
+            QMessageBox.warning(self, "能力设置", message)
+            return False
         batch_save = getattr(self.config_manager, "batch_save", None)
         if callable(batch_save):
             with batch_save():
@@ -3254,6 +3468,20 @@ class CapabilityWorkbenchDialog(QDialog):
             self._refresh_config_status()
             return False
         self._refresh_config_status()
+        if hasattr(self.skill_manager, "get_skill_config_status"):
+            status = self.skill_manager.get_skill_config_status(self.skill_name) or {}
+            missing = status.get("missing_required") or []
+            config_errors = status.get("config_errors") or []
+            if missing or config_errors:
+                message = (
+                    "还缺少必填配置：" + "、".join(str(item) for item in missing)
+                    if missing
+                    else "配置还不完整：" + "；".join(str(item) for item in config_errors)
+                )
+                if getattr(self, "config_status", None) is not None:
+                    self.config_status.setText(message)
+                QMessageBox.warning(self, "能力设置", message)
+                return False
         if show_message:
             message = "配置已保存。"
             if managed_result.get("servers"):
@@ -3262,7 +3490,28 @@ class CapabilityWorkbenchDialog(QDialog):
         return True
 
     def save_skill_config(self):
-        self._save_skill_config_values(show_message=True)
+        log_ui_navigation("capability_config_save_begin", skill_name=self.skill_name)
+        try:
+            saved = self._save_skill_config_values(show_message=not self.simple_mode)
+            if not saved:
+                log_ui_navigation("capability_config_save_error", skill_name=self.skill_name, error="save_failed")
+                return False
+            log_ui_navigation("capability_config_save_done", skill_name=self.skill_name)
+            if self.simple_mode:
+                window = self.window()
+                if not self.skill.get("enabled"):
+                    return self._set_simple_enabled(True)
+                if hasattr(window, "add_system_toast"):
+                    window.add_system_toast("能力设置已保存", "success", auto_close_ms=3200)
+            return True
+        except Exception as exc:
+            log_ui_navigation(
+                "capability_config_save_error",
+                skill_name=self.skill_name,
+                error=str(exc),
+            )
+            QMessageBox.warning(self, "能力设置", f"保存失败：{exc}")
+            return False
 
     def _publish_managed_mcp_refresh(self):
         window = self.window()
@@ -9381,7 +9630,7 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
-class SkillsCenterDialog(QDialog):
+class AdvancedSkillsCenterDialog(QDialog):
     def __init__(self, skill_manager, config_manager, parent=None):
         super().__init__(parent)
         self._main = parent
@@ -9825,6 +10074,14 @@ class SkillsCenterDialog(QDialog):
         description.setWordWrap(True)
         description.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 13px;")
         layout.addWidget(description)
+        presentation_errors = capability_presentation_errors(skill)
+        if presentation_errors:
+            layout.addWidget(
+                ProductInlineNotice(
+                    "普通能力库展示信息不完整：" + "；".join(presentation_errors),
+                    "warning",
+                )
+            )
         risk_text, _risk_color = readable_risk_level(skill.get("risk_level") or skill.get("security_level"))
         risk_badge = ProductStatusBadge(risk_text, "error" if "高" in risk_text else "warning" if "中" in risk_text else "primary")
         meta_row = QHBoxLayout()
@@ -10102,8 +10359,8 @@ class SkillsCenterDialog(QDialog):
             )
             if refreshed_skill:
                 skill = refreshed_skill
-        if self._main is not None and hasattr(self._main, "show_capability_detail"):
-            self._main.show_capability_detail(skill)
+        if self._main is not None and hasattr(self._main, "show_capability_workbench"):
+            self._main.show_capability_workbench(skill)
 
     def import_skill(self):
         clicked = ProductMessageDialog(
@@ -10225,6 +10482,383 @@ class SkillsCenterDialog(QDialog):
         if button:
             button.setToolTip("已复制")
             QTimer.singleShot(1200, lambda: button.setToolTip("复制技能名"))
+
+
+class SkillsCenterDialog(QDialog):
+    """User-facing capability library; technical controls stay in advanced management."""
+
+    RESPONSIVE_COLUMN_THRESHOLD = 880
+
+    def __init__(self, skill_manager, config_manager, parent=None):
+        super().__init__(parent)
+        self._main = parent
+        self.skill_manager = skill_manager
+        self.config_manager = config_manager
+        self._all_skills = []
+        self._user_owned_names = set()
+        self.current_mode = "library"
+        self.current_scene = "all"
+        self.search_text = ""
+        self._column_count = 2
+        self.setWindowTitle("AI 能力商城")
+        self.resize(960, 680)
+        apply_product_dialog(self, "SkillsCenterDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(14)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(12)
+        header = ProductPageHeader("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力")
+        header_row.addWidget(header, 1, Qt.AlignTop)
+        self.more_btn = QToolButton()
+        self.more_btn.setObjectName("CapabilityStoreMore")
+        self.more_btn.setText("···")
+        self.more_btn.setAccessibleName("更多能力选项")
+        self.more_btn.setToolTip("更多")
+        self.more_btn.setPopupMode(QToolButton.InstantPopup)
+        self.more_btn.setFixedSize(DesignTokens.control_height, DesignTokens.control_height)
+        self.more_btn.setStyleSheet(apple_tool_button_style())
+        more_menu = QMenu(self.more_btn)
+        advanced_action = more_menu.addAction("高级管理")
+        advanced_action.triggered.connect(self._open_advanced_management)
+        self.more_btn.setMenu(more_menu)
+        header_row.addWidget(self.more_btn, 0, Qt.AlignTop)
+        layout.addLayout(header_row)
+
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("CapabilityLibrarySearch")
+        self.search_input.setPlaceholderText("搜索想完成的任务，例如：读 PDF、查资料、分析股票")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setStyleSheet(product_field_style())
+        self.search_input.textChanged.connect(self._on_search_changed)
+        layout.addWidget(self.search_input)
+
+        browse_bar = QHBoxLayout()
+        browse_bar.setContentsMargins(0, 0, 0, 0)
+        browse_bar.setSpacing(8)
+        self.mode_control = ProductSegmentedControl(
+            [("library", "发现能力"), ("mine", "我的能力")],
+            current="library",
+        )
+        self.mode_control.currentChanged.connect(self._set_mode)
+        browse_bar.addWidget(self.mode_control, 0)
+        browse_bar.addStretch()
+        layout.addLayout(browse_bar)
+        self.scene_control = ProductSegmentedControl(
+            [("all", "全部"), *CAPABILITY_SCENES.items()],
+            current="all",
+        )
+        self.scene_control.currentChanged.connect(self._set_scene)
+        layout.addWidget(self.scene_control, 0, Qt.AlignLeft)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("CapabilityLibraryScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet(
+            "QScrollArea#CapabilityLibraryScroll { background: transparent; border: none; }"
+        )
+        self.content = QWidget()
+        self.content.setObjectName("CapabilityLibraryContent")
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 0, 0, 12)
+        self.content_layout.setSpacing(18)
+        self.scroll.setWidget(self.content)
+        layout.addWidget(self.scroll, 1)
+
+        self.refresh_list()
+        bind_theme(self, self.refresh_theme, surface="management")
+        log_ui_navigation("capability_library_open", mode=self.current_mode)
+
+    def refresh_theme(self, _resolved=None):
+        apply_product_dialog(self, "SkillsCenterDialog")
+        self.search_input.setStyleSheet(product_field_style())
+        self.more_btn.setStyleSheet(apple_tool_button_style())
+        self._render_content()
+
+    def _is_user_owned(self, skill):
+        name = str(skill.get("name") or "").strip()
+        if not name or capability_is_official(skill):
+            return False
+        if str(skill.get("source_format") or "").strip() == SkillManager.MCP_SOURCE_FORMAT:
+            return False
+        try:
+            return bool(self.skill_manager.is_skill_editable(name))
+        except Exception as exc:
+            log_ui_navigation(
+                "capability_ownership_error",
+                skill_name=name,
+                error=str(exc),
+            )
+            return False
+
+    def refresh_list(self):
+        self._all_skills = list(self.skill_manager.get_all_skills() or [])
+        self._user_owned_names = {
+            str(skill.get("name") or "").strip()
+            for skill in self._all_skills
+            if self._is_user_owned(skill)
+        }
+        self._render_content()
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)
+
+    def _matches_search(self, skill):
+        return skill_center_matches_filters(skill, self.search_text, "all")
+
+    def _official_skills(self):
+        return [
+            skill for skill in self._all_skills
+            if capability_is_official(skill) and self._matches_search(skill)
+        ]
+
+    def _user_skills(self):
+        return [
+            skill for skill in self._all_skills
+            if str(skill.get("name") or "").strip() in self._user_owned_names and self._matches_search(skill)
+        ]
+
+    def _set_mode(self, mode):
+        mode = str(mode or "library")
+        if mode == self.current_mode:
+            return
+        self.current_mode = mode
+        self.scene_control.setVisible(mode == "library")
+        log_ui_navigation("capability_library_mode_change", mode=mode)
+        self._render_content()
+
+    def _set_scene(self, scene):
+        scene = str(scene or "all")
+        if scene != "all" and scene not in CAPABILITY_SCENES:
+            raise ValueError(f"未知能力场景：{scene}")
+        self.current_scene = scene
+        self.scene_control.set_current(scene)
+        log_ui_navigation("capability_library_scene_change", scene=scene)
+        self._render_content()
+
+    def _on_search_changed(self, text):
+        self.search_text = str(text or "")
+        self._render_content()
+
+    def _section(self, title, skills, *, user_owned=False):
+        section = QWidget()
+        section.setObjectName("CapabilitySceneSection")
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        heading = QLabel(title)
+        heading.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_body}px; font-weight: 700; color: {DesignTokens.text_primary}; "
+            f"padding: 0 0 4px 2px;"
+        )
+        layout.addWidget(heading)
+        grid_host = QWidget()
+        grid = QGridLayout(grid_host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        columns = self._column_count
+        for index, skill in enumerate(skills):
+            grid.addWidget(
+                self._capability_row(skill, user_owned=user_owned),
+                index // columns,
+                index % columns,
+            )
+        for column in range(columns):
+            grid.setColumnStretch(column, 1)
+        layout.addWidget(grid_host)
+        return section
+
+    def _capability_row(self, skill, *, user_owned=False):
+        row = QFrame()
+        row.setObjectName("CapabilityStoreCard")
+        row.setMinimumHeight(146)
+        row.setStyleSheet(
+            f"QFrame#CapabilityStoreCard {{ background: {DesignTokens.bg_main}; border: none; "
+            f"border-radius: {DesignTokens.radius_md}px; }}"
+        )
+        layout = QVBoxLayout(row)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(7)
+        title = QLabel(readable_skill_name(skill) or str(skill.get("name") or "未命名能力"))
+        title.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_body}px; font-weight: 600; color: {DesignTokens.text_primary};"
+        )
+        full_description = capability_summary(skill, user_owned=user_owned)
+        description = QLabel(full_description)
+        description.setWordWrap(True)
+        description.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        description.setToolTip(full_description)
+        layout.addWidget(title)
+        layout.addWidget(description)
+        examples = [
+            str(item).strip()
+            for item in (capability_presentation(skill).get("examples") or [])
+            if str(item).strip()
+        ][:2]
+        if examples:
+            example_label = QLabel("可以帮你：" + " · ".join(examples))
+            example_label.setWordWrap(False)
+            example_label.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_tertiary};"
+            )
+            example_label.setToolTip("、".join(examples))
+            layout.addWidget(example_label)
+        layout.addStretch()
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(8)
+        enabled = bool(skill.get("enabled"))
+        needs_config = not enabled and skill_center_config_state(skill) == "needs_config"
+        if enabled:
+            status = QLabel("✓ 已开启")
+            status.setObjectName("CapabilityStateLabel")
+            status.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; font-weight: 600; "
+                f"color: {DesignTokens.success_text};"
+            )
+            actions.addWidget(status)
+            actions.addStretch()
+            if skill.get("config_fields"):
+                settings_btn = QPushButton("设置")
+                settings_btn.setStyleSheet(product_button_style("ghost"))
+                settings_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
+                actions.addWidget(settings_btn)
+            close_btn = QPushButton("关闭")
+            close_btn.setObjectName("CapabilityDisableAction")
+            close_btn.setAccessibleName(f"关闭{readable_skill_name(skill)}")
+            close_btn.setStyleSheet(product_button_style("ghost"))
+            close_btn.clicked.connect(
+                lambda checked=False, value=dict(skill): self._toggle_skill(value, False)
+            )
+            actions.addWidget(close_btn)
+        else:
+            if needs_config:
+                hint = QLabel("需要先完成一次设置")
+                hint.setStyleSheet(
+                    f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.warning_text};"
+                )
+                actions.addWidget(hint)
+            actions.addStretch()
+            if user_owned:
+                manage_btn = QPushButton("管理")
+                manage_btn.setStyleSheet(product_button_style("ghost"))
+                manage_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
+                actions.addWidget(manage_btn)
+            action = QPushButton("设置后开启" if needs_config else "开启")
+            action.setObjectName("CapabilityEnableAction")
+            action.setStyleSheet(product_button_style("primary"))
+            if needs_config:
+                action.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
+            else:
+                action.clicked.connect(
+                    lambda checked=False, value=dict(skill): self._toggle_skill(value, True)
+                )
+            actions.addWidget(action)
+        layout.addLayout(actions)
+        return row
+
+    def _toggle_skill(self, skill, enabled):
+        name = str(skill.get("name") or "").strip()
+        if not name:
+            return False
+        log_ui_navigation("capability_enable_begin", skill_name=name, enabled=bool(enabled))
+        try:
+            self.config_manager.set_skill_enabled(name, bool(enabled))
+            window = self.window()
+            if hasattr(window, "publish_ui_skill_change"):
+                if not window.publish_ui_skill_change(name, "enabled" if enabled else "disabled"):
+                    raise RuntimeError("能力目录刷新失败")
+                self.skill_manager = window.skill_manager
+            self.refresh_list()
+            if hasattr(window, "add_system_toast"):
+                window.add_system_toast("能力已开启" if enabled else "能力已关闭", "success", auto_close_ms=3200)
+            if enabled and name == "browser-automation" and hasattr(window, "offer_browser_skill_setup"):
+                window.offer_browser_skill_setup()
+            log_ui_navigation("capability_enable_done", skill_name=name, enabled=bool(enabled))
+            return True
+        except Exception as exc:
+            log_ui_navigation(
+                "capability_enable_error",
+                skill_name=name,
+                enabled=bool(enabled),
+                error=str(exc),
+            )
+            QMessageBox.warning(self, "能力", f"无法更新能力状态：{exc}")
+            self.refresh_list()
+            return False
+
+    def _open_detail(self, skill):
+        if self._main is not None and hasattr(self._main, "show_capability_detail"):
+            self._main.show_capability_detail(skill)
+
+    def _open_advanced_management(self):
+        if self._main is not None and hasattr(self._main, "show_advanced_capabilities"):
+            self._main.show_advanced_capabilities()
+
+    def _render_content(self):
+        self._clear_layout(self.content_layout)
+        if self.current_mode == "mine":
+            skills = sorted(self._user_skills(), key=lambda item: readable_skill_name(item).casefold())
+            if skills:
+                self.content_layout.addWidget(self._section("我的能力", skills, user_owned=True))
+            else:
+                self.content_layout.addWidget(
+                    ProductEmptyState(
+                        "还没有自己的能力" if not self.search_text.strip() else "没有匹配的能力",
+                        "可以在对话中让 AI 创建能力，或前往高级管理导入已有能力。"
+                        if not self.search_text.strip()
+                        else "调整关键词后再试。",
+                    )
+                )
+            self.content_layout.addStretch()
+            return
+
+        official = self._official_skills()
+        rendered = False
+        scene_keys = [self.current_scene] if self.current_scene != "all" else list(CAPABILITY_SCENES)
+        for scene in scene_keys:
+            scene_skills = sorted(
+                [skill for skill in official if capability_scene(skill) == scene],
+                key=lambda item: readable_skill_name(item).casefold(),
+            )
+            if not scene_skills:
+                continue
+            self.content_layout.addWidget(self._section(CAPABILITY_SCENES[scene], scene_skills))
+            rendered = True
+        invalid = [skill for skill in official if not capability_scene(skill)]
+        if invalid and self.current_scene == "all":
+            self.content_layout.addWidget(self._section("信息需要完善", invalid))
+            rendered = True
+        if not rendered:
+            self.content_layout.addWidget(
+                ProductEmptyState(
+                    "没有匹配的能力",
+                    "换个任务说法，或选择其他场景再试。",
+                )
+            )
+        self.content_layout.addStretch()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        columns = 2 if self.width() >= self.RESPONSIVE_COLUMN_THRESHOLD else 1
+        if columns != self._column_count:
+            self._column_count = columns
+            QTimer.singleShot(0, self._render_content)
 
 
 class SessionSkillPickerDialog(QDialog):
@@ -18911,7 +19545,7 @@ class MainWindow(QMainWindow):
         self.product_nav_buttons = {}
 
         sidebar_skills_btn = QPushButton(" 功能中心")
-        sidebar_skills_btn.setText(" 能力中心")
+        sidebar_skills_btn.setText(" 能力商城")
         sidebar_skills_btn.setIcon(qta.icon('fa5s.puzzle-piece', color=DesignTokens.text_secondary))
         sidebar_skills_btn.setCursor(Qt.PointingHandCursor)
         sidebar_skills_btn.setStyleSheet(sidebar_btn_style)
@@ -22684,7 +23318,7 @@ class MainWindow(QMainWindow):
             return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 未找到，请检查 ai_skills 目录。"
         enabled_checker = getattr(manager, "_is_skill_enabled_for_path", None)
         if callable(enabled_checker) and not enabled_checker(skill_name, skill_path):
-            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 已被禁用，请先在能力中心启用。"
+            return False, skill_name, f"PPT Agent 内置 Skill `{skill_name}` 已被关闭，请先在能力商城开启。"
         return True, skill_name, ""
 
     def _fail_office_request_before_worker(self, state, message, title=None):
@@ -29649,7 +30283,7 @@ class MainWindow(QMainWindow):
             return page
         if route == self.PAGE_CAPABILITIES:
             if not self.skill_manager_ready:
-                message = self.skill_load_error or "能力仍在加载中，请稍后再打开能力中心。"
+                message = self.skill_load_error or "能力仍在加载中，请稍后再打开能力商城。"
                 self.add_system_toast(message, "error" if self.skill_load_error else "info", auto_close_ms=5000)
                 return None
             page = SkillsCenterDialog(self.skill_manager, self.config_manager, self)
@@ -29691,19 +30325,34 @@ class MainWindow(QMainWindow):
         page.deleteLater()
 
     def handle_product_back(self):
-        if self.current_product_route == self.PAGE_CAPABILITIES and self.current_product_subroute == "detail":
-            detail = self.product_pages.pop("capability_detail", None)
-            if detail is not None:
-                self.main_page_stack.removeWidget(detail)
-                detail.deleteLater()
-            self.current_product_subroute = ""
-            page = self.product_pages.get(self.PAGE_CAPABILITIES)
-            if page is not None:
-                page.refresh_list()
-                self.main_page_stack.setCurrentWidget(page)
-            self.workspace_title_label.setText("能力中心")
-            self.workspace_subtitle_label.setText("查看、启用并配置 Cowork 可使用的能力。")
-            return True
+        if self.current_product_route == self.PAGE_CAPABILITIES:
+            if self.current_product_subroute == "workbench":
+                workbench = self.product_pages.pop("capability_workbench", None)
+                if workbench is not None:
+                    self.main_page_stack.removeWidget(workbench)
+                    workbench.deleteLater()
+                advanced = self.product_pages.get("capability_advanced")
+                if advanced is not None:
+                    advanced.refresh_list()
+                    self.current_product_subroute = "advanced"
+                    self.workspace_title_label.setText("高级能力管理")
+                    self.workspace_subtitle_label.setText("管理来源、文件、依赖和调试工具。")
+                    self.main_page_stack.setCurrentWidget(advanced)
+                    return True
+            if self.current_product_subroute in {"detail", "advanced"}:
+                key = "capability_detail" if self.current_product_subroute == "detail" else "capability_advanced"
+                page_to_close = self.product_pages.pop(key, None)
+                if page_to_close is not None:
+                    self.main_page_stack.removeWidget(page_to_close)
+                    page_to_close.deleteLater()
+                self.current_product_subroute = ""
+                page = self.product_pages.get(self.PAGE_CAPABILITIES)
+                if page is not None:
+                    page.refresh_list()
+                    self.main_page_stack.setCurrentWidget(page)
+                self.workspace_title_label.setText("AI 能力商城")
+                self.workspace_subtitle_label.setText("按想完成的任务，为 Cowork 开启新能力。")
+                return True
         if self.current_product_route == self.PAGE_AUTOMATION and self.current_product_subroute == "task_editor":
             editor = self.product_pages.get("automation_task_editor")
             if editor is not None and editor.is_dirty():
@@ -29819,7 +30468,13 @@ class MainWindow(QMainWindow):
         if previous is not None:
             self.main_page_stack.removeWidget(previous)
             previous.deleteLater()
-        detail = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
+        detail = CapabilityWorkbenchDialog(
+            skill,
+            self.skill_manager,
+            self.config_manager,
+            self,
+            simple_mode=True,
+        )
         detail.setParent(self.main_page_stack)
         detail.setWindowFlags(Qt.Widget)
         detail.setModal(False)
@@ -29836,8 +30491,70 @@ class MainWindow(QMainWindow):
         self.product_pages["capability_detail"] = detail
         self.current_product_subroute = "detail"
         self.workspace_title_label.setText(readable_skill_name(skill) or str(skill.get("name") or "能力详情"))
-        self.workspace_subtitle_label.setText("查看能力边界、可用工具和运行配置。")
+        self.workspace_subtitle_label.setText("查看用途、配置并管理这项能力。")
         self.main_page_stack.setCurrentWidget(detail)
+        return True
+
+    def show_advanced_capabilities(self):
+        if self.current_product_route != self.PAGE_CAPABILITIES:
+            return False
+        simple_detail = self.product_pages.pop("capability_detail", None)
+        if simple_detail is not None:
+            self.main_page_stack.removeWidget(simple_detail)
+            simple_detail.deleteLater()
+        previous = self.product_pages.pop("capability_advanced", None)
+        if previous is not None:
+            self.main_page_stack.removeWidget(previous)
+            previous.deleteLater()
+        page = AdvancedSkillsCenterDialog(self.skill_manager, self.config_manager, self)
+        page.setParent(self.main_page_stack)
+        page.setWindowFlags(Qt.Widget)
+        page.setModal(False)
+        page.setProperty("embeddedProductPage", True)
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        page.setMinimumSize(0, 0)
+        for label in page.findChildren(QLabel):
+            if label.property("roleTitle") or label.property("roleSubtitle"):
+                label.hide()
+        for button in page.findChildren(QPushButton):
+            if button.text().strip() == "关闭":
+                button.hide()
+        self.main_page_stack.addWidget(page)
+        self.product_pages["capability_advanced"] = page
+        self.current_product_subroute = "advanced"
+        self.workspace_title_label.setText("高级能力管理")
+        self.workspace_subtitle_label.setText("管理来源、文件、依赖和调试工具。")
+        self.main_page_stack.setCurrentWidget(page)
+        log_ui_navigation("capability_advanced_open")
+        return True
+
+    def show_capability_workbench(self, skill):
+        if self.current_product_route != self.PAGE_CAPABILITIES:
+            return False
+        previous = self.product_pages.pop("capability_workbench", None)
+        if previous is not None:
+            self.main_page_stack.removeWidget(previous)
+            previous.deleteLater()
+        workbench = CapabilityWorkbenchDialog(skill, self.skill_manager, self.config_manager, self)
+        workbench.setParent(self.main_page_stack)
+        workbench.setWindowFlags(Qt.Widget)
+        workbench.setModal(False)
+        workbench.setProperty("embeddedProductPage", True)
+        workbench.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        workbench.setMinimumSize(0, 0)
+        for label in workbench.findChildren(QLabel):
+            if label.property("roleTitle") or label.property("roleSubtitle"):
+                label.hide()
+        for button in workbench.findChildren(QPushButton):
+            if button.text().strip() == "关闭":
+                button.hide()
+        self.main_page_stack.addWidget(workbench)
+        self.product_pages["capability_workbench"] = workbench
+        self.current_product_subroute = "workbench"
+        self.workspace_title_label.setText(readable_skill_name(skill) or str(skill.get("name") or "能力工作台"))
+        self.workspace_subtitle_label.setText("编辑文件、检查依赖并调试工具。")
+        self.main_page_stack.setCurrentWidget(workbench)
+        log_ui_navigation("capability_workbench_open", skill_name=str(skill.get("name") or ""))
         return True
 
     def show_product_page(self, route, section=None):
@@ -29882,7 +30599,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "right_drawer_open", False):
             self.hide_context_drawer(reason="product_page")
         titles = {
-            self.PAGE_CAPABILITIES: ("能力中心", "查看、启用并配置 Cowork 可使用的能力。"),
+            self.PAGE_CAPABILITIES: ("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力。"),
             self.PAGE_AUTOMATION: ("自动化", "管理计划任务、运行状态和执行历史。"),
             self.PAGE_SETTINGS: ("设置", "管理模型、工作区、智能体、记忆与系统偏好。"),
         }
@@ -30408,7 +31125,7 @@ class MainWindow(QMainWindow):
         skills_status = self.skill_load_error or ("能力加载完成" if skills_available else "能力加载中")
         if hasattr(self, "sidebar_skills_btn"):
             self.sidebar_skills_btn.setEnabled(skills_available)
-            self.sidebar_skills_btn.setToolTip("打开能力中心" if skills_available else skills_status)
+            self.sidebar_skills_btn.setToolTip("打开能力商城" if skills_available else skills_status)
         if hasattr(self, "sidebar_skill_capture_btn"):
             self.sidebar_skill_capture_btn.setToolTip("沉淀当前会话为 Skill" if skills_available else skills_status)
         selected = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))

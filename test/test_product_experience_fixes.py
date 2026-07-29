@@ -376,6 +376,59 @@ class ProductExperienceFixTests(unittest.TestCase):
             finally:
                 dialog.close()
 
+    def test_simple_capability_settings_save_and_enable_without_debug_tabs(self):
+        config = MagicMock()
+        config.get_skill_config.return_value = {}
+        manager = MagicMock()
+        manager.is_skill_editable.return_value = False
+        manager.get_skill_config_status.return_value = {
+            "missing_required": ["服务地址"],
+            "config_errors": [],
+            "complete": False,
+        }
+        skill = {
+            "name": "sample-capability",
+            "display_name": "示例能力",
+            "enabled": False,
+            "source_type": "bundled_plugin",
+            "presentation": {
+                "category": "data_analysis",
+                "short_name": "示例",
+                "summary": "分析示例数据。",
+                "examples": ["查看指标", "整理结果"],
+                "access_note": "会访问你配置的示例服务。",
+            },
+            "config_fields": [
+                {"name": "SERVICE_URL", "label": "服务地址", "required": True}
+            ],
+            "tools": ["sample_tool"],
+            "script_entries": [{"name": "sample_script", "path": "sample.py"}],
+        }
+        dialog = CapabilityWorkbenchDialog(skill, manager, config, simple_mode=True)
+        try:
+            button_texts = {button.text() for button in dialog.findChildren(QPushButton)}
+            tab_texts = {
+                dialog.tabs.tabText(index)
+                for index in range(dialog.tabs.count())
+            }
+            self.assertIn("保存并开启", button_texts)
+            self.assertEqual(tab_texts, {"配置"})
+            self.assertNotIn("Tool 调试", tab_texts)
+            self.assertNotIn("Script 调试", tab_texts)
+            with patch("main.QMessageBox.warning"):
+                self.assertFalse(dialog._save_skill_config_values(show_message=False))
+            config.set_skill_config.assert_not_called()
+            dialog.config_editors["SERVICE_URL"].setText("https://service.example")
+            with patch.object(dialog, "_save_skill_config_values", return_value=True), patch.object(
+                dialog,
+                "_set_simple_enabled",
+                return_value=True,
+            ) as enable:
+                self.assertTrue(dialog.save_skill_config())
+            enable.assert_called_once_with(True)
+        finally:
+            dialog.close()
+
     def test_web_search_config_renders_secure_provider_links_and_keyless_notice(self):
         config = MagicMock()
         config.get_skill_config.return_value = {"SEARCH_PROVIDER": "anysearch"}

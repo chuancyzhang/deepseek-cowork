@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "showdoc-mcp",
+  "display_name": "ShowDoc 接口文档",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "ShowDoc MCP skill using the mcp-showdoc stdio server for scoped project documentation search and reading.",
   "description_cn": "ShowDoc MCP 能力，通过 mcp-showdoc stdio server 在指定项目内搜索、列出和读取 API 文档。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "ShowDoc",
+    "summary": "在指定 ShowDoc 项目中搜索和读取 API 文档。",
+    "examples": ["搜索接口说明", "读取项目文档", "查找请求参数"],
+    "access_note": "会使用你配置的凭据读取指定 ShowDoc 项目，不会自动修改项目内容。"
+  },
   "tags": ["showdoc", "mcp", "documentation", "api docs", "接口文档"],
   "triggers": ["ShowDoc", "showdoc", "接口文档", "搜索 API 文档", "读取 ShowDoc"],
   "anti_triggers": ["Airflow", "Superset", "WeKnora", "腾讯文档"],

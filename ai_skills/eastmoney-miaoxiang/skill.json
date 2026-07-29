@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "eastmoney-miaoxiang",
+  "display_name": "东方财富妙想",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Eastmoney Miaoxiang financial skill pack for market data, financial search, stock screening, watchlists, simulated portfolios, and AI community operations.",
   "description_cn": "东方财富妙想金融能力包，支持金融数据、资讯搜索、智能选股、自选股、模拟组合和 AI 社区。",
+  "presentation": {
+    "category": "financial_research",
+    "short_name": "东方财富妙想",
+    "summary": "查询金融数据与资讯，并进行选股、组合和市场研究。",
+    "examples": ["查询行情资讯", "按条件选股", "分析模拟组合"],
+    "access_note": "查询内容会发送到东方财富妙想服务；自选股、模拟交易和社区操作必须由你明确提出。"
+  },
   "tags": [
     "eastmoney",
     "miaoxiang",
@@ -134,4 +142,3 @@
     "Never add automatic community interaction after publishing unless every action was explicitly requested."
   ]
 }
-

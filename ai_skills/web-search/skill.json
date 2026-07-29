@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "web-search",
+  "display_name": "网页搜索",
   "kind": "knowledge",
   "capability_group": "file-information-interaction",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Real-time web search and article extraction through AnySearch or Tavily.",
   "description_cn": "通过 AnySearch 或 Tavily 提供实时网页搜索和正文提取。",
+  "presentation": {
+    "category": "search_browse",
+    "short_name": "网页搜索",
+    "summary": "搜索实时网页信息并提取文章正文。",
+    "examples": ["查询最新信息", "搜索公开资料", "读取网页正文"],
+    "access_note": "搜索词会发送到你选择的搜索服务；不会自动切换服务或修改网页内容。"
+  },
   "tags": ["web search", "anysearch", "tavily", "网页搜索", "实时信息", "文章提取"],
   "triggers": ["网页搜索", "搜索互联网", "最新信息", "读取网页", "AnySearch", "Tavily"],
   "tool_refs": [],

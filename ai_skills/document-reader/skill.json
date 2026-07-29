@@ -1,10 +1,18 @@
 {
   "version": 1,
   "name": "document-reader",
+  "display_name": "本地文档读取",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "description": "Optional bundled plugin for reading DOCX, PPTX, XLSX, XLS, and PDF through one unified tool.",
   "description_cn": "可选随包插件：通过统一工具读取 DOCX、PPTX、XLSX、XLS 和 PDF。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "文档读取",
+    "summary": "读取工作区中的 Word、PowerPoint、Excel 和 PDF 文件。",
+    "examples": ["总结 PDF", "提取表格内容", "读取演示文稿"],
+    "access_note": "只读取当前工作区内你指定的文档，不会修改原文件。"
+  },
   "source_type": "bundled_plugin",
   "default_enabled": false,
   "tags": ["documents", "office", "pdf", "reader"],

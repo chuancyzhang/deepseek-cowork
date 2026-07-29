@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "feishu-docs",
+  "display_name": "飞书文档",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Feishu document skill pack with vendored document, wiki, drive, sheet, media, comment, and auth scripts from hashSTACS-Global/feishu-skills.",
   "description_cn": "飞书文档能力包，内置来自 hashSTACS-Global/feishu-skills 的文档、知识库、云空间、表格、媒体、评论与授权脚本。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "飞书文档",
+    "summary": "读取、搜索和编辑飞书文档、知识库与云空间内容。",
+    "examples": ["搜索飞书文档", "更新知识库页面", "处理飞书表格"],
+    "access_note": "会访问你授权的飞书空间；创建、覆盖或评论内容前仍需明确确认。"
+  },
   "tags": ["feishu", "lark", "docs", "wiki", "drive", "sheet", "document", "飞书文档"],
   "triggers": ["飞书文档", "飞书云文档", "飞书知识库", "Feishu Docs", "Lark Docs", "创建飞书文档", "读取飞书文档", "搜索飞书文档"],
   "anti_triggers": ["钉钉", "腾讯文档", "DingTalk", "Tencent Docs"],

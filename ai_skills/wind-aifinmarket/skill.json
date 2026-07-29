@@ -9,6 +9,13 @@
   "display_name": "万得金融能力",
   "description": "Wind AIFin Market aggregate plugin with 78 financial data, research, screening, trading-plan, risk, and quantitative workflows.",
   "description_cn": "万得 AIFin Market 聚合能力，内置 78 个金融数据、研究、选股、交易计划、风控和量化工作流。",
+  "presentation": {
+    "category": "financial_research",
+    "short_name": "万得金融",
+    "summary": "使用多种金融数据源完成行情、估值、选股和量化研究。",
+    "examples": ["分析市场环境", "进行股票估值", "制定交易研究计划"],
+    "access_note": "会按配置访问 Wind、Tushare 等数据源；只生成研究和执行计划，不会真实下单。"
+  },
   "tags": ["wind", "aifinmarket", "finance", "alice", "tushare", "finviz", "股票", "基金", "估值", "选股", "复盘", "金融数据"],
   "triggers": ["万得", "Wind", "AIFin Market", "Wind Alice", "金融数据", "股票行情", "基金分析", "市场主题", "投资研究", "选股", "回测"],
   "anti_triggers": ["真实下单", "自动交易", "账户转账"],

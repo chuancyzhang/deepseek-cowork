@@ -137,12 +137,49 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIsNone(first.pending_conversation_skill_result)
         self.assertIsNone(second.pending_conversation_skill_result)
 
-    def test_capability_page_uses_direct_refresh_action(self):
+    def test_capability_page_moves_refresh_into_advanced_management(self):
         from main import SkillsCenterDialog
         page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
-        self.assertEqual(page.more_btn.text(), "刷新")
-        self.assertIsNone(page.more_btn.menu())
+        self.assertEqual(page.more_btn.text(), "···")
+        self.assertIn("高级管理", [action.text() for action in page.more_btn.menu().actions()])
+        self.assertEqual(page.mode_control.buttons["library"].text(), "发现能力")
+        self.assertEqual(page.mode_control.buttons["mine"].text(), "我的能力")
         page.deleteLater()
+
+    def test_capability_routes_separate_simple_detail_and_advanced_management(self):
+        from main import AdvancedSkillsCenterDialog, CapabilityWorkbenchDialog, SkillsCenterDialog
+
+        page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
+        self.window._prepare_embedded_product_page(page, self.window.PAGE_CAPABILITIES)
+        self.window.current_product_route = self.window.PAGE_CAPABILITIES
+        self.window.current_product_subroute = ""
+        self.window.main_page_stack.setCurrentWidget(page)
+
+        self.assertTrue(self.window.show_advanced_capabilities())
+        advanced = self.window.product_pages["capability_advanced"]
+        self.assertIsInstance(advanced, AdvancedSkillsCenterDialog)
+        self.assertEqual(self.window.current_product_subroute, "advanced")
+        self.assertTrue(self.window.handle_product_back())
+
+        skill = {
+            "name": "document-reader",
+            "display_name": "本地文档读取",
+            "source_type": "bundled_plugin",
+            "enabled": True,
+            "config_fields": [],
+            "presentation": {
+                "category": "docs_knowledge",
+                "short_name": "文档读取",
+                "summary": "读取工作区文档。",
+                "examples": ["总结文档", "提取表格"],
+                "access_note": "只读取指定文件。",
+            },
+        }
+        self.assertTrue(self.window.show_capability_detail(skill))
+        detail = self.window.product_pages["capability_detail"]
+        self.assertIsInstance(detail, CapabilityWorkbenchDialog)
+        self.assertTrue(detail.simple_mode)
+        self.assertEqual(self.window.current_product_subroute, "detail")
 
     def test_project_preview_keeps_five_conversations_and_hidden_actions(self):
         with tempfile.TemporaryDirectory() as project_dir:

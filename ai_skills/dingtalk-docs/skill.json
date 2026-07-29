@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "dingtalk-docs",
+  "display_name": "钉钉文档",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "DingTalk document and knowledge-base skill vendored from breath57/dingtalk-skills dingtalk-document.",
   "description_cn": "钉钉文档与知识库能力，基于 breath57/dingtalk-skills 的 dingtalk-document 独立内置。",
+  "presentation": {
+    "category": "docs_knowledge",
+    "short_name": "钉钉文档",
+    "summary": "读取、创建和管理钉钉文档与知识库内容。",
+    "examples": ["读取钉钉文档", "新建协作文档", "检索知识库"],
+    "access_note": "会访问你授权的钉钉文档空间；创建或修改内容前仍需明确确认。"
+  },
   "tags": ["dingtalk", "docs", "wiki", "knowledge base", "document", "钉钉文档", "钉钉知识库"],
   "triggers": ["钉钉文档", "钉钉知识库", "DingTalk Docs", "dingtalk document", "新建钉钉文档", "读取钉钉文档"],
   "anti_triggers": [],

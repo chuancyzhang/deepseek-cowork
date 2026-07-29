@@ -1,12 +1,20 @@
 {
   "version": 2,
   "name": "visualize",
+  "display_name": "交互可视化",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
   "default_enabled": false,
   "description": "Generate executable HTML fragments from data or code and embed them as interactive visualizations in the conversation.",
   "description_cn": "由 AI 处理数据并生成可执行 HTML Fragment，直接以内联交互视图显示在对话中。",
+  "presentation": {
+    "category": "content_creation",
+    "short_name": "交互可视化",
+    "summary": "把数据和想法制作成可交互的图表、模拟器或预览。",
+    "examples": ["制作交互图表", "创建参数模拟器", "生成界面预览"],
+    "access_note": "会处理你提供的数据并在对话中运行生成的交互内容，不会自动发布到外部。"
+  },
   "tags": ["visualization", "chart", "data explorer", "diagram", "ui preview", "interactive html"],
   "triggers": ["交互可视化", "交互图表", "数据探索器", "模拟器", "UI Preview", "interactive visualization"],
   "anti_triggers": ["普通 Markdown 表格", "静态文字说明"],

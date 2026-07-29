@@ -1,6 +1,7 @@
 {
   "version": 2,
   "name": "superset-mcp",
+  "display_name": "Superset 数据分析",
   "kind": "knowledge",
   "capability_group": "optional-plugin",
   "source_type": "bundled_plugin",
@@ -8,6 +9,13 @@
   "default_enabled": false,
   "description": "Official Apache Superset MCP Streamable HTTP skill with username/password JWT authentication.",
   "description_cn": "官方 Apache Superset MCP 能力，通过用户名和密码获取 JWT，并以 Streamable HTTP 连接 Superset MCP。",
+  "presentation": {
+    "category": "data_analysis",
+    "short_name": "Superset",
+    "summary": "连接 Apache Superset，查询数据集、图表和仪表板。",
+    "examples": ["查看仪表板", "查询数据集", "分析图表指标"],
+    "access_note": "会连接你配置的 Superset 服务并访问授权数据；修改服务内容前仍需明确确认。"
+  },
   "tags": ["superset", "apache superset", "mcp", "streamable http", "dashboard", "charts"],
   "triggers": ["Superset MCP", "Apache Superset", "Superset dashboard", "Superset chart", "Superset 数据集"],
   "anti_triggers": ["Airflow", "ShowDoc", "WeKnora", "third-party superset-mcp npm"],

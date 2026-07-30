@@ -216,6 +216,300 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.assertIn("展开显示", disclosure)
             row.deleteLater()
 
+    def test_project_history_expands_in_five_item_batches_and_can_collapse(self):
+        with tempfile.TemporaryDirectory() as project_dir:
+            sessions = [
+                {
+                    "id": f"project-page-{index}",
+                    "title": f"项目对话 {index}",
+                    "updated_at": 100 - index,
+                    "pinned": False,
+                }
+                for index in range(12)
+            ]
+            self.window.project_preview_paths.add(project_dir)
+
+            def build_row():
+                self.window.history_rows = {}
+                self.window.history_buttons = {}
+                self.window.history_age_labels = {}
+                self.window.history_activity_indicators = {}
+                self.window.history_activity_statuses = {}
+                self.window.history_skill_capture_indicators = {}
+                self.window.history_inline_hosts = {}
+                return self.window._make_project_row(
+                    {"path": project_dir, "name": "分页项目", "pinned": False},
+                    sessions,
+                )
+
+            def row_state(row):
+                rows = [
+                    item for item in row.findChildren(ConversationHistoryRow)
+                    if not isinstance(item, ProjectHistoryRow)
+                ]
+                disclosures = [
+                    button.text().strip()
+                    for button in row.findChildren(QPushButton, "HistoryDisclosureButton")
+                ]
+                return len(rows), disclosures
+
+            rows = []
+            first = build_row()
+            rows.append(first)
+            self.assertEqual(row_state(first), (5, ["展开显示"]))
+
+            self.assertTrue(
+                self.window.expand_project_history(project_dir, len(sessions), refresh=False)
+            )
+            second = build_row()
+            rows.append(second)
+            self.assertEqual(row_state(second), (10, ["展开显示"]))
+
+            self.assertTrue(
+                self.window.expand_project_history(project_dir, len(sessions), refresh=False)
+            )
+            third = build_row()
+            rows.append(third)
+            self.assertEqual(row_state(third), (12, ["收起显示"]))
+
+            self.assertTrue(
+                self.window.collapse_project_history(project_dir, len(sessions), refresh=False)
+            )
+            collapsed = build_row()
+            rows.append(collapsed)
+            self.assertEqual(row_state(collapsed), (5, ["展开显示"]))
+
+            for row in rows:
+                row.deleteLater()
+
+    def test_sidebar_loads_all_summaries_before_grouping_without_global_more_button(self):
+        with tempfile.TemporaryDirectory() as recent_project, tempfile.TemporaryDirectory() as old_project:
+            conversations = [
+                {
+                    "id": f"recent-{index}",
+                    "title": f"最近对话 {index}",
+                    "updated_at": 200 - index,
+                    "status": "completed",
+                    "meta": {
+                        "workspace_dir": recent_project,
+                        "workspace_source": "project",
+                    },
+                    "im_provider": "",
+                }
+                for index in range(80)
+            ]
+            conversations.append(
+                {
+                    "id": "old-project-conversation",
+                    "title": "最旧但仍存在的项目对话",
+                    "updated_at": 1,
+                    "status": "completed",
+                    "meta": {
+                        "workspace_dir": old_project,
+                        "workspace_source": "project",
+                    },
+                    "im_provider": "",
+                }
+            )
+            projects = [
+                {"path": recent_project, "name": "最近项目", "pinned": False},
+                {"path": old_project, "name": "旧项目", "pinned": False},
+            ]
+            with patch.object(
+                self.window.chat_storage,
+                "list_conversations",
+                return_value=conversations,
+            ) as list_all, patch.object(
+                self.window.chat_storage,
+                "list_conversation_summaries",
+                side_effect=AssertionError("侧栏不应再请求全局截断页"),
+            ), patch.object(
+                self.window.config_manager,
+                "get_projects",
+                return_value=projects,
+            ), patch.object(
+                self.window.config_manager,
+                "get",
+                return_value=[],
+            ):
+                self.window.project_preview_paths.add(os.path.normpath(recent_project))
+                self.window.refresh_history_list()
+
+            list_all.assert_called_once_with()
+            self.assertIn(os.path.normpath(old_project), self.window.project_rows)
+            self.assertEqual(len(self.window.history_rows), 5)
+            history_copy = [
+                button.text().strip()
+                for button in self.window.history_container.findChildren(QPushButton)
+            ]
+            self.assertNotIn("显示更多历史", history_copy)
+
+    def test_history_batches_always_include_running_and_waiting_sessions(self):
+        live_state = self.window.get_current_session()
+        live_state.live_activity = True
+        waiting_id = self.window.create_new_session(make_current=False)
+        waiting_state = self.window.get_session(waiting_id)
+        waiting_state.pending_interactions = {"request": object()}
+        entries = [
+            {
+                "id": f"ordinary-{index}",
+                "title": f"普通聊天 {index}",
+                "updated_at": 100 - index,
+            }
+            for index in range(5)
+        ]
+        entries.extend(
+            [
+                {"id": live_state.session_id, "title": "后台运行", "updated_at": 2},
+                {"id": waiting_id, "title": "等待输入", "updated_at": 1},
+            ]
+        )
+
+        visible_ids = {
+            item["id"]
+            for item in self.window._visible_history_entries(entries, 3)
+        }
+
+        self.assertEqual(
+            visible_ids,
+            {
+                "ordinary-0",
+                "ordinary-1",
+                "ordinary-2",
+                live_state.session_id,
+                waiting_id,
+            },
+        )
+        live_state.live_activity = False
+        waiting_state.pending_interactions = {}
+
+    def test_unassigned_history_pages_by_three_and_search_preserves_page_state(self):
+        conversations = [
+            {
+                "id": f"chat-page-{index}",
+                "title": f"独立聊天 {index}",
+                "updated_at": 100 - index,
+                "status": "completed",
+                "meta": {"workspace_source": "chat"},
+                "im_provider": "",
+            }
+            for index in range(8)
+        ]
+        conversation_ids = [item["id"] for item in conversations]
+
+        def disclosure_copy():
+            return [
+                button.text().strip()
+                for button in self.window.history_disclosure_buttons.values()
+            ]
+
+        with patch.object(
+            self.window.chat_storage,
+            "list_conversations",
+            return_value=conversations,
+        ), patch.object(
+            self.window.config_manager,
+            "get_projects",
+            return_value=[],
+        ), patch.object(
+            self.window.config_manager,
+            "get",
+            return_value=[],
+        ):
+            self.window.refresh_history_list()
+            self.assertEqual(len(self.window.history_rows), 3)
+            self.assertEqual(disclosure_copy(), ["展开显示"])
+
+            self.window.expand_unassigned_history(len(conversations))
+            self.assertEqual(len(self.window.history_rows), 6)
+            self.assertEqual(disclosure_copy(), ["展开显示"])
+
+            self.window._apply_runtime_theme()
+            self.assertEqual(len(self.window.history_rows), 6)
+            self.assertEqual(disclosure_copy(), ["展开显示"])
+            self.assertEqual(self.window.unassigned_history_visible_limit, 6)
+
+            with patch.object(
+                self.window,
+                "_history_query_text",
+                return_value="独立聊天",
+            ), patch.object(
+                self.window.chat_storage,
+                "search_conversations",
+                return_value=conversation_ids,
+            ):
+                self.window.refresh_history_list()
+            self.assertEqual(len(self.window.history_rows), 8)
+            self.assertEqual(disclosure_copy(), [])
+            self.assertEqual(self.window.unassigned_history_visible_limit, 6)
+
+            self.window.refresh_history_list()
+            self.assertEqual(len(self.window.history_rows), 6)
+            self.assertEqual(disclosure_copy(), ["展开显示"])
+
+            self.window.expand_unassigned_history(len(conversations))
+            self.assertEqual(len(self.window.history_rows), 8)
+            self.assertEqual(disclosure_copy(), ["收起显示"])
+
+            self.window.collapse_unassigned_history(len(conversations))
+            self.assertEqual(len(self.window.history_rows), 3)
+            self.assertEqual(disclosure_copy(), ["展开显示"])
+
+    def test_history_disclosure_keeps_its_viewport_anchor_after_expanding(self):
+        conversations = [
+            {
+                "id": f"anchor-chat-{index}",
+                "title": f"锚定聊天 {index}",
+                "updated_at": 100 - index,
+                "status": "completed",
+                "meta": {"workspace_source": "chat"},
+                "im_provider": "",
+            }
+            for index in range(9)
+        ]
+        with patch.object(
+            self.window.chat_storage,
+            "list_conversations",
+            return_value=conversations,
+        ), patch.object(
+            self.window.config_manager,
+            "get_projects",
+            return_value=[],
+        ), patch.object(
+            self.window.config_manager,
+            "get",
+            return_value=[],
+        ):
+            self.window.resize(900, 300)
+            self.window.show()
+            self.window.refresh_history_list()
+            self.app.processEvents()
+            disclosure_key = self.window._history_disclosure_key("chat")
+            button = self.window.history_disclosure_buttons[disclosure_key]
+            self.window.history_scroll.ensureWidgetVisible(button, 0, 0)
+            self.app.processEvents()
+            viewport = self.window.history_scroll.viewport()
+            before_y = button.mapTo(viewport, QPoint(0, 0)).y()
+            before_scroll = self.window.history_scroll.verticalScrollBar().value()
+
+            QTest.mouseClick(button, Qt.LeftButton)
+            QTest.qWait(30)
+            self.app.processEvents()
+
+            replacement = self.window.history_disclosure_buttons[disclosure_key]
+            after_y = replacement.mapTo(viewport, QPoint(0, 0)).y()
+            after_bar = self.window.history_scroll.verticalScrollBar()
+            self.assertLessEqual(
+                abs(after_y - before_y),
+                3,
+                (
+                    f"before_y={before_y}, after_y={after_y}, "
+                    f"before_scroll={before_scroll}, after_scroll={after_bar.value()}, "
+                    f"after_max={after_bar.maximum()}"
+                ),
+            )
+            self.assertTrue(replacement.hasFocus())
+
     def test_project_preview_includes_live_conversation_outside_recent_five(self):
         with tempfile.TemporaryDirectory() as project_dir:
             live_id = self.window.create_new_session(

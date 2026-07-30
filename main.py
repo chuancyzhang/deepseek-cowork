@@ -483,8 +483,10 @@ EXTREME_FINAL_PLAIN_TEXT_THRESHOLD = 120000
 LONG_TEXT_PLAIN_LINE_THRESHOLD = 120
 UI_DAEMON_CONNECT_TIMEOUT_SEC = 0.25
 HISTORY_RENDER_PAGE_SIZE = 12
-HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT = 80
-HISTORY_SIDEBAR_PAGE_SIZE = 80
+PROJECT_HISTORY_INITIAL_LIMIT = 5
+PROJECT_HISTORY_PAGE_SIZE = 5
+CHAT_HISTORY_INITIAL_LIMIT = 3
+CHAT_HISTORY_PAGE_SIZE = 3
 SUB_AGENT_MONITOR_RENDER_LIMIT = 80
 MARKDOWN_RENDER_CACHE_SIZE = 160
 CHAT_BUBBLE_VIRTUALIZATION_MIN_BUBBLES = 48
@@ -20439,12 +20441,14 @@ class MainWindow(QMainWindow):
         self.project_activity_statuses = {}
         self.project_rows = {}
         self.project_buttons = {}
+        self.history_disclosure_buttons = {}
+        self._history_sidebar_refresh_generation = 0
         self.history_inline_hosts = {}
         self.project_inline_hosts = {}
         self.project_preview_paths = set()
-        self.project_full_expanded_paths = set()
+        self.project_history_visible_limits = {}
         self.optimistic_history_session_ids = set()
-        self.unassigned_history_full_expanded = False
+        self.unassigned_history_visible_limit = CHAT_HISTORY_INITIAL_LIMIT
         self.sidebar_sort_mode = "recent"
         self.current_project_path = ""
         self._session_load_token_counter = 0
@@ -20523,7 +20527,6 @@ class MainWindow(QMainWindow):
         self._background_services_scheduled = False
         self._startup_hydration_scheduled = False
         self._startup_hydration_completed = False
-        self.history_sidebar_limit = HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT
         self._running_automation_history_ids = set()
         self._chat_save_failure_notified_at = {}
         
@@ -27700,6 +27703,69 @@ class MainWindow(QMainWindow):
             self.project_preview_paths.add(workspace_dir)
         self.refresh_history_list()
 
+    def _history_disclosure_key(self, group_type, path=""):
+        if group_type == "project":
+            return ("project", self._project_key(path))
+        if group_type == "chat":
+            return ("chat", "")
+        raise ValueError(f"未知的历史分组类型：{group_type}")
+
+    def _session_requires_history_visibility(self, session_id):
+        state = self.get_session(session_id)
+        return bool(
+            self._session_has_live_activity(session_id)
+            or (state and getattr(state, "pending_interactions", {}))
+        )
+
+    def _visible_history_entries(self, entries, visible_limit):
+        entries = list(entries or [])
+        limit = max(0, int(visible_limit or 0))
+        visible_ids = {
+            item.get("id")
+            for item in entries[:limit]
+            if item.get("id")
+        }
+        visible_ids.update(
+            item.get("id")
+            for item in entries
+            if item.get("id") and self._session_requires_history_visibility(item.get("id"))
+        )
+        return [item for item in entries if item.get("id") in visible_ids]
+
+    def _project_history_visible_limit(self, path):
+        key = self._project_key(path)
+        return max(
+            PROJECT_HISTORY_INITIAL_LIMIT,
+            int(self.project_history_visible_limits.get(key, PROJECT_HISTORY_INITIAL_LIMIT) or 0),
+        )
+
+    def _refresh_history_with_disclosure_anchor(self, disclosure_key, anchor):
+        anchor_y = None
+        if _qt_object_alive(anchor):
+            anchor_y = anchor.mapTo(self.history_scroll.viewport(), QPoint(0, 0)).y()
+        self.refresh_history_list()
+        replacement = self.history_disclosure_buttons.get(disclosure_key)
+        if anchor_y is None or not _qt_object_alive(replacement):
+            return
+        generation = self._history_sidebar_refresh_generation
+        QTimer.singleShot(
+            16,
+            lambda key=disclosure_key, y=anchor_y, token=generation:
+            self._restore_history_disclosure_anchor(key, y, token),
+        )
+
+    def _restore_history_disclosure_anchor(self, disclosure_key, anchor_y, generation):
+        if generation != self._history_sidebar_refresh_generation:
+            return
+        replacement = self.history_disclosure_buttons.get(disclosure_key)
+        if not _qt_object_alive(replacement) or not _qt_object_alive(self.history_scroll):
+            return
+        viewport = self.history_scroll.viewport()
+        replacement_y = replacement.mapTo(viewport, QPoint(0, 0)).y()
+        scrollbar = self.history_scroll.verticalScrollBar()
+        replacement.setFocus(Qt.OtherFocusReason)
+        scrollbar.setValue(scrollbar.value() + replacement_y - int(anchor_y))
+
     def _add_history_group_label(self, text):
         label = QLabel(text)
         label.setStyleSheet(apple_history_group_style())
@@ -27851,11 +27917,12 @@ class MainWindow(QMainWindow):
 
     def _make_project_row(self, project, sessions, query=""):
         path = project.get("path") or ""
+        normalized_path = self._normalize_project_path(path)
+        disclosure_key = self._history_disclosure_key("project", normalized_path)
         name = project.get("name") or self._project_display_name(path, project)
         selected = self._session_workspace_source() == "project" and self._project_key(path) == self._project_key(self._workspace_dir_for_state())
         query_active = bool(query)
-        previewed = query_active or path in self.project_preview_paths or path in self.project_full_expanded_paths
-        fully_expanded = query_active or path in self.project_full_expanded_paths
+        previewed = query_active or normalized_path in self.project_preview_paths
         row = QFrame()
         row.setObjectName("ProjectRow")
         row.setMinimumWidth(0)
@@ -27929,43 +27996,43 @@ class MainWindow(QMainWindow):
         header.addAction(rename_shortcut)
         outer.addWidget(header)
 
-        if fully_expanded:
+        visible_limit = PROJECT_HISTORY_INITIAL_LIMIT
+        if query_active:
             visible_sessions = sessions
         elif previewed:
-            recent_ids = {item.get("id") for item in sessions[:5]}
-            live_ids = {
-                item.get("id")
-                for item in sessions
-                if (
-                    self._session_has_live_activity(item.get("id"))
-                    or bool(
-                        getattr(
-                            self.get_session(item.get("id")),
-                            "pending_interactions",
-                            {},
-                        )
-                    )
-                )
-            }
-            visible_ids = recent_ids | live_ids
-            visible_sessions = [
-                item for item in sessions if item.get("id") in visible_ids
-            ]
+            visible_limit = self._project_history_visible_limit(normalized_path)
+            visible_sessions = self._visible_history_entries(sessions, visible_limit)
         else:
             visible_sessions = []
         for session in visible_sessions:
             outer.addWidget(self._make_project_session_row(session))
-        if not query_active and len(sessions) > 5 and previewed and not fully_expanded:
+        has_hidden_sessions = len(visible_sessions) < len(sessions)
+        if not query_active and previewed and has_hidden_sessions:
             expand_btn = QPushButton(" 展开显示")
+            expand_btn.setObjectName("HistoryDisclosureButton")
             expand_btn.setCursor(Qt.PointingHandCursor)
             expand_btn.setStyleSheet(apple_disclosure_button_style())
-            expand_btn.clicked.connect(lambda checked=False, p=path: self.set_project_full_expanded(p, True))
+            expand_btn.clicked.connect(
+                lambda checked=False, p=normalized_path, total=len(sessions), anchor=expand_btn:
+                self.expand_project_history(p, total, anchor=anchor)
+            )
+            self.history_disclosure_buttons[disclosure_key] = expand_btn
             outer.addWidget(expand_btn)
-        elif not query_active and len(sessions) > 5 and fully_expanded:
-            expand_btn = QPushButton(" 收起全部")
+        elif (
+            not query_active
+            and previewed
+            and len(sessions) > PROJECT_HISTORY_INITIAL_LIMIT
+            and visible_limit > PROJECT_HISTORY_INITIAL_LIMIT
+        ):
+            expand_btn = QPushButton(" 收起显示")
+            expand_btn.setObjectName("HistoryDisclosureButton")
             expand_btn.setCursor(Qt.PointingHandCursor)
             expand_btn.setStyleSheet(apple_disclosure_button_style())
-            expand_btn.clicked.connect(lambda checked=False, p=path: self.set_project_full_expanded(p, False))
+            expand_btn.clicked.connect(
+                lambda checked=False, p=normalized_path, total=len(sessions), anchor=expand_btn:
+                self.collapse_project_history(p, total, anchor=anchor)
+            )
+            self.history_disclosure_buttons[disclosure_key] = expand_btn
             outer.addWidget(expand_btn)
 
         self.project_rows[path] = row
@@ -27999,22 +28066,19 @@ class MainWindow(QMainWindow):
             )
             if state:
                 self.normalize_session_ui(state)
-        was_visible = (
-            normalized in self.project_preview_paths
-            or normalized in self.project_full_expanded_paths
-        )
+        was_visible = normalized in self.project_preview_paths
         if query_active:
             self.refresh_history_list()
             log_ui_navigation("sidebar_project_click_done", path=normalized, expanded=True, query_active=True)
             return True
         if was_visible:
             self.project_preview_paths.discard(normalized)
-            self.project_full_expanded_paths.discard(normalized)
+            self.project_history_visible_limits.pop(self._project_key(normalized), None)
             self.refresh_history_list()
             log_ui_navigation("sidebar_project_click_done", path=normalized, expanded=False)
             return True
         self.project_preview_paths.add(normalized)
-        self.project_full_expanded_paths.discard(normalized)
+        self.project_history_visible_limits.pop(self._project_key(normalized), None)
         self.refresh_history_list()
         log_ui_navigation("sidebar_project_click_done", path=normalized, expanded=True)
         return True
@@ -28043,24 +28107,97 @@ class MainWindow(QMainWindow):
         self.load_workspace(path)
         self.refresh_history_list()
 
-    def set_project_full_expanded(self, path, expanded, refresh=True):
+    def expand_project_history(self, path, total, anchor=None, refresh=True):
         normalized = self._normalize_project_path(path)
-        if normalized and expanded:
-            self.project_preview_paths.add(normalized)
-            self.project_full_expanded_paths.add(normalized)
-            if refresh:
-                self.refresh_history_list()
-            return
-        if normalized:
-            self.project_preview_paths.add(normalized)
-            self.project_full_expanded_paths.discard(normalized)
-            if refresh:
-                self.refresh_history_list()
-
-    def set_unassigned_history_full_expanded(self, expanded, refresh=True):
-        self.unassigned_history_full_expanded = bool(expanded)
+        if not normalized:
+            return False
+        total = max(0, int(total or 0))
+        key = self._project_key(normalized)
+        before_limit = self._project_history_visible_limit(normalized)
+        after_limit = before_limit + PROJECT_HISTORY_PAGE_SIZE
+        self.project_preview_paths.add(normalized)
+        self.project_history_visible_limits[key] = after_limit
+        log_ui_navigation(
+            "sidebar_history_group_expand",
+            group_type="project",
+            path=normalized,
+            visible_before=min(before_limit, total),
+            visible_after=min(after_limit, total),
+            total=total,
+        )
         if refresh:
-            self.refresh_history_list()
+            self._refresh_history_with_disclosure_anchor(
+                self._history_disclosure_key("project", normalized),
+                anchor,
+            )
+        return True
+
+    def collapse_project_history(self, path, total, anchor=None, refresh=True):
+        normalized = self._normalize_project_path(path)
+        if not normalized:
+            return False
+        total = max(0, int(total or 0))
+        key = self._project_key(normalized)
+        before_limit = self._project_history_visible_limit(normalized)
+        self.project_preview_paths.add(normalized)
+        self.project_history_visible_limits.pop(key, None)
+        log_ui_navigation(
+            "sidebar_history_group_collapse",
+            group_type="project",
+            path=normalized,
+            visible_before=min(before_limit, total),
+            visible_after=min(PROJECT_HISTORY_INITIAL_LIMIT, total),
+            total=total,
+        )
+        if refresh:
+            self._refresh_history_with_disclosure_anchor(
+                self._history_disclosure_key("project", normalized),
+                anchor,
+            )
+        return True
+
+    def expand_unassigned_history(self, total, anchor=None, refresh=True):
+        total = max(0, int(total or 0))
+        before_limit = max(
+            CHAT_HISTORY_INITIAL_LIMIT,
+            int(self.unassigned_history_visible_limit or 0),
+        )
+        after_limit = before_limit + CHAT_HISTORY_PAGE_SIZE
+        self.unassigned_history_visible_limit = after_limit
+        log_ui_navigation(
+            "sidebar_history_group_expand",
+            group_type="chat",
+            visible_before=min(before_limit, total),
+            visible_after=min(after_limit, total),
+            total=total,
+        )
+        if refresh:
+            self._refresh_history_with_disclosure_anchor(
+                self._history_disclosure_key("chat"),
+                anchor,
+            )
+        return True
+
+    def collapse_unassigned_history(self, total, anchor=None, refresh=True):
+        total = max(0, int(total or 0))
+        before_limit = max(
+            CHAT_HISTORY_INITIAL_LIMIT,
+            int(self.unassigned_history_visible_limit or 0),
+        )
+        self.unassigned_history_visible_limit = CHAT_HISTORY_INITIAL_LIMIT
+        log_ui_navigation(
+            "sidebar_history_group_collapse",
+            group_type="chat",
+            visible_before=min(before_limit, total),
+            visible_after=min(CHAT_HISTORY_INITIAL_LIMIT, total),
+            total=total,
+        )
+        if refresh:
+            self._refresh_history_with_disclosure_anchor(
+                self._history_disclosure_key("chat"),
+                anchor,
+            )
+        return True
 
     def new_conversation_for_project(self, path):
         normalized = self._normalize_project_path(path)
@@ -28453,6 +28590,7 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_history_list(self):
+        self._history_sidebar_refresh_generation += 1
         self.history_container.setUpdatesEnabled(False)
         self.history_rows = {}
         self.history_buttons = {}
@@ -28463,6 +28601,7 @@ class MainWindow(QMainWindow):
         self.project_activity_statuses = {}
         self.project_rows = {}
         self.project_buttons = {}
+        self.history_disclosure_buttons = {}
         while self.history_layout.count():
             item = self.history_layout.takeAt(0)
             if item.widget():
@@ -28470,8 +28609,6 @@ class MainWindow(QMainWindow):
 
         query = self._history_query_text()
         query_active = bool(query)
-        if query_active:
-            self.unassigned_history_full_expanded = False
         search_ids = None
         if query:
             try:
@@ -28479,22 +28616,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 search_ids = set()
 
-        history_has_more = False
-        if query_active:
-            stored_conversations = self.chat_storage.list_conversations()
-        else:
-            limit = max(
-                HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT,
-                int(getattr(self, "history_sidebar_limit", HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT) or 0),
-            )
-            stored_conversations = self.chat_storage.list_conversation_summaries(limit=limit + 1)
-            history_has_more = len(stored_conversations) > limit
-            stored_conversations = stored_conversations[:limit]
+        stored_conversations = self.chat_storage.list_conversations()
         log_startup_stage(
             "history_sidebar_begin",
             query=bool(query_active),
             loaded=len(stored_conversations),
-            has_more=history_has_more,
         )
         conversations = self._merged_history_conversations(stored_conversations)
         config_projects = self.config_manager.get_projects(include_hidden=True)
@@ -28589,6 +28715,25 @@ class MainWindow(QMainWindow):
         else:
             project_entries.sort(key=lambda item: (not item.get("pinned"), -int(item.get("updated_at") or 0), item.get("name", "").lower()))
 
+        if not query_active:
+            project_totals = {
+                self._project_key(item.get("path")): len(item.get("sessions") or [])
+                for item in project_entries
+                if item.get("path")
+            }
+            self.project_history_visible_limits = {
+                key: max(PROJECT_HISTORY_INITIAL_LIMIT, int(limit or 0))
+                for key, limit in self.project_history_visible_limits.items()
+                if project_totals.get(key, 0) > PROJECT_HISTORY_INITIAL_LIMIT
+            }
+            if len(unassigned_entries) <= CHAT_HISTORY_INITIAL_LIMIT:
+                self.unassigned_history_visible_limit = CHAT_HISTORY_INITIAL_LIMIT
+            else:
+                self.unassigned_history_visible_limit = max(
+                    CHAT_HISTORY_INITIAL_LIMIT,
+                    int(self.unassigned_history_visible_limit or 0),
+                )
+
         rendered_any = False
         for project in project_entries:
             row = self._make_project_row(project, project.get("sessions") or [], query=query)
@@ -28600,21 +28745,48 @@ class MainWindow(QMainWindow):
         )
         if unassigned_entries:
             self._add_history_group_label("聊天")
-            if query_active or self.unassigned_history_full_expanded or len(unassigned_entries) <= 3:
+            visible_limit = max(
+                CHAT_HISTORY_INITIAL_LIMIT,
+                int(self.unassigned_history_visible_limit or 0),
+            )
+            if query_active:
                 visible_unassigned_entries = unassigned_entries
             else:
-                visible_unassigned_entries = unassigned_entries[:3]
+                visible_unassigned_entries = self._visible_history_entries(
+                    unassigned_entries,
+                    visible_limit,
+                )
             for entry in visible_unassigned_entries:
                 row = self._make_project_session_row(entry, compact=False)
                 self.history_layout.addWidget(row)
                 rendered_any = True
-            if not query_active and len(unassigned_entries) > 3:
-                expand_btn = QPushButton(" 收起全部" if self.unassigned_history_full_expanded else " 展开显示")
+            has_hidden_entries = len(visible_unassigned_entries) < len(unassigned_entries)
+            disclosure_key = self._history_disclosure_key("chat")
+            if not query_active and has_hidden_entries:
+                expand_btn = QPushButton(" 展开显示")
+                expand_btn.setObjectName("HistoryDisclosureButton")
                 expand_btn.setCursor(Qt.PointingHandCursor)
                 expand_btn.setStyleSheet(apple_disclosure_button_style())
                 expand_btn.clicked.connect(
-                    lambda checked=False, expanded=not self.unassigned_history_full_expanded: self.set_unassigned_history_full_expanded(expanded)
+                    lambda checked=False, total=len(unassigned_entries), anchor=expand_btn:
+                    self.expand_unassigned_history(total, anchor=anchor)
                 )
+                self.history_disclosure_buttons[disclosure_key] = expand_btn
+                self.history_layout.addWidget(expand_btn)
+            elif (
+                not query_active
+                and len(unassigned_entries) > CHAT_HISTORY_INITIAL_LIMIT
+                and visible_limit > CHAT_HISTORY_INITIAL_LIMIT
+            ):
+                expand_btn = QPushButton(" 收起显示")
+                expand_btn.setObjectName("HistoryDisclosureButton")
+                expand_btn.setCursor(Qt.PointingHandCursor)
+                expand_btn.setStyleSheet(apple_disclosure_button_style())
+                expand_btn.clicked.connect(
+                    lambda checked=False, total=len(unassigned_entries), anchor=expand_btn:
+                    self.collapse_unassigned_history(total, anchor=anchor)
+                )
+                self.history_disclosure_buttons[disclosure_key] = expand_btn
                 self.history_layout.addWidget(expand_btn)
 
         if not rendered_any:
@@ -28624,13 +28796,6 @@ class MainWindow(QMainWindow):
                 empty_text = "还没有项目，点击项目标题栏的文件夹按钮添加"
             self._add_history_empty_state(empty_text)
 
-        if history_has_more:
-            more_btn = QPushButton(" 显示更多历史")
-            more_btn.setCursor(Qt.PointingHandCursor)
-            more_btn.setStyleSheet(apple_disclosure_button_style())
-            more_btn.clicked.connect(self.load_more_sidebar_history)
-            self.history_layout.addWidget(more_btn)
-
         self.history_layout.addStretch()
         self.history_container.setUpdatesEnabled(True)
         self.history_container.update()
@@ -28639,15 +28804,10 @@ class MainWindow(QMainWindow):
             "history_sidebar_done",
             query=bool(query_active),
             rendered_projects=len(project_entries),
-            rendered_unassigned=len(unassigned_entries),
-            has_more=history_has_more,
+            rendered_conversations=len(self.history_rows),
+            rendered_unassigned=len(visible_unassigned_entries) if unassigned_entries else 0,
+            total_unassigned=len(unassigned_entries),
         )
-
-    def load_more_sidebar_history(self):
-        self.history_sidebar_limit = int(
-            getattr(self, "history_sidebar_limit", HISTORY_SIDEBAR_INITIAL_CONVERSATION_LIMIT) or 0
-        ) + HISTORY_SIDEBAR_PAGE_SIZE
-        self.refresh_history_list()
 
     def update_history_selection(self):
         for session_id, row in self.history_rows.items():

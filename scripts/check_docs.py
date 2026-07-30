@@ -157,7 +157,7 @@ def validate_product_concepts() -> list[str]:
 def validate_screenshot_contract() -> list[str]:
     errors: list[str] = []
     expected = {
-        ROOT / "docs" / "user-guide.md": 48,
+        ROOT / "docs" / "user-guide.md": 49,
         ROOT / "docs" / "guides" / "ai-theme-and-visualize.md": 11,
     }
     for path, expected_count in expected.items():

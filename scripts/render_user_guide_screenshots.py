@@ -353,6 +353,73 @@ def main_run():
             if scale_label == "1":
                 save_widget(window, "s22a-deliverable-edit.png", 160)
             return
+        if SCREENSHOT_SCOPE == "sidebar-history-pagination":
+            project_dir = TEMP_ROOT / "sidebar-pagination-project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+            project_path = str(project_dir)
+            window.config_manager.upsert_project(project_path, name="客户研究项目")
+            for index in range(12):
+                window.chat_storage.save_conversation(
+                    f"sidebar-project-page-{index}",
+                    [
+                        {
+                            "id": f"sidebar-project-message-{index}",
+                            "role": "user",
+                            "content": f"项目历史 {index}",
+                        }
+                    ],
+                    title=f"项目分析记录 {index + 1}",
+                    status="completed",
+                    meta={
+                        "workspace_dir": project_path,
+                        "workspace_source": "project",
+                    },
+                )
+            for index in range(8):
+                window.chat_storage.save_conversation(
+                    f"sidebar-chat-page-{index}",
+                    [
+                        {
+                            "id": f"sidebar-chat-message-{index}",
+                            "role": "user",
+                            "content": f"独立聊天历史 {index}",
+                        }
+                    ],
+                    title=f"独立聊天记录 {index + 1}",
+                    status="completed",
+                    meta={
+                        "workspace_dir": str(TEMP_ROOT / "conversation-workspaces" / str(index)),
+                        "workspace_source": "chat",
+                    },
+                )
+            window.project_preview_paths.add(project_path)
+            window.refresh_history_list()
+            window.resize(900, 700)
+            window.show()
+            window.main_splitter.setSizes([main.DesignTokens.sidebar_min_width, 696])
+            process_events(240)
+            disclosure_copy = [
+                button.text().strip()
+                for button in window.history_disclosure_buttons.values()
+            ]
+            if len(window.history_rows) != 8 or disclosure_copy.count("展开显示") != 2:
+                raise RuntimeError(
+                    "Sidebar pagination fixture is invalid: "
+                    f"rows={len(window.history_rows)} disclosures={disclosure_copy}"
+                )
+            if any(
+                button.text().strip() == "显示更多历史"
+                for button in window.history_container.findChildren(main.QPushButton)
+                if button.isVisible()
+            ):
+                raise RuntimeError("Global history disclosure is still visible.")
+            scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+            save_widget(
+                window.sidebar,
+                f"sidebar-history-pagination-{scale_label}x.png",
+                220,
+            )
+            return
         if SCREENSHOT_SCOPE == "sidebar-activity":
             project_dir = TEMP_ROOT / "sidebar-activity-project"
             project_dir.mkdir(parents=True, exist_ok=True)

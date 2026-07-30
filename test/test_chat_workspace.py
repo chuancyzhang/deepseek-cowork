@@ -77,7 +77,7 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
         window.workspace_dir = ""
         window.current_project_path = ""
         window.project_preview_paths = set()
-        window.project_full_expanded_paths = set()
+        window.project_history_visible_limits = {}
         window._apply_workspace_to_ui = MagicMock(return_value=True)
         window.refresh_history_list = MagicMock()
         window.normalize_session_ui = MagicMock()

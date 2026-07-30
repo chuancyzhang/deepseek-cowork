@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushBut
 from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.memory_store import MemoryStore
+from core.theme import DesignTokens
 from main import (
     AutoResizingInputEdit,
     CapabilityWorkbenchDialog,
@@ -21,6 +22,7 @@ from main import (
     MainWindow,
     QMessageBox,
     SettingsDialog,
+    WINDOWS_APP_USER_MODEL_ID,
     skill_center_config_state,
 )
 from ui.primitives import ProductTooltipController
@@ -664,8 +666,17 @@ class ProductExperienceFixTests(unittest.TestCase):
         self.assertEqual(len(stub._system_toast_queue), 1)
         self.assertEqual(stub._visible_system_toasts[0].repeat_count, 2)
         positions = [toast.pos().y() for toast in stub._visible_system_toasts]
+        self.assertEqual(
+            positions[0],
+            max(DesignTokens.toast_top_margin, DesignTokens.toast_edge_margin),
+        )
         self.assertLess(positions[0], positions[1])
         self.assertLess(positions[1], positions[2])
+        for toast in stub._visible_system_toasts:
+            self.assertEqual(
+                toast.pos().x(),
+                stub.main_container.width() - toast.width() - DesignTokens.toast_edge_margin,
+            )
 
         stub._dismiss_system_toast(stub._visible_system_toasts[-1])
         self.app.processEvents()
@@ -673,6 +684,9 @@ class ProductExperienceFixTests(unittest.TestCase):
         self.assertEqual(len(stub._system_toast_queue), 0)
         for toast in list(stub._visible_system_toasts):
             stub._dismiss_system_toast(toast)
+
+    def test_windows_notification_identity_omits_version_and_device_suffix(self):
+        self.assertEqual(WINDOWS_APP_USER_MODEL_ID, "deepseek.cowork")
 
 
 if __name__ == "__main__":

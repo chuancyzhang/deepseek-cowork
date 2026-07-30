@@ -490,6 +490,7 @@ CONVERSATION_SKILL_LOG_FILENAME = "conversation_skill_capture.log"
 MEMORY_UPDATE_LOG_FILENAME = "memory_update.log"
 AUTOMATION_LOG_FILENAME = "automation_runtime.log"
 ATTACHMENT_LOG_FILENAME = "attachments.log"
+WINDOWS_APP_USER_MODEL_ID = "deepseek.cowork"
 STARTUP_STAGE_CLOCK = time.monotonic()
 
 
@@ -34653,15 +34654,17 @@ class MainWindow(QMainWindow):
         gap = DesignTokens.toast_stack_gap
         x = max(margin, parent.width() - toast.width() - margin)
         visible = [item for item in getattr(self, "_visible_system_toasts", []) if _qt_object_alive(item)]
-        below = visible[-stack_index:] if stack_index > 0 else []
-        occupied = sum(item.height() for item in below) + gap * len(below)
-        y = max(margin, parent.height() - toast.height() - margin - occupied)
+        above = visible[:stack_index] if stack_index > 0 else []
+        occupied = sum(item.height() for item in above) + gap * len(above)
+        desired_y = max(margin, DesignTokens.toast_top_margin) + occupied
+        max_y = max(margin, parent.height() - toast.height() - margin)
+        y = min(desired_y, max_y)
         return QPoint(x, y)
 
     def _position_active_system_toast(self):
         visible = [item for item in getattr(self, "_visible_system_toasts", []) if _qt_object_alive(item)]
         self._visible_system_toasts = visible
-        for stack_index, toast in enumerate(reversed(visible)):
+        for stack_index, toast in enumerate(visible):
             toast.move(self._system_toast_target_position(toast, stack_index))
             toast.raise_()
         self._active_system_toast = visible[-1] if visible else None
@@ -36326,10 +36329,12 @@ if __name__ == "__main__":
     if platform.system() == 'Windows':
         try:
             import ctypes
-            myappid = f'deepseek.cowork.v3.5.{uuid.getnode()}'
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except Exception:
-            pass
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_USER_MODEL_ID)
+        except Exception as exc:
+            append_background_process_log(
+                STARTUP_LOG_FILENAME,
+                f"SetCurrentProcessExplicitAppUserModelID failed: {exc}",
+            )
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = SafeApplication(sys.argv)

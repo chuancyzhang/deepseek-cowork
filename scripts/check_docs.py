@@ -11,7 +11,7 @@ from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_VERSION = "5.0.9"
+APP_VERSION = "5.1.0"
 
 CURRENT_DOCS = (
     ROOT / "README.md",
@@ -50,7 +50,7 @@ PROTECTED_FILES = {
 LINK_RE = re.compile(r"!?\[[^\]]*]\(([^)]+)\)")
 IMAGE_RE = re.compile(r"!\[[^\]]*]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
-VERSION_RE = re.compile(r"\b5\.0\.\d+\b")
+VERSION_RE = re.compile(r"\b5\.\d+\.\d+\b")
 
 
 def _read(path: Path) -> str:

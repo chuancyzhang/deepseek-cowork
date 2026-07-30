@@ -8,7 +8,7 @@ Tool 调用、Skill、自动化、长期信息和交付物预览组织成一条�
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前应用版本：**5.0.9**
+当前应用版本：**5.1.0**
 
 ## 三条核心理念
 
@@ -103,7 +103,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 - [Skill 系统](docs/skill-system.md)
 - [AI 主题与 Visualize](docs/guides/ai-theme-and-visualize.md)
 - [路线图](docs/roadmap.md)
-- [5.0.9 发布说明](docs/releases/5.0.9.md)
 
 ## 许可证
 

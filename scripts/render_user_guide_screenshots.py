@@ -264,6 +264,61 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "deliverable-editors":
+            window.load_workspace(
+                str(workspace),
+                refresh_sidebar=False,
+                remember_workspace=False,
+                persist_default=False,
+                bind_session=True,
+            )
+            markdown_path = workspace / "meeting-notes.md"
+            window.chat_storage.register_deliverable(
+                str(workspace),
+                str(markdown_path),
+                conversation_id=window.current_session_id,
+                source="generated",
+            )
+            window.show_context_drawer(window.RIGHT_TAB_FILES)
+            window.set_file_workspace_section(
+                window.FILE_SECTION_DELIVERABLES,
+                refresh=True,
+                user_initiated=True,
+            )
+            window.show_file_workspace_detail_view(origin="browse")
+            window.select_deliverable(str(markdown_path), render_html=True)
+            window.begin_deliverable_edit()
+            for _attempt in range(200):
+                process_events(25)
+                if window.deliverable_edit_state == "ready":
+                    break
+            if window.deliverable_edit_state != "ready":
+                raise RuntimeError(
+                    f"Deliverable editor did not become ready: {window.deliverable_edit_state}"
+                )
+            window.deliverable_text_editor.appendPlainText("- 补充发布前验证")
+            window.resize(1440, 900)
+            window.show()
+            window.context_drawer_user_width = 760
+            window.sync_context_drawer_layout()
+            process_events(260)
+            if (
+                window.deliverable_edit_action_bar.isHidden()
+                or window.deliverable_edit_save_btn.isHidden()
+                or window.deliverable_edit_save_btn.width() <= 0
+                or window.preview_stack.currentWidget()
+                is not window.deliverable_text_editor_container
+            ):
+                raise RuntimeError("Deliverable edit controls are clipped or not active.")
+            scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+            save_widget(
+                window,
+                f"s22a-deliverable-edit-{scale_label}x.png",
+                260,
+            )
+            if scale_label == "1":
+                save_widget(window, "s22a-deliverable-edit.png", 160)
+            return
         if SCREENSHOT_SCOPE == "sidebar-activity":
             project_dir = TEMP_ROOT / "sidebar-activity-project"
             project_dir.mkdir(parents=True, exist_ok=True)

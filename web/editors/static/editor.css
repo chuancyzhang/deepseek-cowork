@@ -1,0 +1,108 @@
+:root {
+  color-scheme: light;
+  --cowork-bg-primary: #ffffff;
+  --cowork-bg-secondary: #f7f8fa;
+  --cowork-text-primary: #17171a;
+  --cowork-text-secondary: #60616a;
+  --cowork-border-subtle: #e7e8eb;
+  --cowork-primary: #5b5bd6;
+  --cowork-selection: #e9e9ff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--cowork-bg-primary);
+  color: var(--cowork-text-primary);
+  font: 13px/1.45 "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+.editor-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--cowork-bg-secondary);
+}
+
+.editor-toolbar {
+  z-index: 10;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  min-height: 42px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--cowork-border-subtle);
+  background: var(--cowork-bg-primary);
+}
+
+.editor-toolbar button,
+.editor-toolbar select,
+.editor-toolbar input {
+  height: 28px;
+  min-width: 30px;
+  padding: 0 8px;
+  color: var(--cowork-text-primary);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.editor-toolbar button:hover,
+.editor-toolbar select:hover {
+  background: var(--cowork-selection);
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--cowork-border-subtle);
+}
+
+#docx-canvas,
+#sheet-root {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+#docx-canvas {
+  overflow: auto;
+}
+
+#sheet-root {
+  position: relative;
+  background: var(--cowork-bg-primary);
+}
+
+.html-workspace {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 10px;
+}
+
+#html-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--cowork-border-subtle);
+  border-radius: 8px;
+  background: #ffffff;
+}

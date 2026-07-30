@@ -555,7 +555,7 @@ def _collect_minimal_pyside6():
 qt_minimal_datas = _collect_minimal_pyside6()
 
 application_datas = []
-for source_name in ("skills", "ai_skills", "images"):
+for source_name in ("skills", "ai_skills", "images", os.path.join("web", "editors", "dist")):
     application_datas.extend(
         _collect_tree_for_analysis(
             os.path.join(SPEC_DIR, source_name),
@@ -589,6 +589,7 @@ a = Analysis(
     datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA,
     hiddenimports=pyside6_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
         'bs4',
+        'yaml',
         'requests',
         'markdown',
         'qtawesome',

@@ -30,6 +30,8 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
         self.assertIn(".md", DELIVERABLE_TYPES)
         self.assertIn(".markdown", DELIVERABLE_TYPES)
         self.assertIn(".bmp", DELIVERABLE_TYPES)
+        for extension in (".txt", ".json", ".xml", ".yaml", ".yml", ".log", ".csv", ".tsv"):
+            self.assertIn(extension, DELIVERABLE_TYPES)
 
     def test_only_accepts_existing_workspace_files(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
@@ -133,7 +135,7 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
     def test_does_not_rewrite_external_missing_or_unsupported_anchors(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
             outside_path = os.path.join(outside, "outside.pptx")
-            unsupported_path = os.path.join(workspace, "notes.txt")
+            unsupported_path = os.path.join(workspace, "notes.bin")
             missing_path = os.path.join(workspace, "missing.pptx")
             for path in (outside_path, unsupported_path):
                 with open(path, "wb") as handle:
@@ -141,7 +143,7 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
             source = (
                 '<p><a href="https://example.com/report.pptx">web</a>'
                 f'<a href="{self._markdown_href(outside_path)}">outside</a>'
-                f'<a href="{self._markdown_href(unsupported_path)}">txt</a>'
+                f'<a href="{self._markdown_href(unsupported_path)}">bin</a>'
                 f'<a href="{self._markdown_href(missing_path)}">missing</a></p>'
             )
 

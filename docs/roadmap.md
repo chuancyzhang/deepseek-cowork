@@ -34,7 +34,7 @@
 - 项目与独立聊天的明确工作区边界；
 - 历史恢复、版本化保存队列和恢复日志；
 - 文件、交付物和任务观测上下文抽屉；
-- Markdown、HTML、图片、PDF、DOCX、PPTX、XLSX 预览；
+- Markdown、HTML、图片、PDF、DOCX、PPTX、XLSX 预览，以及 DOCX、HTML、XLSX、CSV/TSV 和常见文本的安全编辑；
 - 办公稿、PPT Agent 和 HTML 到最终文件的转换链路；
 - 主内容区能力、自动化和设置页面。
 

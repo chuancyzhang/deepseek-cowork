@@ -3,7 +3,7 @@
 [中文](README_CN.md) | [English](README.md) | [文档中心](docs/index.md)
 
 DeepSeek Cowork 是一个 Windows 桌面 Agent 工作台。它把对话、项目文件、
-Tool 调用、Skill、自动化、长期信息和交付物预览组织成一条可观察、可干预、
+Tool 调用、Skill、自动化、长期信息和交付物预览/编辑组织成一条可观察、可干预、
 可恢复的工作流。
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
@@ -45,7 +45,7 @@ Cowork 允许 AI 设计界面，但不允许 AI 接管应用代码。AI 可以�
 - 在同一轮中交错展示 reasoning、Tool、阶段回复和最终回答。
 - 通过 `@智能体` 召唤一个或多个已配置 Agent，并在聊天区分别实时查看各自的思考、Tool、阶段输出和最终回答；重新打开历史会话后可恢复完整过程。
 - 运行中补充要求、停止任务、响应确认并查看结构化观测。
-- 预览 Markdown、HTML、图片、PDF、DOCX、PPTX 和 XLSX。
+- 预览 Markdown、HTML、图片、PDF、DOCX、PPTX 和 XLSX，并在应用内安全编辑 DOCX、HTML、XLSX、CSV/TSV 与常见文本文件。
 - 生成办公工作稿，并从 HTML 继续生成 PPTX、DOCX 或 PDF。
 - 使用内置、随包、用户和标准 Agent Skill 扩展能力。
 - 通过 `stdio` 或 Streamable HTTP 接入 MCP Tool。
@@ -59,6 +59,13 @@ Cowork 允许 AI 设计界面，但不允许 AI 接管应用代码。AI 可以�
 1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载最新版。
 2. 解压 ZIP。
 3. 运行 `deepseek-cowork.exe`。
+
+### 运行环境与空间
+
+- 基准运行环境为 4 核 CPU、8 GB 内存和 SSD；推荐 16 GB 内存，不要求独立显卡。
+- 编辑器仅在首次进入编辑时按格式加载。未使用编辑功能时，不初始化 Canvas Editor、Univer 或 Office 文档模型。
+- 离线编辑器资源实测约增加 2.99 MiB ZIP 体积、12.14 MiB 解压体积。以 366.3 MiB ZIP、820.8 MiB 解压目录为基线，整包预计约为 369.3 MiB / 832.9 MiB；最终数字以当次发布审计为准。
+- 发布门禁限制编辑能力最多增加 10 MiB ZIP、30 MiB 解压体积，并禁止携带 `node_modules`、源码映射、CDN 或 Node 运行依赖。
 
 ### 从源码运行
 
@@ -92,7 +99,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
 2. 新建独立聊天，或从项目中创建绑定工作区的会话。
 3. 描述目标，必要时通过输入区 `+` 添加文件或指定能力。
 4. 在消息流和任务观测中查看执行；遇到确认时检查范围再提交。
-5. 从右侧“文件与交付物”预览结果并继续转换。
+5. 从右侧“文件与交付物”预览或编辑结果，并按需继续转换。
 6. 把长期偏好写入记忆，把可靠方法记录为经验或沉淀为 Skill。
 
 ## 文档

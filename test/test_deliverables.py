@@ -373,22 +373,23 @@ class TestDeliverableScanning(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             old_html = os.path.join(tmp, "report.html")
             new_pptx = os.path.join(tmp, "deck.pptx")
-            ignored = os.path.join(tmp, "notes.txt")
+            text_file = os.path.join(tmp, "notes.txt")
             with open(old_html, "w", encoding="utf-8") as f:
                 f.write("<!doctype html><html><body>Report</body></html>")
             with open(new_pptx, "wb") as f:
                 f.write(b"pptx")
-            with open(ignored, "w", encoding="utf-8") as f:
-                f.write("ignore")
+            with open(text_file, "w", encoding="utf-8") as f:
+                f.write("notes")
             now = time.time()
             os.utime(old_html, (now - 20, now - 20))
             os.utime(new_pptx, (now, now))
 
             items = scan_workspace_deliverables(tmp)
 
-        self.assertEqual([item["name"] for item in items], ["deck.pptx", "report.html"])
+        self.assertEqual([item["name"] for item in items], ["deck.pptx", "notes.txt", "report.html"])
         self.assertEqual(items[0]["kind"], "pptx")
-        self.assertEqual(items[1]["kind"], "html")
+        self.assertEqual(items[1]["kind"], "text")
+        self.assertEqual(items[2]["kind"], "html")
 
     def test_skips_cache_and_build_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1987,25 +1988,26 @@ class TestDeliverableScanning(unittest.TestCase):
         window.file_tree.setExpanded.assert_called_once_with(index, True)
         window.show_file_workspace_detail_view.assert_not_called()
 
-    def test_preview_and_source_are_explicit_modes(self):
+    def test_preview_and_edit_are_explicit_modes(self):
         QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
         window.current_deliverable_path = r"D:\workspace\report.html"
+        window.deliverable_edit_state = "idle"
         window.deliverable_preview_btn = QPushButton("预览")
         window.deliverable_preview_btn.setCheckable(True)
-        window.deliverable_source_btn = QPushButton("源码")
-        window.deliverable_source_btn.setCheckable(True)
-        window.toggle_deliverable_source_view = MagicMock()
+        window.deliverable_edit_btn = QPushButton("编辑")
+        window.deliverable_edit_btn.setCheckable(True)
+        window.begin_deliverable_edit = MagicMock()
         window.render_selected_deliverable = MagicMock()
 
-        window.set_deliverable_preview_mode("source")
+        window.set_deliverable_preview_mode("edit")
         self.assertFalse(window.deliverable_preview_btn.isChecked())
-        self.assertTrue(window.deliverable_source_btn.isChecked())
-        window.toggle_deliverable_source_view.assert_called_once_with()
+        self.assertTrue(window.deliverable_edit_btn.isChecked())
+        window.begin_deliverable_edit.assert_called_once_with()
 
         window.set_deliverable_preview_mode("preview")
         self.assertTrue(window.deliverable_preview_btn.isChecked())
-        self.assertFalse(window.deliverable_source_btn.isChecked())
+        self.assertFalse(window.deliverable_edit_btn.isChecked())
         window.render_selected_deliverable.assert_called_once_with(force=False)
 
 

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sys
 import tempfile
@@ -23,6 +25,9 @@ ARCHIVE_ROOT = "deepseek-cowork"
 FIXED_ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
 DEFAULT_MAX_DIST_MB = 850
 DEFAULT_MAX_ZIP_MB = 375
+EDITOR_MAX_UNPACKED_BYTES = 30 * 1024 * 1024
+EDITOR_MAX_COMPRESSED_BYTES = 10 * 1024 * 1024
+EDITOR_ASSET_PREFIX = "_internal/web/editors/dist/"
 
 QT_TRANSLATION_ALLOWLIST = {
     "qt_en.qm",
@@ -49,6 +54,20 @@ REQUIRED_PATHS = (
     "_internal/PySide6/QtPdfWidgets.pyd",
     "_internal/PySide6/QtWebChannel.pyd",
     "_internal/PySide6/QtWebEngineProcess.exe",
+    "_internal/web/editors/dist/docx.html",
+    "_internal/web/editors/dist/docx-editor.js",
+    "_internal/web/editors/dist/html.html",
+    "_internal/web/editors/dist/html-editor.js",
+    "_internal/web/editors/dist/sheet.html",
+    "_internal/web/editors/dist/sheet-editor.js",
+    "_internal/web/editors/dist/sheet-editor.css",
+    "_internal/web/editors/dist/editor.css",
+    "_internal/web/editors/dist/THIRD_PARTY_NOTICES.md",
+    "_internal/web/editors/dist/THIRD_PARTY_LICENSES.txt",
+    "_internal/web/editors/dist/LICENSE-CANVAS-EDITOR.txt",
+    "_internal/web/editors/dist/LICENSE-CANVAS-EDITOR-DOCX.txt",
+    "_internal/web/editors/dist/LICENSE-UNIVER.txt",
+    "_internal/web/editors/dist/LICENSE-BUFFER.txt",
 )
 
 
@@ -67,6 +86,10 @@ def _forbidden_reason(relative: Path) -> str:
     path = relative.as_posix()
     lowered = path.lower()
     basename = relative.name
+    if "node_modules" in {part.lower() for part in relative.parts}:
+        return "Node development dependency"
+    if lowered.startswith(EDITOR_ASSET_PREFIX) and lowered.endswith(".map"):
+        return "editor source map"
     if "/__pycache__/" in f"/{lowered}/" or lowered.endswith((".pyc", ".pyo")):
         return "Python cache file"
     if lowered.startswith("_internal/python_env/lib/site-packages/pythonwin/"):
@@ -87,6 +110,52 @@ def _forbidden_reason(relative: Path) -> str:
         if basename not in QT_TRANSLATION_ALLOWLIST:
             return "non-target Qt translation"
     return ""
+
+
+def _audit_editor_assets(dist_dir: Path, files: list[Path]) -> dict:
+    editor_files = [
+        relative
+        for relative in files
+        if relative.as_posix().lower().startswith(EDITOR_ASSET_PREFIX)
+    ]
+    unpacked_bytes = sum((dist_dir / relative).stat().st_size for relative in editor_files)
+    if unpacked_bytes > EDITOR_MAX_UNPACKED_BYTES:
+        raise PackageAuditError(
+            f"Editor assets use {unpacked_bytes / 1024 / 1024:.2f} MiB unpacked, "
+            f"exceeding the {EDITOR_MAX_UNPACKED_BYTES / 1024 / 1024:.0f} MiB budget."
+        )
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(
+        archive_buffer,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
+        for relative in editor_files:
+            archive.write(dist_dir / relative, relative.as_posix())
+    compressed_bytes = len(archive_buffer.getvalue())
+    if compressed_bytes > EDITOR_MAX_COMPRESSED_BYTES:
+        raise PackageAuditError(
+            f"Editor assets use {compressed_bytes / 1024 / 1024:.2f} MiB compressed, "
+            f"exceeding the {EDITOR_MAX_COMPRESSED_BYTES / 1024 / 1024:.0f} MiB budget."
+        )
+    for relative in editor_files:
+        if relative.suffix.lower() != ".html":
+            continue
+        source = (dist_dir / relative).read_text(encoding="utf-8", errors="strict").lower()
+        if re.search(r"<(?:script|link)\b[^>]*(?:src|href)\s*=\s*['\"]https?://", source):
+            raise PackageAuditError(
+                f"Editor HTML has a CDN/runtime network dependency: {relative.as_posix()}"
+            )
+    return {
+        "files": len(editor_files),
+        "unpacked_bytes": unpacked_bytes,
+        "unpacked_mb": round(unpacked_bytes / 1024 / 1024, 2),
+        "compressed_bytes": compressed_bytes,
+        "compressed_mb": round(compressed_bytes / 1024 / 1024, 2),
+        "unpacked_budget_mb": EDITOR_MAX_UNPACKED_BYTES // 1024 // 1024,
+        "compressed_budget_mb": EDITOR_MAX_COMPRESSED_BYTES // 1024 // 1024,
+    }
 
 
 def _component_name(relative: Path) -> str:
@@ -116,6 +185,7 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
         detail = "; ".join(f"{item['path']} ({item['reason']})" for item in forbidden[:20])
         raise PackageAuditError(f"Forbidden packaged files found: {detail}")
 
+    editor_assets = _audit_editor_assets(dist_dir, files)
     components: dict[str, dict[str, int]] = {}
     total_bytes = 0
     for relative in files:
@@ -152,6 +222,7 @@ def audit_distribution(dist_dir: Path, max_dist_mb: float = DEFAULT_MAX_DIST_MB)
         "file_count": len(files),
         "components": ordered_components,
         "required_paths": list(REQUIRED_PATHS),
+        "editor_assets": editor_assets,
     }
 
 

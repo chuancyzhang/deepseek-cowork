@@ -4,7 +4,7 @@
 
 DeepSeek Cowork is a Windows desktop agent workspace that brings chat, project
 files, tool execution, skills, automation, long-term context, and deliverable
-preview into one observable and recoverable workflow.
+preview/editing into one observable and recoverable workflow.
 
 This is a personal exploration project, not an official DeepSeek product.
 
@@ -51,7 +51,7 @@ See the [product document](docs/product.md) for the full model.
 - Interleave reasoning, Tool calls, stage replies, and the final answer.
 - Mention one or more configured Agents and follow each independent reasoning, Tool, stage, and final-answer stream directly in the chat; the full process is restored from history.
 - Steer or stop running work, answer approval requests, and inspect observability.
-- Preview Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX deliverables.
+- Preview Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX deliverables, and safely edit DOCX, HTML, XLSX, CSV/TSV, and common text files in place.
 - Generate office drafts and convert HTML work products to PPTX, DOCX, or PDF.
 - Extend the runtime with built-in, bundled, user, and standard Agent Skills.
 - Connect MCP Tools over `stdio` or Streamable HTTP.
@@ -64,6 +64,13 @@ See the [product document](docs/product.md) for the full model.
 1. Download the latest package from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
 2. Extract the ZIP.
 3. Run `deepseek-cowork.exe`.
+
+### Runtime and disk budget
+
+- The reference machine has a 4-core CPU, 8 GB RAM, and an SSD. 16 GB RAM is recommended; a discrete GPU is not required.
+- Editor assets and document models load only when editing is first opened. Canvas Editor, Univer, and Office models are not initialized on the normal startup path.
+- The checked-in offline editor assets add about 2.99 MiB compressed and 12.14 MiB unpacked. Against the 366.3 MiB ZIP / 820.8 MiB unpacked baseline, the estimated package is about 369.3 MiB / 832.9 MiB; the release audit remains authoritative.
+- Release gates cap the editor increment at 10 MiB compressed and 30 MiB unpacked, and reject `node_modules`, source maps, CDN references, or a Node runtime dependency.
 
 ### Run from source
 
@@ -97,7 +104,7 @@ Then run the clean build and package audit:
 2. Start a standalone conversation or create one from a project.
 3. Describe the goal and attach files or select capabilities when needed.
 4. Follow Tool activity and observability; review any approval before submitting.
-5. Preview results in **Files & Deliverables** and continue converting if needed.
+5. Preview or edit results in **Files & Deliverables**, then continue converting if needed.
 6. Store durable preferences as memory and reusable methods as experience or a Skill.
 
 ## Documentation

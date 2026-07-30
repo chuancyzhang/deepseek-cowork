@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: qrc:; script-src 'self' qrc:; worker-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:">
+    <title>表格编辑器</title>
+    <link rel="stylesheet" href="editor.css">
+  </head>
+  <body>
+    <main class="editor-shell">
+      <div id="sheet-root"></div>
+    </main>
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="sheet-editor.js"></script>
+  </body>
+</html>

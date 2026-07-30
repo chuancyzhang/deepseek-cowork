@@ -9,6 +9,7 @@ pypdf
 pandas
 duckduckgo-search
 beautifulsoup4
+PyYAML>=6.0.3
 requests
 websocket-client
 markdown

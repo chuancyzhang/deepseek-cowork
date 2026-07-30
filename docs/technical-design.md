@@ -263,6 +263,44 @@ Responses 请求使用稳定的会话级 `prompt_cache_key`。自动命中的 Sk
 历史加载在线程中读取和分组。首屏优先物化最终回答；思考、Tool 参数和结果
 在用户展开后按时间预算分批创建，避免长历史阻塞 Qt 主线程。
 
+### 文件与交付物安全编辑
+
+`core/deliverable_editing.py` 是与 Qt 解耦的编辑内核，统一定义
+`EditorDescriptor`、`CompatibilityReport`、`EditSession` 和 `SaveResult`。
+格式注册、预检、编码判断、Office/表格快照转换、HTML 安全 DOM 补丁与还原、严格
+文本校验、冲突检测、备份和原子保存都在这一层完成。UI 只投影状态并调度
+后台 Worker，不复制格式规则。
+
+编辑状态机覆盖 `loading → ready/dirty → saving`，以及 `conflict`、
+`blocked`、`failed` 和 `restoring`。文件、项目、会话和应用退出共享同一
+未保存修改守卫。保存前重新计算 SHA-256；源文件与会话基线不一致时不能
+覆盖，只能重新载入或另存为。
+
+保存事务按以下顺序执行：
+
+1. 在源文件同目录写入临时文件并重新解析验证。
+2. 将当前源文件复制到应用数据目录中的唯一上一版备份。
+3. 写入备份元数据并以 `os.replace` 原子替换源文件。
+4. 任一步失败都保留编辑会话、用户内容与原文件，并返回结构化错误。
+
+DOCX 和 XLSX 的 ZIP 结构会先做无解压炸弹预算检查，再检查修订、内容控件、
+域、嵌入对象、复杂页眉页脚、图表、数据透视表、外部链接等阻断特征。
+DOCX/XLSX 限制 25 MiB，HTML/文本/CSV/TSV 限制 10 MiB，并额外限制图片、
+工作表和有效单元格规模。HTML 编辑页不执行源文档脚本；危险节点替换为
+不可编辑占位，保存时必须逐一还原且不得丢失。
+
+富编辑器复用一个延迟创建的 `QWebEngineView`，通过 `QWebChannel` 与 Python
+通信；DOCX 等二进制使用有总量和分块数量上限的分块协议。退出编辑后销毁
+文档模型。Canvas Editor `0.9.137` 与 DOCX 插件 `0.0.6`、Univer `0.25.1`
+分别构建为离线 bundle，运行时没有 Node 或 CDN 依赖。WebEngine 禁止远程
+访问和剪贴板脚本，页面使用严格 CSP。主题由 `DesignTokens` 转为受控 CSS
+变量，因此安全主题预览仍能隔离、取消且不会改写已保存主题。
+
+编辑器资源不进入启动导入图。当前静态资源实测 12.14 MiB 解压、2.99 MiB
+压缩；发布审计硬限制为 30/10 MiB，并拒绝 `node_modules`、源码映射、远程
+脚本和缺失许可证。WebEngine 冒烟在独立进程中验证三类编辑器离线加载和
+往返协议，窗口截图覆盖 Windows 100%、125% 和 150% 缩放。
+
 ## 10. 当前完整循环
 
 把前面的层次合并后，当前实现可以概括为：
@@ -341,5 +379,7 @@ flowchart TB
 - `core/chat_storage.py`：SQLite 会话与交付物索引
 - `core/chat_save_queue.py`：版本化异步保存
 - `core/chat_recovery_journal.py`：异常退出恢复
+- `core/deliverable_editing.py`：交付物格式契约、兼容预检、转换和事务保存
 - `core/theme_package.py`、`core/theme_service.py`：声明式 AI 主题与事务边界
+- `web/editors/`：固定版本的离线文档、表格和 HTML 编辑器构建与许可证
 - `main.py`：桌面 UI、会话状态和协议消息到界面的投影

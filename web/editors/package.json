@@ -1,0 +1,19 @@
+{
+  "name": "cowork-deliverable-editors",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@hufe921/canvas-editor": "0.9.137",
+    "@hufe921/canvas-editor-plugin-docx": "0.0.6",
+    "@univerjs/preset-sheets-core": "0.25.1",
+    "@univerjs/presets": "0.25.1",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1"
+  }
+}

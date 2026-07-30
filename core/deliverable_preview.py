@@ -9,6 +9,14 @@ DELIVERABLE_TYPES = {
     ".htm": ("html", "HTML", "fa5s.file-code"),
     ".md": ("markdown", "Markdown", "fa5s.file-alt"),
     ".markdown": ("markdown", "Markdown", "fa5s.file-alt"),
+    ".txt": ("text", "TXT", "fa5s.file-alt"),
+    ".json": ("text", "JSON", "fa5s.file-code"),
+    ".xml": ("text", "XML", "fa5s.file-code"),
+    ".yaml": ("text", "YAML", "fa5s.file-code"),
+    ".yml": ("text", "YAML", "fa5s.file-code"),
+    ".log": ("text", "LOG", "fa5s.file-alt"),
+    ".csv": ("table", "CSV", "fa5s.file-csv"),
+    ".tsv": ("table", "TSV", "fa5s.file-csv"),
     ".png": ("image", "图片", "fa5s.file-image"),
     ".jpg": ("image", "图片", "fa5s.file-image"),
     ".jpeg": ("image", "图片", "fa5s.file-image"),
@@ -34,7 +42,7 @@ OFFICE_EXTENSIONS = {
 }
 _PATH_PATTERN = re.compile(
     r"(?P<path>(?:file://|/?[A-Za-z]:[\\/]|\\\\)[^\r\n<>\"|?*]*?"
-    r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.bmp|\.md))"
+    r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.json|\.yaml|\.yml|\.xml|\.csv|\.tsv|\.txt|\.log|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.bmp|\.md))"
     r"(?=$|[\s\]\[(){}<>，。；：、,;:!?！？'\"`])",
     re.IGNORECASE,
 )

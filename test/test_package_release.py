@@ -32,6 +32,10 @@ class PackageReleaseTests(unittest.TestCase):
             self.assertEqual(report["file_count"], len(package_release.REQUIRED_PATHS))
             self.assertTrue(any(item["name"] == "_internal/PySide6" for item in report["components"]))
             self.assertIn("_internal/python_env/python.exe", report["required_paths"])
+            self.assertLessEqual(
+                report["editor_assets"]["unpacked_bytes"],
+                package_release.EDITOR_MAX_UNPACKED_BYTES,
+            )
 
     def test_audit_rejects_debug_qt_resources_and_extra_locales(self):
         cases = (
@@ -50,6 +54,44 @@ class PackageReleaseTests(unittest.TestCase):
 
                 with self.assertRaises(package_release.PackageAuditError):
                     package_release.audit_distribution(dist, max_dist_mb=1)
+
+    def test_audit_rejects_editor_source_maps_node_modules_and_cdn_imports(self):
+        cases = (
+            ("_internal/web/editors/dist/sheet-editor.js.map", b"{}"),
+            ("_internal/web/editors/node_modules/runtime.js", b"dev"),
+            (
+                "_internal/web/editors/dist/remote.html",
+                b'<script src="https://cdn.example.test/editor.js"></script>',
+            ),
+        )
+        for relative, content in cases:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temp_dir:
+                dist = self._create_minimal_dist(temp_dir)
+                target = dist / Path(relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+
+                with self.assertRaises(package_release.PackageAuditError):
+                    package_release.audit_distribution(dist, max_dist_mb=1)
+
+    def test_checked_in_editor_notices_match_pinned_runtime_dependencies(self):
+        editor_root = ROOT / "web" / "editors"
+        manifest = json.loads((editor_root / "package.json").read_text(encoding="utf-8"))
+        notices = (editor_root / "dist" / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8"
+        )
+        licenses = editor_root / "dist" / "THIRD_PARTY_LICENSES.txt"
+
+        for dependency, version in (
+            ("@hufe921/canvas-editor", "0.9.137"),
+            ("@hufe921/canvas-editor-plugin-docx", "0.0.6"),
+            ("@univerjs/preset-sheets-core", "0.25.1"),
+            ("@univerjs/presets", "0.25.1"),
+        ):
+            self.assertEqual(manifest["dependencies"][dependency], version)
+            self.assertIn(f"`{dependency}@{version}`", notices)
+        self.assertNotIn("UNDECLARED", notices)
+        self.assertGreater(licenses.stat().st_size, 50_000)
 
     def test_release_zip_is_deterministic_and_uses_expected_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:

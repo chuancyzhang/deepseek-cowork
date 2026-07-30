@@ -7,6 +7,7 @@ import copy
 import ast
 import re
 import json
+import base64
 import html
 import importlib
 import mimetypes
@@ -57,6 +58,18 @@ from core.deliverable_preview import (
     normalize_workspace_file,
     render_pdf_text_preview,
     render_structured_document_preview,
+)
+from core.deliverable_editing import (
+    DeliverableEditError,
+    EditSession,
+    atomic_save_session,
+    backup_paths,
+    create_edit_session,
+    editor_descriptor,
+    load_editor_payload,
+    restore_previous_version,
+    save_copy,
+    serialize_editor_payload,
 )
 from core.html_render import extract_renderable_html_response
 from core.inline_visualization import (
@@ -264,7 +277,7 @@ from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QIm
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
+                               QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
 from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QEventLoop, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
 
@@ -18574,6 +18587,262 @@ class DeliverableWebPreview(QWidget):
         self.web_view.update()
         self.schedule_scrollbar_sync()
 
+
+class DeliverableEditorBridge(QObject):
+    """Bounded WebChannel transport for the isolated deliverable editors."""
+
+    readyReported = Signal(str)
+    dirtyReported = Signal(bool)
+    editorLoadedReported = Signal(str)
+    payloadReady = Signal(str, str, str)
+    errorReported = Signal(str)
+
+    MAX_CHUNKS = 1024
+    MAX_PAYLOAD_CHARS = 40 * 1024 * 1024
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._session_id = ""
+        self._payload_kind = ""
+        self._expected_chunks = 0
+        self._chunks = []
+        self._payload_chars = 0
+
+    def reset(self, session_id=""):
+        self._session_id = str(session_id or "")
+        self._payload_kind = ""
+        self._expected_chunks = 0
+        self._chunks = []
+        self._payload_chars = 0
+
+    @Slot(str)
+    def ready(self, mode):
+        self.readyReported.emit(str(mode or ""))
+
+    @Slot(bool)
+    def setDirty(self, dirty):
+        self.dirtyReported.emit(bool(dirty))
+
+    @Slot(str)
+    def editorLoaded(self, session_id):
+        self.editorLoadedReported.emit(str(session_id or ""))
+
+    @Slot(str, str, int)
+    def beginPayload(self, session_id, kind, total):
+        session_id = str(session_id or "")
+        total = int(total or 0)
+        if not self._session_id or session_id != self._session_id:
+            self._fail("编辑器返回了过期会话的数据。")
+            return
+        if total <= 0 or total > self.MAX_CHUNKS:
+            self._fail("编辑器返回的数据分块数量超出安全限制。")
+            return
+        self._payload_kind = str(kind or "")
+        self._expected_chunks = total
+        self._chunks = [None] * total
+        self._payload_chars = 0
+
+    @Slot(str, int, str)
+    def appendPayload(self, session_id, index, chunk):
+        if str(session_id or "") != self._session_id or not self._expected_chunks:
+            self._fail("编辑器数据分块不属于当前会话。")
+            return
+        index = int(index)
+        value = str(chunk or "")
+        if index < 0 or index >= self._expected_chunks or self._chunks[index] is not None:
+            self._fail("编辑器数据分块顺序无效。")
+            return
+        self._payload_chars += len(value)
+        if self._payload_chars > self.MAX_PAYLOAD_CHARS:
+            self._fail("编辑器返回的数据超过安全传输上限。")
+            return
+        self._chunks[index] = value
+
+    @Slot(str)
+    def finishPayload(self, session_id):
+        if str(session_id or "") != self._session_id or not self._expected_chunks:
+            self._fail("编辑器数据结束标记不属于当前会话。")
+            return
+        if any(chunk is None for chunk in self._chunks):
+            self._fail("编辑器数据分块不完整。")
+            return
+        payload = "".join(self._chunks)
+        kind = self._payload_kind
+        active_session = self._session_id
+        self._payload_kind = ""
+        self._expected_chunks = 0
+        self._chunks = []
+        self._payload_chars = 0
+        self.payloadReady.emit(active_session, kind, payload)
+
+    @Slot(str)
+    def reportError(self, message):
+        self.errorReported.emit(str(message or "编辑器发生未知错误。"))
+
+    def _fail(self, message):
+        self._payload_kind = ""
+        self._expected_chunks = 0
+        self._chunks = []
+        self._payload_chars = 0
+        self.errorReported.emit(str(message))
+
+
+class DeliverableEditLoadWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, path, selected_encoding="", parent=None):
+        super().__init__(parent)
+        self.path = os.path.abspath(str(path or ""))
+        self.selected_encoding = str(selected_encoding or "")
+
+    def run(self):
+        started = time.monotonic()
+        try:
+            log_sub_agent_runtime(
+                "deliverable_edit_preflight_start",
+                path=self.path,
+                selected_encoding=bool(self.selected_encoding),
+            )
+            session, report = create_edit_session(
+                self.path,
+                selected_encoding=self.selected_encoding,
+            )
+            payload = load_editor_payload(session)
+            log_sub_agent_runtime(
+                "deliverable_edit_preflight_finish",
+                path=self.path,
+                kind=session.descriptor.kind,
+                elapsed_ms=round((time.monotonic() - started) * 1000),
+                size=session.initial_size,
+            )
+            self.finished_signal.emit(
+                {
+                    "ok": True,
+                    "session": session,
+                    "report": report,
+                    "payload": payload,
+                }
+            )
+        except DeliverableEditError as exc:
+            log_sub_agent_runtime(
+                "deliverable_edit_preflight_error",
+                path=self.path,
+                code=exc.code,
+                error=exc.message,
+            )
+            self.finished_signal.emit(
+                {"ok": False, "code": exc.code, "message": exc.message}
+            )
+        except Exception as exc:
+            log_sub_agent_runtime(
+                "deliverable_edit_preflight_error",
+                path=self.path,
+                code="unexpected_error",
+                error=str(exc),
+            )
+            self.finished_signal.emit(
+                {
+                    "ok": False,
+                    "code": "unexpected_error",
+                    "message": f"准备编辑器失败：{exc}",
+                }
+            )
+
+
+class DeliverableEditSaveWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(
+        self,
+        session,
+        payload,
+        target_path="",
+        serialized_data=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.session = session
+        self.payload = payload
+        self.target_path = os.path.abspath(str(target_path or "")) if target_path else ""
+        self.serialized_data = (
+            bytes(serialized_data)
+            if isinstance(serialized_data, (bytes, bytearray))
+            else None
+        )
+
+    def run(self):
+        data = b""
+        try:
+            data = (
+                self.serialized_data
+                if self.serialized_data is not None
+                else serialize_editor_payload(self.session, self.payload)
+            )
+            if self.target_path:
+                result = save_copy(self.session, data, self.target_path)
+            else:
+                result = atomic_save_session(
+                    self.session,
+                    data,
+                    event_logger=log_sub_agent_runtime,
+                )
+            self.finished_signal.emit(
+                {
+                    "ok": True,
+                    "result": result,
+                    "saved_copy": bool(self.target_path),
+                }
+            )
+        except DeliverableEditError as exc:
+            self.finished_signal.emit(
+                {
+                    "ok": False,
+                    "code": exc.code,
+                    "message": exc.message,
+                    "serialized": data,
+                }
+            )
+        except Exception as exc:
+            log_sub_agent_runtime(
+                "deliverable_edit_save_error",
+                path=getattr(self.session, "path", ""),
+                error=str(exc),
+            )
+            self.finished_signal.emit(
+                {
+                    "ok": False,
+                    "code": "unexpected_error",
+                    "message": f"保存失败：{exc}",
+                    "serialized": data,
+                }
+            )
+
+
+class DeliverableRestoreWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = os.path.abspath(str(path or ""))
+
+    def run(self):
+        try:
+            result = restore_previous_version(self.path)
+            self.finished_signal.emit({"ok": True, "result": result})
+        except DeliverableEditError as exc:
+            self.finished_signal.emit(
+                {"ok": False, "code": exc.code, "message": exc.message}
+            )
+        except Exception as exc:
+            self.finished_signal.emit(
+                {
+                    "ok": False,
+                    "code": "unexpected_error",
+                    "message": f"恢复上一版失败：{exc}",
+                }
+            )
+
+
 class SmartSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
         super().__init__(orientation, parent)
@@ -20244,11 +20513,25 @@ class MainWindow(QMainWindow):
         self.deliverable_more_copy_action.triggered.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_preview_path", "")))
         self.deliverable_more_refresh_action = QAction(qta.icon('fa5s.sync-alt', color=DesignTokens.text_secondary), "刷新预览", self.deliverable_more_menu)
         self.deliverable_more_refresh_action.triggered.connect(lambda: self.render_selected_deliverable(force=True))
+        self.deliverable_more_save_copy_action = QAction(
+            qta.icon("fa5s.save", color=DesignTokens.text_secondary),
+            "另存为…",
+            self.deliverable_more_menu,
+        )
+        self.deliverable_more_save_copy_action.triggered.connect(self.save_deliverable_copy)
+        self.deliverable_more_restore_action = QAction(
+            qta.icon("fa5s.history", color=DesignTokens.text_secondary),
+            "恢复上一版…",
+            self.deliverable_more_menu,
+        )
+        self.deliverable_more_restore_action.triggered.connect(self.restore_deliverable_previous_version)
         self.deliverable_more_menu.addAction(self.deliverable_more_open_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_reveal_action)
         self.deliverable_more_menu.addAction(self.deliverable_more_copy_action)
         self.deliverable_more_menu.addSeparator()
         self.deliverable_more_menu.addAction(self.deliverable_more_refresh_action)
+        self.deliverable_more_menu.addAction(self.deliverable_more_save_copy_action)
+        self.deliverable_more_menu.addAction(self.deliverable_more_restore_action)
         self.deliverable_more_btn.setMenu(self.deliverable_more_menu)
         self.deliverables_refresh_btn = QToolButton()
         self.deliverables_refresh_btn.setIcon(qta.icon("fa5s.file-code", color=DesignTokens.text_secondary))
@@ -20286,13 +20569,16 @@ class MainWindow(QMainWindow):
             lambda checked=False: self.set_deliverable_preview_mode("preview")
         )
         preview_mode_layout.addWidget(self.deliverable_preview_btn, 1)
-        self.deliverable_source_btn = QPushButton("源码")
-        self.deliverable_source_btn.setCheckable(True)
-        self.deliverable_source_btn.setStyleSheet(product_segmented_style())
-        self.deliverable_source_btn.clicked.connect(
-            lambda checked=False: self.set_deliverable_preview_mode("source")
+        self.deliverable_edit_btn = QPushButton("编辑")
+        self.deliverable_edit_btn.setCheckable(True)
+        self.deliverable_edit_btn.setStyleSheet(product_segmented_style())
+        self.deliverable_edit_btn.clicked.connect(
+            lambda checked=False: self.set_deliverable_preview_mode("edit")
         )
-        preview_mode_layout.addWidget(self.deliverable_source_btn, 1)
+        preview_mode_layout.addWidget(self.deliverable_edit_btn, 1)
+        # Compatibility alias for integrations that still locate the former
+        # preview/source segmented control by attribute name.
+        self.deliverable_source_btn = self.deliverable_edit_btn
         self.deliverable_preview_mode_bar.setVisible(False)
         preview_layout.addWidget(self.deliverable_preview_mode_bar)
 
@@ -20362,15 +20648,101 @@ class MainWindow(QMainWindow):
         )
         self.preview_stack.addWidget(self.preview_text)
         self.preview_stack.addWidget(self.preview_image)
+        self.deliverable_text_editor_container = QWidget()
+        deliverable_text_editor_layout = QHBoxLayout(self.deliverable_text_editor_container)
+        self.deliverable_text_editor_layout = deliverable_text_editor_layout
+        deliverable_text_editor_layout.setContentsMargins(0, 0, 0, 0)
+        deliverable_text_editor_layout.setSpacing(8)
+        self.deliverable_text_editor = QPlainTextEdit()
+        self.deliverable_text_editor.setObjectName("DeliverableTextEditor")
+        self.deliverable_text_editor.setPlaceholderText("文件内容")
+        self.deliverable_text_editor.setStyleSheet(
+            apple_code_edit_style(
+                bg=DesignTokens.bg_secondary,
+                radius=14,
+                subtle=True,
+                padding=12,
+            )
+        )
+        self.deliverable_text_editor.textChanged.connect(
+            self._handle_deliverable_text_editor_changed
+        )
+        deliverable_text_editor_layout.addWidget(self.deliverable_text_editor, 1)
+        self.deliverable_markdown_preview = QTextEdit()
+        self.deliverable_markdown_preview.setObjectName("DeliverableMarkdownPreview")
+        self.deliverable_markdown_preview.setReadOnly(True)
+        self.deliverable_markdown_preview.setStyleSheet(
+            apple_code_edit_style(
+                bg=DesignTokens.bg_main,
+                radius=14,
+                subtle=True,
+                padding=12,
+            )
+        )
+        self.deliverable_markdown_preview.setVisible(False)
+        deliverable_text_editor_layout.addWidget(self.deliverable_markdown_preview, 1)
+        self.preview_stack.addWidget(self.deliverable_text_editor_container)
         self.deliverable_web_view = None
         self.deliverable_web_preview = None
         self.deliverable_web_configuration_error = ""
         self.deliverable_web_init_attempted = False
+        self.deliverable_editor_web_view = None
+        self.deliverable_editor_web_channel = None
+        self.deliverable_editor_bridge = None
+        self.deliverable_editor_mode = ""
+        self.deliverable_editor_ready_mode = ""
+        self.deliverable_editor_pending_payload = None
+        self.deliverable_edit_session = None
+        self.deliverable_edit_state = "idle"
+        self.deliverable_edit_dirty = False
+        self.deliverable_edit_worker = None
+        self.deliverable_save_worker = None
+        self.deliverable_restore_worker = None
+        self.deliverable_pending_serialized = b""
+        self.deliverable_editor_external_conflict = False
+        self.deliverable_editor_internal_write = False
+        self.deliverable_text_loading = False
+        self.deliverable_edit_generation = 0
+        self.deliverable_pending_save_target = ""
+        self.deliverable_recent_internal_save_until = 0.0
         self.deliverable_preview_stack = self.preview_stack
         self.preview_stack.setCurrentWidget(self.preview_text)
         self.preview_pixmap = None
         
         preview_layout.addWidget(self.preview_stack, 1)
+
+        self.deliverable_edit_action_bar = QFrame()
+        self.deliverable_edit_action_bar.setObjectName("DeliverableEditActionBar")
+        self.deliverable_edit_action_bar.setStyleSheet(
+            f"QFrame#DeliverableEditActionBar {{ background: {DesignTokens.bg_secondary}; "
+            f"border-top: 1px solid {DesignTokens.border_subtle}; }}"
+        )
+        edit_action_layout = QHBoxLayout(self.deliverable_edit_action_bar)
+        edit_action_layout.setContentsMargins(10, 8, 10, 8)
+        edit_action_layout.setSpacing(8)
+        self.deliverable_edit_status_label = QLabel("准备编辑")
+        self.deliverable_edit_status_label.setWordWrap(True)
+        self.deliverable_edit_status_label.setStyleSheet(apple_caption_style())
+        edit_action_layout.addWidget(self.deliverable_edit_status_label, 1)
+        self.deliverable_edit_cancel_btn = QPushButton("退出编辑")
+        self.deliverable_edit_cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_edit_cancel_btn.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_edit_cancel_btn.setStyleSheet(product_button_style("secondary"))
+        self.deliverable_edit_cancel_btn.clicked.connect(self.cancel_deliverable_edit)
+        edit_action_layout.addWidget(self.deliverable_edit_cancel_btn)
+        self.deliverable_edit_save_btn = QPushButton("保存")
+        self.deliverable_edit_save_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_edit_save_btn.setFixedHeight(DesignTokens.control_height)
+        self.deliverable_edit_save_btn.setStyleSheet(product_button_style("primary"))
+        self.deliverable_edit_save_btn.clicked.connect(self.save_deliverable_edit)
+        edit_action_layout.addWidget(self.deliverable_edit_save_btn)
+        self.deliverable_edit_action_bar.setVisible(False)
+        preview_layout.addWidget(self.deliverable_edit_action_bar)
+        bind_theme(
+            self.deliverable_edit_action_bar,
+            self.refresh_deliverable_editor_theme,
+            surface="preview_shell",
+        )
         preview_layout.addWidget(self.deliverable_conversion_row)
         
         file_detail_layout.addWidget(preview_container, 1)
@@ -21328,6 +21700,14 @@ class MainWindow(QMainWindow):
         log_startup_stage("startup_history_ready")
 
     def keyPressEvent(self, event):
+        if (
+            event.key() == Qt.Key_S
+            and event.modifiers() & Qt.ControlModifier
+            and getattr(self, "deliverable_edit_state", "idle") != "idle"
+        ):
+            self.save_deliverable_edit()
+            event.accept()
+            return
         if getattr(self, "current_product_route", self.PAGE_CONVERSATION) != self.PAGE_CONVERSATION:
             if event.key() == Qt.Key_Left and event.modifiers() & Qt.AltModifier:
                 self.handle_product_back()
@@ -21397,6 +21777,7 @@ class MainWindow(QMainWindow):
         self.context_drawer_expanded = self.context_drawer_user_width > self.context_drawer_max_width
         self._sync_deliverable_expand_button()
         self.sync_context_drawer_layout()
+        self._sync_deliverable_text_editor_layout()
 
     def persist_context_drawer_width(self):
         if getattr(self, "config_manager", None) and self.context_drawer_user_width:
@@ -21743,12 +22124,15 @@ class MainWindow(QMainWindow):
             self.config_manager.set("deliverable_layout_mode", self.deliverable_layout_mode)
 
     def show_file_workspace_browse_view(self):
+        if not self.confirm_leave_deliverable_edit("返回文件列表"):
+            return False
         self._set_file_workspace_view_mode("browse", origin="browse")
         self.set_file_workspace_section(
             getattr(self, "file_workspace_return_section", self.FILE_SECTION_DELIVERABLES),
             refresh=False,
         )
         self._file_navigation_state()["origin"] = "browse"
+        return True
 
     def show_file_workspace_detail_view(self, origin="browse"):
         self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_DELIVERABLES)
@@ -22071,6 +22455,8 @@ class MainWindow(QMainWindow):
         return True
 
     def open_file_workspace_from_rail(self, entrypoint="files_rail"):
+        if not self.confirm_leave_deliverable_edit("切换文件视图"):
+            return
         self._set_file_workspace_view_mode("browse", origin="browse")
         self._sync_file_workspace_for_current_session(entrypoint)
         self.set_file_workspace_section(
@@ -22165,6 +22551,11 @@ class MainWindow(QMainWindow):
     def hide_context_drawer(self, reason="manual", source_obj=None, source_window=None, in_drawer=None, in_rail=None, is_popup=None):
         if not hasattr(self, "right_sidebar"):
             return
+        if (
+            getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_FILES
+            and not self.confirm_leave_deliverable_edit("关闭文件与交付物")
+        ):
+            return False
         log_sub_agent_runtime(
             "ui_context_drawer_hide_begin",
             reason=str(reason or "manual"),
@@ -24861,6 +25252,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "状态", status)
 
     def quit_app(self):
+        if not self.confirm_leave_deliverable_edit("退出应用"):
+            return
         self.shutdown_workers()
         if self.daemon_client:
             self.daemon_client.shutdown()
@@ -24956,6 +25349,9 @@ class MainWindow(QMainWindow):
             self.hide()
             self.tray_icon.showMessage("DeepSeek Cowork", "已最小化到托盘", QSystemTrayIcon.Information, 2000)
         else:
+            if not self.confirm_leave_deliverable_edit("退出应用"):
+                event.ignore()
+                return
             self.skill_catalog_service.stop_watching()
             self.shutdown_workers()
             self.stop_daemon_process()
@@ -24971,6 +25367,7 @@ class MainWindow(QMainWindow):
             self.drag_overlay.resize(self.size())
         if hasattr(self, "right_sidebar"):
             self.position_context_drawer()
+        self._sync_deliverable_text_editor_layout()
         self._position_active_system_toast()
 
     def dragEnterEvent(self, event):
@@ -25173,6 +25570,11 @@ class MainWindow(QMainWindow):
     def close_session_tab(self, index):
         session_id = self.get_session_id_for_tab(index)
         if not session_id: return
+        if (
+            session_id == getattr(self, "current_session_id", None)
+            and not self.confirm_leave_deliverable_edit("关闭会话")
+        ):
+            return
         state = self.sessions.get(session_id)
         if state:
             self._stop_live_subagents(state, force=True)
@@ -25199,8 +25601,27 @@ class MainWindow(QMainWindow):
         if self.session_tabs.count() == 0: self.create_new_session()
 
     def on_session_tab_changed(self, index):
+        target_session_id = self.get_session_id_for_tab(index)
+        if (
+            target_session_id
+            and target_session_id != getattr(self, "current_session_id", None)
+            and not self.confirm_leave_deliverable_edit("切换会话")
+        ):
+            current_state = self.get_current_session()
+            current_index = (
+                self.session_tabs.indexOf(current_state.session_widget)
+                if current_state is not None
+                else -1
+            )
+            if current_index >= 0:
+                self.session_tabs.blockSignals(True)
+                try:
+                    self.session_tabs.setCurrentIndex(current_index)
+                finally:
+                    self.session_tabs.blockSignals(False)
+            return
         self.sync_current_session_state()
-        session_id = self.get_session_id_for_tab(index)
+        session_id = target_session_id
         if session_id:
             self.activate_session(session_id, switch_tab=False, ensure_loaded=True)
 
@@ -25980,6 +26401,11 @@ class MainWindow(QMainWindow):
         session_id = str(session_id or "").strip()
         if not session_id:
             return
+        if (
+            session_id != str(getattr(self, "current_session_id", "") or "")
+            and not self.confirm_leave_deliverable_edit("切换会话")
+        ):
+            return
         state = self.sessions.get(session_id)
         if state is None:
             self.create_new_session(session_id=session_id, make_current=False)
@@ -26591,6 +27017,12 @@ class MainWindow(QMainWindow):
         if normalized and not os.path.isdir(normalized):
             QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
             return False
+        if (
+            self._project_key(normalized)
+            != self._project_key(getattr(self, "workspace_dir", ""))
+            and not self.confirm_leave_deliverable_edit("切换项目")
+        ):
+            return False
         self._apply_workspace_to_ui(
             normalized,
             refresh_sidebar=refresh_sidebar,
@@ -27177,6 +27609,13 @@ class MainWindow(QMainWindow):
         normalized = self._normalize_project_path(path)
         if normalized and not os.path.isdir(normalized):
             QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
+            return False
+        if (
+            self._project_key(normalized)
+            != self._project_key(getattr(self, "workspace_dir", ""))
+            and not self.confirm_leave_deliverable_edit("切换项目")
+        ):
+            self.refresh_project_selector()
             return False
         if normalized:
             self.config_manager.upsert_project(normalized)
@@ -29457,6 +29896,12 @@ class MainWindow(QMainWindow):
         if directory and not os.path.isdir(directory):
             QMessageBox.warning(self, "项目不可用", "这个项目文件夹不存在或无法访问。")
             return False
+        if (
+            self._project_key(directory)
+            != self._project_key(getattr(self, "workspace_dir", ""))
+            and not self.confirm_leave_deliverable_edit("切换项目")
+        ):
+            return False
         if bind_session:
             target_state = self.get_session(session_id) if session_id else self.get_current_session()
             if not self._bind_session_to_project(target_state, directory):
@@ -29473,6 +29918,8 @@ class MainWindow(QMainWindow):
         ext = os.path.splitext(path)[1].lower()
         is_file = bool(path and os.path.isfile(path))
         is_html = ext in {".html", ".htm"}
+        descriptor = editor_descriptor(path) if is_file else None
+        is_editable = descriptor is not None
         if is_file:
             self.set_preview_header(path, title=os.path.basename(path) or path, meta=self.describe_path_for_preview(path), enabled=True)
         for name in ("deliverable_open_btn", "deliverable_reveal_btn", "deliverable_copy_btn"):
@@ -29488,17 +29935,47 @@ class MainWindow(QMainWindow):
             action = getattr(self, name, None)
             if action:
                 action.setEnabled(is_file)
-        source_btn = getattr(self, "deliverable_source_btn", None)
-        if source_btn:
-            source_enabled = is_file and ext in {".html", ".htm", ".md", ".markdown", ".txt", ".py", ".js", ".css", ".json"}
-            source_btn.setEnabled(source_enabled)
-            source_btn.setChecked(False)
+        edit_btn = getattr(self, "deliverable_edit_btn", None)
+        if edit_btn:
+            edit_state = getattr(self, "deliverable_edit_state", "idle")
+            edit_busy = edit_state in {"loading", "saving", "restoring"}
+            edit_session = getattr(self, "deliverable_edit_session", None)
+            editing_current = bool(
+                is_editable
+                and edit_state != "idle"
+                and (
+                    edit_session is None
+                    or os.path.normcase(edit_session.path)
+                    == os.path.normcase(os.path.abspath(path))
+                )
+            )
+            edit_btn.setEnabled(is_editable and not edit_busy)
+            edit_btn.setChecked(
+                editing_current
+            )
             preview_btn = getattr(self, "deliverable_preview_btn", None)
             if preview_btn:
-                preview_btn.setChecked(True)
+                preview_btn.setChecked(not editing_current)
+                preview_btn.setEnabled(not edit_busy)
             mode_bar = getattr(self, "deliverable_preview_mode_bar", None)
             if mode_bar:
-                mode_bar.setVisible(source_enabled and getattr(self, "file_workspace_view_mode", "browse") == "detail")
+                mode_bar.setVisible(
+                    is_editable
+                    and getattr(self, "file_workspace_view_mode", "browse") == "detail"
+                )
+        save_copy_action = getattr(self, "deliverable_more_save_copy_action", None)
+        if save_copy_action:
+            save_copy_action.setEnabled(
+                bool(
+                    is_file
+                    and getattr(self, "deliverable_edit_session", None)
+                    and getattr(self, "deliverable_edit_state", "idle") not in {"idle", "loading", "saving"}
+                )
+            )
+        restore_action = getattr(self, "deliverable_more_restore_action", None)
+        if restore_action:
+            backup_path = backup_paths(path)[0] if is_file else ""
+            restore_action.setEnabled(bool(backup_path and os.path.isfile(backup_path)))
         if hasattr(self, "deliverable_render_btn"):
             self.deliverable_render_btn.setEnabled(is_file and ext in DELIVERABLE_EXTENSIONS)
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
@@ -29506,44 +29983,840 @@ class MainWindow(QMainWindow):
         self._sync_deliverable_action_visibility()
 
     def toggle_deliverable_source_view(self):
-        path = getattr(self, "current_deliverable_path", "") or getattr(self, "current_preview_path", "")
-        if not path or not os.path.isfile(path):
-            return
-        checked = bool(getattr(self, "deliverable_source_btn", None) and self.deliverable_source_btn.isChecked())
-        if not checked:
-            self.render_selected_deliverable(force=False)
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                content = handle.read(40000)
-            if os.path.getsize(path) > 40000:
-                content += "\n\n... 文件较大，仅显示开头。"
-            self.deliverable_text_preview.setPlainText(content)
-        except UnicodeDecodeError:
-            self.deliverable_text_preview.setPlainText("当前文件不是可直接显示的文本源码。")
-        except Exception as exc:
-            self.deliverable_text_preview.setPlainText(f"无法读取源码：{exc}")
-        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-        if hasattr(self, "deliverable_status_label"):
-            self.deliverable_status_label.setText(f"源码视图 · {os.path.basename(path)}")
+        self.begin_deliverable_edit()
 
     def set_deliverable_preview_mode(self, mode):
-        mode = "source" if mode == "source" else "preview"
+        mode = "edit" if mode in {"edit", "source"} else "preview"
         preview_btn = getattr(self, "deliverable_preview_btn", None)
-        source_btn = getattr(self, "deliverable_source_btn", None)
+        edit_btn = getattr(self, "deliverable_edit_btn", None)
         if preview_btn:
             preview_btn.setChecked(mode == "preview")
-        if source_btn:
-            source_btn.setChecked(mode == "source")
+        if edit_btn:
+            edit_btn.setChecked(mode == "edit")
         log_sub_agent_runtime(
             "deliverable_preview_mode_changed",
             mode=mode,
             path=getattr(self, "current_deliverable_path", ""),
         )
-        if mode == "source":
-            self.toggle_deliverable_source_view()
+        if mode == "edit":
+            self.begin_deliverable_edit()
         else:
+            if getattr(self, "deliverable_edit_state", "idle") != "idle":
+                if not self.cancel_deliverable_edit():
+                    if preview_btn:
+                        preview_btn.setChecked(False)
+                    if edit_btn:
+                        edit_btn.setChecked(True)
+                    return
             self.render_selected_deliverable(force=False)
+
+    def refresh_deliverable_editor_theme(self, _resolved=None):
+        action_bar = getattr(self, "deliverable_edit_action_bar", None)
+        if action_bar:
+            action_bar.setStyleSheet(
+                f"QFrame#DeliverableEditActionBar {{ background: {DesignTokens.bg_secondary}; "
+                f"border-top: 1px solid {DesignTokens.border_subtle}; }}"
+            )
+        editor = getattr(self, "deliverable_text_editor", None)
+        if editor:
+            editor.setStyleSheet(
+                apple_code_edit_style(
+                    bg=DesignTokens.bg_secondary,
+                    radius=14,
+                    subtle=True,
+                    padding=12,
+                )
+            )
+        markdown_preview = getattr(self, "deliverable_markdown_preview", None)
+        if markdown_preview:
+            markdown_preview.setStyleSheet(
+                apple_code_edit_style(
+                    bg=DesignTokens.bg_main,
+                    radius=14,
+                    subtle=True,
+                    padding=12,
+                )
+            )
+        status = getattr(self, "deliverable_edit_status_label", None)
+        if status:
+            status.setStyleSheet(apple_caption_style())
+        view = getattr(self, "deliverable_editor_web_view", None)
+        if view is not None:
+            theme = {
+                "bg-primary": DesignTokens.bg_main,
+                "bg-secondary": DesignTokens.bg_secondary,
+                "text-primary": DesignTokens.text_primary,
+                "text-secondary": DesignTokens.text_secondary,
+                "border-subtle": DesignTokens.border_subtle,
+                "primary": DesignTokens.primary,
+                "selection": DesignTokens.selection_bg,
+            }
+            script = (
+                "window.coworkEditor && window.coworkEditor.setTheme("
+                + json.dumps(theme, ensure_ascii=False)
+                + ")"
+            )
+            view.page().runJavaScript(script)
+
+    def _set_deliverable_edit_state(self, state, message=""):
+        self.deliverable_edit_state = str(state or "idle")
+        busy = self.deliverable_edit_state in {"loading", "saving", "restoring"}
+        active = self.deliverable_edit_state != "idle"
+        action_bar = getattr(self, "deliverable_edit_action_bar", None)
+        if action_bar:
+            action_bar.setVisible(active)
+        save_btn = getattr(self, "deliverable_edit_save_btn", None)
+        if save_btn:
+            save_btn.setEnabled(
+                active
+                and not busy
+                and bool(getattr(self, "deliverable_edit_dirty", False))
+            )
+            save_btn.setText("保存中…" if self.deliverable_edit_state == "saving" else "保存")
+        cancel_btn = getattr(self, "deliverable_edit_cancel_btn", None)
+        if cancel_btn:
+            cancel_btn.setEnabled(active and self.deliverable_edit_state != "saving")
+        edit_btn = getattr(self, "deliverable_edit_btn", None)
+        preview_btn = getattr(self, "deliverable_preview_btn", None)
+        if edit_btn:
+            edit_btn.setChecked(active)
+            edit_btn.setEnabled(not busy or active)
+        if preview_btn:
+            preview_btn.setChecked(not active)
+        if not message:
+            labels = {
+                "loading": "正在预检并加载文件…",
+                "ready": "已就绪",
+                "dirty": "有未保存的修改",
+                "saving": "正在验证并保存…",
+                "conflict": "文件已在外部修改，只能重新载入或另存为",
+                "blocked": "兼容性预检未通过",
+                "failed": "编辑器发生错误，内容仍保留",
+                "restoring": "正在恢复上一版…",
+            }
+            message = labels.get(self.deliverable_edit_state, "")
+        status = getattr(self, "deliverable_edit_status_label", None)
+        if status:
+            status.setText(message)
+        self._set_deliverable_controls_enabled(
+            getattr(self, "current_deliverable_path", "")
+        )
+
+    def _set_deliverable_dirty(self, dirty):
+        dirty = bool(dirty)
+        previous = bool(getattr(self, "deliverable_edit_dirty", False))
+        if dirty and getattr(self, "deliverable_edit_state", "idle") != "saving":
+            self.deliverable_pending_serialized = b""
+        self.deliverable_edit_dirty = dirty
+        session = getattr(self, "deliverable_edit_session", None)
+        if session is not None:
+            session.dirty = dirty
+        if dirty and not previous:
+            log_sub_agent_runtime(
+                "deliverable_edit_dirty",
+                path=getattr(session, "path", ""),
+                kind=getattr(getattr(session, "descriptor", None), "kind", ""),
+            )
+        if getattr(self, "deliverable_editor_external_conflict", False):
+            self._set_deliverable_edit_state("conflict")
+        elif getattr(self, "deliverable_edit_state", "idle") not in {
+            "idle",
+            "loading",
+            "saving",
+            "restoring",
+        }:
+            self._set_deliverable_edit_state("dirty" if dirty else "ready")
+
+    def _handle_deliverable_text_editor_changed(self):
+        if getattr(self, "deliverable_text_loading", False):
+            return
+        session = getattr(self, "deliverable_edit_session", None)
+        if session is None or session.descriptor.kind != "text":
+            return
+        self._render_deliverable_markdown_edit_preview()
+        self._set_deliverable_dirty(True)
+
+    def _render_deliverable_markdown_edit_preview(self):
+        preview = getattr(self, "deliverable_markdown_preview", None)
+        session = getattr(self, "deliverable_edit_session", None)
+        if preview is None or session is None:
+            return
+        extension = os.path.splitext(session.path)[1].lower()
+        is_markdown = extension in {".md", ".markdown"}
+        preview.setVisible(is_markdown)
+        if not is_markdown:
+            return
+        try:
+            rendered = markdown.markdown(
+                self.deliverable_text_editor.toPlainText(),
+                extensions=["fenced_code", "tables", "sane_lists"],
+            )
+            preview.setHtml(rendered)
+        except Exception as exc:
+            preview.setPlainText(f"Markdown 预览失败：{exc}")
+        self._sync_deliverable_text_editor_layout()
+
+    def _sync_deliverable_text_editor_layout(self):
+        layout = getattr(self, "deliverable_text_editor_layout", None)
+        container = getattr(self, "deliverable_text_editor_container", None)
+        preview = getattr(self, "deliverable_markdown_preview", None)
+        if layout is None or container is None or preview is None or preview.isHidden():
+            return
+        available_width = max(
+            container.width(),
+            getattr(getattr(self, "right_sidebar", None), "width", lambda: 0)(),
+        )
+        direction = (
+            QBoxLayout.LeftToRight
+            if available_width >= 720
+            else QBoxLayout.TopToBottom
+        )
+        layout.setDirection(direction)
+
+    def _choose_deliverable_encoding(self):
+        dialog = QDialog(self)
+        dialog.setObjectName("DeliverableEncodingDialog")
+        dialog.setWindowTitle("选择文本编码")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(430)
+        apply_product_dialog(dialog, "DeliverableEncodingDialog")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(12)
+        title = QLabel("无法可靠识别这个文件的文本编码")
+        title.setStyleSheet(
+            f"color:{DesignTokens.text_primary};font-size:15px;font-weight:650;"
+        )
+        description = QLabel("请选择原文件实际使用的编码。选择错误不会写入文件，但会阻止进入编辑。")
+        description.setWordWrap(True)
+        description.setStyleSheet(
+            f"color:{DesignTokens.text_secondary};font-size:13px;"
+        )
+        combo = QComboBox()
+        combo.setStyleSheet(product_field_style())
+        for label, codec in (
+            ("UTF-8", "utf-8"),
+            ("GB18030（简体中文）", "gb18030"),
+            ("GBK（简体中文）", "gbk"),
+            ("Big5（繁体中文）", "big5"),
+            ("Windows-1252（西文）", "cp1252"),
+        ):
+            combo.addItem(label, codec)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        cancel.setStyleSheet(product_button_style("secondary"))
+        confirm = QPushButton("继续")
+        confirm.setStyleSheet(product_button_style("primary"))
+        confirm.setDefault(True)
+        cancel.clicked.connect(dialog.reject)
+        confirm.clicked.connect(dialog.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(confirm)
+        layout.addWidget(title)
+        layout.addWidget(description)
+        layout.addWidget(combo)
+        layout.addLayout(actions)
+        if dialog.exec() != QDialog.Accepted:
+            return ""
+        return str(combo.currentData() or "")
+
+    def begin_deliverable_edit(self, selected_encoding=""):
+        path = os.path.abspath(
+            getattr(self, "current_deliverable_path", "")
+            or getattr(self, "current_preview_path", "")
+            or ""
+        )
+        if not path or not os.path.isfile(path):
+            self._reset_deliverable_mode_buttons()
+            return
+        if editor_descriptor(path) is None:
+            QMessageBox.warning(self, "无法编辑", "当前格式只支持预览或使用系统应用打开。")
+            self._reset_deliverable_mode_buttons()
+            return
+        session = getattr(self, "deliverable_edit_session", None)
+        if (
+            session is not None
+            and os.path.normcase(session.path) == os.path.normcase(path)
+            and getattr(self, "deliverable_edit_state", "idle") != "idle"
+        ):
+            if session.descriptor.kind == "text":
+                self.preview_stack.setCurrentWidget(self.deliverable_text_editor_container)
+            elif getattr(self, "deliverable_editor_web_view", None) is not None:
+                self.preview_stack.setCurrentWidget(self.deliverable_editor_web_view)
+            return
+        if session is not None and not self.confirm_leave_deliverable_edit("切换文件"):
+            return
+        self.deliverable_edit_generation += 1
+        generation = self.deliverable_edit_generation
+        self.deliverable_editor_external_conflict = False
+        self.deliverable_pending_serialized = b""
+        self._set_deliverable_dirty(False)
+        self._set_deliverable_edit_state("loading", "正在进行兼容性预检…")
+        self.deliverable_text_preview.setPlainText("正在检查文件结构、大小和兼容性…")
+        self.preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        log_sub_agent_runtime("deliverable_edit_enter", path=path)
+        worker = DeliverableEditLoadWorker(path, selected_encoding, self)
+        self.deliverable_edit_worker = worker
+        worker.finished_signal.connect(
+            lambda result, expected=generation: self._handle_deliverable_edit_loaded(
+                result, expected
+            )
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _handle_deliverable_edit_loaded(self, result, generation):
+        if generation != getattr(self, "deliverable_edit_generation", 0):
+            return
+        self.deliverable_edit_worker = None
+        if not result.get("ok"):
+            code = str(result.get("code") or "edit_failed")
+            message = str(result.get("message") or "无法进入编辑。")
+            if code == "encoding_required":
+                encoding = self._choose_deliverable_encoding()
+                if encoding:
+                    self.begin_deliverable_edit(encoding)
+                    return
+            self._set_deliverable_edit_state("blocked", message)
+            self.deliverable_text_preview.setPlainText(
+                "此文件未通过安全编辑预检。\n\n" + message + "\n\n原文件未发生任何变化。"
+            )
+            self.preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            QMessageBox.warning(self, "无法进入编辑", message)
+            self._release_deliverable_edit_session(show_preview=False)
+            return
+        session = result["session"]
+        session.metadata["ui_session_id"] = uuid.uuid4().hex
+        self.deliverable_edit_session = session
+        self.deliverable_editor_external_conflict = False
+        payload = result["payload"]
+        if payload.get("kind") == "text":
+            self.deliverable_text_loading = True
+            try:
+                self.deliverable_text_editor.setPlainText(str(payload.get("content") or ""))
+                self.deliverable_text_editor.document().setModified(False)
+            finally:
+                self.deliverable_text_loading = False
+            self._render_deliverable_markdown_edit_preview()
+            self.preview_stack.setCurrentWidget(self.deliverable_text_editor_container)
+            if hasattr(self, "deliverable_status_label"):
+                self.deliverable_status_label.setText(
+                    f"正在编辑 {os.path.basename(session.path)} · {session.descriptor.label}"
+                )
+            self._set_deliverable_dirty(False)
+            self._set_deliverable_edit_state(
+                "ready",
+                f"{session.descriptor.label} 编辑已就绪 · Ctrl+S 保存",
+            )
+            log_sub_agent_runtime(
+                "deliverable_edit_ready",
+                path=session.path,
+                kind=session.descriptor.kind,
+            )
+            return
+        if not self._ensure_deliverable_editor_web_view():
+            message = self.deliverable_web_configuration_error or webengine_unavailable_message()
+            self._handle_deliverable_editor_error(message)
+            return
+        self.preview_stack.setCurrentWidget(self.deliverable_editor_web_view)
+        if hasattr(self, "deliverable_status_label"):
+            self.deliverable_status_label.setText(
+                f"正在编辑 {os.path.basename(session.path)} · {session.descriptor.label}"
+            )
+        self._load_deliverable_web_editor(payload)
+
+    def _ensure_deliverable_editor_web_view(self):
+        if getattr(self, "deliverable_editor_web_view", None) is not None:
+            return True
+        view_class = load_qwebengine_view()
+        if view_class is None:
+            self.deliverable_web_configuration_error = webengine_unavailable_message()
+            return False
+        try:
+            view = view_class()
+            view.setObjectName("DeliverableEditorWebView")
+            view.setStyleSheet(
+                f"QWebEngineView#DeliverableEditorWebView {{ background: {DesignTokens.bg_secondary}; border: none; }}"
+            )
+            core_module = importlib.import_module("PySide6.QtWebEngineCore")
+            settings = view.settings()
+            settings_enum = getattr(core_module.QWebEngineSettings, "WebAttribute")
+            settings.setAttribute(settings_enum.JavascriptEnabled, True)
+            settings.setAttribute(settings_enum.LocalContentCanAccessFileUrls, True)
+            settings.setAttribute(settings_enum.LocalContentCanAccessRemoteUrls, False)
+            settings.setAttribute(settings_enum.JavascriptCanAccessClipboard, False)
+            channel_module = importlib.import_module("PySide6.QtWebChannel")
+            bridge = DeliverableEditorBridge(view)
+            channel = channel_module.QWebChannel(view.page())
+            channel.registerObject("deliverableEditorBridge", bridge)
+            view.page().setWebChannel(channel)
+            bridge.readyReported.connect(self._handle_deliverable_editor_ready)
+            bridge.dirtyReported.connect(self._set_deliverable_dirty)
+            bridge.editorLoadedReported.connect(self._handle_deliverable_editor_model_loaded)
+            bridge.payloadReady.connect(self._handle_deliverable_editor_payload)
+            bridge.errorReported.connect(self._handle_deliverable_editor_error)
+            view.loadFinished.connect(self._handle_deliverable_editor_page_loaded)
+            try:
+                view.page().profile().downloadRequested.connect(
+                    lambda item: item.cancel()
+                )
+            except Exception as exc:
+                raise RuntimeError(f"无法禁用编辑器下载通道：{exc}") from exc
+            self.deliverable_editor_web_view = view
+            self.deliverable_editor_bridge = bridge
+            self.deliverable_editor_web_channel = channel
+            self.preview_stack.addWidget(view)
+            log_sub_agent_runtime("deliverable_editor_webengine_init_finish")
+            return True
+        except Exception as exc:
+            self.deliverable_web_configuration_error = f"编辑器 WebEngine 初始化失败：{exc}"
+            log_sub_agent_runtime(
+                "deliverable_editor_webengine_init_error",
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            return False
+
+    def _editor_asset_path(self, mode):
+        filename = {"docx": "docx.html", "sheet": "sheet.html", "html": "html.html"}.get(mode)
+        if not filename:
+            raise DeliverableEditError("editor_mode_invalid", "编辑器格式无效。")
+        path = os.path.join(get_base_dir(), "web", "editors", "dist", filename)
+        if not os.path.isfile(path):
+            raise DeliverableEditError(
+                "editor_assets_missing",
+                f"缺少离线编辑器资源 {filename}，请修复安装后重试。",
+            )
+        return os.path.abspath(path)
+
+    def _load_deliverable_web_editor(self, payload):
+        session = getattr(self, "deliverable_edit_session", None)
+        if session is None:
+            return
+        mode = str(payload.get("kind") or "")
+        try:
+            asset_path = self._editor_asset_path(mode)
+        except DeliverableEditError as exc:
+            self._handle_deliverable_editor_error(exc.message)
+            return
+        session_id = str(session.metadata.get("ui_session_id") or "")
+        self.deliverable_editor_bridge.reset(session_id)
+        self.deliverable_editor_pending_payload = (mode, session_id, payload)
+        self.deliverable_editor_mode = mode
+        if self.deliverable_editor_ready_mode == mode:
+            self._send_deliverable_editor_payload()
+            return
+        self.deliverable_editor_ready_mode = ""
+        self._set_deliverable_edit_state("loading", f"正在加载{session.descriptor.label}编辑器…")
+        self.deliverable_editor_web_view.setUrl(QUrl.fromLocalFile(asset_path))
+
+    def _handle_deliverable_editor_page_loaded(self, ok):
+        if not ok and getattr(self, "deliverable_edit_state", "idle") != "idle":
+            self._handle_deliverable_editor_error("离线编辑器页面加载失败。")
+
+    def _handle_deliverable_editor_ready(self, mode):
+        mode = str(mode or "")
+        if mode != getattr(self, "deliverable_editor_mode", ""):
+            self._handle_deliverable_editor_error("编辑器资源与当前文件格式不匹配。")
+            return
+        self.deliverable_editor_ready_mode = mode
+        self.refresh_deliverable_editor_theme()
+        self._send_deliverable_editor_payload()
+
+    def _send_deliverable_editor_payload(self):
+        pending = getattr(self, "deliverable_editor_pending_payload", None)
+        view = getattr(self, "deliverable_editor_web_view", None)
+        if pending is None or view is None:
+            return
+        mode, session_id, payload = pending
+        if mode != getattr(self, "deliverable_editor_ready_mode", ""):
+            return
+        try:
+            if mode == "docx":
+                value = base64.b64encode(bytes(payload.get("binary") or b"")).decode("ascii")
+            elif mode == "sheet":
+                value = json.dumps(
+                    payload.get("snapshot") or {},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            elif mode == "html":
+                value = str(payload.get("content") or "")
+            else:
+                raise DeliverableEditError("editor_mode_invalid", "编辑器格式无效。")
+            chunk_size = 192 * 1024
+            chunks = [
+                value[index : index + chunk_size]
+                for index in range(0, len(value), chunk_size)
+            ] or [""]
+            view.page().runJavaScript(
+                "window.coworkEditor.beginLoad("
+                + json.dumps(session_id)
+                + f",{len(chunks)},"
+                + json.dumps(mode)
+                + ")"
+            )
+            for index, chunk in enumerate(chunks):
+                view.page().runJavaScript(
+                    f"window.coworkEditor.appendLoadChunk({index},"
+                    + json.dumps(chunk, ensure_ascii=True)
+                    + ")"
+                )
+            view.page().runJavaScript("window.coworkEditor.finishLoad()")
+            self.deliverable_editor_pending_payload = None
+        except DeliverableEditError as exc:
+            self._handle_deliverable_editor_error(exc.message)
+        except Exception as exc:
+            self._handle_deliverable_editor_error(f"向编辑器传输文件失败：{exc}")
+
+    def _handle_deliverable_editor_model_loaded(self, session_id):
+        session = getattr(self, "deliverable_edit_session", None)
+        if (
+            session is None
+            or str(session.metadata.get("ui_session_id") or "") != str(session_id or "")
+        ):
+            return
+        self._set_deliverable_dirty(False)
+        self._set_deliverable_edit_state(
+            "ready",
+            f"{session.descriptor.label} 编辑已就绪 · Ctrl+S 保存",
+        )
+        log_sub_agent_runtime(
+            "deliverable_edit_ready",
+            path=session.path,
+            kind=session.descriptor.kind,
+        )
+
+    def _handle_deliverable_editor_error(self, message):
+        message = str(message or "编辑器发生未知错误。")
+        session = getattr(self, "deliverable_edit_session", None)
+        log_sub_agent_runtime(
+            "deliverable_edit_error",
+            path=getattr(session, "path", ""),
+            state=getattr(self, "deliverable_edit_state", ""),
+            error=message,
+        )
+        self._set_deliverable_edit_state("failed", message)
+        QMessageBox.critical(
+            self,
+            "编辑器错误",
+            message + "\n\n当前编辑内容会保留，请修复问题后重试保存或另存为。",
+        )
+
+    def save_deliverable_edit(self, _checked=False, target_path=""):
+        session = getattr(self, "deliverable_edit_session", None)
+        if session is None:
+            return
+        if getattr(self, "deliverable_edit_state", "idle") == "saving":
+            return
+        if getattr(self, "deliverable_editor_external_conflict", False) and not target_path:
+            self._show_deliverable_conflict_options(
+                file_missing=not os.path.isfile(session.path)
+            )
+            return
+        self.deliverable_pending_save_target = str(target_path or "")
+        self._set_deliverable_edit_state("saving")
+        if session.descriptor.kind == "text":
+            self._start_deliverable_save_worker(
+                self.deliverable_text_editor.toPlainText(),
+                target_path=self.deliverable_pending_save_target,
+            )
+            return
+        view = getattr(self, "deliverable_editor_web_view", None)
+        if view is None:
+            self._handle_deliverable_editor_error("编辑器页面不可用，无法取得待保存内容。")
+            return
+        view.page().runJavaScript("window.coworkEditor.requestSave()")
+
+    def _handle_deliverable_editor_payload(self, session_id, kind, payload):
+        session = getattr(self, "deliverable_edit_session", None)
+        expected = str(getattr(session, "metadata", {}).get("ui_session_id") or "") if session else ""
+        if not session or str(session_id or "") != expected:
+            self._handle_deliverable_editor_error("忽略了过期编辑会话返回的保存数据。")
+            return
+        try:
+            if kind == "docx":
+                parsed = base64.b64decode(str(payload or ""), validate=True)
+            elif kind == "sheet":
+                parsed = json.loads(str(payload or ""))
+                if not isinstance(parsed, dict):
+                    raise ValueError("工作簿快照不是对象")
+            elif kind == "html":
+                parsed = str(payload or "")
+            else:
+                raise ValueError(f"未知保存数据类型：{kind}")
+        except Exception as exc:
+            self._handle_deliverable_editor_error(f"编辑器保存数据无效：{exc}")
+            return
+        self._start_deliverable_save_worker(
+            parsed,
+            target_path=getattr(self, "deliverable_pending_save_target", ""),
+        )
+
+    def _start_deliverable_save_worker(self, payload, target_path=""):
+        session = getattr(self, "deliverable_edit_session", None)
+        if session is None:
+            return
+        self.deliverable_editor_internal_write = not bool(target_path)
+        worker = DeliverableEditSaveWorker(
+            session,
+            payload,
+            target_path,
+            parent=self,
+        )
+        self.deliverable_save_worker = worker
+        worker.finished_signal.connect(self._handle_deliverable_save_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _handle_deliverable_save_finished(self, result):
+        self.deliverable_save_worker = None
+        self.deliverable_editor_internal_write = False
+        self.deliverable_pending_save_target = ""
+        session = getattr(self, "deliverable_edit_session", None)
+        if result.get("ok"):
+            save_result = result["result"]
+            if result.get("saved_copy"):
+                self._set_deliverable_edit_state(
+                    "dirty" if self.deliverable_edit_dirty else "ready",
+                    f"已另存为 {os.path.basename(save_result.path)}；原文件未覆盖",
+                )
+                self.add_system_toast(
+                    f"已另存为 {os.path.basename(save_result.path)}",
+                    "success",
+                    auto_close_ms=3600,
+                )
+            else:
+                self.deliverable_editor_external_conflict = False
+                self.deliverable_pending_serialized = b""
+                self.deliverable_recent_internal_save_until = time.monotonic() + 1.5
+                self._set_deliverable_dirty(False)
+                self._set_deliverable_edit_state(
+                    "ready",
+                    f"已保存 · 已保留上一版 · {format_file_size(save_result.bytes_written)}",
+                )
+                self.current_deliverable_stale = True
+                self.deliverable_render_fingerprint = None
+                self._watch_deliverable_paths()
+                self.add_system_toast("文件已安全保存，并保留上一版。", "success")
+            self._set_deliverable_controls_enabled(
+                getattr(session, "path", "") if session else ""
+            )
+            return
+        code = str(result.get("code") or "save_failed")
+        message = str(result.get("message") or "保存失败。")
+        serialized = result.get("serialized")
+        if isinstance(serialized, (bytes, bytearray)) and serialized:
+            self.deliverable_pending_serialized = bytes(serialized)
+        log_sub_agent_runtime(
+            "deliverable_edit_save_error",
+            path=getattr(session, "path", ""),
+            code=code,
+            error=message,
+        )
+        if code in {"external_modification", "file_not_found"}:
+            self.deliverable_editor_external_conflict = True
+            self._set_deliverable_edit_state("conflict", message)
+            self._show_deliverable_conflict_options(file_missing=code == "file_not_found")
+            return
+        self._set_deliverable_edit_state("failed", message)
+        QMessageBox.critical(
+            self,
+            "保存失败",
+            message + "\n\n原文件未被替换，当前编辑内容仍保留。",
+        )
+
+    def _show_deliverable_conflict_options(self, file_missing=False):
+        message = (
+            "原文件已被删除，不能覆盖。你可以把当前内容另存为新文件。"
+            if file_missing
+            else "文件已被其他程序修改。为避免覆盖外部修改，只能重新载入或另存为。"
+        )
+        buttons = []
+        if not file_missing:
+            buttons.append(("重新载入", "reload", "secondary", False))
+        buttons.extend(
+            [
+                ("另存为…", "save_copy", "primary", True),
+                ("取消", "cancel", "secondary", False),
+            ]
+        )
+        choice = ProductMessageDialog(
+            "检测到外部修改",
+            message,
+            tone="warning",
+            buttons=buttons,
+            parent=self,
+        ).exec_result("cancel")
+        if choice == "reload":
+            self._release_deliverable_edit_session(show_preview=False)
+            self.select_deliverable(
+                getattr(self, "current_deliverable_path", ""),
+                render_html=True,
+            )
+            self.begin_deliverable_edit()
+        elif choice == "save_copy":
+            self.save_deliverable_copy()
+
+    def save_deliverable_copy(self):
+        session = getattr(self, "deliverable_edit_session", None)
+        if session is None:
+            QMessageBox.warning(self, "无法另存", "请先进入编辑。")
+            return
+        extension = os.path.splitext(session.path)[1]
+        base = os.path.splitext(os.path.basename(session.path))[0]
+        target, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "另存编辑内容",
+            os.path.join(os.path.dirname(session.path), f"{base}-副本{extension}"),
+            f"{extension.upper().lstrip('.')} 文件 (*{extension})",
+        )
+        if not target:
+            return
+        if not os.path.splitext(target)[1]:
+            target += extension
+        if os.path.splitext(target)[1].lower() != extension.lower():
+            QMessageBox.warning(
+                self,
+                "无法另存",
+                f"另存文件必须保持 {extension} 扩展名。",
+            )
+            return
+        if os.path.exists(target):
+            QMessageBox.warning(self, "无法另存", "目标文件已存在，请选择一个新的文件名。")
+            return
+        serialized = getattr(self, "deliverable_pending_serialized", b"")
+        if serialized:
+            self._set_deliverable_edit_state("saving", "正在验证并另存文件…")
+            self.deliverable_editor_internal_write = False
+            worker = DeliverableEditSaveWorker(
+                session,
+                None,
+                target,
+                serialized_data=bytes(serialized),
+                parent=self,
+            )
+            self.deliverable_save_worker = worker
+            worker.finished_signal.connect(self._handle_deliverable_save_finished)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+            return
+        self.save_deliverable_edit(target_path=target)
+
+    def restore_deliverable_previous_version(self):
+        path = getattr(self, "current_deliverable_path", "")
+        if not path or not os.path.isfile(path):
+            return
+        if not self.confirm_leave_deliverable_edit("恢复上一版"):
+            return
+        choice = QMessageBox.question(
+            self,
+            "恢复上一版",
+            "将用应用保留的上一版替换当前文件；当前版本会成为新的“上一版”。是否继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice != QMessageBox.Yes:
+            return
+        self._set_deliverable_edit_state("restoring")
+        worker = DeliverableRestoreWorker(path, self)
+        self.deliverable_restore_worker = worker
+        worker.finished_signal.connect(self._handle_deliverable_restore_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _handle_deliverable_restore_finished(self, result):
+        self.deliverable_restore_worker = None
+        if not result.get("ok"):
+            self._set_deliverable_edit_state("idle")
+            QMessageBox.critical(
+                self,
+                "恢复失败",
+                str(result.get("message") or "无法恢复上一版。"),
+            )
+            return
+        log_sub_agent_runtime(
+            "deliverable_edit_restore_finish",
+            path=result["result"].path,
+        )
+        self._release_deliverable_edit_session(show_preview=False)
+        self.current_deliverable_stale = True
+        self.deliverable_render_fingerprint = None
+        self.select_deliverable(result["result"].path, render_html=True)
+        self.add_system_toast("已恢复上一版；恢复前的版本现在是新的上一版。", "success")
+
+    def confirm_leave_deliverable_edit(self, reason="离开编辑"):
+        state = getattr(self, "deliverable_edit_state", "idle")
+        if state == "idle":
+            return True
+        if state == "saving":
+            QMessageBox.warning(self, "正在保存", "请等待保存完成后再继续。")
+            return False
+        if not getattr(self, "deliverable_edit_dirty", False):
+            self._release_deliverable_edit_session(show_preview=False)
+            return True
+        choice = QMessageBox.question(
+            self,
+            "有未保存的修改",
+            f"{reason}前需要处理当前修改。选择“保存”后，请在保存完成后再次操作。",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if choice == QMessageBox.Save:
+            self.save_deliverable_edit()
+            return False
+        if choice != QMessageBox.Discard:
+            return False
+        log_sub_agent_runtime(
+            "deliverable_edit_discard",
+            path=getattr(getattr(self, "deliverable_edit_session", None), "path", ""),
+            reason=reason,
+        )
+        self._release_deliverable_edit_session(show_preview=False)
+        return True
+
+    def cancel_deliverable_edit(self):
+        if not self.confirm_leave_deliverable_edit("退出编辑"):
+            return False
+        self.render_selected_deliverable(force=False)
+        return True
+
+    def _release_deliverable_edit_session(self, show_preview=True):
+        self.deliverable_edit_generation += 1
+        view = getattr(self, "deliverable_editor_web_view", None)
+        if view is not None:
+            view.page().runJavaScript(
+                "window.coworkEditor && window.coworkEditor.dispose()"
+            )
+        bridge = getattr(self, "deliverable_editor_bridge", None)
+        if bridge is not None:
+            bridge.reset()
+        self.deliverable_edit_session = None
+        self.deliverable_editor_pending_payload = None
+        self.deliverable_editor_external_conflict = False
+        self.deliverable_pending_serialized = b""
+        self.deliverable_pending_save_target = ""
+        self.deliverable_text_loading = True
+        try:
+            self.deliverable_text_editor.clear()
+            self.deliverable_markdown_preview.clear()
+            self.deliverable_markdown_preview.setVisible(False)
+        finally:
+            self.deliverable_text_loading = False
+        self.deliverable_edit_dirty = False
+        self._set_deliverable_edit_state("idle")
+        self._reset_deliverable_mode_buttons()
+        if show_preview:
+            self.render_selected_deliverable(force=False)
+
+    def _reset_deliverable_mode_buttons(self):
+        preview_btn = getattr(self, "deliverable_preview_btn", None)
+        edit_btn = getattr(self, "deliverable_edit_btn", None)
+        if preview_btn:
+            preview_btn.setChecked(True)
+        if edit_btn:
+            edit_btn.setChecked(False)
 
     def _ensure_deliverable_web_view(self):
         if getattr(self, "deliverable_web_view", None) is not None:
@@ -29821,8 +31094,49 @@ class MainWindow(QMainWindow):
 
     def handle_deliverable_fs_changed(self, path):
         current = getattr(self, "current_deliverable_path", "")
+        session = getattr(self, "deliverable_edit_session", None)
+        if (
+            current
+            and session is not None
+            and os.path.normcase(session.path)
+            == os.path.normcase(os.path.abspath(current))
+            and not os.path.isfile(current)
+            and not getattr(self, "deliverable_editor_internal_write", False)
+        ):
+            self.deliverable_editor_external_conflict = True
+            self._set_deliverable_edit_state(
+                "conflict",
+                "原文件已被删除；当前内容只能另存为。",
+            )
+            log_sub_agent_runtime(
+                "deliverable_edit_external_conflict",
+                path=current,
+                deleted=True,
+            )
         if current and os.path.normcase(os.path.abspath(path or "")) == os.path.normcase(os.path.abspath(current)):
             self.current_deliverable_stale = True
+            editing_current = bool(
+                session
+                and os.path.normcase(session.path)
+                == os.path.normcase(os.path.abspath(current))
+            )
+            recent_until = float(
+                getattr(self, "deliverable_recent_internal_save_until", 0.0) or 0.0
+            )
+            if (
+                editing_current
+                and not getattr(self, "deliverable_editor_internal_write", False)
+                and time.monotonic() > recent_until
+            ):
+                self.deliverable_editor_external_conflict = True
+                self._set_deliverable_edit_state(
+                    "conflict",
+                    "文件已在外部修改；当前内容只能重新载入或另存为。",
+                )
+                log_sub_agent_runtime(
+                    "deliverable_edit_external_conflict",
+                    path=current,
+                )
             if hasattr(self, "deliverable_status_label"):
                 self.deliverable_status_label.setText("文件已更新，点击“刷新预览”查看最新内容。")
         timer = getattr(self, "deliverable_refresh_timer", None)
@@ -29969,6 +31283,26 @@ class MainWindow(QMainWindow):
 
     def select_deliverable(self, path, render_html=True):
         path = os.path.normpath(str(path or ""))
+        active_session = getattr(self, "deliverable_edit_session", None)
+        if (
+            active_session is not None
+            and getattr(self, "deliverable_edit_state", "idle") != "idle"
+            and os.path.normcase(active_session.path)
+            != os.path.normcase(os.path.abspath(path))
+        ):
+            if not self.confirm_leave_deliverable_edit("切换文件"):
+                self.current_deliverable_path = active_session.path
+                return False
+        if (
+            active_session is not None
+            and getattr(self, "deliverable_edit_state", "idle") != "idle"
+            and os.path.normcase(active_session.path)
+            == os.path.normcase(os.path.abspath(path))
+        ):
+            self.current_deliverable_path = path
+            self._set_deliverable_controls_enabled(path)
+            self._watch_deliverable_paths()
+            return True
         previous_path = getattr(self, "current_deliverable_path", "") or ""
         can_reuse_render = bool(path and self._can_reuse_deliverable_render(path))
         self.current_deliverable_path = path if os.path.isfile(path) else ""
@@ -29987,7 +31321,7 @@ class MainWindow(QMainWindow):
             self.preview_meta_label.setText(relative)
         self._watch_deliverable_paths()
         if not self.current_deliverable_path:
-            return
+            return False
         ext = os.path.splitext(self.current_deliverable_path)[1].lower()
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(self.describe_path_for_preview(self.current_deliverable_path))
@@ -30019,8 +31353,11 @@ class MainWindow(QMainWindow):
         else:
             self.deliverable_text_preview.setPlainText("当前格式暂不支持内嵌渲染，可使用打开或在资源管理器中显示。")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        return True
 
     def render_selected_deliverable(self, force=False):
+        if getattr(self, "deliverable_edit_state", "idle") != "idle":
+            return
         path = getattr(self, "current_deliverable_path", "")
         if not path or not os.path.isfile(path):
             return
@@ -30226,6 +31563,8 @@ class MainWindow(QMainWindow):
     def handle_deliverable_render_progress(self, progress):
         if not getattr(self, "deliverable_render_loading", False):
             return
+        if getattr(self, "deliverable_edit_state", "idle") != "idle":
+            return
         path = getattr(self, "current_deliverable_path", "")
         if path and hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(
@@ -30254,6 +31593,8 @@ class MainWindow(QMainWindow):
         state = self.get_current_session() if hasattr(self, "get_current_session") else None
         if state:
             state.deliverable_preview_rendered = bool(ok)
+        if getattr(self, "deliverable_edit_state", "idle") != "idle":
+            return
         if not hasattr(self, "deliverable_status_label"):
             return
         if ok and path:
@@ -35098,6 +36439,7 @@ class MainWindow(QMainWindow):
             drawer_open=bool(getattr(self, "right_drawer_open", False)),
             drawer_tab=getattr(self, "right_drawer_tab", None),
         )
+        return True
         try:
             self.sub_agent_monitor.reset()
             log_sub_agent_runtime(

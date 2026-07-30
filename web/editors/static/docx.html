@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob: qrc:; script-src 'self' qrc:; worker-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:">
+    <title>DOCX 编辑器</title>
+    <link rel="stylesheet" href="editor.css">
+  </head>
+  <body>
+    <main class="editor-shell">
+      <nav class="editor-toolbar" aria-label="文档编辑工具">
+        <button type="button" data-command="undo" title="撤销">↶</button>
+        <button type="button" data-command="redo" title="重做">↷</button>
+        <span class="toolbar-separator"></span>
+        <select data-command="title" aria-label="段落样式">
+          <option value="">正文</option>
+          <option value="first">标题 1</option>
+          <option value="second">标题 2</option>
+          <option value="third">标题 3</option>
+        </select>
+        <button type="button" data-command="bold" title="粗体"><strong>B</strong></button>
+        <button type="button" data-command="italic" title="斜体"><em>I</em></button>
+        <button type="button" data-command="underline" title="下划线"><u>U</u></button>
+        <button type="button" data-command="strikeout" title="删除线"><s>S</s></button>
+        <span class="toolbar-separator"></span>
+        <button type="button" data-command="bullets" title="项目符号">• 列表</button>
+        <button type="button" data-command="numbering" title="编号列表">1. 列表</button>
+        <button type="button" data-command="alignLeft" title="左对齐">左</button>
+        <button type="button" data-command="alignCenter" title="居中">中</button>
+        <button type="button" data-command="alignRight" title="右对齐">右</button>
+        <button type="button" data-command="justify" title="两端对齐">齐</button>
+        <span class="toolbar-separator"></span>
+        <button type="button" data-command="table" title="插入 3×3 表格">插入表格</button>
+      </nav>
+      <div id="docx-canvas"></div>
+    </main>
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="docx-editor.js"></script>
+  </body>
+</html>

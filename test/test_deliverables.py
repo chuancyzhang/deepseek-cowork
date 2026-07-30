@@ -409,7 +409,7 @@ class TestDeliverableScanning(unittest.TestCase):
 
         self.assertEqual([item["name"] for item in items], ["page.html"])
 
-    def test_empty_state_replaces_report_card_with_office_deliverable_card(self):
+    def test_empty_state_exposes_finance_data_and_browser_task_cards(self):
         app = QApplication.instance() or QApplication([])
         class PromptBox:
             def setText(self, text):
@@ -422,6 +422,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 self.office_output_profile = ""
                 self.opened_settings_page = None
                 self.ppt_opened = False
+                self.prepared_actions = []
 
             def open_settings(self, initial_page_label=None):
                 self.opened_settings_page = initial_page_label
@@ -429,23 +430,40 @@ class TestDeliverableScanning(unittest.TestCase):
             def open_ppt_agent_mode(self):
                 self.ppt_opened = True
 
+            def prepare_home_action(self, action_id):
+                self.prepared_actions.append(action_id)
+
         main_window = MainWindowStub()
         widget = EmptyStateWidget(main_window)
         try:
-            titles = [item[0] for item in widget.actions_data]
-            self.assertEqual(titles, ["PPT Agent", "📁 整理文件", "🖼️ 处理图片", "办公交付物"])
-            self.assertIn("办公交付物", titles)
-            self.assertNotIn("代码搜索", titles)
-            self.assertNotIn("生成报告", titles)
+            titles = [item["title"] for item in widget.actions_data]
+            self.assertEqual(titles, ["PPT Agent", "进行金融分析", "数据分析", "浏览器自动化"])
             widget.action_cards[0].click()
             self.assertTrue(main_window.ppt_opened)
-            office_card = next(item for item in widget.actions_data if item[0] == "办公交付物")
-            self.assertEqual(office_card[1], "预览修改，再生成文件")
-            self.assertIn("右侧交付物视图", office_card[2])
-            self.assertIn("PPTX、DOCX 或 PDF", office_card[2])
-            self.assertEqual(office_card[3], "fa5s.file-code")
-            widget.action_cards[titles.index("办公交付物")].click()
-            self.assertEqual(main_window.input_field.text, office_card[2])
+            finance_card = next(item for item in widget.actions_data if item["id"] == "finance")
+            data_card = next(item for item in widget.actions_data if item["id"] == "data")
+            browser_card = next(item for item in widget.actions_data if item["id"] == "browser")
+            self.assertIn("Wind API Key", finance_card["prompt"])
+            self.assertIn("妙想 API Key", finance_card["prompt"])
+            self.assertIn("机器学习模型", data_card["prompt"])
+            self.assertIn("当前工作区", data_card["prompt"])
+            self.assertIn("明确确认", browser_card["prompt"])
+
+            widget.action_cards[titles.index("进行金融分析")].click()
+            self.assertEqual(main_window.input_field.text, finance_card["prompt"])
+            self.assertEqual(main_window.prepared_actions, ["finance"])
+            widget.refresh_theme(
+                {
+                    "workspace_scene": {"attachment": "fixed", "layers": []},
+                    "surfaces": {},
+                    "components": {},
+                    "content": {"home.card.finance.title": "研究市场"},
+                }
+            )
+            self.assertEqual(widget.action_cards[1]._theme_title_label.text(), "研究市场")
+            widget.action_cards[1].click()
+            self.assertEqual(main_window.prepared_actions, ["finance", "finance"])
+            self.assertEqual(main_window.input_field.text, finance_card["prompt"])
             self.assertEqual(main_window.workflow_mode, "")
             self.assertEqual(main_window.office_output_profile, "")
             self.assertIsNotNone(widget.findChild(QPushButton, None))
@@ -478,6 +496,121 @@ class TestDeliverableScanning(unittest.TestCase):
         finally:
             widget.close()
             widget.deleteLater()
+
+    def _home_action_window(self, *, configs=None, browser_ready=True):
+        state = type(
+            "_Session",
+            (),
+            {
+                "session_id": "session-home",
+                "selected_skill_names": ["command-tools"],
+            },
+        )()
+        window = MainWindow.__new__(MainWindow)
+        window.get_current_session = MagicMock(return_value=state)
+        window._session_is_busy = MagicMock(return_value=False)
+        window.skill_manager_ready = True
+        window.skill_load_error = ""
+        window._flush_pending_skill_runtime_reload = MagicMock(return_value=True)
+        window.skill_manager = MagicMock()
+        window.skill_manager.get_all_skills.return_value = [
+            {"name": "wind-aifinmarket", "enabled": True},
+            {"name": "eastmoney-miaoxiang", "enabled": True},
+            {"name": "python-runner", "enabled": True},
+            {"name": "browser-automation", "enabled": True},
+        ]
+        config_values = configs or {
+            "wind-aifinmarket": {"WIND_API_KEY": "wind-secret"},
+            "eastmoney-miaoxiang": {"MX_APIKEY": "eastmoney-secret"},
+        }
+        window.config_manager = MagicMock()
+        window.config_manager.get_skill_config.side_effect = (
+            lambda skill_name: dict(config_values.get(skill_name) or {})
+        )
+        window.set_session_selected_skills = MagicMock()
+        window.add_system_toast = MagicMock()
+        window.component_task_manager = MagicMock()
+        window.component_task_manager.component_status_snapshot.return_value = {
+            "components": {
+                "browser-skill": {
+                    "ready": browser_ready,
+                }
+            }
+        }
+        return window, state
+
+    def test_finance_home_action_atomically_loads_wind_and_eastmoney(self):
+        window, state = self._home_action_window()
+
+        with patch("main.log_ui_navigation"):
+            prepared = window.prepare_home_action("finance")
+
+        self.assertTrue(prepared)
+        window.set_session_selected_skills.assert_called_once_with(
+            ["command-tools", "wind-aifinmarket", "eastmoney-miaoxiang"],
+            session_id=state.session_id,
+        )
+        success_message = window.add_system_toast.call_args.args[0]
+        self.assertIn("万得金融能力", success_message)
+        self.assertIn("东方财富妙想", success_message)
+
+    def test_finance_home_action_requires_both_keys_without_partial_loading(self):
+        window, _state = self._home_action_window(
+            configs={
+                "wind-aifinmarket": {"WIND_API_KEY": "wind-secret"},
+                "eastmoney-miaoxiang": {},
+            }
+        )
+
+        with patch("main.log_ui_navigation"):
+            prepared = window.prepare_home_action("finance")
+
+        self.assertFalse(prepared)
+        window.set_session_selected_skills.assert_not_called()
+        warning_message = window.add_system_toast.call_args.args[0]
+        self.assertIn("妙想 API Key", warning_message)
+        self.assertIn("AI 能力商城", warning_message)
+
+    def test_data_home_action_loads_python_and_warns_when_toolkit_is_missing(self):
+        window, state = self._home_action_window()
+
+        with patch("main.log_ui_navigation"), patch(
+            "main.toolkit_status",
+            return_value={"installed": False, "healthy": False},
+        ):
+            prepared = window.prepare_home_action("data")
+
+        self.assertFalse(prepared)
+        window.set_session_selected_skills.assert_called_once_with(
+            ["command-tools", "python-runner"],
+            session_id=state.session_id,
+        )
+        warning_message = window.add_system_toast.call_args.args[0]
+        self.assertIn("数据分析工具包", warning_message)
+        self.assertIn("设置 → 组件与依赖", warning_message)
+
+    def test_browser_home_action_requires_connection_before_loading(self):
+        window, _state = self._home_action_window(browser_ready=False)
+
+        with patch("main.log_ui_navigation"):
+            prepared = window.prepare_home_action("browser")
+
+        self.assertFalse(prepared)
+        window.set_session_selected_skills.assert_not_called()
+        warning_message = window.add_system_toast.call_args.args[0]
+        self.assertIn("浏览器扩展安装和连接检查", warning_message)
+
+    def test_browser_home_action_loads_ready_browser_capability(self):
+        window, state = self._home_action_window(browser_ready=True)
+
+        with patch("main.log_ui_navigation"):
+            prepared = window.prepare_home_action("browser")
+
+        self.assertTrue(prepared)
+        window.set_session_selected_skills.assert_called_once_with(
+            ["command-tools", "browser-automation"],
+            session_id=state.session_id,
+        )
 
     def test_agent_module_exposes_builtin_ppt_agent_without_custom_profile_storage(self):
         app = QApplication.instance() or QApplication([])

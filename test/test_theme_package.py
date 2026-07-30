@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage
 
 from core.theme import default_design_tokens
 from core.theme_package import build_asset_record
-from core.theme_service import ThemeRepository, validate_theme_manifest
+from core.theme_service import ThemeRepository, theme_manifest_schema, validate_theme_manifest
 
 
 class ThemePackageTests(unittest.TestCase):
@@ -87,6 +87,76 @@ class ThemePackageTests(unittest.TestCase):
         }
         validated = validate_theme_manifest(payload, self.defaults)
         self.assertEqual(validated["content"]["brand.title"], "My Cowork")
+
+    def test_home_card_schema_uses_new_semantic_ids_and_accepts_legacy_aliases(self):
+        schema = theme_manifest_schema()
+        self.assertIn("home.card.finance", schema["components"])
+        self.assertIn("home.card.data", schema["components"])
+        self.assertIn("home.card.browser", schema["components"])
+        self.assertNotIn("home.card.files", schema["components"])
+        self.assertEqual(
+            schema["content_keys"]["home.card.data.title"],
+            "数据分析",
+        )
+
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "legacy-home-cards",
+            "name": "Legacy home cards",
+            "overrides": {},
+            "assets": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
+            "surfaces": {},
+            "components": {
+                "home.card.files": {
+                    "style": {"background": "#f4f4ff"},
+                    "layout": {"row": 0, "column": 1},
+                },
+                "home.card.images": {"visible": False},
+                "home.card.office": {"icon": {"source": "builtin", "name": "fa5s.globe"}},
+            },
+            "content": {
+                "home.card.files.title": "市场研究",
+                "home.card.images.description": "分析本地数据",
+                "home.card.office.title": "操作网页",
+            },
+        }
+
+        normalized = validate_theme_manifest(payload, self.defaults)
+
+        self.assertEqual(
+            normalized["components"]["home.card.finance"]["layout"],
+            {"row": 0, "column": 1},
+        )
+        self.assertFalse(normalized["components"]["home.card.data"]["visible"])
+        self.assertEqual(
+            normalized["components"]["home.card.browser"]["icon"]["name"],
+            "fa5s.globe",
+        )
+        self.assertEqual(normalized["content"]["home.card.finance.title"], "市场研究")
+        self.assertEqual(normalized["content"]["home.card.data.description"], "分析本地数据")
+        self.assertEqual(normalized["content"]["home.card.browser.title"], "操作网页")
+        self.assertNotIn("home.card.files", normalized["components"])
+
+    def test_home_card_manifest_rejects_mixed_legacy_and_canonical_keys(self):
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "mixed-home-cards",
+            "name": "Mixed home cards",
+            "overrides": {},
+            "assets": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
+            "surfaces": {},
+            "components": {
+                "home.card.files": {"visible": True},
+                "home.card.finance": {"visible": True},
+            },
+            "content": {},
+        }
+        with self.assertRaisesRegex(ValueError, "新旧组件键"):
+            validate_theme_manifest(payload, self.defaults)
 
     def test_preview_asset_import_and_background_package_round_trip(self):
         preview = self.repository.write_preview(

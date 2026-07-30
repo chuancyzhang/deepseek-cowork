@@ -50,7 +50,7 @@ Cowork 允许 AI 设计界面，但不允许 AI 接管应用代码。AI 可以�
 - 使用内置、随包、用户和标准 Agent Skill 扩展能力。
 - 通过 `stdio` 或 Streamable HTTP 接入 MCP Tool。
 - 管理模型、Agent、自动化、记忆、主题、企业消息和可选组件。
-- 使用 PPT Agent、Visualize、浏览器自动化、网页搜索和文档/数据工具包。
+- 从新会话首页快速进入 PPT Agent、万得与东方财富金融分析、工作区数据/机器学习分析和浏览器自动化，并继续使用 Visualize、网页搜索及文档/数据工具包。
 
 ## 安装
 

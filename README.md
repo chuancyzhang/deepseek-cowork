@@ -56,6 +56,7 @@ See the [product document](docs/product.md) for the full model.
 - Extend the runtime with built-in, bundled, user, and standard Agent Skills.
 - Connect MCP Tools over `stdio` or Streamable HTTP.
 - Manage models, Agents, automation, memory, themes, enterprise messaging, and optional components.
+- Start PPT Agent, Wind + Eastmoney financial research, workspace data and machine-learning analysis, or browser automation directly from the new-conversation home screen.
 
 ## Install
 

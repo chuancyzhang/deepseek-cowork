@@ -680,21 +680,24 @@ def main_run():
                     "conversation.composer": {
                         "material": {"kind": "tint", "color": "#171a21", "opacity": 0.94}
                     },
+                    "home.reminder": {
+                        "material": {"kind": "tint", "color": "#f8f9ff", "opacity": 0.96}
+                    },
                 },
                 components={
                     "home.title": {"style": {"foreground": "#f3f4ff", "font_size": 23, "font_weight": 700}},
                     "home.card.ppt": {"layout": {"row": 0, "column": 0, "column_span": 2}, "style": {"border_color": "#555e95", "border_width": 1}},
-                    "home.card.files": {"layout": {"row": 1, "column": 0}},
-                    "home.card.images": {"visible": False},
-                    "home.card.office": {"layout": {"row": 1, "column": 1}},
+                    "home.card.finance": {"layout": {"row": 1, "column": 0}},
+                    "home.card.data": {"visible": False},
+                    "home.card.browser": {"layout": {"row": 1, "column": 1}},
                 },
                 content={
                     "brand.title": "DeepSeek Cowork · 星图",
                     "home.title": "今晚，从一件重要的事开始",
                     "home.card.ppt.title": "星图演示",
                     "home.card.ppt.description": "进入固定行为的 PPT Mode",
-                    "home.card.files.title": "归档素材",
-                    "home.card.office.title": "生成交付物",
+                    "home.card.finance.title": "星图研究",
+                    "home.card.browser.title": "自动操作网页",
                     "home.reminder.title": "主题改变呈现，不改变能力边界",
                     "composer.placeholder": "描述目标，界面会保持动作与安全边界不变",
                 },
@@ -710,6 +713,8 @@ def main_run():
             window.resize(1280, 800)
             window.show()
             process_events(260)
+            window.sync_context_drawer_layout()
+            process_events(120)
             save_window_with_popups(window, "s39-ai-theme-package-home.png", 220)
             window.add_chat_bubble(
                 "User",
@@ -782,6 +787,14 @@ def main_run():
             return
         if SCREENSHOT_SCOPE == "history-performance":
             render_history_performance_screens(window)
+            return
+        if SCREENSHOT_SCOPE == "home":
+            window.resize(1440, 900)
+            window.show()
+            process_events(180)
+            window.sync_context_drawer_layout()
+            process_events(120)
+            save_widget(window, "s04-home-and-settings.png", 250)
             return
         save_widget(window, "04-home-screen.png", 250)
         model_style = window.model_select_btn.styleSheet()

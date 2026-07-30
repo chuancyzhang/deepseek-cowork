@@ -13967,6 +13967,8 @@ class StatusPill(QFrame):
         return self.text_label.fullText()
 
 class EmptyStateWidget(QWidget):
+    ACTION_KEYS = ("ppt", "finance", "data", "browser")
+
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
@@ -13984,27 +13986,53 @@ class EmptyStateWidget(QWidget):
         self.grid_layout.setSpacing(12)
         
         self.actions_data = [
-            (
-                "PPT Agent",
-                "进入 PPT Mode",
-                "让 PPT Agent 生成演示文稿 HTML 工作稿，再从交付物预览导出 PPTX、DOCX 或 PDF。",
-                "fa5s.file-powerpoint",
-            ),
-            ("📁 整理文件", "按类型自动分类", "帮我把当前目录下的文件按类型分类整理"),
-            ("🖼️ 处理图片", "批量重命名/压缩", "帮我把所有图片重命名为日期格式"),
-            (
-                "办公交付物",
-                "预览修改，再生成文件",
-                "请帮我生成一份可预览的办公交付物，保存到工作区。完成后我会在右侧交付物视图里预览并继续修改，最后可按需要生成 PPTX、DOCX 或 PDF。",
-                "fa5s.file-code",
-            ),
+            {
+                "id": "ppt",
+                "title": "PPT Agent",
+                "description": "进入 PPT Mode",
+                "prompt": "让 PPT Agent 生成演示文稿 HTML 工作稿，再从交付物预览导出 PPTX、DOCX 或 PDF。",
+                "icon": "fa5s.file-powerpoint",
+            },
+            {
+                "id": "finance",
+                "title": "进行金融分析",
+                "description": "万得 + 东方财富（需配置 Key）",
+                "prompt": (
+                    "请同时使用万得金融能力和东方财富妙想，对我接下来提供的标的或问题进行金融分析。"
+                    "开始前请确认两项能力均已开启，并已配置 Wind API Key 和妙想 API Key；"
+                    "如果任一能力或 Key 不可用，请停止并明确告诉我，不要静默改用其他数据源。"
+                    "分析时请注明实际数据源、查询时间、限制和金融研究风险提示。"
+                ),
+                "icon": "fa5s.chart-line",
+            },
+            {
+                "id": "data",
+                "title": "数据分析",
+                "description": "分析工作区数据，可构建机器学习模型",
+                "prompt": (
+                    "请先扫描当前工作区中的数据文件，列出可用数据、字段、体量和质量问题，"
+                    "再根据我补充的目标完成统计分析与可视化。"
+                    "如果任务适合，也可以根据我的自然语言要求构建、训练并评估机器学习模型。"
+                    "不要修改源数据，生成的分析结果请保存到工作区。"
+                ),
+                "icon": "fa5s.database",
+            },
+            {
+                "id": "browser",
+                "title": "浏览器自动化",
+                "description": "读取网页、提取数据和填写表单",
+                "prompt": (
+                    "请使用浏览器自动化能力完成网页操作。先说明准备访问的页面和操作计划，"
+                    "再读取网页、提取数据或填写表单；涉及提交、发布、付款或修改远端数据前，"
+                    "必须先取得我的明确确认。"
+                ),
+                "icon": "fa5s.robot",
+            },
         ]
         
         self.action_cards = []
-        for item in self.actions_data:
-            text, desc, prompt = item[:3]
-            icon_name = item[3] if len(item) > 3 else ""
-            btn = self.create_action_card(text, desc, prompt, icon_name=icon_name)
+        for action in self.actions_data:
+            btn = self.create_action_card(action)
             self.action_cards.append(btn)
             
         layout.addStretch()
@@ -14030,9 +14058,9 @@ class EmptyStateWidget(QWidget):
         self._theme_component_bases = {
             "home.title": self.title_label.styleSheet(),
             "home.card.ppt": self.action_cards[0].styleSheet(),
-            "home.card.files": self.action_cards[1].styleSheet(),
-            "home.card.images": self.action_cards[2].styleSheet(),
-            "home.card.office": self.action_cards[3].styleSheet(),
+            "home.card.finance": self.action_cards[1].styleSheet(),
+            "home.card.data": self.action_cards[2].styleSheet(),
+            "home.card.browser": self.action_cards[3].styleSheet(),
             "home.reminder": self.toolkit_hint.styleSheet(),
         }
         bind_theme(self, self.refresh_theme, surface="conversation")
@@ -14065,9 +14093,8 @@ class EmptyStateWidget(QWidget):
             
         # Re-add to grid
         components = (getattr(self, "_resolved_theme", {}) or {}).get("components") or {}
-        keys = ("ppt", "files", "images", "office")
         visible_index = 0
-        for i, (key, btn) in enumerate(zip(keys, self.action_cards)):
+        for i, (key, btn) in enumerate(zip(self.ACTION_KEYS, self.action_cards)):
             layout_spec = (components.get(f"home.card.{key}") or {}).get("layout") or {}
             if btn.isHidden():
                 continue
@@ -14084,7 +14111,12 @@ class EmptyStateWidget(QWidget):
             self.grid_layout.addWidget(btn, row, column, row_span, column_span)
             visible_index += 1
             
-    def create_action_card(self, title, desc, prompt, icon_name=""):
+    def create_action_card(self, action):
+        action_id = str(action.get("id") or "").strip()
+        title = str(action.get("title") or "").strip()
+        desc = str(action.get("description") or "").strip()
+        prompt = str(action.get("prompt") or "").strip()
+        icon_name = str(action.get("icon") or "").strip()
         btn = QPushButton(self.grid_widget)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setMinimumHeight(58)
@@ -14111,10 +14143,6 @@ class EmptyStateWidget(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(8)
         default_icon_name = icon_name
-        if not default_icon_name and "整理文件" in title:
-            default_icon_name = "fa5s.folder"
-        elif not default_icon_name and "处理图片" in title:
-            default_icon_name = "fa5s.image"
         icon_label = QLabel()
         icon_label.setPixmap(qta.icon(default_icon_name, color=DesignTokens.primary).pixmap(20, 20))
         icon_label.setStyleSheet("background: transparent; border: none;")
@@ -14134,18 +14162,25 @@ class EmptyStateWidget(QWidget):
         layout.addWidget(d_label)
         layout.addStretch() # Push content to top
         
-        btn.clicked.connect(lambda: self.activate_action_prompt(prompt, title))
+        btn.clicked.connect(
+            lambda _checked=False, current_id=action_id, current_prompt=prompt: self.activate_action_prompt(
+                current_id,
+                current_prompt,
+            )
+        )
+        btn._home_action_id = action_id
         btn._theme_title_label = t_label
         btn._theme_desc_label = d_label
         btn._theme_icon_label = icon_label
         btn._theme_default_icon = default_icon_name
         return btn
 
-    def activate_action_prompt(self, prompt, title=""):
-        if title == "PPT Agent" and hasattr(self.main_window, "open_ppt_agent_mode"):
+    def activate_action_prompt(self, action_id, prompt):
+        if action_id == "ppt":
             self.main_window.open_ppt_agent_mode()
             return
         self.main_window.input_field.setText(prompt)
+        self.main_window.prepare_home_action(action_id)
 
     def create_toolkit_hint(self):
         hint = QFrame(self)
@@ -14222,11 +14257,11 @@ class EmptyStateWidget(QWidget):
         self.title_label.setText(content.get("home.title", "从一个任务开始"))
         defaults = {
             "ppt": ("PPT Agent", "进入 PPT Mode"),
-            "files": ("整理文件", "按类型自动分类"),
-            "images": ("处理图片", "批量重命名/压缩"),
-            "office": ("办公交付物", "预览修改，再生成文件"),
+            "finance": ("进行金融分析", "万得 + 东方财富（需配置 Key）"),
+            "data": ("数据分析", "分析工作区数据，可构建机器学习模型"),
+            "browser": ("浏览器自动化", "读取网页、提取数据和填写表单"),
         }
-        for key, button in zip(("ppt", "files", "images", "office"), self.action_cards):
+        for key, button in zip(self.ACTION_KEYS, self.action_cards):
             title, description = defaults[key]
             button._theme_title_label.setText(content.get(f"home.card.{key}.title", title))
             button._theme_desc_label.setText(content.get(f"home.card.{key}.description", description))
@@ -33540,6 +33575,271 @@ class MainWindow(QMainWindow):
                 auto_close_ms=2800,
             )
         return submitted
+
+    def _merge_home_action_skills(self, state, action_id, skill_names):
+        existing = normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+        merged = normalize_selected_skill_names(existing + list(skill_names or []))
+        self.set_session_selected_skills(merged, session_id=state.session_id)
+        log_ui_navigation(
+            "home_action_prepare_done",
+            action_id=action_id,
+            session_id=state.session_id,
+            added_skill_names=list(skill_names or []),
+            selected_count=len(merged),
+        )
+        return True
+
+    def _home_action_skill_records(self):
+        if not self.skill_manager_ready:
+            return {}
+        self._flush_pending_skill_runtime_reload()
+        return {
+            str(skill.get("name") or "").strip(): skill
+            for skill in self.skill_manager.get_all_skills()
+            if str(skill.get("name") or "").strip()
+        }
+
+    def _show_home_action_setup_required(self, state, action_id, message, missing_codes):
+        log_ui_navigation(
+            "home_action_setup_required",
+            action_id=action_id,
+            session_id=state.session_id,
+            missing=list(missing_codes or []),
+        )
+        self.add_system_toast(
+            message,
+            "warning",
+            session_id=state.session_id,
+            auto_close_ms=7600,
+        )
+        return False
+
+    def prepare_home_action(self, action_id):
+        action_id = str(action_id or "").strip().lower()
+        state = self.get_current_session()
+        log_ui_navigation(
+            "home_action_prepare_begin",
+            action_id=action_id,
+            session_id=getattr(state, "session_id", "") if state else "",
+        )
+        if not state:
+            log_ui_navigation("home_action_prepare_error", action_id=action_id, error="session_missing")
+            self.add_system_toast("当前会话不可用，无法加载任务能力。", "error", auto_close_ms=5200)
+            return False
+        if self._session_is_busy(state):
+            return self._show_home_action_setup_required(
+                state,
+                action_id,
+                "当前任务仍在运行，请等待完成后再切换首页任务能力。",
+                ["session_busy"],
+            )
+        if not self.skill_manager_ready:
+            message = self.skill_load_error or "能力仍在加载中。提示词已填入，请稍后再次点击任务卡。"
+            return self._show_home_action_setup_required(
+                state,
+                action_id,
+                message,
+                ["skill_catalog_not_ready"],
+            )
+
+        try:
+            skill_records = self._home_action_skill_records()
+        except Exception as exc:
+            log_ui_navigation(
+                "home_action_prepare_error",
+                action_id=action_id,
+                session_id=state.session_id,
+                error=str(exc),
+            )
+            self.add_system_toast(
+                f"无法检查能力状态：{exc}",
+                "error",
+                session_id=state.session_id,
+                auto_close_ms=7600,
+            )
+            return False
+
+        if action_id == "finance":
+            required = (
+                ("wind-aifinmarket", "万得金融能力", "wind_skill_disabled"),
+                ("eastmoney-miaoxiang", "东方财富妙想", "eastmoney_skill_disabled"),
+            )
+            missing_messages = []
+            missing_codes = []
+            for skill_name, label, code in required:
+                skill = skill_records.get(skill_name)
+                if not skill:
+                    missing_messages.append(f"未找到{label}")
+                    missing_codes.append(code.replace("_disabled", "_missing"))
+                elif not bool(skill.get("enabled")):
+                    missing_messages.append(f"开启{label}")
+                    missing_codes.append(code)
+
+            wind_config = self.config_manager.get_skill_config("wind-aifinmarket") or {}
+            eastmoney_config = self.config_manager.get_skill_config("eastmoney-miaoxiang") or {}
+            if not str(wind_config.get("WIND_API_KEY") or "").strip():
+                missing_messages.append("配置 Wind API Key")
+                missing_codes.append("wind_api_key_missing")
+            if not str(eastmoney_config.get("MX_APIKEY") or "").strip():
+                missing_messages.append("配置妙想 API Key")
+                missing_codes.append("eastmoney_api_key_missing")
+            if missing_messages:
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    "已填入金融分析任务。发送前请在 AI 能力商城完成："
+                    + "；".join(missing_messages)
+                    + "。",
+                    missing_codes,
+                )
+
+            self._merge_home_action_skills(
+                state,
+                action_id,
+                ["wind-aifinmarket", "eastmoney-miaoxiang"],
+            )
+            self.add_system_toast(
+                "已为当前会话加载万得金融能力和东方财富妙想。",
+                "success",
+                session_id=state.session_id,
+                auto_close_ms=3600,
+            )
+            return True
+
+        if action_id == "data":
+            python_skill = skill_records.get("python-runner")
+            if not python_skill:
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    "已填入数据分析任务，但未找到 Python 数据处理能力，请在高级能力管理中检查。",
+                    ["python_runner_missing"],
+                )
+            if not bool(python_skill.get("enabled")):
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    "已填入数据分析任务，请先在 AI 能力商城开启 Python Runner。",
+                    ["python_runner_disabled"],
+                )
+            self._merge_home_action_skills(state, action_id, ["python-runner"])
+            try:
+                data_status = toolkit_status("data-analysis")
+            except Exception as exc:
+                log_ui_navigation(
+                    "home_action_prepare_error",
+                    action_id=action_id,
+                    session_id=state.session_id,
+                    error=str(exc),
+                )
+                self.add_system_toast(
+                    f"已加载 Python 数据处理能力，但无法检查数据分析工具包：{exc}",
+                    "error",
+                    session_id=state.session_id,
+                    auto_close_ms=7600,
+                )
+                return False
+            if not data_status.get("healthy"):
+                if data_status.get("installed"):
+                    detail = data_status.get("health_error") or "工具包需要更新或修复"
+                    message = (
+                        "已加载 Python 数据处理能力，但数据分析工具包尚未就绪："
+                        f"{detail}。请前往“设置 → 组件与依赖”处理后再运行机器学习任务。"
+                    )
+                    missing_code = "data_toolkit_unhealthy"
+                else:
+                    message = (
+                        "已加载 Python 数据处理能力。如需 Pandas、可视化或机器学习，"
+                        "请先在“设置 → 组件与依赖”安装数据分析工具包。"
+                    )
+                    missing_code = "data_toolkit_missing"
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    message,
+                    [missing_code],
+                )
+            self.add_system_toast(
+                "已加载数据分析能力，可补充分析目标后发送。",
+                "success",
+                session_id=state.session_id,
+                auto_close_ms=3600,
+            )
+            return True
+
+        if action_id == "browser":
+            browser_skill = skill_records.get("browser-automation")
+            missing_codes = []
+            missing_messages = []
+            if not browser_skill:
+                missing_messages.append("未找到浏览器自动化能力")
+                missing_codes.append("browser_skill_missing")
+            elif not bool(browser_skill.get("enabled")):
+                missing_messages.append("开启浏览器自动化能力")
+                missing_codes.append("browser_skill_disabled")
+
+            manager = getattr(self, "component_task_manager", None)
+            if manager is None:
+                missing_messages.append("恢复浏览器设置服务")
+                missing_codes.append("browser_component_manager_missing")
+            else:
+                try:
+                    component_status = dict(
+                        (
+                            manager.component_status_snapshot().get("components")
+                            or {}
+                        ).get(BROWSER_SKILL_COMPONENT_ID)
+                        or {}
+                    )
+                except Exception as exc:
+                    log_ui_navigation(
+                        "home_action_prepare_error",
+                        action_id=action_id,
+                        session_id=state.session_id,
+                        error=str(exc),
+                    )
+                    self.add_system_toast(
+                        f"无法检查浏览器连接状态：{exc}",
+                        "error",
+                        session_id=state.session_id,
+                        auto_close_ms=7600,
+                    )
+                    return False
+                if not component_status.get("ready"):
+                    missing_messages.append("完成浏览器扩展安装和连接检查")
+                    missing_codes.append("browser_component_not_ready")
+
+            if missing_messages:
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    "已填入浏览器自动化任务。发送前请在“AI 能力商城 → 浏览器自动化”完成："
+                    + "；".join(missing_messages)
+                    + "。",
+                    missing_codes,
+                )
+            self._merge_home_action_skills(state, action_id, ["browser-automation"])
+            self.add_system_toast(
+                "已为当前会话加载浏览器自动化能力。",
+                "success",
+                session_id=state.session_id,
+                auto_close_ms=3600,
+            )
+            return True
+
+        log_ui_navigation(
+            "home_action_prepare_error",
+            action_id=action_id,
+            session_id=state.session_id,
+            error="unknown_action",
+        )
+        self.add_system_toast(
+            f"未知首页任务：{action_id or '<empty>'}",
+            "error",
+            session_id=state.session_id,
+            auto_close_ms=5200,
+        )
+        return False
 
     def refresh_selected_skill_controls(self, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()

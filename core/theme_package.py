@@ -71,9 +71,9 @@ COMPONENT_CATALOG = {
     "right.sub_agents",
     "home.title",
     "home.card.ppt",
-    "home.card.files",
-    "home.card.images",
-    "home.card.office",
+    "home.card.finance",
+    "home.card.data",
+    "home.card.browser",
     "home.reminder",
 }
 
@@ -89,15 +89,29 @@ CONTENT_DEFAULTS = {
     "home.title": "从一个任务开始",
     "home.card.ppt.title": "PPT Agent",
     "home.card.ppt.description": "进入 PPT Mode",
-    "home.card.files.title": "整理文件",
-    "home.card.files.description": "按类型自动分类",
-    "home.card.images.title": "处理图片",
-    "home.card.images.description": "批量重命名/压缩",
-    "home.card.office.title": "办公交付物",
-    "home.card.office.description": "预览修改，再生成文件",
+    "home.card.finance.title": "进行金融分析",
+    "home.card.finance.description": "万得 + 东方财富（需配置 Key）",
+    "home.card.data.title": "数据分析",
+    "home.card.data.description": "分析工作区数据，可构建机器学习模型",
+    "home.card.browser.title": "浏览器自动化",
+    "home.card.browser.description": "读取网页、提取数据和填写表单",
     "home.reminder.title": "需要处理文档或数据？",
     "home.reminder.description": "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
     "composer.placeholder": "描述你要完成的任务，例如：整理本周截图并生成周报摘要",
+}
+
+LEGACY_HOME_CARD_COMPONENT_ALIASES = {
+    "home.card.files": "home.card.finance",
+    "home.card.images": "home.card.data",
+    "home.card.office": "home.card.browser",
+}
+LEGACY_HOME_CARD_CONTENT_ALIASES = {
+    "home.card.files.title": "home.card.finance.title",
+    "home.card.files.description": "home.card.finance.description",
+    "home.card.images.title": "home.card.data.title",
+    "home.card.images.description": "home.card.data.description",
+    "home.card.office.title": "home.card.browser.title",
+    "home.card.office.description": "home.card.browser.description",
 }
 
 DEFAULT_WORKSPACE_SCENE = {
@@ -439,11 +453,19 @@ def normalize_theme_manifest(
     if not isinstance(raw_components, dict):
         raise ValueError("主题 components 必须是对象。")
     components = {}
-    for component_id, raw in raw_components.items():
+    for source_component_id, raw in raw_components.items():
+        component_id = LEGACY_HOME_CARD_COMPONENT_ALIASES.get(
+            source_component_id,
+            source_component_id,
+        )
+        if component_id in components:
+            raise ValueError(
+                f"主题同时包含同一卡片的新旧组件键：{source_component_id} 与 {component_id}"
+            )
         if component_id in RETIRED_SYSTEM_TITLEBAR_COMPONENTS:
             raise ValueError(f"系统标题栏不支持主题覆盖：{component_id}")
         if component_id not in COMPONENT_CATALOG or not isinstance(raw, dict):
-            raise ValueError(f"未知或无效的主题组件：{component_id}")
+            raise ValueError(f"未知或无效的主题组件：{source_component_id}")
         unknown_component = sorted(set(raw) - {"visible", "icon", "style", "layout"})
         if unknown_component:
             raise ValueError(f"{component_id} 包含禁止或未知字段：{', '.join(unknown_component)}")
@@ -496,9 +518,17 @@ def normalize_theme_manifest(
                     )
                 occupied_home_cells[cell] = component_id
 
-    raw_content = payload.get("content") or {}
-    if not isinstance(raw_content, dict):
+    source_content = payload.get("content") or {}
+    if not isinstance(source_content, dict):
         raise ValueError("主题 content 必须是对象。")
+    raw_content = {}
+    for source_key, value in source_content.items():
+        key = LEGACY_HOME_CARD_CONTENT_ALIASES.get(source_key, source_key)
+        if key in raw_content:
+            raise ValueError(
+                f"主题同时包含同一卡片的新旧文案键：{source_key} 与 {key}"
+            )
+        raw_content[key] = value
     retired_content = sorted(set(raw_content) & RETIRED_SYSTEM_TITLEBAR_CONTENT)
     if retired_content:
         raise ValueError(f"系统标题栏不支持主题覆盖：{', '.join(retired_content)}")

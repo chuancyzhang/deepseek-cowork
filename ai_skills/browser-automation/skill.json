@@ -24,9 +24,8 @@
   "external_components": [
     {
       "id": "browser-skill",
-      "name": "Tencent BrowserSkill",
-      "settings_page": "组件与依赖",
-      "settings_section": "可选浏览器能力"
+      "name": "浏览器控制支持",
+      "capability": "browser-automation"
     }
   ],
   "workflow": [

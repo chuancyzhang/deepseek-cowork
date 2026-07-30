@@ -953,7 +953,7 @@ class LLMWorker(QThread):
             "3. 需要真实 shell 环境、项目命令、构建测试、git/npm/npx/bash 管道或现有 CLI 时，再使用 'bash'。",
             "4. Windows 打包版的 'bash' 优先使用 Git Bash；若 Git Bash 缺失，执行层会退回 cmd.exe，因此可继续执行 cmd 兼容命令。",
             "5. 避免为了运行内联 Python/JavaScript 而套一层 'bash'；除非必须复用命令行入口，否则直接使用对应专用工具。",
-            "能力分层: 核心内置能力只包含始终启用的基础能力；浏览器自动化、网页搜索、金融数据、Office/PDF 读取等随包能力位于 ai_skills，是默认关闭的可选插件。BrowserSkill 浏览器能力及常用工具包可在设置的“组件与依赖”页按需安装。",
+            "能力分层: 核心内置能力只包含始终启用的基础能力；浏览器自动化、网页搜索、金融数据、Office/PDF 读取等随包能力位于 ai_skills，是默认关闭的可选能力。浏览器自动化的准备与连接在“AI 能力商城 → 浏览器自动化”内完成；常用工具包可在设置的“组件与依赖”页按需安装。",
             "可选插件策略: ai_skills 中的随包插件不会因为随应用分发而自动可调用；需要相关能力时先用 'tool_search' 发现，启用或被本轮工具清单暴露后才能调用。",
             "文件策略: 'workspace_list_files' 只列工作区路径；'text_file_read'、'text_file_write'、'text_file_update' 只处理普通文本文件，不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
             "Office/PDF 策略: 读取 DOCX/PPTX/XLSX/XLS/PDF 需先启用可选 document-reader 插件并使用 'document_read'；写入这些格式没有固定工具，应使用 'run_python_code' 和任务所需库自行生成。",

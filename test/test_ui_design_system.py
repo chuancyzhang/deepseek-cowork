@@ -270,6 +270,69 @@ class UiDesignSystemTests(unittest.TestCase):
         finally:
             page.deleteLater()
 
+    def test_browser_card_requires_both_skill_and_browser_connection(self):
+        manager = MagicMock()
+        manager.get_all_skills.return_value = [
+            {
+                "name": "browser-automation",
+                "display_name": "浏览器自动化",
+                "source_type": "bundled_plugin",
+                "enabled": True,
+                "presentation": {
+                    "category": "search_browse",
+                    "short_name": "浏览器操作",
+                    "summary": "读取和操作网页。",
+                    "examples": ["读取登录后的网页", "填写网页表单"],
+                    "access_note": "可访问浏览器登录态。",
+                },
+            }
+        ]
+        manager.is_skill_editable.return_value = False
+        config = MagicMock()
+        page = SkillsCenterDialog(manager, config)
+        try:
+            state_labels = [
+                label.text()
+                for label in page.findChildren(QLabel)
+                if label.objectName() == "CapabilityStateLabel"
+            ]
+            self.assertIn("还需完成一次简单设置", state_labels)
+            self.assertNotIn("✓ 已开启", state_labels)
+            self.assertEqual(
+                [
+                    button.text()
+                    for button in page.findChildren(QPushButton)
+                    if button.objectName() == "BrowserAutomationSetupAction"
+                ],
+                ["继续设置"],
+            )
+            self.assertEqual(
+                len(
+                    [
+                        button
+                        for button in page.findChildren(QPushButton)
+                        if button.objectName() == "CapabilityDisableAction"
+                    ]
+                ),
+                1,
+            )
+
+            page.browser_component_status = {
+                "known": True,
+                "installed": True,
+                "ready": True,
+            }
+            page._render_content()
+            self.app.processEvents()
+            ready_labels = [
+                label.text()
+                for label in page.findChildren(QLabel)
+                if label.objectName() == "CapabilityStateLabel"
+            ]
+            self.assertIn("✓ 已开启", ready_labels)
+        finally:
+            page.deleteLater()
+
     def test_bundled_capabilities_have_complete_linear_presentation_metadata(self):
         root = Path(__file__).resolve().parents[1] / "ai_skills"
         bundled = []

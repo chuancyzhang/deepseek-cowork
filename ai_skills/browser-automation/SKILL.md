@@ -19,7 +19,7 @@ allowed-tools: [browser_skill_cli]
 
 Use `browser_skill_cli` to invoke Tencent BrowserSkill's `bsk` CLI. The plugin requires
 the application-managed CLI and the BrowserSkill Chrome/Edge extension. If the tool
-reports `browser_skill_not_ready`, direct the user to **设置 → 组件与依赖 → 可选浏览器能力**.
+reports `browser_skill_not_ready`, direct the user to **AI 能力商城 → 浏览器自动化**.
 
 ## Mandatory lifecycle
 

@@ -3039,6 +3039,7 @@ class AppleSelectionCheck(QCheckBox):
 class CapabilityWorkbenchDialog(QDialog):
     def __init__(self, skill, skill_manager, config_manager, parent=None, simple_mode=False):
         super().__init__(parent)
+        self._main = parent
         self.skill = dict(skill or {})
         self.skill_manager = skill_manager
         self.config_manager = config_manager
@@ -3050,6 +3051,12 @@ class CapabilityWorkbenchDialog(QDialog):
         self.mcp_tools = []
         self.managed_mcp_server = None
         self.config_editors = {}
+        self.browser_component_manager = None
+        self.browser_component_status = {}
+        self.browser_component_task = {}
+        self.browser_setup_error = ""
+        self.browser_extension_page_opened = False
+        self.browser_enable_after_check = False
         self.setWindowTitle("能力设置" if self.simple_mode else "能力工作台")
         self.resize(980, 680)
         apply_product_dialog(self, "CapabilityWorkbenchDialog")
@@ -3083,8 +3090,13 @@ class CapabilityWorkbenchDialog(QDialog):
             self._build_simple_intro(layout)
 
         self.tabs = QTabWidget()
-        layout.addWidget(self.tabs, 1)
-        if self.simple_mode:
+        if self.simple_mode and self._is_browser_automation():
+            self.tabs.hide()
+            self._build_browser_automation_setup(layout)
+            layout.addStretch()
+        else:
+            layout.addWidget(self.tabs, 1)
+        if self.simple_mode and not self._is_browser_automation():
             self._build_config_tab()
             self.tabs.tabBar().hide()
             if not self.tabs.count():
@@ -3095,6 +3107,356 @@ class CapabilityWorkbenchDialog(QDialog):
             self._build_mcp_tabs()
         else:
             self._build_skill_tabs()
+        if self.simple_mode and self._is_browser_automation():
+            bind_theme(
+                self,
+                self._refresh_browser_automation_theme,
+                surface="management",
+            )
+
+    def _is_browser_automation(self):
+        return self.skill_name == "browser-automation"
+
+    def _refresh_browser_automation_theme(self, _resolved=None):
+        apply_product_dialog(self, "CapabilityWorkbenchDialog")
+        if not hasattr(self, "browser_setup_title"):
+            return
+        self.browser_setup_title.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_body}px; font-weight: 600; "
+            f"color: {DesignTokens.text_primary};"
+        )
+        self.browser_setup_description.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        self.browser_setup_primary_btn.setStyleSheet(product_button_style("primary"))
+        self.browser_setup_secondary_btn.setStyleSheet(product_button_style("secondary"))
+        self._render_browser_automation_setup()
+
+    def _build_browser_automation_setup(self, root_layout):
+        manager = getattr(self._main, "component_task_manager", None)
+        self.browser_component_manager = manager
+        if manager is not None:
+            status_snapshot = manager.component_status_snapshot()
+            self.browser_component_status = dict(
+                (status_snapshot.get("components") or {}).get(BROWSER_SKILL_COMPONENT_ID)
+                or {}
+            )
+            self.browser_component_task = dict(
+                (manager.snapshot().get("tasks") or {}).get(BROWSER_SKILL_COMPONENT_ID)
+                or {}
+            )
+            manager.component_status_changed.connect(self._handle_browser_component_status)
+            manager.state_changed.connect(self._handle_browser_component_tasks)
+            manager.component_task_finished.connect(self._handle_browser_component_finished)
+
+        section, section_layout = build_settings_surface(
+            "开启浏览器自动化",
+            "准备和连接都在这里完成，不需要前往其他设置页。",
+            radius=18,
+        )
+        section.setObjectName("BrowserAutomationSetup")
+        self.browser_setup_title = QLabel("")
+        self.browser_setup_title.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_body}px; font-weight: 600; "
+            f"color: {DesignTokens.text_primary};"
+        )
+        self.browser_setup_description = QLabel("")
+        self.browser_setup_description.setWordWrap(True)
+        self.browser_setup_description.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        self.browser_setup_status = QLabel("")
+        self.browser_setup_status.setWordWrap(True)
+        self.browser_setup_progress = QProgressBar()
+        self.browser_setup_progress.setTextVisible(False)
+        self.browser_setup_progress.setFixedHeight(4)
+        self.browser_setup_progress.hide()
+        section_layout.addWidget(self.browser_setup_title)
+        section_layout.addWidget(self.browser_setup_description)
+        section_layout.addWidget(self.browser_setup_status)
+        section_layout.addWidget(self.browser_setup_progress)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 4, 0, 0)
+        actions.setSpacing(8)
+        actions.addStretch()
+        self.browser_setup_secondary_btn = QPushButton("")
+        self.browser_setup_secondary_btn.setObjectName("BrowserAutomationSecondaryAction")
+        self.browser_setup_secondary_btn.setStyleSheet(product_button_style("secondary"))
+        self.browser_setup_secondary_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action(
+                getattr(self, "_browser_secondary_action", "")
+            )
+        )
+        self.browser_setup_primary_btn = QPushButton("")
+        self.browser_setup_primary_btn.setObjectName("BrowserAutomationPrimaryAction")
+        self.browser_setup_primary_btn.setStyleSheet(product_button_style("primary"))
+        self.browser_setup_primary_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action(
+                getattr(self, "_browser_primary_action", "")
+            )
+        )
+        actions.addWidget(self.browser_setup_secondary_btn)
+        actions.addWidget(self.browser_setup_primary_btn)
+        section_layout.addLayout(actions)
+        root_layout.addWidget(section)
+        self._render_browser_automation_setup()
+        log_ui_navigation("browser_capability_setup_open")
+        if manager is not None and not manager.has_task(BROWSER_SKILL_COMPONENT_ID):
+            QTimer.singleShot(0, self._probe_browser_component)
+
+    def _set_browser_setup_actions(
+        self,
+        primary_text="",
+        primary_action="",
+        secondary_text="",
+        secondary_action="",
+    ):
+        self._browser_primary_action = str(primary_action or "")
+        self._browser_secondary_action = str(secondary_action or "")
+        self.browser_setup_primary_btn.setText(str(primary_text or ""))
+        self.browser_setup_primary_btn.setVisible(bool(primary_text and primary_action))
+        self.browser_setup_primary_btn.setEnabled(bool(primary_text and primary_action))
+        self.browser_setup_secondary_btn.setText(str(secondary_text or ""))
+        self.browser_setup_secondary_btn.setVisible(bool(secondary_text and secondary_action))
+        self.browser_setup_secondary_btn.setEnabled(bool(secondary_text and secondary_action))
+
+    def _set_browser_setup_status(self, text="", tone="neutral"):
+        color = {
+            "success": DesignTokens.success_text,
+            "warning": DesignTokens.warning_text,
+            "error": DesignTokens.error_text,
+        }.get(str(tone or "neutral"), DesignTokens.text_tertiary)
+        self.browser_setup_status.setText(str(text or ""))
+        self.browser_setup_status.setVisible(bool(text))
+        self.browser_setup_status.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {color};"
+        )
+
+    def _render_browser_automation_setup(self):
+        if not hasattr(self, "browser_setup_title"):
+            return
+        manager = self.browser_component_manager
+        status = dict(self.browser_component_status or {})
+        task = dict(self.browser_component_task or {})
+        self.browser_setup_progress.hide()
+        self._set_browser_setup_actions()
+
+        if manager is None:
+            self.browser_setup_title.setText("暂时无法完成设置")
+            self.browser_setup_description.setText(
+                "浏览器设置服务没有启动。请重启 Cowork 后再试。"
+            )
+            self._set_browser_setup_status("设置服务不可用", "error")
+            return
+
+        if task:
+            action = str(task.get("action") or "")
+            progress = int(task.get("progress") or 0)
+            self.browser_setup_title.setText(
+                "正在检查浏览器连接"
+                if action == "check"
+                else "正在确认浏览器状态"
+                if action == "probe"
+                else "正在准备浏览器自动化"
+            )
+            task_message = {
+                "check": "正在检查 Chrome 或 Edge 的连接，请稍候…",
+                "probe": "正在确认当前状态，请稍候…",
+                "repair": "正在修复浏览器自动化，请稍候…",
+                "install": (
+                    "正在完成准备，请稍候…"
+                    if progress >= 80
+                    else "正在下载并校验所需文件，请稍候…"
+                ),
+            }.get(action, "正在处理，请稍候…")
+            self.browser_setup_description.setText(task_message)
+            self.browser_setup_progress.setRange(
+                (0 if progress else 0),
+                (100 if progress else 0),
+            )
+            if progress:
+                self.browser_setup_progress.setValue(progress)
+            self.browser_setup_progress.show()
+            self._set_browser_setup_status()
+            return
+
+        if self.browser_setup_error:
+            self._set_browser_setup_status(self.browser_setup_error, "error")
+        elif status.get("ready"):
+            self._set_browser_setup_status("✓ 浏览器已连接", "success")
+        elif status.get("known") and status.get("installed"):
+            self._set_browser_setup_status("还差最后一步", "warning")
+        else:
+            self._set_browser_setup_status()
+
+        if not status.get("known"):
+            self.browser_setup_title.setText("确认浏览器状态")
+            self.browser_setup_description.setText(
+                "先确认当前环境，再继续完成开启。"
+            )
+            self._set_browser_setup_actions("检测状态", "probe")
+            return
+
+        if not status.get("installed"):
+            self.browser_setup_title.setText("准备浏览器自动化")
+            self.browser_setup_description.setText(
+                "Cowork 会自动下载并校验所需文件。完成后再连接 Chrome 或 Edge。"
+            )
+            self._set_browser_setup_actions("开始设置", "install")
+            return
+
+        if status.get("needs_update") or status.get("needs_repair"):
+            self.browser_setup_title.setText("需要修复后继续")
+            self.browser_setup_description.setText(
+                str(status.get("health_error") or "浏览器自动化的本地文件需要修复。")
+            )
+            self._set_browser_setup_actions("修复", "repair")
+            return
+
+        if status.get("ready"):
+            if self.skill.get("enabled"):
+                self.browser_setup_title.setText("浏览器自动化已开启")
+                self.browser_setup_description.setText(
+                    "Cowork 现在可以在独立窗口中读取和操作 Chrome 或 Edge 网页。"
+                )
+                self._set_browser_setup_actions(
+                    secondary_text="关闭能力",
+                    secondary_action="disable",
+                )
+            else:
+                self.browser_setup_title.setText("准备完成")
+                self.browser_setup_description.setText(
+                    "浏览器已经连接，现在可以开启这项能力。"
+                )
+                self._set_browser_setup_actions("开启能力", "enable")
+            return
+
+        self.browser_setup_title.setText("连接 Chrome 或 Edge")
+        if self.browser_extension_page_opened or self.browser_setup_error:
+            self.browser_setup_description.setText(
+                "在浏览器中安装并启用扩展后，回到这里完成检查。"
+            )
+            self._set_browser_setup_actions(
+                "检查并开启",
+                "check",
+                "重新打开扩展页",
+                "extension",
+            )
+        else:
+            self.browser_setup_description.setText(
+                "添加浏览器扩展并保持启用，然后回来完成检查。"
+            )
+            self._set_browser_setup_actions(
+                "安装浏览器扩展",
+                "extension",
+                "已经安装，检查并开启",
+                "check",
+            )
+
+    def _probe_browser_component(self):
+        manager = self.browser_component_manager
+        if manager is None or manager.has_task(BROWSER_SKILL_COMPONENT_ID):
+            return False
+        self.browser_setup_error = ""
+        log_ui_navigation("browser_capability_setup_action", action="probe")
+        accepted = manager.probe_component(BROWSER_SKILL_COMPONENT_ID)
+        if not accepted:
+            self.browser_setup_error = "状态检测未能开始，请稍后重试。"
+            self._render_browser_automation_setup()
+        return bool(accepted)
+
+    def _enqueue_browser_component_action(self, action):
+        manager = self.browser_component_manager
+        if manager is None:
+            self.browser_setup_error = "浏览器设置服务不可用，请重启 Cowork 后重试。"
+            self._render_browser_automation_setup()
+            return False
+        if manager.has_task(BROWSER_SKILL_COMPONENT_ID):
+            return False
+        self.browser_setup_error = ""
+        self.browser_enable_after_check = action == "check"
+        log_ui_navigation("browser_capability_setup_action", action=action)
+        accepted = manager.enqueue(action, BROWSER_SKILL_COMPONENT_ID, {})
+        if not accepted:
+            self.browser_enable_after_check = False
+            self.browser_setup_error = "操作未能开始，请稍后重试。"
+            self._render_browser_automation_setup()
+        return bool(accepted)
+
+    def _open_browser_extension_page(self):
+        log_ui_navigation("browser_capability_setup_action", action="open_extension")
+        if QDesktopServices.openUrl(QUrl(BROWSER_SKILL_EXTENSION_URL)):
+            self.browser_extension_page_opened = True
+            self.browser_setup_error = ""
+            self._render_browser_automation_setup()
+            return True
+        self.browser_setup_error = "系统未能打开浏览器扩展页面，请检查默认浏览器设置后重试。"
+        self._render_browser_automation_setup()
+        return False
+
+    def _run_browser_setup_action(self, action):
+        action = str(action or "")
+        if action == "probe":
+            return self._probe_browser_component()
+        if action in {"install", "repair", "check"}:
+            return self._enqueue_browser_component_action(action)
+        if action == "extension":
+            return self._open_browser_extension_page()
+        if action == "enable":
+            if not self.browser_component_status.get("ready"):
+                self.browser_setup_error = "浏览器尚未连接，请先完成检查。"
+                self._render_browser_automation_setup()
+                return False
+            return self._set_simple_enabled(True)
+        if action == "disable":
+            return self._set_simple_enabled(False)
+        return False
+
+    def _handle_browser_component_status(self, component_id, status):
+        if str(component_id or "") != BROWSER_SKILL_COMPONENT_ID:
+            return
+        self.browser_component_status = dict(status or {})
+        self._render_browser_automation_setup()
+
+    def _handle_browser_component_tasks(self, snapshot):
+        self.browser_component_task = dict(
+            ((snapshot or {}).get("tasks") or {}).get(BROWSER_SKILL_COMPONENT_ID)
+            or {}
+        )
+        self._render_browser_automation_setup()
+
+    def _handle_browser_component_finished(self, component_id, action, result):
+        if str(component_id or "") != BROWSER_SKILL_COMPONENT_ID:
+            return
+        result = dict(result or {})
+        component_status = result.get("result")
+        if isinstance(component_status, dict):
+            self.browser_component_status = dict(component_status)
+            self.browser_component_status["known"] = True
+        ok = bool(result.get("ok"))
+        error = str(result.get("error") or "")
+        log_ui_navigation(
+            "browser_capability_setup_result",
+            action=str(action or ""),
+            ok=ok,
+            error=error,
+        )
+        if not ok:
+            self.browser_enable_after_check = False
+            self.browser_setup_error = error or "操作失败，请重试。"
+            self._render_browser_automation_setup()
+            return
+        self.browser_setup_error = ""
+        should_enable = (
+            str(action or "") == "check"
+            and self.browser_enable_after_check
+            and bool(self.browser_component_status.get("ready"))
+        )
+        self.browser_enable_after_check = False
+        self._render_browser_automation_setup()
+        if should_enable:
+            QTimer.singleShot(0, lambda: self._set_simple_enabled(True))
 
     def _build_simple_intro(self, root_layout):
         presentation = capability_presentation(self.skill)
@@ -3165,6 +3527,14 @@ class CapabilityWorkbenchDialog(QDialog):
 
     def _set_simple_enabled(self, enabled):
         name = self.skill_name
+        if (
+            enabled
+            and self._is_browser_automation()
+            and not self.browser_component_status.get("ready")
+        ):
+            self.browser_setup_error = "浏览器尚未连接，请先完成检查。"
+            self._render_browser_automation_setup()
+            return False
         log_ui_navigation("capability_enable_begin", skill_name=name, enabled=bool(enabled))
         try:
             self.config_manager.set_skill_enabled(name, bool(enabled))
@@ -6877,14 +7247,18 @@ class RuntimeComponentWorker(QThread):
                         20,
                     )
                     result = browser_skill_status(run_diagnostics=True)
-                    if result.get("state") in {
-                        "check_failed",
-                        "execution_unresponsive",
-                    }:
-                        raise RuntimeError(
-                            result.get("health_error")
-                            or "BrowserSkill 连接检查失败，请查看诊断信息后重试。"
-                        )
+                    if not result.get("ready"):
+                        self.finished_signal.emit({
+                            "ok": False,
+                            "component_id": self.component_id,
+                            "action": self.action,
+                            "result": result,
+                            "error": (
+                                result.get("health_error")
+                                or "浏览器扩展尚未连接，请确认已安装并启用后重试。"
+                            ),
+                        })
+                        return
                     progress(result.get("state_text") or "检查完成", 100)
                 else:
                     result = uninstall_browser_skill()
@@ -6926,6 +7300,7 @@ class ComponentTaskManager(QObject):
     notification_requested = Signal(str, str)
     component_status_changed = Signal(str, dict)
     component_probe_progress = Signal(dict)
+    component_task_finished = Signal(str, str, dict)
 
     STATUS_CACHE_SCHEMA = 1
 
@@ -7012,7 +7387,7 @@ class ComponentTaskManager(QObject):
 
     def refresh_all_component_statuses(self):
         accepted = False
-        for component_id in [BROWSER_SKILL_COMPONENT_ID, "node", *TOOLKITS.keys()]:
+        for component_id in ["node", *TOOLKITS.keys()]:
             accepted = self.enqueue("probe", component_id) or accepted
         return accepted
 
@@ -7080,7 +7455,7 @@ class ComponentTaskManager(QObject):
         if component_id == "node":
             return "Node.js"
         if component_id == BROWSER_SKILL_COMPONENT_ID:
-            return "Tencent BrowserSkill"
+            return "浏览器自动化"
         return (TOOLKITS.get(component_id) or {}).get("name") or component_id
 
     def _append_log(self, component_id, message):
@@ -7151,7 +7526,9 @@ class ComponentTaskManager(QObject):
         component_id = task["component_id"]
         ok = bool(result.get("ok"))
         action = str(task.get("action") or "")
-        if isinstance(result.get("result"), dict) and (ok or result.get("conflict")):
+        if isinstance(result.get("result"), dict) and (
+            ok or result.get("conflict") or action == "check"
+        ):
             self._record_component_status(component_id, result["result"])
         if ok:
             task["state"] = "completed"
@@ -7162,8 +7539,13 @@ class ComponentTaskManager(QObject):
                 log_sub_agent_runtime("component_probe_done", component_id=component_id)
             else:
                 log_sub_agent_runtime("component_action_done", component_id=component_id, action=action)
+                notification_title = (
+                    "浏览器设置完成"
+                    if component_id == BROWSER_SKILL_COMPONENT_ID
+                    else "组件操作完成"
+                )
                 self.notification_requested.emit(
-                    "组件操作完成",
+                    notification_title,
                     f"{self._component_name(component_id)}已完成{self._action_label(task['action'])}。",
                 )
         else:
@@ -7173,10 +7555,18 @@ class ComponentTaskManager(QObject):
             self._append_log(component_id, f"失败：{task['error']}")
             event = "component_probe_error" if action == "probe" else "component_action_error"
             log_sub_agent_runtime(event, component_id=component_id, action=action, error=task["error"])
+            notification_title = (
+                "浏览器设置未完成"
+                if component_id == BROWSER_SKILL_COMPONENT_ID
+                else "组件检测失败"
+                if action == "probe"
+                else "组件操作失败"
+            )
             self.notification_requested.emit(
-                "组件检测失败" if action == "probe" else "组件操作失败",
+                notification_title,
                 f"{self._component_name(component_id)}：{task['error']}",
             )
+        self.component_task_finished.emit(component_id, action, copy.deepcopy(result))
         self._tasks.pop(component_id, None)
         self._emit_snapshot()
         self._start_next()
@@ -7961,16 +8351,6 @@ class SettingsDialog(QDialog):
 
         runtime_group, runtime_group_layout = build_settings_surface("运行环境", "Node.js 不再占用基础分发包体积。", radius=20, show_subtitle=False)
         toolkit_group, toolkit_group_layout = build_settings_surface("工具包", "工具包安装到沙箱 Python，可被代码执行和相关 Skill 共同使用。", radius=20, show_subtitle=False)
-        browser_group, browser_group_layout = build_settings_surface(
-            "可选浏览器能力",
-            "安装 Tencent BrowserSkill CLI 后，还需要在 Chrome 或 Edge 中安装扩展。"
-            "“检查连接”会短暂打开 Agent Window，并验证真实浏览器执行通道。",
-            radius=20,
-            show_subtitle=False,
-        )
-        browser_group.setObjectName("BrowserSkillComponentSection")
-        self.browser_skill_component_section = browser_group
-
         def add_component_row(container, component_id, title_text, detail_text, status):
             panel = QFrame()
             panel.setStyleSheet("QFrame { background: transparent; border: none; }")
@@ -8014,32 +8394,6 @@ class SettingsDialog(QDialog):
             self.update_component_row(component_id, status)
 
         add_component_row(
-            browser_group_layout,
-            BROWSER_SKILL_COMPONENT_ID,
-            "Tencent BrowserSkill",
-            "让 AI 在独立 Agent 窗口中读取和操作真实登录态网页。插件默认关闭，启用后仍需完成此处安装。",
-            self.component_status_cache.get(BROWSER_SKILL_COMPONENT_ID, {}),
-        )
-        browser_actions = QHBoxLayout()
-        browser_actions.addStretch()
-        self.browser_skill_extension_btn = QPushButton("安装浏览器扩展")
-        self.browser_skill_extension_btn.setObjectName("SecondaryBtn")
-        self.browser_skill_extension_btn.clicked.connect(
-            lambda _checked=False: self.open_browser_skill_extension_page()
-        )
-        self.browser_skill_check_btn = QPushButton("检查连接")
-        self.browser_skill_check_btn.setObjectName("SecondaryBtn")
-        self.browser_skill_check_btn.clicked.connect(
-            lambda _checked=False: self.start_component_action("check", BROWSER_SKILL_COMPONENT_ID)
-        )
-        browser_actions.addWidget(self.browser_skill_extension_btn)
-        browser_actions.addWidget(self.browser_skill_check_btn)
-        browser_group_layout.addLayout(browser_actions)
-        self.update_component_row(
-            BROWSER_SKILL_COMPONENT_ID,
-            self.component_status_cache.get(BROWSER_SKILL_COMPONENT_ID, {}),
-        )
-        add_component_row(
             runtime_group_layout,
             "node",
             "Node.js",
@@ -8058,7 +8412,6 @@ class SettingsDialog(QDialog):
             )
         runtime_group_layout.addStretch()
         toolkit_group_layout.addStretch()
-        components_layout.addWidget(browser_group)
         components_layout.addWidget(runtime_group)
         components_layout.addWidget(toolkit_group)
 
@@ -8585,22 +8938,6 @@ class SettingsDialog(QDialog):
             raise ValueError(f"未找到设置页：{initial_page_label}")
         self.nav_list.setCurrentItem(matches[0])
 
-    def focus_component(self, component_id):
-        if str(component_id or "") != BROWSER_SKILL_COMPONENT_ID:
-            return False
-        section = getattr(self, "browser_skill_component_section", None)
-        scroll_area = getattr(self, "components_scroll_area", None)
-        row = (getattr(self, "component_rows", {}) or {}).get(BROWSER_SKILL_COMPONENT_ID)
-        if section is None or scroll_area is None or not row:
-            return False
-
-        def reveal():
-            scroll_area.ensureWidgetVisible(section, 24, 24)
-            row["action"].setFocus(Qt.OtherFocusReason)
-
-        QTimer.singleShot(0, reveal)
-        return True
-
     def refresh_archive_lists(self):
         def format_time(timestamp):
             if not timestamp:
@@ -8742,16 +9079,6 @@ class SettingsDialog(QDialog):
     def _cached_component_status(self, component_id):
         return dict((getattr(self, "component_status_cache", {}) or {}).get(component_id) or {})
 
-    def open_browser_skill_extension_page(self):
-        if QDesktopServices.openUrl(QUrl(BROWSER_SKILL_EXTENSION_URL)):
-            return True
-        ProductMessageBox.warning(
-            self,
-            "无法打开浏览器扩展页面",
-            "系统未能打开 Chrome Web Store。请检查默认浏览器设置后重试。",
-        )
-        return False
-
     def update_component_row(self, component_id, status):
         row = self.component_rows.get(component_id)
         if not row:
@@ -8762,9 +9089,6 @@ class SettingsDialog(QDialog):
             row["action"].setText("检测状态")
             row["repair"].setVisible(False)
             row["progress"].setVisible(False)
-            if component_id == BROWSER_SKILL_COMPONENT_ID and hasattr(self, "browser_skill_extension_btn"):
-                self.browser_skill_extension_btn.setEnabled(False)
-                self.browser_skill_check_btn.setEnabled(False)
             return
         installed = bool(status.get("installed"))
         needs_update = bool(status.get("needs_update"))
@@ -8773,16 +9097,8 @@ class SettingsDialog(QDialog):
         suffix = f" · {format_file_size(size)}" if size else ""
         source = status.get("source") or ""
         source_suffix = f" · {source}" if source else ""
-        state_text = (
-            str(status.get("state_text") or "")
-            if component_id == BROWSER_SKILL_COMPONENT_ID
-            else ""
-        )
-        if not state_text:
-            state_text = "需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装"))
+        state_text = "需要更新" if needs_update else ("需要修复" if needs_repair else ("已安装" if installed else "未安装"))
         if needs_repair and status.get("health_error"):
-            state_text += f"：{status['health_error']}"
-        elif component_id == BROWSER_SKILL_COMPONENT_ID and status.get("health_error"):
             state_text += f"：{status['health_error']}"
         updated_at = int(status.get("updated_at") or 0)
         recorded_suffix = ""
@@ -8794,9 +9110,6 @@ class SettingsDialog(QDialog):
         row["action"].setText("更新" if needs_update else ("卸载" if installed else "安装"))
         row["repair"].setVisible(installed)
         row["progress"].setVisible(False)
-        if component_id == BROWSER_SKILL_COMPONENT_ID and hasattr(self, "browser_skill_extension_btn"):
-            self.browser_skill_extension_btn.setEnabled(installed)
-            self.browser_skill_check_btn.setEnabled(installed)
 
     def toggle_component(self, component_id):
         if not self.component_task_manager:
@@ -8808,16 +9121,10 @@ class SettingsDialog(QDialog):
             return
         action = "repair" if status.get("needs_update") or status.get("needs_repair") else ("uninstall" if status.get("installed") else "install")
         if action == "uninstall":
-            uninstall_message = (
-                "确定卸载 Tencent BrowserSkill CLI？浏览器自动化插件会保持启用，"
-                "但在手动重新安装并连接扩展前不可用。"
-                if component_id == BROWSER_SKILL_COMPONENT_ID
-                else "确定卸载该组件？相关能力下次使用时可能重新安装依赖。"
-            )
             reply = QMessageBox.question(
                 self,
                 "卸载组件",
-                uninstall_message,
+                "确定卸载该组件？相关能力下次使用时可能重新安装依赖。",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -8873,9 +9180,6 @@ class SettingsDialog(QDialog):
                 continue
             row["action"].setEnabled(False)
             row["repair"].setEnabled(False)
-            if component_id == BROWSER_SKILL_COMPONENT_ID:
-                self.browser_skill_extension_btn.setEnabled(False)
-                self.browser_skill_check_btn.setEnabled(False)
             state = task.get("state")
             if state == "queued":
                 position = int(task.get("queue_position") or 0)
@@ -10269,6 +10573,7 @@ class AdvancedSkillsCenterDialog(QDialog):
     def toggle_skill(self, name, enabled):
         name = str(name or "").strip()
         enabled = bool(enabled)
+        window = self.window()
         skill = next(
             (
                 item
@@ -10277,6 +10582,21 @@ class AdvancedSkillsCenterDialog(QDialog):
             ),
             None,
         )
+        if enabled and name == "browser-automation":
+            manager = getattr(window, "component_task_manager", None)
+            components = (
+                manager.component_status_snapshot().get("components")
+                if manager is not None
+                else {}
+            )
+            status = dict((components or {}).get(BROWSER_SKILL_COMPONENT_ID) or {})
+            if not status.get("ready"):
+                if hasattr(window, "open_browser_automation_setup"):
+                    window.open_browser_automation_setup()
+                self._render_tab(
+                    skill_center_tab_key(skill) if skill else self.current_tab_key
+                )
+                return
         if skill and str(skill.get("source_format") or "").strip() == SkillManager.MCP_SOURCE_FORMAT:
             servers = self.config_manager.get_mcp_servers()
             updated = False
@@ -10292,7 +10612,6 @@ class AdvancedSkillsCenterDialog(QDialog):
                 self.config_manager.set_skill_enabled(name, enabled)
         else:
             self.config_manager.set_skill_enabled(name, enabled)
-        window = self.window()
         if hasattr(window, "publish_ui_skill_change"):
             applied = window.publish_ui_skill_change(name, "enabled" if enabled else "disabled")
             if not applied:
@@ -10306,8 +10625,6 @@ class AdvancedSkillsCenterDialog(QDialog):
         tab_key = skill_center_tab_key(skill) if skill else self.current_tab_key
         self._render_tab(tab_key)
         self._refresh_count_label()
-        if enabled and name == "browser-automation" and hasattr(window, "offer_browser_skill_setup"):
-            window.offer_browser_skill_setup()
 
     def toggle_selection_mode(self):
         self.selection_mode = not self.selection_mode
@@ -10500,6 +10817,27 @@ class SkillsCenterDialog(QDialog):
         self.current_scene = "all"
         self.search_text = ""
         self._column_count = 2
+        self.component_task_manager = getattr(parent, "component_task_manager", None)
+        self.browser_component_status = {}
+        self.browser_component_task = {}
+        if self.component_task_manager is not None:
+            component_snapshot = self.component_task_manager.component_status_snapshot()
+            self.browser_component_status = dict(
+                (component_snapshot.get("components") or {}).get(BROWSER_SKILL_COMPONENT_ID)
+                or {}
+            )
+            self.browser_component_task = dict(
+                (self.component_task_manager.snapshot().get("tasks") or {}).get(
+                    BROWSER_SKILL_COMPONENT_ID
+                )
+                or {}
+            )
+            self.component_task_manager.component_status_changed.connect(
+                self._handle_component_status_changed
+            )
+            self.component_task_manager.state_changed.connect(
+                self._handle_component_task_state
+            )
         self.setWindowTitle("AI 能力商城")
         self.resize(960, 680)
         apply_product_dialog(self, "SkillsCenterDialog")
@@ -10513,19 +10851,11 @@ class SkillsCenterDialog(QDialog):
         header_row.setSpacing(12)
         header = ProductPageHeader("AI 能力商城", "按想完成的任务，为 Cowork 开启新能力")
         header_row.addWidget(header, 1, Qt.AlignTop)
-        self.more_btn = QToolButton()
-        self.more_btn.setObjectName("CapabilityStoreMore")
-        self.more_btn.setText("···")
-        self.more_btn.setAccessibleName("更多能力选项")
-        self.more_btn.setToolTip("更多")
-        self.more_btn.setPopupMode(QToolButton.InstantPopup)
-        self.more_btn.setFixedSize(DesignTokens.control_height, DesignTokens.control_height)
-        self.more_btn.setStyleSheet(apple_tool_button_style())
-        more_menu = QMenu(self.more_btn)
-        advanced_action = more_menu.addAction("高级管理")
-        advanced_action.triggered.connect(self._open_advanced_management)
-        self.more_btn.setMenu(more_menu)
-        header_row.addWidget(self.more_btn, 0, Qt.AlignTop)
+        self.advanced_btn = QPushButton("高级管理")
+        self.advanced_btn.setObjectName("CapabilityAdvancedManagement")
+        self.advanced_btn.setStyleSheet(product_button_style("secondary"))
+        self.advanced_btn.clicked.connect(self._open_advanced_management)
+        header_row.addWidget(self.advanced_btn, 0, Qt.AlignTop)
         layout.addLayout(header_row)
 
         self.search_input = QLineEdit()
@@ -10577,7 +10907,7 @@ class SkillsCenterDialog(QDialog):
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "SkillsCenterDialog")
         self.search_input.setStyleSheet(product_field_style())
-        self.more_btn.setStyleSheet(apple_tool_button_style())
+        self.advanced_btn.setStyleSheet(product_button_style("secondary"))
         self._render_content()
 
     def _is_user_owned(self, skill):
@@ -10652,6 +10982,22 @@ class SkillsCenterDialog(QDialog):
         self.search_text = str(text or "")
         self._render_content()
 
+    def _handle_component_status_changed(self, component_id, status):
+        if str(component_id or "") != BROWSER_SKILL_COMPONENT_ID:
+            return
+        self.browser_component_status = dict(status or {})
+        self._render_content()
+
+    def _handle_component_task_state(self, snapshot):
+        task = dict(
+            ((snapshot or {}).get("tasks") or {}).get(BROWSER_SKILL_COMPONENT_ID)
+            or {}
+        )
+        if task == self.browser_component_task:
+            return
+        self.browser_component_task = task
+        self._render_content()
+
     def _section(self, title, skills, *, user_owned=False):
         section = QWidget()
         section.setObjectName("CapabilitySceneSection")
@@ -10722,9 +11068,49 @@ class SkillsCenterDialog(QDialog):
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(8)
+        name = str(skill.get("name") or "").strip()
         enabled = bool(skill.get("enabled"))
         needs_config = not enabled and skill_center_config_state(skill) == "needs_config"
-        if enabled:
+        is_browser_automation = name == "browser-automation"
+        browser_ready = bool(self.browser_component_status.get("ready"))
+        browser_task = dict(self.browser_component_task or {}) if is_browser_automation else {}
+        if is_browser_automation and not browser_ready:
+            browser_task_text = {
+                "check": "正在检查浏览器连接…",
+                "probe": "正在确认浏览器状态…",
+                "repair": "正在修复浏览器自动化…",
+                "install": "正在准备浏览器自动化…",
+            }.get(str(browser_task.get("action") or ""), "正在处理…")
+            status = QLabel(
+                browser_task_text
+                if browser_task
+                else "还需完成一次简单设置"
+            )
+            status.setObjectName("CapabilityStateLabel")
+            status.setStyleSheet(
+                f"font-size: {DesignTokens.font_size_meta}px; font-weight: 600; "
+                f"color: {DesignTokens.warning_text};"
+            )
+            actions.addWidget(status)
+            actions.addStretch()
+            setup_btn = QPushButton("正在准备…" if browser_task else ("继续设置" if enabled else "开启"))
+            setup_btn.setObjectName("BrowserAutomationSetupAction")
+            setup_btn.setStyleSheet(product_button_style("primary"))
+            setup_btn.setEnabled(not browser_task)
+            setup_btn.clicked.connect(
+                lambda checked=False, value=dict(skill): self._open_detail(value)
+            )
+            actions.addWidget(setup_btn)
+            if enabled:
+                close_btn = QPushButton("关闭")
+                close_btn.setObjectName("CapabilityDisableAction")
+                close_btn.setAccessibleName(f"关闭{readable_skill_name(skill)}")
+                close_btn.setStyleSheet(product_button_style("ghost"))
+                close_btn.clicked.connect(
+                    lambda checked=False, value=dict(skill): self._toggle_skill(value, False)
+                )
+                actions.addWidget(close_btn)
+        elif enabled:
             status = QLabel("✓ 已开启")
             status.setObjectName("CapabilityStateLabel")
             status.setStyleSheet(
@@ -10776,6 +11162,17 @@ class SkillsCenterDialog(QDialog):
         name = str(skill.get("name") or "").strip()
         if not name:
             return False
+        if (
+            enabled
+            and name == "browser-automation"
+            and not self.browser_component_status.get("ready")
+        ):
+            log_ui_navigation(
+                "browser_capability_setup_required",
+                source="capability_store",
+            )
+            self._open_detail(skill)
+            return False
         log_ui_navigation("capability_enable_begin", skill_name=name, enabled=bool(enabled))
         try:
             self.config_manager.set_skill_enabled(name, bool(enabled))
@@ -10787,8 +11184,6 @@ class SkillsCenterDialog(QDialog):
             self.refresh_list()
             if hasattr(window, "add_system_toast"):
                 window.add_system_toast("能力已开启" if enabled else "能力已关闭", "success", auto_close_ms=3200)
-            if enabled and name == "browser-automation" and hasattr(window, "offer_browser_skill_setup"):
-                window.offer_browser_skill_setup()
             log_ui_navigation("capability_enable_done", skill_name=name, enabled=bool(enabled))
             return True
         except Exception as exc:
@@ -10855,6 +11250,13 @@ class SkillsCenterDialog(QDialog):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        columns = 2 if self.width() >= self.RESPONSIVE_COLUMN_THRESHOLD else 1
+        if columns != self._column_count:
+            self._column_count = columns
+            QTimer.singleShot(0, self._render_content)
+
+    def showEvent(self, event):
+        super().showEvent(event)
         columns = 2 if self.width() >= self.RESPONSIVE_COLUMN_THRESHOLD else 1
         if columns != self._column_count:
             self._column_count = columns
@@ -30665,42 +31067,45 @@ class MainWindow(QMainWindow):
             page.focus_component(target_component)
         return opened
 
-    def offer_browser_skill_setup(self):
-        status = browser_skill_status(run_diagnostics=False)
+    def open_browser_automation_setup(self):
+        status = dict(
+            (
+                self.component_task_manager.component_status_snapshot().get("components")
+                or {}
+            ).get(BROWSER_SKILL_COMPONENT_ID)
+            or {}
+        )
         log_browser_skill_event(
-            "enable",
+            "setup_open",
             installed=bool(status.get("installed")),
             ready=bool(status.get("ready")),
             state=status.get("state"),
         )
         if status.get("ready"):
             return False
-        if not status.get("installed"):
-            message = (
-                "浏览器自动化需要 Tencent BrowserSkill。"
-                "可前往设置下载安装相关能力。"
+        if self.current_product_route != self.PAGE_CAPABILITIES:
+            if not self.open_skills_center():
+                return False
+        skill = next(
+            (
+                item
+                for item in self.skill_manager.get_all_skills()
+                if str(item.get("name") or "").strip() == "browser-automation"
+            ),
+            None,
+        )
+        if skill is None:
+            self.add_system_toast(
+                "未找到浏览器自动化能力，请在高级管理中检查能力信息。",
+                "error",
+                auto_close_ms=8000,
             )
-        else:
-            message = (
-                "Tencent BrowserSkill CLI 已安装，但浏览器扩展尚未确认连接。"
-                "可前往设置安装扩展并检查连接。"
-            )
-        choice = ProductMessageDialog(
-            "配置浏览器自动化",
-            message,
-            tone="information",
-            buttons=[
-                ("稍后", "later", "secondary", False),
-                ("前往设置", "settings", "primary", True),
-            ],
-            parent=self,
-        ).exec_result("later")
-        if choice == "settings":
-            self.open_settings(
-                "组件与依赖",
-                target_component=BROWSER_SKILL_COMPONENT_ID,
-            )
-        return True
+            return False
+        log_ui_navigation(
+            "browser_capability_setup_required",
+            source="advanced_management",
+        )
+        return self.show_capability_detail(skill)
 
     def notify_component_task(self, title, message):
         if getattr(self, "tray_icon", None):

@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget
 
 from main import (
     ConversationHistoryRow,
@@ -137,11 +137,11 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIsNone(first.pending_conversation_skill_result)
         self.assertIsNone(second.pending_conversation_skill_result)
 
-    def test_capability_page_moves_refresh_into_advanced_management(self):
+    def test_capability_page_keeps_advanced_management_visible(self):
         from main import SkillsCenterDialog
         page = SkillsCenterDialog(self.window.skill_manager, self.window.config_manager, self.window)
-        self.assertEqual(page.more_btn.text(), "···")
-        self.assertIn("高级管理", [action.text() for action in page.more_btn.menu().actions()])
+        self.assertEqual(page.advanced_btn.text(), "高级管理")
+        self.assertIsNone(page.advanced_btn.menu())
         self.assertEqual(page.mode_control.buttons["library"].text(), "发现能力")
         self.assertEqual(page.mode_control.buttons["mine"].text(), "我的能力")
         page.deleteLater()

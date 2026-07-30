@@ -497,7 +497,7 @@ def browser_skill_status(run_diagnostics=False):
         result.update({
             "healthy": True,
             "state": "cli_installed",
-            "state_text": "CLI 已安装，扩展连接待检查",
+            "state_text": "本地支持已准备，扩展连接待检查",
         })
         return result
 
@@ -574,9 +574,9 @@ def browser_skill_status(run_diagnostics=False):
     if extension_connected is False:
         result.update({
             "healthy": True,
-            "health_error": "CLI 已安装，但 Chrome 或 Edge 扩展尚未连接。",
+            "health_error": "Chrome 或 Edge 扩展尚未连接。",
             "state": "extension_disconnected",
-            "state_text": "CLI 已安装，扩展未连接",
+            "state_text": "本地支持已准备，扩展未连接",
         })
         _write_diagnostics_cache(result)
         log_browser_skill_event(
@@ -763,7 +763,7 @@ def install_browser_skill(progress_callback=None):
             _stop_managed_daemon()
         _replace_component_root(install_root, target_root)
         if progress_callback:
-            progress_callback("BrowserSkill CLI 已安装，请继续安装并启用浏览器扩展。", 100)
+            progress_callback("浏览器自动化已准备，请继续安装并启用浏览器扩展。", 100)
         log_browser_skill_event(
             "download_finish",
             version=BROWSER_SKILL_VERSION,
@@ -855,8 +855,8 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
             "error": {
                 "code": "browser_skill_not_ready",
                 "message": (
-                    "Tencent BrowserSkill 尚未就绪。请前往"
-                    "“设置 → 组件与依赖 → 可选浏览器能力”完成安装和连接检查。"
+                    "浏览器自动化尚未就绪。请前往"
+                    "“AI 能力商城 → 浏览器自动化”完成设置和连接检查。"
                 ),
                 "detail": status.get("health_error") or status.get("state_text"),
             },

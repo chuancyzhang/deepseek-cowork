@@ -264,6 +264,40 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "attachment-preview":
+            image_path = ROOT / "images" / "user-guide" / "s09-interface-overview.png"
+            if not image_path.is_file():
+                raise RuntimeError(f"Attachment preview fixture is missing: {image_path}")
+            window.show_conversation_page()
+            window._add_prompt_files([str(image_path)])
+            window.input_field.setPlainText("请分析这张界面截图，指出需要优化的区域。")
+            window.resize(1280, 720)
+            window.show()
+            process_events(260)
+            chips = window.prompt_files_section.findChildren(main.FileChip)
+            if len(chips) != 1 or not chips[0]._is_image:
+                raise RuntimeError("Image attachment chip was not rendered.")
+            save_widget(window, "s16-pasted-image.png", 180)
+            chips[0]._open_image_preview(str(image_path))
+            process_events(180)
+            dialog = chips[0]._preview_dialog
+            if not main._qt_object_alive(dialog):
+                raise RuntimeError("Image preview dialog did not open.")
+            dialog.resize(980, 700)
+            process_events(160)
+            if (
+                dialog.image_label.pixmap() is None
+                or dialog.image_label.pixmap().isNull()
+                or dialog.zoom_label.text() == ""
+            ):
+                raise RuntimeError("Image preview content or zoom state is missing.")
+            save_widget(dialog, "s16-image-preview.png", 180)
+            if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
+                dialog.resize(520, 420)
+                process_events(160)
+                save_widget(dialog, "attachment-preview-narrow.png", 120)
+            dialog.close()
+            return
         if SCREENSHOT_SCOPE == "deliverable-editors":
             window.load_workspace(
                 str(workspace),

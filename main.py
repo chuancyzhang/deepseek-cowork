@@ -13256,6 +13256,7 @@ class AutoResizingPlainTextEdit(ReadOnlyPlainTextEdit):
 class AutoResizingInputEdit(QTextEdit):
     returnPressed = Signal()
     mentionRequested = Signal()
+    clipboardFilesPasted = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -13274,11 +13275,20 @@ class AutoResizingInputEdit(QTextEdit):
         QTimer.singleShot(0, self.adjustHeight)
 
     def canInsertFromMimeData(self, source):
-        if source and (source.hasText() or source.hasImage()):
+        if source and (source.hasUrls() or source.hasText() or source.hasImage()):
             return True
         return super().canInsertFromMimeData(source)
 
     def insertFromMimeData(self, source):
+        if source and source.hasUrls():
+            local_paths = [
+                url.toLocalFile()
+                for url in source.urls()
+                if url.isLocalFile() and url.toLocalFile()
+            ]
+            if local_paths:
+                self.clipboardFilesPasted.emit(local_paths)
+                return
         if source and source.hasImage():
             window = self.window()
             if window and hasattr(window, "_add_clipboard_image"):
@@ -14808,12 +14818,394 @@ class SystemToast(QFrame):
         super().leaveEvent(event)
 
 
+class ImagePreviewError(RuntimeError):
+    """User-facing image preview validation failure."""
+
+
+class ClickableImageLabel(QLabel):
+    activated = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAccessibleName("查看图片")
+        self.setAccessibleDescription("按 Enter 或空格打开大图预览")
+
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.activated.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in {Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space}:
+            self.activated.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class ImagePreviewDialog(QDialog):
+    MAX_FILE_BYTES = 25 * 1024 * 1024
+    MIN_MANUAL_ZOOM = 25
+    MAX_MANUAL_ZOOM = 400
+    ZOOM_STEP = 25
+
+    def __init__(self, path, parent=None):
+        super().__init__(parent)
+        self.path = os.path.abspath(os.path.normpath(str(path or "").strip()))
+        self._file_size = 0
+        self._original_pixmap = self._load_pixmap()
+        self._zoom_percent = 100.0
+        self._fit_mode = True
+        self._fit_update_pending = False
+        self._initial_fit_applied = False
+
+        self.setWindowTitle(f"查看图片 · {os.path.basename(self.path) or self.path}")
+        self.setModal(True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self._resize_for_available_screen()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(12)
+        title_column = QVBoxLayout()
+        title_column.setContentsMargins(0, 0, 0, 0)
+        title_column.setSpacing(2)
+        self.title_label = QLabel(os.path.basename(self.path) or self.path)
+        self.title_label.setObjectName("ImagePreviewTitle")
+        self.title_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.title_label.setToolTip(self.path)
+        self.meta_label = QLabel(
+            f"{self._original_pixmap.width()} × {self._original_pixmap.height()}"
+            f" · {format_file_size(self._file_size)}"
+        )
+        self.meta_label.setObjectName("ImagePreviewMeta")
+        title_column.addWidget(self.title_label)
+        title_column.addWidget(self.meta_label)
+        header.addLayout(title_column, 1)
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.setObjectName("PrimaryBtn")
+        self.close_btn.setAccessibleName("关闭图片预览")
+        self.close_btn.clicked.connect(self.accept)
+        header.addWidget(self.close_btn, 0, Qt.AlignTop)
+        layout.addLayout(header)
+
+        self.preview_scroll = QScrollArea()
+        self.preview_scroll.setObjectName("ImagePreviewScroll")
+        self.preview_scroll.setWidgetResizable(False)
+        self.preview_scroll.setAlignment(Qt.AlignCenter)
+        self.preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.image_label = QLabel()
+        self.image_label.setObjectName("ImagePreviewCanvas")
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.preview_scroll.setWidget(self.image_label)
+        self.preview_scroll.viewport().installEventFilter(self)
+        layout.addWidget(self.preview_scroll, 1)
+
+        toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setSpacing(8)
+        self.fit_btn = QPushButton("适应窗口")
+        self.fit_btn.setObjectName("ImagePreviewFitButton")
+        self.fit_btn.setAccessibleName("图片适应窗口")
+        self.fit_btn.clicked.connect(self.fit_to_window)
+        toolbar.addWidget(self.fit_btn)
+        self.actual_size_btn = QPushButton("100%")
+        self.actual_size_btn.setObjectName("SecondaryBtn")
+        self.actual_size_btn.setAccessibleName("按原始尺寸查看图片")
+        self.actual_size_btn.clicked.connect(lambda: self.set_zoom_percent(100))
+        toolbar.addWidget(self.actual_size_btn)
+        toolbar.addStretch()
+        self.zoom_out_btn = QToolButton()
+        self.zoom_out_btn.setObjectName("ImagePreviewZoomButton")
+        self.zoom_out_btn.setText("−")
+        self.zoom_out_btn.setAccessibleName("缩小图片")
+        self.zoom_out_btn.setToolTip("缩小图片（Ctrl+滚轮向下）")
+        self.zoom_out_btn.setFixedSize(32, 32)
+        self.zoom_out_btn.clicked.connect(self.zoom_out)
+        toolbar.addWidget(self.zoom_out_btn)
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setObjectName("ImagePreviewZoomLabel")
+        self.zoom_label.setAlignment(Qt.AlignCenter)
+        self.zoom_label.setMinimumWidth(54)
+        toolbar.addWidget(self.zoom_label)
+        self.zoom_in_btn = QToolButton()
+        self.zoom_in_btn.setObjectName("ImagePreviewZoomButton")
+        self.zoom_in_btn.setText("+")
+        self.zoom_in_btn.setAccessibleName("放大图片")
+        self.zoom_in_btn.setToolTip("放大图片（Ctrl+滚轮向上）")
+        self.zoom_in_btn.setFixedSize(32, 32)
+        self.zoom_in_btn.clicked.connect(self.zoom_in)
+        toolbar.addWidget(self.zoom_in_btn)
+        layout.addLayout(toolbar)
+
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    def _load_pixmap(self):
+        if not self.path or not os.path.isfile(self.path):
+            raise ImagePreviewError(
+                f"图片文件不存在或已被移动：\n{self.path or '未提供路径'}\n\n"
+                "请从文件管理器重新添加该图片。"
+            )
+        try:
+            self._file_size = os.path.getsize(self.path)
+        except OSError as exc:
+            raise ImagePreviewError(
+                f"无法读取图片文件：{exc}\n\n请检查文件权限后重试。"
+            ) from exc
+        if self._file_size > self.MAX_FILE_BYTES:
+            raise ImagePreviewError(
+                "图片文件过大，暂不支持在应用内放大预览。\n\n"
+                f"当前大小：{format_file_size(self._file_size)}；"
+                f"上限：{format_file_size(self.MAX_FILE_BYTES)}。\n"
+                "请使用系统图片查看器打开，或压缩后重新添加。"
+            )
+        pixmap = QPixmap(self.path)
+        if pixmap.isNull():
+            raise ImagePreviewError(
+                f"无法解码图片文件：\n{self.path}\n\n"
+                "请确认文件格式和内容有效，或使用系统图片查看器检查文件。"
+            )
+        return pixmap
+
+    def _resize_for_available_screen(self):
+        screen = self.parentWidget().screen() if self.parentWidget() else QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QRect(0, 0, 1200, 800)
+        width = max(480, min(1100, int(available.width() * 0.78)))
+        height = max(360, min(820, int(available.height() * 0.78)))
+        self.resize(width, height)
+
+    def refresh_theme(self, _resolved=None):
+        apply_product_dialog(self, "ImagePreviewDialog")
+        self.title_label.setStyleSheet(
+            f"QLabel#ImagePreviewTitle {{ color: {DesignTokens.preview_shell_text}; "
+            f"font-size: {DesignTokens.font_size_section}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; }}"
+        )
+        self.meta_label.setStyleSheet(
+            f"QLabel#ImagePreviewMeta {{ color: {DesignTokens.preview_shell_text_muted}; "
+            f"font-size: {DesignTokens.font_size_meta}px; }}"
+        )
+        self.preview_scroll.setStyleSheet(
+            f"""
+            QScrollArea#ImagePreviewScroll {{
+                background: {DesignTokens.preview_shell_bg};
+                border: 1px solid {DesignTokens.preview_shell_border};
+                border-radius: {DesignTokens.preview_shell_radius}px;
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar {{
+                background: transparent;
+                border: none;
+                margin: 0;
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar:vertical {{
+                width: {DesignTokens.scrollbar_width}px;
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar:horizontal {{
+                height: {DesignTokens.scrollbar_width}px;
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar::handle {{
+                background: {DesignTokens.scrollbar_thumb};
+                border-radius: {max(1, DesignTokens.scrollbar_width // 2)}px;
+                min-width: 28px;
+                min-height: 28px;
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar::handle:hover {{
+                background: {DesignTokens.scrollbar_thumb_hover};
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar::add-line,
+            QScrollArea#ImagePreviewScroll QScrollBar::sub-line {{
+                width: 0;
+                height: 0;
+            }}
+            QScrollArea#ImagePreviewScroll QScrollBar::add-page,
+            QScrollArea#ImagePreviewScroll QScrollBar::sub-page {{
+                background: transparent;
+            }}
+            """
+        )
+        self.preview_scroll.viewport().setStyleSheet(
+            f"background: {DesignTokens.preview_shell_bg}; border: none;"
+        )
+        self.image_label.setStyleSheet(
+            f"QLabel#ImagePreviewCanvas {{ background: {DesignTokens.preview_shell_bg}; border: none; }}"
+        )
+        zoom_button_style = f"""
+            QToolButton#ImagePreviewZoomButton {{
+                background: {DesignTokens.bg_main};
+                color: {DesignTokens.text_primary};
+                border: 1px solid {DesignTokens.border};
+                border-radius: {DesignTokens.radius_sm}px;
+                font-size: {DesignTokens.font_size_section}px;
+                font-weight: {DesignTokens.font_weight_semibold};
+            }}
+            QToolButton#ImagePreviewZoomButton:hover {{
+                background: {DesignTokens.bg_hover};
+            }}
+            QToolButton#ImagePreviewZoomButton:pressed {{
+                background: {DesignTokens.bg_pressed};
+            }}
+            QToolButton#ImagePreviewZoomButton:focus {{
+                border: {DesignTokens.focus_ring_width}px solid {DesignTokens.primary_focus};
+            }}
+            QToolButton#ImagePreviewZoomButton:disabled {{
+                background: {DesignTokens.bg_disabled};
+                color: {DesignTokens.text_disabled};
+                border-color: {DesignTokens.border_subtle};
+            }}
+        """
+        self.zoom_out_btn.setStyleSheet(zoom_button_style)
+        self.zoom_in_btn.setStyleSheet(zoom_button_style)
+        self.zoom_label.setStyleSheet(
+            f"QLabel#ImagePreviewZoomLabel {{ color: {DesignTokens.preview_shell_text}; "
+            f"font-size: {DesignTokens.font_size_meta}px; "
+            f"font-weight: {DesignTokens.font_weight_semibold}; }}"
+        )
+        self.actual_size_btn.setStyleSheet(apple_button_style("secondary", radius=DesignTokens.radius_sm))
+        self.close_btn.setStyleSheet(apple_button_style("primary", radius=DesignTokens.radius_sm))
+        self._refresh_fit_button_style()
+
+    def _refresh_fit_button_style(self):
+        if self._fit_mode:
+            self.fit_btn.setStyleSheet(
+                f"""
+                QPushButton#ImagePreviewFitButton {{
+                    min-height: {DesignTokens.control_height}px;
+                    background: {DesignTokens.primary_soft};
+                    color: {DesignTokens.primary};
+                    border: 1px solid {DesignTokens.primary};
+                    border-radius: {DesignTokens.radius_sm}px;
+                    padding: 0 12px;
+                    font-weight: {DesignTokens.font_weight_semibold};
+                }}
+                QPushButton#ImagePreviewFitButton:hover {{ background: {DesignTokens.bg_hover}; }}
+                QPushButton#ImagePreviewFitButton:focus {{
+                    border: {DesignTokens.focus_ring_width}px solid {DesignTokens.primary_focus};
+                }}
+                """
+            )
+        else:
+            self.fit_btn.setStyleSheet(apple_button_style("secondary", radius=DesignTokens.radius_sm))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._initial_fit_applied:
+            self._initial_fit_applied = True
+            self._schedule_fit_update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fit_mode:
+            self._schedule_fit_update()
+
+    def eventFilter(self, watched, event):
+        if (
+            watched is self.preview_scroll.viewport()
+            and event.type() == QEvent.Wheel
+            and event.modifiers() & Qt.ControlModifier
+        ):
+            delta = event.angleDelta().y() or event.pixelDelta().y()
+            if delta > 0:
+                self.zoom_in()
+            elif delta < 0:
+                self.zoom_out()
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _schedule_fit_update(self):
+        if self._fit_update_pending:
+            return
+        self._fit_update_pending = True
+        QTimer.singleShot(0, self._apply_scheduled_fit)
+
+    def _apply_scheduled_fit(self):
+        self._fit_update_pending = False
+        if _qt_object_alive(self) and self._fit_mode:
+            self._apply_fit()
+
+    def _apply_fit(self):
+        viewport_size = self.preview_scroll.viewport().size()
+        available_width = max(1, viewport_size.width() - 8)
+        available_height = max(1, viewport_size.height() - 8)
+        scale = min(
+            available_width / max(1, self._original_pixmap.width()),
+            available_height / max(1, self._original_pixmap.height()),
+            1.0,
+        )
+        self._render_zoom(max(1.0, scale * 100.0), fit_mode=True)
+
+    def _render_zoom(self, percent, fit_mode=False):
+        self._zoom_percent = float(percent)
+        self._fit_mode = bool(fit_mode)
+        target = QSize(
+            max(1, round(self._original_pixmap.width() * self._zoom_percent / 100.0)),
+            max(1, round(self._original_pixmap.height() * self._zoom_percent / 100.0)),
+        )
+        scaled = self._original_pixmap.scaled(
+            target,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.image_label.setPixmap(scaled)
+        self.image_label.setFixedSize(scaled.size())
+        self.zoom_label.setText(f"{round(self._zoom_percent)}%")
+        self.zoom_out_btn.setEnabled(self._zoom_percent > self.MIN_MANUAL_ZOOM)
+        self.zoom_in_btn.setEnabled(self._zoom_percent < self.MAX_MANUAL_ZOOM)
+        self._refresh_fit_button_style()
+
+    def set_zoom_percent(self, percent):
+        value = max(
+            self.MIN_MANUAL_ZOOM,
+            min(self.MAX_MANUAL_ZOOM, int(round(float(percent)))),
+        )
+        self._render_zoom(value, fit_mode=False)
+
+    def fit_to_window(self):
+        self._fit_mode = True
+        self._apply_fit()
+
+    def zoom_in(self):
+        current = int(round(self._zoom_percent))
+        if current < self.MIN_MANUAL_ZOOM:
+            self.set_zoom_percent(self.MIN_MANUAL_ZOOM)
+            return
+        next_step = ((current // self.ZOOM_STEP) + 1) * self.ZOOM_STEP
+        self.set_zoom_percent(next_step)
+
+    def zoom_out(self):
+        current = min(self.MAX_MANUAL_ZOOM, int(round(self._zoom_percent)))
+        next_step = (current // self.ZOOM_STEP) * self.ZOOM_STEP
+        if next_step >= current:
+            next_step -= self.ZOOM_STEP
+        self.set_zoom_percent(next_step)
+
+
 class FileChip(QFrame):
     removeRequested = Signal(str)
+    previewRequested = Signal(str)
 
     def __init__(self, path, removable=False, parent=None):
         super().__init__(parent)
         self.path = os.path.normpath(str(path or ""))
+        self._preview_dialog = None
         self.setObjectName("FileChip")
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.setStyleSheet(
@@ -14828,7 +15220,7 @@ class FileChip(QFrame):
         layout.setContentsMargins(6 if is_image else 10, 6, 8 if is_image else 10, 6)
         layout.setSpacing(6)
 
-        icon_label = QLabel()
+        icon_label = ClickableImageLabel() if is_image else QLabel()
         self.icon_label = icon_label
         if is_image:
             pixmap = QPixmap(self.path)
@@ -14842,6 +15234,9 @@ class FileChip(QFrame):
             else:
                 self._uses_file_icon = True
                 icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
+            icon_label.setObjectName("FileChipImageThumbnail")
+            icon_label.setToolTip("点击查看大图")
+            icon_label.activated.connect(lambda: self.previewRequested.emit(self.path))
         else:
             icon_label.setPixmap(qta.icon(file_chip_icon_name(self.path), color=DesignTokens.primary).pixmap(15, 15))
         layout.addWidget(icon_label)
@@ -14869,7 +15264,41 @@ class FileChip(QFrame):
             layout.addWidget(remove_btn)
 
         self.setToolTip(self.path)
+        self.previewRequested.connect(self._open_image_preview)
         bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def _open_image_preview(self, path):
+        if not self._is_image:
+            return
+        existing = self._preview_dialog
+        if _qt_object_alive(existing):
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        log_attachment_event("image_preview_begin", path=path)
+        try:
+            dialog = ImagePreviewDialog(path, parent=self.window())
+        except ImagePreviewError as exc:
+            log_attachment_event("image_preview_failed", path=path, error=str(exc))
+            QMessageBox.warning(self.window(), "无法预览图片", str(exc))
+            return
+        self._preview_dialog = dialog
+        log_attachment_event(
+            "image_preview_opened",
+            path=path,
+            width=dialog._original_pixmap.width(),
+            height=dialog._original_pixmap.height(),
+            size_bytes=dialog._file_size,
+        )
+        dialog.finished.connect(
+            lambda result, preview_path=path: log_attachment_event(
+                "image_preview_finished",
+                path=preview_path,
+                result=int(result),
+            )
+        )
+        dialog.open()
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
@@ -14889,10 +15318,22 @@ class FileChip(QFrame):
                     color=DesignTokens.primary,
                 ).pixmap(DesignTokens.icon_size_sm, DesignTokens.icon_size_sm)
             )
-        elif self._is_image:
+        if self._is_image:
             self.icon_label.setStyleSheet(
-                f"background: {DesignTokens.bg_secondary}; border: none; "
-                f"border-radius: {DesignTokens.radius_sm}px;"
+                f"""
+                QLabel#FileChipImageThumbnail {{
+                    background: {DesignTokens.bg_secondary};
+                    border: 1px solid transparent;
+                    border-radius: {DesignTokens.radius_sm}px;
+                }}
+                QLabel#FileChipImageThumbnail:hover {{
+                    background: {DesignTokens.bg_hover};
+                    border-color: {DesignTokens.border};
+                }}
+                QLabel#FileChipImageThumbnail:focus {{
+                    border: {DesignTokens.focus_ring_width}px solid {DesignTokens.primary_focus};
+                }}
+                """
             )
         if self.remove_btn is not None:
             self.remove_btn.setIcon(
@@ -21133,6 +21574,7 @@ class MainWindow(QMainWindow):
         self.input_field.setPlaceholderText("描述你要完成的任务，例如：整理本周截图并生成周报摘要")
         self.input_field.returnPressed.connect(self.handle_send)
         self.input_field.mentionRequested.connect(self.show_agent_mention_menu)
+        self.input_field.clipboardFilesPasted.connect(self._add_clipboard_files)
         self.input_field.textChanged.connect(self.refresh_composer_action_state)
         self.input_field.setStyleSheet(
             f"QTextEdit#MainInput {{ background: transparent; border: none; color: {DesignTokens.text_primary}; "
@@ -22827,6 +23269,81 @@ class MainWindow(QMainWindow):
         self._add_prompt_files([target_path])
         log_attachment_event("clipboard_capture_completed", session_id=state.session_id, path=target_path)
         return target_path
+
+    def _add_clipboard_files(self, paths):
+        requested_paths = [
+            os.path.normpath(str(path or "").strip())
+            for path in (paths or [])
+            if str(path or "").strip()
+        ]
+        log_attachment_event(
+            "clipboard_files_paste_begin",
+            requested_count=len(requested_paths),
+        )
+        file_paths = []
+        directory_paths = []
+        missing_paths = []
+        for path in requested_paths:
+            if os.path.isfile(path):
+                file_paths.append(path)
+            elif os.path.isdir(path):
+                directory_paths.append(path)
+            else:
+                missing_paths.append(path)
+
+        before_keys = {
+            os.path.normcase(os.path.normpath(path))
+            for path in self._current_prompt_files()
+        }
+        try:
+            accepted_paths = self._add_prompt_files(file_paths)
+        except Exception as exc:
+            log_attachment_event(
+                "clipboard_files_paste_failed",
+                requested_count=len(requested_paths),
+                error=str(exc),
+            )
+            self.add_system_toast(
+                f"粘贴文件失败：{exc}",
+                "error",
+                auto_close_ms=6000,
+            )
+            return []
+
+        added_paths = [
+            path
+            for path in self._current_prompt_files()
+            if os.path.normcase(os.path.normpath(path)) not in before_keys
+        ]
+        rejected_count = len(directory_paths) + len(missing_paths)
+        if rejected_count:
+            reasons = []
+            if directory_paths:
+                reasons.append(f"{len(directory_paths)} 个文件夹")
+            if missing_paths:
+                reasons.append(f"{len(missing_paths)} 个失效路径")
+            prefix = f"已添加 {len(added_paths)} 个文件；" if added_paths else "未添加附件："
+            self.add_system_toast(
+                prefix + "聊天附件不支持 " + "、".join(reasons) + "。",
+                "warning",
+                auto_close_ms=6000,
+            )
+            log_attachment_event(
+                "clipboard_files_paste_rejected",
+                directory_count=len(directory_paths),
+                missing_count=len(missing_paths),
+                accepted_count=len(accepted_paths),
+                added_count=len(added_paths),
+            )
+        log_attachment_event(
+            "clipboard_files_paste_completed",
+            requested_count=len(requested_paths),
+            accepted_count=len(accepted_paths),
+            added_count=len(added_paths),
+            duplicate_count=max(0, len(accepted_paths) - len(added_paths)),
+            rejected_count=rejected_count,
+        )
+        return accepted_paths
 
     def _cleanup_orphan_attachment_dirs(self):
         root = self._managed_attachment_root()

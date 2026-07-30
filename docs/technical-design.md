@@ -232,6 +232,20 @@ Responses 请求使用稳定的会话级 `prompt_cache_key`。自动命中的 Sk
 持久化保持 OpenAI-compatible 的角色顺序：`user`、`assistant`、`tool`。
 这保证历史能够重新进入模型请求，也能跨 Provider 适配。
 
+### 输入附件与剪贴板投影
+
+聊天输入框按“本地文件 URL → 剪贴板位图 → 普通文本”的顺序解释 MIME。
+从 Windows 文件管理器复制的一个或多个文件会进入统一的
+`_add_prompt_files` 管线，完成路径规范化、去重、会话工作区初始化和附件
+芯片刷新；文件夹与失效路径被明确拒绝，不会退化成 `file:///...` 文本。
+网络 URL 和普通文本仍按文本粘贴。
+
+资源管理器中的图片文件与“添加文件”一样引用原始路径，不额外复制。只有
+没有本地文件 URL 的剪贴板位图才会编码为会话托管 PNG。附件持久化继续使用
+`attachments`、`content_parts` 和 `meta.user_added_files`，因此旧历史无需
+迁移。待发送区、历史消息和补充引导共用 `FileChip`；图片缩略图由该组件
+统一打开主题化大图预览，非图片附件不改变交互。
+
 ### UI 时间线
 
 会话元数据中的 `ui_timeline_v1` 保存 thinking、Tool、正文阶段和运行中引导

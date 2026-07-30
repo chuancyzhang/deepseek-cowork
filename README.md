@@ -102,7 +102,7 @@ Then run the clean build and package audit:
 
 1. Configure and test a model under **Settings → Models & Services**.
 2. Start a standalone conversation or create one from a project.
-3. Describe the goal and attach files or select capabilities when needed.
+3. Describe the goal; attach files with the composer `+`, or copy files from the file manager and paste them directly.
 4. Follow Tool activity and observability; review any approval before submitting.
 5. Preview or edit results in **Files & Deliverables**, then continue converting if needed.
 6. Store durable preferences as memory and reusable methods as experience or a Skill.

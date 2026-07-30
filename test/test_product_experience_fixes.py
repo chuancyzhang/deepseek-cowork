@@ -6,8 +6,9 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QMimeData, QPoint, Qt
+from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl
 from PySide6.QtGui import QHelpEvent, QImage
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit, QPushButton, QToolButton, QWidget
 
 from core.chat_storage import ChatStorage
@@ -19,6 +20,8 @@ from main import (
     CapabilityWorkbenchDialog,
     FeishuQrDialog,
     FileChip,
+    ImagePreviewDialog,
+    ImagePreviewError,
     MainWindow,
     QMessageBox,
     SettingsDialog,
@@ -563,6 +566,112 @@ class ProductExperienceFixTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].size(), image.size())
 
+    def test_input_paste_routes_local_file_urls_before_image_and_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first = os.path.join(temp_dir, "资料 一.txt")
+            second = os.path.join(temp_dir, "截图 二.png")
+            for path in (first, second):
+                with open(path, "wb") as handle:
+                    handle.write(b"fixture")
+            editor = AutoResizingInputEdit()
+            captured = []
+            editor.clipboardFilesPasted.connect(captured.append)
+            mime = QMimeData()
+            mime.setUrls([QUrl.fromLocalFile(first), QUrl.fromLocalFile(second)])
+            mime.setText("\n".join((QUrl.fromLocalFile(first).toString(), QUrl.fromLocalFile(second).toString())))
+            image = QImage(12, 8, QImage.Format_ARGB32)
+            image.fill(Qt.red)
+            mime.setImageData(image)
+
+            editor.insertFromMimeData(mime)
+
+            self.assertEqual(
+                [[os.path.normpath(path) for path in group] for group in captured],
+                [[os.path.normpath(first), os.path.normpath(second)]],
+            )
+            self.assertEqual(editor.toPlainText(), "")
+
+    def test_input_paste_keeps_nonlocal_url_as_text(self):
+        editor = AutoResizingInputEdit()
+        captured = []
+        editor.clipboardFilesPasted.connect(captured.append)
+        mime = QMimeData()
+        mime.setUrls([QUrl("https://example.com/reference")])
+        mime.setText("https://example.com/reference")
+
+        editor.insertFromMimeData(mime)
+
+        self.assertEqual(captured, [])
+        self.assertEqual(editor.toPlainText(), "https://example.com/reference")
+
+    def test_clipboard_files_use_attachment_pipeline_and_report_rejections(self):
+        class Stub:
+            _add_clipboard_files = MainWindow._add_clipboard_files
+
+            def __init__(self):
+                self.prompt_files = []
+                self.add_system_toast = MagicMock()
+
+            def _current_prompt_files(self):
+                return list(self.prompt_files)
+
+            def _add_prompt_files(self, paths):
+                accepted = []
+                seen = set()
+                for path in paths:
+                    key = os.path.normcase(os.path.normpath(path))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    accepted.append(os.path.normpath(path))
+                existing = {
+                    os.path.normcase(os.path.normpath(path))
+                    for path in self.prompt_files
+                }
+                self.prompt_files.extend(
+                    path
+                    for path in accepted
+                    if os.path.normcase(os.path.normpath(path)) not in existing
+                )
+                return accepted
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            valid_path = os.path.join(temp_dir, "有效资料.txt")
+            missing_path = os.path.join(temp_dir, "已移动.txt")
+            with open(valid_path, "w", encoding="utf-8") as handle:
+                handle.write("fixture")
+            stub = Stub()
+
+            with patch("main.log_attachment_event") as attachment_log:
+                accepted = stub._add_clipboard_files(
+                    [valid_path, valid_path, temp_dir, missing_path]
+                )
+
+            self.assertEqual(accepted, [valid_path])
+            self.assertEqual(stub.prompt_files, [valid_path])
+            stub.add_system_toast.assert_called_once()
+            toast_text = stub.add_system_toast.call_args.args[0]
+            self.assertIn("已添加 1 个文件", toast_text)
+            self.assertIn("1 个文件夹", toast_text)
+            self.assertIn("1 个失效路径", toast_text)
+            stages = [call.args[0] for call in attachment_log.call_args_list]
+            self.assertEqual(stages[0], "clipboard_files_paste_begin")
+            self.assertIn("clipboard_files_paste_rejected", stages)
+            self.assertEqual(stages[-1], "clipboard_files_paste_completed")
+
+            stub.add_system_toast.reset_mock()
+            with patch("main.log_attachment_event") as duplicate_log:
+                accepted_again = stub._add_clipboard_files([valid_path])
+            self.assertEqual(accepted_again, [valid_path])
+            self.assertEqual(stub.prompt_files, [valid_path])
+            stub.add_system_toast.assert_not_called()
+            completed = next(
+                call
+                for call in duplicate_log.call_args_list
+                if call.args[0] == "clipboard_files_paste_completed"
+            )
+            self.assertEqual(completed.kwargs["duplicate_count"], 1)
+
     def test_input_height_animation_is_owned_by_editor(self):
         host = QWidget()
         editor = AutoResizingInputEdit(host)
@@ -610,6 +719,90 @@ class ProductExperienceFixTests(unittest.TestCase):
                 self.assertEqual(thumbnail.size(), thumbnail.maximumSize())
             finally:
                 chip.deleteLater()
+
+    def test_image_file_chip_thumbnail_supports_mouse_and_keyboard_activation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "shot.png")
+            image = QImage(20, 10, QImage.Format_ARGB32)
+            image.fill(Qt.blue)
+            self.assertTrue(image.save(path))
+            chip = FileChip(path)
+            chip.previewRequested.disconnect(chip._open_image_preview)
+            captured = []
+            chip.previewRequested.connect(captured.append)
+            chip.show()
+            self.app.processEvents()
+            try:
+                QTest.mouseClick(chip.icon_label, Qt.LeftButton)
+                chip.icon_label.setFocus()
+                QTest.keyClick(chip.icon_label, Qt.Key_Return)
+                self.assertEqual(captured, [path, path])
+            finally:
+                chip.close()
+                chip.deleteLater()
+
+    def test_image_preview_dialog_supports_fit_and_bounded_manual_zoom(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "large-shot.png")
+            image = QImage(640, 320, QImage.Format_ARGB32)
+            image.fill(Qt.green)
+            self.assertTrue(image.save(path))
+            dialog = ImagePreviewDialog(path)
+            dialog.resize(520, 420)
+            dialog.show()
+            self.app.processEvents()
+            try:
+                self.assertTrue(dialog._fit_mode)
+                self.assertFalse(dialog.image_label.pixmap().isNull())
+                self.assertLessEqual(dialog._zoom_percent, 100)
+
+                dialog.set_zoom_percent(999)
+                self.assertEqual(dialog._zoom_percent, 400)
+                self.assertEqual(dialog.zoom_label.text(), "400%")
+                dialog.set_zoom_percent(1)
+                self.assertEqual(dialog._zoom_percent, 25)
+                self.assertEqual(dialog.zoom_label.text(), "25%")
+                dialog.set_zoom_percent(100)
+                self.assertEqual(dialog.image_label.pixmap().size(), image.size())
+
+                dialog._render_zoom(18, fit_mode=True)
+                dialog.zoom_in()
+                self.assertEqual(dialog._zoom_percent, 25)
+
+                dialog.fit_to_window()
+                self.assertTrue(dialog._fit_mode)
+                self.assertLessEqual(dialog._zoom_percent, 100)
+
+                dialog.setAttribute(Qt.WA_DeleteOnClose, False)
+                QTest.keyClick(dialog, Qt.Key_Escape)
+                self.app.processEvents()
+                self.assertFalse(dialog.isVisible())
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+
+    def test_image_preview_dialog_rejects_missing_and_invalid_images(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = os.path.join(temp_dir, "missing.png")
+            with self.assertRaisesRegex(ImagePreviewError, "不存在或已被移动"):
+                ImagePreviewDialog(missing_path)
+
+            invalid_path = os.path.join(temp_dir, "invalid.png")
+            with open(invalid_path, "w", encoding="utf-8") as handle:
+                handle.write("not an image")
+            with self.assertRaisesRegex(ImagePreviewError, "无法解码"):
+                ImagePreviewDialog(invalid_path)
+
+            valid_path = os.path.join(temp_dir, "too-large.png")
+            image = QImage(10, 10, QImage.Format_ARGB32)
+            image.fill(Qt.red)
+            self.assertTrue(image.save(valid_path))
+            with patch(
+                "main.os.path.getsize",
+                return_value=ImagePreviewDialog.MAX_FILE_BYTES + 1,
+            ):
+                with self.assertRaisesRegex(ImagePreviewError, "文件过大"):
+                    ImagePreviewDialog(valid_path)
 
     def test_vision_preflight_blocks_unsupported_model(self):
         class Stub:

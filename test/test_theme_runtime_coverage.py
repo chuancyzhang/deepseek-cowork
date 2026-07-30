@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QImage
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid as is_qt_object_valid
 
@@ -17,6 +17,7 @@ from main import (
     ChatBubble,
     FileChip,
     GuidanceTimelineEvent,
+    ImagePreviewDialog,
     InlineInteractionCard,
     MainWindow,
     SessionSkillPickerPopover,
@@ -303,6 +304,65 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         ):
             self.assertTrue(self.manager.restore_saved_theme(reason="brand_title_restore"))
         self.assertEqual(self.window.windowTitle(), "DeepSeek Cowork")
+
+    def test_image_preview_dialog_tracks_theme_preview_and_restore(self):
+        image_path = os.path.join(self.temp_dir.name, "theme-preview.png")
+        image = QImage(320, 180, QImage.Format_ARGB32)
+        image.fill(Qt.blue)
+        self.assertTrue(image.save(image_path))
+        dialog = ImagePreviewDialog(image_path, parent=self.window)
+        dialog.show()
+        self.app.processEvents()
+        original_style = dialog.preview_scroll.viewport().styleSheet()
+        original_zoom = dialog.zoom_label.text()
+        profile = {
+            "id": "image-preview-theme",
+            "name": "Image Preview Theme",
+            "overrides": {
+                "tokens": {
+                    "bg_app": "#10151d",
+                    "bg_main": "#151c27",
+                    "text_primary": "#eef3ff",
+                    "preview_shell_bg": "#172233",
+                    "preview_shell_text": "#f2f6ff",
+                    "preview_shell_text_muted": "#aebbd0",
+                    "preview_shell_border": "#40516d",
+                }
+            },
+        }
+        try:
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                self.assertTrue(
+                    self.manager.apply_profile(
+                        profile,
+                        preview=True,
+                        reason="image_preview_theme",
+                    )
+                )
+            self.app.processEvents()
+            self.assertIn("#172233", dialog.preview_scroll.viewport().styleSheet())
+            self.assertNotEqual(dialog.preview_scroll.viewport().styleSheet(), original_style)
+            self.assertEqual(dialog.zoom_label.text(), original_zoom)
+            self.assertFalse(dialog.image_label.pixmap().isNull())
+
+            with patch(
+                "core.theme.QFontDatabase.families",
+                return_value=["Microsoft YaHei UI", "Consolas"],
+            ):
+                self.assertTrue(
+                    self.manager.restore_saved_theme(
+                        reason="image_preview_theme_restore"
+                    )
+                )
+            self.app.processEvents()
+            self.assertNotIn("#172233", dialog.preview_scroll.viewport().styleSheet())
+            self.assertEqual(dialog.zoom_label.text(), original_zoom)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
 
     def test_workspace_scene_canvas_uses_one_global_grid_and_revision_cache(self):
         host = QWidget()

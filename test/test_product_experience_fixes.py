@@ -1,5 +1,7 @@
+from dataclasses import replace
 import os
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,9 +17,13 @@ from core.chat_storage import ChatStorage
 from core.config_manager import ConfigManager
 from core.memory_store import MemoryStore
 from core.theme import DesignTokens
+from core.im_gateway_registry import IM_PROVIDER_SPECS
+import main as main_module
 from main import (
     AutoResizingInputEdit,
     CapabilityWorkbenchDialog,
+    ChannelQrDialog,
+    ChannelQrWorker,
     FeishuQrDialog,
     FileChip,
     ImagePreviewDialog,
@@ -28,7 +34,7 @@ from main import (
     WINDOWS_APP_USER_MODEL_ID,
     skill_center_config_state,
 )
-from ui.primitives import ProductTooltipController
+from ui.primitives import ProductMasterDetail, ProductTooltipController
 
 
 class ProductExperienceFixTests(unittest.TestCase):
@@ -183,6 +189,201 @@ class ProductExperienceFixTests(unittest.TestCase):
             finally:
                 dialog._allow_close_without_prompt = True
                 dialog.close()
+
+    def test_enterprise_message_overview_scales_to_registered_channels(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            dialog = SettingsDialog(
+                ConfigManager(),
+                initial_page_label="企业消息",
+            )
+            try:
+                self.assertEqual(
+                    list(dialog.im_provider_rows),
+                    ["feishu", "dingtalk", "wecom", "qq", "wechat"],
+                )
+                self.assertTrue(dialog.im_search_input.isHidden())
+                self.assertEqual(dialog.im_provider_fields["qq"], {})
+                self.assertEqual(dialog.im_provider_fields["wechat"], {})
+                self.assertTrue(
+                    dialog.im_provider_advanced_widgets["dingtalk"].isHidden()
+                )
+
+                dialog._select_im_provider("dingtalk")
+                dialog.dingtalk_fields["client_id"].setText("client")
+                dialog.dingtalk_fields["client_secret"].setText("secret")
+                dialog._connect_form_im_provider("dingtalk")
+                self.assertTrue(
+                    dialog.im_provider_advanced_toggles["dingtalk"].isChecked()
+                )
+                self.assertIn(
+                    "Stream / WS URL",
+                    dialog.im_provider_statuses["dingtalk"].label.text(),
+                )
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_enterprise_message_launch_failure_overrides_stale_connecting_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch("core.config_manager.get_base_dir", return_value=temp_dir):
+            config = ConfigManager()
+            config.set(
+                "im_gateway",
+                {
+                    "enabled_providers": ["wechat"],
+                    "providers": {
+                        "wechat": {
+                            "enabled": True,
+                            "bot_token": "wx-token",
+                            "ilink_bot_id": "wx-bot",
+                        }
+                    },
+                },
+            )
+            host = QWidget()
+            host.gateway_process = None
+            with patch(
+                "main.read_im_gateway_status",
+                return_value={"provider": "wechat", "state": "connecting"},
+            ):
+                dialog = SettingsDialog(
+                    config,
+                    parent=host,
+                    initial_page_label="企业消息",
+                )
+                try:
+                    dialog.im_runtime_errors["wechat"] = "网关进程启动失败"
+                    dialog._refresh_im_provider_states()
+                    self.assertEqual(
+                        dialog.im_provider_row_badges["wechat"].text(),
+                        "连接失败",
+                    )
+                    self.assertIn(
+                        "网关进程启动失败",
+                        dialog.im_overview_notice.label.text(),
+                    )
+                finally:
+                    dialog._allow_close_without_prompt = True
+                    dialog.close()
+
+    def test_enterprise_message_search_appears_for_twelve_channels(self):
+        base = IM_PROVIDER_SPECS[0]
+        specs = tuple(
+            replace(
+                base,
+                provider_id=f"mock_{index}",
+                title=f"渠道 {index + 1}",
+                subtitle=f"用途 {index + 1}",
+                required_keys=(),
+            )
+            for index in range(12)
+        )
+        order = tuple(spec.provider_id for spec in specs)
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "core.config_manager.get_app_data_dir", return_value=temp_dir
+        ), patch(
+            "core.config_manager.get_base_dir", return_value=temp_dir
+        ), patch.object(
+            main_module, "IM_PROVIDER_SPECS", specs
+        ), patch.object(
+            main_module, "IM_PROVIDER_ORDER", order
+        ):
+            dialog = SettingsDialog(
+                ConfigManager(),
+                initial_page_label="企业消息",
+            )
+            try:
+                self.assertEqual(len(dialog.im_provider_rows), 12)
+                self.assertFalse(dialog.im_search_input.isHidden())
+                dialog.im_search_input.setText("渠道 12")
+                self.app.processEvents()
+                self.assertFalse(dialog.im_provider_rows["mock_11"].isHidden())
+                self.assertTrue(dialog.im_provider_rows["mock_0"].isHidden())
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.close()
+
+    def test_wechat_qr_dialog_exposes_scan_and_verify_states(self):
+        with patch.object(ChannelQrDialog, "_start_worker", new=lambda self: None):
+            dialog = ChannelQrDialog("wechat")
+        try:
+            dialog._on_qr_ready("https://weixin.qq.com/q/test", 300)
+            self.assertFalse(dialog.qr_label.pixmap().isNull())
+            dialog._on_status_changed("scanned")
+            dialog._update_countdown()
+            self.assertIn("手机", dialog.status_notice.label.text())
+            dialog._on_verify_code_required("请输入配对码")
+            dialog._update_countdown()
+            self.assertFalse(dialog.verify_code_row.isHidden())
+            self.assertIn("配对码", dialog.status_notice.label.text())
+        finally:
+            dialog._timer.stop()
+            dialog.close()
+
+    def test_qr_worker_cancellation_reaches_async_task(self):
+        class Task:
+            cancelled = False
+
+            def done(self):
+                return False
+
+            def cancel(self):
+                self.cancelled = True
+
+        class Loop:
+            def call_soon_threadsafe(self, callback):
+                callback()
+
+        worker = ChannelQrWorker("qq")
+        task = Task()
+        worker._loop = Loop()
+        worker._task = task
+        worker.cancel()
+        self.assertTrue(worker.cancel_event.is_set())
+        self.assertTrue(task.cancelled)
+
+    def test_product_master_detail_initial_wide_layout_is_visible(self):
+        browse = QWidget()
+        detail = QWidget()
+        master = ProductMasterDetail(browse, detail, threshold=700)
+        try:
+            master.resize(1000, 420)
+            master.show()
+            self.app.processEvents()
+            self.assertFalse(master._compact)
+            self.assertTrue(browse.isVisible())
+            self.assertTrue(detail.isVisible())
+            self.assertTrue(all(size > 0 for size in master.splitter.sizes()))
+        finally:
+            master.close()
+
+    def test_product_master_detail_compact_switch_keeps_single_owner(self):
+        browse = QWidget()
+        detail = QWidget()
+        master = ProductMasterDetail(browse, detail, threshold=700)
+        try:
+            master.resize(620, 420)
+            master.show()
+            self.app.processEvents()
+            self.assertTrue(master._compact)
+            self.assertTrue(browse.isVisible())
+            self.assertFalse(detail.isVisible())
+            self.assertIs(browse.parentWidget(), master.splitter)
+            self.assertIs(detail.parentWidget(), master.splitter)
+
+            master.show_detail()
+            self.app.processEvents()
+            self.assertFalse(browse.isVisible())
+            self.assertTrue(detail.isVisible())
+            master.show_browse()
+            self.app.processEvents()
+            self.assertTrue(browse.isVisible())
+            self.assertFalse(detail.isVisible())
+        finally:
+            master.close()
 
     def test_settings_mixed_save_failure_rolls_back_touched_config_and_memory(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch(

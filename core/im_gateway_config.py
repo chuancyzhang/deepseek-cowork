@@ -1,7 +1,6 @@
 import copy
 
-
-IM_PROVIDER_ORDER = ("feishu", "dingtalk", "wecom")
+from .im_gateway_registry import IM_PROVIDER_ORDER, get_provider_spec
 
 
 def normalize_im_gateway_config(value):
@@ -41,7 +40,10 @@ def update_selected_provider(value, provider_name, provider_values):
     normalized = normalize_im_gateway_config(value)
     selected = str(provider_name or "").strip().lower()
     if selected not in IM_PROVIDER_ORDER:
-        raise ValueError("请选择飞书、钉钉或企业微信。")
+        raise ValueError("请选择一个可用的聊天软件。")
+    spec = get_provider_spec(selected)
+    if spec is None:
+        raise ValueError("无法识别要接入的聊天软件。")
     current = normalized["providers"].get(selected, {})
     current.update(copy.deepcopy(provider_values or {}))
     normalized["providers"][selected] = current

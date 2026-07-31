@@ -581,13 +581,20 @@ pyside6_hidden = [
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",
 ]
+qqbot_dist = _require_distribution("qqbot-agent-sdk")
+qqbot_hidden = collect_submodules("qqbot_agent_sdk")
+if not qqbot_hidden:
+    raise RuntimeError("qqbot-agent-sdk is installed but no modules were collected.")
+qqbot_metadata = copy_metadata(
+    str(qqbot_dist.metadata.get("Name") or "qqbot-agent-sdk")
+)
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA,
-    hiddenimports=pyside6_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
+    datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA + qqbot_metadata,
+    hiddenimports=pyside6_hidden + qqbot_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
         'bs4',
         'yaml',
         'requests',

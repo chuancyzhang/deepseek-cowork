@@ -55,7 +55,7 @@ See the [product document](docs/product.md) for the full model.
 - Generate office drafts and convert HTML work products to PPTX, DOCX, or PDF.
 - Extend the runtime with built-in, bundled, user, and standard Agent Skills.
 - Connect MCP Tools over `stdio` or Streamable HTTP.
-- Manage models, Agents, automation, memory, themes, enterprise messaging, and optional components.
+- Manage models, Agents, automation, memory, themes, enterprise messaging, and optional components. Enterprise messaging supports Feishu, DingTalk, WeCom, QQ, and WeChat with one active channel at a time.
 - Start PPT Agent, Wind + Eastmoney financial research, workspace data and machine-learning analysis, or browser automation directly from the new-conversation home screen.
 
 ## Install

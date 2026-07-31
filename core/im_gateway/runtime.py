@@ -18,7 +18,14 @@ from core.interaction import parse_interaction_reply
 from core.im_session_key import build_im_session_key, resolve_date_key
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.im_gateway_config import normalize_im_gateway_config
+from core.im_gateway_registry import get_provider_spec, provider_title
 from core.im_gateway_status import write_im_gateway_status
+from core.im_gateway.wechat_ilink import (
+    WeChatIlinkClient,
+    WeChatIlinkError,
+    WeChatTokenExpired,
+    parse_wechat_updates,
+)
 
 _RECENT_MESSAGE_IDS = {}
 _RECENT_LOCK = threading.Lock()
@@ -30,15 +37,16 @@ _CARD_CONTEXT = {}
 _CARD_CONTEXT_LOCK = threading.Lock()
 
 def _log_gateway(message):
+    safe_message = _redact_log_text(message)
     try:
         log_dir = get_app_data_dir()
         log_path = os.path.join(log_dir, "im_gateway.log")
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"[{ts}] {message}\n")
+            f.write(f"[{ts}] {safe_message}\n")
     except Exception:
         try:
-            print(f"[im_gateway] {message}", file=sys.stderr)
+            print(f"[im_gateway] {safe_message}", file=sys.stderr)
         except Exception:
             return
 
@@ -52,11 +60,19 @@ def _truncate_text(value, limit=800):
 def _sanitize(value):
     sensitive_keys = {
         "app_secret",
+        "app_id",
         "bot_key",
         "bot_id",
+        "bot_token",
         "client_secret",
+        "context_token",
+        "ilink_bot_id",
+        "ilink_user_id",
+        "user_openid",
+        "user_id",
+        "chat_id",
+        "qrcode",
         "tenant_access_token",
-        "Authorization",
         "authorization",
         "encrypt_key",
         "encrypt",
@@ -70,8 +86,9 @@ def _sanitize(value):
     if isinstance(value, dict):
         result = {}
         for k, v in value.items():
-            if k in sensitive_keys:
-                if k == "encrypt":
+            normalized_key = str(k or "").strip().lower()
+            if normalized_key in sensitive_keys:
+                if normalized_key == "encrypt":
                     raw = v or ""
                     try:
                         raw_len = len(raw)
@@ -103,8 +120,18 @@ def _redact_log_text(value):
     text = str(value or "")
     text = re.sub(r"(?:https?|wss?)://\S+", "<redacted-url>", text)
     text = re.sub(
-        r"(?i)\b(secret|token|authorization|response_code)\b\s*[:=]\s*[^\s,;]+",
-        r"\1=<redacted>",
+        r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(
+        r'''(?ix)
+        (["']?(?:app_?secret|client_?secret|bot_?token|context_?token|secret|token|
+        response_?code|user_?openid|openid|user_?id|chat_?id|bot_?id|qrcode)["']?
+        \s*[:=]\s*)
+        (?:"[^"]*"|'[^']*'|[^\s,;]+)
+        ''',
+        r"\1<redacted>",
         text,
     )
     return _truncate_text(text, limit=800)
@@ -299,12 +326,7 @@ def _enabled_provider_names(config_manager):
 def _build_model_input(event, provider_name=None):
     user_text = (event or {}).get("text") or ""
     provider_value = (provider_name or (event or {}).get("provider") or "enterprise").strip().lower()
-    labels = {
-        "feishu": "飞书",
-        "dingtalk": "钉钉",
-        "wecom": "企业微信智能机器人",
-    }
-    label = labels.get(provider_value, provider_value or "企业消息")
+    label = provider_title(provider_value, provider_value or "企业消息")
     channel_hint = (
         "[渠道上下文]\n"
         f"- 当前交互渠道: {label}\n"
@@ -1005,6 +1027,113 @@ class WeComProvider(IMProvider):
     def send_message(self, text, event=None):
         return self.send_card_reply(event, card_content=text)
 
+class QQProvider(IMProvider):
+    name = "qq"
+
+    def __init__(self, config_manager):
+        super().__init__(config_manager)
+        self.app_id = str(self.config_value("app_id", "") or "").strip()
+        self.client_secret = str(self.config_value("client_secret", "") or "").strip()
+        self.user_openid = str(self.config_value("user_openid", "") or "").strip()
+        self._api_client = None
+        self._loop = None
+
+    def attach_client(self, api_client, loop):
+        self._api_client = api_client
+        self._loop = loop
+
+    def parse_event(self, payload):
+        if not isinstance(payload, dict):
+            return None
+        parsed = dict(payload)
+        parsed.setdefault("provider", self.name)
+        return parsed
+
+    def send_message(self, text, event=None):
+        if self._api_client is None or self._loop is None:
+            raise RuntimeError("QQ 连接尚未就绪。")
+        event = event if isinstance(event, dict) else {}
+        chat_scope = str(event.get("chat_scope") or "").strip()
+        chat_id = str(event.get("chat_id") or "").strip()
+        if chat_scope not in {"c2c", "group"} or not chat_id:
+            raise RuntimeError("QQ 消息缺少可回复的会话信息。")
+        future = asyncio.run_coroutine_threadsafe(
+            self._api_client.send_text(
+                chat_scope,
+                chat_id,
+                str(text or ""),
+                reply_to=str(event.get("message_id") or "") or None,
+                markdown=True,
+            ),
+            self._loop,
+        )
+        try:
+            result = future.result(timeout=35)
+        except Exception as exc:
+            write_im_gateway_status("qq", "error", f"QQ 消息发送失败：{exc}")
+            raise RuntimeError(f"QQ 消息发送失败：{exc}") from exc
+        if isinstance(result, dict):
+            return result.get("id") or result.get("message_id")
+        return result
+
+
+class WeChatProvider(IMProvider):
+    name = "wechat"
+
+    def __init__(self, config_manager):
+        super().__init__(config_manager)
+        self.bot_token = str(self.config_value("bot_token", "") or "").strip()
+        self.ilink_bot_id = str(self.config_value("ilink_bot_id", "") or "").strip()
+        self.ilink_user_id = str(self.config_value("ilink_user_id", "") or "").strip()
+        self.base_url = str(self.config_value("base_url", "") or "").strip()
+        self._client = None
+        self._loop = None
+        self._token_expired_event = None
+
+    def attach_client(self, client, loop, token_expired_event=None):
+        self._client = client
+        self._loop = loop
+        self._token_expired_event = token_expired_event
+
+    def parse_event(self, payload):
+        if not isinstance(payload, dict):
+            return None
+        parsed = dict(payload)
+        parsed.setdefault("provider", self.name)
+        return parsed
+
+    def send_message(self, text, event=None):
+        if self._client is None or self._loop is None:
+            raise RuntimeError("微信连接尚未就绪。")
+        event = event if isinstance(event, dict) else {}
+        user_id = str(event.get("user_id") or "").strip()
+        if not user_id:
+            raise RuntimeError("微信消息缺少可回复的用户信息。")
+        future = asyncio.run_coroutine_threadsafe(
+            self._client.send_text(
+                self.bot_token,
+                user_id,
+                str(event.get("context_token") or ""),
+                str(text or ""),
+            ),
+            self._loop,
+        )
+        try:
+            return future.result(timeout=30)
+        except WeChatTokenExpired as exc:
+            if self._token_expired_event is not None:
+                self._loop.call_soon_threadsafe(self._token_expired_event.set)
+            write_im_gateway_status(
+                "wechat",
+                "error",
+                "微信登录已过期，请重新扫码接入。",
+            )
+            raise RuntimeError("微信登录已过期，请重新扫码接入。") from exc
+        except Exception as exc:
+            write_im_gateway_status("wechat", "error", f"微信消息发送失败：{exc}")
+            raise RuntimeError(f"微信消息发送失败：{exc}") from exc
+
+
 class SessionMapper:
     def __init__(self, chat_storage):
         self.chat_storage = chat_storage
@@ -1500,19 +1629,33 @@ def _handle_im_event(payload, provider, session_mapper, config_manager, daemon_c
                         live_ctx["awaiting_feedback"] = True
                 provider.update_card_message(open_message_id, "请直接回复你对当前结果的反馈内容，我会转给 AI 并继续优化。", thinking=thinking_text, collapse_thinking=False, content_parts=content_parts, interactive_actions=actions_running)
         return None
-    allowed_event_types = {
-        "feishu": {"im.message.receive_v1"},
-        "dingtalk": {"im.message.receive", "im.message.receive_v1", "message", "text"},
-        "wecom": {"im.message.receive", "im.message.receive_v1", "message", "text"},
-    }
-    if event_type not in allowed_event_types.get(provider_name, {"im.message.receive"}):
+    provider_spec = get_provider_spec(provider_name)
+    if provider_spec is None:
+        _log_gateway(f"unknown provider event rejected: {provider_name}")
+        return None
+    if event_type not in set(provider_spec.event_types):
         _log_gateway(f"{provider_name} handle_im_event ignored: event_type={event.get('event_type')}")
         return None
     if event.get("sender_type") and event.get("sender_type") != "user":
         _log_gateway(f"{provider_name} handle_im_event ignored: sender_type={event.get('sender_type')}")
         return None
     if event.get("message_type") and str(event.get("message_type")).lower() not in {"text", "markdown"}:
-        _log_gateway(f"{provider_name} handle_im_event ignored: message_type={event.get('message_type')}")
+        _log_gateway(
+            f"{provider_name} unsupported message type={event.get('message_type')} "
+            f"detail={event.get('unsupported_type')}"
+        )
+        if provider_name in {"qq", "wechat"}:
+            try:
+                provider.send_card_reply(
+                    event,
+                    card_content="当前版本仅支持文字和链接，请换成文字消息再试。",
+                    title="🤖 AI 助手",
+                )
+            except Exception as exc:
+                _log_gateway(
+                    f"{provider_name} unsupported message notice failed: "
+                    f"{_redact_log_text(exc)}"
+                )
         return None
     if not event.get("text"):
         _log_gateway(f"{provider_name} handle_im_event ignored: empty text")
@@ -1659,17 +1802,16 @@ def build_context():
     daemon_port = config_manager.get("daemon_port", DEFAULT_PORT)
     daemon_client = DaemonClient(daemon_host, daemon_port)
 
-    provider_classes = {
-        "feishu": FeishuProvider,
-        "dingtalk": DingTalkProvider,
-        "wecom": WeComProvider,
-    }
     providers = []
     for provider_name in _enabled_provider_names(config_manager):
-        provider_cls = provider_classes.get(provider_name)
-        if not provider_cls:
-            _log_gateway(f"unknown provider ignored: {provider_name}")
-            continue
+        spec = get_provider_spec(provider_name)
+        if spec is None:
+            raise RuntimeError(f"无法识别企业消息渠道：{provider_name}")
+        provider_cls = globals().get(spec.runtime_adapter)
+        if not isinstance(provider_cls, type) or not issubclass(provider_cls, IMProvider):
+            raise RuntimeError(
+                f"{spec.title}运行适配器不可用：{spec.runtime_adapter}"
+            )
         provider = provider_cls(config_manager)
         providers.append(provider)
     return config_manager, session_mapper, daemon_client, providers
@@ -1852,17 +1994,268 @@ def _start_wecom_connection(context):
         raise
 
 
+def _load_qq_sdk():
+    try:
+        import logging
+        from qqbot_agent_sdk import (
+            EventParser,
+            QQApiClient,
+            QQWebSocket,
+            WSCallbacks,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "QQ 官方 SDK 不可用，请确认 qqbot-agent-sdk 已随应用安装。"
+        ) from exc
+    logging.getLogger("qqbot_agent_sdk").setLevel(logging.WARNING)
+    return QQApiClient, QQWebSocket, WSCallbacks, EventParser
+
+
+def _start_qq_connection(context):
+    config_manager, session_mapper, daemon_client, provider = context
+    if not provider.app_id or not provider.client_secret:
+        write_im_gateway_status("qq", "error", "QQ 扫码凭据不完整，请重新扫码接入。")
+        raise RuntimeError("QQ 扫码凭据不完整，请重新扫码接入。")
+    QQApiClient, QQWebSocket, WSCallbacks, EventParser = _load_qq_sdk()
+
+    async def run_client():
+        import httpx
+
+        loop = asyncio.get_running_loop()
+        fatal_event = asyncio.Event()
+        fatal_error = {"message": ""}
+        session_state = {"session_id": None, "last_seq": None}
+        session_lock = threading.Lock()
+        api_client = QQApiClient(
+            app_id=provider.app_id,
+            client_secret=provider.client_secret,
+            log_tag="CoworkQQ",
+        )
+        parser = EventParser()
+
+        async def on_message(event_type, raw):
+            inbound = parser.parse(str(event_type or ""), raw)
+            if inbound is None:
+                _log_gateway(f"qq event ignored type={event_type}")
+                return
+            payload = {
+                "provider": "qq",
+                "event_type": "message",
+                "sender_type": "user",
+                "message_type": "text" if str(inbound.content or "").strip() else "unsupported",
+                "unsupported_type": (
+                    "attachment"
+                    if list(getattr(inbound, "attachments", []) or [])
+                    else getattr(inbound, "message_type", "unknown")
+                ),
+                "text": str(inbound.content or "").strip(),
+                "user_id": str(inbound.user_id or ""),
+                "chat_id": str(inbound.chat_id or ""),
+                "chat_scope": str(inbound.chat_scope or ""),
+                "message_id": str(inbound.message_id or ""),
+                "create_time": str(inbound.timestamp or ""),
+            }
+            await asyncio.to_thread(
+                _handle_im_event,
+                payload,
+                provider,
+                session_mapper,
+                config_manager,
+                daemon_client,
+            )
+
+        def on_connected():
+            _log_gateway("qq websocket connected")
+            write_im_gateway_status("qq", "connected")
+
+        def on_disconnected():
+            _log_gateway("qq websocket disconnected; sdk reconnecting")
+            write_im_gateway_status("qq", "reconnecting")
+
+        def on_fatal_error(error_code, message):
+            safe_message = _redact_log_text(message or error_code or "QQ 连接失败。")
+            fatal_error["message"] = safe_message
+            _log_gateway(f"qq websocket fatal error={safe_message}")
+            write_im_gateway_status("qq", "error", safe_message)
+            loop.call_soon_threadsafe(fatal_event.set)
+
+        def get_session():
+            with session_lock:
+                return session_state["session_id"], session_state["last_seq"]
+
+        def set_session(session_id, last_seq):
+            with session_lock:
+                session_state["session_id"] = session_id
+                session_state["last_seq"] = last_seq
+
+        def set_heartbeat_interval(value):
+            _log_gateway(f"qq heartbeat configured interval={float(value or 0):.1f}s")
+
+        def fail_pending(reason):
+            _log_gateway(f"qq pending replies failed reason={_redact_log_text(reason)}")
+
+        callbacks = WSCallbacks(
+            on_message_event=on_message,
+            on_connected=on_connected,
+            on_disconnected=on_disconnected,
+            on_fatal_error=on_fatal_error,
+            get_token=api_client.ensure_token_sync,
+            get_session=get_session,
+            set_session=set_session,
+            set_heartbeat_interval=set_heartbeat_interval,
+            clear_token=api_client.clear_token,
+            fail_pending=fail_pending,
+            get_gateway_url=api_client.get_gateway_url_sync,
+        )
+        websocket_client = QQWebSocket(callbacks=callbacks, log_tag="CoworkQQ")
+        async with httpx.AsyncClient(follow_redirects=False) as http_client:
+            api_client.setup(http_client)
+            await api_client.ensure_token()
+            gateway_url = await api_client.get_gateway_url()
+            provider.attach_client(api_client, loop)
+            _log_gateway("qq connection starting")
+            write_im_gateway_status("qq", "connecting")
+            websocket_client.start(gateway_url, loop)
+            try:
+                await fatal_event.wait()
+                raise RuntimeError(fatal_error["message"] or "QQ 连接已停止。")
+            finally:
+                await websocket_client.async_stop()
+
+    try:
+        asyncio.run(run_client())
+    except Exception as exc:
+        _log_gateway(f"qq connection failed: {_redact_log_text(exc)}")
+        write_im_gateway_status("qq", "error", str(exc))
+        raise
+
+
+def _start_wechat_connection(context):
+    config_manager, session_mapper, daemon_client, provider = context
+    if not provider.bot_token or not provider.ilink_bot_id:
+        write_im_gateway_status(
+            "wechat",
+            "error",
+            "微信扫码凭据不完整，请重新扫码接入。",
+        )
+        raise RuntimeError("微信扫码凭据不完整，请重新扫码接入。")
+
+    async def run_client():
+        loop = asyncio.get_running_loop()
+        client = WeChatIlinkClient(base_url=provider.base_url or None)
+        token_expired_event = asyncio.Event()
+        provider.attach_client(client, loop, token_expired_event)
+        cursor = ""
+        reconnect_attempt = 0
+        background_tasks = set()
+
+        def consume_task(task):
+            background_tasks.discard(task)
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                _log_gateway(
+                    f"wechat message handler failed: {_redact_log_text(exc)}"
+                )
+
+        async def receive_updates():
+            update_task = asyncio.create_task(
+                client.get_updates(provider.bot_token, cursor)
+            )
+            expired_task = asyncio.create_task(token_expired_event.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {update_task, expired_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if expired_task in done and token_expired_event.is_set():
+                    raise WeChatTokenExpired(
+                        "微信登录已过期，请重新扫码接入。"
+                    )
+                return await update_task
+            finally:
+                for task in (update_task, expired_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(
+                    update_task,
+                    expired_task,
+                    return_exceptions=True,
+                )
+
+        _log_gateway("wechat long-poll starting")
+        write_im_gateway_status("wechat", "connecting")
+        try:
+            while True:
+                try:
+                    payload = await receive_updates()
+                    reconnect_attempt = 0
+                    write_im_gateway_status("wechat", "connected")
+                except WeChatTokenExpired:
+                    message = "微信登录已过期，请重新扫码接入。"
+                    _log_gateway("wechat token expired")
+                    write_im_gateway_status("wechat", "error", message)
+                    raise RuntimeError(message) from None
+                except WeChatIlinkError as exc:
+                    reconnect_attempt += 1
+                    delay = min(30, 2 ** min(reconnect_attempt - 1, 5))
+                    _log_gateway(
+                        f"wechat long-poll failed attempt={reconnect_attempt} "
+                        f"delay={delay}s error={_redact_log_text(exc)}"
+                    )
+                    write_im_gateway_status("wechat", "reconnecting", str(exc))
+                    await asyncio.sleep(delay)
+                    continue
+
+                next_cursor = str(payload.get("get_updates_buf") or "")
+                if next_cursor:
+                    cursor = next_cursor
+                events = parse_wechat_updates(payload)
+                for event in events:
+                    task = asyncio.create_task(
+                        asyncio.to_thread(
+                            _handle_im_event,
+                            event,
+                            provider,
+                            session_mapper,
+                            config_manager,
+                            daemon_client,
+                        )
+                    )
+                    background_tasks.add(task)
+                    task.add_done_callback(consume_task)
+        finally:
+            for task in list(background_tasks):
+                task.cancel()
+            await client.close()
+
+    try:
+        asyncio.run(run_client())
+    except Exception as exc:
+        _log_gateway(f"wechat connection failed: {_redact_log_text(exc)}")
+        write_im_gateway_status("wechat", "error", str(exc))
+        raise
+
+
 def _start_provider(context):
     _config_manager, _session_mapper, _daemon_client, provider = context
     provider_name = getattr(provider, "name", "")
-    if provider_name == "feishu":
-        return _start_feishu_long_connection(context)
-    if provider_name == "wecom":
-        return _start_wecom_connection(context)
-    if provider_name == "dingtalk":
-        return _start_websocket_provider(context)
-    _log_gateway(f"provider start ignored: {provider_name}")
-    return None
+    spec = get_provider_spec(provider_name)
+    if spec is None:
+        raise RuntimeError(f"无法识别企业消息渠道：{provider_name}")
+    starters = {
+        "feishu_long_connection": _start_feishu_long_connection,
+        "websocket": _start_websocket_provider,
+        "wecom": _start_wecom_connection,
+        "qq": _start_qq_connection,
+        "wechat": _start_wechat_connection,
+    }
+    starter = starters.get(spec.runtime_entry)
+    if starter is None:
+        raise RuntimeError(f"{spec.title}运行入口不可用：{spec.runtime_entry}")
+    return starter(context)
 
 
 def run():
@@ -1874,8 +2267,12 @@ def run():
         return
     provider = providers[0]
     context = (config_manager, session_mapper, daemon_client, provider)
-    write_im_gateway_status(getattr(provider, "name", ""), "connecting")
-    _start_provider(context)
+    provider_name = getattr(provider, "name", "")
+    write_im_gateway_status(provider_name, "connecting")
+    try:
+        _start_provider(context)
+    finally:
+        _log_gateway(f"im_gateway finish provider={provider_name}")
 
 
 if __name__ == "__main__":

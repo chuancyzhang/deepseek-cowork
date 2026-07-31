@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -210,6 +211,106 @@ def select_settings_page(dialog, label):
             process_events()
             return
     raise RuntimeError(f"Settings page not found: {label}")
+
+
+def render_enterprise_message_screens(window, qa=False, simulate_many=False):
+    if simulate_many:
+        base_spec = main.IM_PROVIDER_SPECS[0]
+        simulated_specs = tuple(
+            replace(
+                base_spec,
+                provider_id=f"mock_{index}",
+                title=f"模拟渠道 {index + 1}",
+                subtitle=f"用于验证扩展列表 {index + 1}",
+                required_keys=(),
+            )
+            for index in range(12)
+        )
+        main.IM_PROVIDER_SPECS = simulated_specs
+        main.IM_PROVIDER_ORDER = tuple(
+            spec.provider_id for spec in simulated_specs
+        )
+    window.resize(1280, 720)
+    window.open_settings("企业消息")
+    settings = window.product_pages[window.PAGE_SETTINGS]
+    settings._automatic_update_check_started = True
+    window.show()
+    process_events(180)
+    settings._ensure_im_master_detail_layout()
+    process_events(80)
+    scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+    if simulate_many:
+        save_widget(
+            window,
+            f"qa-enterprise-12-channels-{scale_label}x.png",
+            180,
+        )
+        return
+    if qa:
+        settings._im_gateway_status_timer.stop()
+        save_widget(window, f"qa-enterprise-messages-{scale_label}x.png", 180)
+        window.resize(1024, 640)
+        process_events(160)
+        settings._ensure_im_master_detail_layout()
+        save_widget(
+            window,
+            f"qa-enterprise-messages-narrow-{scale_label}x.png",
+            120,
+        )
+        window.resize(1280, 720)
+        process_events(140)
+        settings._select_im_provider("wechat")
+        settings.im_provider_detail_badges["wechat"].setText("连接中")
+        settings.im_provider_detail_badges["wechat"].set_tone("primary")
+        settings.im_provider_statuses["wechat"].set_text(
+            "正在连接微信…",
+            "info",
+        )
+        save_widget(window, f"qa-enterprise-connecting-{scale_label}x.png")
+        settings.im_provider_detail_badges["wechat"].setText("使用中")
+        settings.im_provider_detail_badges["wechat"].set_tone("success")
+        settings.im_provider_statuses["wechat"].set_text(
+            "微信正在使用中，收到的文字和链接会交给默认主助手处理。",
+            "success",
+        )
+        save_widget(window, f"qa-enterprise-connected-{scale_label}x.png")
+        settings.im_provider_detail_badges["wechat"].setText("连接失败")
+        settings.im_provider_detail_badges["wechat"].set_tone("error")
+        settings.im_provider_statuses["wechat"].set_text(
+            "连接失败：微信登录已过期，请重新扫码接入。",
+            "error",
+        )
+        save_widget(window, f"qa-enterprise-error-{scale_label}x.png")
+        settings._select_im_provider("dingtalk")
+        settings.im_provider_advanced_toggles["dingtalk"].setChecked(True)
+        save_widget(window, f"qa-dingtalk-advanced-{scale_label}x.png")
+    else:
+        save_widget(window, "s40-enterprise-messages.png", 180)
+
+    original_start_worker = main.ChannelQrDialog._start_worker
+    main.ChannelQrDialog._start_worker = lambda _dialog: None
+    try:
+        qr_dialog = main.ChannelQrDialog("wechat", parent=settings)
+    finally:
+        main.ChannelQrDialog._start_worker = original_start_worker
+    try:
+        qr_dialog._on_qr_ready("https://weixin.qq.com/q/cowork-user-guide", 300)
+        qr_dialog._on_status_changed("scanned")
+        if qa:
+            save_widget(qr_dialog, f"qa-wechat-scanned-{scale_label}x.png")
+            qr_dialog._on_verify_code_required("请输入手机微信显示的配对码")
+            save_widget(qr_dialog, f"qa-wechat-verify-{scale_label}x.png")
+            qr_dialog._expires_at = 0
+            qr_dialog._update_countdown()
+            save_widget(qr_dialog, f"qa-wechat-expired-{scale_label}x.png")
+            qr_dialog._on_failed("网络连接失败，请检查网络后重新生成二维码。")
+            save_widget(qr_dialog, f"qa-wechat-failed-{scale_label}x.png")
+        else:
+            save_widget(qr_dialog, "s41-wechat-scan.png")
+    finally:
+        qr_dialog._timer.stop()
+        qr_dialog.close()
+
 
 
 def verify_drawer_layout(window, width, height):
@@ -781,6 +882,17 @@ def main_run():
             )
             save_widget(model_filled, "08-model-configuration.png")
             model_filled.hide()
+            return
+        if SCREENSHOT_SCOPE in {
+            "enterprise-messages",
+            "enterprise-messages-qa",
+            "enterprise-messages-qa-12",
+        }:
+            render_enterprise_message_screens(
+                window,
+                qa=SCREENSHOT_SCOPE != "enterprise-messages",
+                simulate_many=SCREENSHOT_SCOPE == "enterprise-messages-qa-12",
+            )
             return
         if SCREENSHOT_SCOPE == "assistant-turn":
             render_assistant_turn_screens(window)

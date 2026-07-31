@@ -1341,10 +1341,7 @@ class ProductMasterDetail(QFrame):
         self.browse = browse
         self.detail = detail
         self.detail_visible = False
-        self._compact = False
-        self.stack = QStackedWidget()
-        self.stack.addWidget(browse)
-        self.stack.addWidget(detail)
+        self._compact = None
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(1)
@@ -1353,16 +1350,19 @@ class ProductMasterDetail(QFrame):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setSizes([320, 640])
-        self.host = QStackedWidget()
-        self.host.addWidget(self.splitter)
-        compact = QWidget()
-        compact_layout = QVBoxLayout(compact)
-        compact_layout.setContentsMargins(0, 0, 0, 0)
-        compact_layout.addWidget(self.stack)
-        self.host.addWidget(compact)
+        self.host = self.splitter
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.host)
+        layout.addWidget(self.splitter)
+
+    def _apply_compact_visibility(self):
+        show_detail = bool(self.detail_visible)
+        self.browse.setVisible(not show_detail)
+        self.detail.setVisible(show_detail)
+        total = max(self.width(), 320)
+        self.splitter.setSizes(
+            [0, total] if show_detail else [total, 0]
+        )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1371,33 +1371,26 @@ class ProductMasterDetail(QFrame):
             return
         self._compact = compact
         if compact:
-            self.browse.setParent(self.stack)
-            self.detail.setParent(self.stack)
-            if self.stack.indexOf(self.browse) < 0:
-                self.stack.addWidget(self.browse)
-            if self.stack.indexOf(self.detail) < 0:
-                self.stack.addWidget(self.detail)
-            self.host.setCurrentIndex(1)
-            self.stack.setCurrentWidget(self.detail if self.detail_visible else self.browse)
+            self._apply_compact_visibility()
         else:
-            self.browse.setParent(self.splitter)
-            self.detail.setParent(self.splitter)
-            if self.splitter.indexOf(self.browse) < 0:
-                self.splitter.insertWidget(0, self.browse)
-            if self.splitter.indexOf(self.detail) < 0:
-                self.splitter.addWidget(self.detail)
-            self.host.setCurrentIndex(0)
+            self.browse.show()
+            self.detail.show()
+            total = max(self.width(), 640)
+            browse_width = min(340, max(240, total // 3))
+            self.splitter.setSizes(
+                [browse_width, max(320, total - browse_width)]
+            )
 
     def show_detail(self):
         self.detail_visible = True
         if self._compact:
-            self.stack.setCurrentWidget(self.detail)
+            self._apply_compact_visibility()
         self.detailVisibilityChanged.emit(True)
 
     def show_browse(self):
         self.detail_visible = False
         if self._compact:
-            self.stack.setCurrentWidget(self.browse)
+            self._apply_compact_visibility()
         self.detailVisibilityChanged.emit(False)
 
 

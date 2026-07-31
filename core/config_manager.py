@@ -294,6 +294,8 @@ class ConfigManager:
                     "feishu": {"enabled": False, "long_connection": True},
                     "dingtalk": {"enabled": False},
                     "wecom": {"enabled": False},
+                    "qq": {"enabled": False},
+                    "wechat": {"enabled": False},
                 },
             },
         }

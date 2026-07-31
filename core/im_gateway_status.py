@@ -26,10 +26,21 @@ def write_im_gateway_status(provider="", state="stopped", error=""):
     if normalized_state not in IM_GATEWAY_STATES:
         raise ValueError(f"未知企业消息网关状态：{state}")
     error_text = str(error or "").strip()
-    error_text = re.sub(r"https?://\S+", "<地址已省略>", error_text)
+    error_text = re.sub(r"(?:https?|wss?)://\S+", "<地址已省略>", error_text)
     error_text = re.sub(
-        r"(?i)\b(secret|token|authorization)\b\s*[:=]\s*[^\s,;]+",
-        r"\1=<已隐藏>",
+        r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+",
+        r"\1<已隐藏>",
+        error_text,
+    )
+    error_text = re.sub(
+        r'''(?ix)
+        (["']?(?:app_?secret|client_?secret|bot_?token|context_?token|secret|token|
+        app_?id|user_?openid|openid|user_?id|chat_?id|bot_?id|
+        ilink_(?:bot|user)_?id|qrcode|response_?code|verification_?token)["']?
+        \s*[:=]\s*)
+        (?:"[^"]*"|'[^']*'|[^\s,;]+)
+        ''',
+        r"\1<已隐藏>",
         error_text,
     )
     payload = {

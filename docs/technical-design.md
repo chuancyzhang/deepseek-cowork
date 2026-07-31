@@ -297,6 +297,17 @@ QQ 运行时直接复用腾讯官方 `qqbot-agent-sdk` 的扫码、Token、WebSo
 `requirements.txt`；其中 `mcp[cli]` 提供分析 MCP CLI 模块所需的 Typer，
 `qqbot-agent-sdk` 则作为必需构建依赖由 spec 显式校验。
 
+### 外部组件进程隔离
+
+BrowserSkill CLI 安装在应用数据目录，属于外部程序而不是随包 helper。Windows
+冻结态通过 `core.process_utils.popen_external_program()` 启动这类进程：在进程
+创建锁内临时调用 `SetDllDirectoryW(NULL)`，并从子进程 `PATH` 中移除
+`sys._MEIPASS` 下的目录；`CreateProcess` 返回后立即把主进程 DLL 搜索目录恢复
+为 `sys._MEIPASS`。这样 `bsk daemon` 不会加载发布目录 `_internal` 中的
+`VCRUNTIME140.dll`，应用退出后也不会因外部守护进程继续占用旧发布目录而阻止
+下一次 PyInstaller `COLLECT`。随包 helper 仍使用普通启动路径，不套用此外部
+程序隔离规则。
+
 ### 延迟渲染
 
 历史加载在线程中读取和分组。首屏优先物化最终回答；思考、Tool 参数和结果

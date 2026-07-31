@@ -92,11 +92,11 @@ class BrowserSkillComponentTests(unittest.TestCase):
     def test_install_verifies_and_atomically_publishes_cli(self):
         archive = _archive_bytes()
         digest = hashlib.sha256(archive).hexdigest().upper()
-        completed = type(
-            "Completed",
-            (),
-            {"returncode": 0, "stdout": "bsk 0.1.7", "stderr": ""},
-        )()
+        completed = {
+            "returncode": 0,
+            "stdout": "bsk 0.1.7",
+            "stderr": "",
+        }
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             browser_skill_component,
             "browser_skill_root",
@@ -110,8 +110,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
             "BROWSER_SKILL_SHA256",
             digest,
         ), patch.object(
-            browser_skill_component.subprocess,
-            "run",
+            browser_skill_component,
+            "_run_bsk_executable",
             return_value=completed,
         ), patch.object(
             browser_skill_component,
@@ -137,11 +137,11 @@ class BrowserSkillComponentTests(unittest.TestCase):
     def test_repair_stops_managed_daemon_before_replacing_cli(self):
         archive = _archive_bytes()
         digest = hashlib.sha256(archive).hexdigest().upper()
-        completed = type(
-            "Completed",
-            (),
-            {"returncode": 0, "stdout": "bsk 0.1.7", "stderr": ""},
-        )()
+        completed = {
+            "returncode": 0,
+            "stdout": "bsk 0.1.7",
+            "stderr": "",
+        }
         with tempfile.TemporaryDirectory() as temp_dir:
             root = self._installed_component(temp_dir)
             with patch.object(
@@ -157,8 +157,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
                 "BROWSER_SKILL_SHA256",
                 digest,
             ), patch.object(
-                browser_skill_component.subprocess,
-                "run",
+                browser_skill_component,
+                "_run_bsk_executable",
                 return_value=completed,
             ), patch.object(
                 browser_skill_component,
@@ -231,7 +231,7 @@ class BrowserSkillComponentTests(unittest.TestCase):
                 "state_text": "CLI 已安装，扩展未连接",
                 "health_error": "extension disconnected",
             },
-        ), patch.object(browser_skill_component.subprocess, "Popen") as popen:
+        ), patch.object(browser_skill_component, "popen_external_program") as popen:
             result = browser_skill_component.run_browser_skill_cli(
                 ["snapshot", "--session", "abcd"]
             )
@@ -353,8 +353,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
             "browser_skill_executable",
             return_value=r"C:\components\bsk.exe",
         ), patch.object(
-            browser_skill_component.subprocess,
-            "Popen",
+            browser_skill_component,
+            "popen_external_program",
             side_effect=start_process,
         ) as popen, patch.object(
             browser_skill_component,
@@ -400,8 +400,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
             "browser_skill_status",
             return_value={"installed": True, "ready": True},
         ), patch.object(
-            browser_skill_component.subprocess,
-            "Popen",
+            browser_skill_component,
+            "popen_external_program",
             side_effect=start_large_output_process,
         ), patch.object(
             browser_skill_component,
@@ -437,8 +437,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
             "browser_skill_status",
             return_value={"installed": True, "ready": True},
         ), patch.object(
-            browser_skill_component.subprocess,
-            "Popen",
+            browser_skill_component,
+            "popen_external_program",
             return_value=BlockingProcess(),
         ), patch.object(
             browser_skill_component,
@@ -484,8 +484,8 @@ class BrowserSkillComponentTests(unittest.TestCase):
             "browser_skill_status",
             return_value={"installed": True, "ready": True},
         ), patch.object(
-            browser_skill_component.subprocess,
-            "Popen",
+            browser_skill_component,
+            "popen_external_program",
             side_effect=start_timeout_process,
         ), patch.object(
             browser_skill_component,

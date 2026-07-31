@@ -2,6 +2,8 @@ import hashlib
 import os
 import platform
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 
 try:
@@ -13,6 +15,9 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
+
+
+_EXTERNAL_PROCESS_LAUNCH_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,83 @@ def subprocess_kwargs_no_window(**kwargs):
             pass
         kwargs["startupinfo"] = startupinfo
     return kwargs
+
+
+def _frozen_windows_bundle_dir():
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        return ""
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if not bundle_dir:
+        raise RuntimeError("冻结应用缺少 sys._MEIPASS，不能安全启动外部程序。")
+    return os.path.abspath(bundle_dir)
+
+
+def _set_windows_dll_directory(path):
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    setter = kernel32.SetDllDirectoryW
+    setter.argtypes = [ctypes.c_wchar_p]
+    setter.restype = ctypes.c_bool
+    ctypes.set_last_error(0)
+    if not setter(path):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _path_is_within(path, root):
+    try:
+        common = os.path.commonpath(
+            [os.path.abspath(path), os.path.abspath(root)]
+        )
+        return os.path.normcase(common) == os.path.normcase(os.path.abspath(root))
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _sanitized_external_environment(environment, bundle_dir):
+    sanitized = dict(os.environ if environment is None else environment)
+    path_key = next(
+        (key for key in sanitized if str(key).upper() == "PATH"),
+        None,
+    )
+    path_value = sanitized.get(path_key) if path_key is not None else None
+    if path_value:
+        sanitized[path_key] = os.pathsep.join(
+            entry
+            for entry in path_value.split(os.pathsep)
+            if entry
+            and not _path_is_within(entry.strip().strip('"'), bundle_dir)
+        )
+    return sanitized
+
+
+def popen_external_program(args, **kwargs):
+    """Start a non-bundled program without PyInstaller's DLL search override."""
+    bundle_dir = _frozen_windows_bundle_dir()
+    if not bundle_dir:
+        return subprocess.Popen(args, **kwargs)
+
+    launch_kwargs = dict(kwargs)
+    launch_kwargs["env"] = _sanitized_external_environment(
+        launch_kwargs.get("env"),
+        bundle_dir,
+    )
+    with _EXTERNAL_PROCESS_LAUNCH_LOCK:
+        _set_windows_dll_directory(None)
+        try:
+            process = subprocess.Popen(args, **launch_kwargs)
+        except BaseException:
+            _set_windows_dll_directory(bundle_dir)
+            raise
+        try:
+            _set_windows_dll_directory(bundle_dir)
+        except BaseException:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            raise
+    return process
 
 
 def runtime_debug_logging_enabled():

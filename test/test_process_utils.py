@@ -1,11 +1,13 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
+from core import process_utils
 from core.process_utils import (
     ProcessSingletonLock,
     build_process_singleton_lock_path,
+    popen_external_program,
     reveal_path_in_file_manager,
     runtime_debug_logging_enabled,
     subprocess_kwargs_no_window,
@@ -69,6 +71,66 @@ class TestProcessUtils(unittest.TestCase):
         else:
             self.assertNotIn("creationflags", kwargs)
             self.assertNotIn("startupinfo", kwargs)
+
+    def test_external_program_launch_resets_frozen_dll_search_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bundle_dir = os.path.join(temp_dir, "_internal")
+            system_dir = os.path.join(temp_dir, "system-bin")
+            os.makedirs(bundle_dir)
+            os.makedirs(system_dir)
+            environment = {
+                "PATH": os.pathsep.join([bundle_dir, system_dir]),
+                "KEEP": "yes",
+            }
+            process = object()
+            with patch.object(
+                process_utils,
+                "_frozen_windows_bundle_dir",
+                return_value=bundle_dir,
+            ), patch.object(
+                process_utils,
+                "_set_windows_dll_directory",
+            ) as set_dll_directory, patch.object(
+                process_utils.subprocess,
+                "Popen",
+                return_value=process,
+            ) as popen:
+                result = popen_external_program(
+                    [r"C:\components\bsk.exe", "doctor"],
+                    env=environment,
+                )
+
+        self.assertIs(result, process)
+        self.assertEqual(
+            set_dll_directory.call_args_list,
+            [call(None), call(bundle_dir)],
+        )
+        child_environment = popen.call_args.kwargs["env"]
+        self.assertEqual(child_environment["PATH"], system_dir)
+        self.assertEqual(child_environment["KEEP"], "yes")
+        self.assertEqual(environment["PATH"], os.pathsep.join([bundle_dir, system_dir]))
+
+    def test_external_program_launch_restores_dll_path_after_failure(self):
+        bundle_dir = os.path.abspath("frozen-bundle")
+        with patch.object(
+            process_utils,
+            "_frozen_windows_bundle_dir",
+            return_value=bundle_dir,
+        ), patch.object(
+            process_utils,
+            "_set_windows_dll_directory",
+        ) as set_dll_directory, patch.object(
+            process_utils.subprocess,
+            "Popen",
+            side_effect=OSError("launch failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "launch failed"):
+                popen_external_program(["missing.exe"])
+
+        self.assertEqual(
+            set_dll_directory.call_args_list,
+            [call(None), call(bundle_dir)],
+        )
 
     def test_runtime_debug_logging_is_opt_in(self):
         with patch.dict(os.environ, {}, clear=True):

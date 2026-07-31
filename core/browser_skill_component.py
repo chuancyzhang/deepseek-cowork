@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 import requests
 
 from .env_utils import get_app_data_dir
-from .process_utils import subprocess_kwargs_no_window
+from .process_utils import popen_external_program, subprocess_kwargs_no_window
 
 
 BROWSER_SKILL_COMPONENT_ID = "browser-skill"
@@ -127,22 +127,37 @@ def _parse_version(text):
     return match.group(1) if match else ""
 
 
-def _run_bsk(args, timeout=20):
-    executable = browser_skill_executable()
-    completed = subprocess.run(
+def _run_bsk_executable(executable, args, timeout=20):
+    process = popen_external_program(
         [executable, *list(args or [])],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=max(1, int(timeout or 20)),
         **subprocess_kwargs_no_window(),
     )
+    timeout = max(1, int(timeout or 20))
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            process.args,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        )
     return {
-        "returncode": completed.returncode,
-        "stdout": (completed.stdout or "").strip(),
-        "stderr": (completed.stderr or "").strip(),
+        "returncode": process.returncode,
+        "stdout": (stdout or "").strip(),
+        "stderr": (stderr or "").strip(),
     }
+
+
+def _run_bsk(args, timeout=20):
+    return _run_bsk_executable(browser_skill_executable(), args, timeout)
 
 
 def _wait_process_while_monitoring(process, timeout_seconds, abort_check=None):
@@ -730,17 +745,15 @@ def install_browser_skill(progress_callback=None):
         install_root = os.path.join(staged_root, "install")
         os.makedirs(install_root)
         shutil.copy2(candidates[0], os.path.join(install_root, "bsk.exe"))
-        completed = subprocess.run(
-            [os.path.join(install_root, "bsk.exe"), "--version"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+        completed = _run_bsk_executable(
+            os.path.join(install_root, "bsk.exe"),
+            ["--version"],
             timeout=10,
-            **subprocess_kwargs_no_window(),
         )
-        detected_version = _parse_version(completed.stdout or completed.stderr)
-        if completed.returncode != 0 or detected_version != BROWSER_SKILL_VERSION:
+        detected_version = _parse_version(
+            completed["stdout"] or completed["stderr"]
+        )
+        if completed["returncode"] != 0 or detected_version != BROWSER_SKILL_VERSION:
             raise RuntimeError(
                 "BrowserSkill CLI 验证失败："
                 f"期望 {BROWSER_SKILL_VERSION}，实际 {detected_version or '未知'}"
@@ -868,7 +881,7 @@ def run_browser_skill_cli(args, timeout_seconds=120, abort_check=None):
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
         mode="w+b"
     ) as stderr_file:
-        process = subprocess.Popen(
+        process = popen_external_program(
             [browser_skill_executable(), "--json", "--quiet", *command_args],
             stdin=subprocess.DEVNULL,
             stdout=stdout_file,

@@ -7,8 +7,10 @@ import time
 from .deepseek import (
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY,
     build_deepseek_request_options,
     is_deepseek_request,
+    is_official_deepseek_api,
     normalize_reasoning_effort,
 )
 
@@ -19,6 +21,16 @@ SUPPORTED_OPENAI_API_PROTOCOLS = (
     API_PROTOCOL_RESPONSES,
 )
 GPT_5_6_CONTEXT_WINDOW_TOKENS = 1_050_000
+DEEPSEEK_RESPONSES_REPLAY_ITEM_TYPES = {
+    "reasoning",
+    "message",
+    "function_call",
+    "web_search_call",
+}
+RESPONSES_WEB_SEARCH_TOOL_TYPES = {
+    "web_search",
+    "web_search_2025_08_26",
+}
 
 
 def normalize_openai_api_protocol(value):
@@ -43,9 +55,12 @@ class LLMProvider(ABC):
         """
         Yields chunks of response.
         Each chunk should be a dict with:
-        - type: 'content' | 'reasoning' | 'tool_call'
+        - type: 'content' | 'reasoning' | 'tool_call' | 'usage' | 'error'
+          | 'response_items' | 'server_tool_status'
         - content: str (for content/reasoning)
         - tool_call: dict (for tool_call, partial or complete)
+        `response_items` carries provider output items needed for stateless replay;
+        `server_tool_status` reports provider-executed tools without local execution.
         """
         pass
 
@@ -237,6 +252,10 @@ class OpenAIProvider(LLMProvider):
         self.stream_usage_enabled = bool(stream_usage_enabled)
         self.prompt_cache_key_param = str(prompt_cache_key_param or "").strip()
         self.api_protocol = normalize_openai_api_protocol(api_protocol)
+        self.requires_deepseek_responses_replay = bool(
+            self.api_protocol == API_PROTOCOL_RESPONSES
+            and is_official_deepseek_api(self.base_url)
+        )
         self.provider_name = (
             "OpenAI Responses"
             if self.api_protocol == API_PROTOCOL_RESPONSES
@@ -374,6 +393,118 @@ class OpenAIProvider(LLMProvider):
             return obj.get(name, default)
         return getattr(obj, name, default)
 
+    @classmethod
+    def _response_error_message(cls, value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        for name in ("message", "reason", "detail", "code"):
+            text = str(cls._object_value(value, name, "") or "").strip()
+            if text:
+                return text
+        return ""
+
+    @classmethod
+    def _json_compatible(cls, value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {
+                str(key): cls._json_compatible(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._json_compatible(item) for item in value]
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return cls._json_compatible(model_dump(mode="json", exclude_unset=True))
+            except TypeError:
+                return cls._json_compatible(model_dump())
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            return cls._json_compatible(to_dict())
+        attributes = getattr(value, "__dict__", None)
+        if isinstance(attributes, dict):
+            return cls._json_compatible({
+                key: item for key, item in attributes.items()
+                if not str(key).startswith("_")
+            })
+        raise TypeError(f"Responses API item contains a non-serializable {type(value).__name__} value.")
+
+    def _normalize_deepseek_replay_items(self, raw_items, source="response"):
+        if not isinstance(raw_items, (list, tuple)) or not raw_items:
+            raise RuntimeError(
+                "DeepSeek Responses completed without replayable output items; "
+                "the stateless conversation cannot continue safely."
+            )
+
+        normalized = []
+        has_reasoning_text = False
+        has_tool_item = False
+        for raw_item in raw_items:
+            item = self._json_compatible(raw_item)
+            if not isinstance(item, dict):
+                raise RuntimeError(f"DeepSeek Responses {source} contains an invalid output item.")
+            item_type = str(item.get("type") or "").strip()
+            if item_type not in DEEPSEEK_RESPONSES_REPLAY_ITEM_TYPES:
+                raise RuntimeError(
+                    f"DeepSeek Responses returned unsupported replay item type: {item_type or 'empty'}."
+                )
+
+            if item_type == "reasoning":
+                if not str(item.get("id") or "").strip():
+                    raise RuntimeError("DeepSeek Responses reasoning item is missing id.")
+                if not isinstance(item.get("summary"), list):
+                    raise RuntimeError("DeepSeek Responses reasoning item is missing summary.")
+                content = item.get("content")
+                if not isinstance(content, list):
+                    raise RuntimeError("DeepSeek Responses reasoning item is missing content.")
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if (
+                        str(part.get("type") or "") == "reasoning_text"
+                        and str(part.get("text") or "")
+                    ):
+                        has_reasoning_text = True
+            elif item_type == "message":
+                if (
+                    not str(item.get("id") or "").strip()
+                    or str(item.get("role") or "") != "assistant"
+                    or not isinstance(item.get("content"), list)
+                ):
+                    raise RuntimeError("DeepSeek Responses returned an invalid assistant message item.")
+            elif item_type == "function_call":
+                has_tool_item = True
+                if (
+                    not str(item.get("call_id") or "").strip()
+                    or not str(item.get("name") or "").strip()
+                    or not isinstance(item.get("arguments"), str)
+                ):
+                    raise RuntimeError("DeepSeek Responses returned an invalid function_call item.")
+            elif item_type == "web_search_call":
+                has_tool_item = True
+                if (
+                    not str(item.get("id") or "").strip()
+                    or not str(item.get("status") or "").strip()
+                    or not isinstance(item.get("action"), dict)
+                ):
+                    raise RuntimeError("DeepSeek Responses returned an invalid web_search_call item.")
+            normalized.append(item)
+
+        if (
+            has_tool_item
+            and (self.thinking_enabled or self.reasoning_effort)
+            and not has_reasoning_text
+        ):
+            raise RuntimeError(
+                "DeepSeek Responses used a tool but did not return replayable reasoning_text; "
+                "tool execution was stopped to prevent an invalid follow-up request."
+            )
+        return normalized
+
     def _responses_stream(self, messages, tools=None, prompt_cache_key=None):
         params = {
             "model": self.model_name,
@@ -385,7 +516,7 @@ class OpenAIProvider(LLMProvider):
             params["tools"] = api_tools
         if self.reasoning_effort:
             params["reasoning"] = {"effort": self.reasoning_effort}
-        if prompt_cache_key:
+        if prompt_cache_key and not self.requires_deepseek_responses_replay:
             params["prompt_cache_key"] = str(prompt_cache_key)
 
         stream = self.client.responses.create(**params)
@@ -405,6 +536,25 @@ class OpenAIProvider(LLMProvider):
                 delta = self._object_value(event, "delta", "")
                 if delta:
                     yield {"type": "reasoning", "content": str(delta)}
+                continue
+            if event_type in {
+                "response.web_search_call.in_progress",
+                "response.web_search_call.searching",
+                "response.web_search_call.completed",
+            }:
+                status = event_type.rsplit(".", 1)[-1]
+                payload = {
+                    "type": "server_tool_status",
+                    "name": "web_search",
+                    "status": status,
+                }
+                item_id = str(self._object_value(event, "item_id", "") or "")
+                if item_id:
+                    payload["id"] = item_id
+                output_index = self._object_value(event, "output_index")
+                if output_index is not None:
+                    payload["output_index"] = output_index
+                yield payload
                 continue
             if event_type == "response.output_item.added":
                 item = self._object_value(event, "item")
@@ -449,6 +599,25 @@ class OpenAIProvider(LLMProvider):
                 continue
             if event_type == "response.completed":
                 response = self._object_value(event, "response")
+                if self.requires_deepseek_responses_replay:
+                    replay_items = self._normalize_deepseek_replay_items(
+                        self._object_value(response, "output"),
+                    )
+                    yield {"type": "response_items", "items": replay_items}
+                    for item in replay_items:
+                        if item.get("type") == "web_search_call" and item.get("status") == "failed":
+                            reason = (
+                                self._response_error_message(item.get("error"))
+                                or self._response_error_message(item.get("action"))
+                                or "DeepSeek did not return error details for the failed web search."
+                            )
+                            yield {
+                                "type": "server_tool_status",
+                                "name": "web_search",
+                                "id": item.get("id") or "",
+                                "status": "failed",
+                                "reason": reason,
+                            }
                 usage_payload = self._usage_payload(response)
                 if usage_payload:
                     yield {"type": "usage", "usage": usage_payload}
@@ -482,6 +651,19 @@ class OpenAIProvider(LLMProvider):
             if "strict" in function:
                 entry["strict"] = bool(function.get("strict"))
             prepared.append(entry)
+        if self.requires_deepseek_responses_replay:
+            deduped = []
+            has_web_search = False
+            for tool in prepared:
+                tool_type = str(tool.get("type") or "") if isinstance(tool, dict) else ""
+                if tool_type in RESPONSES_WEB_SEARCH_TOOL_TYPES:
+                    if has_web_search:
+                        continue
+                    has_web_search = True
+                deduped.append(tool)
+            if not has_web_search:
+                deduped.append({"type": "web_search"})
+            prepared = deduped
         return prepared
 
     def _prepare_responses_input(self, messages):
@@ -496,6 +678,34 @@ class OpenAIProvider(LLMProvider):
                 items.append({"role": "user", "content": self._responses_content(content, "input_text")})
                 continue
             if role == "assistant":
+                replay_items = message.get(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY)
+                if self.requires_deepseek_responses_replay and replay_items:
+                    items.extend(self._normalize_deepseek_replay_items(replay_items, source="history"))
+                    continue
+
+                reasoning_content = str(message.get("reasoning_content") or "")
+                if self.requires_deepseek_responses_replay and reasoning_content:
+                    message_id = str(message.get("id") or "").strip()
+                    if not message_id:
+                        raise ValueError(
+                            "DeepSeek Responses history contains reasoning_text without a stable assistant message id."
+                        )
+                    reasoning_id = message_id if message_id.startswith("rs_") else f"rs_{message_id}"
+                    items.append({
+                        "type": "reasoning",
+                        "id": reasoning_id,
+                        "summary": [],
+                        "content": [{"type": "reasoning_text", "text": reasoning_content}],
+                    })
+                elif (
+                    self.requires_deepseek_responses_replay
+                    and message.get("tool_calls")
+                    and (self.thinking_enabled or self.reasoning_effort)
+                ):
+                    raise ValueError(
+                        "DeepSeek Responses 工具调用历史缺少 reasoning_text，无法安全续接。"
+                        "请新建任务后重试；原历史不会被静默裁剪。"
+                    )
                 if content:
                     items.append({"role": "assistant", "content": self._responses_content(content, "output_text")})
                 for tool_call in message.get("tool_calls") or []:

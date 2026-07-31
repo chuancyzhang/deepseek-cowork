@@ -196,12 +196,26 @@ Responses Provider 把消息、函数调用和函数结果转换为 typed Items�
 reasoning、正文、Tool 参数、用量和错误投影回统一事件。Chat Completions
 保持传统消息协议。
 
+官方 DeepSeek Responses 是无状态接口。Provider 在流结束时从完整 response
+中提取 `reasoning`、`message`、`function_call` 和 `web_search_call`，按原顺序
+写入 assistant 消息的协议元数据；下一次请求优先原样回放这些 Items。旧历史
+只有 `reasoning_content` 时会生成标准 `reasoning_text` 内容块并放在对应函数
+调用之前。工具轮缺少可恢复推理或对应函数结果时直接报出恢复方式，不裁剪
+历史继续运行。
+
+DeepSeek Responses 请求自动暴露一个服务端 `web_search`，同时接受并去重
+`web_search_2025_08_26`。搜索状态进入任务观测，但不会进入本地函数 Tool
+执行器；服务端报告失败时同时保留并显示失败原因。该兼容层只由官方 DeepSeek
+服务地址与 Responses 协议共同触发；标准
+OpenAI Responses 仍保留既有 typed Items、Tool 和 `prompt_cache_key` 行为。
+
 系统提示分为两部分：
 
 - **稳定前缀**：长期安全策略、Tool 使用规则和交互约束；
 - **动态上下文**：工作区、运行模式、模型、记忆、临时 Skill 和本次工作流。
 
-Responses 请求使用稳定的会话级 `prompt_cache_key`。自动命中的 Skill
+标准 Responses 请求使用稳定的会话级 `prompt_cache_key`；官方 DeepSeek
+Responses 使用服务端自动管理的上下文缓存，不发送这个参数。自动命中的 Skill
 上下文只参与当前轮，不持久化到历史，减少后续请求前缀漂移。
 
 ## 8. 第八层：daemon、自动化与子 Agent

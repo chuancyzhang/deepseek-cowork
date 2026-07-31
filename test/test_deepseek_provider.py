@@ -14,6 +14,11 @@ from core.agent import (
     repair_tool_call_sequence,
     sanitize_llm_messages,
 )
+from core.llm.deepseek import (
+    DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY,
+    DEEPSEEK_RESPONSES_REPLAY_META_KEY,
+    is_official_deepseek_api,
+)
 from core.llm.providers import API_PROTOCOL_RESPONSES, OpenAIProvider
 
 
@@ -228,6 +233,362 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         params = client.responses.create.call_args.kwargs
         self.assertEqual(params["max_output_tokens"], 8)
         self.assertEqual(params["reasoning"], {"effort": "medium"})
+
+    def test_official_deepseek_responses_replays_completed_items_and_omits_cache_key(self):
+        provider, client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            reasoning_effort="high",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        replay_items = [
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "需要查询本地工具"}],
+                "status": "completed",
+                "encrypted_content": None,
+            },
+            {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "lookup",
+                "arguments": '{"q":"hi"}',
+                "status": "completed",
+            },
+        ]
+        client.responses.create.return_value = [
+            SimpleNamespace(type="response.reasoning_text.delta", delta="需要查询本地工具"),
+            SimpleNamespace(
+                type="response.output_item.added",
+                output_index=1,
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc_1",
+                    call_id="call-1",
+                    name="lookup",
+                    arguments="",
+                ),
+            ),
+            SimpleNamespace(
+                type="response.function_call_arguments.delta",
+                item_id="fc_1",
+                output_index=1,
+                delta='{"q":"hi"}',
+            ),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(output=replay_items, usage=None),
+            ),
+        ]
+
+        chunks = list(provider.chat_stream(
+            [{"role": "user", "content": "hello"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup data",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            prompt_cache_key="conv-1",
+        ))
+
+        params = client.responses.create.call_args.kwargs
+        self.assertNotIn("prompt_cache_key", params)
+        self.assertEqual(params["tools"][-1], {"type": "web_search"})
+        self.assertEqual(
+            next(chunk for chunk in chunks if chunk["type"] == "response_items")["items"],
+            replay_items,
+        )
+
+    def test_official_deepseek_responses_replays_saved_items_without_duplication(self):
+        provider, _client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        replay_items = [
+            {
+                "id": "rs_saved",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "saved reasoning"}],
+            },
+            {
+                "id": "msg_saved",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "saved answer",
+                    "annotations": [],
+                }],
+            },
+        ]
+
+        items = provider._prepare_responses_input([{
+            "id": "assistant-1",
+            "role": "assistant",
+            "content": "must not be duplicated",
+            DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY: replay_items,
+        }])
+
+        self.assertEqual(items, replay_items)
+
+    def test_official_deepseek_responses_preserves_multi_round_item_order(self):
+        provider, _client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        first_round = [
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "first"}],
+            },
+            {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "lookup",
+                "arguments": '{"round":1}',
+            },
+        ]
+        second_round = [
+            {
+                "id": "rs_2",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "second"}],
+            },
+            {
+                "id": "ws_2",
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "latest"},
+            },
+            {
+                "id": "fc_2",
+                "type": "function_call",
+                "call_id": "call-2",
+                "name": "lookup",
+                "arguments": '{"round":2}',
+            },
+        ]
+
+        items = provider._prepare_responses_input([
+            {
+                "role": "assistant",
+                "content": "",
+                DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY: first_round,
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "one"},
+            {
+                "role": "assistant",
+                "content": "",
+                DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY: second_round,
+            },
+            {"role": "tool", "tool_call_id": "call-2", "content": "two"},
+        ])
+
+        self.assertEqual(items, [
+            *first_round,
+            {"type": "function_call_output", "call_id": "call-1", "output": "one"},
+            *second_round,
+            {"type": "function_call_output", "call_id": "call-2", "output": "two"},
+        ])
+
+    def test_official_deepseek_responses_builds_legacy_reasoning_item_before_function_call(self):
+        provider, _client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+
+        items = provider._prepare_responses_input([
+            {
+                "id": "assistant-legacy",
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "legacy reasoning",
+                "tool_calls": [{
+                    "id": "call-legacy",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-legacy", "content": "ok"},
+        ])
+
+        self.assertEqual([item["type"] for item in items], [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+        ])
+        self.assertEqual(items[0]["id"], "rs_assistant-legacy")
+        self.assertEqual(items[0]["content"], [
+            {"type": "reasoning_text", "text": "legacy reasoning"},
+        ])
+
+    def test_official_deepseek_responses_rejects_tool_history_without_reasoning(self):
+        provider, _client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+
+        with self.assertRaisesRegex(ValueError, "缺少 reasoning_text"):
+            provider._prepare_responses_input([{
+                "id": "assistant-invalid",
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-invalid",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }],
+            }])
+
+    def test_official_deepseek_responses_adds_and_deduplicates_native_web_search(self):
+        provider, _client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+
+        self.assertEqual(provider._prepare_responses_tools([]), [{"type": "web_search"}])
+        prepared = provider._prepare_responses_tools([
+            {"type": "web_search_2025_08_26"},
+            {"type": "web_search"},
+        ])
+        self.assertEqual(prepared, [{"type": "web_search_2025_08_26"}])
+
+        standard_provider, _client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        self.assertEqual(standard_provider._prepare_responses_tools([
+            {"type": "web_search_2025_08_26"},
+            {"type": "web_search"},
+        ]), [
+            {"type": "web_search_2025_08_26"},
+            {"type": "web_search"},
+        ])
+
+    def test_official_deepseek_responses_emits_server_search_status_without_local_tool_call(self):
+        provider, client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        replay_items = [
+            {
+                "id": "rs_web",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "需要联网搜索"}],
+            },
+            {
+                "id": "ws_1",
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "today"},
+            },
+            {
+                "id": "msg_web",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "result", "annotations": []}],
+            },
+        ]
+        client.responses.create.return_value = [
+            SimpleNamespace(type="response.web_search_call.in_progress", item_id="ws_1"),
+            SimpleNamespace(type="response.web_search_call.searching", item_id="ws_1"),
+            SimpleNamespace(type="response.web_search_call.completed", item_id="ws_1"),
+            SimpleNamespace(type="response.reasoning_text.delta", delta="需要联网搜索"),
+            SimpleNamespace(type="response.output_text.delta", delta="result"),
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(output=replay_items, usage=None),
+            ),
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "search"}]))
+
+        self.assertFalse(any(chunk["type"] == "tool_call" for chunk in chunks))
+        self.assertEqual(
+            [chunk["status"] for chunk in chunks if chunk["type"] == "server_tool_status"],
+            ["in_progress", "searching", "completed"],
+        )
+
+    def test_official_deepseek_responses_reports_server_search_failure_reason(self):
+        provider, client = self._build_provider(
+            model_name="deepseek-v4-flash",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        replay_items = [
+            {
+                "id": "rs_web_failed",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "尝试联网搜索"}],
+            },
+            {
+                "id": "ws_failed",
+                "type": "web_search_call",
+                "status": "failed",
+                "action": {"type": "search", "query": "today"},
+                "error": {"message": "search backend unavailable"},
+            },
+        ]
+        client.responses.create.return_value = [
+            SimpleNamespace(
+                type="response.completed",
+                response=SimpleNamespace(output=replay_items, usage=None),
+            ),
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "search"}]))
+
+        failed = next(
+            chunk
+            for chunk in chunks
+            if chunk["type"] == "server_tool_status" and chunk["status"] == "failed"
+        )
+        self.assertEqual(failed["id"], "ws_failed")
+        self.assertEqual(failed["reason"], "search backend unavailable")
+
+    def test_standard_openai_responses_ignores_deepseek_replay_metadata(self):
+        provider, _client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        items = provider._prepare_responses_input([{
+            "id": "assistant-standard",
+            "role": "assistant",
+            "content": "standard answer",
+            "reasoning_content": "deepseek-only",
+            DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY: [{
+                "id": "rs_deepseek",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "deepseek-only"}],
+            }],
+        }])
+
+        self.assertEqual(items, [{
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "standard answer"}],
+        }])
+
+    def test_official_deepseek_api_detection_requires_exact_host(self):
+        self.assertTrue(is_official_deepseek_api("https://api.deepseek.com/v1"))
+        self.assertTrue(is_official_deepseek_api("api.deepseek.com"))
+        self.assertFalse(is_official_deepseek_api("https://proxy.example/deepseek"))
+        self.assertFalse(is_official_deepseek_api("https://api.deepseek.com.example"))
 
     def test_non_deepseek_prepare_messages_drops_reasoning_content(self):
         provider, _client = self._build_provider(
@@ -561,6 +922,109 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
         self.assertNotIn("reasoning", sanitized[1])
         self.assertEqual(sanitized[3]["reasoning_content"], "keep final")
         self.assertNotIn("reasoning_content", sanitized[5])
+
+    def test_sanitize_deepseek_responses_preserves_all_reasoning_and_replay_items(self):
+        replay_items = [
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "keep all"}],
+            },
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "done", "annotations": []}],
+            },
+        ]
+        sanitized = sanitize_llm_messages(
+            [
+                {"role": "user", "content": "plain"},
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "done",
+                    "reasoning_content": "keep all",
+                    "reasoning": "ui copy",
+                    "meta": {
+                        DEEPSEEK_RESPONSES_REPLAY_META_KEY: replay_items,
+                        "ui_stage_id": "stage-1",
+                    },
+                },
+            ],
+            preserve_all_reasoning=True,
+            preserve_responses_replay=True,
+        )
+
+        self.assertEqual(sanitized[1]["reasoning_content"], "keep all")
+        self.assertEqual(sanitized[1][DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY], replay_items)
+        self.assertNotIn("reasoning", sanitized[1])
+        self.assertNotIn("meta", sanitized[1])
+
+    def test_sanitize_deepseek_responses_rejects_missing_tool_reasoning_in_strict_mode(self):
+        with self.assertRaisesRegex(ValueError, "不会被静默裁剪"):
+            sanitize_llm_messages(
+                [
+                    {"role": "user", "content": "use tool"},
+                    {
+                        "id": "assistant-1",
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "demo", "arguments": "{}"},
+                        }],
+                    },
+                    {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
+                ],
+                require_reasoning_replay=True,
+                preserve_all_reasoning=True,
+                preserve_responses_replay=True,
+                strict_reasoning_replay=True,
+            )
+
+    def test_sanitize_deepseek_responses_rejects_missing_function_result(self):
+        replay_items = [
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "use tool"}],
+            },
+            {
+                "id": "fc_1",
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "demo",
+                "arguments": "{}",
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "缺少对应的 function_call_output"):
+            sanitize_llm_messages(
+                [
+                    {"role": "user", "content": "use tool"},
+                    {
+                        "id": "assistant-1",
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "use tool",
+                        "tool_calls": [{
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "demo", "arguments": "{}"},
+                        }],
+                        "meta": {DEEPSEEK_RESPONSES_REPLAY_META_KEY: replay_items},
+                    },
+                ],
+                require_reasoning_replay=True,
+                preserve_all_reasoning=True,
+                preserve_responses_replay=True,
+                strict_reasoning_replay=True,
+            )
 
     def test_drop_invalid_tool_call_rounds_without_reasoning(self):
         cleaned, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning([

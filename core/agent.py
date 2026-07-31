@@ -37,7 +37,11 @@ from core.ppt_agent import (
     ppt_agent_strategy_label,
 )
 from core.memory_store import MemoryStore
-from core.llm.deepseek import is_deepseek_request
+from core.llm.deepseek import (
+    DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY,
+    DEEPSEEK_RESPONSES_REPLAY_META_KEY,
+    is_deepseek_request,
+)
 
 try:
     from openai import OpenAI
@@ -225,7 +229,12 @@ def _reasoning_text_from_message(msg):
     return ""
 
 
-def _clean_reasoning_content_by_turn(messages, drop_meta=False):
+def _clean_reasoning_content_by_turn(
+    messages,
+    drop_meta=False,
+    preserve_all_reasoning=False,
+    preserve_responses_replay=False,
+):
     """
     Drop stale reasoning for ordinary turns, but preserve assistant reasoning for
     every assistant message in a user turn that contains tool calls. DeepSeek's
@@ -242,7 +251,7 @@ def _clean_reasoning_content_by_turn(messages, drop_meta=False):
             if not isinstance(msg, dict):
                 continue
             role = msg.get("role")
-            if role == "assistant" and turn_has_tool_calls:
+            if role == "assistant" and (preserve_all_reasoning or turn_has_tool_calls):
                 reasoning_text = _reasoning_text_from_message(msg)
                 if reasoning_text:
                     msg["reasoning_content"] = reasoning_text
@@ -251,6 +260,15 @@ def _clean_reasoning_content_by_turn(messages, drop_meta=False):
             else:
                 msg.pop("reasoning_content", None)
             msg.pop("reasoning", None)
+            if preserve_responses_replay and role == "assistant":
+                meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
+                replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
+                if replay_items is not None:
+                    if not isinstance(replay_items, list):
+                        raise ValueError("DeepSeek Responses replay metadata must be a list.")
+                    msg[DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY] = json_copy(replay_items, [])
+            else:
+                msg.pop(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY, None)
             if drop_meta:
                 msg.pop("meta", None)
         turn_indices = []
@@ -435,12 +453,88 @@ def drop_invalid_tool_call_rounds_without_reasoning(messages):
 
     return cleaned, dropped_rounds
 
-def sanitize_llm_messages(messages, require_reasoning_replay=False, return_metadata=False):
+
+def _validate_deepseek_responses_tool_results(messages):
+    """Reject replay history that cannot form a valid stateless follow-up."""
+    function_call_ids = set()
+    function_result_ids = set()
+
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "tool":
+            call_id = str(message.get("tool_call_id") or "").strip()
+            if call_id:
+                function_result_ids.add(call_id)
+            continue
+        if message.get("role") != "assistant":
+            continue
+
+        meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+        replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
+        if replay_items is not None:
+            if not isinstance(replay_items, list) or not replay_items:
+                raise ValueError(
+                    "DeepSeek Responses 回放元数据不完整，无法安全续接。"
+                    "请新建任务后重试；原历史不会被静默裁剪。"
+                )
+            for item in replay_items:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "DeepSeek Responses 回放项格式无效，无法安全续接。"
+                        "请新建任务后重试；原历史不会被静默忽略。"
+                    )
+                if str(item.get("type") or "") != "function_call":
+                    continue
+                call_id = str(item.get("call_id") or "").strip()
+                if not call_id:
+                    raise ValueError(
+                        "DeepSeek Responses function_call 回放项缺少 call_id，无法安全续接。"
+                        "请新建任务后重试；原历史不会被静默忽略。"
+                    )
+                function_call_ids.add(call_id)
+
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            call_id = str(tool_call.get("id") or "").strip()
+            if call_id:
+                function_call_ids.add(call_id)
+
+    missing_results = sorted(function_call_ids - function_result_ids)
+    if missing_results:
+        raise ValueError(
+            "DeepSeek Responses 函数调用历史缺少对应的 function_call_output，"
+            f"无法安全续接（call_id: {', '.join(missing_results)}）。"
+            "请新建任务后重试；原历史不会被静默裁剪。"
+        )
+
+def sanitize_llm_messages(
+    messages,
+    require_reasoning_replay=False,
+    return_metadata=False,
+    preserve_all_reasoning=False,
+    preserve_responses_replay=False,
+    strict_reasoning_replay=False,
+):
+    if strict_reasoning_replay:
+        _validate_deepseek_responses_tool_results(messages)
     repaired = repair_tool_call_sequence(messages)
     dropped_rounds = []
     if require_reasoning_replay:
         repaired, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(repaired)
-    cleaned = _clean_reasoning_content_by_turn(repaired, drop_meta=True)
+        if strict_reasoning_replay and dropped_rounds:
+            dropped_calls = sum(len(item.get("tool_call_ids") or []) for item in dropped_rounds)
+            raise ValueError(
+                "DeepSeek Responses 工具调用历史缺少 reasoning_text，无法安全续接"
+                f"（{dropped_calls} 个工具调用）。请新建任务后重试；原历史不会被静默裁剪。"
+            )
+    cleaned = _clean_reasoning_content_by_turn(
+        repaired,
+        drop_meta=True,
+        preserve_all_reasoning=preserve_all_reasoning,
+        preserve_responses_replay=preserve_responses_replay,
+    )
     if return_metadata:
         return cleaned, {"dropped_incomplete_reasoning_rounds": dropped_rounds}
     return cleaned
@@ -1287,10 +1381,10 @@ class LLMWorker(QThread):
             return provider.chat_stream(messages, tools=tools)
 
     def run(self):
-        # Work on a copy of messages to handle multi-turn locally
-        # Keep reasoning_content only on prior assistant tool-call turns so DeepSeek
-        # can continue the same multi-round exchange without 400 errors.
-        current_messages = repair_tool_call_sequence(clear_reasoning_content(self.messages))
+        # Work on a copy of messages to handle multi-turn locally. Reasoning is
+        # sanitized after the concrete provider/protocol is known so Responses
+        # replay data is not discarded before request preparation.
+        current_messages = repair_tool_call_sequence(self.messages)
         runtime_snapshot = get_python_runtime_snapshot()
         sandbox_snapshot = get_runtime_snapshot()
         stable_system_prompt = self._get_stable_system_prompt()
@@ -1368,10 +1462,16 @@ class LLMWorker(QThread):
                             getattr(provider, "base_url", ""),
                         ) and getattr(provider, "thinking_enabled", False)
                     )
+                    preserve_deepseek_responses = bool(
+                        getattr(provider, "requires_deepseek_responses_replay", False)
+                    )
                     sanitized_messages, sanitize_meta = sanitize_llm_messages(
                         request_messages,
                         require_reasoning_replay=require_reasoning_replay,
                         return_metadata=True,
+                        preserve_all_reasoning=preserve_deepseek_responses,
+                        preserve_responses_replay=preserve_deepseek_responses,
+                        strict_reasoning_replay=preserve_deepseek_responses,
                     )
                     dropped_rounds = sanitize_meta.get("dropped_incomplete_reasoning_rounds") or []
                     if dropped_rounds:
@@ -1385,6 +1485,7 @@ class LLMWorker(QThread):
                     chunk_reasoning = ""
                     chunk_content = ""
                     tool_calls_buffer = {} # Index -> ToolCall object (dict)
+                    response_items_buffer = []
                     provider_error_message = None
                     protocol_locked = False
 
@@ -1480,6 +1581,43 @@ class LLMWorker(QThread):
                                     "usage": usage_payload,
                                     "timestamp": time.time(),
                                 })
+                            elif type_ == "response_items":
+                                replay_items = chunk.get("items")
+                                if not isinstance(replay_items, list) or not replay_items:
+                                    raise ValueError(
+                                        "DeepSeek Responses provider returned invalid replay items."
+                                    )
+                                if response_items_buffer:
+                                    raise ValueError(
+                                        "DeepSeek Responses provider returned replay items more than once."
+                                    )
+                                response_items_buffer = json_copy(replay_items, [])
+                            elif type_ == "server_tool_status":
+                                tool_name = str(chunk.get("name") or "server_tool")
+                                status = str(chunk.get("status") or "unknown")
+                                tool_id = str(chunk.get("id") or "")
+                                reason = str(chunk.get("reason") or "").strip()
+                                self.step_signal.emit(
+                                    f"Server Tool: {tool_name} ({status})"
+                                    + (f" - {reason}" if reason else "")
+                                )
+                                status_event = {
+                                    "type": "server_tool_status",
+                                    "id": tool_id,
+                                    "name": tool_name,
+                                    "status": status,
+                                    "timestamp": time.time(),
+                                }
+                                if reason:
+                                    status_event["reason"] = reason
+                                if chunk.get("output_index") is not None:
+                                    status_event["output_index"] = chunk.get("output_index")
+                                self.observability_signal.emit(status_event)
+                                if status == "failed":
+                                    self.output_signal.emit(
+                                        f"Server Tool Error: {tool_name} failed"
+                                        + (f": {reason}" if reason else ".")
+                                    )
                     finally:
                         if protocol_locked:
                             _OPENAI_PROTOCOL_LOCK.release()
@@ -1505,7 +1643,11 @@ class LLMWorker(QThread):
 
                     # Reconstruct final message object from buffers
                     content = chunk_content
-                    if provider_error_message and not content and not tool_calls_buffer:
+                    if provider_error_message:
+                        # A partial tool call cannot be executed when the provider
+                        # failed before delivering the replay state required for
+                        # the next request.
+                        tool_calls_buffer.clear()
                         content = f"⚠️ Provider Error: {provider_error_message}"
                     
                     # Reconstruct tool_calls list
@@ -1594,6 +1736,10 @@ class LLMWorker(QThread):
                     assistant_msg["reasoning_content"] = current_turn_reasoning
                     # Also add 'reasoning' for UI compatibility (used by MainWindow)
                     assistant_msg["reasoning"] = current_turn_reasoning
+                    if response_items_buffer:
+                        assistant_msg["meta"] = {
+                            DEEPSEEK_RESPONSES_REPLAY_META_KEY: response_items_buffer,
+                        }
                         
                     if tool_calls:
                          # For history, we need the dict representation

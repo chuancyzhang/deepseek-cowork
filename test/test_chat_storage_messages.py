@@ -8,6 +8,7 @@ from contextlib import closing
 from unittest.mock import patch
 
 from core.chat_storage import ChatStorage
+from core.llm.deepseek import DEEPSEEK_RESPONSES_REPLAY_META_KEY
 
 
 class TestChatStorageMessages(unittest.TestCase):
@@ -92,6 +93,41 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual(messages[1]["result_obj"], {"ok": True})
         self.assertTrue(messages[0]["id"])
         self.assertTrue(messages[1]["id"])
+
+    def test_message_roundtrip_preserves_deepseek_responses_replay_items(self):
+        storage = ChatStorage(self.db_path)
+        replay_items = [
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "summary": [],
+                "content": [{"type": "reasoning_text", "text": "thinking"}],
+            },
+            {
+                "id": "ws_1",
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "latest"},
+            },
+        ]
+        storage.save_conversation(
+            "responses-replay",
+            [{
+                "id": "assistant-1",
+                "role": "assistant",
+                "content": "done",
+                "reasoning_content": "thinking",
+                "meta": {DEEPSEEK_RESPONSES_REPLAY_META_KEY: replay_items},
+            }],
+            title="responses",
+        )
+
+        message = storage.get_messages("responses-replay")[0]
+
+        self.assertEqual(
+            message["meta"][DEEPSEEK_RESPONSES_REPLAY_META_KEY],
+            replay_items,
+        )
 
     def test_messages_without_ids_are_assigned_stable_ids(self):
         storage = ChatStorage(self.db_path)

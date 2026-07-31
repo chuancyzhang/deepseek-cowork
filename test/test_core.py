@@ -46,6 +46,8 @@ from core.llm.deepseek import (
     DEFAULT_DEEPSEEK_MODEL,
     DEFAULT_DEEPSEEK_REASONING_EFFORT,
     DEFAULT_DEEPSEEK_THINKING_ENABLED,
+    DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY,
+    DEEPSEEK_RESPONSES_REPLAY_META_KEY,
 )
 
 class TestConfigManager(unittest.TestCase):
@@ -1785,6 +1787,146 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             self.assertTrue(finished)
             self.assertIn("连续 3 次重复的工具调用", finished[0]["content"])
             self.assertEqual(skill_manager_instances[0].call_count, 2)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_deepseek_responses_worker_persists_and_replays_items_across_tool_turn(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                self.call_count = 0
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, skill_name):
+                return ""
+
+            def get_skill_display_name(self, skill_name):
+                return skill_name
+
+            def get_skill_of_tool(self, name):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                self.call_count += 1
+                return {"status": "ok", "content": "tool result"}
+
+        class _ProviderStub:
+            provider_name = "DeepSeek Responses"
+            model_name = "deepseek-v4-flash"
+            base_url = "https://api.deepseek.com"
+            thinking_enabled = True
+            requires_deepseek_responses_replay = True
+
+            def __init__(self):
+                self.requests = []
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                self.requests.append(messages)
+                if len(self.requests) == 1:
+                    yield {"type": "reasoning", "content": "先调用工具"}
+                    yield {
+                        "type": "server_tool_status",
+                        "id": "ws-observe",
+                        "name": "web_search",
+                        "status": "searching",
+                    }
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "call-1",
+                        "function": {"name": "read_file", "arguments": '{"path":"demo.txt"}'},
+                    }
+                    yield {
+                        "type": "response_items",
+                        "items": [
+                            {
+                                "id": "rs_1",
+                                "type": "reasoning",
+                                "summary": [],
+                                "content": [{"type": "reasoning_text", "text": "先调用工具"}],
+                            },
+                            {
+                                "id": "fc_1",
+                                "type": "function_call",
+                                "call_id": "call-1",
+                                "name": "read_file",
+                                "arguments": '{"path":"demo.txt"}',
+                            },
+                        ],
+                    }
+                    return
+                yield {"type": "reasoning", "content": "整理结果"}
+                yield {"type": "content", "content": "完成"}
+                yield {
+                    "type": "response_items",
+                    "items": [
+                        {
+                            "id": "rs_2",
+                            "type": "reasoning",
+                            "summary": [],
+                            "content": [{"type": "reasoning_text", "text": "整理结果"}],
+                        },
+                        {
+                            "id": "msg_2",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "完成", "annotations": []}],
+                        },
+                    ],
+                }
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        observability = []
+        provider = _ProviderStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", side_effect=_SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "read demo"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(lambda data: finished.append(data))
+                worker.observability_signal.connect(lambda data: observability.append(data))
+                worker.run()
+
+            self.assertEqual(len(provider.requests), 2)
+            replayed_assistant = next(
+                message
+                for message in provider.requests[1]
+                if message.get("role") == "assistant" and message.get("tool_calls")
+            )
+            self.assertEqual(
+                replayed_assistant[DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY][0]["id"],
+                "rs_1",
+            )
+            first_generated_assistant = next(
+                message
+                for message in finished[0]["generated_messages"]
+                if message.get("role") == "assistant" and message.get("tool_calls")
+            )
+            self.assertEqual(
+                first_generated_assistant["meta"][DEEPSEEK_RESPONSES_REPLAY_META_KEY][1]["call_id"],
+                "call-1",
+            )
+            self.assertTrue(any(
+                event.get("type") == "server_tool_status"
+                and event.get("status") == "searching"
+                for event in observability
+            ))
+            self.assertEqual(finished[0]["content"], "完成")
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -1,3 +1,6 @@
+from urllib.parse import urlparse
+
+
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 LEGACY_DEEPSEEK_MODEL = "deepseek-reasoner"
@@ -7,6 +10,8 @@ SUPPORTED_DEEPSEEK_REASONING_EFFORTS = ("high", "max")
 SUPPORTED_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
 DEEPSEEK_V4_MODEL_PREFIXES = ("deepseek-v4-pro", "deepseek-v4-flash")
+DEEPSEEK_RESPONSES_REPLAY_META_KEY = "deepseek_responses_replay_items"
+DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY = "_deepseek_responses_replay_items"
 
 
 def should_migrate_legacy_model(model_name):
@@ -40,6 +45,14 @@ def is_deepseek_request(model_name, base_url=None):
     name = str(model_name or "").strip().lower()
     url = str(base_url or "").strip().lower()
     return ("deepseek" in name) or ("deepseek.com" in url)
+
+
+def is_official_deepseek_api(base_url):
+    text = str(base_url or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    return str(parsed.hostname or "").strip().lower() == "api.deepseek.com"
 
 
 def is_deepseek_v4_model(model_name):

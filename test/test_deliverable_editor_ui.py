@@ -86,11 +86,24 @@ class DeliverableEditorUiTest(unittest.TestCase):
 
     def test_missing_offline_editor_assets_are_reported_explicitly(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch("main.get_base_dir", return_value=directory):
+            with patch("main.get_resource_dir", return_value=directory):
                 with self.assertRaises(DeliverableEditError) as raised:
                     self.window._editor_asset_path("docx")
 
         self.assertEqual(raised.exception.code, "editor_assets_missing")
+
+    def test_docx_editor_mode_is_visible_in_file_detail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = os.path.join(directory, "report.docx")
+            with open(source, "wb") as handle:
+                handle.write(b"placeholder")
+            self.window.current_deliverable_path = source
+            self.window.file_workspace_view_mode = "detail"
+
+            self.window._set_deliverable_controls_enabled(source)
+
+            self.assertFalse(self.window.deliverable_preview_mode_bar.isHidden())
+            self.assertTrue(self.window.deliverable_edit_btn.isEnabled())
 
 
 if __name__ == "__main__":

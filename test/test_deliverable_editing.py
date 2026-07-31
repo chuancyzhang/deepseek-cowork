@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import os
 import shutil
@@ -167,6 +169,76 @@ class DeliverableEditingCoreTest(unittest.TestCase):
         self.assertFalse(report.allowed)
         self.assertTrue(any(issue.code == "docx_unsupported_markup" for issue in report.issues))
         self.assertEqual(after_preflight, before_preflight)
+
+    def test_docx_plain_header_and_footer_are_preserved_while_body_changes(self):
+        from docx import Document
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "report.docx")
+            document = Document()
+            document.add_paragraph("原正文")
+            document.sections[0].header.paragraphs[0].text = "固定页眉"
+            document.sections[0].footer.paragraphs[0].text = "固定页脚"
+            document.save(path)
+
+            session, report = create_edit_session(path)
+            self.assertTrue(report.allowed)
+            self.assertEqual(
+                report.metadata.get("docx_preserved_header_footer_count"),
+                2,
+            )
+
+            edited_stream = io.BytesIO()
+            edited = Document()
+            edited.add_paragraph("编辑后的正文")
+            edited.save(edited_stream)
+            output = serialize_editor_payload(session, edited_stream.getvalue())
+
+            round_trip = Document(io.BytesIO(output))
+            self.assertEqual(
+                [paragraph.text for paragraph in round_trip.paragraphs],
+                ["编辑后的正文"],
+            )
+            self.assertEqual(
+                round_trip.sections[0].header.paragraphs[0].text,
+                "固定页眉",
+            )
+            self.assertEqual(
+                round_trip.sections[0].footer.paragraphs[0].text,
+                "固定页脚",
+            )
+            with zipfile.ZipFile(io.BytesIO(output)) as archive:
+                names = set(archive.namelist())
+                self.assertTrue(
+                    any(name.startswith("word/cowork-preserved-header") for name in names)
+                )
+                self.assertTrue(
+                    any(name.startswith("word/cowork-preserved-footer") for name in names)
+                )
+
+    def test_docx_header_with_related_image_remains_blocked(self):
+        from docx import Document
+        from docx.shared import Inches
+
+        image_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "image-header.docx")
+            document = Document()
+            document.add_paragraph("正文")
+            document.sections[0].header.paragraphs[0].add_run().add_picture(
+                io.BytesIO(image_bytes),
+                width=Inches(0.1),
+            )
+            document.save(path)
+
+            report = preflight_edit(path)
+
+        self.assertFalse(report.allowed)
+        self.assertTrue(
+            any(issue.code == "docx_complex_header_footer" for issue in report.issues)
+        )
 
     def test_xlsx_snapshot_round_trip_keeps_values_formula_style_and_merge(self):
         import openpyxl

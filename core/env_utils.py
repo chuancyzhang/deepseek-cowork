@@ -13,6 +13,16 @@ def get_base_dir():
         # In dev mode, return the project root (parent of core/)
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+def get_resource_dir():
+    """Return the read-only root that contains bundled application resources."""
+    if getattr(sys, "frozen", False):
+        resource_dir = str(getattr(sys, "_MEIPASS", "") or "").strip()
+        if not resource_dir:
+            raise RuntimeError("冻结应用缺少 PyInstaller 资源目录。")
+        return os.path.abspath(resource_dir)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 def get_app_data_dir():
     """
     Get the directory for storing user data (config, history, skills).

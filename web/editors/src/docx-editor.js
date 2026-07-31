@@ -16,6 +16,7 @@ let sessionId = "";
 let loadingChunks = [];
 let loadingExpected = 0;
 let suppressDirty = true;
+let dirtyTrackingArmed = false;
 let exportCapture = null;
 
 function errorText(error) {
@@ -86,11 +87,16 @@ function installExportCapture() {
 }
 
 function setDirty() {
-  if (!suppressDirty && bridge) bridge.setDirty(true);
+  if (!suppressDirty && dirtyTrackingArmed && bridge) bridge.setDirty(true);
+}
+
+function armDirtyTracking() {
+  if (editor && !suppressDirty) dirtyTrackingArmed = true;
 }
 
 function command(name, value) {
   if (!editor) return;
+  armDirtyTracking();
   const commands = editor.command;
   const mapping = {
     undo: () => commands.executeUndo(),
@@ -125,6 +131,7 @@ async function loadDocument() {
     loadingChunks = [];
     const bytes = bytesFromBase64(encoded);
     suppressDirty = true;
+    dirtyTrackingArmed = false;
     if (editor) editor.destroy();
     editor = new Editor(document.getElementById("docx-canvas"), { main: [] }, {
       mode: "edit",
@@ -136,9 +143,11 @@ async function loadDocument() {
     await Promise.resolve(editor.command.executeImportDocx({
       arrayBuffer: bytes.buffer
     }));
-    suppressDirty = false;
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
     bridge.setDirty(false);
     bridge.editorLoaded(sessionId);
+    suppressDirty = false;
   } catch (error) {
     reportError(error);
   }
@@ -158,6 +167,7 @@ function requestSave() {
 
 function dispose() {
   suppressDirty = true;
+  dirtyTrackingArmed = false;
   loadingChunks = [];
   exportCapture = null;
   if (editor) {
@@ -205,6 +215,10 @@ document.querySelector(".editor-toolbar").addEventListener("click", (event) => {
 document.querySelector("select[data-command]").addEventListener("change", (event) => {
   command("title", event.target.value);
 });
+
+for (const eventName of ["beforeinput", "keydown", "paste", "cut", "drop", "contextmenu"]) {
+  document.addEventListener(eventName, armDirtyTracking, true);
+}
 
 new QWebChannel(qt.webChannelTransport, (channel) => {
   bridge = channel.objects.deliverableEditorBridge;

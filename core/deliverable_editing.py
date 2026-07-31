@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import re
 import shutil
 import tempfile
@@ -22,7 +23,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable
+from xml.dom import minidom
 from xml.etree import ElementTree
+from xml.parsers.expat import ExpatError
 
 from core.env_utils import get_app_data_dir
 
@@ -335,6 +338,169 @@ _DOCX_BLOCKED_XML_MARKERS = {
     b"<wp:anchor": "浮动绘图对象",
 }
 
+_DOCX_WORDPROCESSING_NS = (
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+)
+_DOCX_OFFICE_REL_NS = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+_DOCX_PACKAGE_REL_NS = (
+    "http://schemas.openxmlformats.org/package/2006/relationships"
+)
+_DOCX_CONTENT_TYPES_NS = (
+    "http://schemas.openxmlformats.org/package/2006/content-types"
+)
+_DOCX_HEADER_REL_TYPE = f"{_DOCX_OFFICE_REL_NS}/header"
+_DOCX_FOOTER_REL_TYPE = f"{_DOCX_OFFICE_REL_NS}/footer"
+_DOCX_HEADER_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+)
+_DOCX_FOOTER_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
+)
+
+
+def _docx_part_relationships_name(part_name: str) -> str:
+    directory, filename = posixpath.split(part_name)
+    return posixpath.join(directory, "_rels", f"{filename}.rels")
+
+
+def _resolve_docx_relationship_target(source_part: str, target: str) -> str:
+    normalized_target = str(target or "").replace("\\", "/")
+    if not normalized_target:
+        raise DeliverableEditError(
+            "invalid_docx",
+            "DOCX 页眉或页脚关系缺少目标部件。",
+        )
+    if normalized_target.startswith("/"):
+        normalized = posixpath.normpath(normalized_target.lstrip("/"))
+    else:
+        normalized = posixpath.normpath(
+            posixpath.join(posixpath.dirname(source_part), normalized_target)
+        )
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise DeliverableEditError(
+            "invalid_docx",
+            "DOCX 页眉或页脚关系指向包外路径。",
+        )
+    return normalized
+
+
+def _inspect_docx_header_footer(archive, names: set[str]) -> tuple[dict[str, Any] | None, list[CompatibilityIssue]]:
+    document_root = ElementTree.fromstring(archive.read("word/document.xml"))
+    section_tag = f"{{{_DOCX_WORDPROCESSING_NS}}}sectPr"
+    header_tag = f"{{{_DOCX_WORDPROCESSING_NS}}}headerReference"
+    footer_tag = f"{{{_DOCX_WORDPROCESSING_NS}}}footerReference"
+    relationship_id_attr = f"{{{_DOCX_OFFICE_REL_NS}}}id"
+    section_nodes = document_root.findall(f".//{section_tag}")
+    references = [
+        child
+        for section in section_nodes
+        for child in list(section)
+        if child.tag in {header_tag, footer_tag}
+    ]
+    if not references:
+        return None, []
+    if len(section_nodes) != 1:
+        return None, [
+            _issue(
+                "docx_complex_header_footer",
+                "文档包含多节页眉或页脚，当前编辑器无法保证完整往返。",
+            )
+        ]
+
+    relationships_name = "word/_rels/document.xml.rels"
+    if relationships_name not in names:
+        raise DeliverableEditError(
+            "invalid_docx",
+            "DOCX 缺少正文关系表，无法解析页眉或页脚。",
+        )
+    relationships_root = ElementTree.fromstring(archive.read(relationships_name))
+    relationship_tag = f"{{{_DOCX_PACKAGE_REL_NS}}}Relationship"
+    relationship_by_id = {
+        str(node.attrib.get("Id") or ""): node
+        for node in relationships_root.findall(relationship_tag)
+    }
+    plan_relationships: dict[str, dict[str, str]] = {}
+    preserved_parts: dict[str, bytes] = {}
+    issues: list[CompatibilityIssue] = []
+    for reference in references:
+        reference_type = str(
+            reference.attrib.get(f"{{{_DOCX_WORDPROCESSING_NS}}}type") or "default"
+        )
+        if reference_type != "default":
+            issues.append(
+                _issue(
+                    "docx_complex_header_footer",
+                    "文档使用首页或奇偶页专用页眉页脚，当前编辑器无法保证完整往返。",
+                )
+            )
+            break
+        relationship_id = str(reference.attrib.get(relationship_id_attr) or "")
+        relationship = relationship_by_id.get(relationship_id)
+        kind = "header" if reference.tag == header_tag else "footer"
+        expected_type = (
+            _DOCX_HEADER_REL_TYPE if kind == "header" else _DOCX_FOOTER_REL_TYPE
+        )
+        if (
+            relationship is None
+            or str(relationship.attrib.get("Type") or "") != expected_type
+            or str(relationship.attrib.get("TargetMode") or "").lower() == "external"
+        ):
+            raise DeliverableEditError(
+                "invalid_docx",
+                "DOCX 页眉或页脚关系无效。",
+            )
+        part_name = _resolve_docx_relationship_target(
+            "word/document.xml",
+            str(relationship.attrib.get("Target") or ""),
+        )
+        if part_name not in names:
+            raise DeliverableEditError(
+                "invalid_docx",
+                f"DOCX 缺少页眉或页脚部件：{part_name}",
+            )
+        related_relationships_name = _docx_part_relationships_name(part_name)
+        if related_relationships_name in names:
+            related_root = ElementTree.fromstring(
+                archive.read(related_relationships_name)
+            )
+            if related_root.findall(relationship_tag):
+                issues.append(
+                    _issue(
+                        "docx_complex_header_footer",
+                        "页眉或页脚包含图片、链接等关联资源，当前编辑器无法保证完整往返。",
+                    )
+                )
+                break
+        part_bytes = archive.read(part_name)
+        part_root = ElementTree.fromstring(part_bytes)
+        if any(
+            attribute.startswith(f"{{{_DOCX_OFFICE_REL_NS}}}")
+            for node in part_root.iter()
+            for attribute in node.attrib
+        ):
+            issues.append(
+                _issue(
+                    "docx_complex_header_footer",
+                    "页眉或页脚包含外部关联内容，当前编辑器无法保证完整往返。",
+                )
+            )
+            break
+        plan_relationships[relationship_id] = {
+            "kind": kind,
+            "part_name": part_name,
+        }
+        preserved_parts[part_name] = part_bytes
+
+    if issues:
+        return None, issues
+    return {
+        "section_xml": ElementTree.tostring(section_nodes[0], encoding="utf-8"),
+        "relationships": plan_relationships,
+        "parts": preserved_parts,
+    }, []
+
 
 def _preflight_docx(path: str, descriptor: EditorDescriptor) -> CompatibilityReport:
     issues: list[CompatibilityIssue] = []
@@ -348,8 +514,6 @@ def _preflight_docx(path: str, descriptor: EditorDescriptor) -> CompatibilityRep
                 lowered = name.lower()
                 if lowered == "word/vbaproject.bin":
                     issues.append(_issue("docx_macro", "文档包含宏，不能在应用内安全编辑。"))
-                if lowered.startswith(("word/header", "word/footer")) and lowered.endswith(".xml"):
-                    issues.append(_issue("docx_header_footer", "文档包含页眉或页脚，当前编辑器无法保证完整往返。"))
                 for prefix in _DOCX_BLOCKED_PART_PREFIXES:
                     if lowered.startswith(prefix.lower()):
                         issues.append(
@@ -401,8 +565,20 @@ def _preflight_docx(path: str, descriptor: EditorDescriptor) -> CompatibilityRep
                         "DOCX 解压后内容超过 200 MiB，超出安全内存预算。",
                     )
                 )
+            header_footer_plan, header_footer_issues = _inspect_docx_header_footer(
+                archive,
+                names,
+            )
+            issues.extend(header_footer_issues)
+            if header_footer_plan is not None:
+                metadata["_docx_header_footer_plan"] = header_footer_plan
+                metadata["docx_preserved_header_footer_count"] = len(
+                    header_footer_plan["relationships"]
+                )
     except zipfile.BadZipFile as exc:
         raise DeliverableEditError("invalid_docx", "文件不是有效的 DOCX 压缩包。") from exc
+    except ElementTree.ParseError as exc:
+        raise DeliverableEditError("invalid_docx", f"DOCX XML 结构无效：{exc}") from exc
 
     if not issues:
         try:
@@ -1450,12 +1626,253 @@ def validate_docx_bytes(data: bytes) -> None:
         raise DeliverableEditError("docx_export_invalid", f"导出的 DOCX 无法重新打开：{exc}") from exc
 
 
+def _next_docx_relationship_id(used_ids: set[str]) -> str:
+    index = 1
+    while True:
+        candidate = f"rId{index}"
+        if candidate not in used_ids:
+            used_ids.add(candidate)
+            return candidate
+        index += 1
+
+
+def _next_preserved_docx_part_name(kind: str, used_names: set[str]) -> str:
+    index = 1
+    while True:
+        candidate = f"word/cowork-preserved-{kind}{index}.xml"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        index += 1
+
+
+def restore_docx_header_footer(data: bytes, plan: dict[str, Any]) -> bytes:
+    """Attach preserved, relationship-free header/footer parts to an exported body."""
+    relationships = plan.get("relationships") if isinstance(plan, dict) else None
+    preserved_parts = plan.get("parts") if isinstance(plan, dict) else None
+    section_xml = plan.get("section_xml") if isinstance(plan, dict) else None
+    if (
+        not isinstance(relationships, dict)
+        or not relationships
+        or not isinstance(preserved_parts, dict)
+        or not isinstance(section_xml, (bytes, bytearray))
+    ):
+        raise DeliverableEditError(
+            "docx_preservation_invalid",
+            "DOCX 页眉页脚保留信息无效，不能安全保存。",
+        )
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as source:
+            source_names = {
+                name.replace("\\", "/") for name in source.namelist()
+            }
+            required_parts = {
+                "[Content_Types].xml",
+                "word/document.xml",
+                "word/_rels/document.xml.rels",
+            }
+            missing = sorted(required_parts - source_names)
+            if missing:
+                raise DeliverableEditError(
+                    "docx_export_invalid",
+                    "导出的 DOCX 缺少必需部件：" + "、".join(missing),
+                )
+
+            document_dom = minidom.parseString(source.read("word/document.xml"))
+            section_nodes = document_dom.getElementsByTagNameNS(
+                _DOCX_WORDPROCESSING_NS,
+                "sectPr",
+            )
+            if len(section_nodes) != 1:
+                raise DeliverableEditError(
+                    "docx_export_section_invalid",
+                    "导出的 DOCX 页面结构异常，不能安全还原页眉页脚。",
+                )
+
+            preserved_section_dom = minidom.parseString(bytes(section_xml))
+            preserved_section = preserved_section_dom.documentElement
+            preserved_reference_nodes = [
+                node
+                for local_name in ("headerReference", "footerReference")
+                for node in preserved_section.getElementsByTagNameNS(
+                    _DOCX_WORDPROCESSING_NS,
+                    local_name,
+                )
+            ]
+            if not preserved_reference_nodes:
+                raise DeliverableEditError(
+                    "docx_preservation_invalid",
+                    "DOCX 页眉页脚保留信息不完整。",
+                )
+
+            relationships_dom = minidom.parseString(
+                source.read("word/_rels/document.xml.rels")
+            )
+            relationships_root = relationships_dom.documentElement
+            existing_relationship_nodes = relationships_dom.getElementsByTagNameNS(
+                _DOCX_PACKAGE_REL_NS,
+                "Relationship",
+            )
+            used_relationship_ids = {
+                node.getAttribute("Id")
+                for node in existing_relationship_nodes
+                if node.getAttribute("Id")
+            }
+            used_part_names = set(source_names)
+            source_to_exported_part: dict[str, str] = {}
+            added_parts: dict[str, bytes] = {}
+            for source_part, content in sorted(preserved_parts.items()):
+                source_part = str(source_part or "")
+                if not isinstance(content, (bytes, bytearray)):
+                    raise DeliverableEditError(
+                        "docx_preservation_invalid",
+                        "DOCX 页眉页脚部件内容无效。",
+                    )
+                kinds = {
+                    str(item.get("kind") or "")
+                    for item in relationships.values()
+                    if isinstance(item, dict)
+                    and str(item.get("part_name") or "") == source_part
+                }
+                if len(kinds) != 1 or next(iter(kinds)) not in {"header", "footer"}:
+                    raise DeliverableEditError(
+                        "docx_preservation_invalid",
+                        "DOCX 页眉页脚部件类型无效。",
+                    )
+                kind = next(iter(kinds))
+                exported_part = _next_preserved_docx_part_name(
+                    kind,
+                    used_part_names,
+                )
+                source_to_exported_part[source_part] = exported_part
+                added_parts[exported_part] = bytes(content)
+
+            relationship_id_map: dict[str, str] = {}
+            for original_id, item in sorted(relationships.items()):
+                if not isinstance(item, dict):
+                    raise DeliverableEditError(
+                        "docx_preservation_invalid",
+                        "DOCX 页眉页脚关系信息无效。",
+                    )
+                kind = str(item.get("kind") or "")
+                source_part = str(item.get("part_name") or "")
+                exported_part = source_to_exported_part.get(source_part)
+                if kind not in {"header", "footer"} or not exported_part:
+                    raise DeliverableEditError(
+                        "docx_preservation_invalid",
+                        "DOCX 页眉页脚关系目标无效。",
+                    )
+                relationship_id = _next_docx_relationship_id(
+                    used_relationship_ids
+                )
+                relationship_id_map[str(original_id)] = relationship_id
+                relationship_node = relationships_dom.createElementNS(
+                    _DOCX_PACKAGE_REL_NS,
+                    "Relationship",
+                )
+                relationship_node.setAttribute("Id", relationship_id)
+                relationship_node.setAttribute(
+                    "Type",
+                    _DOCX_HEADER_REL_TYPE
+                    if kind == "header"
+                    else _DOCX_FOOTER_REL_TYPE,
+                )
+                relationship_node.setAttribute(
+                    "Target",
+                    posixpath.relpath(exported_part, "word"),
+                )
+                relationships_root.appendChild(relationship_node)
+
+            for reference in preserved_reference_nodes:
+                original_id = reference.getAttributeNS(
+                    _DOCX_OFFICE_REL_NS,
+                    "id",
+                )
+                relationship_id = relationship_id_map.get(original_id)
+                if not relationship_id:
+                    raise DeliverableEditError(
+                        "docx_preservation_invalid",
+                        "DOCX 页眉页脚引用无法还原。",
+                    )
+                reference.setAttributeNS(
+                    _DOCX_OFFICE_REL_NS,
+                    "r:id",
+                    relationship_id,
+                )
+
+            exported_section = section_nodes[0]
+            exported_section.parentNode.replaceChild(
+                document_dom.importNode(preserved_section, deep=True),
+                exported_section,
+            )
+
+            content_types_dom = minidom.parseString(
+                source.read("[Content_Types].xml")
+            )
+            content_types_root = content_types_dom.documentElement
+            for part_name in sorted(added_parts):
+                kind = "header" if "-header" in part_name else "footer"
+                override = content_types_dom.createElementNS(
+                    _DOCX_CONTENT_TYPES_NS,
+                    "Override",
+                )
+                override.setAttribute("PartName", f"/{part_name}")
+                override.setAttribute(
+                    "ContentType",
+                    _DOCX_HEADER_CONTENT_TYPE
+                    if kind == "header"
+                    else _DOCX_FOOTER_CONTENT_TYPE,
+                )
+                content_types_root.appendChild(override)
+
+            replacements = {
+                "[Content_Types].xml": content_types_dom.toxml(
+                    encoding="utf-8"
+                ),
+                "word/document.xml": document_dom.toxml(encoding="utf-8"),
+                "word/_rels/document.xml.rels": relationships_dom.toxml(
+                    encoding="utf-8"
+                ),
+            }
+            output = io.BytesIO()
+            with zipfile.ZipFile(
+                output,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as target:
+                target.comment = source.comment
+                for item in source.infolist():
+                    normalized_name = item.filename.replace("\\", "/")
+                    target.writestr(
+                        item,
+                        replacements.get(normalized_name, source.read(item.filename)),
+                    )
+                for part_name, content in sorted(added_parts.items()):
+                    target.writestr(
+                        part_name,
+                        content,
+                        compress_type=zipfile.ZIP_DEFLATED,
+                    )
+    except DeliverableEditError:
+        raise
+    except (zipfile.BadZipFile, ExpatError, ValueError, KeyError) as exc:
+        raise DeliverableEditError(
+            "docx_preservation_failed",
+            f"无法还原 DOCX 页眉页脚：{exc}",
+        ) from exc
+    return output.getvalue()
+
+
 def serialize_editor_payload(session: EditSession, payload: Any) -> bytes:
     extension = os.path.splitext(session.path)[1].lower()
     if session.descriptor.kind == "docx":
         if not isinstance(payload, (bytes, bytearray)):
             raise DeliverableEditError("docx_payload_invalid", "DOCX 编辑器没有返回有效文档。")
         data = bytes(payload)
+        header_footer_plan = session.metadata.get("_docx_header_footer_plan")
+        if header_footer_plan is not None:
+            data = restore_docx_header_footer(data, header_footer_plan)
         if len(data) > OFFICE_MAX_BYTES:
             raise DeliverableEditError("file_too_large", "编辑后的 DOCX 超过 25 MiB。")
         validate_docx_bytes(data)

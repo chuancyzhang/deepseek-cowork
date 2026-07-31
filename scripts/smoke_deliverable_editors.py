@@ -26,7 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.deliverable_editing import (  # noqa: E402
+    create_edit_session,
     rows_to_univer_snapshot,
+    serialize_editor_payload,
     validate_docx_bytes,
 )
 
@@ -76,8 +78,9 @@ class SmokeBridge(QObject):
         self.ready_signal.emit(str(mode or ""))
 
     @Slot(bool)
-    def setDirty(self, _dirty):
-        return
+    def setDirty(self, dirty):
+        if dirty:
+            self.error_signal.emit("editor became dirty before user input")
 
     @Slot(str)
     def editorLoaded(self, session_id):
@@ -156,6 +159,11 @@ class SmokeCoordinator(QObject):
         self.shell_budget_seconds = float(shell_budget_seconds)
         self.model_budget_seconds = float(model_budget_seconds)
         self.docx_path = docx_path
+        self.docx_session = (
+            create_edit_session(str(docx_path))[0]
+            if docx_path is not None
+            else None
+        )
         self.metrics: list[tuple[str, float, float]] = []
 
         self.profile = QWebEngineProfile("cowork-editor-smoke", self)
@@ -308,7 +316,13 @@ class SmokeCoordinator(QObject):
         self.mode_saved = True
         try:
             if kind == "docx":
-                validate_docx_bytes(base64.b64decode(payload, validate=True))
+                docx_bytes = base64.b64decode(payload, validate=True)
+                if self.docx_session is not None:
+                    docx_bytes = serialize_editor_payload(
+                        self.docx_session,
+                        docx_bytes,
+                    )
+                validate_docx_bytes(docx_bytes)
             elif kind == "sheet":
                 snapshot = json.loads(payload)
                 if not isinstance(snapshot.get("sheets"), dict):

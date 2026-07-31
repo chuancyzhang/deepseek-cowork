@@ -453,6 +453,49 @@ def main_run():
             )
             if scale_label == "1":
                 save_widget(window, "s22a-deliverable-edit.png", 160)
+
+            window._set_deliverable_dirty(False)
+            window._release_deliverable_edit_session(show_preview=False)
+            from docx import Document
+
+            docx_path = workspace / "weekly-report.docx"
+            document = Document()
+            document.add_heading("项目周报", level=1)
+            document.add_paragraph("这里是可以直接修改的正文。")
+            document.sections[0].header.paragraphs[0].text = "项目资料"
+            document.sections[0].footer.paragraphs[0].text = "内部使用"
+            document.save(docx_path)
+            window.chat_storage.register_deliverable(
+                str(workspace),
+                str(docx_path),
+                conversation_id=window.current_session_id,
+                source="generated",
+            )
+            window.select_deliverable(str(docx_path), render_html=True)
+            window.begin_deliverable_edit()
+            for _attempt in range(240):
+                process_events(25)
+                if window.deliverable_edit_state in {"ready", "blocked", "failed"}:
+                    break
+            if window.deliverable_edit_state != "ready":
+                raise RuntimeError(
+                    f"DOCX editor did not become ready: {window.deliverable_edit_state}"
+                )
+            if (
+                window.deliverable_preview_mode_bar.isHidden()
+                or window.preview_stack.currentWidget()
+                is not window.deliverable_editor_web_view
+                or "页眉页脚将原样保留"
+                not in window.deliverable_edit_status_label.text()
+            ):
+                raise RuntimeError("DOCX edit entry, content, or preservation state is missing.")
+            save_widget(
+                window,
+                f"s22b-deliverable-docx-edit-{scale_label}x.png",
+                260,
+            )
+            if scale_label == "1":
+                save_widget(window, "s22b-deliverable-docx-edit.png", 160)
             return
         if SCREENSHOT_SCOPE == "sidebar-history-pagination":
             project_dir = TEMP_ROOT / "sidebar-pagination-project"

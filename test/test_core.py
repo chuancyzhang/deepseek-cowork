@@ -1047,6 +1047,20 @@ class TestEnvUtils(unittest.TestCase):
              patch("core.env_utils.os.getenv", return_value=""):
             self.assertEqual(env_utils.get_python_executable(), "")
 
+    def test_get_resource_dir_uses_pyinstaller_runtime_root(self):
+        with patch.object(env_utils.sys, "frozen", True, create=True), \
+             patch.object(env_utils.sys, "_MEIPASS", r"C:\app\_internal", create=True):
+            self.assertEqual(
+                env_utils.get_resource_dir(),
+                os.path.abspath(r"C:\app\_internal"),
+            )
+
+    def test_get_resource_dir_rejects_missing_frozen_runtime_root(self):
+        with patch.object(env_utils.sys, "frozen", True, create=True), \
+             patch.object(env_utils.sys, "_MEIPASS", "", create=True):
+            with self.assertRaisesRegex(RuntimeError, "PyInstaller"):
+                env_utils.get_resource_dir()
+
     def test_get_python_executable_frozen_does_not_fallback_to_system_python(self):
         with patch.object(env_utils.sys, "frozen", True, create=True), \
              patch.object(env_utils.sys, "executable", r"C:\app\deepseek-cowork.exe"), \

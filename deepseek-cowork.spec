@@ -581,7 +581,13 @@ pyside6_hidden = [
     "PySide6.QtWebEngineCore",
     "PySide6.QtWebEngineWidgets",
 ]
-qqbot_dist = _require_distribution("qqbot-agent-sdk")
+try:
+    qqbot_dist = _require_distribution("qqbot-agent-sdk")
+except RuntimeError as exc:
+    raise RuntimeError(
+        f"{exc} Install project dependencies in the build environment first: "
+        r"D:\code\cowork\.venv\Scripts\python.exe -m pip install -r requirements.txt."
+    ) from exc
 qqbot_hidden = collect_submodules("qqbot_agent_sdk")
 if not qqbot_hidden:
     raise RuntimeError("qqbot-agent-sdk is installed but no modules were collected.")

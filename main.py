@@ -45,7 +45,12 @@ from core.skill_catalog import DependencyCoordinator, SkillCatalogService, Skill
 from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
-from core.env_utils import get_app_data_dir, get_base_dir, get_python_executable
+from core.env_utils import (
+    get_app_data_dir,
+    get_base_dir,
+    get_python_executable,
+    get_resource_dir,
+)
 from core.single_instance import (
     UiSingleInstanceServer,
     build_ui_server_name,
@@ -19631,6 +19636,9 @@ class DeliverableEditLoadWorker(QThread):
                 kind=session.descriptor.kind,
                 elapsed_ms=round((time.monotonic() - started) * 1000),
                 size=session.initial_size,
+                preserved_header_footer_count=int(
+                    session.metadata.get("docx_preserved_header_footer_count") or 0
+                ),
             )
             self.finished_signal.emit(
                 {
@@ -22770,8 +22778,9 @@ class MainWindow(QMainWindow):
         if preview_mode_bar is not None:
             preview_mode_bar.setVisible(
                 getattr(self, "file_workspace_view_mode", "browse") == "detail"
-                and ext in {".html", ".htm", ".md", ".markdown", ".txt", ".py", ".js", ".css", ".json"}
+                and bool(path)
                 and os.path.isfile(path)
+                and editor_descriptor(path) is not None
             )
 
     def _snapshot_file_browser_state(self):
@@ -31533,7 +31542,14 @@ class MainWindow(QMainWindow):
         filename = {"docx": "docx.html", "sheet": "sheet.html", "html": "html.html"}.get(mode)
         if not filename:
             raise DeliverableEditError("editor_mode_invalid", "编辑器格式无效。")
-        path = os.path.join(get_base_dir(), "web", "editors", "dist", filename)
+        try:
+            resource_dir = get_resource_dir()
+        except RuntimeError as exc:
+            raise DeliverableEditError(
+                "editor_resources_unavailable",
+                f"无法定位离线编辑器资源：{exc}",
+            ) from exc
+        path = os.path.join(resource_dir, "web", "editors", "dist", filename)
         if not os.path.isfile(path):
             raise DeliverableEditError(
                 "editor_assets_missing",
@@ -31628,15 +31644,22 @@ class MainWindow(QMainWindow):
             or str(session.metadata.get("ui_session_id") or "") != str(session_id or "")
         ):
             return
+        preserved_header_footer_count = int(
+            session.metadata.get("docx_preserved_header_footer_count") or 0
+        )
+        ready_message = f"{session.descriptor.label} 编辑已就绪 · Ctrl+S 保存"
+        if session.descriptor.kind == "docx" and preserved_header_footer_count:
+            ready_message = "DOCX 正文编辑已就绪 · 页眉页脚将原样保留 · Ctrl+S 保存"
         self._set_deliverable_dirty(False)
         self._set_deliverable_edit_state(
             "ready",
-            f"{session.descriptor.label} 编辑已就绪 · Ctrl+S 保存",
+            ready_message,
         )
         log_sub_agent_runtime(
             "deliverable_edit_ready",
             path=session.path,
             kind=session.descriptor.kind,
+            preserved_header_footer_count=preserved_header_footer_count,
         )
 
     def _handle_deliverable_editor_error(self, message):

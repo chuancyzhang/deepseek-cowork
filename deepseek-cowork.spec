@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+import ast
 import fnmatch
 import importlib.metadata as importlib_metadata
 import os
@@ -93,6 +94,37 @@ def _collect_tree_for_analysis(src_root, dest_root, exclude_dirs=None, exclude_g
             dest_dir = os.path.join(dest_root, rel_root).replace("\\", "/")
             collected.append((src, dest_dir))
     return collected
+
+
+def _collect_dynamic_skill_core_hiddenimports(*skill_roots):
+    """Collect project modules imported by Skill implementations loaded as data."""
+    hiddenimports = set()
+    for skill_root in skill_roots:
+        if not os.path.isdir(skill_root):
+            continue
+        for current_root, dirs, files in os.walk(skill_root):
+            dirs[:] = [name for name in dirs if name != "__pycache__"]
+            if "impl.py" not in files:
+                continue
+            impl_path = os.path.join(current_root, "impl.py")
+            try:
+                with open(impl_path, "r", encoding="utf-8-sig") as handle:
+                    tree = ast.parse(handle.read(), filename=impl_path)
+            except (OSError, SyntaxError) as exc:
+                raise RuntimeError(
+                    f"Cannot analyze bundled Skill implementation imports: {impl_path}: {exc}"
+                ) from exc
+            for node in ast.walk(tree):
+                module_names = []
+                if isinstance(node, ast.Import):
+                    module_names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    module_names = [node.module]
+                hiddenimports.update(
+                    name for name in module_names
+                    if name == "core" or name.startswith("core.")
+                )
+    return sorted(hiddenimports)
 
 
 QT_TRANSLATION_ALLOWLIST = {
@@ -568,6 +600,23 @@ application_datas.extend(
         (os.path.join(SPEC_DIR, "qt.conf"), "."),
     ]
 )
+DYNAMIC_SKILL_CORE_HIDDENIMPORTS = _collect_dynamic_skill_core_hiddenimports(
+    os.path.join(SPEC_DIR, "skills"),
+    os.path.join(SPEC_DIR, "ai_skills"),
+)
+REQUIRED_WORKSPACE_SKILL_MODULES = {"core.apply_patch", "core.filesystem_ops"}
+missing_workspace_skill_modules = sorted(
+    REQUIRED_WORKSPACE_SKILL_MODULES.difference(DYNAMIC_SKILL_CORE_HIDDENIMPORTS)
+)
+if missing_workspace_skill_modules:
+    raise RuntimeError(
+        "Bundled workspace Skill modules were not discovered for PyInstaller: "
+        + ", ".join(missing_workspace_skill_modules)
+    )
+print(
+    "[Packaging] Dynamic Skill core hidden imports: "
+    + ", ".join(DYNAMIC_SKILL_CORE_HIDDENIMPORTS)
+)
 
 pyside6_hidden = [
     "PySide6.QtCore",
@@ -600,22 +649,25 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=application_datas + qt_minimal_datas + MCP_ANALYSIS_METADATA + qqbot_metadata,
-    hiddenimports=pyside6_hidden + qqbot_hidden + MCP_ANALYSIS_HIDDENIMPORTS + [
-        'bs4',
-        'yaml',
-        'requests',
-        'markdown',
-        'qtawesome',
-        'anthropic',
-        'openai',
-        'lark_oapi',
-        'aibot',
-        'qrcode',
-        'httpx',
-        # skill-builder/impl.py is loaded dynamically from packaged data, so
-        # PyInstaller cannot discover this core module through static imports.
-        'core.remote_skill_installer',
-    ],
+    hiddenimports=(
+        pyside6_hidden
+        + qqbot_hidden
+        + MCP_ANALYSIS_HIDDENIMPORTS
+        + DYNAMIC_SKILL_CORE_HIDDENIMPORTS
+        + [
+            'bs4',
+            'yaml',
+            'requests',
+            'markdown',
+            'qtawesome',
+            'anthropic',
+            'openai',
+            'lark_oapi',
+            'aibot',
+            'qrcode',
+            'httpx',
+        ]
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

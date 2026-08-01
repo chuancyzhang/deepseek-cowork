@@ -1,4 +1,6 @@
+import ast
 import os
+import tempfile
 import unittest
 
 
@@ -6,6 +8,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestPackagedRuntimeContract(unittest.TestCase):
+    @staticmethod
+    def _load_spec_function(function_name):
+        spec_path = os.path.join(ROOT, "deepseek-cowork.spec")
+        with open(spec_path, "r", encoding="utf-8") as handle:
+            tree = ast.parse(handle.read(), filename=spec_path)
+        function_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == function_name
+        )
+        namespace = {"ast": ast, "os": os}
+        module = ast.Module(body=[function_node], type_ignores=[])
+        exec(compile(module, spec_path, "exec"), namespace)
+        return namespace[function_name]
+
     def test_document_preview_libraries_ship_with_packaged_app(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
             spec_text = handle.read()
@@ -53,7 +70,7 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         self.assertIn('lowered.startswith("pyside6/qml/")', spec_text)
         self.assertIn('".debug." in basename', spec_text)
         self.assertIn('relative.startswith("pythonwin/")', spec_text)
-        self.assertIn('for source_name in ("skills", "ai_skills", "images")', spec_text)
+        self.assertIn('for source_name in ("skills", "ai_skills", "images", os.path.join("web", "editors", "dist"))', spec_text)
         self.assertIn("datas=application_datas + qt_minimal_datas", spec_text)
         self.assertIn("a.datas = _filter_entries", spec_text)
         self.assertIn("a.binaries = _filter_entries", spec_text)
@@ -65,12 +82,42 @@ class TestPackagedRuntimeContract(unittest.TestCase):
         hidden_imports = spec_text.split("pyside6_hidden = [", 1)[1].split("]", 1)[0]
         self.assertNotIn('"PySide6.QtAxContainer"', hidden_imports)
 
-    def test_remote_skill_installer_core_module_is_packaged(self):
+    def test_dynamic_skill_core_modules_are_packaged(self):
         with open(os.path.join(ROOT, "deepseek-cowork.spec"), "r", encoding="utf-8") as handle:
             spec_text = handle.read()
 
-        analysis_hidden_imports = spec_text.split("hiddenimports=", 1)[1].split("],", 1)[0]
-        self.assertIn("'core.remote_skill_installer'", analysis_hidden_imports)
+        self.assertIn("+ DYNAMIC_SKILL_CORE_HIDDENIMPORTS", spec_text)
+        self.assertIn(
+            'REQUIRED_WORKSPACE_SKILL_MODULES = {"core.apply_patch", "core.filesystem_ops"}',
+            spec_text,
+        )
+        self.assertIn("[Packaging] Dynamic Skill core hidden imports:", spec_text)
+        collect_hiddenimports = self._load_spec_function(
+            "_collect_dynamic_skill_core_hiddenimports"
+        )
+        hiddenimports = collect_hiddenimports(
+            os.path.join(ROOT, "skills"),
+            os.path.join(ROOT, "ai_skills"),
+        )
+        for module_name in (
+            "core.apply_patch",
+            "core.filesystem_ops",
+            "core.remote_skill_installer",
+        ):
+            self.assertIn(module_name, hiddenimports)
+
+    def test_dynamic_skill_import_analysis_fails_loudly_for_invalid_impl(self):
+        collect_hiddenimports = self._load_spec_function(
+            "_collect_dynamic_skill_core_hiddenimports"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_dir = os.path.join(temp_dir, "broken-skill")
+            os.makedirs(skill_dir)
+            with open(os.path.join(skill_dir, "impl.py"), "w", encoding="utf-8") as handle:
+                handle.write("from core.\n")
+
+            with self.assertRaisesRegex(RuntimeError, "Cannot analyze bundled Skill"):
+                collect_hiddenimports(temp_dir)
 
 
 if __name__ == "__main__":

@@ -435,6 +435,14 @@ DOCX/XLSX 限制 25 MiB，HTML/文本/CSV/TSV 限制 10 MiB，并额外限制图
 `_internal`）读取，EXE 同级目录只用于可执行文件与便携数据判定，不能作为
 随包只读资源根目录。
 
+内置 Skill 的 `impl.py` 以数据文件形式由 `SkillManager` 动态导入，不进入
+PyInstaller 的静态 import graph。构建 spec 因此会解析 `skills/` 与
+`ai_skills/` 下每个 `impl.py`，把其直接导入的 `core.*` 模块统一加入
+`Analysis.hiddenimports`；解析或读取失败会直接中止构建。这样新增
+`core.apply_patch`、`core.filesystem_ops` 一类 Skill 运行时依赖时，不会出现
+源码可用、冻结包中整组 Tool 静默消失的情况。构建日志会输出最终收集到的
+模块列表，并把工作区工具所需模块缺失视为构建错误。
+
 ## 10. 当前完整循环
 
 把前面的层次合并后，当前实现可以概括为：

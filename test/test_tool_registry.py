@@ -213,7 +213,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertIn("read_note", after_search)
         self.assertIn("write_note", after_search)
 
-    def test_chat_only_mode_hides_workspace_tools_from_definitions_and_search(self):
+    def test_chat_only_mode_keeps_workspace_tools_visible_without_binding(self):
         skill_dir = os.path.join(self.skills_dir, "mixed-tools")
         os.makedirs(skill_dir, exist_ok=True)
         with open(os.path.join(skill_dir, "impl.py"), "w", encoding="utf-8") as f:
@@ -230,6 +230,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
                 "]\n"
             )
         sm = self._build_manager()
+        sm.set_workspace_dir(None)
         discovered = {"local_lookup", "public_lookup"}
 
         visible = {
@@ -240,7 +241,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
                 run_context={"mode": RUN_MODE_EXECUTION, "workspace_mode": "chat_only"},
             )
         }
-        self.assertNotIn("local_lookup", visible)
+        self.assertIn("local_lookup", visible)
         self.assertIn("public_lookup", visible)
 
         result = sm.call_tool(
@@ -252,8 +253,41 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             },
         )
         names = {item["name"] for item in result.get("tools", [])}
-        self.assertNotIn("local_lookup", names)
+        self.assertIn("local_lookup", names)
         self.assertIn("public_lookup", names)
+
+    def test_core_workspace_tools_remain_visible_with_or_without_binding(self):
+        self._copy_repo_skill("file-system")
+        self._copy_repo_skill("command-tools")
+        sm = self._build_manager_with_sources(
+            {self.skills_dir: TOOL_SOURCE_CORE_BUILTIN}
+        )
+
+        visible = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=set(),
+                run_context={"mode": RUN_MODE_EXECUTION, "workspace_mode": "chat_only"},
+            )
+        }
+
+        self.assertIn("text_file_read", visible)
+        self.assertIn("apply_patch", visible)
+        self.assertIn("workspace_list_files", visible)
+        self.assertIn("glob", visible)
+        self.assertIn("grep", visible)
+
+        sm.set_workspace_dir(None)
+        unbound_visible = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=set(),
+                run_context={"mode": RUN_MODE_EXECUTION, "workspace_mode": "chat_only"},
+            )
+        }
+        self.assertTrue(visible <= unbound_visible)
 
     def test_parallel_tools_visible_by_default_in_execution_mode(self):
         self._copy_repo_skill("meta-tools")

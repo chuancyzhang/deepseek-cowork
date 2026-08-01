@@ -1823,6 +1823,50 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_workspace_tools_appear_in_prompt_without_workspace_binding(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            worker.run_context = {
+                "mode": RUN_MODE_EXECUTION,
+                "workspace_mode": "chat_only",
+            }
+            worker.workspace_dir = None
+            worker.discovered_tool_names = set()
+            worker.is_subagent = False
+            worker.skill_manager = SkillManager(
+                workspace_dir=None,
+                config_manager=None,
+                load_mcp_tools=False,
+            )
+
+            worker._refresh_tool_definitions()
+            prompt = worker._build_system_prompt(
+                {
+                    "python": {"available": True, "version": "3.test", "path": "python.exe"},
+                    "node": {"available": False},
+                    "bash": {"available": False},
+                }
+            )
+
+            visible_names = {
+                item["function"]["name"]
+                for item in worker.tools
+                if isinstance(item, dict) and isinstance(item.get("function"), dict)
+            }
+            for name in (
+                "workspace_list_files",
+                "text_file_read",
+                "apply_patch",
+                "glob",
+                "grep",
+                "bash",
+            ):
+                self.assertIn(name, visible_names)
+                self.assertIn(f"`{name}`", prompt)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_image_turn_keeps_tool_search_available(self):
         worker = LLMWorker.__new__(LLMWorker)
         worker.tools = [

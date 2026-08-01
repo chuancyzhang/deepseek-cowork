@@ -163,6 +163,10 @@ sequenceDiagram
 相同解析入口并剪枝重解析点；无法读取或严格解码的文件通过 `warnings` 和
 `skipped_count` 外显。
 
+工作区绑定不参与 Tool Schema 可见性判断。文件与命令工具在 project、chat-only、
+已绑定和未绑定状态下都进入当前可用工具清单；未绑定时若实际调用，由 Handler
+返回明确的 `workspace_not_selected`，不得通过预先隐藏工具制造能力缺失的假象。
+
 补丁执行分为完整解析与预检、聚合删除确认、按补丁顺序提交三个阶段。预检
 失败以及删除拒绝/超时都保证零修改；提交使用目标同目录临时文件，已有文件
 通过 `os.replace` 原子替换，新增文件使用拒绝覆盖的原子 rename/link 提交。

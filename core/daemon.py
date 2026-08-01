@@ -18,6 +18,7 @@ from core.interaction import interaction_service
 from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
 from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
+from core.message_persistence import filter_persistable_messages
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
 
@@ -110,6 +111,11 @@ class DaemonState:
             return
         with self.lock:
             for session_id, messages in list(self.sessions.items()):
+                messages = self._normalize_persistable_messages(
+                    session_id,
+                    messages,
+                    source="idle_suspend",
+                )
                 title = _compute_session_title(messages)
                 self.chat_storage.save_conversation(session_id, messages, title=title)
             self.sessions = {}
@@ -204,9 +210,63 @@ class DaemonState:
                 return
         messages.append({"role": "user", "content": content})
 
+    def _normalize_persistable_messages(self, session_id, messages, source):
+        source_messages = messages if isinstance(messages, list) else []
+        persistable_messages = filter_persistable_messages(source_messages)
+        normalized_messages = self.chat_storage.normalize_messages(persistable_messages)
+        filtered_count = len(source_messages) - len(persistable_messages)
+        if filtered_count:
+            _log_daemon(
+                "message_persistence_filter "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "source": source,
+                        "input_message_count": len(source_messages),
+                        "persisted_message_count": len(normalized_messages),
+                        "filtered_message_count": filtered_count,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return normalized_messages
+
+    def append_worker_result_messages(self, session_id, messages, result, source):
+        generated_messages = result.get("generated_messages", [])
+        if generated_messages:
+            persistable_messages = filter_persistable_messages(generated_messages)
+            filtered_count = len(generated_messages) - len(persistable_messages)
+            if filtered_count:
+                _log_daemon(
+                    "message_persistence_filter "
+                    + json.dumps(
+                        {
+                            "session_id": session_id,
+                            "source": source,
+                            "input_message_count": len(generated_messages),
+                            "persisted_message_count": len(persistable_messages),
+                            "filtered_message_count": filtered_count,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            messages.extend(persistable_messages)
+            return
+        messages.append(
+            {
+                "role": result.get("role", "assistant"),
+                "content": result.get("content", ""),
+                "reasoning": result.get("reasoning", ""),
+            }
+        )
+
     def save_session(self, session_id):
         with self.lock:
-            messages = self.chat_storage.normalize_messages(self.sessions.get(session_id, []))
+            messages = self._normalize_persistable_messages(
+                session_id,
+                self.sessions.get(session_id, []),
+                source="daemon_save_session",
+            )
             self.sessions[session_id] = messages
         title = _compute_session_title(messages)
         self.chat_storage.save_conversation(session_id, messages, title=title)
@@ -698,18 +758,17 @@ class DaemonState:
                 )
                 result = retry_result
         if "error" not in result:
-            generated_messages = result.get("generated_messages", [])
-            if generated_messages:
-                messages.extend(generated_messages)
-            else:
-                messages.append(
-                    {
-                        "role": result.get("role", "assistant"),
-                        "content": result.get("content", ""),
-                        "reasoning": result.get("reasoning", "")
-                    }
-                )
-        messages[:] = self.chat_storage.normalize_messages(messages)
+            self.append_worker_result_messages(
+                session_id,
+                messages,
+                result,
+                source="daemon_sync_result",
+            )
+        messages[:] = self._normalize_persistable_messages(
+            session_id,
+            messages,
+            source="daemon_sync_finalize",
+        )
         self.save_session(session_id)
         self.touch()
         return result
@@ -898,18 +957,17 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 f"has_error={isinstance(result, dict) and 'error' in result}"
             )
             if "error" not in result:
-                generated_messages = result.get("generated_messages", [])
-                if generated_messages:
-                    messages.extend(generated_messages)
-                else:
-                    messages.append(
-                        {
-                            "role": result.get("role", "assistant"),
-                            "content": result.get("content", ""),
-                            "reasoning": result.get("reasoning", "")
-                        }
-                    )
-            messages[:] = state.chat_storage.normalize_messages(messages)
+                state.append_worker_result_messages(
+                    session_id,
+                    messages,
+                    result,
+                    source="daemon_stream_result",
+                )
+            messages[:] = state._normalize_persistable_messages(
+                session_id,
+                messages,
+                source="daemon_stream_finalize",
+            )
             state.save_session(session_id)
             state.touch()
             return

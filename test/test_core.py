@@ -1415,6 +1415,33 @@ class TestDaemonState(unittest.TestCase):
         saved_messages = self.state.chat_storage.get_messages(session_id)
         self.assertEqual([msg.get("content") for msg in saved_messages], ["first", "reply", "continue", "done"])
 
+    def test_save_session_uses_shared_persistence_filter(self):
+        session_id = "daemon-persistence-filter"
+        self.state.sessions[session_id] = [
+            {"id": "u1", "role": "user", "content": "问题"},
+            {
+                "id": "skill-context",
+                "role": "system",
+                "content": "runtime only",
+                "meta": {
+                    "kind": "skill_context",
+                    "source": "skill_prompt_query_match",
+                },
+            },
+            {"id": "a1", "role": "assistant", "content": "回答"},
+        ]
+
+        self.state.save_session(session_id)
+
+        self.assertEqual(
+            [message["id"] for message in self.state.sessions[session_id]],
+            ["u1", "a1"],
+        )
+        self.assertEqual(
+            [message["id"] for message in self.state.chat_storage.get_messages(session_id)],
+            ["u1", "a1"],
+        )
+
     def test_snapshot_restores_context_after_idle_suspend(self):
         session_id = "desktop-after-idle"
         self.state.sessions[session_id] = [{"role": "user", "content": "stale memory"}]

@@ -65,6 +65,10 @@ from core.conversation_render import (
     is_legacy_skill_change_notice_message,
     is_same_turn_guidance_message,
 )
+from core.message_persistence import (
+    filter_persistable_messages,
+    is_auto_query_skill_context_message,
+)
 from core.deliverable_preview import (
     DELIVERABLE_TYPES,
     OFFICE_EXTENSIONS,
@@ -19286,24 +19290,6 @@ def session_history_ready(state):
     return bool(getattr(state, "history_loaded", False))
 
 
-AUTO_QUERY_SKILL_CONTEXT_SOURCES = {
-    "skill_prompt",
-    "skill_prompt_query_match",
-    "skill_prompt_tool_search",
-    "selected_skill_prompt",
-}
-
-
-def is_auto_query_skill_context_message(message):
-    if not isinstance(message, dict):
-        return False
-    meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-    return bool(
-        meta.get("kind") in ("skill_context", "skill_context_update")
-        and meta.get("source") in AUTO_QUERY_SKILL_CONTEXT_SOURCES
-    )
-
-
 class DrawerResizeHandle(QWidget):
     widthRequested = Signal(int)
     resizeFinished = Signal()
@@ -27627,7 +27613,45 @@ class MainWindow(QMainWindow):
                 state.messages,
                 existing_meta=conversation_meta
             )
-        state.render_items = loaded_spans
+        state.render_items = build_conversation_render_spans(state.messages)
+        span_max_end = max(
+            [int(span.get("end") or 0) for span in state.render_items]
+            or [0]
+        )
+        spans_in_bounds = all(
+            0 <= int(span.get("start") or 0) < int(span.get("end") or 0) <= len(state.messages)
+            for span in state.render_items
+        )
+        log_ui_navigation(
+            "history_load_normalized",
+            session_id=session_id,
+            token=token,
+            raw_message_count=len(loaded_messages),
+            normalized_message_count=len(state.messages),
+            raw_span_count=len(loaded_spans),
+            normalized_span_count=len(state.render_items),
+            span_max_end=span_max_end,
+            spans_in_bounds=spans_in_bounds,
+        )
+        if not spans_in_bounds:
+            exc = (
+                "历史消息渲染区间越界："
+                f"message_count={len(state.messages)}, span_max_end={span_max_end}"
+            )
+            state.history_loaded = False
+            state.history_loading = False
+            self._show_session_load_error_state(state, exc)
+            self.append_log(f"历史会话加载失败({session_id}): {exc}")
+            log_ui_navigation(
+                "history_load_error",
+                session_id=session_id,
+                token=token,
+                stage="normalized_render_spans",
+                error=exc,
+            )
+            if session_id == self.current_session_id:
+                self.normalize_session_ui(state)
+            return
         state.displayed_count = len(state.messages)
         state.displayed_render_count = 0
         self._render_initial_session_history(
@@ -30402,10 +30426,7 @@ class MainWindow(QMainWindow):
             normalized_messages = repair_tool_call_sequence(source_messages)
         except Exception:
             normalized_messages = source_messages
-        normalized_messages = [
-            msg for msg in normalized_messages
-            if not is_auto_query_skill_context_message(msg)
-        ]
+        normalized_messages = filter_persistable_messages(normalized_messages)
         deduped_messages = []
         for msg in normalized_messages:
             if (
@@ -30688,9 +30709,18 @@ class MainWindow(QMainWindow):
             return None
         if not session_history_ready(state):
             return None
-        messages = copy.deepcopy(
-            list(messages if messages is not None else state.messages)
-        )
+        source_messages = list(messages if messages is not None else state.messages)
+        messages = copy.deepcopy(filter_persistable_messages(source_messages))
+        filtered_message_count = len(source_messages) - len(messages)
+        if filtered_message_count:
+            log_ui_navigation(
+                "chat_persistence_filter_applied",
+                session_id=state.session_id,
+                source="ui_save_request",
+                input_message_count=len(source_messages),
+                persisted_message_count=len(messages),
+                filtered_message_count=filtered_message_count,
+            )
         has_clarify_state = bool(
             bool(getattr(state, "pending_clarify_questions", []))
         )
@@ -38480,9 +38510,8 @@ class MainWindow(QMainWindow):
         if not isinstance(generated_messages, list):
             return []
         new_messages = [
-            msg for msg in generated_messages
+            msg for msg in filter_persistable_messages(generated_messages)
             if isinstance(msg, dict)
-            and not is_auto_query_skill_context_message(msg)
         ]
         if not new_messages:
             return []
@@ -38784,9 +38813,15 @@ class MainWindow(QMainWindow):
                 finished_at=time.time(),
             )
         generated_messages_raw = result.get("generated_messages", [])
+        persistable_generated_messages = filter_persistable_messages(generated_messages_raw)
+        persistence_filtered_count = (
+            len(generated_messages_raw) - len(persistable_generated_messages)
+            if isinstance(generated_messages_raw, list)
+            else 0
+        )
         generated_messages = self._merge_generated_messages(
             state.messages,
-            generated_messages_raw,
+            persistable_generated_messages,
         )
 
         if not (content or "").strip() and generated_messages:
@@ -38927,7 +38962,13 @@ class MainWindow(QMainWindow):
             group_id=str(getattr(bubble, "ui_turn_group_id", "")),
             stage_id=str(getattr(bubble, "ui_stage_id", "")),
             content_len=len(str(content or "")),
+            raw_generated_message_count=(
+                len(generated_messages_raw)
+                if isinstance(generated_messages_raw, list)
+                else 0
+            ),
             generated_message_count=len(generated_messages),
+            persistence_filtered_message_count=persistence_filtered_count,
         )
         state.agent_stage_closed = True
         state.pending_guidance_messages = []

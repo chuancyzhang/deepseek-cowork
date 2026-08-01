@@ -131,6 +131,94 @@ class HistoryPerformanceTests(unittest.TestCase):
         self.assertEqual(results[0]["spans"], [{"start": 0, "end": 1}, {"start": 1, "end": 2}])
         self.assertNotIn("widget", results[0])
 
+    def test_history_load_rebuilds_spans_after_message_normalization(self):
+        raw_messages = [
+            {"id": "u1", "role": "user", "content": "问题"},
+            {
+                "id": "skill-context",
+                "role": "system",
+                "content": "runtime only",
+                "meta": {
+                    "hidden": True,
+                    "kind": "skill_context",
+                    "source": "skill_prompt_tool_search",
+                },
+            },
+            {"id": "a1", "role": "assistant", "content": "回答"},
+        ]
+        normalized_messages = [raw_messages[0], raw_messages[2]]
+        raw_spans = build_conversation_render_spans(raw_messages)
+        self.assertEqual(raw_spans[-1], {"start": 2, "end": 3})
+
+        self.state.history_load_token = 17
+        self.state.history_loading = True
+        with (
+            patch.object(
+                self.window,
+                "_normalize_and_persist_session_messages",
+                return_value=normalized_messages,
+            ),
+            patch.object(self.window, "_render_initial_session_history") as render_history,
+            patch("main.log_ui_navigation") as navigation_log,
+        ):
+            self.window._handle_session_history_loaded(
+                {
+                    "ok": True,
+                    "session_id": self.state.session_id,
+                    "token": 17,
+                    "conversation_meta": {},
+                    "conversation_record": {"status": "draft"},
+                    "messages": raw_messages,
+                    "agents": [],
+                    "spans": raw_spans,
+                    "elapsed_ms": 1,
+                }
+            )
+
+        self.assertEqual(self.state.messages, normalized_messages)
+        self.assertEqual(
+            self.state.render_items,
+            [{"start": 0, "end": 1}, {"start": 1, "end": 2}],
+        )
+        render_history.assert_called_once()
+        normalized_log = next(
+            call
+            for call in navigation_log.call_args_list
+            if call.args and call.args[0] == "history_load_normalized"
+        )
+        self.assertEqual(normalized_log.kwargs["raw_message_count"], 3)
+        self.assertEqual(normalized_log.kwargs["normalized_message_count"], 2)
+        self.assertTrue(normalized_log.kwargs["spans_in_bounds"])
+
+    def test_chat_save_request_uses_shared_persistence_filter(self):
+        self.state.messages = [
+            {"id": "u1", "role": "user", "content": "问题"},
+            {
+                "id": "skill-context",
+                "role": "system",
+                "content": "runtime only",
+                "meta": {
+                    "kind": "skill_context_update",
+                    "source": "selected_skill_prompt",
+                },
+            },
+            {"id": "a1", "role": "assistant", "content": "回答"},
+        ]
+
+        with patch("main.log_ui_navigation") as navigation_log:
+            request = self.window._build_chat_save_request(self.state, revision=3)
+
+        self.assertEqual(
+            [message["id"] for message in request.messages],
+            ["u1", "a1"],
+        )
+        filter_log = next(
+            call
+            for call in navigation_log.call_args_list
+            if call.args and call.args[0] == "chat_persistence_filter_applied"
+        )
+        self.assertEqual(filter_log.kwargs["filtered_message_count"], 1)
+
     def test_office_history_process_is_created_only_after_expand(self):
         messages = [
             {

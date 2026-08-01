@@ -1,4 +1,3 @@
-import fnmatch
 import json
 import locale
 import os
@@ -9,12 +8,10 @@ import time
 
 from PySide6.QtCore import QObject, Qt
 
+from core.filesystem_ops import glob_paths, grep_contents
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox, run_skill_script_in_sandbox
 from core.interaction import ask_user
 from core.runtime_components import install_node_runtime, load_saved_download_sources, selected_source
-
-DEFAULT_EXCLUDE_DIRS = {".git", ".idea", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
-
 
 def _init_abort_state(context):
     state = {"aborted": False, "bridge": None}
@@ -68,48 +65,6 @@ def _decode_bytes(raw):
         return raw.decode("utf-8", errors="replace")
     except Exception:
         return str(raw)
-
-
-def _normalize_exclude_patterns(exclude):
-    patterns = set(DEFAULT_EXCLUDE_DIRS)
-    if not exclude:
-        return patterns
-    if isinstance(exclude, str):
-        candidates = exclude.split(",")
-    elif isinstance(exclude, (list, tuple, set)):
-        candidates = exclude
-    else:
-        candidates = []
-    for item in candidates:
-        text = str(item or "").strip()
-        if text:
-            patterns.add(text)
-    return patterns
-
-
-def _resolve_workspace_path(workspace_dir, path="."):
-    if not workspace_dir:
-        return None, "Error: Workspace not selected."
-    root = os.path.abspath(workspace_dir)
-    rel = path or "."
-    resolved = os.path.abspath(os.path.join(root, rel))
-    try:
-        common = os.path.commonpath([root, resolved])
-    except ValueError:
-        return None, "Error: Path is outside the workspace."
-    if common != root:
-        return None, "Error: Path is outside the workspace."
-    return resolved, None
-
-
-def _to_workspace_relative(file_path, workspace_dir):
-    return os.path.relpath(file_path, workspace_dir)
-
-
-def _path_matches(pattern, rel_path):
-    normalized = rel_path.replace("\\", "/")
-    basename = os.path.basename(rel_path)
-    return fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(basename, pattern)
 
 
 def bash(workspace_dir, command, _context=None):
@@ -234,97 +189,28 @@ def _glob_internal(workspace_dir, pattern="*", path=".", limit=200, _context=Non
     """
     在工作区内按路径/文件名模式搜索文件。
     """
-    if not workspace_dir:
-        return "Error: Workspace not selected."
-    pattern = str(pattern or "").strip() or "*"
-    start_dir, error = _resolve_workspace_path(workspace_dir, path)
-    if error:
-        return error
-    if not os.path.exists(start_dir):
-        return f"Error: Path not found - {path}"
-    if not os.path.isdir(start_dir):
-        return f"Error: Path is not a directory - {path}"
-
-    try:
-        max_results = int(limit) if limit is not None else 200
-    except Exception:
-        return "Error: limit must be an integer."
-    if max_results <= 0:
-        return "Error: limit must be greater than 0."
-
-    matches = []
-    try:
-        for root, dirs, files in os.walk(start_dir):
-            dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDE_DIRS]
-            for file_name in files:
-                file_path = os.path.join(root, file_name)
-                rel_path = _to_workspace_relative(file_path, workspace_dir)
-                if _path_matches(pattern, rel_path):
-                    matches.append(rel_path)
-                    if len(matches) >= max_results:
-                        matches.append("... (Truncated due to result limit)")
-                        return "\n".join(matches)
-        if not matches:
-            return "No matches found."
-        return "\n".join(matches)
-    except Exception as e:
-        return f"Error: {str(e)}"
+    return glob_paths(
+        workspace_dir,
+        pattern=pattern,
+        path=path,
+        limit=limit,
+        context=_context,
+    )
 
 
 def _grep_internal(workspace_dir, pattern, path=".", include="*", exclude=None, recursive=True, _context=None):
     """
     在工作区内搜索文件内容。
     """
-    if not workspace_dir:
-        return "Error: Workspace not selected."
-    start_dir, error = _resolve_workspace_path(workspace_dir, path)
-    if error:
-        return error
-    if not os.path.exists(start_dir):
-        return f"Error: Path not found - {path}"
-    exclude_patterns = _normalize_exclude_patterns(exclude)
-
-    try:
-        regex = re.compile(pattern)
-    except re.error as e:
-        return f"Error: Invalid regex pattern - {str(e)}"
-
-    results = []
-    match_count = 0
-    max_matches = 1000
-
-    try:
-        for root, dirs, files in os.walk(start_dir):
-            dirs[:] = [d for d in dirs if d not in exclude_patterns]
-            for file_name in files:
-                if file_name in exclude_patterns:
-                    continue
-                if not fnmatch.fnmatch(file_name, include):
-                    continue
-                file_path = os.path.join(root, file_name)
-                try:
-                    with open(file_path, "rb") as f:
-                        is_binary = b"\0" in f.read(1024)
-                    if is_binary:
-                        continue
-                    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                        for index, line in enumerate(f, start=1):
-                            if regex.search(line):
-                                rel_path = _to_workspace_relative(file_path, workspace_dir)
-                                results.append(f"{rel_path}:{index}: {line.strip()}")
-                                match_count += 1
-                                if match_count >= max_matches:
-                                    results.append("... (Truncated due to match limit)")
-                                    return "\n".join(results)
-                except Exception:
-                    continue
-            if not recursive:
-                break
-        if not results:
-            return "No matches found."
-        return "\n".join(results)
-    except Exception as e:
-        return f"Error: {str(e)}"
+    return grep_contents(
+        workspace_dir,
+        pattern=pattern,
+        path=path,
+        include=include,
+        exclude=exclude,
+        recursive=recursive,
+        context=_context,
+    )
 
 
 def glob(workspace_dir, pattern="*", path=".", limit=200, _context=None):

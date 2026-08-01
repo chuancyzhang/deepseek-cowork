@@ -140,6 +140,37 @@ sequenceDiagram
 每个会话都有明确 `workspace_dir`。独立聊天使用会话专属目录，项目聊天
 绑定项目路径。文件 Tool、脚本和交付物扫描都以当前会话工作区为边界。
 
+### 普通文本读取与补丁提交
+
+模型可见的普通文本内容接口收敛为 `text_file_read` 和 `apply_patch`。
+`glob` 只发现路径，`grep` 只定位匹配行；二者都不能代替完整有序读取。
+`text_file_read` 对单文件限制 10 MiB，按 Unicode BOM 或 UTF-8 严格解码，
+其他编码必须显式指定。只有从首行开始且不分页的完整读取，才会在会话上下文
+记录 SHA-256、字节数、`mtime_ns`、编码、BOM 与换行风格；后续修改以内容哈希
+而不是时间戳判断读取凭据是否仍有效。
+
+`apply_patch(patch: string)` 在 OpenAI-compatible、DeepSeek 和 Anthropic 中都以
+标准函数 Schema 暴露。补丁使用 `Begin Patch`、`Add/Update/Delete File`、
+`Move to`、精确上下文 hunk 与 `End of File` 语法，输入上限 12 MiB、单次最多
+100 个文件。新增文件固定为 UTF-8/LF；已有内容必须先取得完整读取凭据，hunk
+只做唯一、逐字符精确匹配，不进行空白或 Unicode 模糊归一化。纯移动继续走
+重命名语义，带内容修改的移动仍受读取审计约束；Office/PDF 路径在预检阶段
+直接拒绝。
+
+路径解析同时检查词法绝对路径和 `realpath`。普通模式拒绝工作区外路径与通过
+符号链接或目录联接产生的逃逸；所有写路径都拒绝经过重解析点。God Mode 保留
+既有的工作区外授权，但不放宽重解析点写入和 UNC 禁令。`glob`、`grep` 使用
+相同解析入口并剪枝重解析点；无法读取或严格解码的文件通过 `warnings` 和
+`skipped_count` 外显。
+
+补丁执行分为完整解析与预检、聚合删除确认、按补丁顺序提交三个阶段。预检
+失败以及删除拒绝/超时都保证零修改；提交使用目标同目录临时文件，已有文件
+通过 `os.replace` 原子替换，新增文件使用拒绝覆盖的原子 rename/link 提交。
+跨文件不伪装成事务：运行期 I/O 失败返回
+`partial_apply`，分别列出已完成、失败与待处理项。诊断只记录
+`start/preflight/confirm/commit/finish/error` 状态和计数，不记录文件内容或
+补丁正文。
+
 ### 用户交互
 
 - `request_user_input` 收集文本、单选、多选或问卷。

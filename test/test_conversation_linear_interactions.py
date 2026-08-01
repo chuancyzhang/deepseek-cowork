@@ -36,7 +36,9 @@ from main import (
     GuidanceTimelineEvent,
     ToolCallCard,
     build_sub_agent_history_events,
+    extract_related_paths,
     launch_daemon_subprocess,
+    summarize_tool_action,
 )
 from ui.primitives import ProductActionRow, ProductEmptyState, ProductPopover
 
@@ -920,6 +922,39 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         bubble.think_toggle_btn.setChecked(False)
         self.assertTrue(bubble.think_container.isHidden())
         bubble.deleteLater()
+
+    def test_apply_patch_card_uses_multi_path_summary_and_error_state(self):
+        patch_text = (
+            "*** Begin Patch\n"
+            "*** Update File: src/old.py\n"
+            "*** Move to: src/new.py\n"
+            "@@\n-old\n+new\n"
+            "*** Add File: docs/readme.md\n+text\n"
+            "*** End Patch"
+        )
+        args = {"patch": patch_text}
+
+        title, summary = summarize_tool_action("apply_patch", args)
+        self.assertEqual(title, "应用文本补丁")
+        self.assertEqual(summary, "处理 3 个文本路径")
+        self.assertEqual(
+            extract_related_paths("apply_patch", args),
+            ["src/old.py", "src/new.py", "docs/readme.md"],
+        )
+
+        card = ToolCallCard("apply_patch", args, "patch-tool")
+        card.show()
+        self.app.processEvents()
+        card.set_result(
+            '{"ok": false}',
+            {"ok": False, "error": {"code": "ambiguous_hunk", "message": "context is ambiguous"}},
+        )
+        self.app.processEvents()
+
+        self.assertTrue(card.failed)
+        self.assertFalse(card.status_icon.pixmap().isNull())
+        self.assertFalse(card.grab().isNull())
+        card.deleteLater()
 
     def test_empty_thinking_expansion_does_not_create_timeline_height(self):
         bubble = ChatBubble("Agent", "", thinking="...")

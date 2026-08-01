@@ -897,7 +897,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def get_tool_definitions(self):
                 names = [
                     "bash",
-                    "text_file_write",
+                    "apply_patch",
                     "search_codebase",
                     "workspace_list_files",
                     "text_file_read",
@@ -934,7 +934,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("grep", tool_names)
             self.assertIn("request_user_input", tool_names)
             self.assertIn("bash", tool_names)
-            self.assertIn("text_file_write", tool_names)
+            self.assertIn("apply_patch", tool_names)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -2,6 +2,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -23,20 +24,20 @@ doc_spec.loader.exec_module(document_impl)
 
 class TestOfficeSkill(unittest.TestCase):
     def setUp(self):
-        self.workspace_dir = os.path.abspath("test_workspace")
-        if os.path.exists(self.workspace_dir):
-            shutil.rmtree(self.workspace_dir)
-        os.makedirs(self.workspace_dir)
+        self.workspace_dir = tempfile.mkdtemp()
 
     def tearDown(self):
         shutil.rmtree(self.workspace_dir, ignore_errors=True)
 
     def test_plain_text_tool_refuses_structured_documents(self):
         result = file_impl.text_file_read(self.workspace_dir, "test.docx")
-        self.assertIn("structured_document_not_supported", result)
+        self.assertEqual(result["error"]["code"], "structured_document_not_supported")
 
-        result = file_impl.text_file_write(self.workspace_dir, "test.pdf", "content")
-        self.assertIn("structured_document_not_supported", result)
+        result = file_impl.apply_patch(
+            self.workspace_dir,
+            "*** Begin Patch\n*** Add File: test.pdf\n+content\n*** End Patch",
+        )
+        self.assertEqual(result["error"]["code"], "structured_document_not_supported")
 
     def test_document_read_handles_docx_xlsx_and_plain_text_stays_separate(self):
         from docx import Document
@@ -56,13 +57,13 @@ class TestOfficeSkill(unittest.TestCase):
             handle.write("Just some text")
 
         docx_content = document_impl.document_read(self.workspace_dir, "test.docx")
-        self.assertIn("Hello World", docx_content)
+        self.assertIn("Hello World", docx_content["content"])
 
         xlsx_content = document_impl.document_read(self.workspace_dir, "test.xlsx")
-        self.assertIn("Alice", xlsx_content)
+        self.assertIn("Alice", xlsx_content["content"])
 
         text_content = file_impl.text_file_read(self.workspace_dir, "test.txt")
-        self.assertIn("Just some text", text_content)
+        self.assertEqual(text_content["content"], "Just some text")
 
 
 if __name__ == "__main__":

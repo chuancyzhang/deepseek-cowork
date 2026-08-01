@@ -1072,7 +1072,10 @@ class LLMWorker(QThread):
             "Imported / agent script skill 规则: 已命中包含 `script_entries` 的 imported/agent skill 时，优先调用 `run_skill_script`，不要用 `glob`、`grep` 或 `bash` 猜测 Skill 目录和脚本路径。",
             "策略 [命令]: 当前清单暴露对应工具时，数据处理、批量文本、计算和 Python 检查优先用 'run_python_code'；项目命令、构建测试、git/npm/npx、管道或现有 CLI 使用 'bash'。Node.js 工具选择必须服从动态运行时判定；不要为内联 Python/JavaScript 额外套一层 shell。",
             "能力分层: 浏览器自动化、网页搜索、金融数据、Office/PDF 读取等随包能力位于 `ai_skills/`。浏览器自动化在“AI 能力商城 → 浏览器自动化”中配置；常用工具包在设置的“组件与依赖”页按需安装。",
-            "文件策略: 'workspace_list_files' 只列工作区路径；'text_file_read'、'text_file_write'、'text_file_update' 只处理普通文本文件，不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
+            "策略 [文本文件]: 'glob' 只查路径，'grep' 只定位内容，'text_file_read' 获取单个文件完整且有序的内容，'apply_patch' 是创建、更新、移动或删除普通文本内容的唯一工具；这些工具不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
+            "策略 [读取审计]: 修改已有文件前，必须用 'text_file_read' 从 offset=1 且不传 limit 完整读取，建立基于 SHA-256、大小、mtime_ns、编码、BOM 和换行风格的审计凭据；分页读取不授予写审计，禁止用 'grep' 的匹配结果代替完整读取。",
+            "策略 [补丁格式]: 'apply_patch' 的 patch 必须以 '*** Begin Patch' 开始、以 '*** End Patch' 结束；使用 '*** Add File: path'（内容每行以 + 开头）、'*** Update File: path'、可选 '*** Move to: path'、'@@' 精确上下文 hunk、'*** Delete File: path'，纯追加 hunk 必须以 '*** End of File' 收尾。",
+            "策略 [补丁约束]: 先读后改并提供精确上下文；重复片段必须补足上下文直到唯一匹配，不得依赖空白或 Unicode 模糊匹配。删除会一次展示全部路径并要求确认。补丁失败后根据结构化错误重新读取或修正补丁，不得臆造其他文本写入工具。",
             "Office/PDF 策略: 读取 DOCX/PPTX/XLSX/XLS/PDF 需显式选择并使用可选 `document-reader` 能力的 'document_read'；写入这些格式应使用任务所需的实际生成工具或运行时库。",
             "依赖策略: 不要根据静态库清单、系统 PATH 或常见安装目录推断依赖可用性；以实际 Tool/Skill 调用和依赖协调结果为准。缺少依赖时报告根因和恢复方式。",
             "",
@@ -2038,10 +2041,12 @@ class LLMWorker(QThread):
                                 }
                             }
                             current_messages.append(tool_msg)
-                            if result_text.strip() and not (
-                                isinstance(result_obj, dict)
-                                and str(result_obj.get("status") or "").lower() in {"denied", "invalid_tool_call"}
-                            ):
+                            structured_failure = isinstance(result_obj, dict) and (
+                                result_obj.get("ok") is False
+                                or str(result_obj.get("status") or "").lower()
+                                in {"denied", "error", "failed", "invalid_tool_call", "partial_apply"}
+                            )
+                            if result_text.strip() and not structured_failure:
                                 successful_tool_results.append(name)
                             if name == "tool_search":
                                 self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)

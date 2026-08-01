@@ -299,7 +299,8 @@ class TestInteractionSkill(unittest.TestCase):
             with patch.object(module, "ask_user", return_value=False) as approval_mock:
                 result = module.workspace_delete_path(tmp, "delete-me.txt", _context={"session_id": "session-delete"})
 
-        self.assertIn("cancelled", result.lower())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "cancelled")
         approval_mock.assert_called_once()
 
 

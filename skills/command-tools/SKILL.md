@@ -24,6 +24,7 @@ allowed-tools: ["bash", "glob", "grep", "run_node_code", "run_skill_script"]
 2. `glob` / `grep`
    - `glob` 用于按路径模式查找文件。
    - `grep` 用于按内容正则查找文件。
+   - 两者复用文件系统统一路径边界，不遍历符号链接或目录联接；跳过的重解析点、无法读取或无法严格解码的文本会通过 `warnings` 和 `skipped_count` 返回。
    - 两者是只读搜索工具，多个独立搜索可通过 `parallel_tools` 并行执行。
 
 3. `run_skill_script`
@@ -42,6 +43,7 @@ allowed-tools: ["bash", "glob", "grep", "run_node_code", "run_skill_script"]
 - 先读取动态运行时上下文中的 Node.js 可用性与路径；只有确认当前用户环境已安装 Node.js 且本轮暴露该 Tool 时，JavaScript/Node.js 代码才优先使用 `run_node_code`。
 - 未检测到 Node.js 时，不得因 Tool Schema 已暴露就假设运行时存在；任务确实依赖 Node.js 时，应明确说明缺失并进入用户确认的安装或配置流程。
 - 当只需要路径或内容搜索时优先使用 `glob` / `grep`，不要用 shell 包一层。
+- `glob` 结果不能代替文件内容，`grep` 匹配行也不能代替完整有序读取或授予文件修改审计。
 - `glob` 的递归遍历由工具本身完成；如果已知文件名片段，优先写 `*文件名片段*`，例如 `*AI 赋能数据分析*`。
 - 不要为了“搜索所有层级”默认写 `**/文件名*`；当前匹配语义下，这种写法可能漏掉工作区根目录文件。
 - 如果已知目录范围，用 `path` 限定目录，再让 `pattern` 专注匹配文件名或相对路径。

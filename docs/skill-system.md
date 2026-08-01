@@ -121,6 +121,13 @@ Tool 最终进入统一 `ToolRegistry`。记录包含：
 脚本型 Skill 不要求模型猜目录和命令，而是声明 `script_entries`，统一通过
 `run_skill_script` 在隔离运行时中执行。
 
+随包 `file-system` Skill 的模型接口只暴露完整文本读取与标准补丁提交：
+`text_file_read` 建立基于内容哈希的完整读取审计，`apply_patch` 负责普通文本
+创建、更新、移动和删除。目录级 `workspace_rename_path` 与
+`workspace_delete_path` 继续保留；路径发现和内容定位由 `command-tools` 的
+`glob`、`grep` 承担。Skill 的 `allowed-tools`、稳定系统提示和 Tool Registry
+必须使用同一组名称，避免模型从缓存提示或 Skill 正文重新学到已撤下的接口。
+
 ## 6. 运行配置
 
 `skill.json` 可以声明 `config_fields`：

@@ -2428,8 +2428,10 @@ def summarize_tool_action(tool_name, args):
             break
     if name in {"text_file_read", "document_read"}:
         return "查看文件", path or "读取内容"
-    if name in {"text_file_write", "text_file_update"}:
-        return "更新文件", path or "写入结果"
+    if name == "apply_patch":
+        related = extract_related_paths(name, args)
+        detail = f"处理 {len(related)} 个文本路径" if related else "创建、更新、移动或删除文本文件"
+        return "应用文本补丁", detail
     if name in {"workspace_rename_path"}:
         return "整理文件", path or "移动或重命名"
     if name in {"workspace_delete_path"}:
@@ -2459,8 +2461,19 @@ def extract_related_paths(tool_name, args):
         value = args.get(key)
         if isinstance(value, str) and value.strip():
             paths.append(value.strip())
-    if tool_name in {"text_file_write", "text_file_update", "workspace_rename_path", "workspace_delete_path"}:
-        return paths
+    if tool_name == "apply_patch":
+        patch_text = args.get("patch")
+        if isinstance(patch_text, str):
+            prefixes = ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
+            for line in patch_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                for prefix in prefixes:
+                    if line.startswith(prefix):
+                        value = line[len(prefix) :].strip()
+                        if value:
+                            paths.append(value)
+                        break
+    if tool_name in {"apply_patch", "workspace_rename_path", "workspace_delete_path"}:
+        return list(dict.fromkeys(paths))
     return []
 
 
@@ -2742,8 +2755,10 @@ def summarize_tool_action(tool_name, args):
             break
     if name in {"text_file_read", "document_read"}:
         return "Read File", path or "Read file contents"
-    if name in {"text_file_write", "text_file_update"}:
-        return "Update File", path or "Write output to disk"
+    if name == "apply_patch":
+        related = extract_related_paths(name, args)
+        detail = f"处理 {len(related)} 个文本路径" if related else "创建、更新、移动或删除文本文件"
+        return "应用文本补丁", detail
     if name in {"workspace_rename_path"}:
         return "Rename File", path or "Move or rename item"
     if name in {"workspace_delete_path"}:
@@ -17973,6 +17988,7 @@ class ToolCallCard(QFrame):
         self.result = ""
         self.result_obj = None
         self.is_finished = False
+        self.failed = False
         self.meta = meta or {}
         self.tool_name = tool_name
         self.is_selected = False
@@ -18018,8 +18034,8 @@ class ToolCallCard(QFrame):
         
         # 1. Icon Area (Timeline Dot)
         tool_icons = {
-            "workspace_list_files": "fa5s.folder", "text_file_read": "fa5s.book-open", "text_file_write": "fa5s.pen-alt",
-            "text_file_update": "fa5s.pen", "workspace_delete_path": "fa5s.trash-alt", "workspace_rename_path": "fa5s.exchange-alt", "document_read": "fa5s.file-alt", "run_command": "fa5s.terminal",
+            "workspace_list_files": "fa5s.folder", "text_file_read": "fa5s.book-open", "apply_patch": "fa5s.file-signature",
+            "workspace_delete_path": "fa5s.trash-alt", "workspace_rename_path": "fa5s.exchange-alt", "document_read": "fa5s.file-alt", "run_command": "fa5s.terminal",
             "bash": "fa5s.terminal",
             "open_preview": "fa5s.compass", "search_codebase": "fa5s.search", "grep": "fa5s.filter",
             "glob": "fa5s.globe", "web_search": "fa5s.globe-americas", "get_diagnostics": "fa5s.stethoscope",
@@ -18360,9 +18376,17 @@ class ToolCallCard(QFrame):
             """)
 
     def set_result(self, result_text, result_obj=None):
-        self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
+        failed = isinstance(result_obj, dict) and (
+            result_obj.get("ok") is False
+            or str(result_obj.get("status") or "").strip().lower() in {"error", "failed", "partial_apply"}
+        )
+        if failed:
+            self.status_icon.setPixmap(qta.icon('fa5s.exclamation-circle', color=DesignTokens.error_text).pixmap(14, 14))
+        else:
+            self.status_icon.setPixmap(qta.icon('fa5s.check-circle', color=DesignTokens.success_accent).pixmap(14, 14))
         self.result = result_text
         self.result_obj = result_obj
+        self.failed = failed
         self.is_finished = True
         
         if not self.is_selected:
@@ -37113,7 +37137,7 @@ class MainWindow(QMainWindow):
                     3,
                     max(0, int(getattr(state, "clarify_round_count", 0) or 0)) + 1,
                 )
-        if related_files:
+        if related_files and data.get("name") != "apply_patch":
             for path in related_files:
                 state.changed_files.append({"path": path, "type": "related", "summary": summary})
         state.tool_cards[data['id']] = card
@@ -37203,7 +37227,7 @@ class MainWindow(QMainWindow):
         card.set_result(result, result_obj=data.get("result_obj"))
         timeline_event = self._timeline_find_event(state, kind="tool", tool_call_id=tool_id)
         if timeline_event is not None:
-            timeline_event["status"] = "completed"
+            timeline_event["status"] = "failed" if card.failed else "completed"
             timeline_event["finished_at"] = time.time()
         if meta:
             card.meta.update(meta)
@@ -37219,7 +37243,7 @@ class MainWindow(QMainWindow):
             if record.get("tool_id") != tool_id:
                 continue
             has_result = bool((result or "").strip()) or result_obj is not None
-            record["status"] = "done" if has_result else "running"
+            record["status"] = "error" if card.failed else ("done" if has_result else "running")
             duration = (meta or {}).get("duration") if isinstance(meta, dict) else None
             if isinstance(duration, (int, float)):
                 record["duration"] = duration
@@ -37229,7 +37253,19 @@ class MainWindow(QMainWindow):
             elif (result or "").strip():
                 preview = str(result).strip().replace("\n", " ")
                 record["summary"] = preview[:120]
-            for path in record.get("related_files") or []:
+            applied_paths = []
+            if isinstance(result_obj, dict):
+                applied_items = result_obj.get("changes") if result_obj.get("ok") is True else result_obj.get("applied_changes")
+                if isinstance(applied_items, list):
+                    for item in applied_items:
+                        if not isinstance(item, dict):
+                            continue
+                        for key in ("path", "from_path", "to_path"):
+                            value = item.get(key)
+                            if isinstance(value, str) and value.strip() and value not in applied_paths:
+                                applied_paths.append(value)
+            changed_paths = applied_paths if applied_paths else ([] if card.failed else (record.get("related_files") or []))
+            for path in changed_paths:
                 state.changed_files.append(
                     {
                         "path": path,

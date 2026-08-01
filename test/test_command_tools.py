@@ -47,10 +47,10 @@ class TestCommandTools(unittest.TestCase):
 
         result = self.module.glob(self.workspace_dir, pattern="*.py")
 
-        lines = result.splitlines()
-        self.assertIn(os.path.normpath("src\\app.py"), lines)
-        self.assertNotIn(os.path.normpath("node_modules\\skip.py"), lines)
-        self.assertNotIn(os.path.normpath("src\\notes.txt"), lines)
+        self.assertTrue(result["ok"])
+        self.assertIn("src/app.py", result["items"])
+        self.assertNotIn("node_modules/skip.py", result["items"])
+        self.assertNotIn("src/notes.txt", result["items"])
 
     def test_glob_uses_path_scope_and_does_not_search_content(self):
         os.makedirs(os.path.join(self.workspace_dir, "docs"), exist_ok=True)
@@ -61,8 +61,8 @@ class TestCommandTools(unittest.TestCase):
 
         result = self.module.glob(self.workspace_dir, pattern="*needle*", path="docs")
 
-        lines = result.splitlines()
-        self.assertEqual(lines, [os.path.normpath("docs\\needle-guide.md")])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"], ["docs/needle-guide.md"])
 
     def test_grep_only_matches_file_content(self):
         os.makedirs(os.path.join(self.workspace_dir, "src"), exist_ok=True)
@@ -73,8 +73,22 @@ class TestCommandTools(unittest.TestCase):
 
         result = self.module.grep(self.workspace_dir, pattern="needle", path="src")
 
-        self.assertIn(os.path.normpath("src\\actual.txt") + ":2: needle appears here", result.splitlines())
-        self.assertNotIn(os.path.normpath("src\\needle-name.txt") + ":1: line 1", result.splitlines())
+        self.assertTrue(result["ok"])
+        self.assertIn(
+            {"path": "src/actual.txt", "line": 2, "text": "needle appears here"},
+            result["matches"],
+        )
+        self.assertFalse(any(item["path"] == "src/needle-name.txt" for item in result["matches"]))
+
+    def test_grep_reports_strict_decode_warning(self):
+        with open(os.path.join(self.workspace_dir, "legacy.txt"), "wb") as handle:
+            handle.write("中文".encode("gbk"))
+
+        result = self.module.grep(self.workspace_dir, pattern="中文")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["skipped_count"], 1)
+        self.assertEqual(result["warnings"][0]["code"], "encoding_required")
 
     def test_bash_uses_command_tools_skill_id(self):
         with patch.object(self.module, "run_in_sandbox", return_value=_FakeProcess(stdout=b"ok\n", stderr=b"")) as run_mock:
@@ -102,7 +116,8 @@ class TestCommandTools(unittest.TestCase):
         self.assertEqual(kwargs["shell_kind"], "exec")
 
     def test_run_node_code_reports_missing_node_runtime(self):
-        with patch.object(self.module, "get_runtime_executable", return_value=""):
+        with patch.object(self.module, "get_runtime_executable", return_value=""), \
+             patch.object(self.module, "ask_user", return_value=False):
             result = self.module.run_node_code(self.workspace_dir, "console.log('x')")
 
         self.assertIn("Node.js runtime is not installed", result)

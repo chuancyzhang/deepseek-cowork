@@ -1,13 +1,12 @@
 import os
 
+from core.apply_patch import apply_patch as apply_text_patch
 from core.filesystem_ops import (
     _build_error,
     delete_path,
     list_files as list_files_core,
     read_text_file,
     rename_path,
-    update_text_file,
-    write_text_file,
 )
 from core.interaction import ask_user
 
@@ -37,6 +36,13 @@ def _confirm_delete(rel_path, recursive_flag, context):
     return bool(ask_user(prompt, _context=context, title="请确认", timeout_seconds=120))
 
 
+def _confirm_patch_deletions(paths, context):
+    normalized = [str(path or "").strip() for path in paths or [] if str(path or "").strip()]
+    lines = "\n".join(f"- {path}" for path in normalized)
+    prompt = f"补丁将删除以下 {len(normalized)} 个文件：\n{lines}\n\n是否继续应用整个补丁？"
+    return bool(ask_user(prompt, _context=context, title="确认应用补丁", timeout_seconds=120))
+
+
 def workspace_list_files(workspace_dir, path=".", recursive=False, include_hidden=False, limit=200, _context=None):
     """List files and directories in the workspace without reading file contents."""
     return list_files_core(
@@ -49,45 +55,31 @@ def workspace_list_files(workspace_dir, path=".", recursive=False, include_hidde
     )
 
 
-def text_file_read(workspace_dir, path, offset=1, limit=None, _context=None):
+def text_file_read(workspace_dir, path, offset=1, limit=None, encoding=None, _context=None):
     """Read a plain text file. Does not parse DOCX, PPTX, XLSX, XLS, or PDF documents."""
     action = "text_file_read"
     error = _structured_document_error(action, path)
     if error:
         return error
-    return read_text_file(workspace_dir, path, offset=offset, limit=limit, context=_context, action=action)
-
-
-def text_file_write(workspace_dir, path, content, mode="overwrite", _context=None):
-    """Create or overwrite a plain text file. Does not create Office or PDF documents."""
-    action = "text_file_write"
-    error = _structured_document_error(action, path)
-    if error:
-        return error
-    return write_text_file(
+    return read_text_file(
         workspace_dir,
         path,
-        content,
-        mode=mode,
+        offset=offset,
+        limit=limit,
+        encoding=encoding,
         context=_context,
         action=action,
     )
 
 
-def text_file_update(workspace_dir, path, old_string, new_string, replace_all=False, _context=None):
-    """Replace text inside a plain text file. Does not edit Office or PDF documents."""
-    action = "text_file_update"
-    error = _structured_document_error(action, path)
-    if error:
-        return error
-    return update_text_file(
+def apply_patch(workspace_dir, patch, _context=None):
+    """Apply a structured plain-text patch inside the current workspace."""
+    return apply_text_patch(
         workspace_dir,
-        path,
-        old_string=old_string,
-        new_string=new_string,
-        replace_all=replace_all,
+        patch,
         context=_context,
-        action=action,
+        confirm_delete=lambda paths: _confirm_patch_deletions(paths, _context),
+        action="apply_patch",
     )
 
 
@@ -135,13 +127,20 @@ TOOL_EXPORTS = [
     {
         "name": "text_file_read",
         "handler": text_file_read,
-        "description": "Read a plain text file. Refuses DOCX, PPTX, XLSX, XLS, and PDF; use document_read for those formats.",
+        "description": (
+            "Strictly read up to 10 MiB of a plain-text file. A full read from offset 1 with no limit "
+            "establishes the SHA-256 write audit required by apply_patch. Refuses DOCX, PPTX, XLSX, XLS, and PDF."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Workspace-relative plain text file path."},
                 "offset": {"type": "integer", "description": "1-based line offset."},
                 "limit": {"type": "integer", "description": "Maximum number of lines to return."},
+                "encoding": {
+                    "type": "string",
+                    "description": "Optional explicit text encoding for files without a Unicode BOM or valid UTF-8.",
+                },
             },
             "required": ["path"],
         },
@@ -149,37 +148,29 @@ TOOL_EXPORTS = [
         "search_hint": "plain text file read",
     },
     {
-        "name": "text_file_write",
-        "handler": text_file_write,
-        "description": "Create or overwrite a plain text file. Refuses Office and PDF document formats.",
+        "name": "apply_patch",
+        "handler": apply_patch,
+        "description": (
+            "Create, update, move, or delete plain-text files with an exact structured patch. "
+            "Existing files with content changes must be fully read with text_file_read first. "
+            "The patch may contain at most 100 files and 12 MiB of UTF-8 input. Delete operations require user confirmation."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative plain text file path."},
-                "content": {"type": "string", "description": "Text content to write."},
-                "mode": {"type": "string", "description": "Write mode, usually overwrite or append."},
+                "patch": {
+                    "type": "string",
+                    "description": (
+                        "Patch text enclosed by *** Begin Patch and *** End Patch, containing "
+                        "Add File, Update File, Delete File, optional Move to, and @@ hunks."
+                    ),
+                },
             },
-            "required": ["path", "content"],
+            "required": ["patch"],
         },
         "destructive": True,
-        "search_hint": "plain text file write create",
-    },
-    {
-        "name": "text_file_update",
-        "handler": text_file_update,
-        "description": "Replace text in a plain text file. Refuses Office and PDF document formats.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Workspace-relative plain text file path."},
-                "old_string": {"type": "string", "description": "Exact text to replace."},
-                "new_string": {"type": "string", "description": "Replacement text."},
-                "replace_all": {"type": "boolean", "description": "Whether to replace all matches."},
-            },
-            "required": ["path", "old_string", "new_string"],
-        },
-        "destructive": True,
-        "search_hint": "plain text file update edit replace",
+        "requires_user_interaction": True,
+        "search_hint": "apply patch plain text file edit create update move delete",
     },
     {
         "name": "workspace_rename_path",

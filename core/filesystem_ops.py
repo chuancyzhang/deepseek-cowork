@@ -1,12 +1,24 @@
+import codecs
 import fnmatch
-import json
+import hashlib
 import os
 import re
 import shutil
+import stat
+import tempfile
 
 
 DEFAULT_EXCLUDE_DIRS = {".git", ".idea", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
 GLOB_PATTERN_REGEX = re.compile(r"[*?[\]{}]")
+MAX_TEXT_FILE_BYTES = 10 * 1024 * 1024
+MAX_SEARCH_WARNINGS = 100
+
+
+class TextFileCodecError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 def _is_god_mode(context):
@@ -28,14 +40,140 @@ def _normalize_rel_path(path):
 
 
 def _cache_key(path):
-    return os.path.normcase(os.path.abspath(path))
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
 
 
-def _safe_mtime(path):
+def _sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_file_bytes(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def _newline_for_text(value):
+    crlf = value.count("\r\n")
+    without_crlf = value.replace("\r\n", "")
+    lf = without_crlf.count("\n")
+    cr = without_crlf.count("\r")
+    if crlf and crlf >= lf and crlf >= cr:
+        return "\r\n"
+    if cr and cr > lf:
+        return "\r"
+    return "\n"
+
+
+def decode_text_bytes(data, selected_encoding=None):
+    raw = bytes(data or b"")
+    bom_candidates = (
+        (codecs.BOM_UTF8, "utf-8"),
+        (codecs.BOM_UTF32_LE, "utf-32-le"),
+        (codecs.BOM_UTF32_BE, "utf-32-be"),
+        (codecs.BOM_UTF16_LE, "utf-16-le"),
+        (codecs.BOM_UTF16_BE, "utf-16-be"),
+    )
+    for bom, encoding in bom_candidates:
+        if bom and raw.startswith(bom):
+            try:
+                text = raw[len(bom) :].decode(encoding, errors="strict")
+            except UnicodeDecodeError as exc:
+                raise TextFileCodecError(
+                    "text_decode_failed",
+                    f"File declares {encoding} but cannot be decoded strictly: {exc}",
+                ) from exc
+            return text, encoding, bom, _newline_for_text(text)
+
+    selected = str(selected_encoding or "").strip()
+    if selected:
+        try:
+            normalized = codecs.lookup(selected).name
+            if normalized == "utf-8-sig":
+                normalized = "utf-8"
+            if normalized in {"utf-16", "utf-32"}:
+                raise TextFileCodecError(
+                    "encoding_requires_bom",
+                    f"{selected} requires a BOM. Specify an explicit endian encoding such as {normalized}-le or {normalized}-be.",
+                )
+            text = raw.decode(normalized, errors="strict")
+        except TextFileCodecError:
+            raise
+        except LookupError as exc:
+            raise TextFileCodecError(
+                "unsupported_encoding",
+                f"Unknown text encoding: {selected}",
+            ) from exc
+        except UnicodeDecodeError as exc:
+            raise TextFileCodecError(
+                "text_decode_failed",
+                f"File cannot be decoded strictly as {selected}: {exc}",
+            ) from exc
+        return text, normalized, b"", _newline_for_text(text)
+
     try:
-        return os.path.getmtime(path)
-    except Exception:
-        return None
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise TextFileCodecError(
+            "encoding_required",
+            "Text encoding cannot be determined. Read the file again with an explicit encoding.",
+        ) from exc
+    return text, "utf-8", b"", _newline_for_text(text)
+
+
+def encode_text_bytes(text, encoding="utf-8", bom=b"", newline="\n"):
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    newline_value = newline if newline in {"\n", "\r\n", "\r"} else "\n"
+    normalized = normalized.replace("\n", newline_value)
+    try:
+        encoded = normalized.encode(encoding or "utf-8", errors="strict")
+    except (LookupError, UnicodeEncodeError) as exc:
+        raise TextFileCodecError(
+            "text_encode_failed",
+            f"Text cannot be encoded as {encoding or 'utf-8'}: {exc}",
+        ) from exc
+    return bytes(bom or b"") + encoded
+
+
+def _is_reparse_point(path, *, strict=False):
+    try:
+        if os.path.islink(path):
+            return True
+        isjunction = getattr(os.path, "isjunction", None)
+        if callable(isjunction) and isjunction(path):
+            return True
+        file_attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        return bool(reparse_attribute and file_attributes & reparse_attribute)
+    except OSError:
+        if strict:
+            raise
+        return False
+
+
+def _write_reparse_component(workspace_abs, abs_path):
+    try:
+        relative = os.path.relpath(abs_path, workspace_abs)
+    except ValueError:
+        relative = abs_path
+    if relative == ".":
+        candidates = [abs_path]
+    elif os.path.isabs(relative) or relative.startswith(".." + os.sep) or relative == "..":
+        drive, tail = os.path.splitdrive(abs_path)
+        current = drive + os.sep if drive else os.sep
+        candidates = []
+        for part in [item for item in tail.split(os.sep) if item]:
+            current = os.path.join(current, part)
+            candidates.append(current)
+    else:
+        current = workspace_abs
+        candidates = [workspace_abs]
+        for part in [item for item in relative.split(os.sep) if item and item != "."]:
+            current = os.path.join(current, part)
+            candidates.append(current)
+    for candidate in candidates:
+        if os.path.lexists(candidate) and _is_reparse_point(candidate, strict=True):
+            return candidate
+    return ""
 
 
 def _is_hidden_name(name):
@@ -53,14 +191,14 @@ def _build_error(action, code, message, path=None, extra=None):
         payload["path"] = path
     if isinstance(extra, dict):
         payload.update(extra)
-    return json.dumps(payload, ensure_ascii=False)
+    return payload
 
 
 def _build_ok(action, extra=None):
     payload = {"ok": True, "action": action}
     if isinstance(extra, dict):
         payload.update(extra)
-    return json.dumps(payload, ensure_ascii=False)
+    return payload
 
 
 def _parse_positive_int(value, field_name, action, path=None, allow_none=False):
@@ -89,15 +227,50 @@ def _get_file_state(context):
     return state
 
 
-def record_full_read_state(abs_path, context):
+def record_full_read_state(
+    abs_path,
+    context,
+    *,
+    data=None,
+    encoding="",
+    bom=b"",
+    newline="\n",
+):
     state = _get_file_state(context)
     if "reads" not in state:
-        return
-    state["reads"][_cache_key(abs_path)] = {"full": True, "mtime": _safe_mtime(abs_path)}
+        return None
+    raw = _read_file_bytes(abs_path) if data is None else bytes(data)
+    file_stat = os.stat(abs_path)
+    entry = {
+        "full": True,
+        "sha256": _sha256_bytes(raw),
+        "size": len(raw),
+        "mtime_ns": int(file_stat.st_mtime_ns),
+        "encoding": str(encoding or ""),
+        "bom_hex": bytes(bom or b"").hex(),
+        "newline": newline if newline in {"\n", "\r\n", "\r"} else "\n",
+    }
+    state["reads"][_cache_key(abs_path)] = entry
+    return dict(entry)
 
 
-def mark_file_written(abs_path, context):
-    record_full_read_state(abs_path, context)
+def mark_file_written(
+    abs_path,
+    context,
+    *,
+    data=None,
+    encoding="utf-8",
+    bom=b"",
+    newline="\n",
+):
+    record_full_read_state(
+        abs_path,
+        context,
+        data=data,
+        encoding=encoding,
+        bom=bom,
+        newline=newline,
+    )
 
 
 def clear_read_state(abs_path, context, recursive=False):
@@ -114,7 +287,15 @@ def clear_read_state(abs_path, context, recursive=False):
             reads.pop(item, None)
 
 
-def resolve_path(workspace_dir, path, context=None, action="filesystem", must_exist=False, reject_glob_for_write=False):
+def resolve_path(
+    workspace_dir,
+    path,
+    context=None,
+    action="filesystem",
+    must_exist=False,
+    reject_glob_for_write=False,
+    for_write=False,
+):
     if not workspace_dir:
         return None, None, _build_error(action, "workspace_not_selected", "Workspace not selected.")
 
@@ -142,15 +323,55 @@ def resolve_path(workspace_dir, path, context=None, action="filesystem", must_ex
             common = os.path.commonpath([workspace_abs, abs_path])
         except Exception:
             return None, None, _build_error(action, "path_outside_workspace", "Path is outside the workspace.", path=raw_path)
-        if common != workspace_abs:
+        if os.path.normcase(common) != os.path.normcase(workspace_abs):
             return None, None, _build_error(action, "path_outside_workspace", "Path is outside the workspace.", path=raw_path)
+
+        workspace_real = os.path.realpath(workspace_abs)
+        path_real = os.path.realpath(abs_path)
+        try:
+            real_common = os.path.commonpath([workspace_real, path_real])
+        except Exception:
+            return None, None, _build_error(action, "path_outside_workspace", "Path resolves outside the workspace.", path=raw_path)
+        if os.path.normcase(real_common) != os.path.normcase(workspace_real):
+            return None, None, _build_error(
+                action,
+                "path_outside_workspace",
+                "Path resolves outside the workspace through a symbolic link or directory junction.",
+                path=raw_path,
+            )
+
+    if for_write:
+        try:
+            reparse_component = _write_reparse_component(workspace_abs, abs_path)
+        except OSError as exc:
+            return None, None, _build_error(
+                action,
+                "path_inspection_failed",
+                f"Could not inspect the write path for symbolic links or directory junctions: {exc}",
+                path=raw_path,
+            )
+        if reparse_component:
+            return None, None, _build_error(
+                action,
+                "reparse_point_not_allowed",
+                "Write paths cannot traverse symbolic links or directory junctions.",
+                path=raw_path,
+            )
 
     if must_exist and not os.path.exists(abs_path):
         display_path = _normalize_rel_path(os.path.relpath(abs_path, workspace_abs)) if not os.path.isabs(raw_path) else raw_path
         return None, None, _build_error(action, "path_not_found", "Path does not exist.", path=display_path)
 
     if god_mode:
-        rel_path = abs_path if not abs_path.startswith(workspace_abs) else _normalize_rel_path(os.path.relpath(abs_path, workspace_abs))
+        try:
+            common = os.path.commonpath([workspace_abs, abs_path])
+        except Exception:
+            common = ""
+        rel_path = (
+            _normalize_rel_path(os.path.relpath(abs_path, workspace_abs))
+            if os.path.normcase(common) == os.path.normcase(workspace_abs)
+            else abs_path
+        )
     else:
         rel_path = _normalize_rel_path(os.path.relpath(abs_path, workspace_abs))
     return abs_path, rel_path, None
@@ -173,9 +394,12 @@ def ensure_existing_file_write_allowed(abs_path, rel_path, context, action):
             path=rel_path,
         )
 
-    recorded_mtime = entry.get("mtime")
-    current_mtime = _safe_mtime(abs_path)
-    if recorded_mtime is not None and current_mtime is not None and current_mtime != recorded_mtime:
+    try:
+        current_bytes = _read_file_bytes(abs_path)
+    except Exception as exc:
+        return _build_error(action, "read_failed", str(exc), path=rel_path)
+    current_sha256 = _sha256_bytes(current_bytes)
+    if current_sha256 != entry.get("sha256"):
         return _build_error(
             action,
             "stale_write",
@@ -183,6 +407,15 @@ def ensure_existing_file_write_allowed(abs_path, rel_path, context, action):
             path=rel_path,
         )
     return None
+
+
+def get_verified_read_state(abs_path, rel_path, context, action):
+    error = ensure_existing_file_write_allowed(abs_path, rel_path, context, action)
+    if error:
+        return None, error
+    state = _get_file_state(context)
+    entry = (state.get("reads") or {}).get(_cache_key(abs_path))
+    return dict(entry or {}), None
 
 
 def list_files(workspace_dir, path=".", recursive=False, include_hidden=False, limit=200, context=None):
@@ -258,29 +491,66 @@ def glob_paths(workspace_dir, pattern="*", path=".", limit=200, include_hidden=F
     normalized_pattern = str(pattern or "*").strip() or "*"
     items = []
     truncated = False
+    warnings = []
+    skipped_count = 0
+
+    def add_warning(target, code, message):
+        nonlocal skipped_count
+        skipped_count += 1
+        if len(warnings) < MAX_SEARCH_WARNINGS:
+            warnings.append(
+                {
+                    "path": _normalize_rel_path(os.path.relpath(target, workspace_dir)),
+                    "code": code,
+                    "message": message,
+                }
+            )
+
+    def walk_error(exc):
+        add_warning(getattr(exc, "filename", None) or abs_path, "path_read_failed", str(exc))
+
+    def result_payload(current_items, is_truncated):
+        return {
+            "path": rel_path,
+            "items": current_items,
+            "count": len(current_items),
+            "truncated": is_truncated,
+            "warnings": warnings,
+            "skipped_count": skipped_count,
+            "warnings_truncated": skipped_count > len(warnings),
+        }
+
+    if _is_reparse_point(abs_path):
+        add_warning(abs_path, "reparse_point_skipped", "Symbolic-link and junction traversal is disabled.")
+        return _build_ok(action, result_payload([], False))
 
     try:
-        for root, dirs, files in os.walk(abs_path):
-            dirs[:] = [
-                name
-                for name in dirs
-                if name not in DEFAULT_EXCLUDE_DIRS and (include_hidden_flag or not _is_hidden_name(name))
-            ]
+        for root, dirs, files in os.walk(abs_path, topdown=True, followlinks=False, onerror=walk_error):
+            retained_dirs = []
+            for name in dirs:
+                child_abs = os.path.join(root, name)
+                if name in DEFAULT_EXCLUDE_DIRS or (not include_hidden_flag and _is_hidden_name(name)):
+                    continue
+                if _is_reparse_point(child_abs):
+                    add_warning(child_abs, "reparse_point_skipped", "Symbolic-link and junction traversal is disabled.")
+                    continue
+                retained_dirs.append(name)
+            dirs[:] = sorted(retained_dirs)
             for name in sorted(files):
                 if not include_hidden_flag and _is_hidden_name(name):
                     continue
                 child_abs = os.path.join(root, name)
+                if _is_reparse_point(child_abs):
+                    add_warning(child_abs, "reparse_point_skipped", "Symbolic-link files are not searched.")
+                    continue
                 child_rel = _normalize_rel_path(os.path.relpath(child_abs, workspace_dir))
                 basename = os.path.basename(child_rel)
                 if fnmatch.fnmatch(child_rel, normalized_pattern) or fnmatch.fnmatch(basename, normalized_pattern):
                     items.append(child_rel)
                     if len(items) >= parsed_limit:
                         truncated = True
-                        return _build_ok(
-                            action,
-                            {"path": rel_path, "items": items[:parsed_limit], "count": len(items[:parsed_limit]), "truncated": truncated},
-                        )
-        return _build_ok(action, {"path": rel_path, "items": items, "count": len(items), "truncated": truncated})
+                        return _build_ok(action, result_payload(items[:parsed_limit], truncated))
+        return _build_ok(action, result_payload(items, truncated))
     except Exception as exc:
         return _build_error(action, "glob_failed", str(exc), path=rel_path)
 
@@ -323,16 +593,55 @@ def grep_contents(workspace_dir, pattern, path=".", include="*", exclude=None, r
     recursive_flag = bool(recursive)
     matches = []
     truncated = False
+    warnings = []
+    skipped_count = 0
+
+    def add_warning(target, code, message):
+        nonlocal skipped_count
+        skipped_count += 1
+        if len(warnings) < MAX_SEARCH_WARNINGS:
+            warnings.append(
+                {
+                    "path": _normalize_rel_path(os.path.relpath(target, workspace_dir)),
+                    "code": code,
+                    "message": message,
+                }
+            )
+
+    def walk_error(exc):
+        add_warning(getattr(exc, "filename", None) or abs_path, "path_read_failed", str(exc))
+
+    def result_payload(current_matches, is_truncated):
+        return {
+            "path": rel_path,
+            "matches": current_matches,
+            "count": len(current_matches),
+            "truncated": is_truncated,
+            "warnings": warnings,
+            "skipped_count": skipped_count,
+            "warnings_truncated": skipped_count > len(warnings),
+        }
+
+    if _is_reparse_point(abs_path):
+        add_warning(abs_path, "reparse_point_skipped", "Symbolic-link and junction traversal is disabled.")
+        return _build_ok(action, result_payload([], False))
 
     try:
-        for root, dirs, files in os.walk(abs_path):
-            dirs[:] = [
-                name
-                for name in dirs
-                if name not in exclude_patterns
-                and not fnmatch.fnmatch(name, ".*")
-                and not any(fnmatch.fnmatch(name, p) for p in exclude_patterns if p not in DEFAULT_EXCLUDE_DIRS)
-            ]
+        for root, dirs, files in os.walk(abs_path, topdown=True, followlinks=False, onerror=walk_error):
+            retained_dirs = []
+            for name in dirs:
+                child_abs = os.path.join(root, name)
+                if (
+                    name in exclude_patterns
+                    or fnmatch.fnmatch(name, ".*")
+                    or any(fnmatch.fnmatch(name, p) for p in exclude_patterns if p not in DEFAULT_EXCLUDE_DIRS)
+                ):
+                    continue
+                if _is_reparse_point(child_abs):
+                    add_warning(child_abs, "reparse_point_skipped", "Symbolic-link and junction traversal is disabled.")
+                    continue
+                retained_dirs.append(name)
+            dirs[:] = sorted(retained_dirs)
             for name in sorted(files):
                 if name in exclude_patterns or any(fnmatch.fnmatch(name, p) for p in exclude_patterns):
                     continue
@@ -340,31 +649,58 @@ def grep_contents(workspace_dir, pattern, path=".", include="*", exclude=None, r
                     continue
                 child_abs = os.path.join(root, name)
                 child_rel = _normalize_rel_path(os.path.relpath(child_abs, workspace_dir))
+                if _is_reparse_point(child_abs):
+                    add_warning(child_abs, "reparse_point_skipped", "Symbolic-link files are not searched.")
+                    continue
                 try:
-                    with open(child_abs, "rb") as handle:
-                        sample = handle.read(4096)
-                    if b"\0" in sample:
+                    file_size = os.path.getsize(child_abs)
+                    if file_size > MAX_TEXT_FILE_BYTES:
+                        add_warning(
+                            child_abs,
+                            "file_too_large",
+                            f"File exceeds the {MAX_TEXT_FILE_BYTES // (1024 * 1024)} MiB text search limit.",
+                        )
                         continue
-                    with open(child_abs, "r", encoding="utf-8", errors="replace") as handle:
-                        for index, line in enumerate(handle, start=1):
-                            if regex.search(line):
-                                matches.append({"path": child_rel, "line": index, "text": line.rstrip("\r\n")})
-                                if len(matches) >= parsed_limit:
-                                    truncated = True
-                                    return _build_ok(
-                                        action,
-                                        {"path": rel_path, "matches": matches[:parsed_limit], "count": len(matches[:parsed_limit]), "truncated": truncated},
-                                    )
-                except Exception:
+                    raw = _read_file_bytes(child_abs)
+                    if len(raw) > MAX_TEXT_FILE_BYTES:
+                        add_warning(
+                            child_abs,
+                            "file_too_large",
+                            f"File exceeded the {MAX_TEXT_FILE_BYTES // (1024 * 1024)} MiB text search limit while being read.",
+                        )
+                        continue
+                    text, _encoding, _bom, _newline = decode_text_bytes(raw)
+                    if "\x00" in text:
+                        add_warning(child_abs, "binary_file_skipped", "Binary files are not searched as text.")
+                        continue
+                    for index, line in enumerate(text.splitlines(), start=1):
+                        if regex.search(line):
+                            matches.append({"path": child_rel, "line": index, "text": line})
+                            if len(matches) >= parsed_limit:
+                                truncated = True
+                                return _build_ok(action, result_payload(matches[:parsed_limit], truncated))
+                except TextFileCodecError as exc:
+                    add_warning(child_abs, exc.code, exc.message)
+                    continue
+                except OSError as exc:
+                    add_warning(child_abs, "file_read_failed", str(exc))
                     continue
             if not recursive_flag:
                 break
-        return _build_ok(action, {"path": rel_path, "matches": matches, "count": len(matches), "truncated": truncated})
+        return _build_ok(action, result_payload(matches, truncated))
     except Exception as exc:
         return _build_error(action, "grep_failed", str(exc), path=rel_path)
 
 
-def read_text_file(workspace_dir, path, offset=1, limit=None, context=None, action="read_file"):
+def read_text_file(
+    workspace_dir,
+    path,
+    offset=1,
+    limit=None,
+    encoding=None,
+    context=None,
+    action="read_file",
+):
     abs_path, rel_path, error = resolve_path(workspace_dir, path, context=context, action=action, must_exist=True)
     if error:
         return error
@@ -379,8 +715,19 @@ def read_text_file(workspace_dir, path, offset=1, limit=None, context=None, acti
         return error
 
     try:
-        with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
-            lines = handle.read().splitlines(keepends=True)
+        file_size = os.path.getsize(abs_path)
+        if file_size > MAX_TEXT_FILE_BYTES:
+            return _build_error(
+                action,
+                "file_too_large",
+                f"Plain text files larger than {MAX_TEXT_FILE_BYTES // (1024 * 1024)} MiB are not supported.",
+                path=rel_path,
+                extra={"file_size": file_size, "max_bytes": MAX_TEXT_FILE_BYTES},
+            )
+        raw = _read_file_bytes(abs_path)
+        file_stat = os.stat(abs_path)
+        text, detected_encoding, bom, newline = decode_text_bytes(raw, selected_encoding=encoding)
+        lines = text.splitlines(keepends=True)
         total_lines = len(lines)
         start_index = min(parsed_offset - 1, total_lines)
         if parsed_limit is None:
@@ -393,144 +740,81 @@ def read_text_file(workspace_dir, path, offset=1, limit=None, context=None, acti
         content = "".join(selected)
         returned_lines = len(selected)
         if parsed_offset == 1 and parsed_limit is None:
-            record_full_read_state(abs_path, context)
+            record_full_read_state(
+                abs_path,
+                context,
+                data=raw,
+                encoding=detected_encoding,
+                bom=bom,
+                newline=newline,
+            )
         return _build_ok(
             action,
             {
                 "path": rel_path,
                 "content": content,
-                "encoding": "utf-8",
+                "encoding": detected_encoding,
+                "bom": bool(bom),
+                "newline": newline,
+                "sha256": _sha256_bytes(raw),
+                "file_size": len(raw),
+                "mtime_ns": int(file_stat.st_mtime_ns),
                 "truncated": truncated,
                 "start_line": parsed_offset,
                 "returned_lines": returned_lines,
                 "total_lines": total_lines,
+                "next_offset": parsed_offset + returned_lines if truncated else None,
+                "audit_complete": parsed_offset == 1 and parsed_limit is None,
             },
         )
+    except TextFileCodecError as exc:
+        return _build_error(action, exc.code, exc.message, path=rel_path)
     except Exception as exc:
         return _build_error(action, "read_failed", str(exc), path=rel_path)
 
 
-def write_text_file(workspace_dir, path, content, mode="overwrite", context=None, action="write_file"):
-    abs_path, rel_path, error = resolve_path(
-        workspace_dir,
-        path,
-        context=context,
-        action=action,
-        must_exist=False,
-        reject_glob_for_write=True,
+def _atomic_write_bytes(abs_path, data, *, existed_before, expected_sha256=None):
+    parent = os.path.dirname(abs_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    descriptor, temp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(abs_path)}.cowork-",
+        suffix=".tmp",
+        dir=parent or None,
     )
-    if error:
-        return error
-
-    mode_value = str(mode or "overwrite").strip().lower() or "overwrite"
-    if mode_value not in {"overwrite", "append"}:
-        return _build_error(action, "invalid_mode", "mode must be 'overwrite' or 'append'.", path=rel_path)
-
-    existed_before = os.path.exists(abs_path)
-    if existed_before:
-        error = ensure_existing_file_write_allowed(abs_path, rel_path, context, action)
-        if error:
-            return error
-    else:
-        parent = os.path.dirname(abs_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-
-    if os.path.isdir(abs_path):
-        return _build_error(action, "not_a_file", "Target path is a directory.", path=rel_path)
-
-    text = content if isinstance(content, str) else str(content)
-    write_mode = "a" if mode_value == "append" else "w"
     try:
-        with open(abs_path, write_mode, encoding="utf-8") as handle:
-            handle.write(text)
-        mark_file_written(abs_path, context)
-        if not existed_before:
-            change_type = "create"
-        elif mode_value == "append":
-            change_type = "append"
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if existed_before:
+            if not os.path.isfile(abs_path):
+                raise FileNotFoundError("Target file disappeared before commit.")
+            if expected_sha256 and _sha256_bytes(_read_file_bytes(abs_path)) != expected_sha256:
+                raise RuntimeError("File changed before commit.")
+            mode_bits = stat.S_IMODE(os.stat(abs_path).st_mode)
+            os.chmod(temp_path, mode_bits)
+            os.replace(temp_path, abs_path)
+        elif os.name == "nt":
+            os.rename(temp_path, abs_path)
         else:
-            change_type = "update"
-        return _build_ok(
-            action,
-            {
-                "path": rel_path,
-                "change_type": change_type,
-                "bytes_written": len(text.encode("utf-8")),
-            },
-        )
-    except Exception as exc:
-        return _build_error(action, "write_failed", str(exc), path=rel_path)
-
-
-def update_text_file(workspace_dir, path, old_string, new_string, replace_all=False, context=None, action="update_file"):
-    abs_path, rel_path, error = resolve_path(
-        workspace_dir,
-        path,
-        context=context,
-        action=action,
-        must_exist=True,
-        reject_glob_for_write=True,
-    )
-    if error:
-        return error
-    if not os.path.isfile(abs_path):
-        return _build_error(action, "not_a_file", "Path is not a file.", path=rel_path)
-
-    error = ensure_existing_file_write_allowed(abs_path, rel_path, context, action)
-    if error:
-        return error
-
-    old_text = old_string if isinstance(old_string, str) else str(old_string)
-    new_text = new_string if isinstance(new_string, str) else str(new_string)
-    replace_all_flag = bool(replace_all)
-
-    if old_text == new_text:
-        return _build_error(action, "identical_replacement", "old_string and new_string must be different.", path=rel_path)
-
-    try:
-        with open(abs_path, "r", encoding="utf-8", errors="replace") as handle:
-            original = handle.read()
-    except Exception as exc:
-        return _build_error(action, "read_failed", str(exc), path=rel_path)
-
-    occurrences = original.count(old_text)
-    if occurrences == 0:
-        return _build_error(action, "target_not_found", "old_string was not found in file.", path=rel_path)
-    if occurrences > 1 and not replace_all_flag:
-        return _build_error(
-            action,
-            "ambiguous_match",
-            "Multiple matches found. Set replace_all=true to replace all occurrences.",
-            path=rel_path,
-        )
-
-    if replace_all_flag:
-        updated = original.replace(old_text, new_text)
-        replaced_count = occurrences
-    else:
-        updated = original.replace(old_text, new_text, 1)
-        replaced_count = 1
-
-    try:
-        with open(abs_path, "w", encoding="utf-8") as handle:
-            handle.write(updated)
-        mark_file_written(abs_path, context)
-        return _build_ok(
-            action,
-            {
-                "path": rel_path,
-                "change_type": "update",
-                "bytes_written": len(updated.encode("utf-8")),
-                "replaced_count": replaced_count,
-            },
-        )
-    except Exception as exc:
-        return _build_error(action, "write_failed", str(exc), path=rel_path)
+            os.link(temp_path, abs_path)
+            os.unlink(temp_path)
+        temp_path = ""
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def rename_path(workspace_dir, old_path, new_path, context=None, action="rename_file"):
-    abs_old, rel_old, error = resolve_path(workspace_dir, old_path, context=context, action=action, must_exist=True)
+    abs_old, rel_old, error = resolve_path(
+        workspace_dir,
+        old_path,
+        context=context,
+        action=action,
+        must_exist=True,
+        for_write=True,
+    )
     if error:
         return error
     abs_new, rel_new, error = resolve_path(
@@ -540,6 +824,7 @@ def rename_path(workspace_dir, old_path, new_path, context=None, action="rename_
         action=action,
         must_exist=False,
         reject_glob_for_write=True,
+        for_write=True,
     )
     if error:
         return error
@@ -584,6 +869,7 @@ def delete_path(workspace_dir, path, recursive=False, confirm_callback=None, con
         action=action,
         must_exist=True,
         reject_glob_for_write=True,
+        for_write=True,
     )
     if error:
         return error

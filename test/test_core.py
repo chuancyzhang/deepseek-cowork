@@ -1775,6 +1775,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
                 {"type": "function", "function": {"name": "tool_search"}},
                 {"type": "function", "function": {"name": "workspace_list_files"}},
                 {"type": "function", "function": {"name": "text_file_read"}},
+                {"type": "function", "function": {"name": "apply_patch"}},
                 {"type": "function", "function": {"name": "run_python_code"}},
                 {"type": "function", "function": {"name": "run_node_code"}},
             ]
@@ -1796,9 +1797,20 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertIn("核心内置 Tool 已直接出现在当前工具清单", prompt)
             self.assertIn("不要先用 'tool_search' 搜索这些内置 Tool", prompt)
             self.assertIn("workspace_list_files", prompt)
-            self.assertIn("只列工作区路径", prompt)
+            self.assertIn("'glob' 只查路径", prompt)
             self.assertIn("text_file_read", prompt)
-            self.assertIn("只处理普通文本文件", prompt)
+            self.assertIn("apply_patch", prompt)
+            self.assertIn("文本内容", prompt)
+            self.assertIn("唯一工具", prompt)
+            self.assertIn("offset=1", prompt)
+            self.assertIn("SHA-256", prompt)
+            self.assertIn("禁止用 'grep' 的匹配结果代替完整读取", prompt)
+            self.assertIn("*** Begin Patch", prompt)
+            self.assertIn("*** End of File", prompt)
+            self.assertIn("重复片段必须补足上下文", prompt)
+            self.assertIn("删除会一次展示全部路径并要求确认", prompt)
+            self.assertNotIn("text_file_" + "write", prompt)
+            self.assertNotIn("text_file_" + "update", prompt)
             self.assertIn("document-reader", prompt)
             self.assertIn("document_read", prompt)
             self.assertIn("实际生成工具或运行时库", prompt)

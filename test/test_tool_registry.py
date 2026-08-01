@@ -24,8 +24,8 @@ class TestToolRegistry(unittest.TestCase):
         def text_file_read(path):
             return path
 
-        def text_file_write(path, content):
-            return content
+        def apply_patch(patch):
+            return patch
 
         registry.register(
             "text_file_read",
@@ -34,9 +34,9 @@ class TestToolRegistry(unittest.TestCase):
             {"type": "object", "properties": {}, "required": []},
         )
         registry.register(
-            "text_file_write",
-            text_file_write,
-            "Write a workspace file",
+            "apply_patch",
+            apply_patch,
+            "Apply a workspace patch",
             {"type": "object", "properties": {}, "required": []},
         )
 
@@ -45,20 +45,20 @@ class TestToolRegistry(unittest.TestCase):
             for item in registry.definitions(RUN_MODE_EXECUTION, discovered_tool_names=set())
         ]
         self.assertNotIn("text_file_read", execution_initial)
-        self.assertNotIn("text_file_write", execution_initial)
+        self.assertNotIn("apply_patch", execution_initial)
 
-        matches = registry.search("write file", run_mode=RUN_MODE_EXECUTION)
-        self.assertEqual(matches[0]["name"], "text_file_write")
+        matches = registry.search("apply patch", run_mode=RUN_MODE_EXECUTION)
+        self.assertEqual(matches[0]["name"], "apply_patch")
         execution_after_search = [
             item["function"]["name"]
             for item in registry.definitions(
                 RUN_MODE_EXECUTION,
-                discovered_tool_names={"text_file_write"},
+                discovered_tool_names={"apply_patch"},
             )
         ]
-        self.assertIn("text_file_write", execution_after_search)
-        legacy_matches = registry.search("write file", run_mode="clarifying")
-        self.assertEqual(legacy_matches[0]["name"], "text_file_write")
+        self.assertIn("apply_patch", execution_after_search)
+        legacy_matches = registry.search("apply patch", run_mode="clarifying")
+        self.assertEqual(legacy_matches[0]["name"], "apply_patch")
 
     def test_alias_resolution(self):
         registry = ToolRegistry()
@@ -682,9 +682,8 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
             "grep",
             "run_node_code",
             "run_skill_script",
+            "apply_patch",
             "text_file_read",
-            "text_file_write",
-            "text_file_update",
             "workspace_list_files",
         }
         self.assertTrue(expected <= visible)

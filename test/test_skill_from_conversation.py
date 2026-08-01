@@ -839,8 +839,8 @@ class TestSkillFromConversation(unittest.TestCase):
         self.addCleanup(app.processEvents)
         dialog = main.SessionSkillPickerDialog(
             [
-                {"name": "alpha-skill", "description": "Alpha"},
-                {"name": "beta-skill", "description": "Beta"},
+                {"name": "alpha-skill", "description": "Alpha", "type": "ai_generated"},
+                {"name": "beta-skill", "description": "Beta", "type": "ai_generated"},
             ],
             selected_skill_names=["alpha-skill"],
         )

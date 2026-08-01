@@ -83,8 +83,18 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_skill_picker_searches_description_and_preserves_hidden_selection(self):
         skills = [
-            {"name": "company-one-page", "display_name": "Company One Page", "description": "企业单页分析"},
-            {"name": "market-brief", "display_name": "Market Brief", "description": "市场日报"},
+            {
+                "name": "company-one-page",
+                "display_name": "Company One Page",
+                "description": "企业单页分析",
+                "type": "ai_generated",
+            },
+            {
+                "name": "market-brief",
+                "display_name": "Market Brief",
+                "description": "市场日报",
+                "type": "ai_generated",
+            },
         ]
         picker = SessionSkillPickerPopover(skills, ["company-one-page"])
         self.assertFalse(picker.apply_btn.isEnabled())
@@ -96,6 +106,45 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         picker.clear_selection()
         self.assertTrue(picker.apply_btn.isEnabled())
         self.assertTrue(picker.selection_chip_scroll.isHidden())
+        picker.deleteLater()
+
+    def test_skill_picker_excludes_builtin_abilities_and_cleans_legacy_selection(self):
+        skills = [
+            {"name": "skill-importer", "display_name": "能力导入", "type": "system"},
+            {
+                "name": "browser-automation",
+                "display_name": "浏览器自动化",
+                "source_type": "bundled_plugin",
+            },
+            {
+                "name": "custom-research",
+                "display_name": "自定义研究",
+                "type": "ai_generated",
+            },
+        ]
+
+        picker = SessionSkillPickerPopover(
+            skills,
+            ["skill-importer", "browser-automation"],
+        )
+
+        self.assertEqual(
+            [item.data(Qt.UserRole) for item in picker._items],
+            ["browser-automation", "custom-research"],
+        )
+        self.assertNotIn("skill-importer", picker.selected_names)
+        self.assertEqual(picker.selected_values(), ["browser-automation"])
+        self.assertTrue(picker.apply_btn.isEnabled())
+        picker.deleteLater()
+
+    def test_skill_picker_shows_an_explicit_empty_state_when_only_builtins_exist(self):
+        picker = SessionSkillPickerPopover(
+            [{"name": "skill-importer", "display_name": "能力导入", "type": "system"}],
+        )
+
+        self.assertTrue(picker.skill_list.isHidden())
+        self.assertFalse(picker.empty_label.isHidden())
+        self.assertEqual(picker.empty_label.text(), "暂无可指定的非内置能力")
         picker.deleteLater()
 
     def test_model_picker_keeps_channel_model_and_effort(self):

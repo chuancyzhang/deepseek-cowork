@@ -2266,6 +2266,11 @@ def skill_center_is_builtin(skill):
     return skill_center_tab_key(skill) == "builtin"
 
 
+def session_skill_is_selectable(skill):
+    """Only non-builtin abilities can be explicitly attached to a session."""
+    return isinstance(skill, dict) and not skill_center_is_builtin(skill)
+
+
 def skill_center_config_state(skill):
     if not isinstance(skill, dict):
         return ""
@@ -11728,7 +11733,7 @@ class SessionSkillPickerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("为当前会话指定能力")
         self.resize(680, 520)
-        self.skills = list(skills or [])
+        self.skills = [skill for skill in (skills or []) if session_skill_is_selectable(skill)]
         self._selected_skill_names = normalize_selected_skill_names(selected_skill_names)
         self.setStyleSheet(f"QDialog {{ background: {DesignTokens.bg_app}; }}")
 
@@ -11738,7 +11743,7 @@ class SessionSkillPickerDialog(QDialog):
 
         title = QLabel("为当前会话指定能力")
         title.setProperty("roleTitle", True)
-        subtitle = QLabel("这些能力会在本会话后续轮次持续写入系统提示词，作为用户明确要求优先使用的能力。")
+        subtitle = QLabel("仅展示可指定的非内置能力；所选能力会在本会话后续轮次中优先使用。")
         subtitle.setProperty("roleSubtitle", True)
         subtitle.setWordWrap(True)
         layout.addWidget(title)
@@ -11816,16 +11821,21 @@ class SessionSkillPickerPopover(ProductPopover):
 
     def __init__(self, skills, selected_skill_names=None, parent=None):
         super().__init__(parent, width=500)
-        self.skills = [item for item in (skills or []) if str(item.get("name") or "").strip()]
+        self.skills = [
+            item
+            for item in (skills or [])
+            if session_skill_is_selectable(item) and str(item.get("name") or "").strip()
+        ]
         self.initial_names = normalize_selected_skill_names(selected_skill_names)
-        self.selected_names = set(self.initial_names)
+        selectable_names = {str(item.get("name") or "").strip() for item in self.skills}
+        self.selected_names = {name for name in self.initial_names if name in selectable_names}
         self._items = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
         title = QLabel("指定能力")
         title.setStyleSheet(f"color: {DesignTokens.text_primary}; font-size: 14px; font-weight: 700;")
-        subtitle = QLabel("所选能力会在当前会话后续轮次中优先使用")
+        subtitle = QLabel("仅展示可指定的非内置能力；所选能力会在后续轮次中优先使用")
         subtitle.setStyleSheet(apple_caption_style())
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -11925,6 +11935,7 @@ class SessionSkillPickerPopover(ProductPopover):
         actions.addWidget(self.apply_btn)
         layout.addLayout(actions)
         self._refresh_summary()
+        self._filter_items(self.search_input.text())
 
     def _on_item_changed(self, item):
         name = str(item.data(Qt.UserRole) or "").strip()
@@ -11986,6 +11997,7 @@ class SessionSkillPickerPopover(ProductPopover):
             matched = not query or query in str(item.data(Qt.UserRole + 1) or "")
             item.setHidden(not matched)
             visible += int(matched)
+        self.empty_label.setText("没有匹配的能力" if query else "暂无可指定的非内置能力")
         self.skill_list.setVisible(visible > 0)
         self.empty_label.setVisible(visible == 0)
 

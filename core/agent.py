@@ -14,7 +14,13 @@ import hashlib
 from datetime import datetime
 from PySide6.QtCore import QThread, Signal, Slot, QObject, QMutex, QWaitCondition
 from core.skill_manager import SkillManager
-from core.env_utils import get_python_executable, get_python_runtime_snapshot, get_runtime_snapshot
+from core.env_utils import get_python_executable, get_runtime_snapshot
+from core.im_gateway_registry import (
+    ARTIFACT_DELIVERY_LINK,
+    ARTIFACT_DELIVERY_NATIVE,
+    get_provider_spec,
+    provider_artifact_delivery_mode,
+)
 from core.sandbox_runtime import get_runtime_executable, run_in_sandbox
 from core.llm.factory import LLMFactory
 from core.chat_storage import ChatStorage
@@ -624,6 +630,7 @@ class LLMWorker(QThread):
         self._bind_agent_manager()
         self._prompt_context_date = datetime.now().strftime("%Y-%m-%d")
         self._stable_system_prompt = None
+        self._last_tool_exposure_signature = None
 
     def _publish_skill_change(self, event):
         if self.skill_catalog_service is None:
@@ -1030,46 +1037,48 @@ class LLMWorker(QThread):
         return list(dict.fromkeys(names))
 
     def _build_stable_system_prompt(self):
-        enterprise_channels = {"feishu", "dingtalk", "wecom"}
-        enterprise_delivery_enabled = (
-            (self.run_context.get("im_provider") or "").strip().lower() in enterprise_channels
-            or (self.run_context.get("channel") or "").strip().lower() in enterprise_channels
-        )
-        clarify_round_count = max(0, int(self.run_context.get("clarify_round_count") or 0))
-
+        provider_id = (
+            self.run_context.get("im_provider")
+            or self.run_context.get("channel")
+            or ""
+        ).strip().lower()
+        provider_spec = get_provider_spec(provider_id)
+        delivery_mode = provider_artifact_delivery_mode(provider_id)
+        if delivery_mode == ARTIFACT_DELIVERY_NATIVE:
+            delivery_policy = (
+                f"策略 [交付]: 当前{provider_spec.title}会话支持通过 'publish_artifacts' 原生交付本地文件、图片和链接；"
+                "必须检查 delivery_result，只能把明确成功的项目称为已发送。"
+            )
+        elif delivery_mode == ARTIFACT_DELIVERY_LINK:
+            delivery_policy = (
+                f"策略 [交付]: 当前{provider_spec.title}会话的 'publish_artifacts' 仅支持可访问 URL；"
+                "不得传入仅有本地路径的项目，也不得声称本地文件已发送。"
+            )
+        elif provider_spec:
+            delivery_policy = (
+                f"策略 [交付]: 当前{provider_spec.title}会话不提供 'publish_artifacts'；"
+                "请直接回复文本或可访问链接，不得声称本地文件已发送。"
+            )
+        else:
+            delivery_policy = (
+                "策略 [交付]: 普通桌面会话不要调用 'publish_artifacts'；"
+                "生成本地文件或链接后，在最终回复中给出实际路径或地址。"
+            )
         stable_policy_lines = [
             "注意: 你正在指定的工作区内操作。除非明确允许使用绝对路径，否则所有文件操作都应相对于当前工作区。",
-            "能力: 你可以使用 'create_new_skill' 创建新的技能/工具。",
-            "Imported / agent script skill 规则: 如果你已经命中了包含 `script_entries` 的 imported/agent skill，优先调用 `run_skill_script`，不要再用 `glob`、`grep` 或 `bash` 去定位该 skill 目录或猜脚本路径。",
-            "命令策略: 推荐的通用执行工具是 'run_python_code'、'run_node_code' 和 'bash'，其中优先使用最贴近任务语言的专用执行工具。",
-            "1. 可用 Python 完成的数据处理、批量文本处理、脚本化检查、计算和轻量文件分析，优先使用 'run_python_code'。",
-            "2. 可用 JavaScript/Node.js 完成的验证、JSON 处理、前端脚本和轻量代码执行，优先使用 'run_node_code'。",
-            "3. 需要真实 shell 环境、项目命令、构建测试、git/npm/npx/bash 管道或现有 CLI 时，再使用 'bash'。",
-            "4. Windows 打包版的 'bash' 优先使用 Git Bash；若 Git Bash 缺失，执行层会退回 cmd.exe，因此可继续执行 cmd 兼容命令。",
-            "5. 避免为了运行内联 Python/JavaScript 而套一层 'bash'；除非必须复用命令行入口，否则直接使用对应专用工具。",
-            "能力分层: 核心内置能力只包含始终启用的基础能力；浏览器自动化、网页搜索、金融数据、Office/PDF 读取等随包能力位于 ai_skills，是默认关闭的可选能力。浏览器自动化的准备与连接在“AI 能力商城 → 浏览器自动化”内完成；常用工具包可在设置的“组件与依赖”页按需安装。",
-            "可选插件策略: ai_skills 中的随包插件不会因为随应用分发而自动可调用；需要相关能力时先用 'tool_search' 发现，启用或被本轮工具清单暴露后才能调用。",
+            "策略 [能力暴露]: 应用 `skills/` 中符合当前模式和上下文的核心内置 Tool 已直接出现在当前工具清单，可直接调用；不要先用 'tool_search' 搜索这些内置 Tool。",
+            "策略 [能力暴露]: `ai_skills/` 可选能力只有被当前会话显式选择时才直接暴露；已启用但未选择的可选能力、用户扩展和 MCP 可通过 'tool_search' 按需发现，禁用能力不可发现或调用。",
+            "策略 [工具权威]: 只能调用当前工具清单中的真实名称。需要当前未暴露的非内置能力时才使用 'tool_search'；不要臆造工具名称、旧别名或不存在的参数。",
+            "Imported / agent script skill 规则: 已命中包含 `script_entries` 的 imported/agent skill 时，优先调用 `run_skill_script`，不要用 `glob`、`grep` 或 `bash` 猜测 Skill 目录和脚本路径。",
+            "策略 [命令]: 当前清单暴露对应工具时，数据处理、批量文本、计算和 Python 检查优先用 'run_python_code'；项目命令、构建测试、git/npm/npx、管道或现有 CLI 使用 'bash'。Node.js 工具选择必须服从动态运行时判定；不要为内联 Python/JavaScript 额外套一层 shell。",
+            "能力分层: 浏览器自动化、网页搜索、金融数据、Office/PDF 读取等随包能力位于 `ai_skills/`。浏览器自动化在“AI 能力商城 → 浏览器自动化”中配置；常用工具包在设置的“组件与依赖”页按需安装。",
             "文件策略: 'workspace_list_files' 只列工作区路径；'text_file_read'、'text_file_write'、'text_file_update' 只处理普通文本文件，不解析或生成 DOCX/PPTX/XLSX/XLS/PDF。",
-            "Office/PDF 策略: 读取 DOCX/PPTX/XLSX/XLS/PDF 需先启用可选 document-reader 插件并使用 'document_read'；写入这些格式没有固定工具，应使用 'run_python_code' 和任务所需库自行生成。",
-            "旧文件工具名称策略: 不要假设存在 'file_list'、'file_read'、'file_write'、'file_update'、'file_rename'、'file_delete' 等通用文件工具；以当前可用工具清单中的真实名称和边界为准。",
-            "判定策略: 不要仅依赖系统 PATH 或常见安装目录猜测 Node/Python 可用性，应先在沙盒中直接执行版本命令验证。",
+            "Office/PDF 策略: 读取 DOCX/PPTX/XLSX/XLS/PDF 需显式选择并使用可选 `document-reader` 能力的 'document_read'；写入这些格式应使用任务所需的实际生成工具或运行时库。",
+            "依赖策略: 不要根据静态库清单、系统 PATH 或常见安装目录推断依赖可用性；以实际 Tool/Skill 调用和依赖协调结果为准。缺少依赖时报告根因和恢复方式。",
             "",
-            "策略 [技能创建]:",
-            "1. 鼓励创建新技能来封装可复用的任务（例如：特定的文件处理、复杂计算、数据转换、系统操作等）。",
-            "2. 当你发现某个任务可能在未来被再次使用，或者通过代码实现比通过纯文本生成更可靠时，请果断创建技能。",
-            "3. 不要受到过度限制，灵活运用技能来增强你的能力。",
-            "",
-            "策略 [自我进化]:",
-            "1. 你拥有 'update_experience' 工具，用于记录重要的经验教训、配置偏好或特定的工具使用技巧。",
-            "2. 当你成功解决一个难题、发现某个工具的最佳实践或遇到并修复了错误时，请务必使用 'update_experience' 记录下来。",
-            "3. 这些经验将在未来类似场景中自动注入，帮助你变得更聪明。",
-            "",
-            "策略 [记忆]:",
-            "1. 全局摘要与当前工作区摘要会常驻上下文；需要回顾具体历史时使用历史检索工具。",
-            "2. 只有用户明确要求记住时才使用 'write_memories'；自行推断的信息不要静默写入。",
-            "3. 避免写入敏感信息、临时细节或完整聊天记录。",
-            "",
-            "策略 [历史检索]: 当用户需要回忆之前讨论内容时，优先使用 'query_history' 工具进行检索。",
+            "策略 [持久化]: 只有用户明确要求时，才创建、修改或安装 Skill，或调用 'write_memories' 写入长期记忆；不得静默持久化推断、敏感信息、临时细节或完整聊天记录。",
+            "策略 [经验]: 只有结论已经验证、可跨任务复用、非敏感且价值明确时，才调用 'update_experience'；不要记录例行成功、猜测或项目临时状态。",
+            "策略 [历史]: 需要回顾具体历史时，使用当前清单暴露的历史检索工具；不得把历史检索结果自动写入记忆。",
             "",
             "策略 [交互]: 如果你需要向用户获取确认，请使用 'request_user_approval'。如果你需要向用户提问、收集文本或选项，请使用 'request_user_input'。",
             "不要在文本回复中直接提问。文本回复仅用于展示推理过程和最终答案。",
@@ -1077,42 +1086,20 @@ class LLMWorker(QThread):
             "策略 [必要澄清]:",
             "1. 默认直接执行用户任务；不要为了偏好、风格、可合理默认的细节、可先做草稿的内容，或可通过上下文/只读探索查明的信息打断用户。",
             "2. 只有不澄清就无法可靠执行、很可能执行错对象/错范围，或会带来明显风险时，才允许调用 'request_user_input'。",
-            "3. 必须澄清时只能使用 questionnaire；每个问题必须提供互斥选项，第一个选项是推荐最佳选项，最后一个选项必须是“自定义”。",
-            "4. 不要直接让用户自由输入；只有用户选择“自定义”时才让用户补充自定义内容。",
-            f"5. 当前任务已澄清 {clarify_round_count}/3 轮；达到 3 轮后禁止继续澄清，必须采用推荐/最安全选项继续，或明确说明仍无法安全执行。",
+            "3. 任务澄清只能使用 questionnaire；每个问题提供互斥选项并把推荐项放在第一位。系统会自动追加“自定义”，不要手工添加。",
+            "4. 任务最多澄清 3 轮；达到上限后采用推荐/最安全的合理假设继续，或明确说明仍无法安全执行。当前轮次以动态运行上下文为准。",
             "",
-            "策略 [并行工具]: 当需要并行读取多个文件、并行执行 grep/glob、或同时查询多个彼此独立的只读数据源时，优先使用 'parallel_tools'。",
-            "策略 [并行工具]: 'parallel_tools' 只适用于彼此独立的只读工具调用；涉及写文件、命令执行、审批、用户输入、经验更新、子代理管理时，保持普通单工具调用。",
+            "策略 [并行工具]: 当前清单暴露 'parallel_tools' 时，可并行执行彼此独立的只读调用；写文件、命令、审批、用户输入、经验更新和 Agent 管理必须保持普通单工具调用。",
             "",
-            "策略 [元工具导航]:",
-            "1. 工具发现: 需要额外能力时先用 'tool_search'，匹配到的延迟工具会在下一轮可用。",
-            "2. 并行只读: 多个独立只读调用可使用 'parallel_tools' 合并为一次显式并发执行。",
-            "3. 通用执行: 优先使用 'run_python_code' 或 'run_node_code'，需要 shell/CLI 时使用 'bash'。",
-            "4. 技能创建/维护: 使用 'create_new_skill'、'update_skill'、'install_agent_skill'、'remote_skill_installer_agent'、'analyze_skill_source_folder'、'generate_skill_from_folder'、'run_skill_script'。用户提供 HTTPS skill.md 或远程 Skill 安装入口时，必须委派给 'remote_skill_installer_agent'，不要使用 bash、浏览器、npx、手工 Git 或本地 'install_agent_skill'。首次调用必须原样传递用户请求，不要添加自行核验的 commit、目录或范围。该 Tool 返回 needs_confirmation 时，先用 'request_user_approval' 转交固定预览；用户明确确认后再携带 continuation_id 和 decision='confirm' 调用同一 Tool。若返回 needs_input，只能请求一次必要的用户输入，并最多再检查一次；不得靠改写措辞、浏览网页或拆分 Skill 反复调用。",
-            "5. 经验/记忆/历史: 使用 'update_experience'、'read_memories'、'write_memories'、'query_history'、'query_history_vector'。",
-            "6. 用户交互: 使用 'request_user_input'、'request_user_approval'。",
-            "7. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。",
-            "8. 元工具导航只是推荐；必须遵守当前可用工具清单、延迟发现机制和当前运行模式权限。",
+            "策略 [失败与验证]: Tool 或依赖失败时必须说明真实根因和可执行恢复路径；不得静默更换工具、数据源或输出格式。必须核验工具结果和交付状态后才能声称完成、保存或发送成功。",
+            "策略 [远程 Skill]: 用户明确提供 HTTPS skill.md 或远程 Skill 安装入口时，只能使用 'remote_skill_installer_agent'，不得改用 bash、浏览器、npx、手工 Git 或本地安装工具。首次调用原样传递用户请求；返回 needs_confirmation 时用 'request_user_approval' 展示固定预览，确认后携带 continuation_id 和 decision='confirm' 继续。返回 needs_input 时只请求一次必要输入并最多再检查一次。",
+            delivery_policy,
             "",
             "策略 [思考规范]:",
             "1. 你的思考过程 (Reasoning) 仅用于分析问题、规划步骤和反思结果。",
             "2. 严禁将最终给用户的回复（如任务总结、文件列表、结果汇报）放在思考过程中。",
             "3. 思考过程对用户是折叠的，用户主要阅读的是你的最终 Content 回复。",
         ]
-        if enterprise_delivery_enabled:
-            stable_policy_lines.insert(
-                stable_policy_lines.index("策略 [元工具导航]:"),
-                "企业消息会话中，若需要交付文件、图片或链接，请使用 'publish_artifacts'。",
-            )
-            stable_policy_lines.insert(
-                stable_policy_lines.index("7. 多代理协作: 使用 'spawn_agent'、'send_input'、'wait_agent'、'close_agent'、'list_agents'。"),
-                "补充: 企业消息链路中可使用 'publish_artifacts' 交付文件或图片。",
-            )
-        else:
-            stable_policy_lines.insert(
-                stable_policy_lines.index("策略 [元工具导航]:"),
-                "普通桌面会话不要调用 'publish_artifacts'；若生成了本地文件或链接，请直接在最终回复里说明路径或地址。",
-            )
 
         memory_lines = []
         if self.config_manager:
@@ -1130,11 +1117,11 @@ class LLMWorker(QThread):
 
         return "\n".join(stable_policy_lines + memory_lines)
 
-    def _build_runtime_context_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
-        python_exe = runtime_snapshot.get("python_exe") or get_python_executable()
-        python_info = sandbox_snapshot.get("python") or {}
-        node_info = sandbox_snapshot.get("node") or {}
-        bash_info = sandbox_snapshot.get("bash") or {}
+    def _build_runtime_context_prompt(self, runtime_snapshot):
+        python_info = runtime_snapshot.get("python") or {}
+        node_info = runtime_snapshot.get("node") or {}
+        bash_info = runtime_snapshot.get("bash") or {}
+        python_exe = python_info.get("path") or get_python_executable()
         available_runtimes = [
             name for name, info in (("Python", python_info), ("Node.js", node_info), ("Bash", bash_info))
             if info.get("available")
@@ -1144,26 +1131,31 @@ class LLMWorker(QThread):
             if not info.get("available")
         ]
         sandbox_env_line = (
-            f"沙盒运行时: 已内置/检测到 {', '.join(available_runtimes)}，可直接调用，无需要求用户安装。"
+            f"运行时快照: 当前检测到可用的 {', '.join(available_runtimes)}。"
             if available_runtimes
-            else "沙盒运行时: 未检测到可用 Python/Node.js/Bash。"
+            else "运行时快照: 未检测到可用 Python/Node.js/Bash。"
         )
         if missing_runtimes:
             sandbox_env_line += f" 缺失: {', '.join(missing_runtimes)}。"
-        available_packages = runtime_snapshot.get("available_packages", [])
-        missing_packages = runtime_snapshot.get("missing_packages", [])
-        package_line = (
-            f"运行时库检测(可用): {', '.join(available_packages[:10])}"
-            if available_packages
-            else "运行时库检测(可用): 未检测到"
-        )
-        missing_line = (
-            f"运行时库检测(缺失): {', '.join(missing_packages[:10])}"
-            if missing_packages
-            else "运行时库检测(缺失): 无"
-        )
         run_mode = self._current_run_mode()
         available_tool_names = self._available_tool_names()
+        node_runtime_available = bool(node_info.get("available") and node_info.get("path"))
+        if node_runtime_available and "run_node_code" in available_tool_names:
+            node_policy_line = (
+                f"Node.js 判定: 当前用户环境已检测到 Node.js（{node_info.get('path')}），且本轮已暴露 'run_node_code'；"
+                "JavaScript、JSON 和前端脚本可优先使用 'run_node_code'。"
+            )
+        elif node_runtime_available:
+            node_policy_line = (
+                f"Node.js 判定: 当前用户环境已检测到 Node.js（{node_info.get('path')}），"
+                "但本轮未暴露 'run_node_code'，不得调用该 Tool。"
+            )
+        else:
+            node_policy_line = (
+                "Node.js 判定: 当前用户环境未检测到 Node.js。Node.js 不随应用分发，"
+                "不得把 'run_node_code' 当作可直接执行的首选；任务确实依赖 Node.js 时，"
+                "先说明缺失并进入用户确认的安装或配置流程。"
+            )
 
         capability_lines = []
         if available_tool_names:
@@ -1177,7 +1169,7 @@ class LLMWorker(QThread):
                     "",
                     "当前可用工具清单（仅以下工具真正暴露给你，可直接调用）:",
                     *tool_lines,
-                    "更多工具可能被延迟加载；需要额外能力时，先调用 `tool_search` 按关键词发现工具。",
+                    "核心内置 Tool 已直接暴露，不要通过 `tool_search` 搜索。只有需要当前未暴露的可选能力、用户扩展或 MCP 时，才调用 `tool_search`。",
                 ]
             )
         else:
@@ -1199,16 +1191,17 @@ class LLMWorker(QThread):
             f"当前运行模式: {run_mode}",
             f"当前日期: {getattr(self, '_prompt_context_date', '') or datetime.now().strftime('%Y-%m-%d')}",
             f"操作系统: {platform.system()} {platform.release()}",
-            f"Python 版本: {sys.version.split()[0]}",
-            f"运行时 Python 版本: {runtime_snapshot.get('version') or '未知'}",
+            f"应用 Python 版本: {sys.version.split()[0]}",
+            f"应用 Python 路径: {sys.executable}",
+            f"沙盒 Python 版本: {python_info.get('version') or '未知'}",
             sandbox_env_line,
-            f"Python 路径: {python_exe or '沙盒 Python 路径解析失败'}",
-            f"Node.js 版本: {node_info.get('version') or '未知'}",
-            f"Node.js 路径: {node_info.get('path') or '沙盒 Node.js 路径解析失败'}",
-            f"Bash 版本: {bash_info.get('version') or '未知'}",
-            f"Bash 路径: {bash_info.get('path') or '沙盒 Bash 路径解析失败'}",
-            package_line,
-            missing_line,
+            f"沙盒 Python 路径: {python_exe or '解析失败'}",
+            f"用户环境 Node.js 版本: {node_info.get('version') or '未知'}",
+            f"用户环境 Node.js 路径: {node_info.get('path') or '解析失败'}",
+            node_policy_line,
+            f"沙盒 Bash 版本: {bash_info.get('version') or '未知'}",
+            f"沙盒 Bash 路径: {bash_info.get('path') or '解析失败'}",
+            f"当前任务已澄清 {max(0, int(self.run_context.get('clarify_round_count') or 0))}/3 轮。",
         ]
         workflow_mode = str(self.run_context.get("workflow_mode") or "").strip()
         if workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST:
@@ -1329,9 +1322,9 @@ class LLMWorker(QThread):
         context_lines = capability_lines + dynamic_state_lines
         return "\n".join(context_lines)
 
-    def _build_system_prompt(self, current_messages, runtime_snapshot, sandbox_snapshot):
+    def _build_system_prompt(self, runtime_snapshot):
         stable_prompt = self._build_stable_system_prompt()
-        runtime_prompt = self._build_runtime_context_prompt(current_messages, runtime_snapshot, sandbox_snapshot)
+        runtime_prompt = self._build_runtime_context_prompt(runtime_snapshot)
         return "\n".join([part for part in (stable_prompt, runtime_prompt) if part])
 
     def _get_stable_system_prompt(self):
@@ -1344,6 +1337,47 @@ class LLMWorker(QThread):
         if runtime_context_prompt:
             request_messages.append({"role": "system", "content": runtime_context_prompt})
         return request_messages
+
+    def _tool_exposure_observability(self):
+        selected_tools = set(self._selected_skill_tool_names())
+        discovered_tools = set(getattr(self, "discovered_tool_names", set()) or [])
+        groups = {
+            "core_builtin_direct": [],
+            "session_selected": [],
+            "tool_search_discovered": [],
+            "other_direct": [],
+        }
+        details = []
+        record_getter = getattr(self.skill_manager, "get_tool_record", None)
+        skill_getter = getattr(self.skill_manager, "get_skill_of_tool", None)
+        for name in self._available_tool_names():
+            record = record_getter(name) if callable(record_getter) else None
+            record = record if isinstance(record, dict) else {}
+            source_kind = str(record.get("source_kind") or "unknown")
+            if source_kind == "core_builtin":
+                exposure = "core_builtin_direct"
+            elif name in selected_tools:
+                exposure = "session_selected"
+            elif name in discovered_tools:
+                exposure = "tool_search_discovered"
+            else:
+                exposure = "other_direct"
+            groups[exposure].append(name)
+            details.append(
+                {
+                    "name": name,
+                    "source_kind": source_kind,
+                    "exposure": exposure,
+                    "skill_name": skill_getter(name) if callable(skill_getter) else "",
+                }
+            )
+        return {
+            "type": "tool_exposure",
+            "run_mode": self._current_run_mode(),
+            "groups": groups,
+            "tools": details,
+            "timestamp": time.time(),
+        }
 
     def _emit_prompt_observability(self, stable_prompt, runtime_prompt, request_messages):
         skill_contexts = []
@@ -1360,6 +1394,7 @@ class LLMWorker(QThread):
                 "skill_names": [meta.get("skill_name")] if meta.get("skill_name") else [],
                 "content": msg.get("content") or "",
             })
+        available_tools = self._available_tool_names()
         self.observability_signal.emit({
             "type": "system_prompt",
             "content": stable_prompt,
@@ -1368,7 +1403,21 @@ class LLMWorker(QThread):
             "prompt_cache_key": self.conversation_id or self.session_id,
             "timestamp": time.time(),
             "run_mode": self._current_run_mode(),
+            "available_tools": available_tools,
         })
+        exposure_event = self._tool_exposure_observability()
+        exposure_signature = tuple(
+            (
+                item.get("name") or "",
+                item.get("source_kind") or "",
+                item.get("exposure") or "",
+                item.get("skill_name") or "",
+            )
+            for item in exposure_event.get("tools") or []
+        )
+        if exposure_signature != getattr(self, "_last_tool_exposure_signature", None):
+            self._last_tool_exposure_signature = exposure_signature
+            self.observability_signal.emit(exposure_event)
 
     def _provider_chat_stream(self, provider, messages, tools, prompt_cache_key):
         try:
@@ -1385,8 +1434,7 @@ class LLMWorker(QThread):
         # sanitized after the concrete provider/protocol is known so Responses
         # replay data is not discarded before request preparation.
         current_messages = repair_tool_call_sequence(self.messages)
-        runtime_snapshot = get_python_runtime_snapshot()
-        sandbox_snapshot = get_runtime_snapshot()
+        runtime_snapshot = get_runtime_snapshot()
         stable_system_prompt = self._get_stable_system_prompt()
         current_messages.insert(0, {"role": "system", "content": stable_system_prompt})
         
@@ -1432,11 +1480,7 @@ class LLMWorker(QThread):
 
             stable_system_prompt = self._get_stable_system_prompt()
             current_messages[0]["content"] = stable_system_prompt
-            runtime_context_prompt = self._build_runtime_context_prompt(
-                current_messages[1:],
-                runtime_snapshot,
-                sandbox_snapshot,
-            )
+            runtime_context_prompt = self._build_runtime_context_prompt(runtime_snapshot)
             request_messages = self._build_request_messages(current_messages, runtime_context_prompt)
             self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 
@@ -1888,12 +1932,28 @@ class LLMWorker(QThread):
                                     "content": f"当前模式禁止执行 {name}，请改用允许的工具或切换模式。",
                                 }
                             elif not self._is_tool_visible_for_run(name):
+                                record_getter = getattr(self.skill_manager, "get_tool_record", None)
+                                tool_record = record_getter(name) if callable(record_getter) else None
+                                source_kind = (
+                                    str(tool_record.get("source_kind") or "")
+                                    if isinstance(tool_record, dict)
+                                    else ""
+                                )
+                                if source_kind == "core_builtin":
+                                    visibility_error = f"Tool '{name}' is unavailable in the current run context."
+                                    unavailable_content = (
+                                        f"核心内置 Tool {name} 受当前运行模式、工作区、渠道或权限限制，"
+                                        "tool_search 无法解除该限制。"
+                                    )
+                                else:
+                                    visibility_error = f"Tool '{name}' has not been discovered for this run."
+                                    unavailable_content = f"请先调用 tool_search 发现 {name}，再在下一轮使用它。"
                                 result = {
-                                    "error": f"Tool '{name}' has not been discovered for this run.",
+                                    "error": visibility_error,
                                     "blocked_tool": name,
                                     "status": "denied",
                                     "mode": self._current_run_mode(),
-                                    "content": f"请先调用 tool_search 发现 {name}，再在下一轮使用它。",
+                                    "content": unavailable_content,
                                 }
                             elif (
                                 name == "request_user_input"

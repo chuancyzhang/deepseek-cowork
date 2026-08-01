@@ -19,6 +19,17 @@ CORE_ALWAYS_LOAD_TOOLS = {
     "update_experience",
 }
 
+TOOL_SOURCE_CORE_BUILTIN = "core_builtin"
+TOOL_SOURCE_OPTIONAL = "optional"
+TOOL_SOURCE_USER_EXTENSION = "user_extension"
+TOOL_SOURCE_MCP = "mcp"
+TOOL_SOURCE_KINDS = {
+    TOOL_SOURCE_CORE_BUILTIN,
+    TOOL_SOURCE_OPTIONAL,
+    TOOL_SOURCE_USER_EXTENSION,
+    TOOL_SOURCE_MCP,
+}
+
 READ_ONLY_TOOL_NAMES = {
     "workspace_list_files",
     "text_file_read",
@@ -110,6 +121,7 @@ class ToolRecord:
     runtime_binding: dict = field(default_factory=dict)
     skill_refs: list = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    source_kind: str = TOOL_SOURCE_USER_EXTENSION
 
     @property
     def requires_workspace(self):
@@ -165,6 +177,7 @@ class ToolRegistry:
         runtime_binding=None,
         skill_refs=None,
         metadata=None,
+        source_kind=TOOL_SOURCE_USER_EXTENSION,
     ):
         name = str(name or "").strip()
         if not name or not callable(handler) or name in self.records or name in self.alias_to_name:
@@ -183,7 +196,12 @@ class ToolRegistry:
             read_only=inferred_read_only,
         )
         load_always = self._infer_always_load(name) if always_load is None else bool(always_load)
+        normalized_source_kind = str(source_kind or TOOL_SOURCE_USER_EXTENSION).strip().lower()
+        if normalized_source_kind not in TOOL_SOURCE_KINDS:
+            raise ValueError(f"Unsupported tool source_kind: {source_kind}")
         defer = (not load_always) if should_defer is None else bool(should_defer)
+        if normalized_source_kind == TOOL_SOURCE_CORE_BUILTIN:
+            defer = False
 
         record = ToolRecord(
             name=name,
@@ -202,6 +220,7 @@ class ToolRegistry:
             runtime_binding=dict(runtime_binding or {}),
             skill_refs=list(skill_refs or ([skill_name] if skill_name else [])),
             metadata=dict(metadata or {}),
+            source_kind=normalized_source_kind,
         )
         self.records[name] = record
         for alias in aliases:
@@ -258,6 +277,8 @@ class ToolRegistry:
                 continue
             if record.name == "tool_search":
                 continue
+            if record.source_kind == TOOL_SOURCE_CORE_BUILTIN:
+                continue
             if not include_loaded and (record.always_load or record.name in discovered or not record.should_defer):
                 continue
             score = self._score_record(record, query_tokens)
@@ -301,6 +322,7 @@ class ToolRegistry:
             "read_only": record.read_only,
             "destructive": record.destructive,
             "allowed_modes": sorted(record.allowed_modes),
+            "source_kind": record.source_kind,
             "score": round(float(score), 3),
         }
 

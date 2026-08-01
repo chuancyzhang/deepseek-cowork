@@ -1,7 +1,7 @@
 ---
 name: meta-tools
-description: Meta skill for AI self-evolution. Invoke when recording lessons learned and improving skill guidance from execution feedback.
-description_cn: 面向AI进化的元技能。用于沉淀经验教训并持续优化技能说明。
+description: Meta skill for recording verified, non-sensitive, cross-task lessons and running independent read-only tools in parallel.
+description_cn: 用于沉淀已验证、非敏感、可跨任务复用的高价值经验，并并行执行独立只读工具。
 type: system
 created_by: system
 allowed-tools: [parallel_tools, update_experience]
@@ -9,7 +9,7 @@ allowed-tools: [parallel_tools, update_experience]
 
 # Meta Tools
 
-Tools for the Agent to self-evolve through execution feedback.
+Tools for controlled read-only parallelism and high-value experience maintenance.
 
 ## Tools
 
@@ -29,14 +29,16 @@ Executes multiple independent read-only tool calls concurrently and returns orde
 - A denied or failed subcall returns a structured partial error; unsafe write tools are not executed.
 
 ### update_experience
-Records a successful "experience" or "lesson learned", or updates the description/instructions for a specific skill.
-This allows the skill to evolve by refining its capabilities and usage guide.
+Records a verified, reusable lesson or updates a Skill description/instructions when the user explicitly requests that maintenance.
 
 **When to use:**
-- When you encounter an error with a tool and find a workaround (use `experience`).
-- When you discover a specific configuration that works best (use `experience`).
-- When you realize the skill's description is inaccurate or incomplete (use `description`).
-- When the usage instructions (body) need clarification or expansion (use `instructions`).
+- A failure was reproduced, its root cause was confirmed, the fix was verified, and the lesson applies across tasks.
+- A stable, non-sensitive configuration rule was validated and will materially prevent future errors.
+- The user explicitly asks to correct a Skill description or usage instructions.
+
+**Do not use:**
+- Routine task success, unverified guesses, temporary project state, full conversation content, secrets, or personal data.
+- To modify Skill guidance without an explicit user request.
 
 ### update_experience Parameters:
 - `skill_name`: The name of the skill to update.

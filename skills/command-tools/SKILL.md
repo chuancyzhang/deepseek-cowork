@@ -32,14 +32,15 @@ allowed-tools: ["bash", "glob", "grep", "run_node_code", "run_skill_script"]
    - 脚本可能产生副作用，因此保持普通单工具调用。
 
 4. `run_node_code`
-   - 使用沙盒 Node.js 在当前工作区执行 JavaScript 代码。
+   - 使用当前用户环境中已检测到的 Node.js 在工作区执行 JavaScript 代码；Node.js 不随应用分发。
    - 适合运行内联 JS、验证 Node.js 可用性、处理 JSON/前端构建相关的小脚本。
    - 不属于只读并行工具，不能通过 `parallel_tools` 执行。
 
 ## 使用约定
 
 - 当需要运行 shell 命令时使用 `bash`。
-- 当只需要执行 JavaScript/Node.js 代码时优先使用 `run_node_code`，不要为了内联 JS 套一层 shell。
+- 先读取动态运行时上下文中的 Node.js 可用性与路径；只有确认当前用户环境已安装 Node.js 且本轮暴露该 Tool 时，JavaScript/Node.js 代码才优先使用 `run_node_code`。
+- 未检测到 Node.js 时，不得因 Tool Schema 已暴露就假设运行时存在；任务确实依赖 Node.js 时，应明确说明缺失并进入用户确认的安装或配置流程。
 - 当只需要路径或内容搜索时优先使用 `glob` / `grep`，不要用 shell 包一层。
 - `glob` 的递归遍历由工具本身完成；如果已知文件名片段，优先写 `*文件名片段*`，例如 `*AI 赋能数据分析*`。
 - 不要为了“搜索所有层级”默认写 `**/文件名*`；当前匹配语义下，这种写法可能漏掉工作区根目录文件。

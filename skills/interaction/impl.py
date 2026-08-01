@@ -4,6 +4,14 @@ import os
 import requests
 import uuid
 
+from core.im_gateway_registry import (
+    ARTIFACT_DELIVERY_LINK,
+    ARTIFACT_DELIVERY_NATIVE,
+    ARTIFACT_DELIVERY_NONE,
+    artifact_capable_provider_ids,
+    get_provider_spec,
+    provider_artifact_delivery_mode,
+)
 from core.interaction import interaction_service
 
 
@@ -27,25 +35,21 @@ def _run_context(_context):
     return run_context if isinstance(run_context, dict) else {}
 
 
-ENTERPRISE_PROVIDERS = {"feishu", "dingtalk", "wecom"}
-
-
 def _runtime_im_provider(_context):
     ctx = _run_context(_context)
     provider = (ctx.get("im_provider") or ctx.get("channel") or "").strip().lower()
-    if provider in ENTERPRISE_PROVIDERS:
+    if get_provider_spec(provider):
         return provider
     if not isinstance(_context, dict):
         return ""
-    event_like = _context.get("im_event") or _context.get("feishu_event")
+    event_like = _context.get("im_event")
     if isinstance(event_like, dict):
         provider = (event_like.get("provider") or "").strip().lower()
-        return provider if provider in ENTERPRISE_PROVIDERS else "feishu"
+        if get_provider_spec(provider):
+            return provider
+    if isinstance(_context.get("feishu_event"), dict):
+        return "feishu"
     return ""
-
-
-def _is_enterprise_runtime_context(_context):
-    return bool(_runtime_im_provider(_context))
 
 
 def _gateway_provider_config(_context, provider_name):
@@ -564,12 +568,16 @@ def publish_artifacts(
         return {"error": "items must be a non-empty list."}
 
     audience_value = (audience or "auto").strip().lower()
-    if audience_value not in {"auto", "feishu", "dingtalk", "wecom"}:
-        return {"error": "audience must be auto, feishu, dingtalk, or wecom."}
+    supported_providers = set(artifact_capable_provider_ids())
+    if audience_value not in {"auto", *supported_providers}:
+        choices = ", ".join(["auto", *artifact_capable_provider_ids()])
+        return {"error": f"audience must be one of: {choices}."}
     runtime_provider = _runtime_im_provider(_context)
-    if not runtime_provider:
-        return {"error": "publish_artifacts is only available in enterprise messaging sessions."}
+    runtime_delivery_mode = provider_artifact_delivery_mode(runtime_provider)
+    if runtime_delivery_mode == ARTIFACT_DELIVERY_NONE:
+        return {"error": "publish_artifacts is not available for the current messaging channel."}
     target_provider = runtime_provider if audience_value == "auto" else audience_value
+    target_delivery_mode = provider_artifact_delivery_mode(target_provider)
     provider_cfg = _gateway_provider_config(_context, target_provider)
 
     tenant_token = None
@@ -578,7 +586,7 @@ def publish_artifacts(
     receive_id_type_value = ""
     receive_id_value = ""
     target_enabled = False
-    if target_provider == "feishu":
+    if target_delivery_mode == ARTIFACT_DELIVERY_NATIVE:
         app_id = (provider_cfg.get("app_id") or "").strip()
         app_secret = (provider_cfg.get("app_secret") or "").strip()
         receive_id_type_value, receive_id_value, receive_error = _resolve_receive_target(_context, provider_cfg)
@@ -644,7 +652,7 @@ def publish_artifacts(
         is_image = _is_image_item(subtype, mime, name)
         delivered = False
         reason = ""
-        if target_provider == "feishu" and target_enabled and path and os.path.exists(path):
+        if target_delivery_mode == ARTIFACT_DELIVERY_NATIVE and target_enabled and path and os.path.exists(path):
             if is_image:
                 image_key, upload_reason = _upload_image(tenant_token, path)
                 if image_key:
@@ -679,7 +687,7 @@ def publish_artifacts(
                         reason = f"send_file_failed:{send_reason}"
                 else:
                     reason = f"upload_file_failed:{upload_reason}"
-        if target_provider == "feishu" and target_enabled and (not delivered) and url:
+        if target_delivery_mode == ARTIFACT_DELIVERY_NATIVE and target_enabled and (not delivered) and url:
             ok, send_reason = _send_feishu_message(
                 tenant_token,
                 receive_id_type_value,
@@ -692,7 +700,7 @@ def publish_artifacts(
                 success.append({"name": name, "type": "post_link"})
             else:
                 reason = f"send_post_failed:{send_reason}"
-        if target_provider in {"dingtalk", "wecom"} and target_enabled and url:
+        if target_delivery_mode == ARTIFACT_DELIVERY_LINK and target_enabled and url:
             webhook_url = (provider_cfg.get("webhook_url") or "").strip()
             text = f"**{title or 'AI 助手交付物'}**\n\n- {name}: {url}"
             if caption:
@@ -705,13 +713,13 @@ def publish_artifacts(
                 reason = f"send_markdown_failed:{send_reason}"
         if not delivered:
             if not reason:
-                if target_provider == "feishu" and not target_enabled:
+                if target_delivery_mode == ARTIFACT_DELIVERY_NATIVE and not target_enabled:
                     reason = "delivery_skipped_missing_runtime_target_or_credentials"
                     skipped.append({"name": name, "reason": reason})
-                elif target_provider in {"dingtalk", "wecom"} and not target_enabled:
+                elif target_delivery_mode == ARTIFACT_DELIVERY_LINK and not target_enabled:
                     reason = "delivery_skipped_missing_webhook_url"
                     skipped.append({"name": name, "reason": reason})
-                elif target_provider in {"dingtalk", "wecom"} and path and not url:
+                elif target_delivery_mode == ARTIFACT_DELIVERY_LINK and path and not url:
                     reason = "delivery_skipped_native_file_upload_not_available"
                     skipped.append({"name": name, "reason": reason})
                 else:
@@ -777,7 +785,7 @@ TOOL_EXPORTS = [
     {
         "name": "request_user_input",
         "handler": request_user_input,
-        "description": "Ask the user for choices or a multi-question questionnaire. Clarifying questions must use questionnaire options: first option recommended, last option custom.",
+        "description": "Ask the user for choices or a multi-question questionnaire. For clarification, provide mutually exclusive choices with the recommended option first; the system appends the custom option.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -853,7 +861,7 @@ TOOL_EXPORTS = [
                         },
                     },
                 },
-                "audience": {"type": "string", "description": "One of auto, feishu, dingtalk, or wecom for enterprise-message delivery."},
+                "audience": {"type": "string", "description": "One of auto, feishu, dingtalk, or wecom for an artifact-capable messaging channel."},
                 "summary": {"type": "string", "description": "Summary text for timeline display."},
                 "title": {"type": "string", "description": "Title used for IM post link messages."},
             },

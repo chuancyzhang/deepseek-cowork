@@ -2,6 +2,11 @@ from dataclasses import dataclass
 from typing import Mapping, Tuple
 
 
+ARTIFACT_DELIVERY_NATIVE = "native"
+ARTIFACT_DELIVERY_LINK = "link"
+ARTIFACT_DELIVERY_NONE = "none"
+
+
 @dataclass(frozen=True)
 class ProviderFieldSpec:
     key: str
@@ -29,6 +34,7 @@ class ProviderSpec:
     connect_label: str = "开始接入"
     reconnect_label: str = "重新接入"
     capabilities: Tuple[str, ...] = ("文字", "链接")
+    artifact_delivery_mode: str = ARTIFACT_DELIVERY_NONE
 
     def is_configured(self, value) -> bool:
         config = value if isinstance(value, dict) else {}
@@ -49,6 +55,8 @@ IM_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
         event_types=("im.message.receive_v1",),
         connect_label="扫码接入飞书",
         reconnect_label="重新扫码",
+        capabilities=("文字", "链接", "文件", "图片"),
+        artifact_delivery_mode=ARTIFACT_DELIVERY_NATIVE,
     ),
     ProviderSpec(
         provider_id="dingtalk",
@@ -105,6 +113,7 @@ IM_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
         ),
         connect_label="连接钉钉",
         reconnect_label="保存并重新连接",
+        artifact_delivery_mode=ARTIFACT_DELIVERY_LINK,
     ),
     ProviderSpec(
         provider_id="wecom",
@@ -134,6 +143,7 @@ IM_PROVIDER_SPECS: Tuple[ProviderSpec, ...] = (
         ),
         connect_label="连接企业微信",
         reconnect_label="保存并重新连接",
+        artifact_delivery_mode=ARTIFACT_DELIVERY_LINK,
     ),
     ProviderSpec(
         provider_id="qq",
@@ -178,3 +188,16 @@ def get_provider_spec(provider_id):
 def provider_title(provider_id, default="企业消息"):
     spec = get_provider_spec(provider_id)
     return spec.title if spec else default
+
+
+def provider_artifact_delivery_mode(provider_id):
+    spec = get_provider_spec(provider_id)
+    return spec.artifact_delivery_mode if spec else ARTIFACT_DELIVERY_NONE
+
+
+def artifact_capable_provider_ids():
+    return tuple(
+        spec.provider_id
+        for spec in IM_PROVIDER_SPECS
+        if spec.artifact_delivery_mode != ARTIFACT_DELIVERY_NONE
+    )

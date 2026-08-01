@@ -180,12 +180,20 @@ class TestInteractionSkill(unittest.TestCase):
         )
         self.assertIn("file not found", (result.get("error") or "").lower())
 
-    def test_publish_artifacts_requires_enterprise_context(self):
+    def test_publish_artifacts_requires_artifact_capable_context(self):
         result = interaction_impl.publish_artifacts(
             items=[{"url": "https://example.com/demo.txt", "name": "demo.txt"}],
             audience="feishu",
         )
-        self.assertIn("only available in enterprise", (result.get("error") or "").lower())
+        self.assertIn("not available for the current messaging channel", (result.get("error") or "").lower())
+
+        for provider in ("qq", "wechat"):
+            result = interaction_impl.publish_artifacts(
+                items=[{"url": "https://example.com/demo.txt", "name": "demo.txt"}],
+                audience="feishu",
+                _context={"run_context": {"im_provider": provider, "channel": provider}},
+            )
+            self.assertIn("not available for the current messaging channel", (result.get("error") or "").lower())
 
     def test_publish_artifacts_supports_dingtalk_context_with_fallback(self):
         result = interaction_impl.publish_artifacts(
@@ -212,6 +220,39 @@ class TestInteractionSkill(unittest.TestCase):
         )
         self.assertIn("dingtalk", result["delivery_result"])
         self.assertFalse(result["delivery_result"]["dingtalk"]["enabled"])
+
+    def test_link_only_channel_does_not_claim_local_file_delivery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = os.path.join(tmp, "local-only.txt")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("demo")
+            result = interaction_impl.publish_artifacts(
+                items=[{"path": file_path, "name": "local-only.txt"}],
+                audience="dingtalk",
+                _context={
+                    "run_context": {"im_provider": "dingtalk", "channel": "dingtalk"},
+                    "config_manager": type(
+                        "Cfg",
+                        (),
+                        {
+                            "get": lambda self, key, default=None: {
+                                "providers": {"dingtalk": {"webhook_url": "https://example.com/hook"}}
+                            }
+                            if key == "im_gateway"
+                            else default
+                        },
+                    )(),
+                },
+            )
+
+        delivery = result["delivery_result"]["dingtalk"]
+        self.assertEqual(delivery["success"], [])
+        self.assertEqual(
+            delivery["skipped"][0]["reason"],
+            "delivery_skipped_native_file_upload_not_available",
+        )
+        file_part = next(part for part in result["content_parts"] if part.get("type") == "file")
+        self.assertFalse(file_part["delivered"])
 
     def test_publish_artifacts_supports_wecom_context_with_fallback(self):
         result = interaction_impl.publish_artifacts(

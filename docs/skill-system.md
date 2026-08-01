@@ -52,20 +52,25 @@ Cowork 也可以安装符合 Agent Skills 约定、根目录带 `SKILL.md` 的�
 
 ## 3. 发现与渐进披露
 
-如果所有 Skill、参考资料和 Tool Schema 都在每轮请求中注入，Prompt 会随
-能力数量快速膨胀。Cowork 将披露分成四个实际层次：
+核心内置 Tool Schema 与 Skill 长文采用不同策略：`skills/` 中符合当前上下文
+的 Tool 首轮直接暴露，而 Skill 正文、参考资料和经验仍按相关性展开。Cowork
+将指导内容披露分成四个实际层次：
 
 1. **不披露**：任务无关。
 2. **简要信息**：名称、用途、标签和推荐 Tool。
 3. **完整指导**：当前任务明确命中 Skill。
 4. **参考资料和经验条目**：只有确实需要时才展开。
 
-`tool_search` 是延迟发现入口。它可以：
+`tool_search` 只负责非核心内置能力的延迟发现。它可以：
 
 - 搜索尚未暴露的 Tool；
 - 匹配相关 Skill；
 - 返回推荐的执行入口；
 - 让命中的 Tool Schema 在下一次模型请求中可见。
+
+当前会话显式选择的 `ai_skills/` 不需要搜索，其 Tool 与指导会直接进入本轮；
+已启用但未选择的可选能力仍可搜索，禁用能力不可搜索。核心内置 Tool 不进入
+搜索结果，因为它们已经直接出现在当前工具清单中。
 
 Skill 全文和自动命中的经验只参与当前运行，不写入正常会话历史。这样既能
 复用能力，又能保持后续 Prompt 前缀稳定。
@@ -74,8 +79,13 @@ Skill 全文和自动命中的经验只参与当前运行，不写入正常会�
 
 Cowork 从以下来源构建能力目录：
 
-- `skills/`：核心内置能力；
-- `ai_skills/`：随包可选能力和用户能力；
+- 应用随包 `skills/`：`core_builtin`，始终加载并直接暴露；
+- 应用随包 `ai_skills/`：`optional`，按会话选择或延迟发现；
+- 用户能力目录：`user_extension`；
+- 合成 MCP Server：`mcp`。
+
+来源类别由注册能力根目录时显式写入，不根据末级文件夹名猜测；应用随包核心
+根优先加载，用户目录中的同名 Skill 不能覆盖或冒充核心内置能力。
 
 ### 聚合型内置 Skill
 
@@ -98,7 +108,12 @@ Tool 最终进入统一 `ToolRegistry`。记录包含：
 - `destructive`；
 - `requires_user_interaction`；
 - 所属 Skill、工具类型和搜索提示；
+- `source_kind`；
 - 延迟 Handler 或 MCP 映射。
+
+`core_builtin` Tool 的有效 `should_defer` 固定为 `false`，即使旧 Tool 导出仍
+声明延迟也会被注册层纠正。其他来源保持声明的渐进披露策略，运行模式、工作区、
+渠道、Agent Profile 和审批边界继续优先过滤。
 
 声明式 Skill 可以在 `skill.json.tools` 中绑定 `impl.py:function`。Handler
 直到首次调用才导入。旧版只有 `impl.py` 的 Skill 仍可通过反射注册公开函数。
@@ -140,6 +155,14 @@ MCP 的远端工具仍会被映射为本地 Tool 名称，并通过统一 Agent 
 
 Python 和 Node 依赖不会在应用启动或 Skill 启用时全部安装。
 
+系统提示分别标明应用 Python、沙盒 Python 和用户环境 Node.js，并报告 Python、
+Node.js 与 Bash 的可用性、版本及路径；不生成全局 Python 包“可用/缺失”清单。不同
+Skill 使用隔离依赖目录，静态清单无法代表某次调用的真实环境。
+
+其中 Node.js 是用户环境提供的可选运行时，不随应用分发。`run_node_code` 的
+Tool Schema 可以作为核心入口直接暴露，但 Agent 只有在动态快照确认 Node.js
+可用且路径存在时才将它作为优先执行方式；未检测到时必须明确报告缺失。
+
 `DependencyCoordinator` 在 Tool 首次调用前按“Skill + 依赖哈希”准备环境：
 
 - 同一哈希的并发请求共享 single-flight；
@@ -163,6 +186,10 @@ experience/entries.jsonl
 
 `update_experience` 在未指定 Skill 时记录到 `general-experience`；指定 Skill
 时记录到相应能力。运行时同时维护简短经验摘要，用于搜索和低成本披露。
+
+Agent 只应写入已经验证、可跨任务复用、非敏感且价值明确的经验；例行成功、
+猜测和项目临时状态不进入经验包。创建、修改或安装 Skill，以及写入长期记忆，
+都要求用户明确提出，不能因“可能以后有用”而静默持久化。
 
 完整经验不会默认进入每次 Prompt。`disclosure_level_defaults` 控制是否在
 完整 Skill Prompt 中包含条目；调用方还可以显式请求参考资料或经验。

@@ -25,7 +25,14 @@ from core.im_gateway_config import (
     normalize_im_gateway_config,
     update_selected_provider,
 )
-from core.im_gateway_registry import IM_PROVIDER_SPECS, get_provider_spec
+from core.im_gateway_registry import (
+    ARTIFACT_DELIVERY_LINK,
+    ARTIFACT_DELIVERY_NATIVE,
+    ARTIFACT_DELIVERY_NONE,
+    IM_PROVIDER_SPECS,
+    artifact_capable_provider_ids,
+    get_provider_spec,
+)
 from core.im_gateway_status import read_im_gateway_status, write_im_gateway_status
 
 
@@ -112,6 +119,22 @@ class IMGatewayRegistryTests(unittest.TestCase):
             all(spec.runtime_adapter and spec.runtime_entry and spec.event_types
                 for spec in IM_PROVIDER_SPECS)
         )
+        self.assertEqual(get_provider_spec("feishu").artifact_delivery_mode, ARTIFACT_DELIVERY_NATIVE)
+        self.assertEqual(get_provider_spec("dingtalk").artifact_delivery_mode, ARTIFACT_DELIVERY_LINK)
+        self.assertEqual(get_provider_spec("wecom").artifact_delivery_mode, ARTIFACT_DELIVERY_LINK)
+        self.assertEqual(get_provider_spec("qq").artifact_delivery_mode, ARTIFACT_DELIVERY_NONE)
+        self.assertEqual(get_provider_spec("wechat").artifact_delivery_mode, ARTIFACT_DELIVERY_NONE)
+        self.assertEqual(artifact_capable_provider_ids(), ("feishu", "dingtalk", "wecom"))
+
+    def test_channel_model_input_describes_actual_delivery_capability(self):
+        feishu_prompt = im_gateway._build_model_input({"text": "hello"}, "feishu")
+        dingtalk_prompt = im_gateway._build_model_input({"text": "hello"}, "dingtalk")
+        qq_prompt = im_gateway._build_model_input({"text": "hello"}, "qq")
+
+        self.assertIn("本地文件、图片或链接", feishu_prompt)
+        self.assertIn("仅能交付可访问的 URL", dingtalk_prompt)
+        self.assertIn("不提供 publish_artifacts", qq_prompt)
+        self.assertNotIn("若需要交付本地文件", qq_prompt)
 
     def test_sensitive_values_are_redacted(self):
         sanitized = im_gateway._sanitize(

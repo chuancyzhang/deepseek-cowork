@@ -72,6 +72,7 @@ assistant(next response)
 - 是否具有破坏性；
 - 是否需要用户交互；
 - 所属 Skill、实现类型和搜索提示；
+- 来源类别（`core_builtin`、`optional`、`user_extension`、`mcp`）；
 - 当前是否可直接调用。
 
 ```mermaid
@@ -86,9 +87,10 @@ flowchart TB
     I --> L
 ```
 
-常驻 Tool 只保留循环必需的最小集合，例如 `tool_search`、
-`run_python_code`、用户交互和记忆入口。其他能力延迟发现，避免一次把所有
-Schema 放进 Prompt。
+应用随包 `skills/` 根目录中的核心内置 Tool 在符合运行模式、工作区、渠道和
+权限边界时全部直接进入首轮 Tool Schema，不经过 `tool_search`。来源由目录
+注册信息确定，不能只看文件夹名称，因此用户目录中的同名 Skill 不会被误判
+为核心内置能力。`ai_skills/`、用户扩展和 MCP 继续采用选择或延迟发现。
 
 这就是技术层面的 Everything is Tool：可执行动作共享注册、调用、权限、
 日志和结果协议。
@@ -105,8 +107,10 @@ Tool 的结构化经验包：
 - `experience/entries.jsonl` 保存结构化经验；
 - `references/` 提供按需加载的长资料。
 
-模型需要额外能力时先调用 `tool_search`。搜索结果可以让延迟 Tool 在下一轮
-可见，也可以命中相关 Skill。Agent 随后把相应指导作为新的系统上下文追加
+模型可以直接调用当前清单中的核心内置 Tool，不应先搜索。只有任务需要当前
+未暴露的已启用可选能力、用户扩展或 MCP 时才调用 `tool_search`。搜索结果可
+让延迟 Tool 在下一轮可见，也可以命中相关 Skill；当前会话显式选择的
+`ai_skills/` 会在首轮直接暴露。Agent 随后把相应指导作为新的系统上下文追加
 到下一次模型请求；用户可见历史保持不变。
 
 ```mermaid
@@ -115,7 +119,7 @@ sequenceDiagram
     participant R as Tool Registry
     participant S as Skill Manager
     participant M as Model
-    L->>M: 基础 Tool + 最小上下文
+    L->>M: 核心内置 Tool + 当前上下文
     M->>L: tool_search("browser")
     L->>R: 搜索延迟 Tool
     R->>S: 匹配 Skill 与经验摘要
@@ -174,7 +178,10 @@ sequenceDiagram
 “完成当前步骤后应用”和“已应用”。
 
 Observability 与消息历史分离。稳定系统提示、动态上下文、Skill 披露、
-Tool 调用和运行状态可以进入任务观测，但 UI 专用字段不会发送给模型。
+Tool 调用和运行状态可以进入任务观测，但 UI 专用字段不会发送给模型。Worker
+会在首轮以及 Tool 暴露集合发生变化时发送独立的 `tool_exposure` 观测事件，按
+核心内置直出、会话显式选择、`tool_search` 发现和其他直出分组记录当前 Tool；
+相同集合不重复刷屏，取消内置搜索步骤也不会丢失能力暴露轨迹。
 
 应用内轻量反馈统一投影为主内容区右上角下方的主题化 Toast，最多显示三条并
 向下堆叠，避开 Windows 原生窗口按钮。系统托盘通知属于独立的 Windows
@@ -211,8 +218,20 @@ OpenAI Responses 仍保留既有 typed Items、Tool 和 `prompt_cache_key` 行�
 
 系统提示分为两部分：
 
-- **稳定前缀**：长期安全策略、Tool 使用规则和交互约束；
-- **动态上下文**：工作区、运行模式、模型、记忆、临时 Skill 和本次工作流。
+- **稳定前缀**：长期安全策略、Tool 使用规则、交互约束以及 Worker 创建时冻结
+  的长期记忆摘要；
+- **动态上下文**：工作区、运行模式、日期、一次性运行时快照、当前 Tool、澄清
+  轮次、显式选择的 Skill 和本次工作流。
+
+每个 Worker 只探测一次沙盒 Python、用户环境 Node.js 和 Bash 的可用性、版本
+与路径，并把应用 Python 与沙盒解释器明确分开。系统上下文不再维护静态 Python 包
+“可用/缺失”清单；包与 Skill 依赖只在实际调用时由 Tool、Skill Handler 和
+`DependencyCoordinator` 验证，避免全局清单与隔离依赖环境漂移。
+
+Node.js 不随应用分发。稳定提示不预设 `run_node_code` 可执行；动态上下文只有
+在当前用户环境的运行时快照同时确认 Node.js 可用且路径可解析时，才建议用它
+处理 JavaScript、JSON 或前端脚本。Tool Schema 暴露与外部运行时已安装是两个
+独立状态，未检测到 Node.js 时必须先暴露缺失并进入用户确认的安装或配置流程。
 
 标准 Responses 请求使用稳定的会话级 `prompt_cache_key`；官方 DeepSeek
 Responses 使用服务端自动管理的上下文缓存，不发送这个参数。自动命中的 Skill
@@ -290,7 +309,10 @@ Responses 使用服务端自动管理的上下文缓存，不发送这个参数�
 
 `core/im_gateway_registry.py` 的 `ProviderSpec` 是企业消息的单一注册源，集中
 声明渠道名称、图标、接入方式、字段、配置判定、事件类型、运行适配器和启动
-入口。设置页、配置规范化、模型渠道标签和网关运行时都读取该注册表；新增
+入口，并通过 `artifact_delivery_mode` 声明交付能力。飞书为 `native`，可上传
+本地文件、图片和链接；钉钉、企业微信为 `link`，只发送可访问 URL；QQ、微信
+为 `none`，不暴露 `publish_artifacts`。设置页、配置规范化、Agent Tool 可见性、
+模型渠道提示和网关运行时都读取该注册表；新增
 渠道不再复制一套选择卡、状态栏与表单分支。配置仍保持本地单账号模型，
 `enabled_providers` 最多规范化为一个值，切换渠道只改变活动标记，不删除其他
 渠道凭据。

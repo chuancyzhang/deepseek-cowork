@@ -62,65 +62,8 @@ def get_runtime_snapshot():
     from core.sandbox_runtime import get_runtime_snapshot as _get_runtime_snapshot
     return _get_runtime_snapshot()
 
-def get_python_runtime_snapshot():
-    runtime_snapshot = get_runtime_snapshot()
-    python_info = runtime_snapshot.get("python") or {}
-    python_exe = python_info.get("path") or get_python_executable()
-    snapshot = {
-        "python_exe": python_exe,
-        "resolved_from": python_info.get("source") or ("bundled" if getattr(sys, "frozen", False) else "system"),
-        "version": (python_info.get("version") or "").replace("Python ", ""),
-        "available_packages": [],
-        "missing_packages": [name for name, _ in _RUNTIME_IMPORT_CHECKS]
-    }
-    if not python_exe or not os.path.isfile(python_exe):
-        return snapshot
-    try:
-        import subprocess
-        checks = json.dumps(_RUNTIME_IMPORT_CHECKS, ensure_ascii=False)
-        code = (
-            "import json,sys,importlib.util\n"
-            f"checks={checks}\n"
-            "available=[]\n"
-            "missing=[]\n"
-            "for pkg,mod in checks:\n"
-            "    (available if importlib.util.find_spec(mod) else missing).append(pkg)\n"
-            "print(json.dumps({'version':sys.version.split()[0],'available':available,'missing':missing},ensure_ascii=False))\n"
-        )
-        from core.sandbox_runtime import build_sandbox_env
-        output = subprocess.check_output(
-            [python_exe, "-c", code],
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=build_sandbox_env(),
-            **subprocess_kwargs_no_window(),
-        ).strip()
-        data = json.loads(output)
-        snapshot["version"] = data.get("version", "") or snapshot["version"]
-        snapshot["available_packages"] = data.get("available", []) or []
-        snapshot["missing_packages"] = data.get("missing", []) or []
-    except Exception:
-        pass
-    return snapshot
-
 _INSTALL_SUCCESS = set()
 _INSTALL_FAILED = {}
-_RUNTIME_IMPORT_CHECKS = [
-    ("openpyxl", "openpyxl"),
-    ("python-docx", "docx"),
-    ("python-pptx", "pptx"),
-    ("pypdf", "pypdf"),
-    ("beautifulsoup4", "bs4"),
-    ("requests", "requests"),
-    ("markdown", "markdown"),
-    ("qtawesome", "qtawesome"),
-    ("anthropic", "anthropic"),
-    ("openai", "openai"),
-    ("lark-oapi", "lark_oapi"),
-    ("wecom-aibot-python-sdk", "aibot"),
-    ("qrcode", "qrcode"),
-]
 
 
 def _inject_skill_python_path(skill_id):

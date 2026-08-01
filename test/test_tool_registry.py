@@ -10,7 +10,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.skill_manager import SkillManager
-from core.tool_registry import ToolRegistry
+from core.tool_registry import (
+    TOOL_SOURCE_CORE_BUILTIN,
+    TOOL_SOURCE_OPTIONAL,
+    ToolRegistry,
+)
 
 
 class TestToolRegistry(unittest.TestCase):
@@ -73,12 +77,46 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(registry.resolve_name("open_file"), "text_file_read")
         self.assertTrue(registry.is_allowed("open_file", "clarifying"))
 
+    def test_core_builtin_tools_are_direct_and_not_searchable(self):
+        registry = ToolRegistry()
+
+        def bash(command):
+            return command
+
+        record = registry.register(
+            "bash",
+            bash,
+            "Execute shell commands",
+            {"type": "object", "properties": {}, "required": []},
+            should_defer=True,
+            source_kind=TOOL_SOURCE_CORE_BUILTIN,
+        )
+
+        self.assertFalse(record.should_defer)
+        visible = {
+            item["function"]["name"]
+            for item in registry.definitions(RUN_MODE_EXECUTION, discovered_tool_names=set())
+        }
+        self.assertIn("bash", visible)
+        self.assertEqual(registry.search("bash shell", run_mode=RUN_MODE_EXECUTION), [])
+        self.assertEqual(
+            registry.search(
+                "bash shell",
+                run_mode=RUN_MODE_EXECUTION,
+                include_loaded=True,
+                discovered_tool_names={"bash"},
+            ),
+            [],
+        )
+
 
 class TestSkillManagerToolDiscovery(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.skills_dir = os.path.join(self.temp_dir, "skills")
+        self.ai_skills_dir = os.path.join(self.temp_dir, "ai_skills")
         os.makedirs(self.skills_dir, exist_ok=True)
+        os.makedirs(self.ai_skills_dir, exist_ok=True)
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -86,6 +124,20 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
     def _build_manager(self):
         sm = SkillManager(workspace_dir=self.temp_dir)
         sm.skills_dirs = [self.skills_dir]
+        sm.load_skills()
+        return sm
+
+    def _build_manager_with_sources(self, roots, config_manager=None):
+        sm = SkillManager(
+            workspace_dir=self.temp_dir,
+            config_manager=config_manager,
+            auto_load=False,
+        )
+        sm.skills_dirs = list(roots)
+        sm.skill_root_kinds = {
+            os.path.abspath(path): source_kind
+            for path, source_kind in roots.items()
+        }
         sm.load_skills()
         return sm
 
@@ -609,9 +661,130 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
         self.assertEqual(result["results"][1]["status"], "error")
         self.assertIn("Error executing boom_note: boom", result["results"][1]["error"])
 
+    def test_packaged_core_skills_are_visible_on_first_turn_and_not_searchable(self):
+        self._copy_repo_skill("command-tools")
+        self._copy_repo_skill("file-system")
+        sm = self._build_manager_with_sources(
+            {self.skills_dir: TOOL_SOURCE_CORE_BUILTIN}
+        )
+
+        visible = {
+            item["function"]["name"]
+            for item in sm.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=set(),
+                run_context={"mode": RUN_MODE_EXECUTION},
+            )
+        }
+        expected = {
+            "bash",
+            "glob",
+            "grep",
+            "run_node_code",
+            "run_skill_script",
+            "text_file_read",
+            "text_file_write",
+            "text_file_update",
+            "workspace_list_files",
+        }
+        self.assertTrue(expected <= visible)
+        self.assertTrue(all(sm.get_tool_record(name)["source_kind"] == TOOL_SOURCE_CORE_BUILTIN for name in expected))
+
+        result = sm.call_tool(
+            "tool_search",
+            {"query": "shell file read write command"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+        self.assertTrue(expected.isdisjoint(result["discovered_tools"]))
+        self.assertNotIn("command-tools", {item["name"] for item in result["skills"]})
+        self.assertNotIn("file-system", {item["name"] for item in result["skills"]})
+
+    def test_optional_skill_is_direct_only_when_selected_and_disabled_skill_is_hidden(self):
+        skill_dir = os.path.join(self.ai_skills_dir, "optional-tools")
+        os.makedirs(skill_dir, exist_ok=True)
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(
+                "---\nname: optional-tools\ndescription: Optional report helper\ndefault_enabled: false\n---\n"
+                "# Optional Tools\n"
+            )
+        with open(os.path.join(skill_dir, "impl.py"), "w", encoding="utf-8") as f:
+            f.write("def build_optional_report(topic):\n    return topic\n")
+
+        class ConfigStub:
+            def __init__(self, enabled):
+                self.enabled = enabled
+
+            def is_skill_enabled(self, skill_name, default_enabled=True):
+                return skill_name in self.enabled or default_enabled
+
+            def get_mcp_servers(self):
+                return []
+
+            def get(self, _key, default=None):
+                return default
+
+        enabled = self._build_manager_with_sources(
+            {self.ai_skills_dir: TOOL_SOURCE_OPTIONAL},
+            ConfigStub({"optional-tools"}),
+        )
+        initial = {
+            item["function"]["name"]
+            for item in enabled.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=set(),
+                run_context={"mode": RUN_MODE_EXECUTION},
+            )
+        }
+        self.assertNotIn("build_optional_report", initial)
+
+        search_result = enabled.call_tool(
+            "tool_search",
+            {"query": "optional report"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+        self.assertIn("build_optional_report", search_result["discovered_tools"])
+
+        selected_tools = set(enabled.get_tools_for_skill("optional-tools"))
+        selected_visible = {
+            item["function"]["name"]
+            for item in enabled.get_tool_definitions(
+                run_mode=RUN_MODE_EXECUTION,
+                discovered_tool_names=selected_tools,
+                run_context={
+                    "mode": RUN_MODE_EXECUTION,
+                    "selected_skill_names": ["optional-tools"],
+                },
+            )
+        }
+        self.assertIn("build_optional_report", selected_visible)
+
+        disabled = self._build_manager_with_sources(
+            {self.ai_skills_dir: TOOL_SOURCE_OPTIONAL},
+            ConfigStub(set()),
+        )
+        disabled_result = disabled.call_tool(
+            "tool_search",
+            {"query": "optional report"},
+            context={
+                "run_context": {"mode": RUN_MODE_EXECUTION},
+                "discovered_tool_names": set(),
+            },
+        )
+        self.assertNotIn("optional-tools", disabled.skill_records)
+        self.assertNotIn("build_optional_report", disabled_result["discovered_tools"])
+        self.assertNotIn("optional-tools", {item["name"] for item in disabled_result["skills"]})
+
     def test_publish_artifacts_is_visible_only_in_enterprise_im_context(self):
         self._copy_repo_skill("interaction")
-        sm = self._build_manager()
+        sm = self._build_manager_with_sources(
+            {self.skills_dir: TOOL_SOURCE_CORE_BUILTIN}
+        )
 
         desktop_tools = {
             item["function"]["name"]
@@ -654,7 +827,7 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
                 "discovered_tool_names": set(),
             },
         )
-        self.assertIn("publish_artifacts", feishu_search["discovered_tools"])
+        self.assertNotIn("publish_artifacts", feishu_search["discovered_tools"])
 
         for provider in ("dingtalk", "wecom"):
             run_context = {
@@ -670,6 +843,20 @@ class TestSkillManagerToolDiscovery(unittest.TestCase):
                 )
             }
             self.assertIn("publish_artifacts", tools)
+
+        for provider in ("qq", "wechat"):
+            tools = {
+                item["function"]["name"]
+                for item in sm.get_tool_definitions(
+                    run_mode=RUN_MODE_EXECUTION,
+                    run_context={
+                        "mode": RUN_MODE_EXECUTION,
+                        "im_provider": provider,
+                        "channel": provider,
+                    },
+                )
+            }
+            self.assertNotIn("publish_artifacts", tools)
 
     def test_allowed_skill_scope_filters_tool_visibility_and_search(self):
         skill_dir = os.path.join(self.skills_dir, "notes-tools")

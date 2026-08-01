@@ -18,7 +18,13 @@ from core.interaction import parse_interaction_reply
 from core.im_session_key import build_im_session_key, resolve_date_key
 from core.clarify_mode import RUN_MODE_EXECUTION
 from core.im_gateway_config import normalize_im_gateway_config
-from core.im_gateway_registry import get_provider_spec, provider_title
+from core.im_gateway_registry import (
+    ARTIFACT_DELIVERY_LINK,
+    ARTIFACT_DELIVERY_NATIVE,
+    get_provider_spec,
+    provider_artifact_delivery_mode,
+    provider_title,
+)
 from core.im_gateway_status import write_im_gateway_status
 from core.im_gateway.wechat_ilink import (
     WeChatIlinkClient,
@@ -327,11 +333,27 @@ def _build_model_input(event, provider_name=None):
     user_text = (event or {}).get("text") or ""
     provider_value = (provider_name or (event or {}).get("provider") or "enterprise").strip().lower()
     label = provider_title(provider_value, provider_value or "企业消息")
+    delivery_mode = provider_artifact_delivery_mode(provider_value)
+    if delivery_mode == ARTIFACT_DELIVERY_NATIVE:
+        delivery_hint = (
+            "- 若需要交付本地文件、图片或链接，请调用 publish_artifacts；"
+            f"需要触达当前渠道时将 audience 设为 '{provider_value}' 或 'auto'。\n"
+        )
+    elif delivery_mode == ARTIFACT_DELIVERY_LINK:
+        delivery_hint = (
+            "- 当前渠道的 publish_artifacts 仅能交付可访问的 URL，不能上传本地文件；"
+            "不得把本地路径描述为已发送。\n"
+        )
+    else:
+        delivery_hint = (
+            "- 当前渠道不提供 publish_artifacts；请直接回复文本或可访问链接，"
+            "不得声称本地文件已发送。\n"
+        )
     channel_hint = (
         "[渠道上下文]\n"
         f"- 当前交互渠道: {label}\n"
         f"- 你正在处理{label}会话消息，请优先使用适配企业消息的交互方式。\n"
-        f"- 若需要交付文件、图片或链接，请调用 publish_artifacts；需要触达当前渠道时将 audience 设为 '{provider_value}' 或 'auto'。\n"
+        f"{delivery_hint}"
     )
     return f"{channel_hint}\n[用户消息]\n{user_text}"
 

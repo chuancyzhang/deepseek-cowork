@@ -8,7 +8,7 @@ allowed-tools: request_user_approval, request_user_input, publish_artifacts
 
 # Interaction Skill
 
-This skill provides interaction capabilities with the user, plus enterprise-message artifact delivery for enterprise IM sessions.
+This core built-in Skill is exposed directly when allowed by the current run context. It provides user interaction plus channel-aware artifact delivery.
 
 ## Tools
 
@@ -31,12 +31,19 @@ Ask the user for text, a single choice, or multiple choices.
 - **allow_free_text** (boolean, optional): allow arbitrary free-text input.
 - **timeout_seconds** (number, optional): timeout before the request is cancelled.
 
+For task clarification, use questionnaire questions with mutually exclusive choices and put the recommended choice first. The runtime removes any caller-supplied custom choice and appends exactly one `自定义` option automatically; callers must not add it themselves.
+
 ### publish_artifacts
-Publish generated files/images for enterprise-message delivery.
+Publish generated artifacts only when the current messaging channel advertises artifact delivery.
 Use this tool when:
-- An enterprise-message task produced files and the user needs them delivered in that conversation.
-- User asks to send image output or downloadable files into the current enterprise IM conversation.
-- This tool is the supported delivery entry for enterprise-message file/image handoff.
+- A Feishu task needs local files, images, or links delivered in that conversation.
+- A DingTalk or WeCom task needs an accessible URL delivered in that conversation.
+
+Channel contract:
+- Feishu: native local file/image upload and URL delivery.
+- DingTalk / WeCom: URL-only delivery; local-only paths are reported as not delivered.
+- QQ / WeChat: this Tool is not exposed.
+- Desktop: this Tool is not exposed; report the real local path or URL in the final reply.
 
 - **items** (array, required): list of artifacts. Each item supports:
   - `path` or `url`
@@ -44,7 +51,7 @@ Use this tool when:
   - `mime`
   - `subtype` (`image` recommended for images)
   - `caption`
-- **audience** (string, optional): `auto` or provider-specific target such as `feishu`
+- **audience** (string, optional): `auto`, `feishu`, `dingtalk`, or `wecom`
 - **summary** (string, optional): summary text for timeline display
 - **title** (string, optional): title used when sending IM post link messages
 
@@ -53,9 +60,10 @@ Use this tool when:
 Output contract:
 - Must return a structured object with `source_tool="publish_artifacts"`.
 - Must include `content_parts` (file/tool_event) and `delivery_result`.
-- Tool availability is restricted to enterprise-message sessions; normal desktop chats should hand off files by mentioning local paths or links in the final reply.
+- Tool availability is restricted to channels whose registry `artifact_delivery_mode` is `native` or `link`.
+- Delivery success must be read from `delivery_result`; skipped or failed items must never be described as sent.
 
 ## Current Runtime Notes
 - Clarifying mode should use `request_user_input` for actual user questions after read-only exploration.
 - Approval and input tools are interactive and must not be batched through `parallel_tools`.
-- In desktop sessions, generated local files should be reported in the final answer rather than published through this skill.
+- In desktop, QQ, and WeChat sessions, generated local files should be reported as local-only rather than published through this skill.

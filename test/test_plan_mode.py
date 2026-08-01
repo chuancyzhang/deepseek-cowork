@@ -144,6 +144,14 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             with (
                 patch("core.agent.SkillManager", _SkillManagerStub),
                 patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub(provider_events)),
+                patch(
+                    "core.agent.get_runtime_snapshot",
+                    return_value={
+                        "python": {"available": True, "version": "Python 3.test", "path": "python.exe"},
+                        "node": {"available": False, "version": "", "path": ""},
+                        "bash": {"available": False, "version": "", "path": ""},
+                    },
+                ) as runtime_snapshot_mock,
             ):
                 worker = LLMWorker(
                     [{"role": "user", "content": "clarify this"}],
@@ -159,13 +167,15 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             runtime_prompt = events[0].get("runtime_context", "")
             self.assertIn("策略 [必要澄清]", system_prompt)
             self.assertIn("默认直接执行用户任务", system_prompt)
-            self.assertIn("当前任务已澄清 2/3 轮", system_prompt)
+            self.assertNotIn("当前任务已澄清 2/3 轮", system_prompt)
             self.assertIn("request_user_input", system_prompt)
+            self.assertIn("当前任务已澄清 2/3 轮", runtime_prompt)
             self.assertNotIn("策略 [反问模式]", runtime_prompt)
             self.assertNotIn("<proposed_plan>", runtime_prompt)
             self.assertTrue(provider_events)
             self.assertEqual(system_prompt, provider_events[0][1][0])
             self.assertEqual(runtime_prompt, provider_events[0][1][-1])
+            runtime_snapshot_mock.assert_called_once_with()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -40,8 +40,16 @@ from .skill_adapter import (
     discover_importable_skill_dirs,
     discover_skill_artifacts,
 )
-from .tool_registry import ToolRegistry
+from .tool_registry import (
+    TOOL_SOURCE_CORE_BUILTIN,
+    TOOL_SOURCE_MCP,
+    TOOL_SOURCE_OPTIONAL,
+    TOOL_SOURCE_USER_EXTENSION,
+    TOOL_SOURCE_KINDS,
+    ToolRegistry,
+)
 from .clarify_mode import normalize_selected_skill_names
+from .im_gateway_registry import ARTIFACT_DELIVERY_NONE, provider_artifact_delivery_mode
 
 
 def _tokenize(text):
@@ -179,15 +187,29 @@ class SkillManager:
             and any(os.path.isfile(os.path.join(path, name)) for name in cls.SKILL_ENTRY_FILES)
         )
 
-    def _append_skill_dir(self, path):
-        if path and os.path.isdir(path) and path not in self.skills_dirs:
-            self.skills_dirs.append(path)
+    def _register_skill_root(self, path, source_kind, *, require_exists=False):
+        if not hasattr(self, "skills_dirs"):
+            self.skills_dirs = []
+        if not hasattr(self, "skill_root_kinds"):
+            self.skill_root_kinds = {}
+        normalized_path = os.path.abspath(str(path or "")) if path else ""
+        if not normalized_path or (require_exists and not os.path.isdir(normalized_path)):
+            return
+        normalized_source_kind = str(source_kind or "").strip().lower()
+        if normalized_source_kind not in TOOL_SOURCE_KINDS:
+            raise ValueError(f"Unsupported Skill root source_kind: {source_kind}")
+        if normalized_path not in self.skills_dirs:
+            self.skills_dirs.append(normalized_path)
+        self.skill_root_kinds[normalized_path] = normalized_source_kind
+
+    def _append_skill_dir(self, path, source_kind):
+        self._register_skill_root(path, source_kind, require_exists=True)
 
     def _append_frozen_skill_dirs(self, base_dir):
-        for folder in ("skills", "ai_skills"):
-            self._append_skill_dir(os.path.join(base_dir, "_internal", folder))
-        for folder in ("skills", "ai_skills"):
-            self._append_skill_dir(os.path.join(base_dir, folder))
+        self._append_skill_dir(os.path.join(base_dir, "_internal", "skills"), TOOL_SOURCE_CORE_BUILTIN)
+        self._append_skill_dir(os.path.join(base_dir, "_internal", "ai_skills"), TOOL_SOURCE_OPTIONAL)
+        self._append_skill_dir(os.path.join(base_dir, "skills"), TOOL_SOURCE_CORE_BUILTIN)
+        self._append_skill_dir(os.path.join(base_dir, "ai_skills"), TOOL_SOURCE_OPTIONAL)
 
     def __init__(
         self,
@@ -206,21 +228,23 @@ class SkillManager:
         self.change_publisher = None
         self._runtime_lock = threading.RLock()
         self.skills_dirs = []
+        self.skill_root_kinds = {}
+        self.skill_source_kinds = {}
 
         data_dir = get_app_data_dir()
-        self.skills_dirs.append(os.path.join(data_dir, "skills"))
-        self.skills_dirs.append(os.path.join(data_dir, "ai_skills"))
+        self._register_skill_root(os.path.join(data_dir, "skills"), TOOL_SOURCE_USER_EXTENSION)
+        self._register_skill_root(os.path.join(data_dir, "ai_skills"), TOOL_SOURCE_USER_EXTENSION)
 
         if getattr(sys, "frozen", False):
             if hasattr(sys, "_MEIPASS"):
-                self._append_skill_dir(os.path.join(sys._MEIPASS, "skills"))
-                self._append_skill_dir(os.path.join(sys._MEIPASS, "ai_skills"))
+                self._append_skill_dir(os.path.join(sys._MEIPASS, "skills"), TOOL_SOURCE_CORE_BUILTIN)
+                self._append_skill_dir(os.path.join(sys._MEIPASS, "ai_skills"), TOOL_SOURCE_OPTIONAL)
             else:
                 self._append_frozen_skill_dirs(os.path.dirname(sys.executable))
         else:
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            self.skills_dirs.append(os.path.join(repo_root, "skills"))
-            self.skills_dirs.append(os.path.join(repo_root, "ai_skills"))
+            self._register_skill_root(os.path.join(repo_root, "skills"), TOOL_SOURCE_CORE_BUILTIN)
+            self._register_skill_root(os.path.join(repo_root, "ai_skills"), TOOL_SOURCE_OPTIONAL)
 
         self.tools = {}
         self.tool_definitions = []
@@ -230,6 +254,7 @@ class SkillManager:
         self.skill_to_tools = {}
         self.loaded_skills_meta = {}
         self.loaded_skill_sources = {}
+        self.skill_source_kinds = {}
         self.skill_prompts_brief = []
         self.skill_prompts_full = {}
         self.skill_records = {}
@@ -272,6 +297,8 @@ class SkillManager:
         runtime.skill_prompts_brief = list(self.skill_prompts_brief)
         runtime.skill_prompts_full = dict(self.skill_prompts_full)
         runtime.skill_records = copy.deepcopy(self.skill_records)
+        runtime.skill_root_kinds = dict(self.skill_root_kinds)
+        runtime.skill_source_kinds = dict(self.skill_source_kinds)
         runtime.experience_packages = runtime.skill_records
         runtime.last_load_time = self.last_load_time
         runtime.catalog_revision = int(catalog_revision or 0)
@@ -300,6 +327,7 @@ class SkillManager:
                 runtime_binding=record.runtime_binding,
                 skill_refs=record.skill_refs,
                 metadata=record.metadata,
+                source_kind=record.source_kind,
             )
             if cloned:
                 runtime.tools[name] = handler
@@ -338,6 +366,7 @@ class SkillManager:
                 runtime_binding=record.runtime_binding,
                 skill_refs=record.skill_refs,
                 metadata=record.metadata,
+                source_kind=record.source_kind,
             )
             if cloned:
                 refreshed.tools[name] = handler
@@ -446,6 +475,8 @@ class SkillManager:
         }
 
     def _is_skill_enabled_for_path(self, skill_name, skill_path):
+        if self._skill_source_kind_for_path(skill_path) == TOOL_SOURCE_CORE_BUILTIN:
+            return True
         identity = self._skill_identity(skill_path)
         default_enabled = identity.get("default_enabled", True)
         if self.config_manager and hasattr(self.config_manager, "is_skill_enabled"):
@@ -456,6 +487,24 @@ class SkillManager:
                     return False
                 return self.config_manager.is_skill_enabled(skill_name)
         return bool(default_enabled)
+
+    def _skill_source_kind_for_root(self, skills_dir):
+        root = os.path.abspath(str(skills_dir or "")) if skills_dir else ""
+        return getattr(self, "skill_root_kinds", {}).get(root, TOOL_SOURCE_USER_EXTENSION)
+
+    def _skill_source_kind_for_path(self, skill_path):
+        parent = os.path.dirname(os.path.abspath(str(skill_path or ""))) if skill_path else ""
+        return self._skill_source_kind_for_root(parent)
+
+    def _skill_roots_in_load_order(self):
+        indexed = list(enumerate(getattr(self, "skills_dirs", []) or []))
+        indexed.sort(
+            key=lambda item: (
+                0 if self._skill_source_kind_for_root(item[1]) == TOOL_SOURCE_CORE_BUILTIN else 1,
+                item[0],
+            )
+        )
+        return [path for _index, path in indexed]
 
     def _coerce_string_list(self, value):
         if isinstance(value, list):
@@ -989,6 +1038,7 @@ class SkillManager:
 
         tool_description = description or (func.__doc__.strip().split("\n")[0] if func.__doc__ else f"Tool {tool_name}")
         parameters_schema = {"type": "object", "properties": properties, "required": required}
+        source_kind = self.skill_source_kinds.get(skill_name, TOOL_SOURCE_USER_EXTENSION)
         record = self.tool_registry.register(
             tool_name,
             func,
@@ -999,6 +1049,7 @@ class SkillManager:
             runtime_binding={"type": "python_function", "skill_name": skill_name},
             skill_refs=[skill_name],
             metadata={"requires_workspace": "workspace_dir" in sig.parameters},
+            source_kind=source_kind,
         )
         if not record:
             return
@@ -1023,6 +1074,7 @@ class SkillManager:
             "always_load": record.always_load,
             "runtime_binding": {"type": "python_function", "skill_name": skill_name},
             "skill_refs": [skill_name],
+            "source_kind": record.source_kind,
         }
 
     def _register_explicit_tool_export(self, skill_name, export):
@@ -1046,6 +1098,7 @@ class SkillManager:
         parameters_schema.setdefault("properties", {})
         parameters_schema.setdefault("required", [])
 
+        source_kind = self.skill_source_kinds.get(skill_name, TOOL_SOURCE_USER_EXTENSION)
         record = self.tool_registry.register(
             tool_name,
             func,
@@ -1084,6 +1137,7 @@ class SkillManager:
                 ),
                 **(dict(export.get("metadata")) if isinstance(export.get("metadata"), dict) else {}),
             },
+            source_kind=source_kind,
         )
         if not record:
             return
@@ -1120,6 +1174,7 @@ class SkillManager:
             "requires_user_interaction": bool(export.get("requires_user_interaction")),
             "result_format": str(export.get("result_format") or ""),
             "metadata": dict(export.get("metadata")) if isinstance(export.get("metadata"), dict) else {},
+            "source_kind": record.source_kind,
         }
 
     def _load_legacy_implementation(self, skill_name, impl_path):
@@ -1235,6 +1290,7 @@ class SkillManager:
             always_load=True,
             runtime_binding={"type": "builtin_method"},
             skill_refs=["builtin"],
+            source_kind=TOOL_SOURCE_CORE_BUILTIN,
         )
         if record:
             self.tools["tool_search"] = self._tool_search
@@ -1252,6 +1308,7 @@ class SkillManager:
                 "always_load": record.always_load,
                 "runtime_binding": record.runtime_binding,
                 "skill_refs": list(record.skill_refs),
+                "source_kind": record.source_kind,
             }
 
     def _tool_search(self, query, limit=8, include_loaded=False, _context=None):
@@ -1272,29 +1329,8 @@ class SkillManager:
             discovered_tool_names=discovered,
         )
         results = self._filter_results_by_allowed_skills(results, run_context)
-        results = self._filter_enterprise_tool_results(results, run_context)
+        results = self._filter_artifact_delivery_tool_results(results, run_context)
         results = self._filter_workspace_tool_results(results, run_context)
-        if (
-            self._is_enterprise_tool_allowed("publish_artifacts", run_context)
-            and self._is_tool_allowed_by_skill_scope("publish_artifacts", run_context)
-        ):
-            loaded_matches = self.tool_registry.search(
-                query,
-                run_mode=run_mode,
-                limit=max(int(limit or 8), 1),
-                include_loaded=True,
-                discovered_tool_names=discovered,
-            )
-            loaded_matches = self._filter_results_by_allowed_skills(loaded_matches, run_context)
-            for item in loaded_matches:
-                if item.get("name") != "publish_artifacts":
-                    continue
-                if any(existing.get("name") == "publish_artifacts" for existing in results):
-                    break
-                results.append(item)
-                break
-            results.sort(key=lambda item: (-float(item.get("score") or 0), item.get("name") or ""))
-            results = results[: max(1, int(limit or 8))]
         names = [item["name"] for item in results]
         if hasattr(discovered, "update"):
             discovered.update(names)
@@ -1360,6 +1396,8 @@ class SkillManager:
             return []
         matches = []
         for skill_name, record in self.skill_records.items():
+            if record.get("source_kind") == TOOL_SOURCE_CORE_BUILTIN:
+                continue
             if not self._is_skill_allowed_by_scope(skill_name, run_context):
                 continue
             score = self._skill_search_score(record, query_tokens, query)
@@ -1384,6 +1422,7 @@ class SkillManager:
             "kind": record.get("kind") or spec.get("kind") or "knowledge",
             "capability_group": spec.get("capability_group") or "",
             "source_format": spec.get("source_format") or "",
+            "source_kind": record.get("source_kind") or TOOL_SOURCE_USER_EXTENSION,
             "tool_refs": list(record.get("tool_refs") or []),
             "script_entries": script_entries,
             "execution_surface": execution_surface,
@@ -1610,7 +1649,7 @@ class SkillManager:
         return self.tool_registry.is_allowed(name, run_mode)
 
     def is_tool_visible(self, name, run_mode, discovered_tool_names=None, run_context=None):
-        if not self._is_enterprise_tool_allowed(name, run_context):
+        if not self._is_artifact_delivery_tool_allowed(name, run_context):
             return False
         if name == "publish_artifacts":
             return True
@@ -1653,6 +1692,10 @@ class SkillManager:
         return {
             "name": skill_name,
             "path": skill_path,
+            "source_kind": self.skill_source_kinds.get(
+                skill_name,
+                self._skill_source_kind_for_path(skill_path),
+            ),
             "kind": "knowledge",
             "meta": meta,
             "spec": spec,
@@ -1721,6 +1764,7 @@ class SkillManager:
         return {
             "name": skill_name,
             "path": f"mcp://{server_config.get('id') or skill_name}",
+            "source_kind": TOOL_SOURCE_MCP,
             "kind": "knowledge",
             "meta": meta,
             "spec": spec,
@@ -1736,6 +1780,7 @@ class SkillManager:
         }
 
     def _register_mcp_tools_for_server(self, skill_name, server_config, tools_payload):
+        self.skill_source_kinds[skill_name] = TOOL_SOURCE_MCP
         tool_refs = []
         used_names = set(self.tools)
         for tool in tools_payload or []:
@@ -1802,6 +1847,7 @@ class SkillManager:
             if not isinstance(server_config, dict):
                 continue
             skill_name = build_mcp_skill_name(server_config.get("id") or server_config.get("name") or f"server-{index + 1}")
+            self.skill_source_kinds[skill_name] = TOOL_SOURCE_MCP
             source_skill = str(server_config.get("source_skill") or "").strip()
             source_enabled = True
             if source_skill and hasattr(self.config_manager, "is_skill_enabled"):
@@ -1919,6 +1965,10 @@ class SkillManager:
         record = {
             "name": skill_name,
             "path": skill_path,
+            "source_kind": self.skill_source_kinds.get(
+                skill_name,
+                self._skill_source_kind_for_path(skill_path),
+            ),
             "kind": kind,
             "meta": meta,
             "spec": spec,
@@ -2071,7 +2121,10 @@ class SkillManager:
         normalized_name = str(skill_name or "").strip()
         if not normalized_name:
             return None
-        for skills_dir in self.skills_dirs:
+        loaded_path = getattr(self, "loaded_skill_sources", {}).get(normalized_name)
+        if loaded_path and os.path.isdir(loaded_path):
+            return loaded_path
+        for skills_dir in self._skill_roots_in_load_order():
             candidate = os.path.join(skills_dir, normalized_name)
             if os.path.isdir(candidate):
                 return candidate
@@ -2110,7 +2163,7 @@ class SkillManager:
         root = os.path.abspath(skill_path)
         if os.path.basename(os.path.dirname(root)) != "ai_skills":
             return False
-        for skills_dir in self.skills_dirs:
+        for skills_dir in self._skill_roots_in_load_order():
             ai_root = os.path.abspath(skills_dir)
             if os.path.basename(ai_root) != "ai_skills":
                 continue
@@ -2125,7 +2178,7 @@ class SkillManager:
         normalized_name = str(skill_name or "").strip()
         if not normalized_name:
             return None
-        for skills_dir in self.skills_dirs:
+        for skills_dir in self._skill_roots_in_load_order():
             root = os.path.abspath(skills_dir)
             if os.path.basename(root) != "ai_skills":
                 continue
@@ -2575,7 +2628,7 @@ class SkillManager:
         self._scan_dist_dirs()
         all_skills = []
         seen = set()
-        for skills_dir in self.skills_dirs:
+        for skills_dir in self._skill_roots_in_load_order():
             if not os.path.exists(skills_dir):
                 continue
             is_ai_dir = os.path.basename(skills_dir) == "ai_skills"
@@ -2605,6 +2658,7 @@ class SkillManager:
                     "config_fields": list(record["spec"].get("config_fields") or []),
                     "config_status": self.get_skill_config_status(skill_name),
                     "source_format": record["spec"].get("source_format"),
+                    "source_kind": record.get("source_kind") or self._skill_source_kind_for_path(skill_path),
                 }
                 if is_ai_dir:
                     info["type"] = "ai_generated"
@@ -2646,6 +2700,7 @@ class SkillManager:
                 "config_fields": list(record["spec"].get("config_fields") or []),
                 "config_status": self.get_skill_config_status(skill_name),
                 "source_format": record["spec"].get("source_format"),
+                "source_kind": record.get("source_kind") or TOOL_SOURCE_MCP,
             }
             if self.config_manager:
                 info["enabled"] = default_enabled
@@ -2853,6 +2908,7 @@ class SkillManager:
         self.skill_to_tools = {}
         self.loaded_skills_meta = {}
         self.loaded_skill_sources = {}
+        self.skill_source_kinds = {}
         self.skill_prompts_brief = []
         self.skill_prompts_full = {}
         self.skill_records = {}
@@ -2865,7 +2921,7 @@ class SkillManager:
 
         seen = set()
         pending_records = []
-        for skills_dir in self.skills_dirs:
+        for skills_dir in self._skill_roots_in_load_order():
             if not os.path.exists(skills_dir):
                 continue
             for skill_name in sorted(os.listdir(skills_dir)):
@@ -2878,6 +2934,7 @@ class SkillManager:
                     continue
                 seen.add(skill_name)
                 self.loaded_skill_sources[skill_name] = skill_path
+                self.skill_source_kinds[skill_name] = self._skill_source_kind_for_root(skills_dir)
                 dependency_status = self._prepare_skill_dependencies(skill_name, skill_path)
                 impl_path = os.path.join(skill_path, "impl.py")
                 if os.path.exists(impl_path):
@@ -2981,9 +3038,9 @@ class SkillManager:
             include_deferred=bool(include_deferred),
         )
         definitions = self._filter_definitions_by_allowed_skills(definitions, run_context)
-        definitions = self._filter_enterprise_tool_definitions(definitions, run_context)
+        definitions = self._filter_artifact_delivery_tool_definitions(definitions, run_context)
         definitions = self._filter_workspace_tool_definitions(definitions, run_context)
-        if self._is_enterprise_tool_allowed("publish_artifacts", run_context):
+        if self._is_artifact_delivery_tool_allowed("publish_artifacts", run_context):
             publish_definition = self._get_tool_definition("publish_artifacts")
             if publish_definition and not any(
                 (item.get("function") or {}).get("name") == "publish_artifacts"
@@ -3026,31 +3083,29 @@ class SkillManager:
     def _normalize_run_context_for_tools(self, run_context):
         return run_context if isinstance(run_context, dict) else {}
 
-    def _is_enterprise_im_run_context(self, run_context):
+    def _artifact_delivery_mode_for_run_context(self, run_context):
         ctx = self._normalize_run_context_for_tools(run_context)
-        enterprise_channels = {"feishu", "dingtalk", "wecom"}
-        return (ctx.get("im_provider") or "").strip().lower() in enterprise_channels or (
-            (ctx.get("channel") or "").strip().lower() in enterprise_channels
-        )
+        provider_id = (ctx.get("im_provider") or ctx.get("channel") or "").strip().lower()
+        return provider_artifact_delivery_mode(provider_id)
 
-    def _is_enterprise_tool_allowed(self, name, run_context):
+    def _is_artifact_delivery_tool_allowed(self, name, run_context):
         if name != "publish_artifacts":
             return True
-        return self._is_enterprise_im_run_context(run_context)
+        return self._artifact_delivery_mode_for_run_context(run_context) != ARTIFACT_DELIVERY_NONE
 
-    def _filter_enterprise_tool_results(self, results, run_context):
+    def _filter_artifact_delivery_tool_results(self, results, run_context):
         filtered = []
         for item in results or []:
-            if self._is_enterprise_tool_allowed(item.get("name"), run_context):
+            if self._is_artifact_delivery_tool_allowed(item.get("name"), run_context):
                 filtered.append(item)
         return filtered
 
-    def _filter_enterprise_tool_definitions(self, definitions, run_context):
+    def _filter_artifact_delivery_tool_definitions(self, definitions, run_context):
         filtered = []
         for item in definitions or []:
             function = item.get("function") if isinstance(item, dict) else None
             name = function.get("name") if isinstance(function, dict) else ""
-            if self._is_enterprise_tool_allowed(name, run_context):
+            if self._is_artifact_delivery_tool_allowed(name, run_context):
                 filtered.append(item)
         return filtered
 
@@ -3124,7 +3179,7 @@ class SkillManager:
             return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not a read-only tool."}
         if not self._is_tool_allowed_by_skill_scope(resolved_name, run_context):
             return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not allowed for this agent profile."}
-        if not self._is_enterprise_tool_allowed(resolved_name, run_context):
+        if not self._is_artifact_delivery_tool_allowed(resolved_name, run_context):
             return {"ok": False, "name": resolved_name, "record": record, "error": f"Tool '{resolved_name}' is not available in this run context."}
         run_mode = (run_context or {}).get("mode")
         if not self.tool_registry.is_allowed(resolved_name, run_mode):

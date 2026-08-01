@@ -10,6 +10,8 @@ This skill is dedicated to skill engineering tasks only.
 
 ## When to Use
 
+Use this Skill only when the user explicitly asks to create, modify, import, or install a Skill. Do not invoke it merely because the current task might be reusable later.
+
 - Create a new skill from scratch.
 - Update an existing skill's code or documentation.
 - Install a standard Agent Skill package into the user AI skill directory.

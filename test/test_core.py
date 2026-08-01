@@ -1226,6 +1226,12 @@ class _PromptSkillManagerStub:
         return ""
     def get_skill_display_name(self, skill_name):
         return skill_name
+    def get_tools_for_skill(self, _skill_name):
+        return []
+    def get_tool_record(self, _tool_name):
+        return None
+    def get_skill_of_tool(self, _tool_name):
+        return None
 
 class TestInteractionService(unittest.TestCase):
     def setUp(self):
@@ -1558,19 +1564,25 @@ class TestAgentSystemPrompt(unittest.TestCase):
                 {"role": "user", "content": "hello"},
             ]
             runtime_prompt = worker._build_runtime_context_prompt(
-                current_messages=current_messages[1:],
-                runtime_snapshot={"version": "3.a", "python_exe": "python-a.exe"},
-                sandbox_snapshot={
+                {
                     "python": {"available": True, "version": "3.a", "path": "python-a.exe"},
                     "node": {"available": False},
                     "bash": {"available": False},
-                },
+                    "available_packages": ["stale-package"],
+                    "missing_packages": ["another-stale-package"],
+                }
             )
             request_messages = worker._build_request_messages(current_messages, runtime_prompt)
 
             self.assertEqual(request_messages[0]["content"], current_messages[0]["content"])
             self.assertEqual(request_messages[-1]["role"], "system")
             self.assertIn("# 当前运行状态", request_messages[-1]["content"])
+            self.assertIn("应用 Python 路径:", runtime_prompt)
+            self.assertIn("沙盒 Python 版本: 3.a", runtime_prompt)
+            self.assertIn("Node.js 不随应用分发", runtime_prompt)
+            self.assertNotIn("JavaScript、JSON 和前端脚本可优先使用", runtime_prompt)
+            self.assertNotIn("运行时库检测", runtime_prompt)
+            self.assertNotIn("stale-package", runtime_prompt)
             self.assertEqual(len(current_messages), 2)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1588,6 +1600,28 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertNotIn("当前日期", first)
             self.assertNotIn("当前可用工具清单（仅以下工具真正暴露给你，可直接调用）", first)
+            self.assertNotIn("JavaScript、JSON 和前端脚本可优先使用", first)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_clarification_count_is_dynamic_not_cached_in_stable_prompt(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            snapshot = {
+                "python": {"available": True, "version": "3.test", "path": "python.exe"},
+                "node": {"available": False},
+                "bash": {"available": False},
+            }
+            stable_prompt = worker._build_stable_system_prompt()
+            worker.run_context["clarify_round_count"] = 1
+            first_runtime = worker._build_runtime_context_prompt(snapshot)
+            worker.run_context["clarify_round_count"] = 2
+            second_runtime = worker._build_runtime_context_prompt(snapshot)
+
+            self.assertNotIn("当前任务已澄清", stable_prompt)
+            self.assertIn("当前任务已澄清 1/3 轮", first_runtime)
+            self.assertIn("当前任务已澄清 2/3 轮", second_runtime)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1629,6 +1663,55 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertNotIn("runtime_context_hash", events[0])
             self.assertNotIn("tools_hash", events[0])
             self.assertNotIn("message_prefix_hash", events[0])
+            self.assertEqual(events[1]["type"], "tool_exposure")
+            self.assertEqual(
+                set(events[1]["groups"]),
+                {
+                    "core_builtin_direct",
+                    "session_selected",
+                    "tool_search_discovered",
+                    "other_direct",
+                },
+            )
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_prompt_observability_reports_tool_exposure_sources(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+
+            class SkillManagerStub(_PromptSkillManagerStub):
+                def get_tools_for_skill(self, skill_name):
+                    return ["browser_skill_cli"] if skill_name == "browser-automation" else []
+
+                def get_tool_record(self, tool_name):
+                    if tool_name == "bash":
+                        return {"source_kind": "core_builtin"}
+                    return {"source_kind": "optional"}
+
+                def get_skill_of_tool(self, tool_name):
+                    return "command-tools" if tool_name == "bash" else "browser-automation"
+
+            worker.skill_manager = SkillManagerStub()
+            worker.run_context["selected_skill_names"] = ["browser-automation"]
+            worker.discovered_tool_names = {"browser_skill_cli"}
+            worker.tools = [
+                {"type": "function", "function": {"name": "bash"}},
+                {"type": "function", "function": {"name": "browser_skill_cli"}},
+            ]
+            events = []
+            worker.observability_signal = type(
+                "_Signal",
+                (),
+                {"emit": lambda _self, payload: events.append(payload)},
+            )()
+
+            worker._emit_prompt_observability("stable", "runtime", [])
+
+            exposure = next(event for event in events if event.get("type") == "tool_exposure")
+            self.assertEqual(exposure["groups"]["core_builtin_direct"], ["bash"])
+            self.assertEqual(exposure["groups"]["session_selected"], ["browser_skill_cli"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1643,17 +1726,15 @@ class TestAgentSystemPrompt(unittest.TestCase):
             worker.skill_manager = _PromptSkillManagerStub()
             worker.config_manager = _DaemonConfigStub(temp_dir)
             prompt = worker._build_system_prompt(
-                current_messages=[],
-                runtime_snapshot={"version": "3.test", "python_exe": "python.exe"},
-                sandbox_snapshot={
+                {
                     "python": {"available": True, "version": "3.test", "path": "python.exe"},
                     "node": {"available": False},
                     "bash": {"available": False},
-                },
+                }
             )
 
-            self.assertLess(prompt.index("策略 [技能创建]:"), prompt.index("# 当前运行状态"))
-            self.assertLess(prompt.index("策略 [元工具导航]:"), prompt.index("当前运行模式: execution"))
+            self.assertLess(prompt.index("策略 [持久化]:"), prompt.index("# 当前运行状态"))
+            self.assertLess(prompt.index("策略 [能力暴露]:"), prompt.index("当前运行模式: execution"))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -1668,34 +1749,38 @@ class TestAgentSystemPrompt(unittest.TestCase):
                 {"type": "function", "function": {"name": "workspace_list_files"}},
                 {"type": "function", "function": {"name": "text_file_read"}},
                 {"type": "function", "function": {"name": "run_python_code"}},
+                {"type": "function", "function": {"name": "run_node_code"}},
             ]
             worker.parent_agent_id = ""
             worker.skill_manager = _PromptSkillManagerStub()
             worker.config_manager = _DaemonConfigStub(temp_dir)
 
             prompt = worker._build_system_prompt(
-                current_messages=[],
-                runtime_snapshot={"version": "3.test", "python_exe": "python.exe"},
-                sandbox_snapshot={
+                {
                     "python": {"available": True, "version": "3.test", "path": "python.exe"},
                     "node": {"available": True, "version": "20.test", "path": "node.exe"},
                     "bash": {"available": False},
-                },
+                }
             )
 
             self.assertIn("能力分层", prompt)
             self.assertIn("ai_skills", prompt)
-            self.assertIn("默认关闭的可选插件", prompt)
+            self.assertIn("可选能力", prompt)
+            self.assertIn("核心内置 Tool 已直接出现在当前工具清单", prompt)
+            self.assertIn("不要先用 'tool_search' 搜索这些内置 Tool", prompt)
             self.assertIn("workspace_list_files", prompt)
             self.assertIn("只列工作区路径", prompt)
             self.assertIn("text_file_read", prompt)
             self.assertIn("只处理普通文本文件", prompt)
             self.assertIn("document-reader", prompt)
             self.assertIn("document_read", prompt)
-            self.assertIn("写入这些格式没有固定工具", prompt)
+            self.assertIn("实际生成工具或运行时库", prompt)
             self.assertIn("run_python_code", prompt)
-            self.assertIn("file_read", prompt)
+            self.assertIn("当前用户环境已检测到 Node.js（node.exe）", prompt)
+            self.assertIn("JavaScript、JSON 和前端脚本可优先使用 'run_node_code'", prompt)
             self.assertIn("当前可用工具清单", prompt)
+            self.assertNotIn("默认关闭的可选插件", prompt)
+            self.assertNotIn("运行时库检测", prompt)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

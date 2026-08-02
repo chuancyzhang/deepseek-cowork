@@ -1,13 +1,42 @@
-# DeepSeek Cowork 技术设计：从 Agent Loop 到桌面运行时
+# DeepSeek Cowork 技术设计
 
 当前应用版本：**5.1.0**
 
-这份文档不先罗列模块，而从一个最小 Agent Loop 开始。每一节只增加当前
-实现中真实存在的一层能力，最后得到 Cowork 的完整运行模型。
+本文描述当前源码中长期成立的运行模型。发布流水账放在
+[5.1.0 发布说明](releases/5.1.0.md)，Skill 包格式和安装流程放在
+[Skill 系统](skill-system.md)。
 
-## 1. 第一层：最小循环
+## 1. 架构目标与不变量
 
-一个能调用工具的 Agent，底层可以简化为：
+Cowork 的技术设计围绕五个不变量：
+
+1. **单一循环**：本地对话、daemon、自动化、子 Agent 和企业消息最终都创建同一种 `LLMWorker`。
+2. **单一执行面**：所有模型动作通过 Tool Registry 注册、校验、执行并回填。
+3. **明确上下文**：模型、工作区、能力、记忆和运行模式在提交时形成不可混淆的 run context。
+4. **先记录再投影**：协议消息、恢复日志和 SQLite 是事实；聊天卡片、观测和文件抽屉是 UI 投影。
+5. **失败外显**：工作区、依赖、协议、保存或构建失败显示根因，不用隐藏能力或静默降级掩盖问题。
+
+```mermaid
+flowchart TB
+    E["PySide6 UI / 自动化 / 企业消息"] --> RC["Run Context"]
+    RC --> W["LLMWorker / Agent Loop"]
+    CAT["Skill Catalog Snapshot"] --> W
+    MEM["记忆与经验"] --> W
+    W <--> P["Provider Adapter"]
+    W <--> TR["Tool Registry"]
+    TR --> BI["核心内置 Tool"]
+    TR --> SK["Skill Tool / Script"]
+    TR --> MCP["MCP Tool"]
+    TR --> UX["用户交互"]
+    W --> OBS["UI 事件与 Observability"]
+    W --> SAVE["恢复日志 + Save Queue + SQLite"]
+```
+
+## 2. Agent Loop 与协议消息
+
+### 2.1 最小循环
+
+一个可调用 Tool 的最小循环是：
 
 ```python
 messages = [user_message]
@@ -15,7 +44,6 @@ messages = [user_message]
 while True:
     response = model.generate(messages, tools)
     messages.append(response)
-
     if not response.tool_calls:
         return response.content
 
@@ -24,32 +52,13 @@ while True:
         messages.append(tool_result(call.id, result))
 ```
 
-循环只有一个关键约束：Tool 的真实结果必须回到消息序列，模型才能基于
-结果继续推理。Tool 的调用与结果回填属于对话协议本身。
+关键约束不是循环形式，而是 Tool 的真实结果必须进入消息序列。模型只能基于已
+发生的结果继续判断，历史也只有保留这条关系才能恢复。
 
-```mermaid
-flowchart LR
-    U["用户消息"] --> M["模型"]
-    M -- "最终回答" --> O["结束"]
-    M -- "tool_calls" --> T["执行 Tool"]
-    T -- "tool result" --> M
-```
+### 2.2 流式、多 Tool 与 `tool_call_id`
 
-在 Cowork 中，这个循环的核心位于 `core/agent.py` 的 `LLMWorker`。后续
-能力都围绕它扩展，没有替换这个基本结构。
-
-## 2. 第二层：流式响应、多工具与标准消息
-
-真实模型不会总是一次返回完整对象。Cowork 需要在流式事件中分别累积：
-
-- 正文增量；
-- reasoning 增量；
-- Tool 名称；
-- 分段到达的 JSON 参数；
-- token 用量和 Provider 错误。
-
-参数收集完成后，运行时重建标准 Tool Call。一次响应可以包含多个调用，
-消息顺序必须保持：
+Provider 流式返回正文、reasoning、Tool 名、分段 JSON 参数、用量和错误。
+`LLMWorker` 聚合完整调用后，保持标准顺序：
 
 ```text
 assistant(tool_calls)
@@ -58,470 +67,356 @@ tool(tool_call_id=B)
 assistant(next response)
 ```
 
-`tool_call_id` 让 UI 可以把“开始执行”和“收到结果”更新到同一张工具卡，
-也让 Provider 能确认每个结果对应哪个调用。历史恢复时，投影层也依赖这套
-标准顺序重建同一轮中的思考、阶段回复、工具和最终回答。
+`tool_call_id` 同时承担三项职责：把结果配对到调用、更新同一张 UI Tool 卡、让
+恢复后的协议消息仍能跨 Provider 适配。
 
-## 3. 第三层：统一 Tool Registry
+同一轮若连续三次生成完全相同的 Tool 签名，循环停止并要求模型检查现有结果，
+避免空转。
 
-仅有 `execute_tool(name, args)` 无法支持权限、发现和调试。Cowork 使用
-`core/tool_registry.py` 为 Tool 建立统一记录：
+## 3. Provider、Responses 与请求上下文
 
-- 名称、描述和参数 Schema；
-- 是否只读；
-- 是否具有破坏性；
-- 是否需要用户交互；
-- 所属 Skill、实现类型和搜索提示；
-- 来源类别（`core_builtin`、`optional`、`user_extension`、`mcp`）；
-- 当前是否可直接调用。
+### 3.1 Provider 边界
 
-```mermaid
-flowchart TB
-    R["Tool Registry"] --> B["基础 Tool"]
-    R --> S["Skill Tool / Script"]
-    R --> M["MCP Tool"]
-    R --> I["用户交互 Tool"]
-    B --> L["同一个 Agent Loop"]
-    S --> L
-    M --> L
-    I --> L
-```
-
-应用随包 `skills/` 根目录中的核心内置 Tool 在符合运行模式、工作区、渠道和
-权限边界时全部直接进入首轮 Tool Schema，不经过 `tool_search`。来源由目录
-注册信息确定，不能只看文件夹名称，因此用户目录中的同名 Skill 不会被误判
-为核心内置能力。`ai_skills/`、用户扩展和 MCP 继续采用选择或延迟发现。
-
-这就是技术层面的 Everything is Tool：可执行动作共享注册、调用、权限、
-日志和结果协议。
-
-## 4. 第四层：Tool Search、Skill 与经验
-
-Skill 不构成第二套执行协议。`core/skill_manager.py` 把 Skill 解释为围绕
-Tool 的结构化经验包：
-
-- `SKILL.md` 提供工作流和边界；
-- `skill.json` 提供发现、配置和运行元数据；
-- `tool_refs` 指向可调用 Tool；
-- `script_entries` 通过 `run_skill_script` 进入统一执行面；
-- `experience/entries.jsonl` 保存结构化经验；
-- `references/` 提供按需加载的长资料。
-
-模型可以直接调用当前清单中的核心内置 Tool，不应先搜索。只有任务需要当前
-未暴露的已启用可选能力、用户扩展或 MCP 时才调用 `tool_search`。搜索结果可
-让延迟 Tool 在下一轮可见，也可以命中相关 Skill；当前会话显式选择的
-`ai_skills/` 会在首轮直接暴露。Agent 随后把相应指导作为新的系统上下文追加
-到下一次模型请求；用户可见历史保持不变。
-
-```mermaid
-sequenceDiagram
-    participant L as Agent Loop
-    participant R as Tool Registry
-    participant S as Skill Manager
-    participant M as Model
-    L->>M: 核心内置 Tool + 当前上下文
-    M->>L: tool_search("browser")
-    L->>R: 搜索延迟 Tool
-    R->>S: 匹配 Skill 与经验摘要
-    S-->>L: Tool Schema + 按需指导
-    L->>M: 下一次请求加入新能力
-```
-
-经验默认只提供摘要。只有 Skill 明确命中或被用户选择时，运行时才物化完整
-指导、经验条目或参考资料。`disclosed_skills` 使用内容哈希避免同一轮重复
-注入。
-
-## 5. 第五层：执行安全与依赖
-
-基础循环现在能找到很多 Tool，但仍需控制“能否执行”。
-
-### 工作区边界
-
-每个会话都有明确 `workspace_dir`。独立聊天使用会话专属目录，项目聊天
-绑定项目路径。文件 Tool、脚本和交付物扫描都以当前会话工作区为边界。
-
-### 普通文本读取与补丁提交
-
-模型可见的普通文本内容接口收敛为 `text_file_read` 和 `apply_patch`。
-`glob` 只发现路径，`grep` 只定位匹配行；二者都不能代替完整有序读取。
-`text_file_read` 对单文件限制 10 MiB，按 Unicode BOM 或 UTF-8 严格解码，
-其他编码必须显式指定。只有从首行开始且不分页的完整读取，才会在会话上下文
-记录 SHA-256、字节数、`mtime_ns`、编码、BOM 与换行风格；后续修改以内容哈希
-而不是时间戳判断读取凭据是否仍有效。
-
-`apply_patch(patch: string)` 在 OpenAI-compatible、DeepSeek 和 Anthropic 中都以
-标准函数 Schema 暴露。补丁使用 `Begin Patch`、`Add/Update/Delete File`、
-`Move to`、精确上下文 hunk 与 `End of File` 语法，输入上限 12 MiB、单次最多
-100 个文件。新增文件固定为 UTF-8/LF；已有内容必须先取得完整读取凭据，hunk
-只做唯一、逐字符精确匹配，不进行空白或 Unicode 模糊归一化。纯移动继续走
-重命名语义，带内容修改的移动仍受读取审计约束；Office/PDF 路径在预检阶段
-直接拒绝。
-
-路径解析同时检查词法绝对路径和 `realpath`。普通模式拒绝工作区外路径与通过
-符号链接或目录联接产生的逃逸；所有写路径都拒绝经过重解析点。God Mode 保留
-既有的工作区外授权，但不放宽重解析点写入和 UNC 禁令。`glob`、`grep` 使用
-相同解析入口并剪枝重解析点；无法读取或严格解码的文件通过 `warnings` 和
-`skipped_count` 外显。
-
-工作区绑定不参与 Tool Schema 可见性判断。文件与命令工具在 project、chat-only、
-已绑定和未绑定状态下都进入当前可用工具清单；未绑定时若实际调用，由 Handler
-返回明确的 `workspace_not_selected`，不得通过预先隐藏工具制造能力缺失的假象。
-
-补丁执行分为完整解析与预检、聚合删除确认、按补丁顺序提交三个阶段。预检
-失败以及删除拒绝/超时都保证零修改；提交使用目标同目录临时文件，已有文件
-通过 `os.replace` 原子替换，新增文件使用拒绝覆盖的原子 rename/link 提交。
-跨文件不伪装成事务：运行期 I/O 失败返回
-`partial_apply`，分别列出已完成、失败与待处理项。诊断只记录
-`start/preflight/confirm/commit/finish/error` 状态和计数，不记录文件内容或
-补丁正文。
-
-### 用户交互
-
-- `request_user_input` 收集文本、单选、多选或问卷。
-- `request_user_approval` 承担需要明确授权的动作。
-- UI 把请求呈现在来源会话内，成功后通过 resolver 或 daemon 响应通道返回。
-- 提交失败时输入保留，不能把失败当成用户已同意。
-
-### 并行只读
-
-`parallel_tools` 只接受已经可见、彼此独立且标记为只读的 Tool。写文件、
-命令、审批、用户输入、经验更新和子 Agent 管理不会进入这条并行路径。
-
-### Skill 依赖
-
-`DependencyCoordinator` 在 Tool 首次实际调用前准备 Skill 声明的 Python
-或 Node 依赖。相同依赖哈希共享 single-flight；成功和失败都会持久化。
-失败不会在后续会话静默重试，必须由用户显式重试或依赖声明变化触发。
-
-### 防止空转
-
-同一轮如果连续三次出现完全相同的 Tool 签名，循环停止并提示模型检查已有
-结果，避免 Tool 已经返回但模型继续重复调用。
-
-## 6. 第六层：可干预、可停止、可观察
-
-桌面 Agent 不能是一个不可中断的后台函数。`LLMWorker` 增加了：
-
-- 暂停与继续；
-- 显式停止；
-- 运行中补充引导；
-- Provider、参数和 Tool 错误外显；
-- step、thinking、message、tool、usage 和 observability 事件。
-
-运行中引导不会强行中断正在执行的 Tool。它先进入待处理队列，在下一个安全
-节点追加为新的用户消息，并关闭前一 AI 轮次容器。UI 因而能准确显示
-“完成当前步骤后应用”和“已应用”。
-
-Observability 与消息历史分离。稳定系统提示、动态上下文、Skill 披露、
-Tool 调用和运行状态可以进入任务观测，但 UI 专用字段不会发送给模型。Worker
-会在首轮以及 Tool 暴露集合发生变化时发送独立的 `tool_exposure` 观测事件，按
-核心内置直出、会话显式选择、`tool_search` 发现和其他直出分组记录当前 Tool；
-相同集合不重复刷屏，取消内置搜索步骤也不会丢失能力暴露轨迹。
-
-应用内轻量反馈统一投影为主内容区右上角下方的主题化 Toast，最多显示三条并
-向下堆叠，避开 Windows 原生窗口按钮。系统托盘通知属于独立的 Windows
-通知链路，使用稳定的 `deepseek.cowork` AppUserModelID，不把版本号或设备
-编号暴露为通知来源名称。
-
-## 7. 第七层：模型协议与请求上下文
-
-当前会话保存“下一轮使用什么模型”，提交时把完整模型配置快照写入
-`run_context`。运行中切换模型只影响下一轮，不改变已经启动的 Worker。
-
-模型层支持：
+当前模型层支持：
 
 - OpenAI-compatible Chat Completions；
 - OpenAI-compatible Responses；
 - Anthropic。
 
-Responses Provider 把消息、函数调用和函数结果转换为 typed Items，再把
-reasoning、正文、Tool 参数、用量和错误投影回统一事件。Chat Completions
-保持传统消息协议。
+Provider Adapter 只负责协议转换：把 Cowork 消息、Tool 和上下文映射为服务端
+请求，再把 reasoning、正文、函数调用、用量和错误投影回统一事件。Agent Loop
+不为某个 Provider 复制一套执行逻辑。
 
-官方 DeepSeek Responses 是无状态接口。Provider 在流结束时从完整 response
-中提取 `reasoning`、`message`、`function_call` 和 `web_search_call`，按原顺序
-写入 assistant 消息的协议元数据；下一次请求优先原样回放这些 Items。旧历史
-只有 `reasoning_content` 时会生成标准 `reasoning_text` 内容块并放在对应函数
-调用之前。工具轮缺少可恢复推理或对应函数结果时直接报出恢复方式，不裁剪
-历史继续运行。
+### 3.2 DeepSeek Responses 兼容
 
-DeepSeek Responses 请求自动暴露一个服务端 `web_search`，同时接受并去重
-`web_search_2025_08_26`。搜索状态进入任务观测，但不会进入本地函数 Tool
-执行器；服务端报告失败时同时保留并显示失败原因。该兼容层只由官方 DeepSeek
-服务地址与 Responses 协议共同触发；标准
-OpenAI Responses 仍保留既有 typed Items、Tool 和 `prompt_cache_key` 行为。
+官方 DeepSeek Responses 按无状态协议处理。流结束后，Provider 从完整 response
+提取 `reasoning`、`message`、`function_call` 和 `web_search_call`，按原顺序写入
+assistant 消息的协议元数据；下一次请求优先原样回放这些 Items。
 
-系统提示分为两部分：
+兼容层同时处理：
 
-- **稳定前缀**：长期安全策略、Tool 使用规则、交互约束以及 Worker 创建时冻结
-  的长期记忆摘要；
-- **动态上下文**：工作区、运行模式、日期、一次性运行时快照、当前 Tool、澄清
-  轮次、显式选择的 Skill 和本次工作流。
+- 旧历史中的 `reasoning_content` 转换为标准 reasoning 内容块；
+- Tool 轮缺少可恢复推理或函数结果时明确报错，不裁剪历史继续；
+- 自动提供并去重服务端 `web_search` / `web_search_2025_08_26`；
+- 服务端搜索状态与失败原因进入任务观测，不进入本地函数执行器；
+- 官方 DeepSeek Responses 不发送 `prompt_cache_key`，标准 OpenAI Responses 保持原行为。
 
-每个 Worker 只探测一次沙盒 Python、用户环境 Node.js 和 Bash 的可用性、版本
-与路径，并把应用 Python 与沙盒解释器明确分开。系统上下文不再维护静态 Python 包
-“可用/缺失”清单；包与 Skill 依赖只在实际调用时由 Tool、Skill Handler 和
-`DependencyCoordinator` 验证，避免全局清单与隔离依赖环境漂移。
+该分支只由官方 DeepSeek 服务地址与 Responses 协议共同触发，避免对其他兼容
+服务误用 DeepSeek 回放规则。
 
-Node.js 不随应用分发。稳定提示不预设 `run_node_code` 可执行；动态上下文只有
-在当前用户环境的运行时快照同时确认 Node.js 可用且路径可解析时，才建议用它
-处理 JavaScript、JSON 或前端脚本。Tool Schema 暴露与外部运行时已安装是两个
-独立状态，未检测到 Node.js 时必须先暴露缺失并进入用户确认的安装或配置流程。
+### 3.3 后训练调用偏好与 Responses 协议兼容准备
 
-标准 Responses 请求使用稳定的会话级 `prompt_cache_key`；官方 DeepSeek
-Responses 使用服务端自动管理的上下文缓存，不发送这个参数。自动命中的 Skill
-上下文只参与当前轮，不持久化到历史，减少后续请求前缀漂移。
+5.1.0 将“核心 Tool 首轮直出、可选 Tool 按需发现、稳定函数 Schema、完整文本
+读取凭据、标准 `apply_patch`”收敛为一个确定动作空间，并补齐 DeepSeek Responses
+的 reasoning、函数调用和服务端搜索回放。这是为 DeepSeek V4 Flash 正式版及
+后续 V4 Pro 正式版的**后训练调用偏好和 Responses 协议兼容**做准备；具体模型
+是否可用、何时上线仍由模型服务决定。
 
-## 8. 第八层：daemon、自动化与子 Agent
+### 3.4 稳定前缀与动态上下文
 
-本地 Worker 和 daemon 使用同一运行语义。daemon 负责后台连接、流式事件和
-跨界面存活，但实际任务仍创建同一种 `LLMWorker`。
+系统提示分两层：
 
-自动化保存提示词、计划、引用 Skill 和可选 Agent：
+- **稳定前缀**：安全策略、Tool 规则、交互约束和 Worker 创建时冻结的长期记忆摘要。
+- **动态上下文**：工作区、运行模式、日期、模型、当前 Tool、显式 Skill、澄清轮次和一次性运行时快照。
 
-```text
-计划触发
-  → 组装 prompt + skill_names + agent_profile
-  → 创建会话运行上下文
-  → 进入同一个 Agent Loop
-  → 记录运行历史
-```
+每个 Worker 只探测一次应用 Python、沙盒 Python、用户 Node.js 与 Bash 的可用性、
+版本和路径。系统不生成全局 Python 包清单；Skill 依赖在真正调用时验证，避免
+全局静态状态与隔离环境漂移。
 
-`SessionAgentManager` 为子任务创建独立运行记录、上下文和事件流，底层
-继续复用 Tool、Agent Loop 和模型协议。主对话只接收需要
-回传的结果；完整过程留在观测界面和诊断日志。
+## 4. Tool Registry、Skill 与能力暴露
 
-## 9. 第九层：持久化与 UI 投影
+### 4.1 统一注册记录
 
-模型协议消息与界面状态采用两套数据结构。
+`core/tool_registry.py` 为每个 Tool 保存：
 
-### 协议消息
+- 名称、描述和参数 Schema；
+- `read_only`、`destructive`、`requires_user_interaction`；
+- Skill、实现类型、搜索提示和来源类别；
+- 延迟 Handler 或 MCP 映射；
+- 当前运行模式、渠道、工作区和 Agent 能力范围下的可见性。
 
-持久化保持 OpenAI-compatible 的角色顺序：`user`、`assistant`、`tool`。
-这保证历史能够重新进入模型请求，也能跨 Provider 适配。
+来源类别为 `core_builtin`、`optional`、`user_extension` 或 `mcp`。来源由注册
+根目录决定，用户同名目录不能冒充核心能力。
 
-### 输入附件与剪贴板投影
+### 4.2 直接暴露与 `tool_search`
 
-聊天输入框按“本地文件 URL → 剪贴板位图 → 普通文本”的顺序解释 MIME。
-从 Windows 文件管理器复制的一个或多个文件会进入统一的
-`_add_prompt_files` 管线，完成路径规范化、去重、会话工作区初始化和附件
-芯片刷新；文件夹与失效路径被明确拒绝，不会退化成 `file:///...` 文本。
-网络 URL 和普通文本仍按文本粘贴。
+- 随包 `skills/` 中符合当前上下文的核心 Tool 首轮直接进入 Schema。
+- 当前会话显式选择的可选能力也在首轮进入。
+- 其他已启用可选能力、用户扩展和 MCP 由 `tool_search` 延迟发现。
+- 禁用能力不可搜索；核心 Tool 已经可见，因此不进入搜索结果。
 
-资源管理器中的图片文件与“添加文件”一样引用原始路径，不额外复制。只有
-没有本地文件 URL 的剪贴板位图才会编码为会话托管 PNG。附件持久化继续使用
-`attachments`、`content_parts` 和 `meta.user_added_files`，因此旧历史无需
-迁移。待发送区、历史消息和补充引导共用 `FileChip`；图片缩略图由该组件
-统一打开主题化大图预览，非图片附件不改变交互。
+工作区是否绑定不参与文件/命令 Tool 的 Schema 可见性判断。未绑定时调用由
+Handler 返回 `workspace_not_selected`，而不是预先隐藏 Tool 制造“模型不会”的
+假象。
 
-### UI 时间线
+Skill 指导、经验和参考资料仍按相关性渐进披露，只参与当前运行，不写入正常
+历史。`disclosed_skills` 通过内容哈希避免重复注入。
 
-会话元数据中的 `ui_timeline_v1` 保存 thinking、Tool、正文阶段和运行中引导
-的展示顺序。`group_id`、`stage_id` 和 `reply_kind` 用来构建
-`AssistantTurnGroup`。进入 Worker 前，所有 `ui_*` 字段都会被剥离。
+### 4.3 只读并行与依赖
 
-### 可靠保存
+`parallel_tools` 只接收已经可见、彼此独立且标记为只读的 Tool。写文件、命令、
+审批、用户输入、经验更新和子 Agent 管理都不能进入这条并行路径。
 
-1. 首次有效提交先写带 revision 和校验和的恢复快照。
-2. 内存会话与侧栏立即更新。
+`DependencyCoordinator` 在 Tool 首次调用前按 Skill 与依赖哈希准备隔离环境。
+相同哈希共享 single-flight；成功和失败都持久化；失败后只能由用户重试或新依赖
+哈希触发，不在新会话静默重装。
+
+## 5. 工作区与普通文本写入
+
+### 5.1 工作区边界
+
+每个会话拥有明确 `workspace_dir`：独立聊天使用会话目录，项目聊天绑定项目
+路径。文件 Tool、Skill 脚本与交付物扫描都从当前会话上下文取边界。
+
+路径解析同时检查词法路径和 `realpath`。普通模式拒绝工作区外路径、UNC 和通过
+符号链接或目录联接逃逸；所有写路径拒绝经过重解析点。扩展权限模式可以授权
+工作区外路径，但不放宽重解析点与 UNC 禁令。
+
+### 5.2 完整读取审计
+
+普通文本内容接口收敛为 `text_file_read`：
+
+- 单文件上限 10 MiB；
+- 根据 Unicode BOM 或 UTF-8 严格解码，其他编码必须显式指定；
+- 只有从首行开始且不分页的完整读取才建立审计；
+- 审计记录 SHA-256、字节数、`mtime_ns`、编码、BOM 和换行风格；
+- 修改授权以内容哈希为准，不用时间戳推测内容未变。
+
+`glob` 只发现路径，`grep` 只定位匹配行。二者剪枝重解析点，并用 `warnings` 和
+`skipped_count` 外显无法读取或严格解码的文件，不能替代完整读取。
+
+### 5.3 `apply_patch` 预检与提交
+
+`apply_patch(patch: string)` 在 OpenAI-compatible、DeepSeek 和 Anthropic 中使用
+同一个标准函数 Schema。补丁支持 Add、Update、Delete 与 Move：
+
+- 输入上限 12 MiB，单次最多 100 个文件；
+- 新文件固定为 UTF-8/LF；
+- 已有文件必须先取得完整读取凭据；
+- hunk 只做唯一、逐字符精确匹配，不模糊归一化；
+- Office/PDF 在预检阶段直接拒绝；
+- 纯移动保持重命名语义，带修改的移动仍需读取审计。
+
+执行分三阶段：完整解析与预检、聚合删除确认、按补丁顺序提交。预检失败或删除
+拒绝/超时保证零修改。已有文件通过同目录临时文件加 `os.replace` 原子替换；
+新增文件使用拒绝覆盖的原子提交。
+
+跨文件写入不伪装成事务。运行期 I/O 失败返回 `partial_apply`，分别列出已完成、
+失败和待处理项。诊断只记录 `start/preflight/confirm/commit/finish/error` 与计数，
+不记录文件内容或补丁正文。
+
+## 6. 干预、观测与 UI 事件
+
+`LLMWorker` 提供暂停、继续、停止和运行中引导。引导先进入待处理队列，在下一个
+安全节点作为新用户消息应用，不中断已经启动的 Tool。UI 因此区分“等待下一安全
+节点”“完成当前步骤后应用”和“已应用”。
+
+Worker 输出 step、thinking、message、tool、usage 和 observability 事件。
+Observability 与协议历史分离：稳定提示、动态上下文、Skill 披露和 Tool 执行可
+进入观测，但 UI 专用字段不会发送给模型。
+
+首轮及 Tool 集合变化时，Worker 发送 `tool_exposure` 事件，按核心直出、会话指定、
+`tool_search` 发现和其他直出分组。集合不变时不重复刷屏。
+
+应用内轻量反馈使用主内容区右上方的主题化 Toast，最多三条；Windows 系统通知
+使用稳定 AppUserModelID，不把版本或设备编号暴露为来源名。
+
+## 7. 持久化、历史与恢复
+
+### 7.1 两套数据结构
+
+- **协议消息**：保持 `user`、`assistant`、`tool` 角色与 Tool 往返，可重新进入模型请求。
+- **UI 时间线**：`ui_timeline_v1` 保存 thinking、Tool、阶段正文和引导的展示顺序；`ui_*` 字段进入 Worker 前全部剥离。
+
+`core/message_persistence.py` 为 UI 保存队列与 daemon 最终保存提供同一过滤规则。
+自动匹配、Tool 搜索和会话选择注入的运行时 Skill 上下文不进入长期历史；诊断
+记录输入、过滤和落库数量，避免两条保存路径分叉。
+
+### 7.2 可靠保存
+
+1. 首次有效提交写入带 revision 与校验和的恢复日志快照。
+2. 内存会话和侧栏立即更新。
 3. `ChatSaveWorker` 合并同会话待保存版本。
-4. SQLite 在同一事务中写入会话摘要与消息。
+4. SQLite 在同一事务中写入摘要与消息。
 5. 写入确认后，恢复日志才被 acknowledge。
 6. 异常退出后按消息 ID 对账，未完成运行标记为中断。
 
-UI 构造供恢复日志与保存队列共用的会话快照时，与 daemon 最终保存统一调用
-`core/message_persistence.py` 的持久化过滤规则。自动匹配、工具搜索和会话选择
-注入的运行时 Skill 上下文只服务当前 Worker，不进入长期会话；过滤发生时记录
-输入、落库和过滤数量，避免 UI 与 daemon 各自维护条件而产生消息数量分叉。
+### 7.3 历史投影
 
-### 设置保存的副作用边界
+历史在线程中读取并预分组。消息迁移与规范化完成后，主线程基于同一消息列表
+重新计算 render spans 并校验边界。最终回答优先物化；thinking、Tool 参数和结果
+只在展开后按时间预算创建。
 
-设置中心以打开页面时的结构化快照为基线，将待保存状态拆成配置、记忆和
-外观三个变更分区。配置只通过一次 `batch_save` 落盘；记忆只写入内容变化
-的作用域，聊天记录目录变化时才迁移全部记忆；外观只有在草稿、活动主题或
-预览状态变化时才提交主题仓库并刷新 Qt 运行时。
+左侧历史按项目和独立聊天分别分页；正在运行或等待输入的会话始终保留。修改
+历史消息时复用目标之前的 Widget 与阅读位置，提交失败则恢复原投影，不全量
+回放掩盖错误。
 
-本地主题提交在运行时刷新前登记当前仓库时间戳，轮询器不会把自身写入再次
-识别为外部修改。任何分区失败时只回滚本次已经触及的配置和记忆，用户输入
-与 dirty 状态继续保留，未参与保存的分区不执行 IO、备份或界面刷新。
+### 7.4 附件投影
 
-### 企业消息渠道注册与运行
+输入框按“本地文件 URL → 剪贴板位图 → 普通文本”解释 MIME。本地文件进入统一
+附件管线；文件夹与失效路径明确拒绝。没有本地文件 URL 的剪贴板位图保存为
+会话托管 PNG。待发送区、历史消息与补充引导共用 `FileChip`，图片可打开受控
+缩放预览。
 
-`core/im_gateway_registry.py` 的 `ProviderSpec` 是企业消息的单一注册源，集中
-声明渠道名称、图标、接入方式、字段、配置判定、事件类型、运行适配器和启动
-入口，并通过 `artifact_delivery_mode` 声明交付能力。飞书为 `native`，可上传
-本地文件、图片和链接；钉钉、企业微信为 `link`，只发送可访问 URL；QQ、微信
-为 `none`，不暴露 `publish_artifacts`。设置页、配置规范化、Agent Tool 可见性、
-模型渠道提示和网关运行时都读取该注册表；新增
-渠道不再复制一套选择卡、状态栏与表单分支。配置仍保持本地单账号模型，
-`enabled_providers` 最多规范化为一个值，切换渠道只改变活动标记，不删除其他
-渠道凭据。
+## 8. 文件与交付物安全编辑
 
-飞书、QQ 和微信共用 `ChannelQrDialog` 状态机，覆盖生成、等待、已扫码、手机
-确认、配对码、过期、失败、取消和重新生成。二维码由本地 `qrcode` 矩阵绘制，
-URL 与二维码令牌不写入日志。钉钉和企业微信使用注册表生成的分步表单，技术
-字段通过高级设置渐进披露；提交、启动、运行、重连、停止、完成与错误写入同一
-诊断日志，并在最终写入前统一脱敏 URL、Secret、Token、OpenID 和用户标识。
+`core/deliverable_editing.py` 是与 Qt 解耦的编辑内核，定义格式注册、兼容预检、
+编辑会话、快照转换、冲突检测、备份和保存结果。UI 只投影状态并调度 Worker。
 
-QQ 运行时直接复用腾讯官方 `qqbot-agent-sdk` 的扫码、Token、WebSocket
-心跳、自动重连、Resume、事件解析与 `send_text`。微信由独立 Python iLink
-适配器调用 `get_bot_qrcode`、`get_qrcode_status`、`getupdates` 和
-`sendmessage`，保存并回传长轮询游标；只接受腾讯微信 HTTPS 连接地址。
-`getupdates` 或回复请求返回会话过期时会取消正在进行的长轮询、停止网关并
-提示重新扫码。WeKnora 只用于核对接入行为，不是运行依赖，也未复用其 UI、
-架构或代码。Windows 打包前必须在执行 PyInstaller 的同一个 `.venv` 中安装
-`requirements.txt`；其中 `mcp[cli]` 提供分析 MCP CLI 模块所需的 Typer，
-`qqbot-agent-sdk` 则作为必需构建依赖由 spec 显式校验。
+### 8.1 格式边界
 
-### 外部组件进程隔离
+| 类型 | 当前行为 |
+| --- | --- |
+| DOCX | 编辑正文；普通单节、无关系资源的页眉页脚冻结后原样接回 |
+| XLSX | 编辑值、公式、常用格式、合并和行列结构 |
+| HTML | 隔离编辑 body，原始 head 保持权威，脚本不执行 |
+| CSV/TSV | 使用表格快照，限制为单表并保留引号语义 |
+| Markdown/JSON/XML/YAML/文本 | 文本编辑；结构化格式保存前严格解析 |
+| PDF/PPTX/图片/旧版 Office | 只读 |
 
-BrowserSkill CLI 安装在应用数据目录，属于外部程序而不是随包 helper。Windows
-冻结态通过 `core.process_utils.popen_external_program()` 启动这类进程：在进程
-创建锁内临时调用 `SetDllDirectoryW(NULL)`，并从子进程 `PATH` 中移除
-`sys._MEIPASS` 下的目录；`CreateProcess` 返回后立即把主进程 DLL 搜索目录恢复
-为 `sys._MEIPASS`。这样 `bsk daemon` 不会加载发布目录 `_internal` 中的
-`VCRUNTIME140.dll`，应用退出后也不会因外部守护进程继续占用旧发布目录而阻止
-下一次 PyInstaller `COLLECT`。随包 helper 仍使用普通启动路径，不套用此外部
-程序隔离规则。
+修订、内容控件、域、嵌入对象、复杂页眉页脚、图表、数据透视表、外部链接等会
+阻止 Office 编辑。DOCX/XLSX 上限 25 MiB，HTML/文本/CSV/TSV 上限 10 MiB，
+并限制图片、工作表和有效单元格规模。
 
-### 延迟渲染
+### 8.2 状态与保存
 
-历史加载在线程中读取和预分组；主线程完成历史迁移与消息规范化后，必须基于
-规范化后的同一消息列表重新计算 render spans，并校验所有区间没有越界。诊断
-日志同时记录原始/规范化消息数、区间数和最大结束位置。首屏优先物化最终回答；
-思考、Tool 参数和结果在用户展开后按时间预算分批创建，避免长历史阻塞 Qt 主线程。
+状态机覆盖 `loading → ready/dirty → saving`，以及 `conflict`、`blocked`、
+`failed` 和 `restoring`。切换文件、项目、会话、退出编辑和关闭应用共用同一
+未保存守卫。
 
-### 文件与交付物安全编辑
+保存顺序：
 
-`core/deliverable_editing.py` 是与 Qt 解耦的编辑内核，统一定义
-`EditorDescriptor`、`CompatibilityReport`、`EditSession` 和 `SaveResult`。
-格式注册、预检、编码判断、Office/表格快照转换、HTML 安全 DOM 补丁与还原、严格
-文本校验、冲突检测、备份和原子保存都在这一层完成。UI 只投影状态并调度
-后台 Worker，不复制格式规则。
+1. 在源文件同目录写临时文件并重新解析验证。
+2. 把当前源文件复制为应用数据目录中的唯一上一版备份。
+3. 写备份元数据，以 `os.replace` 原子替换源文件。
+4. 任一步失败都保留编辑会话、用户内容与原文件。
 
-编辑状态机覆盖 `loading → ready/dirty → saving`，以及 `conflict`、
-`blocked`、`failed` 和 `restoring`。文件、项目、会话和应用退出共享同一
-未保存修改守卫。保存前重新计算 SHA-256；源文件与会话基线不一致时不能
-覆盖，只能重新载入或另存为。
+保存前重新计算 SHA-256；外部内容变化时禁止覆盖，只允许重新载入或另存为。
 
-保存事务按以下顺序执行：
-
-1. 在源文件同目录写入临时文件并重新解析验证。
-2. 将当前源文件复制到应用数据目录中的唯一上一版备份。
-3. 写入备份元数据并以 `os.replace` 原子替换源文件。
-4. 任一步失败都保留编辑会话、用户内容与原文件，并返回结构化错误。
-
-DOCX 和 XLSX 的 ZIP 结构会先做无解压炸弹预算检查，再检查修订、内容控件、
-域、嵌入对象、复杂页眉页脚、图表、数据透视表、外部链接等阻断特征。DOCX
-插件只导入正文；对于单节、默认类型且不带关系资源的普通页眉页脚，预检会
-冻结其 OOXML 部件和节属性，导出后分配新的关系 ID 与无冲突部件名再接回，
-并重新解析成品。多节、首页/奇偶页专用或包含图片、链接的页眉页脚继续阻断。
-DOCX/XLSX 限制 25 MiB，HTML/文本/CSV/TSV 限制 10 MiB，并额外限制图片、
-工作表和有效单元格规模。HTML 编辑页不执行源文档脚本；危险节点替换为
-不可编辑占位，保存时必须逐一还原且不得丢失。
+### 8.3 离线编辑器
 
 富编辑器复用一个延迟创建的 `QWebEngineView`，通过 `QWebChannel` 与 Python
-通信；DOCX 等二进制使用有总量和分块数量上限的分块协议。退出编辑后销毁
-文档模型。Canvas Editor `0.9.137` 与 DOCX 插件 `0.0.6`、Univer `0.25.1`
-分别构建为离线 bundle，运行时没有 Node 或 CDN 依赖。WebEngine 禁止远程
-访问和剪贴板脚本，页面使用严格 CSP。主题由 `DesignTokens` 转为受控 CSS
-变量，因此安全主题预览仍能隔离、取消且不会改写已保存主题。
+通信。Canvas Editor、DOCX 插件与 Univer 构建为离线 bundle，运行时不依赖 Node
+或 CDN。页面使用严格 CSP，禁止远程访问和剪贴板脚本；主题只经受控 CSS 变量
+进入编辑器外壳，预览仍可隔离和取消。
 
-编辑器资源不进入启动导入图。当前静态资源实测 12.14 MiB 解压、2.99 MiB
-压缩；发布审计硬限制为 30/10 MiB，并拒绝 `node_modules`、源码映射、远程
-脚本和缺失许可证。WebEngine 冒烟在独立进程中验证三类编辑器离线加载和
-往返协议，窗口截图覆盖 Windows 100%、125% 和 150% 缩放。开发态从项目根
-目录读取这些资源；PyInstaller 冻结态必须从 `sys._MEIPASS`（onedir 包中的
-`_internal`）读取，EXE 同级目录只用于可执行文件与便携数据判定，不能作为
-随包只读资源根目录。
+## 9. 后台运行时与外部连接
 
-内置 Skill 的 `impl.py` 以数据文件形式由 `SkillManager` 动态导入，不进入
-PyInstaller 的静态 import graph。构建 spec 因此会解析 `skills/` 与
-`ai_skills/` 下每个 `impl.py`，把其直接导入的 `core.*` 模块统一加入
-`Analysis.hiddenimports`；解析或读取失败会直接中止构建。这样新增
-`core.apply_patch`、`core.filesystem_ops` 一类 Skill 运行时依赖时，不会出现
-源码可用、冻结包中整组 Tool 静默消失的情况。构建日志会输出最终收集到的
-模块列表，并把工作区工具所需模块缺失视为构建错误。
+### 9.1 daemon、自动化与子 Agent
 
-## 10. 当前完整循环
+daemon 负责后台连接、流式事件与跨页面存活，任务仍创建同一种 `LLMWorker`。
 
-把前面的层次合并后，当前实现可以概括为：
+```text
+计划触发
+  → prompt + skill_names + agent_profile
+  → run context
+  → Agent Loop
+  → 运行历史
+```
+
+`SessionAgentManager` 为子任务维护独立 run context 与事件流，底层复用同一 Tool、
+模型和持久化协议。主会话只接收需要汇总的结果，完整过程留在观测与诊断中。
+
+### 9.2 企业消息
+
+`core/im_gateway_registry.py` 的 `ProviderSpec` 是渠道单一注册源，声明名称、接入
+方式、字段、配置判定、事件类型、运行适配器、启动入口和交付模式。配置最多只
+激活飞书、钉钉、企业微信、QQ、微信中的一个渠道；切换不删除其他凭据。
+
+飞书、QQ、微信共用扫码状态机；钉钉和企业微信使用注册表生成的分步表单。
+二维码令牌和敏感字段不写日志，提交、启动、运行、重连、停止、完成和错误统一
+脱敏记录。
+
+交付能力按渠道注册：飞书为 `native`，钉钉/企业微信为 `link`，QQ/微信为
+`none`。Agent 只在企业消息上下文且渠道支持时看到 `publish_artifacts`。
+
+### 9.3 外部组件进程隔离
+
+BrowserSkill CLI 安装在应用数据目录，属于外部程序。Windows 冻结态通过
+`popen_external_program()` 在创建进程时清除 PyInstaller DLL 搜索影响，并从
+子进程 `PATH` 移除 `_internal` 路径；创建完成后立即恢复主进程环境。这样浏览器
+守护进程不会错误加载发行目录运行库，也不会在退出后占用旧发布目录。
+
+随包 helper 继续使用普通启动路径，不套用外部程序隔离规则。
+
+## 10. 主题与设置事务
+
+主题包通过 Schema、资产白名单、稳定 Surface/Component ID 和
+`preview_id + revision` 控制。预览与已保存配置隔离；接受时原子保存，取消或
+应用失败恢复上一状态。关键组件、区域归属和动作由代码保护。
+
+设置中心以打开页面时的快照为基线，把保存拆成配置、记忆和外观三个变更分区：
+
+- 配置通过一次 `batch_save` 落盘；
+- 记忆只写内容变化的作用域；
+- 外观只有草稿、活动主题或预览变化时才提交并刷新运行时。
+
+分区失败只回滚已经触及的部分，用户输入和 dirty 状态保留；无关分区不执行 IO、
+备份或界面刷新。
+
+## 11. 冻结构建与发行门禁
+
+开发态资源从项目根目录读取；PyInstaller onedir 冻结态从 `sys._MEIPASS`
+（发行目录 `_internal`）读取随包只读资源，EXE 同级目录不作为资源根。
+
+Skill `impl.py` 是动态数据文件，不进入静态 import graph。构建 spec 扫描
+`skills/` 与 `ai_skills/` 的直接 `core.*` 导入，加入 `Analysis.hiddenimports`；
+读取、解析或核心工作区模块缺失时直接中止构建，防止“源码可用、冻结包 Tool
+消失”。
+
+发行审计检查固定运行时、WebEngine、离线编辑器、许可证、远程资源、源码映射、
+`node_modules` 和体积预算。WebEngine 冒烟在独立进程验证三类编辑器离线加载与
+往返协议，代表性截图覆盖 Windows 100%、125% 和 150% 缩放。
+
+## 12. 当前完整循环
 
 ```python
 state = load_session_and_run_context()
 runtime = clone_skill_catalog_snapshot()
 messages = restore_protocol_messages(state)
-disclosed_skills = set()
 
 while not stopped:
     wait_if_paused()
     append_guidance_at_safe_point(messages)
     runtime.apply_latest_snapshot_at_request_boundary()
 
-    stable_prompt = build_stable_system_prompt()
-    dynamic_prompt = build_runtime_context(
-        workspace=state.workspace,
-        memory=state.memory,
-        workflow=state.workflow,
-        disclosed_skills=disclosed_skills,
-    )
     tools = runtime.visible_tool_schemas()
-
-    response = stream_model(stable_prompt, dynamic_prompt, messages, tools)
-    assistant_message = rebuild_assistant_message(response)
-    messages.append(assistant_message)
+    response = stream_model(build_context(state, runtime), messages, tools)
+    assistant = rebuild_assistant_message(response)
+    messages.append(assistant)
     emit_ui_and_observability_events(response)
 
-    if not assistant_message.tool_calls:
+    if not assistant.tool_calls:
         persist_and_finish(messages)
         break
 
-    stop_if_same_calls_repeat_three_times(assistant_message.tool_calls)
-
-    for call in assistant_message.tool_calls:
-        validate_visibility_schema_permission_and_dependencies(call)
+    stop_if_same_calls_repeat_three_times(assistant.tool_calls)
+    for call in assistant.tool_calls:
+        validate_visibility_permission_and_dependencies(call)
         result = execute_through_tool_registry(call)
         messages.append(tool_message(call.id, result))
-        emit_tool_result(call.id, result)
-
         if call.name == "tool_search":
-            disclose_matched_skills_for_next_request(result, disclosed_skills)
+            disclose_matches_for_next_request(result)
 
     checkpoint_session(messages)
 ```
 
-```mermaid
-flowchart TB
-    UI["PySide6 UI / 企业消息 / 自动化"] --> RC["Run Context"]
-    RC --> W["LLMWorker"]
-    C["Skill Catalog Snapshot"] --> W
-    MEM["记忆与经验"] --> W
-    W --> P["Provider Adapter"]
-    P --> W
-    W --> TR["Tool Registry"]
-    TR --> BI["内置 Tool"]
-    TR --> SI["Skill Tool / Script"]
-    TR --> MCP["MCP"]
-    TR --> UX["用户交互"]
-    BI --> W
-    SI --> W
-    MCP --> W
-    UX --> W
-    W --> OBS["UI 事件与 Observability"]
-    W --> SAVE["SQLite + Save Queue + Recovery Journal"]
-```
+## 13. 主要源码入口
 
-## 11. 主要源码入口
-
-- `core/agent.py`：核心循环、提示上下文、Tool 调度与运行事件
-- `core/tool_registry.py`：Tool 元数据、可见性和只读/危险属性
-- `core/skill_manager.py`：Skill、经验、脚本、MCP 与渐进披露
-- `core/daemon.py`：后台请求、流式事件和 Worker 托管
-- `core/agent_manager.py`：子 Agent 生命周期和事件
-- `core/chat_storage.py`：SQLite 会话与交付物索引
-- `core/chat_save_queue.py`：版本化异步保存
-- `core/chat_recovery_journal.py`：异常退出恢复
-- `core/deliverable_editing.py`：交付物格式契约、兼容预检、转换和事务保存
-- `core/theme_package.py`、`core/theme_service.py`：声明式 AI 主题与事务边界
-- `web/editors/`：固定版本的离线文档、表格和 HTML 编辑器构建与许可证
-- `main.py`：桌面 UI、会话状态和协议消息到界面的投影
+| 入口 | 职责 |
+| --- | --- |
+| `core/agent.py` | Agent Loop、上下文、Tool 调度和运行事件 |
+| `core/llm/` | Provider 协议、Responses Items 与流式转换 |
+| `core/tool_registry.py` | Tool 元数据、可见性与风险属性 |
+| `core/skill_manager.py` | Skill 目录、经验、脚本、MCP 与披露 |
+| `core/filesystem_ops.py`、`core/apply_patch.py` | 文本读取审计、路径边界与补丁提交 |
+| `core/daemon.py` | 后台请求、流式事件和 Worker 托管 |
+| `core/message_persistence.py` | UI 与 daemon 共用的持久化过滤 |
+| `core/chat_storage.py`、`core/chat_save_queue.py` | SQLite 与版本化异步保存 |
+| `core/chat_recovery_journal.py` | 异常退出恢复 |
+| `core/deliverable_editing.py` | 交付物预检、转换、冲突与事务保存 |
+| `core/im_gateway_registry.py`、`core/im_gateway/` | 企业消息注册与运行适配 |
+| `core/theme_package.py`、`core/theme_service.py` | 声明式主题与预览事务 |
+| `core/process_utils.py` | 外部程序进程环境隔离 |
+| `web/editors/` | 固定版本离线编辑器与许可证 |
+| `main.py` | 桌面 UI、会话状态与协议到界面的投影 |

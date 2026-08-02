@@ -2,76 +2,58 @@
 
 [中文](README_CN.md) | [English](README.md) | [Documentation](docs/index.md)
 
-DeepSeek Cowork is a Windows desktop agent workspace that brings chat, project
-files, tool execution, skills, automation, long-term context, and deliverable
-preview/editing into one observable and recoverable workflow.
+DeepSeek Cowork is a local Windows desktop workspace for agentic work. It brings
+chat, project files, Tool execution, capability extensions, automation, and
+deliverables into one observable, steerable, and recoverable workflow.
 
-This is a personal exploration project, not an official DeepSeek product.
+This is a personal exploration project and is not affiliated with DeepSeek.
 
-Current app version: **5.1.0**
+Current app version: **5.1.0** · [Read the release notes](docs/releases/5.1.0.md)
 
-## Three Product Ideas
+## What matters in 5.1.0
 
-### Everything is Tool
+- **Revise results in place:** preview common formats and safely edit DOCX, HTML, XLSX, CSV/TSV, Markdown, JSON, XML, YAML, and plain text in Files & Deliverables.
+- **Find capabilities by task:** the capability marketplace groups tools into research, documents, data, content, and finance; the new-chat home opens PPT, finance, data, and browser workflows directly.
+- **Connect with less setup:** browser automation has one guided preparation and connection flow; enterprise messaging supports Feishu, DingTalk, WeCom, QQ, and WeChat with one active channel at a time.
+- **Use a stable Agent tool contract:** core Tools are visible on the first model turn, text work converges on full-file reads plus audited patches, and DeepSeek Responses preserves reasoning, function calls, and server-side search order. This prepares for the post-training calling preferences and Responses protocol compatibility of the DeepSeek V4 Flash release and the later V4 Pro release.
 
-Every model-executable action enters the Agent Loop through one Tool interface.
-File operations, commands, MCP, user interaction, theme configuration, and
-external services share the same schema, permission, observability, and result
-protocol.
+## Core workflow
 
-Skills provide guidance and experience, Agents provide roles and run context,
-and automation provides triggers. None of them creates a second execution
-protocol.
+1. Select a model and start either a standalone conversation or a project-bound workspace.
+2. Describe the outcome and attach or paste the files, images, and references the task needs.
+3. Follow reasoning, Tools, stage results, and the final answer in one stream; steer or stop the run when needed.
+4. Inspect observability, files, and deliverables in the right drawer, then edit or convert the result.
+5. Store durable preferences as memory, validated methods as experience or a Skill, and repeatable schedules as automation.
 
-### AI-Designed UI
+## Capability map
 
-Cowork lets AI design the interface without letting AI take over application
-code. AI can configure theme tokens, the workspace scene, surface materials,
-component styles, constrained layout, icons, and allowlisted display copy.
+| Layer | Main capabilities |
+| --- | --- |
+| Workspace | Standalone chat directories, explicit project boundaries, history recovery, background runs, and grouped pagination |
+| Files & deliverables | File/image paste, Markdown/HTML/image/PDF/DOCX/PPTX/XLSX preview, safe editing, and Office conversion |
+| Agent runtime | Streaming reasoning and Tools, mid-run guidance, structured observability, sub-agents, daemon, and automation |
+| Extensions | Built-in, optional, and user Skills; `stdio` and Streamable HTTP MCP; on-demand dependencies and remote Skill installation |
+| Connections | Browser automation, web search, finance and data capabilities, plus Feishu/DingTalk/WeCom/QQ/WeChat |
+| Personalization | Global and workspace memory, the Experience System, safe `.cowork-theme` themes, and Visualize |
 
-Every theme passes schema validation, revision-bound isolated preview, and user
-confirmation. Critical controls, region ownership, actions, and recovery paths
-remain protected by code.
+## Three design principles
 
-### Experience System
+- **Everything is Tool:** every executable action shares the same Tool schema, permissions, observability, and result protocol. Skills provide guidance, Agents provide roles, and automation provides triggers.
+- **AI-designed UI:** AI can configure theme tokens, the workspace scene, and constrained components, but it cannot rewrite the component tree, protected actions, or recovery controls. Themes require validation, isolated preview, and user confirmation.
+- **Experience System:** history preserves evidence, memory keeps durable facts, experience improves methods, and Skills package reusable capability. This is not model fine-tuning.
 
-After a task, the Agent can record tool techniques, failure patterns, and
-recovery methods as structured experience. Experience belongs to a specific
-Skill or `general-experience` and is disclosed only for relevant work.
-
-This is not model fine-tuning. History provides evidence, memory keeps durable
-facts and preferences, experience improves operating methods, and Skills package
-reusable capability.
-
-See the [product document](docs/product.md) for the full model.
-
-## Capabilities
-
-- Run a local Agent inside a conversation workspace or explicit project boundary.
-- Interleave reasoning, Tool calls, stage replies, and the final answer.
-- Mention one or more configured Agents and follow each independent reasoning, Tool, stage, and final-answer stream directly in the chat; the full process is restored from history.
-- Steer or stop running work, answer approval requests, and inspect observability.
-- Preview Markdown, HTML, images, PDF, DOCX, PPTX, and XLSX deliverables, and safely edit DOCX, HTML, XLSX, CSV/TSV, and common text files in place.
-- Generate office drafts and convert HTML work products to PPTX, DOCX, or PDF.
-- Extend the runtime with built-in, bundled, user, and standard Agent Skills.
-- Connect MCP Tools over `stdio` or Streamable HTTP.
-- Manage models, Agents, automation, memory, themes, enterprise messaging, and optional components. Enterprise messaging supports Feishu, DingTalk, WeCom, QQ, and WeChat with one active channel at a time.
-- Start PPT Agent, Wind + Eastmoney financial research, workspace data and machine-learning analysis, or browser automation directly from the new-conversation home screen.
+See the [product document](docs/product.md) for the complete product model.
 
 ## Install
 
 ### Windows release
 
-1. Download the latest package from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
-2. Extract the ZIP.
-3. Run `deepseek-cowork.exe`.
+1. Download the latest ZIP from [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases).
+2. Extract it completely, then run `deepseek-cowork.exe`; do not launch it from inside the archive.
+3. Open **Settings → Models & Services**, add a model, and test the connection.
 
-### Runtime and disk budget
-
-- The reference machine has a 4-core CPU, 8 GB RAM, and an SSD. 16 GB RAM is recommended; a discrete GPU is not required.
-- Editor assets and document models load only when editing is first opened. Canvas Editor, Univer, and Office models are not initialized on the normal startup path.
-- The checked-in offline editor assets add about 2.99 MiB compressed and 12.14 MiB unpacked. Against the 366.3 MiB ZIP / 820.8 MiB unpacked baseline, the estimated package is about 369.3 MiB / 832.9 MiB; the release audit remains authoritative.
-- Release gates cap the editor increment at 10 MiB compressed and 30 MiB unpacked, and reject `node_modules`, source maps, CDN references, or a Node runtime dependency.
+The reference environment is a 4-core CPU, 8 GB RAM, and an SSD. 16 GB RAM is
+recommended; a discrete GPU is not required.
 
 ### Run from source
 
@@ -86,36 +68,24 @@ python main.py
 
 ### Build a release
 
-Prepare the pinned runtime first:
-
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-```
-
-Then run the clean build and package audit:
-
-```powershell
 .\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
 .\.venv\Scripts\python.exe .\scripts\package_release.py
 ```
 
-## Quick Start
-
-1. Configure and test a model under **Settings → Models & Services**.
-2. Start a standalone conversation or create one from a project.
-3. Describe the goal; attach files with the composer `+`, or copy files from the file manager and paste them directly.
-4. Follow Tool activity and observability; review any approval before submitting.
-5. Preview or edit results in **Files & Deliverables**, then continue converting if needed.
-6. Store durable preferences as memory and reusable methods as experience or a Skill.
+The release uses pinned runtimes, offline editor assets, and a packaging audit.
+Treat the report from the current build as authoritative for size and contents.
 
 ## Documentation
 
-- [User guide](docs/user-guide.md) (Chinese)
-- [Product document](docs/product.md) (Chinese)
-- [Technical design: from Agent Loop to desktop runtime](docs/technical-design.md) (Chinese)
-- [Skill system](docs/skill-system.md) (Chinese)
-- [AI themes and Visualize](docs/guides/ai-theme-and-visualize.md) (Chinese)
-- [Roadmap](docs/roadmap.md)
+- [User guide](docs/user-guide.md) (Chinese): installation, setup, and complete task workflows
+- [Product document](docs/product.md) (Chinese): goals, principles, and boundaries
+- [Technical design](docs/technical-design.md) (Chinese): Agent Loop, Tools, safety, persistence, and desktop runtime
+- [Skill system](docs/skill-system.md) (Chinese): sources, discovery, configuration, MCP, dependencies, and experience
+- [AI themes and Visualize](docs/guides/ai-theme-and-visualize.md) (Chinese): user-focused walkthrough
+- [Roadmap](docs/roadmap.md) (Chinese): current phase and candidate directions
+- [Release history](docs/releases/index.md) (Chinese): version changes and acceptance priorities
 
 ## License
 

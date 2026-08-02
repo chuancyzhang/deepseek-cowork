@@ -2,30 +2,34 @@
 
 当前应用版本：**5.1.0**
 
-Skill 系统只解决一个问题：怎样让 Agent 在不扩大核心执行协议的前提下，
-获得可发现、可组合、可积累的专业能力。
+Skill 系统解决一个明确问题：怎样在不扩大核心执行协议的前提下，让 Agent 获得
+可发现、可配置、可组合、可积累的专业能力。
 
-## 1. Tool 是执行面，Skill 是经验包
+## 1. 先建立正确模型
 
-Cowork 保持单一执行面：
+**Tool 是执行面，Skill 是经验包，MCP 是外部 Tool 的连接方式。**
 
-- **Tool**：模型可以直接调用的动作。
-- **Skill**：围绕一类任务组织的指导、边界、经验、工具引用和资源。
-- **MCP**：把外部服务暴露成 Tool 的标准连接方式。
+| 概念 | 运行时职责 | 模型如何使用 |
+| --- | --- | --- |
+| Tool | 执行动作并返回结构化结果 | 直接函数调用 |
+| Skill | 组织指导、边界、经验、Tool 引用和资源 | 读取上下文后选择 Tool |
+| MCP | 把外部服务映射为本地 Tool | 仍通过 Tool Registry 调用 |
+| Agent | 绑定角色、模型、允许能力和运行上下文 | 进入同一 Agent Loop |
 
-模型不会“调用 Skill”。它读取 Skill 提供的上下文，然后调用 Tool。
+模型不会“调用 Skill”。它先获得相关指导，再调用 Tool：
 
 ```mermaid
 flowchart LR
-    Q["当前任务"] --> D["发现相关 Skill"]
+    Q["当前任务"] --> D["匹配或指定 Skill"]
     D --> G["披露指导与经验"]
     G --> T["选择 Tool"]
-    T --> E["统一 Agent Loop 执行"]
+    T --> R["Tool Registry 执行"]
+    R --> A["结果回到 Agent Loop"]
 ```
 
-这避免了 Skill、自动化、MCP 和内置能力各自形成不兼容的运行协议。
+## 2. Skill 包结构
 
-## 2. 一个 Skill 可以包含什么
+一个完整 Skill 可以包含：
 
 ```text
 <skill>/
@@ -39,192 +43,203 @@ flowchart LR
   assets/
 ```
 
-- `SKILL.md`：面向 Agent 和人的权威指导。
-- `skill.json`：发现、工作台、配置、Tool 和运行时元数据。
-- `impl.py`：可选的 Python Tool 实现。
-- `experience/entries.jsonl`：可选的结构化经验。
-- `references/`：按需披露的长资料。
-- `scripts/`：通过声明入口执行的脚本。
-- `assets/`：Skill 使用的静态资源。
+| 文件或目录 | 职责 | 是否必需 |
+| --- | --- | --- |
+| `SKILL.md` | 面向 Agent 和人的权威工作流与边界 | 是 |
+| `skill.json` | 发现、展示、配置、Tool 和运行元数据 | Cowork 原生能力需要 |
+| `impl.py` | 延迟导入的 Python Tool 实现 | 可选 |
+| `experience/entries.jsonl` | 结构化经验条目 | 可选 |
+| `references/` | 按需读取的长资料 | 可选 |
+| `scripts/` | 由声明入口执行的脚本 | 可选 |
+| `assets/` | 静态模板与资源 | 可选 |
 
-Cowork 也可以安装符合 Agent Skills 约定、根目录带 `SKILL.md` 的能力包。
-安装时保留上游 `SKILL.md`，只生成 Cowork 所需的本地索引元数据。
+符合 Agent Skills 约定、根目录带 `SKILL.md` 的能力也可以安装。Cowork 保留上游
+指导，只补充本地索引元数据，不要求上游改写为第二种格式。
 
-## 3. 发现与渐进披露
+## 3. 来源与身份
 
-核心内置 Tool Schema 与 Skill 长文采用不同策略：`skills/` 中符合当前上下文
-的 Tool 首轮直接暴露，而 Skill 正文、参考资料和经验仍按相关性展开。Cowork
-将指导内容披露分成四个实际层次：
+能力来源在注册根目录时显式确定：
 
-1. **不披露**：任务无关。
-2. **简要信息**：名称、用途、标签和推荐 Tool。
-3. **完整指导**：当前任务明确命中 Skill。
-4. **参考资料和经验条目**：只有确实需要时才展开。
+| 来源 | `source_kind` | 默认行为 |
+| --- | --- | --- |
+| 应用随包 `skills/` | `core_builtin` | 始终加载，符合上下文的 Tool 首轮直接可见 |
+| 应用随包 `ai_skills/` | `optional` | 会话指定时直出，否则在启用后按需发现 |
+| 用户能力目录 | `user_extension` | 受启用、指定和发现规则约束 |
+| MCP Server | `mcp` | 连接成功后合成为 Tool Provider |
 
-`tool_search` 只负责非核心内置能力的延迟发现。它可以：
+来源不根据文件夹末级名称猜测。核心根优先，用户目录中的同名 Skill 不能覆盖或
+冒充核心内置能力。
 
-- 搜索尚未暴露的 Tool；
-- 匹配相关 Skill；
-- 返回推荐的执行入口；
-- 让命中的 Tool Schema 在下一次模型请求中可见。
+`SkillCatalogService` 把目录编译为进程级不可变快照。UI 与 daemon 各自持有
+快照；提交消息时只创建轻量运行视图，不重新扫描目录、导入实现或安装依赖。
 
-当前会话显式选择的 `ai_skills/` 不需要搜索，其 Tool 与指导会直接进入本轮；
-已启用但未选择的可选能力仍可搜索，禁用能力不可搜索。核心内置 Tool 不进入
-搜索结果，因为它们已经直接出现在当前工具清单中。
+### 聚合能力示例
 
-Skill 全文和自动命中的经验只参与当前运行，不写入正常会话历史。这样既能
-复用能力，又能保持后续 Prompt 前缀稳定。
+`wind-aifinmarket` 在商城中只显示一个“万得金融能力”，内部子 Skill 通过
+`search_wind_subskills` 和 `load_wind_subskill` 渐进加载，不把大量子目录注册成
+重复卡片。每个数据源保留自己的配置与错误语义，失败时不静默换源；交易类能力
+只输出研究分析与计划，不执行真实账户操作。
 
-## 4. Skill 来源
+## 4. 发现、指定与披露
 
-Cowork 从以下来源构建能力目录：
+Tool Schema 和 Skill 长文使用不同策略。
 
-- 应用随包 `skills/`：`core_builtin`，始终加载并直接暴露；
-- 应用随包 `ai_skills/`：`optional`，按会话选择或延迟发现；
-- 用户能力目录：`user_extension`；
-- 合成 MCP Server：`mcp`。
+### Tool 可见性
 
-来源类别由注册能力根目录时显式写入，不根据末级文件夹名猜测；应用随包核心
-根优先加载，用户目录中的同名 Skill 不能覆盖或冒充核心内置能力。
+- `core_builtin` Tool 在运行模式、渠道和权限允许时直接进入首轮 Schema，不经过 `tool_search`。
+- 当前会话显式选择的可选能力，其 Tool 和指导直接进入本轮。
+- 已启用但未选择的可选能力、用户扩展和 MCP 可以由 `tool_search` 按需发现。
+- 禁用能力不可搜索；已经直出的核心 Tool 不进入搜索结果。
+- 工作区是否已经绑定不决定文件/命令 Tool 的 Schema 可见性；实际调用时若没有工作区，Handler 明确返回 `workspace_not_selected`。
 
-### 聚合型内置 Skill
+### 指导披露
 
-`wind-aifinmarket` 是一个默认关闭的聚合型内置 Skill。能力中心只展示一个“万得金融能力”条目，插件内部包含固定上游提交的 78 个独立子 Skill。根 Skill 通过只读的 `search_wind_subskills` 和 `load_wind_subskill` 工具进行分类检索与渐进加载，嵌套的 `skills/` 目录不会被注册为 78 个独立能力中心条目。首次加载子 Skill 时只传 `skill_name`，工具默认读取该目录的 `SKILL.md`；后续只有在其正文明确引用资料时才传对应的子 Skill 本地 `reference`。根插件的 `SOURCE.md` 仅记录聚合快照来源，不属于任何子 Skill 的引用；为兼容旧提示造成的误传，加载器会明确标注纠正并加载所选子 Skill 的 `SKILL.md`。
+Skill 内容分四级：
 
-该快照不在运行时安装或更新，也不会从用户目录读取凭据。Wind、Alice、Tushare、FINVIZ/FMP 等数据源保持各自语义和配置边界；执行入口只校验自身需要的配置，失败时返回明确根因，不会静默换源。所有生成物必须位于 `COWORK_WORKSPACE_DIR/wind-aifinmarket/` 下，交易类能力仅输出分析和计划，不执行真实账户操作。固定来源、目录清单与 Cowork 改造说明见插件内的 `SOURCE.md`。
-- 标准 Agent Skill：由安装工具写入用户能力目录；
-- MCP Server：作为合成 Tool Provider 出现在目录中。
+1. 任务无关：不披露。
+2. 候选能力：只给名称、用途、标签和推荐 Tool。
+3. 明确命中：加载完整 `SKILL.md`。
+4. 执行确有需要：再加载参考资料和经验条目。
 
-能力目录由 `SkillCatalogService` 维护为进程级不可变快照。UI 和 daemon
-分别持有自己的快照；请求 Worker 只创建轻量运行视图，不在提交消息时扫描
-目录、导入实现或安装依赖。
+自动命中的 Skill 指导只参与当前运行，不写入正常会话历史。内容哈希避免同一轮
+重复注入，也保持后续 Prompt 前缀稳定。
 
-## 5. Tool 注册
+## 5. Tool 注册与统一文本契约
 
-Tool 最终进入统一 `ToolRegistry`。记录包含：
+所有 Tool 最终进入 `ToolRegistry`，记录：
 
-- `name`、`description` 和输入 Schema；
-- `read_only`；
-- `destructive`；
-- `requires_user_interaction`；
-- 所属 Skill、工具类型和搜索提示；
-- `source_kind`；
-- 延迟 Handler 或 MCP 映射。
+- `name`、`description` 和 JSON Schema；
+- `read_only`、`destructive`、`requires_user_interaction`；
+- 所属 Skill、Tool 类型、搜索提示与 `source_kind`；
+- 延迟 Handler、脚本入口或 MCP 映射；
+- 当前运行模式、能力范围和渠道下是否可调用。
 
-`core_builtin` Tool 的有效 `should_defer` 固定为 `false`，即使旧 Tool 导出仍
-声明延迟也会被注册层纠正。其他来源保持声明的渐进披露策略，运行模式、工作区、
-渠道、Agent Profile 和审批边界继续优先过滤。
+`core_builtin` 的有效 `should_defer` 固定为 `false`；可选来源保留渐进发现策略。
+声明式 Skill 可以用 `impl.py:function` 绑定 Handler，直到首次调用才导入。脚本
+通过 `script_entries` 声明后统一由 `run_skill_script` 执行，模型不需要猜目录和命令。
 
-声明式 Skill 可以在 `skill.json.tools` 中绑定 `impl.py:function`。Handler
-直到首次调用才导入。旧版只有 `impl.py` 的 Skill 仍可通过反射注册公开函数。
+### 文件与命令工具的职责
 
-脚本型 Skill 不要求模型猜目录和命令，而是声明 `script_entries`，统一通过
-`run_skill_script` 在隔离运行时中执行。
+| Tool | 只负责什么 |
+| --- | --- |
+| `glob` | 按模式发现路径 |
+| `grep` | 定位文本匹配及上下文行 |
+| `text_file_read` | 严格解码并完整、有序读取普通文本，建立内容哈希审计 |
+| `apply_patch` | 创建、更新、移动或删除普通文本文件 |
+| `workspace_rename_path` | 目录级重命名 |
+| `workspace_delete_path` | 目录级删除与确认 |
 
-随包 `file-system` Skill 的模型接口只暴露完整文本读取与标准补丁提交：
-`text_file_read` 建立基于内容哈希的完整读取审计，`apply_patch` 负责普通文本
-创建、更新、移动和删除。目录级 `workspace_rename_path` 与
-`workspace_delete_path` 继续保留；路径发现和内容定位由 `command-tools` 的
-`glob`、`grep` 承担。Skill 的 `allowed-tools`、稳定系统提示和 Tool Registry
-必须使用同一组名称，避免模型从缓存提示或 Skill 正文重新学到已撤下的接口。
+`text_file_read` 只有在完整读取时才建立 SHA-256、编码、BOM 和换行风格凭据；
+`apply_patch` 只接受精确上下文补丁，先完成全量解析、路径与读取凭据预检，再聚合
+删除确认并按顺序提交。Office/PDF 不走这条普通文本路径。
 
-## 6. 运行配置
+Skill 的 `allowed-tools`、稳定系统提示与 Tool Registry 必须使用同一组正式名称，
+防止已撤下接口从缓存提示或 Skill 正文重新泄露。
 
-`skill.json` 可以声明 `config_fields`：
+> 模型适配意图：核心 Tool 直出、稳定函数 Schema、完整读取凭据和标准
+> `apply_patch` 共同形成更确定的动作空间。这是为 DeepSeek V4 Flash 正式版及
+> 后续 V4 Pro 正式版的后训练调用偏好和 Responses 协议兼容做准备；具体模型
+> 可用性仍由模型服务决定。
 
-- `text`：普通文本；
-- `secret`：密钥；
-- `select`：固定选项；
+## 6. 配置与依赖
+
+### 运行配置
+
+`skill.json.config_fields` 支持：
+
+- `text`、`secret`、`select`；
 - `required`、`default`、`options`；
-- `env`：执行时注入的环境变量；
+- 执行时注入的 `env`；
 - `help`、`placeholder`；
-- `action_label`、`action_url`：不含凭据的 HTTPS 辅助入口。
+- 不含凭据的 HTTPS `action_url` 与按钮文案。
 
-配置保存在本地 `skill_configs`。Tool 或脚本执行时，只按字段声明注入环境。
-必填项缺失会明确失败，不进行静默降级。
+配置保存在本地 `skill_configs`。运行时只注入字段声明的环境变量；必填项缺失
+直接返回根因，不从其他目录猜测密钥，也不静默切换 Provider。
 
-## 7. 托管 MCP
+### 依赖准备
 
-Skill 可以通过 `mcp_server_presets` 描述 `stdio` 或 Streamable HTTP Server。
-保存 Skill 配置时，Cowork 会：
-
-1. 解析 `{{ENV_NAME}}` 配置引用；
-2. 生成或更新带 `source_skill` 的 MCP 条目；
-3. 启用由该 Skill 管理的 Server；
-4. 保留独立的连接测试和诊断入口。
-
-`runtime: skill_python` 的 stdio Server 使用所属 Skill 的隔离 Python 环境。
-托管认证只持久化配置引用，短期 access/refresh token 保留在内存中。
-
-MCP 的远端工具仍会被映射为本地 Tool 名称，并通过统一 Agent Loop 调用。
-
-## 8. 依赖准备
-
-Python 和 Node 依赖不会在应用启动或 Skill 启用时全部安装。
-
-系统提示分别标明应用 Python、沙盒 Python 和用户环境 Node.js，并报告 Python、
-Node.js 与 Bash 的可用性、版本及路径；不生成全局 Python 包“可用/缺失”清单。不同
-Skill 使用隔离依赖目录，静态清单无法代表某次调用的真实环境。
-
-其中 Node.js 是用户环境提供的可选运行时，不随应用分发。`run_node_code` 的
-Tool Schema 可以作为核心入口直接暴露，但 Agent 只有在动态快照确认 Node.js
-可用且路径存在时才将它作为优先执行方式；未检测到时必须明确报告缺失。
+Python 和 Node 依赖不会在应用启动或 Skill 启用时批量安装。
 
 `DependencyCoordinator` 在 Tool 首次调用前按“Skill + 依赖哈希”准备环境：
 
-- 同一哈希的并发请求共享 single-flight；
-- 默认超时 300 秒，可配置为 30–1800 秒；
-- 成功和失败状态都会持久化；
-- 失败不会在新会话中自动重试；
-- 用户可从能力中心显式重试；
-- 依赖声明变化会产生新的哈希。
+- 相同哈希的并发请求共享 single-flight；
+- 成功与失败状态都持久化；
+- 失败不会在新会话静默重试；
+- 用户显式重试或依赖声明变化才会再次准备。
 
-## 9. 经验系统
+系统上下文区分应用 Python、沙盒 Python、用户环境 Node.js 与 Bash。Node.js
+不随应用分发；Tool Schema 可见不代表外部运行时已经安装，缺失时必须明确报告。
 
-经验由 Skill 承载，与指导、工具引用和资源一起形成可复用能力包。
+## 7. 托管 MCP
 
-结构化条目保存在：
+Skill 可以在 `mcp_server_presets` 中声明 `stdio` 或 Streamable HTTP Server。
+保存配置时，Cowork 会：
+
+1. 解析 `{{ENV_NAME}}` 配置引用；
+2. 创建或更新带 `source_skill` 的 MCP 条目；
+3. 启用由该 Skill 管理的 Server；
+4. 保留独立的连接测试与诊断入口。
+
+`runtime: skill_python` 的 stdio Server 使用所属 Skill 的隔离 Python 环境。认证
+配置只保存引用，短期 access/refresh token 留在内存。远端工具最终仍映射成本地
+Tool，经统一权限、观测和结果协议执行。
+
+## 8. 能力商城与安装
+
+AI 能力商城负责普通用户的发现和最小状态操作：
+
+- “发现能力”按查找资料、处理文档、分析数据、制作内容和金融研究分类；
+- “我的能力”展示用户创建、导入或 AI 生成的 Skill；
+- 卡片使用“开启 / 设置后开启 / 已开启 / 关闭”，不要求用户理解 Tool 或 MCP；
+- “高级管理”集中来源、文件、依赖、导入导出和调试；
+- 浏览器自动化把本地准备、扩展安装、真实连接探测和启用收敛为一个流程。
+
+随包可选能力通过 `skill.json.presentation` 声明分类、短名称、摘要、示例和访问
+边界。元数据缺失时显示明确错误，不由运行时猜测。用户 Skill 不强制进入官方分类。
+
+### 本地与远程安装
+
+- 文件夹与 ZIP 导入先在临时目录检查路径穿越和结构，再原子发布；同名目标不覆盖。
+- 标准 Agent Skill 保留上游指导，只增加本地索引。
+- 远程入口由专用安装 Agent 读取受限 Markdown 和仓库证据，主 Agent 不执行入口中的 Shell、Git 或 `npx` 命令。
+- 内核负责 HTTPS/SSRF 校验、浅克隆、固定 commit、文件摘要、配置字段校验和发布。
+- 第一次调用只生成 30 分钟有效的安装预览；确认后使用同一 continuation，不重新联网或换快照。
+- 入口过期、摘要变化、同名冲突或风险校验失败都明确停止。
+
+## 9. 经验与会话沉淀
+
+结构化经验保存在：
 
 ```text
 experience/entries.jsonl
 ```
 
-典型字段包括经验正文、Tool 名、任务类型、错误模式、标签、来源和时间。
+条目可包含经验正文、Tool、任务类型、错误模式、标签、来源和时间。未指定 Skill
+时，`update_experience` 写入 `general-experience`；有明确能力归属时写入对应包。
 
-`update_experience` 在未指定 Skill 时记录到 `general-experience`；指定 Skill
-时记录到相应能力。运行时同时维护简短经验摘要，用于搜索和低成本披露。
+只有经过验证、可跨任务复用、非敏感且价值明确的方法才应进入经验。例行成功、
+猜测和临时项目状态不保存。创建、修改或安装 Skill，以及写入长期记忆，都需要
+用户明确提出。
 
-Agent 只应写入已经验证、可跨任务复用、非敏感且价值明确的经验；例行成功、
-猜测和项目临时状态不进入经验包。创建、修改或安装 Skill，以及写入长期记忆，
-都要求用户明确提出，不能因“可能以后有用”而静默持久化。
+“沉淀为 Skill”采用两阶段流程：
 
-完整经验不会默认进入每次 Prompt。`disclosure_level_defaults` 控制是否在
-完整 Skill Prompt 中包含条目；调用方还可以显式请求参考资料或经验。
+1. 从用户选择的会话范围提取并脱敏证据，保留消息 ID、置信度和缺失项。
+2. 用户选择创建、合并指导或追加经验。
+3. 第二阶段只接收已确认的规范化证据，编译指导、资源和可选脚本草稿。
+4. 草稿通过 Schema、引用、敏感内容、路径、Python AST 和目标 revision 校验。
+5. 用户最终确认后原子保存；失败时草稿仍留在来源会话。
 
-### 会话沉淀
+会话中执行过的原始代码不会直接复制进 Skill；选中的脚本候选会按用途重新生成
+参数化实现并再次校验。
 
-“沉淀为 Skill”采用提取、确认两阶段流程：
+## 10. 变更发布与运行一致性
 
-1. 选择来源会话范围。
-2. 对密钥和本地路径进行脱敏。
-3. 提取带消息 ID 引用的目标、模式、约束、失败、验证和资源候选。
-4. 展示证据置信度与缺失项。
-5. 用户选择创建、合并指导或追加经验。
-6. 第二阶段只接收规范化证据和非敏感目标快照。
-7. 通过 Schema、引用、敏感内容、路径、Python AST 和目标 revision 校验。
-8. 用户最终确认后原子保存。
-
-执行过的原始 Python 代码不会直接复制进 Skill。用户选择脚本候选时，编译器
-会根据用途重新生成参数化实现，并经过同一静态质量门。
-
-## 10. 变更与热更新
-
-能力变更统一发布 `SkillChangeEvent`，包含事件 ID、动作、Skill 名称、来源、
-会话和 revision。
+创建、更新、启停或删除能力后，系统发布 `SkillChangeEvent`，包含事件 ID、动作、
+Skill、来源、会话和 revision。
 
 ```mermaid
 flowchart LR
-    M["创建/更新/启停/删除"] --> V["校验并原子发布目录"]
+    M["能力变更"] --> V["校验并原子发布"]
     V --> E["SkillChangeEvent"]
     E --> U["UI 重建快照"]
     E --> D["daemon 重建快照"]
@@ -232,68 +247,15 @@ flowchart LR
     D --> B
 ```
 
-重复事件按 ID 幂等，旧 revision 不覆盖新快照。已经运行的 Tool 不会被中断；
-Worker 只在下一次模型请求边界应用最新快照。文件监听只负责修复外部编辑，
-不参与业务强一致链路。
+事件按 ID 幂等，旧 revision 不覆盖新快照。已经运行的 Tool 不被中断；Worker
+只在下一次模型请求边界应用新目录。文件监听只修复外部编辑，不承担业务强一致。
 
-## 11. 导入、导出与兼容
-
-AI 能力商城支持：
-
-- 面向普通用户的任务卡片，展示用途、典型任务和最小状态操作；
-- “发现能力 / 我的能力”分层，其中用户可编辑 Skill 不需要声明官方场景；
-- 查找资料、处理文档、分析数据、制作内容、金融研究五类任务场景；
-- 未开启能力显示“开启”，缺少必填配置时显示“设置后开启”；
-- 已开启能力显示成功状态，并在卡片内直接提供“关闭”；
-- 通过右上角“高级管理”直达来源、文件、依赖和调试信息；
-- 浏览器自动化把本地准备、扩展安装、连接检查和 Skill 启用收敛为同一能力流程；普通商城只有在浏览器控制通道可用且 Skill 已启用时才显示“已开启”；
-- 导入单个 Skill 文件夹；
-- 导入包含多个 Skill 的目录；
-- 导入 ZIP；
-- 安装标准 Agent Skill；
-- 通过专用安装 Agent 检查并安装 HTTPS 远程 Skill 入口；
-- 导出单个或多个 Skill；
-- 校验文件并调试 Tool、脚本和 MCP。
-
-随包可选能力通过 `skill.json.presentation` 声明普通用户展示信息：
-`category` 必须属于五个官方场景，`short_name` 提供紧凑显示名称，
-`summary`、`examples` 和 `access_note` 分别提供用途、典型任务和访问边界。
-缺少或非法元数据会在普通商城显示“能力信息不完整”，具体原因在高级管理中展示。
-用户自己的能力不要求声明 `presentation`，名称和说明缺失时显示明确占位文案，
-不会由运行时猜测分类。
-
-ZIP 先解压到临时目录并检查路径穿越。最终名称来自元数据；已有目标不会被
-静默覆盖。
-
-远程入口由 `remote_skill_installer_agent` 统一处理。主 Agent 不执行入口
-文档中的 `npx`、Git 或 Shell 命令；专用 Agent 只读取经过限制的 Markdown
-和仓库材料，并输出带文件证据的结构化安装清单。Cowork 内核负责 HTTPS 与
-SSRF 校验、浅克隆、固定 commit、文件摘要、配置字段校验和原子发布。
-仓库目录、固定 commit 和用户级安装位置由内核在下载后确定，不属于入口
-Agent 可要求用户补充的歧义。入口 Agent 只提取有原文证据的仓库候选和必需
-Skill；多个官方镜像由内核依次尝试。
-
-首次调用只生成安装预览和 30 分钟有效的 `continuation_id`。预览包含来源、
-commit、Skill 列表、脚本风险和待生成的 `config_fields`。主 Agent 必须通过
-`request_user_approval` 取得确认，再用同一 `continuation_id` 和
-`decision="confirm"` 调用专用 Tool。安装阶段不重新联网或重新解析文档；
-计划绑定来源会话，过期、已消费或摘要变化都会明确失败。
-`needs_input` 只用于无法确定必需 Skill 的情况。主 Agent 最多收集一次用户
-补充并重试一次，不能通过浏览器补证、改写请求或拆分 Skill 循环检查。
-
-远程 Skill 中明确声明的 `skill.json.config_fields` 优先。未声明时，专用
-Agent 只能从确定性扫描发现的环境变量中生成候选；`KEY`、`TOKEN`、
-`SECRET`、`PASSWORD` 和 `CREDENTIAL` 默认作为 `secret`，且禁止默认值。
-确认后的字段进入正常能力配置 UI，执行时继续通过环境变量临时注入。
-
-只有 `impl.py` 的旧 Skill 继续受支持，系统会生成最小发现记录。空目录、
-缓存目录和已经删除实现留下的残片不会重新出现在能力中心。
-
-## 12. 设计原则
+## 11. 设计不变量
 
 - Tool 保持直接、统一、可观察。
-- Skill 聚合任务指导、经验和资源。
-- 经验按需披露，不让 Prompt 无限增长。
-- 重依赖能力保持可选和延迟准备。
-- 配置缺失、连接失败和依赖错误必须暴露根因。
-- 用户明确控制哪些对话内容进入长期可复用能力。
+- Skill 只组织指导、经验和资源，不建立第二套执行协议。
+- 核心动作首轮可用，长指导和扩展能力按需披露。
+- 配置、连接和依赖失败必须显示根因。
+- 重依赖保持可选和延迟准备。
+- 用户明确控制哪些对话内容进入长期记忆、经验或 Skill。
+- 源码态与冻结发行包必须注册同一组核心 Tool；动态 `impl.py` 依赖缺失时构建直接失败。

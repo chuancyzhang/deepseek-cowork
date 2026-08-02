@@ -2,70 +2,56 @@
 
 [中文](README_CN.md) | [English](README.md) | [文档中心](docs/index.md)
 
-DeepSeek Cowork 是一个 Windows 桌面 Agent 工作台。它把对话、项目文件、
-Tool 调用、Skill、自动化、长期信息和交付物预览/编辑组织成一条可观察、可干预、
-可恢复的工作流。
+DeepSeek Cowork 是一个面向 Windows 的本地桌面 Agent 工作台。它把对话、项目文件、
+Tool 执行、能力扩展、自动化和交付物组织成一条可观察、可干预、可恢复的工作流。
 
 本项目为个人探索，与 DeepSeek 官方无隶属关系。
 
-当前应用版本：**5.1.0**
+当前应用版本：**5.1.0** · [查看本版发布说明](docs/releases/5.1.0.md)
 
-## 三条核心理念
+## 5.1.0 的重点
 
-### Everything is Tool
+- **结果可以直接修订**：在“文件与交付物”中预览常见格式，并安全编辑 DOCX、HTML、XLSX、CSV/TSV、Markdown、JSON、XML、YAML 与普通文本。
+- **能力按任务组织**：能力商城用“查找资料、处理文档、分析数据、制作内容、金融研究”组织入口；新对话首页直达 PPT、金融、数据和浏览器任务。
+- **常用连接更容易启用**：浏览器自动化采用一体化准备与连接流程；企业消息支持飞书、钉钉、企业微信、QQ 和微信，并保持单活动渠道。
+- **Agent 工具契约更稳定**：核心 Tool 首轮直接可见，普通文本统一使用完整读取与安全补丁提交；DeepSeek Responses 能保留推理、函数调用和服务端搜索顺序。这也是为 DeepSeek V4 Flash 正式版及后续 V4 Pro 正式版的后训练调用偏好和 Responses 协议兼容做准备。
 
-所有模型可执行动作都通过统一 Tool 接口进入 Agent Loop。文件操作、命令、
-MCP、用户交互、主题配置和外部服务共享同一套 Schema、权限、观测和结果
-回填机制。
+## 核心工作流
 
-Skill 是经验与工作流指导，Agent 是角色和上下文，自动化是触发方式；它们
-不会建立第二套执行协议。
+1. 选择模型，创建独立聊天或绑定明确的项目工作区。
+2. 描述目标，按需添加或粘贴文件、图片和参考资料。
+3. Agent 在同一消息流中展示 reasoning、Tool、阶段结果与最终回答；运行中可以补充要求或停止。
+4. 从右侧抽屉检查任务观测、文件和交付物，并继续编辑或转换结果。
+5. 把稳定偏好写入记忆，把经过验证的方法沉淀为经验或 Skill；需要重复执行时再创建自动化。
 
-### AI 设计 UI
+## 能力地图
 
-Cowork 允许 AI 设计界面，但不允许 AI 接管应用代码。AI 可以配置主题令牌、
-工作区场景、区域材质、组件样式、受控布局、图标和白名单文案。
+| 层次 | 主要能力 |
+| --- | --- |
+| 工作区 | 独立聊天目录、项目边界、历史恢复、后台运行与分组分页 |
+| 文件与交付物 | 文件/图片粘贴，Markdown、HTML、图片、PDF、DOCX、PPTX、XLSX 预览，安全编辑与 Office 转换 |
+| Agent 运行时 | 流式 reasoning 与 Tool、运行中引导、结构化观测、子 Agent、daemon 与自动化 |
+| 能力扩展 | 内置/可选/用户 Skill，`stdio` 与 Streamable HTTP MCP，按需依赖和远程 Skill 安装 |
+| 外部连接 | 浏览器自动化、网页搜索、金融与数据能力、飞书/钉钉/企业微信/QQ/微信 |
+| 个性化 | 全局与工作区记忆、经验系统、`.cowork-theme` 安全主题、Visualize |
 
-主题必须通过 Schema 校验、revision 隔离预览和用户确认。关键控件、区域
-归属、交互动作和安全恢复路径由代码保护。
+## 三条设计原则
 
-### 经验系统
+- **Everything is Tool**：所有可执行动作共享 Tool Schema、权限、观测和结果协议；Skill 提供指导，Agent 提供角色，自动化提供触发方式。
+- **AI 设计 UI**：AI 可以配置主题令牌、工作区场景和受控组件，但不能改写组件树、关键动作或安全恢复路径。主题必须经过校验、隔离预览和用户确认。
+- **经验系统**：历史负责追溯，记忆保存长期事实，经验改善方法，Skill 组织可复用能力；这不是模型微调。
 
-任务完成后，Agent 可以把工具技巧、失败模式和恢复方法记录为结构化经验。
-经验归入特定 Skill 或 `general-experience`，在相关任务中按需披露。
-
-经验是本地、显式、可查看、可编辑的运行知识层，不涉及模型权重调整。历史
-负责追溯，记忆保存长期事实和偏好，经验改善操作方法，Skill 组织可复用能力。
-
-详细说明见[产品文档](docs/product.md)。
-
-## 主要能力
-
-- 在独立聊天目录或明确项目工作区内运行本地 Agent。
-- 在同一轮中交错展示 reasoning、Tool、阶段回复和最终回答。
-- 通过 `@智能体` 召唤一个或多个已配置 Agent，并在聊天区分别实时查看各自的思考、Tool、阶段输出和最终回答；重新打开历史会话后可恢复完整过程。
-- 运行中补充要求、停止任务、响应确认并查看结构化观测。
-- 预览 Markdown、HTML、图片、PDF、DOCX、PPTX 和 XLSX，并在应用内安全编辑 DOCX、HTML、XLSX、CSV/TSV 与常见文本文件。
-- 生成办公工作稿，并从 HTML 继续生成 PPTX、DOCX 或 PDF。
-- 使用内置、随包、用户和标准 Agent Skill 扩展能力。
-- 通过 `stdio` 或 Streamable HTTP 接入 MCP Tool。
-- 管理模型、Agent、自动化、记忆、主题、企业消息和可选组件；企业消息支持飞书、钉钉、企业微信、QQ 与微信，并保持同一时间只运行一个渠道。
-- 从新会话首页快速进入 PPT Agent、万得与东方财富金融分析、工作区数据/机器学习分析和浏览器自动化，并继续使用 Visualize、网页搜索及文档/数据工具包。
+完整说明见[产品文档](docs/product.md)。
 
 ## 安装
 
 ### Windows 发行包
 
-1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载最新版。
-2. 解压 ZIP。
-3. 运行 `deepseek-cowork.exe`。
+1. 从 [GitHub Releases](https://github.com/chuancyzhang/deepseek-cowork/releases) 下载最新版 ZIP。
+2. 完整解压后运行 `deepseek-cowork.exe`；不要直接在压缩包内启动。
+3. 打开“设置 → 模型与服务”，添加模型并完成一次连接测试。
 
-### 运行环境与空间
-
-- 基准运行环境为 4 核 CPU、8 GB 内存和 SSD；推荐 16 GB 内存，不要求独立显卡。
-- 编辑器仅在首次进入编辑时按格式加载。未使用编辑功能时，不初始化 Canvas Editor、Univer 或 Office 文档模型。
-- 离线编辑器资源实测约增加 2.99 MiB ZIP 体积、12.14 MiB 解压体积。以 366.3 MiB ZIP、820.8 MiB 解压目录为基线，整包预计约为 369.3 MiB / 832.9 MiB；最终数字以当次发布审计为准。
-- 发布门禁限制编辑能力最多增加 10 MiB ZIP、30 MiB 解压体积，并禁止携带 `node_modules`、源码映射、CDN 或 Node 运行依赖。
+基准环境为 4 核 CPU、8 GB 内存和 SSD；推荐 16 GB 内存，不要求独立显卡。
 
 ### 从源码运行
 
@@ -80,36 +66,23 @@ python main.py
 
 ### 构建发行包
 
-先准备固定运行时：
-
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\fetch_runtimes.ps1
-```
-
-再执行干净构建和打包审计：
-
-```powershell
 .\.venv\Scripts\python -m PyInstaller deepseek-cowork.spec --noconfirm --clean
 .\.venv\Scripts\python.exe .\scripts\package_release.py
 ```
 
-## 快速开始
-
-1. 打开“设置 → 模型与服务”，配置模型并测试连接。
-2. 新建独立聊天，或从项目中创建绑定工作区的会话。
-3. 描述目标；需要资料时可通过输入区 `+` 添加文件，也可从文件管理器复制文件后直接粘贴。
-4. 在消息流和任务观测中查看执行；遇到确认时检查范围再提交。
-5. 从右侧“文件与交付物”预览或编辑结果，并按需继续转换。
-6. 把长期偏好写入记忆，把可靠方法记录为经验或沉淀为 Skill。
+发行包使用固定运行时、离线编辑器资源和打包审计；最终体积与组件清单以本次构建生成的报告为准。
 
 ## 文档
 
-- [用户指南](docs/user-guide.md)
-- [产品文档](docs/product.md)
-- [技术设计：从 Agent Loop 到桌面运行时](docs/technical-design.md)
-- [Skill 系统](docs/skill-system.md)
-- [AI 主题与 Visualize](docs/guides/ai-theme-and-visualize.md)
-- [路线图](docs/roadmap.md)
+- [用户指南](docs/user-guide.md)：安装、配置与完整任务操作
+- [产品文档](docs/product.md)：产品目标、核心理念与边界
+- [技术设计](docs/technical-design.md)：Agent Loop、Tool、安全、持久化与桌面运行时
+- [Skill 系统](docs/skill-system.md)：能力来源、发现、配置、MCP、依赖与经验
+- [AI 主题与 Visualize](docs/guides/ai-theme-and-visualize.md)：普通用户专题指南
+- [路线图](docs/roadmap.md)：当前阶段和候选方向
+- [发布记录](docs/releases/index.md)：版本变化与验收重点
 
 ## 许可证
 

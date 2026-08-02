@@ -27,8 +27,8 @@ from core.updater import (
 
 
 class TestAppVersion(unittest.TestCase):
-    def test_current_app_version_matches_509_release(self):
-        self.assertEqual(APP_VERSION, "5.0.9")
+    def test_current_app_version_matches_510_release(self):
+        self.assertEqual(APP_VERSION, "5.1.0")
 
     def test_normalize_version_accepts_release_tags(self):
         self.assertEqual(normalize_version("V4.7"), (4, 7, 0))

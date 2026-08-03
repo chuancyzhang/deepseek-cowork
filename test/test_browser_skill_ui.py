@@ -16,6 +16,7 @@ from main import (
     MainWindow,
     RuntimeComponentWorker,
     SettingsDialog,
+    SkillsCenterDialog,
 )
 from core.config_manager import ConfigManager
 
@@ -320,6 +321,33 @@ class BrowserSkillUiTests(unittest.TestCase):
             for call in manager.enqueue.call_args_list
         ]
         self.assertNotIn(BROWSER_SKILL_COMPONENT_ID, component_ids)
+
+    def test_enabled_browser_card_keeps_settings_and_refreshes_stale_status(self):
+        manager = _FakeComponentManager({
+            "known": True,
+            "installed": True,
+            "ready": True,
+            "version": "0.1.7",
+            "expected_version": "0.1.7",
+        })
+        parent = QWidget()
+        parent.component_task_manager = manager
+        skill_manager = MagicMock()
+        skill_manager.get_all_skills.return_value = [self._browser_skill(enabled=True)]
+        skill_manager.is_skill_editable.return_value = False
+        page = SkillsCenterDialog(skill_manager, MagicMock(), parent)
+        try:
+            self.app.processEvents()
+            settings = [
+                button
+                for button in page.findChildren(QPushButton)
+                if button.objectName() == "BrowserAutomationSettingsAction"
+            ]
+            self.assertEqual([button.text() for button in settings], ["设置"])
+            self.assertIn(("probe", BROWSER_SKILL_COMPONENT_ID), manager.enqueued)
+        finally:
+            page.deleteLater()
+            parent.deleteLater()
 
     def test_connection_check_does_not_succeed_until_browser_is_ready(self):
         worker = RuntimeComponentWorker(

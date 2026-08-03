@@ -330,6 +330,14 @@ class UiDesignSystemTests(unittest.TestCase):
                 if label.objectName() == "CapabilityStateLabel"
             ]
             self.assertIn("✓ 已开启", ready_labels)
+            self.assertEqual(
+                [
+                    button.text()
+                    for button in page.findChildren(QPushButton)
+                    if button.objectName() == "BrowserAutomationSettingsAction"
+                ],
+                ["设置"],
+            )
         finally:
             page.deleteLater()
 

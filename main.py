@@ -11705,6 +11705,21 @@ class SkillsCenterDialog(QDialog):
         self.refresh_list()
         bind_theme(self, self.refresh_theme, surface="management")
         log_ui_navigation("capability_library_open", mode=self.current_mode)
+        if (
+            self.component_task_manager is not None
+            and not self.component_task_manager.has_task(BROWSER_SKILL_COMPONENT_ID)
+        ):
+            QTimer.singleShot(0, self._probe_browser_component_status)
+
+    def _probe_browser_component_status(self):
+        manager = self.component_task_manager
+        if manager is None or manager.has_task(BROWSER_SKILL_COMPONENT_ID):
+            return False
+        log_ui_navigation(
+            "browser_capability_status_probe",
+            source="capability_store",
+        )
+        return bool(manager.probe_component(BROWSER_SKILL_COMPONENT_ID))
 
     def refresh_theme(self, _resolved=None):
         apply_product_dialog(self, "SkillsCenterDialog")
@@ -11921,8 +11936,10 @@ class SkillsCenterDialog(QDialog):
             )
             actions.addWidget(status)
             actions.addStretch()
-            if skill.get("config_fields"):
+            if is_browser_automation or skill.get("config_fields"):
                 settings_btn = QPushButton("设置")
+                if is_browser_automation:
+                    settings_btn.setObjectName("BrowserAutomationSettingsAction")
                 settings_btn.setStyleSheet(product_button_style("ghost"))
                 settings_btn.clicked.connect(lambda checked=False, value=dict(skill): self._open_detail(value))
                 actions.addWidget(settings_btn)

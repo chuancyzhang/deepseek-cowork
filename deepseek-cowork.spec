@@ -1,7 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 import ast
 import fnmatch
+import hashlib
 import importlib.metadata as importlib_metadata
+import json
 import os
 import re
 import sys
@@ -14,6 +16,21 @@ block_cipher = None
 _spec_arg = next((arg for arg in sys.argv[1:] if str(arg).lower().endswith(".spec")), None)
 SPEC_DIR = os.path.dirname(os.path.abspath(_spec_arg)) if _spec_arg else os.getcwd()
 ICON_PATH = os.path.join(SPEC_DIR, "images", "logo.ico")
+BROWSER_SKILL_RESOURCE_ROOT = os.path.join(SPEC_DIR, "resources", "browser_skill")
+BROWSER_SKILL_BUILD_ARTIFACTS = {
+    "cli": {
+        "version": "0.1.8",
+        "archive": "bsk-v0.1.8-x86_64-pc-windows-msvc.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.1.8/bsk-v0.1.8-x86_64-pc-windows-msvc.zip",
+        "sha256": "A5FEF16F7247F5BA6AE2ED032DF8C3704F124291884FEA40C19E6492AD442E13",
+    },
+    "extension": {
+        "version": "0.1.4",
+        "archive": "browser-skill-extension-v0.1.4-chrome.zip",
+        "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.1.4/browser-skill-extension-v0.1.4-chrome.zip",
+        "sha256": "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E",
+    },
+}
 
 python_prefix = sys.exec_prefix
 python_runtime_prefix = getattr(sys, "base_prefix", "") or python_prefix
@@ -94,6 +111,66 @@ def _collect_tree_for_analysis(src_root, dest_root, exclude_dirs=None, exclude_g
             dest_dir = os.path.join(dest_root, rel_root).replace("\\", "/")
             collected.append((src, dest_dir))
     return collected
+
+
+def _collect_browser_skill_bundle_for_analysis():
+    manifest_path = os.path.join(BROWSER_SKILL_RESOURCE_ROOT, "bundle.json")
+    license_path = os.path.join(BROWSER_SKILL_RESOURCE_ROOT, "LICENSE.txt")
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(f"Missing BrowserSkill bundle manifest: {manifest_path}")
+    if not os.path.isfile(license_path):
+        raise FileNotFoundError(f"Missing BrowserSkill MIT license: {license_path}")
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if (
+        manifest.get("schema") != 1
+        or manifest.get("component_id") != "browser-skill"
+        or manifest.get("license") != "LICENSE.txt"
+    ):
+        raise RuntimeError("BrowserSkill bundle manifest identity, schema, or license is invalid.")
+    with open(license_path, "r", encoding="utf-8") as handle:
+        license_text = handle.read()
+    if "MIT License" not in license_text or "Copyright (c) 2026 Tencent" not in license_text:
+        raise RuntimeError("BrowserSkill MIT license is missing or does not match Tencent's release.")
+    for artifact_key, expected in BROWSER_SKILL_BUILD_ARTIFACTS.items():
+        artifact = manifest.get(artifact_key) or {}
+        mismatches = [
+            key
+            for key in ("version", "archive", "url", "sha256")
+            if str(artifact.get(key) or "").strip().upper()
+            != str(expected[key]).strip().upper()
+        ]
+        if mismatches:
+            raise RuntimeError(
+                f"BrowserSkill {artifact_key} manifest does not match the pinned release: "
+                + ", ".join(mismatches)
+            )
+        archive_name = expected["archive"]
+        expected_sha256 = expected["sha256"]
+        archive_path = os.path.join(
+            BROWSER_SKILL_RESOURCE_ROOT,
+            "artifacts",
+            archive_name,
+        )
+        if not archive_name or not os.path.isfile(archive_path):
+            raise FileNotFoundError(
+                f"Missing BrowserSkill {artifact_key} artifact: {archive_path}. "
+                "Run scripts/fetch_runtimes.ps1 before building."
+            )
+        digest = hashlib.sha256()
+        with open(archive_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual_sha256 = digest.hexdigest().upper()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"BrowserSkill {artifact_key} SHA256 mismatch: "
+                f"expected={expected_sha256} actual={actual_sha256} path={archive_path}"
+            )
+    return _collect_tree_for_analysis(
+        BROWSER_SKILL_RESOURCE_ROOT,
+        "resources/browser_skill",
+    )
 
 
 def _collect_dynamic_skill_core_hiddenimports(*skill_roots):
@@ -600,6 +677,7 @@ application_datas.extend(
         (os.path.join(SPEC_DIR, "qt.conf"), "."),
     ]
 )
+application_datas.extend(_collect_browser_skill_bundle_for_analysis())
 DYNAMIC_SKILL_CORE_HIDDENIMPORTS = _collect_dynamic_skill_core_hiddenimports(
     os.path.join(SPEC_DIR, "skills"),
     os.path.join(SPEC_DIR, "ai_skills"),

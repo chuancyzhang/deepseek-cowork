@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "component_id": "browser-skill",
+  "license": "LICENSE.txt",
+  "cli": {
+    "version": "0.1.8",
+    "archive": "bsk-v0.1.8-x86_64-pc-windows-msvc.zip",
+    "url": "https://github.com/Tencent/BrowserSkill/releases/download/cli-v0.1.8/bsk-v0.1.8-x86_64-pc-windows-msvc.zip",
+    "sha256": "A5FEF16F7247F5BA6AE2ED032DF8C3704F124291884FEA40C19E6492AD442E13"
+  },
+  "extension": {
+    "version": "0.1.4",
+    "archive": "browser-skill-extension-v0.1.4-chrome.zip",
+    "url": "https://github.com/Tencent/BrowserSkill/releases/download/ext-v0.1.4/browser-skill-extension-v0.1.4-chrome.zip",
+    "sha256": "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E"
+  }
+}

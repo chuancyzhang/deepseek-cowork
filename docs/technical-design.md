@@ -332,10 +332,20 @@ daemon 负责后台连接、流式事件与跨页面存活，任务仍创建同�
 
 ### 9.3 外部组件进程隔离
 
-BrowserSkill CLI 安装在应用数据目录，属于外部程序。Windows 冻结态通过
+BrowserSkill CLI 0.1.8 与 Chrome/Edge 扩展 0.1.4 作为固定 SHA-256 的原始 ZIP
+进入只读资源目录。运行时不访问 GitHub：CLI 经哈希校验、安全解压、版本探测和
+原子替换安装到应用数据目录；扩展只在用户选择离线入口后解压到跨 Cowork 更新
+保持不变的稳定路径。扩展加载仍由用户在 Chrome/Edge 扩展页确认，不使用 CRX、
+注册表策略或 `--load-extension` 静默安装。
+
+BrowserSkill CLI 属于外部程序。Windows 冻结态通过
 `popen_external_program()` 在创建进程时清除 PyInstaller DLL 搜索影响，并从
 子进程 `PATH` 移除 `_internal` 路径；创建完成后立即恢复主进程环境。这样浏览器
 守护进程不会错误加载发行目录运行库，也不会在退出后占用旧发布目录。
+
+`bsk doctor` 按固定检查名解析 CLI/daemon、扩展连接和浏览器协议状态；只有协议
+检查通过后才执行真实 Agent 标签页探测。扩展未连接、协议不兼容、本地服务故障
+和执行探测失败分别投影为独立状态，避免用一条笼统错误掩盖恢复路径。
 
 随包 helper 继续使用普通启动路径，不套用外部程序隔离规则。
 
@@ -364,8 +374,9 @@ Skill `impl.py` 是动态数据文件，不进入静态 import graph。构建 sp
 读取、解析或核心工作区模块缺失时直接中止构建，防止“源码可用、冻结包 Tool
 消失”。
 
-发行审计检查固定运行时、WebEngine、离线编辑器、许可证、远程资源、源码映射、
-`node_modules` 和体积预算。WebEngine 冒烟在独立进程验证三类编辑器离线加载与
+发行审计检查固定运行时、BrowserSkill 两个 ZIP 的清单/哈希/MIT 许可证、WebEngine、
+离线编辑器、远程资源、源码映射、`node_modules` 和体积预算。缺失或篡改任一
+BrowserSkill 制品都会中止构建或审计。WebEngine 冒烟在独立进程验证三类编辑器离线加载与
 往返协议，代表性截图覆盖 Windows 100%、125% 和 150% 缩放。
 
 ## 12. 当前完整循环

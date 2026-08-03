@@ -177,7 +177,9 @@ from core.browser_skill_component import (
     BROWSER_SKILL_EXTENSION_URL,
     browser_skill_status,
     install_browser_skill,
+    launch_browser_skill_extension_manager,
     log_browser_skill_event,
+    prepare_browser_skill_extension,
     uninstall_browser_skill,
 )
 from core.llm.factory import LLMFactory
@@ -3111,6 +3113,8 @@ class CapabilityWorkbenchDialog(QDialog):
         self.browser_component_task = {}
         self.browser_setup_error = ""
         self.browser_extension_page_opened = False
+        self.browser_offline_guidance_visible = False
+        self.browser_pending_browser_id = ""
         self.browser_enable_after_check = False
         self.setWindowTitle("能力设置" if self.simple_mode else "能力工作台")
         self.resize(980, 680)
@@ -3185,6 +3189,29 @@ class CapabilityWorkbenchDialog(QDialog):
         )
         self.browser_setup_primary_btn.setStyleSheet(product_button_style("primary"))
         self.browser_setup_secondary_btn.setStyleSheet(product_button_style("secondary"))
+        self.browser_extension_controls.setStyleSheet(product_surface_style("subtle"))
+        self.browser_choice_combo.setStyleSheet(product_field_style())
+        self.browser_offline_btn.setStyleSheet(
+            product_button_style(
+                "secondary" if self.browser_extension_page_opened else "primary"
+            )
+        )
+        self.browser_store_btn.setStyleSheet(product_button_style("secondary"))
+        for button in (
+            self.browser_open_manager_btn,
+            self.browser_open_folder_btn,
+            self.browser_copy_path_btn,
+        ):
+            button.setStyleSheet(product_button_style("secondary"))
+        self.browser_extension_warning.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.warning_text};"
+        )
+        self.browser_extension_steps.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        self.browser_extension_path_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_caption}px; color: {DesignTokens.text_tertiary};"
+        )
         self._render_browser_automation_setup()
 
     def _build_browser_automation_setup(self, root_layout):
@@ -3230,6 +3257,101 @@ class CapabilityWorkbenchDialog(QDialog):
         section_layout.addWidget(self.browser_setup_description)
         section_layout.addWidget(self.browser_setup_status)
         section_layout.addWidget(self.browser_setup_progress)
+
+        self.browser_extension_controls = QFrame()
+        self.browser_extension_controls.setObjectName("BrowserExtensionControls")
+        self.browser_extension_controls.setProperty("productSurface", "subtle")
+        self.browser_extension_controls.setStyleSheet(product_surface_style("subtle"))
+        extension_layout = QVBoxLayout(self.browser_extension_controls)
+        extension_layout.setContentsMargins(12, 10, 12, 10)
+        extension_layout.setSpacing(8)
+
+        browser_row = QHBoxLayout()
+        browser_row.setSpacing(8)
+        browser_row.addWidget(QLabel("目标浏览器"))
+        self.browser_choice_combo = QComboBox()
+        self.browser_choice_combo.setObjectName("BrowserExtensionBrowserChoice")
+        self.browser_choice_combo.setMinimumWidth(210)
+        self.browser_choice_combo.setStyleSheet(product_field_style())
+        self.browser_choice_combo.currentIndexChanged.connect(
+            lambda _index: self._refresh_browser_extension_controls()
+        )
+        browser_row.addWidget(self.browser_choice_combo, 1)
+        extension_layout.addLayout(browser_row)
+
+        entry_actions = QHBoxLayout()
+        entry_actions.setSpacing(8)
+        self.browser_offline_btn = QPushButton("离线安装扩展")
+        self.browser_offline_btn.setObjectName("BrowserExtensionOfflineAction")
+        self.browser_offline_btn.setStyleSheet(product_button_style("primary"))
+        self.browser_offline_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action("offline_extension")
+        )
+        self.browser_store_btn = QPushButton("Chrome Web Store")
+        self.browser_store_btn.setObjectName("BrowserExtensionStoreAction")
+        self.browser_store_btn.setStyleSheet(product_button_style("secondary"))
+        self.browser_store_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action("store_extension")
+        )
+        entry_actions.addWidget(self.browser_offline_btn)
+        entry_actions.addWidget(self.browser_store_btn)
+        entry_actions.addStretch()
+        extension_layout.addLayout(entry_actions)
+
+        self.browser_extension_warning = QLabel(
+            "不要在同一浏览器配置中同时启用商店版和离线版。"
+        )
+        self.browser_extension_warning.setWordWrap(True)
+        self.browser_extension_warning.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.warning_text};"
+        )
+        extension_layout.addWidget(self.browser_extension_warning)
+
+        self.browser_extension_guidance = QWidget()
+        guidance_layout = QVBoxLayout(self.browser_extension_guidance)
+        guidance_layout.setContentsMargins(0, 2, 0, 0)
+        guidance_layout.setSpacing(6)
+        self.browser_extension_steps = QLabel(
+            "1. 启用开发者模式  →  2. 点击“加载已解压的扩展程序”  →  3. 选择下方目录"
+        )
+        self.browser_extension_steps.setWordWrap(True)
+        self.browser_extension_steps.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_meta}px; color: {DesignTokens.text_secondary};"
+        )
+        self.browser_extension_path_label = QLabel("")
+        self.browser_extension_path_label.setWordWrap(True)
+        self.browser_extension_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.browser_extension_path_label.setStyleSheet(
+            f"font-size: {DesignTokens.font_size_caption}px; color: {DesignTokens.text_tertiary};"
+        )
+        guidance_layout.addWidget(self.browser_extension_steps)
+        guidance_layout.addWidget(self.browser_extension_path_label)
+        utility_actions = QHBoxLayout()
+        utility_actions.setSpacing(8)
+        self.browser_open_manager_btn = QPushButton("打开扩展管理页")
+        self.browser_open_folder_btn = QPushButton("打开扩展目录")
+        self.browser_copy_path_btn = QPushButton("复制路径")
+        for button in (
+            self.browser_open_manager_btn,
+            self.browser_open_folder_btn,
+            self.browser_copy_path_btn,
+        ):
+            button.setStyleSheet(product_button_style("secondary"))
+            utility_actions.addWidget(button)
+        utility_actions.addStretch()
+        self.browser_open_manager_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action("open_extension_manager")
+        )
+        self.browser_open_folder_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action("open_extension_folder")
+        )
+        self.browser_copy_path_btn.clicked.connect(
+            lambda checked=False: self._run_browser_setup_action("copy_extension_path")
+        )
+        guidance_layout.addLayout(utility_actions)
+        extension_layout.addWidget(self.browser_extension_guidance)
+        self.browser_extension_controls.hide()
+        section_layout.addWidget(self.browser_extension_controls)
 
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 4, 0, 0)
@@ -3288,6 +3410,82 @@ class CapabilityWorkbenchDialog(QDialog):
             f"font-size: {DesignTokens.font_size_meta}px; color: {color};"
         )
 
+    def _selected_browser_id(self):
+        if not hasattr(self, "browser_choice_combo"):
+            return ""
+        return str(self.browser_choice_combo.currentData() or "").strip()
+
+    def _refresh_browser_extension_controls(self):
+        if not hasattr(self, "browser_extension_controls"):
+            return
+        status = dict(self.browser_component_status or {})
+        browsers = [
+            dict(item)
+            for item in (status.get("available_browsers") or [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        signature = tuple(
+            (str(item.get("id")), str(item.get("name")), str(item.get("path")))
+            for item in browsers
+        )
+        if signature != getattr(self, "_browser_choice_signature", None):
+            previous = self._selected_browser_id()
+            self.browser_choice_combo.blockSignals(True)
+            self.browser_choice_combo.clear()
+            self.browser_choice_combo.addItem("请选择浏览器…", "")
+            for browser in browsers:
+                self.browser_choice_combo.addItem(
+                    str(browser.get("name") or browser.get("id")),
+                    str(browser.get("id")),
+                )
+            if previous:
+                index = self.browser_choice_combo.findData(previous)
+                if index >= 0:
+                    self.browser_choice_combo.setCurrentIndex(index)
+            self.browser_choice_combo.blockSignals(False)
+            self._browser_choice_signature = signature
+        has_browser = bool(browsers)
+        selected_browser = self._selected_browser_id()
+        busy = bool(self.browser_component_task)
+        extension_available = bool(status.get("bundled_extension_available"))
+        prepared = bool(status.get("extension_prepared"))
+        path = str(status.get("extension_path") or "")
+        self.browser_choice_combo.setEnabled(has_browser and not busy)
+        self.browser_choice_combo.setToolTip(
+            ""
+            if has_browser
+            else "未检测到 Google Chrome 或 Microsoft Edge，请先安装受支持浏览器。"
+        )
+        self.browser_offline_btn.setEnabled(
+            bool(selected_browser and extension_available and not busy)
+        )
+        if not extension_available:
+            self.browser_offline_btn.setToolTip(
+                str(status.get("bundle_error") or "随包离线扩展不可用。")
+            )
+        elif not has_browser:
+            self.browser_offline_btn.setToolTip(
+                "请先安装 Google Chrome 或 Microsoft Edge。"
+            )
+        elif not selected_browser:
+            self.browser_offline_btn.setToolTip("请先明确选择目标浏览器。")
+        else:
+            self.browser_offline_btn.setToolTip("")
+        self.browser_store_btn.setEnabled(not busy)
+        show_guidance = bool(prepared or self.browser_offline_guidance_visible)
+        self.browser_extension_guidance.setVisible(show_guidance)
+        self.browser_extension_path_label.setText(
+            f"扩展目录：{path}" if path else "扩展目录尚未准备。"
+        )
+        self.browser_open_manager_btn.setEnabled(bool(selected_browser and not busy))
+        self.browser_open_folder_btn.setEnabled(bool(prepared and path and not busy))
+        self.browser_copy_path_btn.setEnabled(bool(prepared and path and not busy))
+        self.browser_offline_btn.setStyleSheet(
+            product_button_style(
+                "secondary" if self.browser_extension_page_opened else "primary"
+            )
+        )
+
     def _render_browser_automation_setup(self):
         if not hasattr(self, "browser_setup_title"):
             return
@@ -3295,6 +3493,7 @@ class CapabilityWorkbenchDialog(QDialog):
         status = dict(self.browser_component_status or {})
         task = dict(self.browser_component_task or {})
         self.browser_setup_progress.hide()
+        self.browser_extension_controls.hide()
         self._set_browser_setup_actions()
 
         if manager is None:
@@ -3308,21 +3507,27 @@ class CapabilityWorkbenchDialog(QDialog):
         if task:
             action = str(task.get("action") or "")
             progress = int(task.get("progress") or 0)
+            if status.get("installed") and not status.get("needs_repair"):
+                self.browser_extension_controls.show()
+                self._refresh_browser_extension_controls()
             self.browser_setup_title.setText(
                 "正在检查浏览器连接"
                 if action == "check"
                 else "正在确认浏览器状态"
                 if action == "probe"
+                else "正在准备离线扩展"
+                if action == "prepare_extension"
                 else "正在准备浏览器自动化"
             )
             task_message = {
                 "check": "正在检查 Chrome 或 Edge 的连接，请稍候…",
                 "probe": "正在确认当前状态，请稍候…",
                 "repair": "正在修复浏览器自动化，请稍候…",
+                "prepare_extension": "正在校验并解压随 Cowork 提供的浏览器扩展…",
                 "install": (
-                    "正在完成准备，请稍候…"
+                    "正在完成离线安装，请稍候…"
                     if progress >= 80
-                    else "正在下载并校验所需文件，请稍候…"
+                    else "正在校验并安装随 Cowork 提供的 CLI…"
                 ),
             }.get(action, "正在处理，请稍候…")
             self.browser_setup_description.setText(task_message)
@@ -3354,11 +3559,18 @@ class CapabilityWorkbenchDialog(QDialog):
             return
 
         if not status.get("installed"):
-            self.browser_setup_title.setText("准备浏览器自动化")
-            self.browser_setup_description.setText(
-                "Cowork 会自动下载并校验所需文件。完成后再连接 Chrome 或 Edge。"
-            )
-            self._set_browser_setup_actions("开始设置", "install")
+            if not status.get("bundled_cli_available", status.get("bundle_ready", True)):
+                self.browser_setup_title.setText("随包安装文件不可用")
+                self.browser_setup_description.setText(
+                    str(status.get("bundle_error") or "BrowserSkill CLI 未随 Cowork 正确提供。")
+                )
+                self._set_browser_setup_status("请重新安装完整的 Cowork 发布包。", "error")
+            else:
+                self.browser_setup_title.setText("准备浏览器自动化")
+                self.browser_setup_description.setText(
+                    "CLI 已随 Cowork 提供，将从本机校验并安装，不会在运行时访问 GitHub。"
+                )
+                self._set_browser_setup_actions("开始设置", "install")
             return
 
         if status.get("needs_update") or status.get("needs_repair"):
@@ -3366,7 +3578,8 @@ class CapabilityWorkbenchDialog(QDialog):
             self.browser_setup_description.setText(
                 str(status.get("health_error") or "浏览器自动化的本地文件需要修复。")
             )
-            self._set_browser_setup_actions("修复", "repair")
+            if status.get("bundled_cli_available", status.get("bundle_ready", True)):
+                self._set_browser_setup_actions("修复", "repair")
             return
 
         if status.get("ready"):
@@ -3387,26 +3600,29 @@ class CapabilityWorkbenchDialog(QDialog):
                 self._set_browser_setup_actions("开启能力", "enable")
             return
 
-        self.browser_setup_title.setText("连接 Chrome 或 Edge")
-        if self.browser_extension_page_opened or self.browser_setup_error:
+        self.browser_extension_controls.show()
+        self._refresh_browser_extension_controls()
+        if status.get("protocol_incompatible"):
+            self.browser_setup_title.setText("更新浏览器扩展")
             self.browser_setup_description.setText(
-                "在浏览器中安装并启用扩展后，回到这里完成检查。"
-            )
-            self._set_browser_setup_actions(
-                "检查并开启",
-                "check",
-                "重新打开扩展页",
-                "extension",
+                "当前扩展协议与 CLI 不兼容。请选择离线更新或前往 Chrome Web Store 更新。"
             )
         else:
+            self.browser_setup_title.setText("连接 Chrome 或 Edge")
             self.browser_setup_description.setText(
-                "添加浏览器扩展并保持启用，然后回来完成检查。"
+                "离线安装为主路径，也可保留使用 Chrome Web Store；完成后共用连接检查。"
             )
+        if not status.get("available_browsers"):
+            self._set_browser_setup_status(
+                "未检测到 Chrome 或 Edge，请先安装受支持浏览器。",
+                "warning",
+            )
+        if self.browser_extension_page_opened:
+            self._set_browser_setup_actions("检查并开启", "check")
+        else:
             self._set_browser_setup_actions(
-                "安装浏览器扩展",
-                "extension",
-                "已经安装，检查并开启",
-                "check",
+                secondary_text="检查并开启",
+                secondary_action="check",
             )
 
     def _probe_browser_component(self):
@@ -3440,7 +3656,7 @@ class CapabilityWorkbenchDialog(QDialog):
         return bool(accepted)
 
     def _open_browser_extension_page(self):
-        log_ui_navigation("browser_capability_setup_action", action="open_extension")
+        log_ui_navigation("browser_capability_setup_action", action="open_chrome_web_store")
         if QDesktopServices.openUrl(QUrl(BROWSER_SKILL_EXTENSION_URL)):
             self.browser_extension_page_opened = True
             self.browser_setup_error = ""
@@ -3450,14 +3666,108 @@ class CapabilityWorkbenchDialog(QDialog):
         self._render_browser_automation_setup()
         return False
 
+    def _prepare_offline_browser_extension(self):
+        browser_id = self._selected_browser_id()
+        if not browser_id:
+            browsers = self.browser_component_status.get("available_browsers") or []
+            self.browser_setup_error = (
+                "请先明确选择 Chrome 或 Edge。"
+                if browsers
+                else "未检测到 Chrome 或 Edge，请先安装受支持浏览器。"
+            )
+            self._render_browser_automation_setup()
+            return False
+        if not self.browser_component_status.get("bundled_extension_available"):
+            self.browser_setup_error = str(
+                self.browser_component_status.get("bundle_error")
+                or "随包 BrowserSkill 扩展不可用，请重新安装完整的 Cowork 发布包。"
+            )
+            self._render_browser_automation_setup()
+            return False
+        self.browser_pending_browser_id = browser_id
+        self.browser_offline_guidance_visible = True
+        return self._enqueue_browser_component_action("prepare_extension")
+
+    def _open_selected_extension_manager(self):
+        browser_id = self._selected_browser_id()
+        if not browser_id:
+            self.browser_setup_error = "请先明确选择 Chrome 或 Edge。"
+            self._render_browser_automation_setup()
+            return False
+        try:
+            launch_browser_skill_extension_manager(browser_id)
+        except Exception as exc:
+            self.browser_setup_error = str(exc)
+            self._render_browser_automation_setup()
+            return False
+        self.browser_extension_page_opened = True
+        self.browser_setup_error = ""
+        self._render_browser_automation_setup()
+        return True
+
+    def _open_browser_extension_folder(self):
+        path = str(self.browser_component_status.get("extension_path") or "")
+        result = reveal_path_in_file_manager(path)
+        if not result.ok:
+            self.browser_setup_error = result.error or "系统未能打开扩展目录。"
+            self._render_browser_automation_setup()
+            return False
+        self.browser_setup_error = ""
+        self.browser_offline_guidance_visible = True
+        self._render_browser_automation_setup()
+        return True
+
+    def _copy_browser_extension_path(self):
+        path = str(self.browser_component_status.get("extension_path") or "")
+        if not path:
+            self.browser_setup_error = "扩展目录尚未准备。"
+            self._render_browser_automation_setup()
+            return False
+        QApplication.clipboard().setText(path)
+        log_ui_navigation("browser_capability_setup_action", action="copy_extension_path")
+        self.browser_setup_error = ""
+        self._render_browser_automation_setup()
+        self._set_browser_setup_status("✓ 扩展目录路径已复制", "success")
+        return True
+
+    def _finish_offline_browser_extension_setup(self):
+        browser_id = self.browser_pending_browser_id or self._selected_browser_id()
+        self.browser_pending_browser_id = ""
+        if browser_id:
+            index = self.browser_choice_combo.findData(browser_id)
+            if index >= 0:
+                self.browser_choice_combo.setCurrentIndex(index)
+        errors = []
+        try:
+            launch_browser_skill_extension_manager(browser_id)
+            self.browser_extension_page_opened = True
+        except Exception as exc:
+            errors.append(str(exc))
+        path = str(self.browser_component_status.get("extension_path") or "")
+        folder_result = reveal_path_in_file_manager(path)
+        if not folder_result.ok:
+            errors.append(folder_result.error or "系统未能打开扩展目录。")
+        self.browser_offline_guidance_visible = True
+        self.browser_setup_error = "；".join(errors)
+        self._render_browser_automation_setup()
+        return not errors
+
     def _run_browser_setup_action(self, action):
         action = str(action or "")
         if action == "probe":
             return self._probe_browser_component()
         if action in {"install", "repair", "check"}:
             return self._enqueue_browser_component_action(action)
-        if action == "extension":
+        if action in {"extension", "store_extension"}:
             return self._open_browser_extension_page()
+        if action == "offline_extension":
+            return self._prepare_offline_browser_extension()
+        if action == "open_extension_manager":
+            return self._open_selected_extension_manager()
+        if action == "open_extension_folder":
+            return self._open_browser_extension_folder()
+        if action == "copy_extension_path":
+            return self._copy_browser_extension_path()
         if action == "enable":
             if not self.browser_component_status.get("ready"):
                 self.browser_setup_error = "浏览器尚未连接，请先完成检查。"
@@ -3499,10 +3809,15 @@ class CapabilityWorkbenchDialog(QDialog):
         )
         if not ok:
             self.browser_enable_after_check = False
+            if str(action or "") == "prepare_extension":
+                self.browser_pending_browser_id = ""
             self.browser_setup_error = error or "操作失败，请重试。"
             self._render_browser_automation_setup()
             return
         self.browser_setup_error = ""
+        if str(action or "") == "prepare_extension":
+            self._finish_offline_browser_extension_setup()
+            return
         should_enable = (
             str(action or "") == "check"
             and self.browser_enable_after_check
@@ -7295,6 +7610,8 @@ class RuntimeComponentWorker(QThread):
             elif self.component_id == BROWSER_SKILL_COMPONENT_ID:
                 if self.action in {"install", "repair"}:
                     result = install_browser_skill(progress)
+                elif self.action == "prepare_extension":
+                    result = prepare_browser_skill_extension(progress)
                 elif self.action == "check":
                     progress(
                         "正在检查 BrowserSkill CLI、扩展和浏览器执行通道，"
@@ -7504,6 +7821,7 @@ class ComponentTaskManager(QObject):
             "repair": "修复",
             "uninstall": "卸载",
             "check": "检查",
+            "prepare_extension": "准备离线扩展",
         }.get(action, action)
 
     def _component_name(self, component_id):

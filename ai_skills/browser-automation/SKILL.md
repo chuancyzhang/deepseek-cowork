@@ -9,7 +9,8 @@ metadata:
   author: deepseek-cowork team
   version: "3.0.0"
   upstream: "Tencent/BrowserSkill"
-  upstream_cli: "0.1.7"
+  upstream_cli: "0.1.8"
+  upstream_extension: "0.1.4"
   permissions: ["screen_access", "internet"]
 security_level: high
 allowed-tools: [browser_skill_cli]

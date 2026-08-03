@@ -332,6 +332,135 @@ def quiet_show_event(window, event):
     QMainWindow.showEvent(window, event)
 
 
+def render_browser_skill_setup(window, app):
+    dark = str(os.environ.get("COWORK_BROWSER_SKILL_DARK") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if dark:
+        from unittest.mock import patch
+
+        from core.theme import ThemeRuntimeManager, default_design_tokens
+        from core.theme_service import ThemeRepository
+
+        repository = ThemeRepository(str(APP_DATA_DIR))
+        theme_manager = ThemeRuntimeManager(app, repository)
+        app.theme_manager = theme_manager
+        window.theme_manager = theme_manager
+        theme_manager.themeChanged.connect(window._apply_runtime_theme)
+        theme_manager.previewStateChanged.connect(window._on_theme_preview_state)
+        repository.write_preview(
+            name="浏览器设置深色验收",
+            overrides={
+                "tokens": {
+                    "primary": "#8b93ff",
+                    "primary_hover": "#9ca3ff",
+                    "primary_pressed": "#737be8",
+                    "primary_soft": "#252a43",
+                    "primary_focus": "#6972cc",
+                    "bg_app": "#101116",
+                    "bg_main": "#15171d",
+                    "bg_secondary": "#1b1e26",
+                    "bg_disabled": "#22252d",
+                    "bg_hover": "#242832",
+                    "bg_pressed": "#2a2f3a",
+                    "bg_sidebar": "#12141a",
+                    "bg_sidebar_hover": "#1c2029",
+                    "bg_sidebar_selected": "#23283a",
+                    "bg_chat": "#101116",
+                    "management_bg": "#101116",
+                    "management_panel_bg": "#181b22",
+                    "text_primary": "#eceef3",
+                    "text_secondary": "#b7bcc8",
+                    "text_tertiary": "#858c9b",
+                    "text_disabled": "#666d7a",
+                    "sidebar_text": "#eceef3",
+                    "sidebar_text_muted": "#aeb4c2",
+                    "sidebar_border": "#292d36",
+                    "chat_text": "#eceef3",
+                    "chat_text_muted": "#b7bcc8",
+                    "chat_border": "#292d36",
+                    "icon_primary": "#eceef3",
+                    "icon_secondary": "#aeb4c2",
+                    "border": "#343946",
+                    "border_strong": "#474d5b",
+                    "border_subtle": "#292d36",
+                    "separator": "#292d36",
+                    "warning_text": "#f0b86e",
+                },
+            },
+            default_tokens=default_design_tokens(),
+            session_id="browser-skill-screenshot",
+        )
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            if not theme_manager.apply_repository_state(reason="browser_skill_screenshot"):
+                raise RuntimeError(theme_manager.last_error)
+
+    window.skill_manager.load_skills()
+    window.skill_manager_ready = True
+    window.component_task_manager._component_statuses[main.BROWSER_SKILL_COMPONENT_ID] = {
+        "known": True,
+        "installed": True,
+        "healthy": True,
+        "ready": False,
+        "state": "extension_disconnected",
+        "state_text": "本地支持已准备，扩展未连接",
+        "version": "0.1.8",
+        "expected_version": "0.1.8",
+        "bundle_ready": True,
+        "bundle_error": "",
+        "bundled_cli_available": True,
+        "bundled_extension_available": True,
+        "expected_extension_version": "0.1.4",
+        "extension_prepared": True,
+        "extension_prepared_version": "0.1.4",
+        "extension_path": r"C:\Users\用户\AppData\Roaming\DeepSeekCowork\runtime_sandbox\v1\components\browser-skill-extension\extension",
+        "available_browsers": [
+            {"id": "chrome", "name": "Google Chrome", "path": r"C:\Program Files\Google\Chrome\Application\chrome.exe", "extensions_url": "chrome://extensions/"},
+            {"id": "edge", "name": "Microsoft Edge", "path": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "extensions_url": "edge://extensions/"},
+        ],
+        "protocol_incompatible": False,
+        "updated_at": 1785686400,
+    }
+    original_probe = window.component_task_manager.probe_component
+    window.component_task_manager.probe_component = lambda _component_id: True
+    try:
+        window.open_skills_center()
+        skills_page = window.product_pages[window.PAGE_CAPABILITIES]
+        browser_skill = next(
+            (
+                skill
+                for skill in skills_page._all_skills
+                if str(skill.get("name") or "") == "browser-automation"
+            ),
+            None,
+        )
+        if browser_skill is None:
+            raise RuntimeError("Browser automation capability fixture was not found.")
+        window.show_capability_detail(browser_skill)
+        detail = window.product_pages["capability_detail"]
+        edge_index = detail.browser_choice_combo.findData("edge")
+        if edge_index < 0:
+            raise RuntimeError("Edge choice was not rendered in BrowserSkill setup.")
+        detail.browser_choice_combo.setCurrentIndex(edge_index)
+        window.resize(1120, 720)
+        window.show()
+        process_events(220)
+        scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+        tone = "dark" if dark else "light"
+        save_widget(
+            window,
+            f"browser-skill-offline-{tone}-{scale_label}x.png",
+            220,
+        )
+        if not dark and scale_label == "1":
+            save_widget(window, "s29-capability-settings.png", 80)
+    finally:
+        window.component_task_manager.probe_component = original_probe
+
+
 def main_run():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     workspace = TEMP_ROOT / "Linear Demo Project"
@@ -365,6 +494,9 @@ def main_run():
     try:
         window = main.MainWindow()
         window.resize(1280, 720)
+        if SCREENSHOT_SCOPE == "browser-skill":
+            render_browser_skill_setup(window, app)
+            return
         if SCREENSHOT_SCOPE == "attachment-preview":
             image_path = ROOT / "images" / "user-guide" / "s09-interface-overview.png"
             if not image_path.is_file():
@@ -1007,9 +1139,13 @@ def main_run():
         window.open_skills_center()
         skills = window.product_pages[window.PAGE_CAPABILITIES]
         save_widget(window, "23-skills-center.png")
-        if skills._all_skills:
-            window.show_capability_detail(skills._all_skills[0])
-            save_widget(window, "29-capability-workbench.png")
+        browser_skill = next(
+            (item for item in skills._all_skills if item.get("name") == "browser-automation"),
+            None,
+        )
+        if browser_skill:
+            window.show_capability_detail(browser_skill)
+            save_widget(window, "s29-capability-settings.png")
         window.show_conversation_page()
 
         window.open_automation_center()

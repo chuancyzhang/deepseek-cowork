@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -10,25 +11,36 @@ import time
 import zipfile
 from datetime import datetime, timezone
 
-import requests
+try:
+    import winreg
+except ImportError:  # pragma: no cover - non-Windows
+    winreg = None
 
-from .env_utils import get_app_data_dir
+from .env_utils import get_app_data_dir, get_resource_dir
 from .process_utils import popen_external_program, subprocess_kwargs_no_window
 
 
 BROWSER_SKILL_COMPONENT_ID = "browser-skill"
-BROWSER_SKILL_VERSION = "0.1.7"
-BROWSER_SKILL_ARCHIVE = "bsk-v0.1.7-x86_64-pc-windows-msvc.zip"
-BROWSER_SKILL_SHA256 = "C941BE54D0C0CE56212BF38A512AC9F017A4A74A4760BCD40BBD5399C489CB75"
+BROWSER_SKILL_VERSION = "0.1.8"
+BROWSER_SKILL_ARCHIVE = "bsk-v0.1.8-x86_64-pc-windows-msvc.zip"
+BROWSER_SKILL_SHA256 = "A5FEF16F7247F5BA6AE2ED032DF8C3704F124291884FEA40C19E6492AD442E13"
 BROWSER_SKILL_DOWNLOAD_URL = (
     "https://github.com/Tencent/BrowserSkill/releases/download/"
     f"cli-v{BROWSER_SKILL_VERSION}/{BROWSER_SKILL_ARCHIVE}"
+)
+BROWSER_SKILL_EXTENSION_VERSION = "0.1.4"
+BROWSER_SKILL_EXTENSION_ARCHIVE = "browser-skill-extension-v0.1.4-chrome.zip"
+BROWSER_SKILL_EXTENSION_SHA256 = "0C7A0B371CC15AC42AF155A55ED0C1BDAF257916F1ACC71C0C2BC56AAE366C3E"
+BROWSER_SKILL_EXTENSION_DOWNLOAD_URL = (
+    "https://github.com/Tencent/BrowserSkill/releases/download/"
+    f"ext-v{BROWSER_SKILL_EXTENSION_VERSION}/{BROWSER_SKILL_EXTENSION_ARCHIVE}"
 )
 BROWSER_SKILL_EXTENSION_URL = (
     "https://chromewebstore.google.com/detail/"
     "hhcmgoofomhgciiibhipgmgkgnoenaoi"
 )
-BROWSER_SKILL_MARKER_SCHEMA = 1
+BROWSER_SKILL_MARKER_SCHEMA = 2
+BROWSER_SKILL_BUNDLE_SCHEMA = 1
 BROWSER_SKILL_PROBE_TIMEOUT_SECONDS = 45
 
 _LOG_LOCK = threading.RLock()
@@ -46,6 +58,28 @@ def browser_skill_root():
 
 def browser_skill_executable():
     return os.path.join(browser_skill_root(), "bsk.exe")
+
+
+def browser_skill_bundle_root():
+    return os.path.join(get_resource_dir(), "resources", "browser_skill")
+
+
+def browser_skill_extension_component_root():
+    return os.path.join(
+        get_app_data_dir(),
+        "runtime_sandbox",
+        "v1",
+        "components",
+        "browser-skill-extension",
+    )
+
+
+def browser_skill_extension_path():
+    return os.path.join(browser_skill_extension_component_root(), "extension")
+
+
+def _extension_marker_path(root=None):
+    return os.path.join(root or browser_skill_extension_component_root(), "component.json")
 
 
 def _marker_path(root=None):
@@ -107,6 +141,280 @@ def _read_marker():
         return payload if isinstance(payload, dict) else {}
     except (OSError, ValueError, TypeError):
         return {}
+
+
+def _read_json_file(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"JSON 根节点必须是对象：{path}")
+    return payload
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().upper()
+
+
+def _browser_skill_bundle_manifest():
+    manifest_path = os.path.join(browser_skill_bundle_root(), "bundle.json")
+    license_path = os.path.join(browser_skill_bundle_root(), "LICENSE.txt")
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(f"随包 BrowserSkill 清单缺失：{manifest_path}")
+    if not os.path.isfile(license_path):
+        raise RuntimeError(f"随包 BrowserSkill MIT 许可证缺失：{license_path}")
+    try:
+        manifest = _read_json_file(manifest_path)
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        raise RuntimeError(f"随包 BrowserSkill 清单无效：{exc}") from exc
+    if (
+        manifest.get("schema") != BROWSER_SKILL_BUNDLE_SCHEMA
+        or manifest.get("component_id") != BROWSER_SKILL_COMPONENT_ID
+        or manifest.get("license") != "LICENSE.txt"
+    ):
+        raise RuntimeError("随包 BrowserSkill 清单版本或组件标识不受支持。")
+    try:
+        with open(license_path, "r", encoding="utf-8") as handle:
+            license_text = handle.read()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"随包 BrowserSkill MIT 许可证无法读取：{exc}") from exc
+    if "MIT License" not in license_text or "Copyright (c) 2026 Tencent" not in license_text:
+        raise RuntimeError("随包 BrowserSkill MIT 许可证内容不匹配。")
+    return manifest
+
+
+def _bundled_artifact_status(kind):
+    expected = {
+        "cli": {
+            "version": BROWSER_SKILL_VERSION,
+            "archive": BROWSER_SKILL_ARCHIVE,
+            "sha256": BROWSER_SKILL_SHA256,
+            "url": BROWSER_SKILL_DOWNLOAD_URL,
+        },
+        "extension": {
+            "version": BROWSER_SKILL_EXTENSION_VERSION,
+            "archive": BROWSER_SKILL_EXTENSION_ARCHIVE,
+            "sha256": BROWSER_SKILL_EXTENSION_SHA256,
+            "url": BROWSER_SKILL_EXTENSION_DOWNLOAD_URL,
+        },
+    }.get(str(kind or ""))
+    if expected is None:
+        raise ValueError(f"未知 BrowserSkill 随包制品：{kind}")
+    result = {
+        "kind": kind,
+        "available": False,
+        "version": expected["version"],
+        "archive": expected["archive"],
+        "sha256": expected["sha256"],
+        "path": "",
+        "error": "",
+    }
+    try:
+        manifest = _browser_skill_bundle_manifest()
+        declared = manifest.get(kind) or {}
+        mismatches = [
+            key
+            for key in ("version", "archive", "sha256", "url")
+            if str(declared.get(key) or "").strip().upper()
+            != str(expected[key]).strip().upper()
+        ]
+        if mismatches:
+            raise RuntimeError(
+                f"随包 BrowserSkill {kind} 清单与固定版本不一致："
+                + "、".join(mismatches)
+            )
+        artifact_path = os.path.join(
+            browser_skill_bundle_root(),
+            "artifacts",
+            expected["archive"],
+        )
+        result["path"] = artifact_path
+        if not os.path.isfile(artifact_path):
+            raise RuntimeError(f"随包 BrowserSkill {kind} 制品缺失：{artifact_path}")
+        actual_sha256 = _file_sha256(artifact_path)
+        result["actual_sha256"] = actual_sha256
+        if actual_sha256 != expected["sha256"]:
+            raise RuntimeError(
+                f"随包 BrowserSkill {kind} SHA-256 校验失败："
+                f"期望 {expected['sha256']}，实际 {actual_sha256}"
+            )
+        result["available"] = True
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _browser_skill_bundle_status():
+    cli = _bundled_artifact_status("cli")
+    extension = _bundled_artifact_status("extension")
+    errors = [item["error"] for item in (cli, extension) if item.get("error")]
+    return {
+        "ready": bool(cli.get("available") and extension.get("available")),
+        "error": "；".join(errors),
+        "cli": cli,
+        "extension": extension,
+    }
+
+
+def _extension_preparation_status():
+    extension_path = browser_skill_extension_path()
+    marker_path = _extension_marker_path()
+    result = {
+        "prepared": False,
+        "version": "",
+        "path": extension_path if os.path.isdir(extension_path) else "",
+        "error": "",
+    }
+    if not os.path.isdir(extension_path):
+        return result
+    try:
+        marker = _read_json_file(marker_path)
+        manifest = _read_json_file(os.path.join(extension_path, "manifest.json"))
+        version = str(manifest.get("version") or "").strip()
+        result["version"] = version
+        if (
+            marker.get("schema") != BROWSER_SKILL_MARKER_SCHEMA
+            or marker.get("id") != "browser-skill-extension"
+            or str(marker.get("archive_sha256") or "").upper()
+            != BROWSER_SKILL_EXTENSION_SHA256
+            or version != BROWSER_SKILL_EXTENSION_VERSION
+            or int(manifest.get("manifest_version") or 0) != 3
+        ):
+            raise RuntimeError("已准备的 BrowserSkill 扩展版本或校验标记不一致。")
+        result["prepared"] = True
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _registry_browser_paths(executable_name):
+    if os.name != "nt" or winreg is None:
+        return []
+    paths = []
+    key_path = rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{executable_name}"
+    access_modes = [getattr(winreg, "KEY_READ", 0)]
+    for flag_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        flag = getattr(winreg, flag_name, 0)
+        if flag:
+            access_modes.append(getattr(winreg, "KEY_READ", 0) | flag)
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for access in access_modes:
+            try:
+                with winreg.OpenKey(hive, key_path, 0, access) as key:
+                    value, _value_type = winreg.QueryValueEx(key, "")
+                if value:
+                    paths.append(str(value).strip().strip('"'))
+            except OSError:
+                continue
+    return paths
+
+
+def _browser_candidate_paths(browser_id):
+    environment = os.environ
+    program_files = [
+        environment.get("PROGRAMFILES"),
+        environment.get("PROGRAMFILES(X86)"),
+        environment.get("ProgramW6432"),
+    ]
+    local_app_data = environment.get("LOCALAPPDATA")
+    if browser_id == "chrome":
+        executable_name = "chrome.exe"
+        suffix = os.path.join("Google", "Chrome", "Application", executable_name)
+    elif browser_id == "edge":
+        executable_name = "msedge.exe"
+        suffix = os.path.join("Microsoft", "Edge", "Application", executable_name)
+    else:
+        return []
+    candidates = [shutil.which(executable_name)]
+    candidates.extend(_registry_browser_paths(executable_name))
+    candidates.extend(
+        os.path.join(root, suffix)
+        for root in [local_app_data, *program_files]
+        if root
+    )
+    return candidates
+
+
+def browser_skill_browser_candidates():
+    browsers = []
+    definitions = (
+        ("chrome", "Google Chrome", "chrome://extensions/"),
+        ("edge", "Microsoft Edge", "edge://extensions/"),
+    )
+    for browser_id, name, extensions_url in definitions:
+        seen = set()
+        executable = ""
+        for candidate in _browser_candidate_paths(browser_id):
+            normalized = os.path.abspath(str(candidate or "").strip().strip('"'))
+            key = os.path.normcase(normalized)
+            if not candidate or key in seen:
+                continue
+            seen.add(key)
+            if os.path.isfile(normalized):
+                executable = normalized
+                break
+        if executable:
+            browsers.append({
+                "id": browser_id,
+                "name": name,
+                "path": executable,
+                "extensions_url": extensions_url,
+            })
+    return browsers
+
+
+def launch_browser_skill_extension_manager(browser_id):
+    browser_id = str(browser_id or "").strip().lower()
+    supported = {"chrome": "Google Chrome", "edge": "Microsoft Edge"}
+    if browser_id not in supported:
+        raise RuntimeError("请选择 Google Chrome 或 Microsoft Edge。")
+    candidates = {
+        item["id"]: item
+        for item in browser_skill_browser_candidates()
+    }
+    browser = candidates.get(browser_id)
+    if browser is None:
+        available = [item["name"] for item in candidates.values()]
+        suggestion = f"，可改选 {'、'.join(available)}" if available else ""
+        raise RuntimeError(f"未找到 {supported[browser_id]}{suggestion}。")
+    log_browser_skill_event(
+        "browser_launch_start",
+        browser=browser_id,
+        executable=browser["path"],
+        url=browser["extensions_url"],
+    )
+    try:
+        process = popen_external_program(
+            [browser["path"], browser["extensions_url"]],
+            **subprocess_kwargs_no_window(),
+        )
+    except Exception as exc:
+        available = [
+            item["name"]
+            for item in candidates.values()
+            if item["id"] != browser_id
+        ]
+        suggestion = f" 请明确改选 {'、'.join(available)} 后重试。" if available else ""
+        error = f"无法启动 {browser['name']}：{exc}。{suggestion}".strip()
+        log_browser_skill_event(
+            "browser_launch_error",
+            browser=browser_id,
+            error=error,
+        )
+        raise RuntimeError(error) from exc
+    log_browser_skill_event(
+        "browser_launch_finish",
+        browser=browser_id,
+        pid=getattr(process, "pid", None),
+    )
+    return {
+        "ok": True,
+        "browser": browser,
+        "pid": getattr(process, "pid", None),
+    }
 
 
 def _directory_size(path):
@@ -281,6 +589,106 @@ def _extension_health(payload, combined_text):
     return None
 
 
+_DOCTOR_CHECK_NAMES = {
+    "bsk home writable",
+    "agent skill up to date",
+    "daemon running",
+    "protocol compatible",
+    "extension connected",
+    "browser protocol compatible",
+}
+
+
+def _structured_doctor_checks(payload):
+    checks = {}
+    for check in _doctor_checks(payload):
+        name = str(check.get("name") or check.get("check") or "").strip().lower()
+        if name in _DOCTOR_CHECK_NAMES:
+            checks[name] = check
+    return checks
+
+
+def _doctor_check_ok(check):
+    if not isinstance(check, dict):
+        return None
+    if check.get("ok") is True:
+        return True
+    if check.get("ok") is False:
+        return False
+    status = str(check.get("status") or check.get("state") or "").strip().lower()
+    if status in {"ok", "pass", "passed", "healthy", "ready", "connected"}:
+        return True
+    if status in {"fail", "failed", "error", "missing", "disconnected"}:
+        return False
+    return None
+
+
+def _doctor_check_detail(check):
+    if not isinstance(check, dict):
+        return ""
+    return "；".join(
+        str(check.get(key) or "").strip()
+        for key in ("detail", "message", "hint")
+        if str(check.get(key) or "").strip()
+    )
+
+
+def _classify_doctor_result(payload, combined_text):
+    checks = _structured_doctor_checks(payload)
+    local_failures = []
+    for name in ("bsk home writable", "daemon running", "protocol compatible"):
+        check = checks.get(name)
+        if _doctor_check_ok(check) is False:
+            local_failures.append((name, check))
+    if local_failures:
+        details = [
+            _doctor_check_detail(check) or name
+            for name, check in local_failures
+        ]
+        return {
+            "kind": "cli_daemon_failed",
+            "detail": "；".join(details),
+            "checks": checks,
+        }
+
+    extension_check = checks.get("extension connected")
+    extension_ok = _doctor_check_ok(extension_check)
+    if extension_ok is False:
+        return {
+            "kind": "extension_disconnected",
+            "detail": _doctor_check_detail(extension_check) or "0 browsers connected",
+            "checks": checks,
+        }
+
+    browser_protocol_check = checks.get("browser protocol compatible")
+    if extension_ok is True and _doctor_check_ok(browser_protocol_check) is False:
+        return {
+            "kind": "extension_incompatible",
+            "detail": (
+                _doctor_check_detail(browser_protocol_check)
+                or "浏览器扩展协议与当前 CLI 不兼容。"
+            ),
+            "checks": checks,
+        }
+    if extension_ok is True:
+        return {"kind": "connected", "detail": "", "checks": checks}
+
+    legacy_extension_ok = _extension_health(payload, combined_text)
+    if legacy_extension_ok is True:
+        return {"kind": "connected", "detail": "", "checks": checks}
+    if legacy_extension_ok is False:
+        return {
+            "kind": "extension_disconnected",
+            "detail": "Chrome 或 Edge 扩展尚未连接。",
+            "checks": checks,
+        }
+    return {
+        "kind": "unknown",
+        "detail": str(combined_text or "").strip(),
+        "checks": checks,
+    }
+
+
 def _session_id_from_payload(payload):
     if not isinstance(payload, dict):
         return ""
@@ -434,6 +842,9 @@ def browser_skill_status(run_diagnostics=False):
     executable = browser_skill_executable()
     marker = _read_marker()
     installed = os.path.isfile(executable)
+    bundle = _browser_skill_bundle_status()
+    extension = _extension_preparation_status()
+    browsers = browser_skill_browser_candidates()
     result = {
         "id": BROWSER_SKILL_COMPONENT_ID,
         "name": "Tencent BrowserSkill",
@@ -450,10 +861,28 @@ def browser_skill_status(run_diagnostics=False):
         "expected_version": BROWSER_SKILL_VERSION,
         "path": executable if installed else "",
         "size": _directory_size(root),
+        "bundle_ready": bundle["ready"],
+        "bundle_error": bundle["error"],
+        "bundled_cli_available": bool(bundle["cli"].get("available")),
+        "bundled_extension_available": bool(bundle["extension"].get("available")),
+        "expected_extension_version": BROWSER_SKILL_EXTENSION_VERSION,
+        "extension_prepared": extension["prepared"],
+        "extension_prepared_version": extension["version"],
+        "extension_path": extension["path"],
+        "extension_prepare_error": extension["error"],
+        "available_browsers": browsers,
+        "protocol_incompatible": False,
         "extension_url": BROWSER_SKILL_EXTENSION_URL,
         "diagnostics": {},
     }
     if not installed:
+        if not bundle["cli"].get("available"):
+            result.update({
+                "needs_repair": True,
+                "health_error": bundle["cli"].get("error") or bundle["error"],
+                "state": "bundle_unavailable",
+                "state_text": "随包安装文件不可用",
+            })
         return result
 
     try:
@@ -467,11 +896,25 @@ def browser_skill_status(run_diagnostics=False):
         })
         return result
 
+    if version_result.get("returncode") != 0:
+        result.update({
+            "needs_repair": True,
+            "health_error": (
+                version_result.get("stderr")
+                or version_result.get("stdout")
+                or "bsk --version 执行失败。"
+            ),
+            "state": "check_failed",
+            "state_text": "检查失败",
+        })
+        return result
+
     version = _parse_version(version_result["stdout"] or version_result["stderr"])
     result["version"] = version
     marker_valid = (
         marker.get("schema") == BROWSER_SKILL_MARKER_SCHEMA
         and str(marker.get("sha256") or "").upper() == BROWSER_SKILL_SHA256
+        and str(marker.get("source") or "") == "bundled"
     )
     if version != BROWSER_SKILL_VERSION:
         result.update({
@@ -481,7 +924,7 @@ def browser_skill_status(run_diagnostics=False):
                 f"需要 {BROWSER_SKILL_VERSION}"
             ),
             "state": "version_mismatch",
-            "state_text": "版本不兼容",
+            "state_text": "需要更新",
         })
         return result
     if not marker_valid:
@@ -494,19 +937,28 @@ def browser_skill_status(run_diagnostics=False):
         return result
     if not run_diagnostics:
         cached = _read_diagnostics_cache()
-        if cached.get("state") in {
+        cached_state = cached.get("state")
+        if cached_state in {
             "ready",
             "extension_disconnected",
+            "extension_incompatible",
+            "cli_daemon_failed",
             "execution_unresponsive",
             "check_failed",
         }:
             result.update({
-                "healthy": cached.get("state") in {"ready", "extension_disconnected"},
+                "healthy": cached_state in {
+                    "ready",
+                    "extension_disconnected",
+                    "extension_incompatible",
+                },
                 "ready": bool(cached.get("ready")),
                 "health_error": cached.get("health_error") or "",
-                "state": cached.get("state"),
+                "state": cached_state,
                 "state_text": cached.get("state_text") or "检查完成",
                 "diagnostics": cached.get("diagnostics") or {},
+                "protocol_incompatible": cached_state == "extension_incompatible",
+                "needs_repair": cached_state == "cli_daemon_failed",
             })
             return result
         result.update({
@@ -516,7 +968,7 @@ def browser_skill_status(run_diagnostics=False):
         })
         return result
 
-    log_browser_skill_event("doctor", executable=executable)
+    log_browser_skill_event("doctor_start", executable=executable)
     try:
         doctor = _run_bsk(["--json", "--quiet", "doctor"], timeout=30)
     except subprocess.TimeoutExpired:
@@ -526,11 +978,7 @@ def browser_skill_status(run_diagnostics=False):
             "state_text": "检查失败",
         })
         _write_diagnostics_cache(result)
-        log_browser_skill_event(
-            "error",
-            operation="doctor",
-            error=result["health_error"],
-        )
+        log_browser_skill_event("doctor_error", error=result["health_error"])
         return result
     except Exception as exc:
         result.update({
@@ -539,89 +987,108 @@ def browser_skill_status(run_diagnostics=False):
             "state_text": "检查失败",
         })
         _write_diagnostics_cache(result)
-        log_browser_skill_event(
-            "error",
-            operation="doctor",
-            error=result["health_error"],
-        )
+        log_browser_skill_event("doctor_error", error=result["health_error"])
         return result
 
     payload = _parse_json_output(doctor["stdout"], doctor["stderr"])
     combined = "\n".join([doctor["stdout"], doctor["stderr"]]).strip()
-    extension_connected = _extension_health(payload, combined)
+    classification = _classify_doctor_result(payload, combined)
     result["diagnostics"] = {
         "returncode": doctor["returncode"],
         "payload": payload,
         "stdout": doctor["stdout"],
         "stderr": doctor["stderr"],
-        "extension_connected": extension_connected,
+        "classification": classification["kind"],
+        "checks": classification["checks"],
+        "extension_connected": classification["kind"] in {
+            "connected",
+            "extension_incompatible",
+        },
     }
-    if extension_connected is True and doctor["returncode"] == 0:
-        probe = browser_skill_execution_probe()
-        result["diagnostics"]["probe"] = probe
-        if not probe.get("ok"):
-            result.update({
-                "healthy": False,
-                "ready": False,
-                "health_error": (
-                    f"{probe.get('error') or '浏览器执行通道无响应'} "
-                    "请重新加载 BrowserSkill 扩展或重启 Chrome/Edge 后再次检查。"
-                ),
-                "state": "execution_unresponsive",
-                "state_text": "执行通道无响应",
-            })
-            _write_diagnostics_cache(result)
-            log_browser_skill_event(
-                "error",
-                operation="probe",
-                error=result["health_error"],
-            )
-            return result
+
+    if classification["kind"] == "cli_daemon_failed":
         result.update({
-            "healthy": True,
-            "ready": True,
-            "state": "ready",
-            "state_text": "已就绪",
+            "needs_repair": True,
+            "health_error": classification["detail"] or "BrowserSkill CLI 或 daemon 检查失败。",
+            "state": "cli_daemon_failed",
+            "state_text": "CLI 或后台服务故障",
         })
-        _write_diagnostics_cache(result)
-        log_browser_skill_event("doctor_finish", state="ready", returncode=0)
-        return result
-    if extension_connected is False:
+    elif classification["kind"] == "extension_disconnected":
         result.update({
             "healthy": True,
             "health_error": "Chrome 或 Edge 扩展尚未连接。",
             "state": "extension_disconnected",
             "state_text": "本地支持已准备，扩展未连接",
         })
-        _write_diagnostics_cache(result)
-        log_browser_skill_event(
-            "doctor_finish",
-            state="extension_disconnected",
-            returncode=doctor["returncode"],
-        )
-        return result
-    detail = doctor["stderr"] or doctor["stdout"] or "bsk doctor 未返回可识别的连接状态。"
-    result.update({
-        "health_error": detail,
-        "state": "check_failed",
-        "state_text": "检查失败",
-    })
+    elif classification["kind"] == "extension_incompatible":
+        result.update({
+            "healthy": True,
+            "protocol_incompatible": True,
+            "health_error": classification["detail"],
+            "state": "extension_incompatible",
+            "state_text": "浏览器扩展需要更新",
+        })
+    elif classification["kind"] == "connected":
+        probe = browser_skill_execution_probe()
+        result["diagnostics"]["probe"] = probe
+        if probe.get("ok"):
+            result.update({
+                "healthy": True,
+                "ready": True,
+                "state": "ready",
+                "state_text": "已就绪",
+            })
+        else:
+            result.update({
+                "health_error": (
+                    f"{probe.get('error') or '浏览器执行通道无响应'} "
+                    "请重新加载 BrowserSkill 扩展或重启 Chrome/Edge 后再次检查。"
+                ),
+                "state": "execution_unresponsive",
+                "state_text": "执行探测失败",
+            })
+    else:
+        result.update({
+            "health_error": (
+                classification["detail"]
+                or "bsk doctor 未返回可识别的结构化检查结果。"
+            ),
+            "state": "check_failed",
+            "state_text": "检查失败",
+        })
+
     _write_diagnostics_cache(result)
     log_browser_skill_event(
-        "error",
-        operation="doctor",
+        "doctor_finish",
+        state=result["state"],
         returncode=doctor["returncode"],
-        error=detail,
+        ready=result["ready"],
+        error=result["health_error"],
     )
     return result
 
 
 def _safe_extract_zip(archive_path, target_dir):
     target_abs = os.path.abspath(target_dir)
+    os.makedirs(target_abs, exist_ok=True)
     with zipfile.ZipFile(archive_path, "r") as archive:
         for member in archive.infolist():
-            candidate = os.path.abspath(os.path.join(target_abs, member.filename))
-            if os.path.commonpath([target_abs, candidate]) != target_abs:
+            normalized_name = str(member.filename or "").replace("\\", "/")
+            parts = [part for part in normalized_name.split("/") if part not in {"", "."}]
+            candidate = os.path.abspath(os.path.join(target_abs, *parts))
+            unsafe = (
+                not normalized_name
+                or normalized_name.startswith(("/", "\\"))
+                or any(part == ".." for part in parts)
+                or bool(os.path.splitdrive(normalized_name)[0])
+                or stat.S_ISLNK(member.external_attr >> 16)
+                or bool(member.flag_bits & 0x1)
+            )
+            try:
+                outside_target = os.path.commonpath([target_abs, candidate]) != target_abs
+            except ValueError:
+                outside_target = True
+            if unsafe or outside_target:
                 raise RuntimeError("BrowserSkill 压缩包包含不安全路径。")
         archive.extractall(target_dir)
 
@@ -694,38 +1161,20 @@ def install_browser_skill(progress_callback=None):
     components_root = os.path.dirname(browser_skill_root())
     os.makedirs(components_root, exist_ok=True)
     staged_root = tempfile.mkdtemp(prefix=".browser-skill-", dir=components_root)
+    artifact = _bundled_artifact_status("cli")
     log_browser_skill_event(
-        "download_start",
+        "install_start",
         version=BROWSER_SKILL_VERSION,
-        url=BROWSER_SKILL_DOWNLOAD_URL,
+        source="bundled",
+        archive=artifact.get("path"),
     )
     try:
-        archive_path = os.path.join(staged_root, BROWSER_SKILL_ARCHIVE)
-        digest = hashlib.sha256()
+        if not artifact.get("available"):
+            raise RuntimeError(artifact.get("error") or "随包 BrowserSkill CLI 不可用。")
+        archive_path = artifact["path"]
         if progress_callback:
-            progress_callback("正在下载 Tencent BrowserSkill…", 1)
-        with requests.get(
-            BROWSER_SKILL_DOWNLOAD_URL,
-            stream=True,
-            timeout=30,
-            headers={"User-Agent": "deepseek-cowork-components"},
-        ) as response:
-            response.raise_for_status()
-            expected = int(response.headers.get("content-length") or 0)
-            downloaded = 0
-            with open(archive_path, "wb") as handle:
-                for chunk in response.iter_content(512 * 1024):
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    digest.update(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and expected:
-                        progress_callback(
-                            "正在下载 Tencent BrowserSkill…",
-                            min(78, int(downloaded * 78 / expected)),
-                        )
-        actual_sha256 = digest.hexdigest().upper()
+            progress_callback("正在校验随 Cowork 提供的 BrowserSkill CLI…", 10)
+        actual_sha256 = _file_sha256(archive_path)
         if actual_sha256 != BROWSER_SKILL_SHA256:
             raise RuntimeError(
                 "BrowserSkill SHA-256 校验失败："
@@ -734,7 +1183,7 @@ def install_browser_skill(progress_callback=None):
         extract_root = os.path.join(staged_root, "extract")
         os.makedirs(extract_root)
         if progress_callback:
-            progress_callback("正在校验并解压 BrowserSkill…", 82)
+            progress_callback("正在安全解压 BrowserSkill CLI…", 48)
         _safe_extract_zip(archive_path, extract_root)
         candidates = []
         for root, _dirs, filenames in os.walk(extract_root):
@@ -745,6 +1194,8 @@ def install_browser_skill(progress_callback=None):
         install_root = os.path.join(staged_root, "install")
         os.makedirs(install_root)
         shutil.copy2(candidates[0], os.path.join(install_root, "bsk.exe"))
+        if progress_callback:
+            progress_callback("正在验证 BrowserSkill CLI 版本…", 72)
         completed = _run_bsk_executable(
             os.path.join(install_root, "bsk.exe"),
             ["--version"],
@@ -763,34 +1214,126 @@ def install_browser_skill(progress_callback=None):
             "id": BROWSER_SKILL_COMPONENT_ID,
             "version": BROWSER_SKILL_VERSION,
             "sha256": BROWSER_SKILL_SHA256,
+            "source": "bundled",
             "source_url": BROWSER_SKILL_DOWNLOAD_URL,
+            "archive": BROWSER_SKILL_ARCHIVE,
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "verified": True,
         }
         with open(_marker_path(install_root), "w", encoding="utf-8") as handle:
             json.dump(marker, handle, ensure_ascii=False, indent=2)
         if progress_callback:
-            progress_callback("正在启用 Tencent BrowserSkill…", 94)
+            progress_callback("正在原子更新 Tencent BrowserSkill…", 90)
         target_root = browser_skill_root()
         if os.path.isdir(target_root):
             _stop_managed_daemon()
         _replace_component_root(install_root, target_root)
         if progress_callback:
-            progress_callback("浏览器自动化已准备，请继续安装并启用浏览器扩展。", 100)
+            progress_callback("CLI 已离线安装，请继续准备浏览器扩展。", 100)
         log_browser_skill_event(
-            "download_finish",
+            "install_finish",
             version=BROWSER_SKILL_VERSION,
             sha256=actual_sha256,
+            source="bundled",
             ok=True,
         )
         return browser_skill_status(run_diagnostics=False)
     except Exception as exc:
         log_browser_skill_event(
-            "download_finish",
+            "install_finish",
             version=BROWSER_SKILL_VERSION,
+            source="bundled",
             ok=False,
+            error=str(exc),
         )
-        log_browser_skill_event("error", operation="install", error=str(exc))
+        raise
+    finally:
+        if os.path.isdir(staged_root):
+            shutil.rmtree(staged_root, ignore_errors=True)
+
+
+def prepare_browser_skill_extension(progress_callback=None):
+    components_root = os.path.dirname(browser_skill_extension_component_root())
+    os.makedirs(components_root, exist_ok=True)
+    staged_root = tempfile.mkdtemp(prefix=".browser-skill-extension-", dir=components_root)
+    artifact = _bundled_artifact_status("extension")
+    log_browser_skill_event(
+        "extension_prepare_start",
+        version=BROWSER_SKILL_EXTENSION_VERSION,
+        source="bundled",
+        archive=artifact.get("path"),
+    )
+    try:
+        if not artifact.get("available"):
+            raise RuntimeError(artifact.get("error") or "随包 BrowserSkill 扩展不可用。")
+        if progress_callback:
+            progress_callback("正在校验随 Cowork 提供的浏览器扩展…", 12)
+        actual_sha256 = _file_sha256(artifact["path"])
+        if actual_sha256 != BROWSER_SKILL_EXTENSION_SHA256:
+            raise RuntimeError(
+                "BrowserSkill 扩展 SHA-256 校验失败："
+                f"期望 {BROWSER_SKILL_EXTENSION_SHA256}，实际 {actual_sha256}"
+            )
+        install_root = os.path.join(staged_root, "install")
+        extension_root = os.path.join(install_root, "extension")
+        os.makedirs(extension_root)
+        if progress_callback:
+            progress_callback("正在安全解压 BrowserSkill 扩展…", 46)
+        _safe_extract_zip(artifact["path"], extension_root)
+        manifest_path = os.path.join(extension_root, "manifest.json")
+        if not os.path.isfile(manifest_path):
+            raise RuntimeError("BrowserSkill 扩展包根目录缺少 manifest.json。")
+        try:
+            manifest = _read_json_file(manifest_path)
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            raise RuntimeError(f"BrowserSkill 扩展 manifest.json 无效：{exc}") from exc
+        detected_version = str(manifest.get("version") or "").strip()
+        if (
+            detected_version != BROWSER_SKILL_EXTENSION_VERSION
+            or int(manifest.get("manifest_version") or 0) != 3
+        ):
+            raise RuntimeError(
+                "BrowserSkill 扩展验证失败："
+                f"期望 {BROWSER_SKILL_EXTENSION_VERSION} / Manifest V3，"
+                f"实际 {detected_version or '未知'} / "
+                f"Manifest V{manifest.get('manifest_version') or '未知'}"
+            )
+        marker = {
+            "schema": BROWSER_SKILL_MARKER_SCHEMA,
+            "id": "browser-skill-extension",
+            "version": BROWSER_SKILL_EXTENSION_VERSION,
+            "archive": BROWSER_SKILL_EXTENSION_ARCHIVE,
+            "archive_sha256": BROWSER_SKILL_EXTENSION_SHA256,
+            "source": "bundled",
+            "source_url": BROWSER_SKILL_EXTENSION_DOWNLOAD_URL,
+            "prepared_at": datetime.now(timezone.utc).isoformat(),
+            "verified": True,
+        }
+        with open(_extension_marker_path(install_root), "w", encoding="utf-8") as handle:
+            json.dump(marker, handle, ensure_ascii=False, indent=2)
+        if progress_callback:
+            progress_callback("正在发布稳定的扩展目录…", 82)
+        _replace_component_root(install_root, browser_skill_extension_component_root())
+        prepared = _extension_preparation_status()
+        if not prepared.get("prepared"):
+            raise RuntimeError(prepared.get("error") or "扩展目录发布后验证失败。")
+        if progress_callback:
+            progress_callback("离线扩展已准备，请在浏览器中加载该目录。", 100)
+        log_browser_skill_event(
+            "extension_prepare_finish",
+            version=BROWSER_SKILL_EXTENSION_VERSION,
+            sha256=actual_sha256,
+            path=prepared["path"],
+            ok=True,
+        )
+        return browser_skill_status(run_diagnostics=False)
+    except Exception as exc:
+        log_browser_skill_event(
+            "extension_prepare_finish",
+            version=BROWSER_SKILL_EXTENSION_VERSION,
+            ok=False,
+            error=str(exc),
+        )
         raise
     finally:
         if os.path.isdir(staged_root):

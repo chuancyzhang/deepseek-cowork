@@ -1,10 +1,12 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,12 +17,69 @@ SPEC.loader.exec_module(package_release)
 
 
 class PackageReleaseTests(unittest.TestCase):
+    CLI_FIXTURE = b"browser-skill-cli-fixture"
+    EXTENSION_FIXTURE = b"browser-skill-extension-fixture"
+
+    def setUp(self):
+        self.fixture_hashes = {
+            package_release.BROWSER_SKILL_CLI_ARCHIVE: hashlib.sha256(
+                self.CLI_FIXTURE
+            ).hexdigest().upper(),
+            package_release.BROWSER_SKILL_EXTENSION_ARCHIVE: hashlib.sha256(
+                self.EXTENSION_FIXTURE
+            ).hexdigest().upper(),
+        }
+        self.hash_patch = patch.dict(
+            package_release.BROWSER_SKILL_ARTIFACT_HASHES,
+            self.fixture_hashes,
+            clear=True,
+        )
+        self.hash_patch.start()
+
+    def tearDown(self):
+        self.hash_patch.stop()
+
     def _create_minimal_dist(self, root):
         dist = Path(root) / "deepseek-cowork"
         for relative in package_release.REQUIRED_PATHS:
             path = dist / Path(relative)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(f"fixture:{relative}".encode("utf-8"))
+            if relative.endswith("/bundle.json"):
+                path.write_text(
+                    json.dumps({
+                        "schema": 1,
+                        "component_id": "browser-skill",
+                        "license": "LICENSE.txt",
+                        "cli": {
+                            "version": "0.1.8",
+                            "archive": package_release.BROWSER_SKILL_CLI_ARCHIVE,
+                            "url": package_release.BROWSER_SKILL_PINNED_ARTIFACTS["cli"]["url"],
+                            "sha256": self.fixture_hashes[
+                                package_release.BROWSER_SKILL_CLI_ARCHIVE
+                            ],
+                        },
+                        "extension": {
+                            "version": "0.1.4",
+                            "archive": package_release.BROWSER_SKILL_EXTENSION_ARCHIVE,
+                            "url": package_release.BROWSER_SKILL_PINNED_ARTIFACTS["extension"]["url"],
+                            "sha256": self.fixture_hashes[
+                                package_release.BROWSER_SKILL_EXTENSION_ARCHIVE
+                            ],
+                        },
+                    }),
+                    encoding="utf-8",
+                )
+            elif relative.endswith("/LICENSE.txt") and "browser_skill" in relative:
+                path.write_text(
+                    "MIT License\n\nCopyright (c) 2026 Tencent\n",
+                    encoding="utf-8",
+                )
+            elif relative.endswith(package_release.BROWSER_SKILL_CLI_ARCHIVE):
+                path.write_bytes(self.CLI_FIXTURE)
+            elif relative.endswith(package_release.BROWSER_SKILL_EXTENSION_ARCHIVE):
+                path.write_bytes(self.EXTENSION_FIXTURE)
+            else:
+                path.write_bytes(f"fixture:{relative}".encode("utf-8"))
         return dist
 
     def test_audit_reports_components_and_required_runtime(self):
@@ -36,6 +95,29 @@ class PackageReleaseTests(unittest.TestCase):
                 report["editor_assets"]["unpacked_bytes"],
                 package_release.EDITOR_MAX_UNPACKED_BYTES,
             )
+            self.assertEqual(
+                report["browser_skill_assets"]["cli"]["sha256"],
+                self.fixture_hashes[package_release.BROWSER_SKILL_CLI_ARCHIVE],
+            )
+
+    def test_audit_rejects_tampered_browser_skill_artifacts(self):
+        for archive_name in (
+            package_release.BROWSER_SKILL_CLI_ARCHIVE,
+            package_release.BROWSER_SKILL_EXTENSION_ARCHIVE,
+        ):
+            with self.subTest(archive=archive_name), tempfile.TemporaryDirectory() as temp_dir:
+                dist = self._create_minimal_dist(temp_dir)
+                artifact = (
+                    dist
+                    / "_internal"
+                    / "resources"
+                    / "browser_skill"
+                    / "artifacts"
+                    / archive_name
+                )
+                artifact.write_bytes(artifact.read_bytes() + b"tampered")
+                with self.assertRaisesRegex(package_release.PackageAuditError, "SHA256"):
+                    package_release.audit_distribution(dist, max_dist_mb=1)
 
     def test_audit_rejects_debug_qt_resources_and_extra_locales(self):
         cases = (

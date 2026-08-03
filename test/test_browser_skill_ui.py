@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget
 
 from main import (
     BROWSER_SKILL_COMPONENT_ID,
+    BROWSER_SKILL_EXTENSION_URL,
     CapabilityWorkbenchDialog,
     ComponentTaskManager,
     MainWindow,
@@ -151,6 +152,18 @@ class BrowserSkillUiTests(unittest.TestCase):
                 "installed": True,
                 "ready": False,
                 "state": "cli_installed",
+                "bundled_extension_available": True,
+                "bundle_error": "",
+                "extension_prepared": False,
+                "extension_path": "",
+                "available_browsers": [
+                    {
+                        "id": "edge",
+                        "name": "Microsoft Edge",
+                        "path": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                        "extensions_url": "edge://extensions/",
+                    }
+                ],
             }
             manager.status = connected_status
             manager.component_status_changed.emit(
@@ -158,18 +171,140 @@ class BrowserSkillUiTests(unittest.TestCase):
                 connected_status,
             )
             self.app.processEvents()
-            self.assertEqual(page.browser_setup_primary_btn.text(), "安装浏览器扩展")
-            self.assertEqual(
-                page.browser_setup_secondary_btn.text(),
-                "已经安装，检查并开启",
+            self.assertEqual(page.browser_offline_btn.text(), "离线安装扩展")
+            self.assertEqual(page.browser_store_btn.text(), "Chrome Web Store")
+            self.assertEqual(page.browser_setup_secondary_btn.text(), "检查并开启")
+            self.assertFalse(page.browser_offline_btn.isEnabled())
+
+            page.browser_choice_combo.setCurrentIndex(1)
+            self.assertEqual(page.browser_choice_combo.currentData(), "edge")
+            self.assertTrue(page.browser_offline_btn.isEnabled())
+            page.browser_offline_btn.click()
+            self.assertIn(
+                ("prepare_extension", BROWSER_SKILL_COMPONENT_ID),
+                manager.enqueued,
             )
 
-            with patch("main.QDesktopServices.openUrl", return_value=True):
-                page.browser_setup_primary_btn.click()
+            with patch("main.QDesktopServices.openUrl", return_value=True) as open_url:
+                page.browser_store_btn.click()
+            open_url.assert_called_once()
+            self.assertEqual(
+                open_url.call_args.args[0].toString(),
+                BROWSER_SKILL_EXTENSION_URL,
+            )
             self.app.processEvents()
             self.assertEqual(page.browser_setup_primary_btn.text(), "检查并开启")
             page.browser_setup_primary_btn.click()
             self.assertIn(("check", BROWSER_SKILL_COMPONENT_ID), manager.enqueued)
+        finally:
+            page.deleteLater()
+            parent.deleteLater()
+
+    def test_prepare_extension_worker_uses_background_component_action(self):
+        worker = RuntimeComponentWorker(
+            "prepare_extension",
+            BROWSER_SKILL_COMPONENT_ID,
+        )
+        results = []
+        worker.finished_signal.connect(results.append)
+        with patch(
+            "main.browser_skill_status",
+            return_value={"installed": True, "needs_update": False, "needs_repair": False},
+        ), patch(
+            "main.prepare_browser_skill_extension",
+            return_value={"installed": True, "extension_prepared": True},
+        ) as prepare:
+            worker.run()
+        prepare.assert_called_once()
+        self.assertTrue(results[0]["ok"])
+        self.assertTrue(results[0]["result"]["extension_prepared"])
+
+    def test_offline_finish_opens_selected_edge_and_stable_directory(self):
+        status = {
+            "known": True,
+            "installed": True,
+            "ready": False,
+            "state": "cli_installed",
+            "bundled_extension_available": True,
+            "extension_prepared": False,
+            "extension_path": "",
+            "available_browsers": [
+                {
+                    "id": "edge",
+                    "name": "Microsoft Edge",
+                    "path": r"C:\edge.exe",
+                    "extensions_url": "edge://extensions/",
+                }
+            ],
+        }
+        manager = _FakeComponentManager(status)
+        parent = QWidget()
+        parent.component_task_manager = manager
+        page = CapabilityWorkbenchDialog(
+            self._browser_skill(),
+            MagicMock(),
+            MagicMock(),
+            parent,
+            simple_mode=True,
+        )
+        try:
+            page.browser_choice_combo.setCurrentIndex(1)
+            page.browser_pending_browser_id = "edge"
+            prepared = dict(status)
+            prepared.update({
+                "extension_prepared": True,
+                "extension_prepared_version": "0.1.4",
+                "extension_path": r"C:\AppData\BrowserSkill\extension",
+            })
+            folder_result = MagicMock(ok=True, error="")
+            with patch(
+                "main.launch_browser_skill_extension_manager",
+                return_value={"ok": True},
+            ) as launch, patch(
+                "main.reveal_path_in_file_manager",
+                return_value=folder_result,
+            ) as reveal:
+                page._handle_browser_component_finished(
+                    BROWSER_SKILL_COMPONENT_ID,
+                    "prepare_extension",
+                    {"ok": True, "result": prepared},
+                )
+            launch.assert_called_once_with("edge")
+            reveal.assert_called_once_with(r"C:\AppData\BrowserSkill\extension")
+            self.assertFalse(page.browser_extension_guidance.isHidden())
+            self.assertEqual(page.browser_setup_primary_btn.text(), "检查并开启")
+        finally:
+            page.deleteLater()
+            parent.deleteLater()
+
+    def test_copy_path_uses_prepared_extension_directory(self):
+        status = {
+            "known": True,
+            "installed": True,
+            "ready": False,
+            "bundled_extension_available": True,
+            "extension_prepared": True,
+            "extension_path": r"C:\AppData\BrowserSkill\extension",
+            "available_browsers": [],
+        }
+        manager = _FakeComponentManager(status)
+        parent = QWidget()
+        parent.component_task_manager = manager
+        page = CapabilityWorkbenchDialog(
+            self._browser_skill(),
+            MagicMock(),
+            MagicMock(),
+            parent,
+            simple_mode=True,
+        )
+        try:
+            self.assertTrue(page._copy_browser_extension_path())
+            self.assertEqual(
+                QApplication.clipboard().text(),
+                r"C:\AppData\BrowserSkill\extension",
+            )
+            page._refresh_browser_automation_theme()
+            self.assertTrue(page.browser_copy_path_btn.styleSheet())
         finally:
             page.deleteLater()
             parent.deleteLater()

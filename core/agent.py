@@ -43,10 +43,15 @@ from core.ppt_agent import (
     ppt_agent_strategy_label,
 )
 from core.memory_store import MemoryStore
+from core.message_persistence import fold_skill_state_events
 from core.llm.deepseek import (
     DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY,
     DEEPSEEK_RESPONSES_REPLAY_META_KEY,
     is_deepseek_request,
+)
+from core.llm.responses_replay import (
+    RESPONSES_REPLAY_INPUT_KEY,
+    RESPONSES_REPLAY_META_KEY,
 )
 
 try:
@@ -60,6 +65,7 @@ class SecurityError(Exception):
 
 
 _OPENAI_PROTOCOL_LOCK = threading.Lock()
+APPEND_ONLY_LEDGER_REVISION = 1
 
 
 def _needs_openai_protocol_lock(provider):
@@ -240,6 +246,7 @@ def _clean_reasoning_content_by_turn(
     drop_meta=False,
     preserve_all_reasoning=False,
     preserve_responses_replay=False,
+    preserve_legacy_deepseek_replay=False,
 ):
     """
     Drop stale reasoning for ordinary turns, but preserve assistant reasoning for
@@ -268,12 +275,20 @@ def _clean_reasoning_content_by_turn(
             msg.pop("reasoning", None)
             if preserve_responses_replay and role == "assistant":
                 meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
-                replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
+                replay_items = meta.get(RESPONSES_REPLAY_META_KEY)
+                if replay_items is None and preserve_legacy_deepseek_replay:
+                    replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
                 if replay_items is not None:
                     if not isinstance(replay_items, list):
-                        raise ValueError("DeepSeek Responses replay metadata must be a list.")
-                    msg[DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY] = json_copy(replay_items, [])
+                        raise ValueError("Responses replay metadata must be a list.")
+                    msg[RESPONSES_REPLAY_INPUT_KEY] = json_copy(replay_items, [])
+                    if (
+                        preserve_legacy_deepseek_replay
+                        and meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY) is not None
+                    ):
+                        msg[DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY] = json_copy(replay_items, [])
             else:
+                msg.pop(RESPONSES_REPLAY_INPUT_KEY, None)
                 msg.pop(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY, None)
             if drop_meta:
                 msg.pop("meta", None)
@@ -477,7 +492,9 @@ def _validate_deepseek_responses_tool_results(messages):
             continue
 
         meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
-        replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
+        replay_items = meta.get(RESPONSES_REPLAY_META_KEY)
+        if replay_items is None:
+            replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
         if replay_items is not None:
             if not isinstance(replay_items, list) or not replay_items:
                 raise ValueError(
@@ -521,25 +538,31 @@ def sanitize_llm_messages(
     return_metadata=False,
     preserve_all_reasoning=False,
     preserve_responses_replay=False,
+    preserve_legacy_deepseek_replay=False,
     strict_reasoning_replay=False,
 ):
     if strict_reasoning_replay:
         _validate_deepseek_responses_tool_results(messages)
-    repaired = repair_tool_call_sequence(messages)
+    ledger_messages = [
+        json_copy(message, {})
+        for message in (messages or [])
+        if isinstance(message, dict)
+    ]
     dropped_rounds = []
     if require_reasoning_replay:
-        repaired, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(repaired)
-        if strict_reasoning_replay and dropped_rounds:
+        _unused_messages, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(ledger_messages)
+        if dropped_rounds:
             dropped_calls = sum(len(item.get("tool_call_ids") or []) for item in dropped_rounds)
             raise ValueError(
-                "DeepSeek Responses 工具调用历史缺少 reasoning_text，无法安全续接"
+                "DeepSeek 工具调用历史缺少 reasoning_text，无法按原序安全续接"
                 f"（{dropped_calls} 个工具调用）。请新建任务后重试；原历史不会被静默裁剪。"
             )
     cleaned = _clean_reasoning_content_by_turn(
-        repaired,
+        ledger_messages,
         drop_meta=True,
         preserve_all_reasoning=preserve_all_reasoning,
         preserve_responses_replay=preserve_responses_replay,
+        preserve_legacy_deepseek_replay=preserve_legacy_deepseek_replay,
     )
     if return_metadata:
         return cleaned, {"dropped_incomplete_reasoning_rounds": dropped_rounds}
@@ -650,7 +673,7 @@ class LLMWorker(QThread):
                 return
             self._pending_skill_snapshot = (event, snapshot)
 
-    def _apply_pending_skill_snapshot(self):
+    def _apply_pending_skill_snapshot(self, current_messages=None, generated_messages=None):
         with self._skill_snapshot_lock:
             pending = self._pending_skill_snapshot
             self._pending_skill_snapshot = None
@@ -660,6 +683,12 @@ class LLMWorker(QThread):
         self.skill_manager.apply_snapshot(snapshot)
         self._refresh_tool_definitions()
         payload = event.to_dict() if hasattr(event, "to_dict") else dict(event or {})
+        if isinstance(current_messages, list):
+            self._append_skill_catalog_state_events(
+                payload,
+                current_messages,
+                generated_messages,
+            )
         payload["type"] = "skill_changed"
         self.observability_signal.emit(payload)
         self.agent_state_signal.emit(payload)
@@ -918,8 +947,7 @@ class LLMWorker(QThread):
         if not pending:
             return False
         for message in pending:
-            current_messages.append(message)
-            generated_messages.append(message)
+            self._append_ledger_message(current_messages, generated_messages, message)
             self.observability_signal.emit({
                 "type": "guidance",
                 "content": message.get("content") or "",
@@ -929,37 +957,120 @@ class LLMWorker(QThread):
         self.step_signal.emit(f"System: Applied {len(pending)} guidance message(s).")
         return True
 
+    def _append_ledger_message(self, current_messages, generated_messages, message):
+        ledger_message = json_copy(message, {})
+        if not ledger_message.get("id"):
+            ledger_message["id"] = uuid.uuid4().hex
+        current_messages.append(ledger_message)
+        if isinstance(generated_messages, list):
+            generated_messages.append(json_copy(ledger_message, {}))
+        return ledger_message
+
     def _skill_context_hash(self, content):
         return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
 
-    def _existing_skill_context_hashes(self, current_messages, skill_name):
-        hashes = set()
-        for msg in current_messages or []:
-            if not isinstance(msg, dict):
-                continue
-            meta = msg.get("meta") if isinstance(msg.get("meta"), dict) else {}
-            if meta.get("kind") not in ("skill_context", "skill_context_update"):
-                continue
-            if str(meta.get("skill_name") or "") != str(skill_name or ""):
-                continue
-            content_hash = str(meta.get("content_hash") or "")
-            if content_hash:
-                hashes.add(content_hash)
-        return hashes
+    def _skill_catalog_revision(self):
+        try:
+            return int(getattr(self.skill_manager, "catalog_revision", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
 
-    def _build_skill_context_message(self, skill_name, content, source):
+    def _build_skill_context_message(
+        self,
+        skill_name,
+        content,
+        source,
+        supersedes_hash="",
+        selection_scoped=False,
+    ):
         content_hash = self._skill_context_hash(content)
+        rendered_content = content
+        if supersedes_hash:
+            rendered_content = (
+                f"Skill `{skill_name}` 的内容已更新；以下版本取代内容哈希 `{supersedes_hash}`。\n\n"
+                f"{content}"
+            )
+        meta = {
+            "kind": "skill_context",
+            "hidden": True,
+            "skill_name": str(skill_name or ""),
+            "source": source,
+            "state": "enabled",
+            "content_hash": content_hash,
+            "catalog_revision": self._skill_catalog_revision(),
+            "selection_scoped": bool(selection_scoped),
+        }
+        if supersedes_hash:
+            meta["supersedes_hash"] = str(supersedes_hash)
         return {
+            "id": uuid.uuid4().hex,
+            "role": "system",
+            "content": rendered_content,
+            "meta": meta,
+        }
+
+    def _build_skill_state_message(
+        self,
+        skill_name,
+        state,
+        content_hash,
+        source,
+        selection_scoped=False,
+    ):
+        normalized_state = str(state or "").strip().lower()
+        if normalized_state not in {"enabled", "disabled"}:
+            raise ValueError(f"Unsupported Skill state: {state}")
+        if normalized_state == "enabled":
+            content = (
+                f"Skill `{skill_name}` 已重新启用；继续使用内容哈希 `{content_hash}` 对应的既有 Skill 指令。"
+            )
+        else:
+            content = (
+                f"Skill `{skill_name}` 已停用；后续请求不得再把此前注入的该 Skill 内容视为当前有效指令。"
+            )
+        return {
+            "id": uuid.uuid4().hex,
             "role": "system",
             "content": content,
             "meta": {
-                "kind": "skill_context",
+                "kind": "skill_state_update",
                 "hidden": True,
                 "skill_name": str(skill_name or ""),
-                "source": source,
-                "content_hash": content_hash,
+                "source": str(source or "skill_state"),
+                "state": normalized_state,
+                "content_hash": str(content_hash or ""),
+                "catalog_revision": self._skill_catalog_revision(),
+                "selection_scoped": bool(selection_scoped),
             },
         }
+
+    def _append_skill_state_message(
+        self,
+        skill_name,
+        state,
+        content_hash,
+        source,
+        current_messages,
+        generated_messages,
+        selection_scoped=False,
+    ):
+        folded = fold_skill_state_events(current_messages)
+        previous = folded.get(str(skill_name or "").strip(), {})
+        revision = self._skill_catalog_revision()
+        if (
+            previous.get("state") == state
+            and str(previous.get("content_hash") or "") == str(content_hash or "")
+            and int(previous.get("catalog_revision") or 0) == revision
+        ):
+            return None
+        message = self._build_skill_state_message(
+            skill_name,
+            state,
+            content_hash,
+            source,
+            selection_scoped=selection_scoped,
+        )
+        return self._append_ledger_message(current_messages, generated_messages, message)
 
     def _append_skill_prompts_for_names(self, skill_names, current_messages, disclosed_skills, generated_messages=None, source="skill_prompt"):
         appended = []
@@ -978,13 +1089,38 @@ class LLMWorker(QThread):
             if disclosure_key in disclosed_skills:
                 continue
             disclosed_skills.add(disclosure_key)
-            if content_hash in self._existing_skill_context_hashes(current_messages, skill_name):
+            states = fold_skill_state_events(current_messages)
+            previous = states.get(skill_name, {})
+            previous_hash = str(previous.get("content_hash") or "")
+            selection_scoped = bool(
+                source == "selected_skill_prompt"
+                or previous.get("selection_scoped")
+            )
+            if previous_hash == content_hash and previous.get("state") == "enabled":
                 continue
-            message = self._build_skill_context_message(skill_name, prompt, source)
-            current_messages.append(message)
-            if isinstance(generated_messages, list):
-                generated_messages.append(message.copy())
-            appended.append(message)
+            if previous_hash == content_hash:
+                message = self._append_skill_state_message(
+                    skill_name,
+                    "enabled",
+                    content_hash,
+                    source,
+                    current_messages,
+                    generated_messages,
+                    selection_scoped=selection_scoped,
+                )
+                if message:
+                    appended.append(message)
+                continue
+            message = self._build_skill_context_message(
+                skill_name,
+                prompt,
+                source,
+                supersedes_hash=previous_hash,
+                selection_scoped=selection_scoped,
+            )
+            appended.append(
+                self._append_ledger_message(current_messages, generated_messages, message)
+            )
         if appended:
             content = "\n\n".join(msg.get("content") or "" for msg in appended)
             self.observability_signal.emit({
@@ -995,6 +1131,78 @@ class LLMWorker(QThread):
                 "skill_names": [msg.get("meta", {}).get("skill_name") for msg in appended],
                 "timestamp": time.time(),
             })
+        return appended
+
+    def _reconcile_selected_skill_states(self, current_messages, generated_messages, disclosed_skills):
+        selected = set(self._selected_skill_names())
+        states = fold_skill_state_events(current_messages)
+        for skill_name, state in states.items():
+            if not state.get("selection_scoped") or state.get("state") != "enabled":
+                continue
+            if skill_name in selected:
+                continue
+            self._append_skill_state_message(
+                skill_name,
+                "disabled",
+                state.get("content_hash") or "",
+                "selected_skill_removed",
+                current_messages,
+                generated_messages,
+                selection_scoped=True,
+            )
+        self._append_skill_prompts_for_names(
+            self._selected_skill_names(),
+            current_messages,
+            disclosed_skills,
+            generated_messages,
+            source="selected_skill_prompt",
+        )
+
+    def _append_skill_catalog_state_events(self, payload, current_messages, generated_messages):
+        action = str((payload or {}).get("action") or "updated").strip().lower()
+        selected = set(self._selected_skill_names())
+        states = fold_skill_state_events(current_messages)
+        for skill_name in (payload or {}).get("skill_names") or []:
+            skill_name = str(skill_name or "").strip()
+            if not skill_name or (skill_name not in states and skill_name not in selected):
+                continue
+            previous = states.get(skill_name, {})
+            if action in {"disabled", "deleted"}:
+                self._append_skill_state_message(
+                    skill_name,
+                    "disabled",
+                    previous.get("content_hash") or "",
+                    f"skill_catalog_{action}",
+                    current_messages,
+                    generated_messages,
+                    selection_scoped=bool(previous.get("selection_scoped")),
+                )
+                continue
+            appended = self._append_skill_prompts_for_names(
+                [skill_name],
+                current_messages,
+                set(),
+                generated_messages,
+                source=f"skill_catalog_{action}",
+            )
+            refreshed = fold_skill_state_events(current_messages).get(skill_name, {})
+            prompt_getter = getattr(self.skill_manager, "get_full_skill_prompt", None)
+            refreshed_prompt = prompt_getter(skill_name) if callable(prompt_getter) else ""
+            if (
+                not appended
+                and previous.get("state") == "enabled"
+                and refreshed == previous
+                and not str(refreshed_prompt or "").strip()
+            ):
+                self._append_skill_state_message(
+                    skill_name,
+                    "disabled",
+                    previous.get("content_hash") or "",
+                    "skill_catalog_unavailable",
+                    current_messages,
+                    generated_messages,
+                    selection_scoped=bool(previous.get("selection_scoped")),
+                )
 
     def _append_skill_prompts(self, tool_calls, current_messages, disclosed_skills, generated_messages=None):
         skill_names = []
@@ -1335,11 +1543,109 @@ class LLMWorker(QThread):
             self._stable_system_prompt = self._build_stable_system_prompt()
         return self._stable_system_prompt
 
-    def _build_request_messages(self, current_messages, runtime_context_prompt):
-        request_messages = [msg.copy() if isinstance(msg, dict) else msg for msg in current_messages]
-        if runtime_context_prompt:
-            request_messages.append({"role": "system", "content": runtime_context_prompt})
-        return request_messages
+    def _append_runtime_context(self, runtime_context_prompt, current_messages, generated_messages):
+        content_hash = self._skill_context_hash(runtime_context_prompt)
+        previous_hash = ""
+        previous_kind = ""
+        for message in reversed(current_messages or []):
+            if not isinstance(message, dict):
+                continue
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            if meta.get("kind") not in {"runtime_context", "runtime_context_update"}:
+                continue
+            previous_hash = str(meta.get("content_hash") or "")
+            previous_kind = str(meta.get("kind") or "")
+            break
+        if previous_hash == content_hash:
+            return None
+        meta = {
+            "kind": "runtime_context_update" if previous_kind else "runtime_context",
+            "hidden": True,
+            "source": "runtime_context",
+            "ledger_revision": APPEND_ONLY_LEDGER_REVISION,
+            "content_hash": content_hash,
+            "tools_hash": _stable_json_hash(self.tools or []),
+        }
+        if previous_hash:
+            meta["supersedes_hash"] = previous_hash
+        message = {
+            "id": uuid.uuid4().hex,
+            "role": "system",
+            "content": runtime_context_prompt,
+            "meta": meta,
+        }
+        appended = self._append_ledger_message(current_messages, generated_messages, message)
+        self.observability_signal.emit({
+            "type": "system_prompt_append",
+            "content": runtime_context_prompt,
+            "source": "runtime_context",
+            "kind": meta["kind"],
+            "content_hash": content_hash,
+            "timestamp": time.time(),
+        })
+        return appended
+
+    def _build_request_messages(self, current_messages):
+        return [json_copy(msg, {}) if isinstance(msg, dict) else msg for msg in current_messages]
+
+    def _verify_request_prefix(self, previous_messages, current_messages, protocol):
+        previous = previous_messages or []
+        current = current_messages or []
+        matched = 0
+        for index, previous_message in enumerate(previous):
+            if index >= len(current) or previous_message != current[index]:
+                break
+            matched += 1
+        prefix_ok = matched == len(previous)
+        event = {
+            "type": "conversation_prefix_check",
+            "protocol": str(protocol or "unknown"),
+            "previous_message_count": len(previous),
+            "current_message_count": len(current),
+            "matched_message_count": matched,
+            "first_difference_index": None if prefix_ok else matched,
+            "previous_hash": _stable_json_hash(previous),
+            "current_prefix_hash": _stable_json_hash(current[:len(previous)]),
+            "ok": prefix_ok,
+            "timestamp": time.time(),
+        }
+        self.observability_signal.emit(event)
+        if not prefix_ok:
+            raise RuntimeError(
+                "会话请求前缀被改写："
+                f"protocol={event['protocol']}, first_difference_index={matched}, "
+                f"previous_messages={len(previous)}, current_messages={len(current)}"
+            )
+        return json_copy(current, [])
+
+    def _previous_request_prefix_from_ledger(self, request_messages, sanitized_messages):
+        if len(request_messages or []) != len(sanitized_messages or []):
+            raise RuntimeError(
+                "Provider message sanitization changed the append-only ledger length."
+            )
+        latest_user_index = None
+        for index in range(len(request_messages or []) - 1, -1, -1):
+            message = request_messages[index]
+            if isinstance(message, dict) and message.get("role") == "user":
+                latest_user_index = index
+                break
+        if latest_user_index is None:
+            return []
+        for index in range(latest_user_index - 1, -1, -1):
+            message = request_messages[index]
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                prefix_messages = request_messages[:index]
+                has_append_only_marker = any(
+                    isinstance(prefix_message, dict)
+                    and isinstance(prefix_message.get("meta"), dict)
+                    and int(prefix_message["meta"].get("ledger_revision") or 0)
+                    >= APPEND_ONLY_LEDGER_REVISION
+                    for prefix_message in prefix_messages
+                )
+                if not has_append_only_marker:
+                    return []
+                return json_copy(sanitized_messages[:index], [])
+        return []
 
     def _tool_exposure_observability(self):
         selected_tools = set(self._selected_skill_tool_names())
@@ -1436,7 +1742,11 @@ class LLMWorker(QThread):
         # Work on a copy of messages to handle multi-turn locally. Reasoning is
         # sanitized after the concrete provider/protocol is known so Responses
         # replay data is not discarded before request preparation.
-        current_messages = repair_tool_call_sequence(self.messages)
+        current_messages = [
+            json_copy(message, {})
+            for message in (self.messages or [])
+            if isinstance(message, dict)
+        ]
         runtime_snapshot = get_runtime_snapshot()
         stable_system_prompt = self._get_stable_system_prompt()
         current_messages.insert(0, {"role": "system", "content": stable_system_prompt})
@@ -1453,6 +1763,7 @@ class LLMWorker(QThread):
         last_turn_reasoning = None
         reasoning_repetition_count = 0
         force_reply_attempted = False
+        previous_provider_messages = None
         
         disclosed_skills = set()
         while True:
@@ -1467,24 +1778,27 @@ class LLMWorker(QThread):
             self._append_pending_guidance(current_messages, generated_messages)
 
             # Catalog changes are applied only between model requests.
-            self._apply_pending_skill_snapshot()
+            self._apply_pending_skill_snapshot(current_messages, generated_messages)
 
             turn_count += 1
             self._refresh_tool_definitions()
             self.step_signal.emit(f"Turn {turn_count}: Requesting LLM...")
 
-            self._append_skill_prompts_for_names(
-                self._selected_skill_names(),
+            self._reconcile_selected_skill_states(
                 current_messages,
-                disclosed_skills,
                 generated_messages,
-                source="selected_skill_prompt",
+                disclosed_skills,
             )
 
             stable_system_prompt = self._get_stable_system_prompt()
             current_messages[0]["content"] = stable_system_prompt
             runtime_context_prompt = self._build_runtime_context_prompt(runtime_snapshot)
-            request_messages = self._build_request_messages(current_messages, runtime_context_prompt)
+            self._append_runtime_context(
+                runtime_context_prompt,
+                current_messages,
+                generated_messages,
+            )
+            request_messages = self._build_request_messages(current_messages)
             self._emit_prompt_observability(stable_system_prompt, runtime_context_prompt, request_messages)
 
             # Reset reasoning for the current turn (for UI display)
@@ -1509,25 +1823,31 @@ class LLMWorker(QThread):
                             getattr(provider, "base_url", ""),
                         ) and getattr(provider, "thinking_enabled", False)
                     )
+                    preserve_responses = bool(
+                        getattr(provider, "requires_responses_replay", False)
+                        or getattr(provider, "requires_deepseek_responses_replay", False)
+                    )
                     preserve_deepseek_responses = bool(
                         getattr(provider, "requires_deepseek_responses_replay", False)
                     )
-                    sanitized_messages, sanitize_meta = sanitize_llm_messages(
+                    sanitized_messages = sanitize_llm_messages(
                         request_messages,
                         require_reasoning_replay=require_reasoning_replay,
-                        return_metadata=True,
                         preserve_all_reasoning=preserve_deepseek_responses,
-                        preserve_responses_replay=preserve_deepseek_responses,
+                        preserve_responses_replay=preserve_responses,
+                        preserve_legacy_deepseek_replay=preserve_deepseek_responses,
                         strict_reasoning_replay=preserve_deepseek_responses,
                     )
-                    dropped_rounds = sanitize_meta.get("dropped_incomplete_reasoning_rounds") or []
-                    if dropped_rounds:
-                        dropped_calls = sum(len(item.get("tool_call_ids") or []) for item in dropped_rounds)
-                        self.step_signal.emit(
-                            "System: Pruned "
-                            f"{len(dropped_rounds)} DeepSeek tool-call history round(s) "
-                            f"missing reasoning_content before replay ({dropped_calls} tool call(s))."
+                    if previous_provider_messages is None:
+                        previous_provider_messages = self._previous_request_prefix_from_ledger(
+                            request_messages,
+                            sanitized_messages,
                         )
+                    previous_provider_messages = self._verify_request_prefix(
+                        previous_provider_messages,
+                        sanitized_messages,
+                        getattr(provider, "api_protocol", provider_name),
+                    )
                     # Streaming Buffers
                     chunk_reasoning = ""
                     chunk_content = ""
@@ -1632,11 +1952,11 @@ class LLMWorker(QThread):
                                 replay_items = chunk.get("items")
                                 if not isinstance(replay_items, list) or not replay_items:
                                     raise ValueError(
-                                        "DeepSeek Responses provider returned invalid replay items."
+                                        "Responses provider returned invalid replay items."
                                     )
                                 if response_items_buffer:
                                     raise ValueError(
-                                        "DeepSeek Responses provider returned replay items more than once."
+                                        "Responses provider returned replay items more than once."
                                     )
                                 response_items_buffer = json_copy(replay_items, [])
                             elif type_ == "server_tool_status":
@@ -1673,6 +1993,29 @@ class LLMWorker(QThread):
                     duration = end_time - start_time
                     total_duration += duration
                     self.step_signal.emit(f"Provider End: {provider_name} ({duration:.2f}s)")
+
+                    if preserve_responses and not response_items_buffer:
+                        if self.is_stopped:
+                            stop_prompt = (
+                                "用户已停止上一轮 Responses 生成；未完成的流式文本仅保留在界面中，"
+                                "不得把它当作 provider 已完成的 output item。"
+                            )
+                            self._append_ledger_message(current_messages, generated_messages, {
+                                "role": "system",
+                                "content": stop_prompt,
+                                "meta": {
+                                    "kind": "runtime_instruction",
+                                    "hidden": True,
+                                    "source": "responses_generation_stopped",
+                                    "content_hash": self._skill_context_hash(stop_prompt),
+                                },
+                            })
+                            final_content = chunk_content or "⚠️ Operation stopped by user."
+                            break
+                        raise RuntimeError(
+                            "Responses provider ended without completed output items; "
+                            "the append-only conversation was not extended."
+                        )
                     
                     # --- Reasoning Loop Detection ---
                     if current_turn_reasoning and len(current_turn_reasoning) > 10: # Ignore very short reasonings
@@ -1735,9 +2078,15 @@ class LLMWorker(QThread):
                         self.output_signal.emit(
                             "Tool Call Error: Provider returned malformed tool calls without function.name."
                         )
-                        current_messages.append({
+                        self._append_ledger_message(current_messages, generated_messages, {
                             "role": "system",
                             "content": malformed_prompt,
+                            "meta": {
+                                "kind": "runtime_instruction",
+                                "hidden": True,
+                                "source": "invalid_tool_call_recovery",
+                                "content_hash": self._skill_context_hash(malformed_prompt),
+                            },
                         })
                         self.observability_signal.emit({
                             "type": "system_prompt_append",
@@ -1758,9 +2107,15 @@ class LLMWorker(QThread):
                             force_reply_attempted = True
                             self.step_signal.emit("System: Empty content detected, requesting a forced final answer.")
                             force_prompt = "你必须立即给出给用户可见的最终答复。禁止只输出思考内容。除非绝对必要，不要继续调用工具。请基于已有上下文与工具结果，直接输出清晰结论。"
-                            current_messages.append({
+                            self._append_ledger_message(current_messages, generated_messages, {
                                 "role": "system",
-                                "content": force_prompt
+                                "content": force_prompt,
+                                "meta": {
+                                    "kind": "runtime_instruction",
+                                    "hidden": True,
+                                    "source": "force_final_answer",
+                                    "content_hash": self._skill_context_hash(force_prompt),
+                                },
                             })
                             self.observability_signal.emit({
                                 "type": "system_prompt_append",
@@ -1784,9 +2139,12 @@ class LLMWorker(QThread):
                     # Also add 'reasoning' for UI compatibility (used by MainWindow)
                     assistant_msg["reasoning"] = current_turn_reasoning
                     if response_items_buffer:
-                        assistant_msg["meta"] = {
-                            DEEPSEEK_RESPONSES_REPLAY_META_KEY: response_items_buffer,
-                        }
+                        replay_meta_key = (
+                            DEEPSEEK_RESPONSES_REPLAY_META_KEY
+                            if preserve_deepseek_responses
+                            else RESPONSES_REPLAY_META_KEY
+                        )
+                        assistant_msg["meta"] = {replay_meta_key: response_items_buffer}
                         
                     if tool_calls:
                          # For history, we need the dict representation
@@ -1800,8 +2158,11 @@ class LLMWorker(QThread):
                                  }
                              } for t in tool_calls
                          ]
-                    current_messages.append(assistant_msg)
-                    generated_messages.append(assistant_msg)
+                    self._append_ledger_message(
+                        current_messages,
+                        generated_messages,
+                        assistant_msg,
+                    )
                     
                     if tool_calls:
                         # --- Loop Detection ---
@@ -2040,7 +2401,11 @@ class LLMWorker(QThread):
                                     "duration": duration_tool
                                 }
                             }
-                            current_messages.append(tool_msg)
+                            self._append_ledger_message(
+                                current_messages,
+                                generated_messages,
+                                tool_msg,
+                            )
                             structured_failure = isinstance(result_obj, dict) and (
                                 result_obj.get("ok") is False
                                 or str(result_obj.get("status") or "").lower()
@@ -2050,17 +2415,23 @@ class LLMWorker(QThread):
                                 successful_tool_results.append(name)
                             if name == "tool_search":
                                 self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)
-                            generated_messages.append(tool_msg)
                             self.step_signal.emit(f"Tool Result: {result_text}")
                         if successful_tool_results:
                             tool_names = ", ".join(sorted(set(successful_tool_results)))
-                            current_messages.append({
+                            result_prompt = (
+                                "上一轮工具调用已返回可用结果"
+                                f"（{tool_names}）。除非缺少完成任务所必需的信息，"
+                                "请优先基于已有工具结果直接回答用户，不要重复调用相同工具和参数。"
+                            )
+                            self._append_ledger_message(current_messages, generated_messages, {
                                 "role": "system",
-                                "content": (
-                                    "上一轮工具调用已返回可用结果"
-                                    f"（{tool_names}）。除非缺少完成任务所必需的信息，"
-                                    "请优先基于已有工具结果直接回答用户，不要重复调用相同工具和参数。"
-                                ),
+                                "content": result_prompt,
+                                "meta": {
+                                    "kind": "runtime_instruction",
+                                    "hidden": True,
+                                    "source": "successful_tool_result",
+                                    "content_hash": self._skill_context_hash(result_prompt),
+                                },
                             })
                         # Loop continues to let LLM see tool results
                         continue

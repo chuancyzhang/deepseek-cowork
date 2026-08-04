@@ -20,6 +20,10 @@ from core.llm.deepseek import (
     is_official_deepseek_api,
 )
 from core.llm.providers import API_PROTOCOL_RESPONSES, OpenAIProvider
+from core.llm.responses_replay import (
+    RESPONSES_REPLAY_INPUT_KEY,
+    RESPONSES_REPLAY_META_KEY,
+)
 
 
 class TestOpenAIProviderDeepSeek(unittest.TestCase):
@@ -133,6 +137,13 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             SimpleNamespace(
                 type="response.completed",
                 response=SimpleNamespace(
+                    output=[{
+                        "id": "msg-standard-1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "完成", "annotations": []}],
+                    }],
                     usage=SimpleNamespace(
                         input_tokens=100,
                         output_tokens=20,
@@ -162,7 +173,10 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(chunks[1]["function"]["arguments"], '{"q":"hi"}')
         self.assertEqual(chunks[2], {"type": "reasoning", "content": "检查资料"})
         self.assertEqual(chunks[3], {"type": "content", "content": "完成"})
-        self.assertEqual(chunks[4]["usage"]["cached_input_tokens"], 60)
+        replay_chunk = next(chunk for chunk in chunks if chunk["type"] == "response_items")
+        self.assertEqual(replay_chunk["items"][0]["id"], "msg-standard-1")
+        usage_chunk = next(chunk for chunk in chunks if chunk["type"] == "usage")
+        self.assertEqual(usage_chunk["usage"]["cached_input_tokens"], 60)
 
     def test_responses_protocol_sends_prompt_cache_key_without_explicit_param_config(self):
         provider, client = self._build_provider(
@@ -584,6 +598,36 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
             "content": [{"type": "output_text", "text": "standard answer"}],
         }])
 
+    def test_standard_openai_responses_replays_generic_saved_items_without_duplication(self):
+        provider, _client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-5.6",
+            api_protocol=API_PROTOCOL_RESPONSES,
+        )
+        replay_items = [
+            {
+                "id": "rs_standard",
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "checked"}],
+            },
+            {
+                "id": "msg_standard",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "saved", "annotations": []}],
+            },
+        ]
+
+        items = provider._prepare_responses_input([{
+            "id": "assistant-standard",
+            "role": "assistant",
+            "content": "must not be duplicated",
+            RESPONSES_REPLAY_INPUT_KEY: replay_items,
+        }])
+
+        self.assertEqual(items, replay_items)
+
     def test_official_deepseek_api_detection_requires_exact_host(self):
         self.assertTrue(is_official_deepseek_api("https://api.deepseek.com/v1"))
         self.assertTrue(is_official_deepseek_api("api.deepseek.com"))
@@ -956,12 +1000,33 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
             ],
             preserve_all_reasoning=True,
             preserve_responses_replay=True,
+            preserve_legacy_deepseek_replay=True,
         )
 
         self.assertEqual(sanitized[1]["reasoning_content"], "keep all")
         self.assertEqual(sanitized[1][DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY], replay_items)
         self.assertNotIn("reasoning", sanitized[1])
         self.assertNotIn("meta", sanitized[1])
+
+    def test_sanitize_standard_responses_uses_only_generic_replay_metadata(self):
+        replay_items = [{
+            "id": "msg_standard",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "done", "annotations": []}],
+        }]
+        sanitized = sanitize_llm_messages(
+            [{
+                "role": "assistant",
+                "content": "done",
+                "meta": {RESPONSES_REPLAY_META_KEY: replay_items},
+            }],
+            preserve_responses_replay=True,
+        )
+
+        self.assertEqual(sanitized[0][RESPONSES_REPLAY_INPUT_KEY], replay_items)
+        self.assertNotIn(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY, sanitized[0])
 
     def test_sanitize_deepseek_responses_rejects_missing_tool_reasoning_in_strict_mode(self):
         with self.assertRaisesRegex(ValueError, "不会被静默裁剪"):
@@ -1054,9 +1119,9 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
         self.assertEqual(len(dropped_rounds), 1)
         self.assertEqual(dropped_rounds[0]["tool_call_ids"], ["call-1"])
 
-    def test_sanitize_llm_messages_prunes_invalid_deepseek_replay_rounds(self):
-        sanitized, meta = sanitize_llm_messages(
-            [
+    def test_sanitize_llm_messages_rejects_invalid_deepseek_replay_rounds(self):
+        with self.assertRaisesRegex(ValueError, "不会被静默裁剪"):
+            sanitize_llm_messages([
                 {"role": "user", "content": "hi"},
                 {
                     "role": "assistant",
@@ -1072,19 +1137,7 @@ class TestDeepSeekMessageSanitization(unittest.TestCase):
                 },
                 {"role": "tool", "tool_call_id": "call-1", "content": "ok"},
                 {"role": "assistant", "content": "final"},
-            ],
-            require_reasoning_replay=True,
-            return_metadata=True,
-        )
-
-        self.assertEqual(
-            sanitized,
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "final"},
-            ],
-        )
-        self.assertEqual(len(meta["dropped_incomplete_reasoning_rounds"]), 1)
+            ], require_reasoning_replay=True, return_metadata=True)
 
     def test_sanitize_llm_messages_does_not_prune_when_reasoning_replay_not_required(self):
         sanitized = sanitize_llm_messages([

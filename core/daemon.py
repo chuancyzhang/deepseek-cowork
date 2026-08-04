@@ -134,9 +134,7 @@ class DaemonState:
         else:
             messages = []
             source = "empty"
-        messages = self.chat_storage.normalize_messages(
-            self._dedupe_consecutive_user_messages(messages)
-        )
+        messages = self.chat_storage.normalize_messages(messages)
         with self.lock:
             self.sessions[session_id] = messages
         self._log_context_source(session_id, source, messages)
@@ -145,9 +143,7 @@ class DaemonState:
     def use_session_messages_snapshot(self, session_id, messages):
         if not isinstance(messages, list):
             return None
-        normalized = self.chat_storage.normalize_messages(
-            self._dedupe_consecutive_user_messages(messages)
-        )
+        normalized = self.chat_storage.normalize_messages(messages)
         with self.lock:
             self.sessions[session_id] = normalized
         self._log_context_source(session_id, "ui_snapshot", normalized)
@@ -176,23 +172,6 @@ class DaemonState:
             )
         except Exception:
             pass
-
-    def _dedupe_consecutive_user_messages(self, messages):
-        if not isinstance(messages, list):
-            return []
-        deduped = []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            if (
-                deduped
-                and msg.get("role") == "user"
-                and deduped[-1].get("role") == "user"
-                and (msg.get("content") or "") == (deduped[-1].get("content") or "")
-            ):
-                continue
-            deduped.append(msg)
-        return deduped
 
     def append_user_message_if_needed(self, messages, content):
         if not isinstance(messages, list):

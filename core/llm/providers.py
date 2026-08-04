@@ -13,6 +13,7 @@ from .deepseek import (
     is_official_deepseek_api,
     normalize_reasoning_effort,
 )
+from .responses_replay import RESPONSES_REPLAY_INPUT_KEY
 
 API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
 API_PROTOCOL_RESPONSES = "responses"
@@ -252,8 +253,9 @@ class OpenAIProvider(LLMProvider):
         self.stream_usage_enabled = bool(stream_usage_enabled)
         self.prompt_cache_key_param = str(prompt_cache_key_param or "").strip()
         self.api_protocol = normalize_openai_api_protocol(api_protocol)
+        self.requires_responses_replay = self.api_protocol == API_PROTOCOL_RESPONSES
         self.requires_deepseek_responses_replay = bool(
-            self.api_protocol == API_PROTOCOL_RESPONSES
+            self.requires_responses_replay
             and is_official_deepseek_api(self.base_url)
         )
         self.provider_name = (
@@ -505,6 +507,31 @@ class OpenAIProvider(LLMProvider):
             )
         return normalized
 
+    def _normalize_responses_replay_items(self, raw_items, source="response"):
+        if self.requires_deepseek_responses_replay:
+            return self._normalize_deepseek_replay_items(raw_items, source=source)
+        if not isinstance(raw_items, (list, tuple)) or not raw_items:
+            raise RuntimeError(
+                "Responses completed without replayable output items; "
+                "the append-only conversation cannot continue safely."
+            )
+        normalized = []
+        for raw_item in raw_items:
+            item = self._json_compatible(raw_item)
+            if not isinstance(item, dict):
+                raise RuntimeError(f"Responses {source} contains an invalid output item.")
+            item_type = str(item.get("type") or "").strip()
+            if not item_type:
+                raise RuntimeError(f"Responses {source} contains an output item without type.")
+            if item_type == "function_call" and (
+                not str(item.get("call_id") or "").strip()
+                or not str(item.get("name") or "").strip()
+                or not isinstance(item.get("arguments"), str)
+            ):
+                raise RuntimeError("Responses returned an invalid function_call replay item.")
+            normalized.append(item)
+        return normalized
+
     def _responses_stream(self, messages, tools=None, prompt_cache_key=None):
         params = {
             "model": self.model_name,
@@ -599,11 +626,11 @@ class OpenAIProvider(LLMProvider):
                 continue
             if event_type == "response.completed":
                 response = self._object_value(event, "response")
+                replay_items = self._normalize_responses_replay_items(
+                    self._object_value(response, "output"),
+                )
+                yield {"type": "response_items", "items": replay_items}
                 if self.requires_deepseek_responses_replay:
-                    replay_items = self._normalize_deepseek_replay_items(
-                        self._object_value(response, "output"),
-                    )
-                    yield {"type": "response_items", "items": replay_items}
                     for item in replay_items:
                         if item.get("type") == "web_search_call" and item.get("status") == "failed":
                             reason = (
@@ -678,9 +705,11 @@ class OpenAIProvider(LLMProvider):
                 items.append({"role": "user", "content": self._responses_content(content, "input_text")})
                 continue
             if role == "assistant":
-                replay_items = message.get(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY)
-                if self.requires_deepseek_responses_replay and replay_items:
-                    items.extend(self._normalize_deepseek_replay_items(replay_items, source="history"))
+                replay_items = message.get(RESPONSES_REPLAY_INPUT_KEY)
+                if replay_items is None and self.requires_deepseek_responses_replay:
+                    replay_items = message.get(DEEPSEEK_RESPONSES_REPLAY_INPUT_KEY)
+                if self.requires_responses_replay and replay_items:
+                    items.extend(self._normalize_responses_replay_items(replay_items, source="history"))
                     continue
 
                 reasoning_content = str(message.get("reasoning_content") or "")

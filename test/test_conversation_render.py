@@ -66,6 +66,42 @@ class TestConversationRender(unittest.TestCase):
         )
         self.assertEqual(len(messages), 4)
 
+    def test_append_only_hidden_context_does_not_change_chat_projection(self):
+        hidden_kinds = [
+            "skill_context",
+            "skill_state_update",
+            "runtime_context",
+            "runtime_context_update",
+            "runtime_instruction",
+        ]
+        messages = [{"id": "u1", "role": "user", "content": "hello"}]
+        for index, kind in enumerate(hidden_kinds):
+            messages.append({
+                "id": f"hidden-{index}",
+                "role": "system",
+                "content": f"hidden {kind}",
+                "meta": {"hidden": True, "kind": kind},
+            })
+        messages.append({
+            "id": "a1",
+            "role": "assistant",
+            "content": "world",
+            "reasoning_content": "thinking",
+            "meta": {"responses_replay_items": [{"type": "message", "id": "provider-a1"}]},
+        })
+
+        items = build_conversation_render_items(messages)
+
+        self.assertEqual([item["type"] for item in items], ["user", "assistant"])
+        self.assertEqual(items[0]["message"]["content"], "hello")
+        self.assertEqual(items[1]["content"], "world")
+        self.assertEqual(items[1]["reasoning"], "thinking")
+        self.assertEqual(
+            build_conversation_render_spans(messages),
+            [{"start": 0, "end": 1}, {"start": 6, "end": 7}],
+        )
+        self.assertEqual(len(messages), 7)
+
     def test_embedded_agent_result_stays_out_of_chat_projection(self):
         messages = [
             {

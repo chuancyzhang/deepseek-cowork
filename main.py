@@ -42,7 +42,7 @@ from core.im_gateway.wechat_ilink import (
 )
 from core.skill_manager import SkillManager
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
-from core.agent import LLMWorker, CodeWorker, repair_tool_call_sequence
+from core.agent import LLMWorker, CodeWorker
 from core.skill_generator import SkillGenerator
 from core.interaction import bridge
 from core.env_utils import (
@@ -30781,24 +30781,7 @@ class MainWindow(QMainWindow):
             current_version = 0
         if not force_persist and current_version >= HISTORY_MIGRATION_VERSION:
             return source_messages
-        try:
-            normalized_messages = repair_tool_call_sequence(source_messages)
-        except Exception:
-            normalized_messages = source_messages
-        normalized_messages = filter_persistable_messages(normalized_messages)
-        deduped_messages = []
-        for msg in normalized_messages:
-            if (
-                deduped_messages
-                and isinstance(msg, dict)
-                and isinstance(deduped_messages[-1], dict)
-                and msg.get("role") == "user"
-                and deduped_messages[-1].get("role") == "user"
-                and (msg.get("content") or "") == (deduped_messages[-1].get("content") or "")
-            ):
-                continue
-            deduped_messages.append(msg)
-        normalized_messages = deduped_messages
+        normalized_messages = filter_persistable_messages(source_messages)
 
         changed = False
         try:
@@ -38839,44 +38822,6 @@ class MainWindow(QMainWindow):
             state.last_agent_bubble.update_thinking(delta)
         self.request_session_scroll_to_bottom(state.session_id, force=False)
 
-    def _message_signature_for_merge(self, message):
-        if not isinstance(message, dict):
-            return None
-        role = message.get("role") or ""
-        signature = {
-            "role": role,
-            "content": message.get("content") or "",
-            "tool_call_id": message.get("tool_call_id") or "",
-        }
-        tool_calls = message.get("tool_calls")
-        if isinstance(tool_calls, list):
-            normalized_calls = []
-            for tool_call in tool_calls:
-                if not isinstance(tool_call, dict):
-                    continue
-                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
-                arguments = function.get("arguments")
-                if isinstance(arguments, dict):
-                    try:
-                        arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-                    except Exception:
-                        arguments = str(arguments)
-                elif arguments is None:
-                    arguments = ""
-                normalized_calls.append(
-                    {
-                        "id": tool_call.get("id") or "",
-                        "type": tool_call.get("type") or "function",
-                        "name": function.get("name") or "",
-                        "arguments": arguments,
-                    }
-                )
-            signature["tool_calls"] = normalized_calls
-        try:
-            return json.dumps(signature, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            return f"{role}:{signature.get('content', '')}"
-
     def _merge_generated_messages(self, existing_messages, generated_messages):
         if not isinstance(generated_messages, list):
             return []
@@ -38900,39 +38845,7 @@ class MainWindow(QMainWindow):
             if not new_messages:
                 return []
 
-        existing_signatures = [
-            sig
-            for sig in (self._message_signature_for_merge(msg) for msg in (existing_messages or []))
-            if sig is not None
-        ]
-        new_signatures = [
-            sig
-            for sig in (self._message_signature_for_merge(msg) for msg in new_messages)
-            if sig is not None
-        ]
-
-        overlap = 0
-        max_overlap = min(len(existing_signatures), len(new_signatures))
-        for size in range(max_overlap, 0, -1):
-            if existing_signatures[-size:] == new_signatures[:size]:
-                overlap = size
-                break
-
-        delta_messages = new_messages[overlap:]
-        if not delta_messages:
-            return []
-
-        deduped_delta = []
-        tail_signature = existing_signatures[-1] if existing_signatures else None
-        for msg in delta_messages:
-            msg_signature = self._message_signature_for_merge(msg)
-            if msg_signature is None:
-                continue
-            if msg_signature == tail_signature:
-                continue
-            deduped_delta.append(msg)
-            tail_signature = msg_signature
-        return deduped_delta
+        return new_messages
 
     def _annotate_generated_messages_for_unified_turn(self, state, generated_messages):
         """Attach UI-only projection metadata without changing provider wire messages."""

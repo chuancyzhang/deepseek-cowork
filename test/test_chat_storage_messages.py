@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from core.chat_storage import ChatStorage
 from core.llm.deepseek import DEEPSEEK_RESPONSES_REPLAY_META_KEY
+from core.llm.responses_replay import RESPONSES_REPLAY_META_KEY
 
 
 class TestChatStorageMessages(unittest.TestCase):
@@ -128,6 +129,52 @@ class TestChatStorageMessages(unittest.TestCase):
             message["meta"][DEEPSEEK_RESPONSES_REPLAY_META_KEY],
             replay_items,
         )
+
+    def test_message_roundtrip_preserves_generic_responses_replay_items(self):
+        storage = ChatStorage(self.db_path)
+        replay_items = [{
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "done", "annotations": []}],
+        }]
+        storage.save_conversation(
+            "generic-responses-replay",
+            [{
+                "id": "assistant-1",
+                "role": "assistant",
+                "content": "done",
+                "meta": {RESPONSES_REPLAY_META_KEY: replay_items},
+            }],
+            title="responses",
+        )
+
+        message = storage.get_messages("generic-responses-replay")[0]
+
+        self.assertEqual(message["meta"][RESPONSES_REPLAY_META_KEY], replay_items)
+
+    def test_normalize_messages_preserves_duplicate_content_and_order(self):
+        storage = ChatStorage(self.db_path)
+        messages = [
+            {"id": "u1", "role": "user", "content": "same"},
+            {"id": "u2", "role": "user", "content": "same"},
+            {"id": "a1", "role": "assistant", "content": "same"},
+        ]
+
+        normalized = storage.normalize_messages(messages)
+
+        self.assertEqual([message["id"] for message in normalized], ["u1", "u2", "a1"])
+        self.assertEqual([message["role"] for message in normalized], ["user", "user", "assistant"])
+
+    def test_normalize_messages_rejects_duplicate_message_ids(self):
+        storage = ChatStorage(self.db_path)
+
+        with self.assertRaisesRegex(ValueError, "duplicate message id: same-id"):
+            storage.normalize_messages([
+                {"id": "same-id", "role": "user", "content": "first"},
+                {"id": "same-id", "role": "assistant", "content": "second"},
+            ])
 
     def test_messages_without_ids_are_assigned_stable_ids(self):
         storage = ChatStorage(self.db_path)

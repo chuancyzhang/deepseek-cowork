@@ -20,6 +20,7 @@ from core.ppt_agent import (
     build_ppt_agent_prompt,
     choose_ppt_agent_strategy,
 )
+from core.message_persistence import fold_skill_state_events
 
 
 class _ConfigStub:
@@ -92,6 +93,101 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertEqual(ctx["workflow_mode"], "")
         self.assertEqual(ctx["office_output_profile"], "free")
 
+
+class TestAppendOnlySkillStateLedger(unittest.TestCase):
+    def test_skill_enable_disable_reenable_upgrade_and_duplicate_events(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                self.catalog_revision = 1
+                self.prompts = {"demo-skill": "# Demo Skill v1"}
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def get_tools_for_skill(self, _skill_name):
+                return []
+
+            def get_full_skill_prompt(self, skill_name):
+                return self.prompts.get(skill_name, "")
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with patch("core.agent.SkillManager", _SkillManagerStub):
+                worker = LLMWorker(
+                    [],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+            messages = []
+            generated = []
+
+            first = worker._append_skill_prompts_for_names(
+                ["demo-skill"], messages, set(), generated, source="selected_skill_prompt"
+            )
+            self.assertEqual(len(first), 1)
+            first_hash = first[0]["meta"]["content_hash"]
+            self.assertEqual(first[0]["meta"]["kind"], "skill_context")
+            self.assertEqual(first[0]["meta"]["state"], "enabled")
+            self.assertEqual(first[0]["meta"]["catalog_revision"], 1)
+
+            duplicate = worker._append_skill_prompts_for_names(
+                ["demo-skill"], messages, set(), generated, source="selected_skill_prompt"
+            )
+            self.assertEqual(duplicate, [])
+
+            disabled = worker._append_skill_state_message(
+                "demo-skill", "disabled", first_hash, "selected_skill_removed",
+                messages, generated, selection_scoped=True,
+            )
+            self.assertEqual(disabled["meta"]["state"], "disabled")
+            self.assertIsNone(worker._append_skill_state_message(
+                "demo-skill", "disabled", first_hash, "selected_skill_removed",
+                messages, generated, selection_scoped=True,
+            ))
+
+            reenabled = worker._append_skill_prompts_for_names(
+                ["demo-skill"], messages, set(), generated, source="selected_skill_prompt"
+            )
+            self.assertEqual(len(reenabled), 1)
+            self.assertEqual(reenabled[0]["meta"]["kind"], "skill_state_update")
+            self.assertEqual(reenabled[0]["meta"]["content_hash"], first_hash)
+
+            worker.skill_manager.catalog_revision = 2
+            worker.skill_manager.prompts["demo-skill"] = "# Demo Skill v2"
+            upgraded = worker._append_skill_prompts_for_names(
+                ["demo-skill"], messages, set(), generated, source="skill_catalog_updated"
+            )
+            self.assertEqual(len(upgraded), 1)
+            self.assertEqual(upgraded[0]["meta"]["kind"], "skill_context")
+            self.assertEqual(upgraded[0]["meta"]["supersedes_hash"], first_hash)
+            self.assertNotEqual(upgraded[0]["meta"]["content_hash"], first_hash)
+
+            self.assertEqual(messages, generated)
+            self.assertEqual(messages[0]["content"], "# Demo Skill v1")
+            folded = fold_skill_state_events(messages)
+            self.assertEqual(folded["demo-skill"]["state"], "enabled")
+            self.assertEqual(folded["demo-skill"]["catalog_revision"], 2)
+            self.assertEqual(
+                folded["demo-skill"]["content_hash"],
+                upgraded[0]["meta"]["content_hash"],
+            )
+            worker.chat_storage.save_conversation(
+                "skill-ledger-restart",
+                messages,
+                title="skill ledger",
+            )
+            restored = worker.chat_storage.get_messages("skill-ledger-restart")
+            self.assertEqual(
+                [message["id"] for message in restored],
+                [message["id"] for message in messages],
+            )
+            self.assertEqual(fold_skill_state_events(restored), folded)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_ppt_agent_strategy_rules_select_huashu_for_business_visuals(self):
         self.assertEqual(
             choose_ppt_agent_strategy("生成一份高级感路演 BP", preference=PPT_AGENT_PREFERENCE_BUSINESS),
@@ -163,8 +259,9 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.run()
 
             self.assertTrue(events)
-            system_prompt = events[0].get("content", "")
-            runtime_prompt = events[0].get("runtime_context", "")
+            prompt_event = next(event for event in events if event.get("type") == "system_prompt")
+            system_prompt = prompt_event.get("content", "")
+            runtime_prompt = prompt_event.get("runtime_context", "")
             self.assertIn("策略 [必要澄清]", system_prompt)
             self.assertIn("默认直接执行用户任务", system_prompt)
             self.assertNotIn("当前任务已澄清 2/3 轮", system_prompt)
@@ -236,7 +333,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.observability_signal.connect(lambda data: events.append(data))
                 worker.run()
 
-            runtime_prompt = events[0].get("runtime_context", "")
+            prompt_event = next(event for event in events if event.get("type") == "system_prompt")
+            runtime_prompt = prompt_event.get("runtime_context", "")
             self.assertIn("# 用户指定能力", runtime_prompt)
             self.assertIn("`browser-automation`: 浏览器自动化", runtime_prompt)
             self.assertIn("Browser automation brief", runtime_prompt)
@@ -295,7 +393,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.observability_signal.connect(lambda data: events.append(data))
                 worker.run()
 
-            runtime_prompt = events[0].get("runtime_context", "")
+            prompt_event = next(event for event in events if event.get("type") == "system_prompt")
+            runtime_prompt = prompt_event.get("runtime_context", "")
             self.assertIn("策略 [办公稿生成]", runtime_prompt)
             self.assertIn("当前类型: PPT", runtime_prompt)
             self.assertIn("不要称为 HTML 模式", runtime_prompt)
@@ -361,7 +460,8 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.observability_signal.connect(lambda data: events.append(data))
                 worker.run()
 
-            runtime_prompt = events[0].get("runtime_context", "")
+            prompt_event = next(event for event in events if event.get("type") == "system_prompt")
+            runtime_prompt = prompt_event.get("runtime_context", "")
             self.assertIn("策略 [PPT Agent]", runtime_prompt)
             self.assertIn("Huashu Design", runtime_prompt)
             self.assertIn("HTML deliverable preview", runtime_prompt)
@@ -696,6 +796,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def chat_stream(self, messages, tools=None):
                 self.calls.append(
                     {
+                        "messages": messages,
                         "system_messages": [
                             item.get("content", "")
                             for item in messages
@@ -802,6 +903,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             def chat_stream(self, messages, tools=None):
                 self.calls.append(
                     {
+                        "messages": messages,
                         "system_messages": [
                             item.get("content", "")
                             for item in messages
@@ -837,6 +939,10 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.run()
 
             self.assertEqual(len(provider_calls), 2)
+            self.assertEqual(
+                provider_calls[1]["messages"][:len(provider_calls[0]["messages"])],
+                provider_calls[0]["messages"],
+            )
             self.assertNotIn("validate_input", "\n\n".join(provider_calls[0]["system_messages"]))
             self.assertIn("validate_input", "\n\n".join(provider_calls[1]["system_messages"]))
         finally:

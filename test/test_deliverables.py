@@ -203,7 +203,7 @@ class TestDeliverableScanning(unittest.TestCase):
         )
         self.assertFalse(is_auto_query_skill_context_message({"role": "user", "content": "hello"}))
 
-    def test_merge_generated_messages_skips_auto_skill_contexts(self):
+    def test_merge_generated_messages_preserves_skill_contexts(self):
         window = MainWindow.__new__(MainWindow)
         existing = [{"role": "user", "content": "生成报告"}]
         generated = [
@@ -217,7 +217,7 @@ class TestDeliverableScanning(unittest.TestCase):
 
         merged = MainWindow._merge_generated_messages(window, existing, generated)
 
-        self.assertEqual(merged, [{"role": "assistant", "content": "完成"}])
+        self.assertEqual(merged, generated)
 
     def test_normalize_session_ui_resets_guidance_label_when_idle(self):
         QApplication.instance() or QApplication([])

@@ -1435,11 +1435,11 @@ class TestDaemonState(unittest.TestCase):
 
         self.assertEqual(
             [message["id"] for message in self.state.sessions[session_id]],
-            ["u1", "a1"],
+            ["u1", "skill-context", "a1"],
         )
         self.assertEqual(
             [message["id"] for message in self.state.chat_storage.get_messages(session_id)],
-            ["u1", "a1"],
+            ["u1", "skill-context", "a1"],
         )
 
     def test_snapshot_restores_context_after_idle_suspend(self):
@@ -1570,19 +1570,19 @@ class TestDaemonState(unittest.TestCase):
 
 class TestAgentSystemPrompt(unittest.TestCase):
     def _build_prompt_worker(self, temp_dir):
-        worker = LLMWorker.__new__(LLMWorker)
-        worker.workspace_dir = temp_dir
-        worker.run_context = {"mode": RUN_MODE_EXECUTION}
-        worker.tools = []
-        worker.parent_agent_id = ""
-        worker.session_id = "session-1"
-        worker.conversation_id = "conversation-1"
-        worker.skill_manager = _PromptSkillManagerStub()
-        worker.config_manager = _DaemonConfigStub(temp_dir)
+        with patch("core.agent.SkillManager", return_value=_PromptSkillManagerStub()):
+            worker = LLMWorker(
+                [],
+                _DaemonConfigStub(temp_dir),
+                workspace_dir=temp_dir,
+                session_id="session-1",
+                conversation_id="conversation-1",
+                run_context={"mode": RUN_MODE_EXECUTION},
+            )
         worker._prompt_context_date = "2026-06-16"
         return worker
 
-    def test_request_prompt_keeps_stable_prefix_and_runtime_tail_separate(self):
+    def test_request_prompt_appends_runtime_context_to_the_ledger(self):
         temp_dir = tempfile.mkdtemp()
         try:
             worker = self._build_prompt_worker(temp_dir)
@@ -1599,7 +1599,13 @@ class TestAgentSystemPrompt(unittest.TestCase):
                     "missing_packages": ["another-stale-package"],
                 }
             )
-            request_messages = worker._build_request_messages(current_messages, runtime_prompt)
+            generated_messages = []
+            runtime_message = worker._append_runtime_context(
+                runtime_prompt,
+                current_messages,
+                generated_messages,
+            )
+            request_messages = worker._build_request_messages(current_messages)
 
             self.assertEqual(request_messages[0]["content"], current_messages[0]["content"])
             self.assertEqual(request_messages[-1]["role"], "system")
@@ -1610,7 +1616,88 @@ class TestAgentSystemPrompt(unittest.TestCase):
             self.assertNotIn("JavaScript、JSON 和前端脚本可优先使用", runtime_prompt)
             self.assertNotIn("运行时库检测", runtime_prompt)
             self.assertNotIn("stale-package", runtime_prompt)
-            self.assertEqual(len(current_messages), 2)
+            self.assertEqual(len(current_messages), 3)
+            self.assertEqual(generated_messages, [runtime_message])
+            self.assertEqual(runtime_message["meta"]["kind"], "runtime_context")
+            self.assertTrue(runtime_message["meta"]["hidden"])
+
+            self.assertIsNone(
+                worker._append_runtime_context(
+                    runtime_prompt,
+                    current_messages,
+                    generated_messages,
+                )
+            )
+            self.assertEqual(request_messages, current_messages)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_request_prefix_diagnostic_rejects_history_rewrites(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            events = []
+            worker.observability_signal.connect(events.append)
+            previous = [
+                {"role": "system", "content": "stable"},
+                {"role": "user", "content": "hello"},
+            ]
+            current = previous + [{"role": "assistant", "content": "done"}]
+
+            self.assertEqual(
+                worker._verify_request_prefix(previous, current, "chat_completions"),
+                current,
+            )
+            self.assertTrue(events[-1]["ok"])
+            self.assertEqual(events[-1]["matched_message_count"], 2)
+
+            rewritten = [dict(previous[0]), {"role": "user", "content": "changed"}]
+            with self.assertRaisesRegex(RuntimeError, "first_difference_index=1"):
+                worker._verify_request_prefix(previous, rewritten, "chat_completions")
+            self.assertFalse(events[-1]["ok"])
+            self.assertEqual(events[-1]["first_difference_index"], 1)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_previous_provider_prefix_is_recovered_across_worker_restarts(self):
+        temp_dir = tempfile.mkdtemp()
+        try:
+            worker = self._build_prompt_worker(temp_dir)
+            request_messages = [
+                {"role": "system", "content": "stable"},
+                {"role": "user", "content": "first"},
+                {
+                    "role": "system",
+                    "content": "runtime v1",
+                    "meta": {
+                        "hidden": True,
+                        "kind": "runtime_context",
+                        "ledger_revision": 1,
+                    },
+                },
+                {"role": "assistant", "content": "first answer"},
+                {"role": "user", "content": "second"},
+                {
+                    "role": "system",
+                    "content": "runtime v2",
+                    "meta": {"hidden": True, "kind": "runtime_context_update"},
+                },
+            ]
+            sanitized = [
+                {key: value for key, value in message.items() if key != "meta"}
+                for message in request_messages
+            ]
+
+            recovered = worker._previous_request_prefix_from_ledger(
+                request_messages,
+                sanitized,
+            )
+
+            self.assertEqual(recovered, sanitized[:3])
+            self.assertEqual(
+                worker._verify_request_prefix(recovered, sanitized, "chat_completions"),
+                sanitized,
+            )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -2071,6 +2158,10 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 worker.run()
 
             self.assertEqual(len(provider.requests), 2)
+            self.assertEqual(
+                provider.requests[1][:len(provider.requests[0])],
+                provider.requests[0],
+            )
             replayed_assistant = next(
                 message
                 for message in provider.requests[1]
@@ -2095,6 +2186,230 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
                 for event in observability
             ))
             self.assertEqual(finished[0]["content"], "完成")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_standard_responses_worker_persists_and_replays_items_with_strict_prefix(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_skill_of_tool(self, _name):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                return {"status": "ok", "content": "tool result"}
+
+        class _ProviderStub:
+            provider_name = "GPT Responses"
+            model_name = "gpt-5.6"
+            base_url = "https://api.openai.com/v1"
+            api_protocol = "responses"
+            thinking_enabled = True
+            requires_responses_replay = True
+            requires_deepseek_responses_replay = False
+
+            def __init__(self):
+                self.requests = []
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                self.requests.append(messages)
+                if len(self.requests) == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "call-1",
+                        "function": {"name": "read_file", "arguments": '{"path":"demo.txt"}'},
+                    }
+                    yield {
+                        "type": "response_items",
+                        "items": [{
+                            "id": "fc_1",
+                            "type": "function_call",
+                            "call_id": "call-1",
+                            "name": "read_file",
+                            "arguments": '{"path":"demo.txt"}',
+                        }],
+                    }
+                    return
+                yield {"type": "content", "content": "完成"}
+                yield {
+                    "type": "response_items",
+                    "items": [{
+                        "id": "msg_2",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "完成", "annotations": []}],
+                    }],
+                }
+
+        from core.llm.responses_replay import (
+            RESPONSES_REPLAY_INPUT_KEY,
+            RESPONSES_REPLAY_META_KEY,
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        provider = _ProviderStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", side_effect=_SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "read demo"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(finished.append)
+                worker.run()
+
+            self.assertEqual(len(provider.requests), 2)
+            self.assertEqual(
+                provider.requests[1][:len(provider.requests[0])],
+                provider.requests[0],
+            )
+            replayed_assistant = next(
+                message for message in provider.requests[1]
+                if message.get("role") == "assistant" and message.get("tool_calls")
+            )
+            self.assertEqual(replayed_assistant[RESPONSES_REPLAY_INPUT_KEY][0]["id"], "fc_1")
+            generated_assistant = next(
+                message for message in finished[0]["generated_messages"]
+                if message.get("role") == "assistant" and message.get("tool_calls")
+            )
+            self.assertEqual(
+                generated_assistant["meta"][RESPONSES_REPLAY_META_KEY][0]["call_id"],
+                "call-1",
+            )
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_responses_stop_keeps_partial_text_out_of_provider_ledger(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "GPT Responses"
+            model_name = "gpt-5.6"
+            base_url = "https://api.openai.com/v1"
+            api_protocol = "responses"
+            thinking_enabled = False
+            requires_responses_replay = True
+            requires_deepseek_responses_replay = False
+
+            def __init__(self):
+                self.worker = None
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                yield {"type": "content", "content": "partial"}
+                self.worker.is_stopped = True
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        provider = _ProviderStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", side_effect=_SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "start"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                provider.worker = worker
+                worker.finished_signal.connect(finished.append)
+                worker.run()
+
+            self.assertEqual(finished[0]["content"], "partial")
+            generated = finished[0]["generated_messages"]
+            self.assertFalse(any(message.get("role") == "assistant" for message in generated))
+            stopped = next(
+                message for message in generated
+                if (message.get("meta") or {}).get("source") == "responses_generation_stopped"
+            )
+            self.assertTrue(stopped["meta"]["hidden"])
+            self.assertNotIn("partial", stopped["content"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_chat_completions_prefix_survives_worker_restart(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "Chat Completions"
+            model_name = "chat-model"
+            base_url = "https://chat.example/v1"
+            api_protocol = "chat_completions"
+            thinking_enabled = False
+            requires_responses_replay = False
+            requires_deepseek_responses_replay = False
+
+            def __init__(self):
+                self.requests = []
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                self.requests.append(messages)
+                yield {"type": "content", "content": f"answer-{len(self.requests)}"}
+
+        temp_dir = tempfile.mkdtemp()
+        provider = _ProviderStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", side_effect=_SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                first_finished = []
+                first_messages = [{"id": "user-1", "role": "user", "content": "first"}]
+                first_worker = LLMWorker(
+                    first_messages,
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                first_worker.finished_signal.connect(first_finished.append)
+                first_worker.run()
+
+                restored_ledger = first_messages + first_finished[0]["generated_messages"]
+                restored_ledger.append({"id": "user-2", "role": "user", "content": "second"})
+                second_worker = LLMWorker(
+                    restored_ledger,
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                second_worker.run()
+
+            self.assertEqual(len(provider.requests), 2)
+            self.assertEqual(
+                provider.requests[1][:len(provider.requests[0])],
+                provider.requests[0],
+            )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -500,7 +500,7 @@ class ChatStorage:
         if not isinstance(messages, list):
             return []
 
-        filtered = []
+        normalized = []
         seen_ids = set()
         for msg in messages:
             if not isinstance(msg, dict):
@@ -510,62 +510,12 @@ class ChatStorage:
             if not msg_id:
                 msg_id = uuid.uuid4().hex
                 msg_copy["id"] = msg_id
-            if msg_id:
-                if msg_id in seen_ids:
-                    continue
-                seen_ids.add(msg_id)
-            filtered.append(msg_copy)
-
-        changed = True
-        normalized = filtered
-        while changed:
-            changed = False
-
-            deduped = []
-            for msg in normalized:
-                role = msg.get("role")
-                if deduped:
-                    prev = deduped[-1]
-                    if (
-                        role == "user"
-                        and prev.get("role") == "user"
-                        and (msg.get("content") or "") == (prev.get("content") or "")
-                    ):
-                        changed = True
-                        continue
-                    if role != "user":
-                        if self._message_signature(msg) == self._message_signature(prev):
-                            changed = True
-                            continue
-                deduped.append(msg)
-            normalized = deduped
-
-            collapsed = []
-            i = 0
-            while i < len(normalized):
-                matched = False
-                max_block = (len(normalized) - i) // 2
-                for block_size in range(max_block, 0, -1):
-                    left = normalized[i:i + block_size]
-                    right = normalized[i + block_size:i + (2 * block_size)]
-                    if not left or not right:
-                        continue
-                    roles = {msg.get("role") for msg in left + right}
-                    if "user" in roles:
-                        continue
-                    left_signatures = [self._message_signature(msg) for msg in left]
-                    right_signatures = [self._message_signature(msg) for msg in right]
-                    if left_signatures == right_signatures:
-                        collapsed.extend(left)
-                        i += block_size * 2
-                        changed = True
-                        matched = True
-                        break
-                if matched:
-                    continue
-                collapsed.append(normalized[i])
-                i += 1
-            normalized = collapsed
+            if msg_id in seen_ids:
+                raise ValueError(
+                    f"Conversation ledger contains duplicate message id: {msg_id}"
+                )
+            seen_ids.add(msg_id)
+            normalized.append(msg_copy)
 
         return normalized
 

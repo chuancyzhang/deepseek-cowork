@@ -34,7 +34,14 @@ def _is_hidden_context_message(message):
     meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
     return (
         bool(meta.get("hidden"))
-        and meta.get("kind") in {"skill_context", "skill_context_update"}
+        and meta.get("kind") in {
+            "runtime_context",
+            "runtime_context_update",
+            "runtime_instruction",
+            "skill_context",
+            "skill_context_update",
+            "skill_state_update",
+        }
     ) or bool(meta.get("embedded_agent_result")) or is_legacy_skill_change_notice_message(message)
 
 

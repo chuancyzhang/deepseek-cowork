@@ -1391,15 +1391,17 @@ class TestDaemonState(unittest.TestCase):
     def test_run_llm_sync_uses_snapshot_and_dedupes_current_user_message(self):
         session_id = "desktop-dedupe"
         snapshot = [
-            {"role": "user", "content": "first"},
-            {"role": "assistant", "content": "reply"},
-            {"role": "user", "content": "continue"},
+            {"id": "user-first", "role": "user", "content": "first"},
+            {"id": "assistant-reply", "role": "assistant", "content": "reply"},
+            {"id": "user-continue", "role": "user", "content": "continue"},
         ]
         captured = {}
 
-        def run_once(sid, worker_messages, workspace_dir, run_context=None):
+        def run_once(sid, worker_messages, workspace_dir, run_context=None, turn_id=None, request_id=None):
             captured["messages"] = list(worker_messages)
-            return {"generated_messages": [{"role": "assistant", "content": "done"}]}
+            captured["turn_id"] = turn_id
+            captured["request_id"] = request_id
+            return {"generated_messages": [{"id": "assistant-done", "role": "assistant", "content": "done"}]}
 
         self.state._run_worker_once = run_once
 
@@ -1409,9 +1411,12 @@ class TestDaemonState(unittest.TestCase):
             workspace_dir=self.temp_dir,
             run_context={},
             messages_snapshot=snapshot,
+            user_message_id="user-continue",
         )
 
         self.assertEqual([msg.get("content") for msg in captured["messages"]], ["first", "reply", "continue"])
+        self.assertTrue(captured["turn_id"])
+        self.assertTrue(captured["request_id"])
         saved_messages = self.state.chat_storage.get_messages(session_id)
         self.assertEqual([msg.get("content") for msg in saved_messages], ["first", "reply", "continue", "done"])
 
@@ -2042,6 +2047,151 @@ class TestLLMWorkerToolLoopGuard(unittest.TestCase):
             self.assertTrue(finished)
             self.assertIn("连续 3 次重复的工具调用", finished[0]["content"])
             self.assertEqual(skill_manager_instances[0].call_count, 2)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_tool_execution_exception_is_persisted_as_explicit_tool_result(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, skill_name):
+                return ""
+
+            def get_skill_display_name(self, skill_name):
+                return skill_name
+
+            def get_skill_of_tool(self, name):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                raise RuntimeError("工具后端不可用")
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.requests = []
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                self.requests.append(messages)
+                if len(self.requests) == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "call-error",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                    return
+                yield {"type": "content", "content": "已记录工具错误"}
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        provider = _ProviderStub()
+        try:
+            with (
+                patch("core.agent.SkillManager", return_value=_SkillManagerStub()),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "读取文件"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(finished.append)
+                worker.run()
+
+            self.assertEqual(len(provider.requests), 2)
+            self.assertTrue(finished)
+            self.assertNotIn("error", finished[0])
+            tool_message = next(
+                message
+                for message in finished[0]["generated_messages"]
+                if message.get("role") == "tool"
+            )
+            self.assertEqual(tool_message["tool_call_id"], "call-error")
+            self.assertIn("工具后端不可用", tool_message["content"])
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_provider_stream_error_does_not_commit_partial_tool_call_block(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return []
+
+            def check_for_updates(self):
+                return False
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, skill_name):
+                return ""
+
+            def get_skill_display_name(self, skill_name):
+                return skill_name
+
+            def get_skill_of_tool(self, name):
+                return ""
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def chat_stream(self, messages, tools=None, prompt_cache_key=None):
+                yield {
+                    "type": "tool_call",
+                    "index": 0,
+                    "id": "call-partial",
+                    "function": {"name": "read_file", "arguments": "{\"path\":"},
+                }
+                yield {
+                    "type": "error",
+                    "content": "peer closed connection without complete body",
+                }
+
+        temp_dir = tempfile.mkdtemp()
+        finished = []
+        try:
+            with (
+                patch("core.agent.SkillManager", return_value=_SkillManagerStub()),
+                patch("core.agent.LLMFactory.create_provider", return_value=_ProviderStub()),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "读取文件"}],
+                    _DaemonConfigStub(temp_dir, values={"api_key": "test-key"}),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_EXECUTION},
+                )
+                worker.finished_signal.connect(finished.append)
+                worker.run()
+
+            self.assertTrue(finished)
+            self.assertIn("peer closed connection", finished[0]["error"])
+            self.assertFalse(
+                any(
+                    message.get("role") == "assistant" and message.get("tool_calls")
+                    for message in finished[0]["generated_messages"]
+                )
+            )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

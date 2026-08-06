@@ -1,3 +1,5 @@
+import hashlib
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -30,15 +32,58 @@ class ChatSaveWorker(QThread):
         self._condition = threading.Condition()
         self._pending = OrderedDict()
         self._inflight = set()
+        self._highest_revision = {}
+        self._accepted_signature = {}
         self._stop_requested = False
+
+    @staticmethod
+    def _request_signature(request):
+        payload = {
+            "messages": request.messages,
+            "title": request.title,
+            "status": request.status,
+            "meta": request.meta,
+        }
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            encoded = repr(payload)
+        return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()
 
     def enqueue(self, request):
         if not isinstance(request, ChatSaveRequest):
             return False
         request.ready_at = time.monotonic() + self.debounce_seconds
+        revision = max(0, int(request.revision or 0))
+        signature = self._request_signature(request)
         with self._condition:
+            highest_revision_value = self._highest_revision.get(request.session_id)
+            highest_revision = (
+                int(highest_revision_value)
+                if highest_revision_value is not None
+                else None
+            )
+            accepted_signature = self._accepted_signature.get(request.session_id)
+            if highest_revision is not None and revision < highest_revision:
+                # A stale UI callback is harmless, but it must never overwrite
+                # a newer snapshot already accepted by this worker.
+                return True
+            if (
+                highest_revision is not None
+                and revision == highest_revision
+                and accepted_signature
+                and signature != accepted_signature
+            ):
+                return False
+            if highest_revision is None or revision > highest_revision:
+                self._highest_revision[request.session_id] = revision
+                self._accepted_signature[request.session_id] = signature
             current = self._pending.get(request.session_id)
-            if current is None or int(request.revision or 0) >= int(current.revision or 0):
+            if current is None or revision >= int(current.revision or 0):
+                if current is not None and revision == int(current.revision or 0):
+                    current_signature = self._request_signature(current)
+                    if current_signature != signature:
+                        return False
                 self._pending[request.session_id] = request
             self._condition.notify_all()
         return True
@@ -116,6 +161,16 @@ class ChatSaveWorker(QThread):
             try:
                 if storage is None:
                     storage = ChatStorage(self.db_path)
+                with self._condition:
+                    newest_revision = int(self._highest_revision.get(request.session_id, 0) or 0)
+                if int(request.revision or 0) < newest_revision:
+                    # A newer request is already accepted and will be written
+                    # by this single worker; do not let this stale request
+                    # overwrite it if it was still in flight.
+                    with self._condition:
+                        self._inflight.discard(request.session_id)
+                        self._condition.notify_all()
+                    continue
                 storage.save_conversation(
                     request.session_id,
                     request.messages,

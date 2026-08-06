@@ -748,7 +748,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         window = MainWindow.__new__(MainWindow)
         window.chat_storage = SimpleNamespace(
             get_agent=lambda _agent_id: {"parent_message_id": "user-1"},
-            normalize_messages=lambda messages: messages,
+            normalize_messages=lambda messages, **kwargs: messages,
         )
         window._new_message_id = lambda: "result-1"
         window._rebuild_session_render_spans = lambda current: setattr(current, "render_items", [])

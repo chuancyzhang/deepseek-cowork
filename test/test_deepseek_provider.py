@@ -60,6 +60,38 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(captured["reasoning_effort"], "max")
         self.assertEqual(captured["extra_body"]["thinking"]["type"], "enabled")
 
+    def test_chat_completions_blocks_incomplete_tool_round_before_provider_call(self):
+        provider, client = self._build_provider(
+            base_url="https://api.openai.com/v1",
+            model_name="gpt-4.1-mini",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+
+        chunks = list(provider.chat_stream([
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "one", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "two", "arguments": "{}"},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "one"},
+        ]))
+
+        client.chat.completions.create.assert_not_called()
+        self.assertEqual(chunks[0]["type"], "error")
+        self.assertIn("call-2", chunks[0]["content"])
+
     def test_non_deepseek_requests_send_configured_reasoning_effort_without_deepseek_body(self):
         provider, client = self._build_provider(
             base_url="https://api.openai.com/v1",
@@ -764,6 +796,33 @@ class TestOpenAIProviderDeepSeek(unittest.TestCase):
         self.assertEqual(usage["cached_input_tokens"], 75)
         self.assertEqual(usage["uncached_input_tokens"], 25)
         self.assertAlmostEqual(usage["cache_hit_rate"], 0.75)
+
+    def test_chat_stream_emits_official_deepseek_cache_usage_payload(self):
+        provider, client = self._build_provider(
+            model_name="deepseek-v4-pro",
+            thinking_enabled=False,
+            reasoning_effort="",
+        )
+        client.chat.completions.create.return_value = [
+            SimpleNamespace(
+                usage=SimpleNamespace(
+                    prompt_tokens=10_000,
+                    completion_tokens=20,
+                    total_tokens=10_020,
+                    prompt_cache_hit_tokens=8_576,
+                    prompt_cache_miss_tokens=1_424,
+                ),
+                choices=[],
+            )
+        ]
+
+        chunks = list(provider.chat_stream([{"role": "user", "content": "hello"}]))
+
+        usage = chunks[0]["usage"]
+        self.assertEqual(usage["cached_input_tokens"], 8_576)
+        self.assertEqual(usage["uncached_input_tokens"], 1_424)
+        self.assertAlmostEqual(usage["cache_hit_rate"], 0.8576)
+        self.assertEqual(usage["cache_metrics_status"], "deepseek_prompt_cache")
 
     def test_prompt_cache_key_requires_explicit_param(self):
         provider, client = self._build_provider(

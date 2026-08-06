@@ -651,7 +651,10 @@ class SessionAgentManager:
             "created_at": created_at,
         }
         record.messages.append(msg)
-        record.messages = self.chat_storage.normalize_messages(record.messages)
+        record.messages = self.chat_storage.normalize_messages(
+            record.messages,
+            conversation_id=f"agent:{record.agent_id}",
+        )
         self.chat_storage.append_agent_messages(record.agent_id, [msg])
         self._emit_agent_state(
             record,
@@ -706,7 +709,10 @@ class SessionAgentManager:
                             "created_at": int(time.time()),
                         }
                     )
-            record.messages = self.chat_storage.normalize_messages(record.messages)
+            record.messages = self.chat_storage.normalize_messages(
+                record.messages,
+                conversation_id=f"agent:{record.agent_id}",
+            )
             self.chat_storage.replace_agent_messages(record.agent_id, record.messages)
 
             if record.closing_requested:
@@ -917,7 +923,10 @@ class SessionAgentManager:
                 source_tool_call_id=str(source_tool_call_id or ""),
                 run_context=run_context_copy,
                 meta=meta_copy,
-                messages=self.chat_storage.normalize_messages(base_messages),
+                messages=self.chat_storage.normalize_messages(
+                    base_messages,
+                    conversation_id=f"agent:{agent_id}",
+                ),
             )
             self._agents[agent_id] = record
             self._persist_record_unlocked(record)

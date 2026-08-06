@@ -167,14 +167,46 @@ class TestChatStorageMessages(unittest.TestCase):
         self.assertEqual([message["id"] for message in normalized], ["u1", "u2", "a1"])
         self.assertEqual([message["role"] for message in normalized], ["user", "user", "assistant"])
 
-    def test_normalize_messages_rejects_duplicate_message_ids(self):
+    def test_normalize_messages_repairs_duplicate_message_ids_without_dropping_history(self):
         storage = ChatStorage(self.db_path)
 
-        with self.assertRaisesRegex(ValueError, "duplicate message id: same-id"):
-            storage.normalize_messages([
+        normalized = storage.normalize_messages(
+            [
                 {"id": "same-id", "role": "user", "content": "first"},
                 {"id": "same-id", "role": "assistant", "content": "second"},
-            ])
+            ],
+            conversation_id="duplicate-history",
+        )
+
+        self.assertEqual(len(normalized), 2)
+        self.assertEqual(normalized[0]["id"], "same-id")
+        self.assertNotEqual(normalized[1]["id"], "same-id")
+        self.assertEqual([message["content"] for message in normalized], ["first", "second"])
+        self.assertEqual(
+            normalized[1]["meta"]["original_message_id"],
+            "same-id",
+        )
+        self.assertTrue(normalized[1]["meta"]["message_id_remapped"])
+
+    def test_legacy_history_with_duplicate_ids_loads_all_messages(self):
+        storage = ChatStorage(self.db_path)
+        legacy_path = os.path.join(self.temp_dir, "chat_history_legacy-duplicate.json")
+        with open(legacy_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                [
+                    {"id": "same-id", "role": "user", "content": "第一条"},
+                    {"id": "same-id", "role": "assistant", "content": "第二条"},
+                ],
+                handle,
+                ensure_ascii=False,
+            )
+
+        transcripts = storage._legacy_json_transcripts(set())
+
+        self.assertEqual(len(transcripts), 1)
+        messages = transcripts[0]["messages"]
+        self.assertEqual([item["content"] for item in messages], ["第一条", "第二条"])
+        self.assertNotEqual(messages[0]["id"], messages[1]["id"])
 
     def test_messages_without_ids_are_assigned_stable_ids(self):
         storage = ChatStorage(self.db_path)

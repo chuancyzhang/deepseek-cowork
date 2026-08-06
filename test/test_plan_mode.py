@@ -606,13 +606,12 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
                 worker.finished_signal.connect(lambda data: results.append(data))
                 worker.run()
 
-            self.assertEqual(provider.calls, 2)
             self.assertTrue(results)
             result = results[0]
-            self.assertEqual(result["content"], "direct answer")
-            assistant_messages = [msg for msg in result["generated_messages"] if msg.get("role") == "assistant"]
-            self.assertTrue(assistant_messages)
-            self.assertFalse(any(msg.get("tool_calls") for msg in assistant_messages))
+            self.assertEqual(provider.calls, 1)
+            self.assertIn("function.name", result["error"])
+            self.assertIn("未提交不完整 assistant tool-call 消息", result["error"])
+            self.assertFalse(any(msg.get("tool_calls") for msg in result["generated_messages"]))
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -19,6 +19,7 @@ from core.clarify_mode import RUN_MODE_EXECUTION, normalize_run_context
 from core.llm.deepseek import DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS, is_deepseek_v4_model
 from core.llm.providers import GPT_5_6_CONTEXT_WINDOW_TOKENS, is_gpt_5_6_model
 from core.message_persistence import filter_persistable_messages
+from core.conversation_integrity import merge_messages_by_id
 from core.skill_catalog import DependencyCoordinator, SkillCatalogService, SkillChangeEvent
 
 
@@ -124,7 +125,10 @@ class DaemonState:
     def get_session_messages(self, session_id):
         with self.lock:
             if session_id in self.sessions:
-                messages = self.chat_storage.normalize_messages(self.sessions[session_id])
+                messages = self.chat_storage.normalize_messages(
+                    self.sessions[session_id],
+                    conversation_id=session_id,
+                )
                 self.sessions[session_id] = messages
                 self._log_context_source(session_id, "daemon_memory", messages)
                 return messages
@@ -134,7 +138,7 @@ class DaemonState:
         else:
             messages = []
             source = "empty"
-        messages = self.chat_storage.normalize_messages(messages)
+        messages = self.chat_storage.normalize_messages(messages, conversation_id=session_id)
         with self.lock:
             self.sessions[session_id] = messages
         self._log_context_source(session_id, source, messages)
@@ -143,7 +147,7 @@ class DaemonState:
     def use_session_messages_snapshot(self, session_id, messages):
         if not isinstance(messages, list):
             return None
-        normalized = self.chat_storage.normalize_messages(messages)
+        normalized = self.chat_storage.normalize_messages(messages, conversation_id=session_id)
         with self.lock:
             self.sessions[session_id] = normalized
         self._log_context_source(session_id, "ui_snapshot", normalized)
@@ -173,26 +177,64 @@ class DaemonState:
         except Exception:
             pass
 
-    def append_user_message_if_needed(self, messages, content):
+    def append_user_message_if_needed(
+        self,
+        messages,
+        content,
+        message_id="",
+        turn_id="",
+        request_id="",
+    ):
         if not isinstance(messages, list):
             return
         text = (content or "").strip()
         if not text:
             return
-        if messages:
-            last = messages[-1]
-            if (
-                isinstance(last, dict)
-                and last.get("role") == "user"
-                and (last.get("content") or "").strip() == text
-            ):
+        stable_id = str(message_id or "").strip()
+        if stable_id:
+            for existing in messages:
+                if not isinstance(existing, dict) or str(existing.get("id") or "") != stable_id:
+                    continue
+                if (
+                    existing.get("role") != "user"
+                    or (existing.get("content") or "").strip() != text
+                ):
+                    raise ValueError(f"用户消息 ID 冲突：{stable_id}")
                 return
-        messages.append({"role": "user", "content": content})
+        else:
+            # A caller without an ID is an older boundary and must receive a
+            # fresh identity here; text equality is never a ledger idempotency
+            # rule.  Current UI/daemon submissions always provide the ID from
+            # the submit entry point.
+            stable_id = uuid.uuid4().hex
+        meta = {}
+        if turn_id not in (None, ""):
+            meta["turn_id"] = str(turn_id)
+        if request_id:
+            meta["request_id"] = str(request_id)
+        sequences = []
+        for existing in messages:
+            existing_meta = existing.get("meta") if isinstance(existing, dict) else None
+            if not isinstance(existing_meta, dict):
+                continue
+            try:
+                existing_sequence = int(existing_meta.get("sequence"))
+            except (TypeError, ValueError):
+                continue
+            if existing_sequence >= 0:
+                sequences.append(existing_sequence)
+        meta["sequence"] = max(sequences, default=len(messages) - 1) + 1
+        message = {"id": stable_id, "role": "user", "content": content}
+        message["meta"] = meta
+        messages.append(message)
 
     def _normalize_persistable_messages(self, session_id, messages, source):
         source_messages = messages if isinstance(messages, list) else []
         persistable_messages = filter_persistable_messages(source_messages)
-        normalized_messages = self.chat_storage.normalize_messages(persistable_messages)
+        normalized_messages = self.chat_storage.normalize_messages(
+            persistable_messages,
+            conversation_id=session_id,
+        )
         filtered_count = len(source_messages) - len(persistable_messages)
         if filtered_count:
             _log_daemon(
@@ -229,15 +271,35 @@ class DaemonState:
                         ensure_ascii=False,
                     )
                 )
-            messages.extend(persistable_messages)
+            messages[:] = merge_messages_by_id(messages, persistable_messages)
             return
-        messages.append(
-            {
-                "role": result.get("role", "assistant"),
-                "content": result.get("content", ""),
-                "reasoning": result.get("reasoning", ""),
-            }
-        )
+        if "error" in result:
+            _log_daemon(
+                "provider_error_without_ledger_append "
+                + json.dumps(
+                    {
+                        "session_id": session_id,
+                        "source": source,
+                        "error": str(result.get("error") or ""),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        fallback = {
+            "id": str(result.get("message_id") or uuid.uuid4().hex),
+            "role": result.get("role", "assistant"),
+            "content": result.get("content", ""),
+            "reasoning": result.get("reasoning", ""),
+        }
+        fallback_meta = {}
+        if result.get("turn_id") not in (None, ""):
+            fallback_meta["turn_id"] = str(result.get("turn_id"))
+        if result.get("request_id") not in (None, ""):
+            fallback_meta["request_id"] = str(result.get("request_id"))
+        if fallback_meta:
+            fallback["meta"] = fallback_meta
+        messages[:] = merge_messages_by_id(messages, [fallback])
 
     def save_session(self, session_id):
         with self.lock:
@@ -380,7 +442,15 @@ class DaemonState:
         except Exception as e:
             _log_daemon(f"_close_live_subagents failed session_id={session_id} error={e}")
 
-    def _run_worker_once(self, session_id, worker_messages, workspace_dir, run_context=None):
+    def _run_worker_once(
+        self,
+        session_id,
+        worker_messages,
+        workspace_dir,
+        run_context=None,
+        turn_id=None,
+        request_id=None,
+    ):
         result_holder = {}
         loop = QEventLoop()
 
@@ -395,6 +465,8 @@ class DaemonState:
             workspace_dir,
             session_id=session_id,
             run_context=run_context,
+            turn_id=turn_id,
+            request_id=request_id,
             skill_catalog_service=self.skill_catalog,
             dependency_coordinator=self.dependency_coordinator,
         )
@@ -681,7 +753,17 @@ class DaemonState:
         )
         return retry_messages
 
-    def run_llm_sync(self, session_id, user_text, workspace_dir=None, run_context=None, messages_snapshot=None):
+    def run_llm_sync(
+        self,
+        session_id,
+        user_text,
+        workspace_dir=None,
+        run_context=None,
+        messages_snapshot=None,
+        turn_id=None,
+        request_id=None,
+        user_message_id=None,
+    ):
         self.touch()
         try:
             self.config_manager.load_config()
@@ -691,7 +773,15 @@ class DaemonState:
         self.idle_timeout = max(int(idle_minutes), 1) * 60
         messages = self.request_messages(session_id, messages_snapshot)
         normalized_run_context = normalize_run_context(run_context)
-        self.append_user_message_if_needed(messages, user_text)
+        turn_id = str(turn_id or uuid.uuid4().hex)
+        request_id = str(request_id or uuid.uuid4().hex)
+        self.append_user_message_if_needed(
+            messages,
+            user_text,
+            message_id=user_message_id,
+            turn_id=turn_id,
+            request_id=request_id,
+        )
         worker_messages = (
             self._build_overflow_retry_messages(
                 session_id,
@@ -707,6 +797,8 @@ class DaemonState:
             worker_messages,
             workspace_dir,
             run_context=normalized_run_context,
+            turn_id=turn_id,
+            request_id=request_id,
         )
         retry_once = self.config_manager.get("im_context_overflow_retry_once", True)
         if retry_once is not False and self._is_context_overflow_error(result):
@@ -723,6 +815,8 @@ class DaemonState:
                     retry_messages,
                     workspace_dir,
                     run_context=normalized_run_context,
+                    turn_id=turn_id,
+                    request_id=request_id,
                 )
                 _log_daemon(
                     "context_overflow_retry_result "
@@ -736,13 +830,12 @@ class DaemonState:
                     )
                 )
                 result = retry_result
-        if "error" not in result:
-            self.append_worker_result_messages(
-                session_id,
-                messages,
-                result,
-                source="daemon_sync_result",
-            )
+        self.append_worker_result_messages(
+            session_id,
+            messages,
+            result,
+            source="daemon_sync_result",
+        )
         messages[:] = self._normalize_persistable_messages(
             session_id,
             messages,
@@ -783,6 +876,9 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
         if action == "send_message":
             session_id = data.get("session_id") or uuid.uuid4().hex
             content = data.get("content") or ""
+            turn_id = data.get("turn_id")
+            request_id = data.get("request_id")
+            user_message_id = data.get("user_message_id")
             workspace_dir = data.get("workspace_dir")
             run_context = normalize_run_context(data.get("run_context"))
             if not content and run_context.get("mode") != RUN_MODE_EXECUTION:
@@ -794,12 +890,17 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 workspace_dir,
                 run_context=run_context,
                 messages_snapshot=data.get("messages"),
+                turn_id=turn_id,
+                request_id=request_id,
+                user_message_id=user_message_id,
             )
             self._send({"status": "ok", "session_id": session_id, "result": result})
             return
         if action == "send_message_stream":
             session_id = data.get("session_id") or uuid.uuid4().hex
             turn_id = str(data.get("turn_id") or uuid.uuid4().hex)
+            request_id = str(data.get("request_id") or uuid.uuid4().hex)
+            user_message_id = str(data.get("user_message_id") or "")
             content = data.get("content") or ""
             workspace_dir = data.get("workspace_dir")
             run_context = normalize_run_context(data.get("run_context"))
@@ -820,7 +921,13 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             idle_minutes = state.config_manager.get("daemon_idle_minutes", 10)
             state.idle_timeout = max(int(idle_minutes), 1) * 60
             messages = state.request_messages(session_id, data.get("messages"))
-            state.append_user_message_if_needed(messages, content)
+            state.append_user_message_if_needed(
+                messages,
+                content,
+                message_id=user_message_id,
+                turn_id=turn_id,
+                request_id=request_id,
+            )
             _log_daemon(
                 f"send_message_stream prepared_messages session_id={session_id} "
                 f"turn_id={turn_id} message_count={len(messages)}"
@@ -887,6 +994,7 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 session_id=session_id,
                 run_context=run_context,
                 turn_id=turn_id,
+                request_id=request_id,
                 skill_catalog_service=state.skill_catalog,
                 dependency_coordinator=state.dependency_coordinator,
             )
@@ -935,13 +1043,12 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
                 f"keys={sorted(list(result.keys())) if isinstance(result, dict) else []} "
                 f"has_error={isinstance(result, dict) and 'error' in result}"
             )
-            if "error" not in result:
-                state.append_worker_result_messages(
-                    session_id,
-                    messages,
-                    result,
-                    source="daemon_stream_result",
-                )
+            state.append_worker_result_messages(
+                session_id,
+                messages,
+                result,
+                source="daemon_stream_result",
+            )
             messages[:] = state._normalize_persistable_messages(
                 session_id,
                 messages,

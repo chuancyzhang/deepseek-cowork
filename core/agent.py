@@ -53,6 +53,7 @@ from core.llm.responses_replay import (
     RESPONSES_REPLAY_INPUT_KEY,
     RESPONSES_REPLAY_META_KEY,
 )
+from core.conversation_integrity import ensure_tool_call_sequence
 
 try:
     from openai import OpenAI
@@ -475,6 +476,79 @@ def drop_invalid_tool_call_rounds_without_reasoning(messages):
     return cleaned, dropped_rounds
 
 
+def project_responses_replay_to_chat_messages(messages):
+    """Project replay-only function calls into a Chat Completions ledger copy."""
+    projected = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        copied = json_copy(message, {})
+        if copied.get("role") != "assistant":
+            projected.append(copied)
+            continue
+        meta = copied.get("meta") if isinstance(copied.get("meta"), dict) else {}
+        replay_items = meta.get(RESPONSES_REPLAY_META_KEY)
+        if replay_items is None:
+            replay_items = meta.get(DEEPSEEK_RESPONSES_REPLAY_META_KEY)
+        if replay_items is None:
+            projected.append(copied)
+            continue
+        if not isinstance(replay_items, list):
+            raise ValueError(
+                "Responses replay 历史不是数组，无法投影到 Chat Completions；"
+                "原历史不会被静默裁剪。"
+            )
+        replay_calls = []
+        unsupported_types = []
+        for item in replay_items:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    "Responses replay 包含无效项目，无法投影到 Chat Completions；"
+                    "原历史不会被静默裁剪。"
+                )
+            item_type = str(item.get("type") or "").strip()
+            if item_type == "function_call":
+                call_id = str(item.get("call_id") or item.get("id") or "").strip()
+                name = str(item.get("name") or "").strip()
+                arguments = item.get("arguments")
+                if not call_id or not name or not isinstance(arguments, str):
+                    raise ValueError(
+                        "Responses replay 的 function_call 缺少 call_id、name 或 arguments，"
+                        "无法投影到 Chat Completions；原历史不会被静默裁剪。"
+                    )
+                replay_calls.append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                })
+            elif item_type not in {"reasoning", "message", "text"}:
+                unsupported_types.append(item_type or "empty")
+        if unsupported_types and not copied.get("tool_calls"):
+            raise ValueError(
+                "Responses replay 包含 Chat Completions 无法表达的项目类型："
+                + ", ".join(sorted(set(unsupported_types)))
+                + "；原历史不会被静默裁剪。"
+            )
+        if replay_calls:
+            existing_calls = copied.get("tool_calls")
+            if existing_calls:
+                existing_ids = [
+                    str(item.get("id") or "").strip()
+                    for item in existing_calls
+                    if isinstance(item, dict)
+                ]
+                replay_ids = [item["id"] for item in replay_calls]
+                if existing_ids != replay_ids:
+                    raise ValueError(
+                        "Responses replay 与 assistant.tool_calls 的顺序或 ID 不一致，"
+                        "无法投影到 Chat Completions；原历史不会被静默裁剪。"
+                    )
+            else:
+                copied["tool_calls"] = replay_calls
+        projected.append(copied)
+    return projected
+
+
 def _validate_deepseek_responses_tool_results(messages):
     """Reject replay history that cannot form a valid stateless follow-up."""
     function_call_ids = set()
@@ -540,6 +614,7 @@ def sanitize_llm_messages(
     preserve_responses_replay=False,
     preserve_legacy_deepseek_replay=False,
     strict_reasoning_replay=False,
+    project_responses_replay_to_chat=False,
 ):
     if strict_reasoning_replay:
         _validate_deepseek_responses_tool_results(messages)
@@ -548,6 +623,9 @@ def sanitize_llm_messages(
         for message in (messages or [])
         if isinstance(message, dict)
     ]
+    if project_responses_replay_to_chat:
+        ledger_messages = project_responses_replay_to_chat_messages(ledger_messages)
+    ensure_tool_call_sequence(ledger_messages, context="LLM provider request")
     dropped_rounds = []
     if require_reasoning_replay:
         _unused_messages, dropped_rounds = drop_invalid_tool_call_rounds_without_reasoning(ledger_messages)
@@ -597,6 +675,7 @@ class LLMWorker(QThread):
         turn_id=None,
         skill_catalog_service=None,
         dependency_coordinator=None,
+        request_id=None,
     ):
         super().__init__()
         self.messages = messages
@@ -611,6 +690,7 @@ class LLMWorker(QThread):
         self.is_subagent = bool(is_subagent or parent_agent_id)
         self.run_context = normalize_run_context(run_context)
         self.turn_id = str(turn_id or "")
+        self.request_id = str(request_id or "")
         
         # Flags for control
         self.is_paused = False
@@ -961,10 +1041,67 @@ class LLMWorker(QThread):
         ledger_message = json_copy(message, {})
         if not ledger_message.get("id"):
             ledger_message["id"] = uuid.uuid4().hex
+        worker_turn_id = str(getattr(self, "turn_id", "") or "")
+        worker_request_id = str(getattr(self, "request_id", "") or "")
+        meta = ledger_message.get("meta") if isinstance(ledger_message.get("meta"), dict) else {}
+        meta = dict(meta)
+        if worker_turn_id:
+            meta.setdefault("turn_id", worker_turn_id)
+        if worker_request_id:
+            meta.setdefault("request_id", worker_request_id)
+        if "sequence" not in meta:
+            sequences = []
+            for existing in current_messages:
+                existing_meta = existing.get("meta") if isinstance(existing, dict) else None
+                if not isinstance(existing_meta, dict):
+                    continue
+                try:
+                    existing_sequence = int(existing_meta.get("sequence"))
+                except (TypeError, ValueError):
+                    continue
+                if existing_sequence >= 0:
+                    sequences.append(existing_sequence)
+            meta["sequence"] = max(sequences, default=len(current_messages) - 1) + 1
+        if meta:
+            ledger_message["meta"] = meta
         current_messages.append(ledger_message)
         if isinstance(generated_messages, list):
             generated_messages.append(json_copy(ledger_message, {}))
         return ledger_message
+
+    @staticmethod
+    def _discard_incomplete_tool_round(current_messages, generated_messages, tool_round):
+        """Remove a draft tool round before it can enter the persisted ledger."""
+        if not isinstance(tool_round, dict):
+            return 0
+        assistant_id = str(tool_round.get("assistant_message_id") or "").strip()
+        tool_call_ids = {
+            str(value or "").strip()
+            for value in (tool_round.get("tool_call_ids") or [])
+            if str(value or "").strip()
+        }
+        removed = 0
+
+        def keep(message):
+            nonlocal removed
+            if not isinstance(message, dict):
+                return True
+            if assistant_id and str(message.get("id") or "").strip() == assistant_id:
+                removed += 1
+                return False
+            if (
+                message.get("role") == "tool"
+                and str(message.get("tool_call_id") or "").strip() in tool_call_ids
+            ):
+                removed += 1
+                return False
+            return True
+
+        if isinstance(current_messages, list):
+            current_messages[:] = [message for message in current_messages if keep(message)]
+        if isinstance(generated_messages, list):
+            generated_messages[:] = [message for message in generated_messages if keep(message)]
+        return removed
 
     def _skill_context_hash(self, content):
         return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
@@ -1817,6 +1954,18 @@ class LLMWorker(QThread):
                     )
                     provider_name = getattr(provider, "provider_name", None) or provider.__class__.__name__
                     self.step_signal.emit(f"Provider Start: {provider_name}")
+                    self.observability_signal.emit({
+                        "type": "provider_request_start",
+                        "request_id": f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
+                        "turn_id": self.turn_id,
+                        "provider": provider_name,
+                        "model": getattr(provider, "model_name", ""),
+                        "base_url": getattr(provider, "base_url", ""),
+                        "protocol": getattr(provider, "api_protocol", "") or provider_name,
+                        "message_count": len(request_messages),
+                        "tool_count": len(self._tools_for_messages(request_messages)),
+                        "timestamp": time.time(),
+                    })
                     require_reasoning_replay = bool(
                         is_deepseek_request(
                             getattr(provider, "model_name", ""),
@@ -1837,6 +1986,10 @@ class LLMWorker(QThread):
                         preserve_responses_replay=preserve_responses,
                         preserve_legacy_deepseek_replay=preserve_deepseek_responses,
                         strict_reasoning_replay=preserve_deepseek_responses,
+                        project_responses_replay_to_chat=(
+                            str(getattr(provider, "api_protocol", "") or "").strip().lower()
+                            == "chat_completions"
+                        ),
                     )
                     if previous_provider_messages is None:
                         previous_provider_messages = self._previous_request_prefix_from_ledger(
@@ -1855,6 +2008,7 @@ class LLMWorker(QThread):
                     response_items_buffer = []
                     provider_error_message = None
                     protocol_locked = False
+                    tool_round_context = None
 
                     try:
                         if _needs_openai_protocol_lock(provider):
@@ -1943,6 +2097,51 @@ class LLMWorker(QThread):
                             elif type_ == "usage":
                                 usage_payload = dict(chunk.get("usage") or {})
                                 usage_payload.setdefault("prompt_cache_key", self.conversation_id or self.session_id)
+                                usage_payload.setdefault("turn_id", self.turn_id)
+                                usage_payload.setdefault(
+                                    "request_id",
+                                    f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
+                                )
+                                usage_payload.setdefault("provider", provider_name)
+                                usage_payload.setdefault("model", getattr(provider, "model_name", ""))
+                                usage_payload.setdefault("base_url", getattr(provider, "base_url", ""))
+                                selected_profile = self.run_context.get("selected_model_profile")
+                                if isinstance(selected_profile, dict):
+                                    profile_id = str(
+                                        selected_profile.get("profile_id")
+                                        or selected_profile.get("id")
+                                        or selected_profile.get("name")
+                                        or ""
+                                    ).strip()
+                                    if profile_id:
+                                        usage_payload.setdefault("profile_id", profile_id)
+                                protocol = str(
+                                    getattr(provider, "api_protocol", "")
+                                    or provider_name
+                                )
+                                usage_payload.setdefault("protocol", protocol)
+                                usage_payload.setdefault(
+                                    "cache_namespace",
+                                    "|".join(
+                                        [
+                                            str(getattr(provider, "base_url", "") or ""),
+                                            str(getattr(provider, "model_name", "") or ""),
+                                            protocol,
+                                        ]
+                                    ),
+                                )
+                                if usage_payload.get("cache_metrics_status") == "unavailable":
+                                    raw_usage = chunk.get("usage") if isinstance(chunk, dict) else {}
+                                    raw_usage_fields = sorted(raw_usage.keys()) if isinstance(raw_usage, dict) else []
+                                    self.observability_signal.emit({
+                                        "type": "usage_cache_metrics_unavailable",
+                                        "provider": provider_name,
+                                        "model": getattr(provider, "model_name", ""),
+                                        "protocol": protocol,
+                                        "usage_fields": raw_usage_fields,
+                                        "request_id": usage_payload.get("request_id") or "",
+                                        "timestamp": time.time(),
+                                    })
                                 self.observability_signal.emit({
                                     "type": "llm_usage",
                                     "usage": usage_payload,
@@ -1993,6 +2192,18 @@ class LLMWorker(QThread):
                     duration = end_time - start_time
                     total_duration += duration
                     self.step_signal.emit(f"Provider End: {provider_name} ({duration:.2f}s)")
+                    self.observability_signal.emit({
+                        "type": "provider_request_finish",
+                        "request_id": f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
+                        "turn_id": self.turn_id,
+                        "provider": provider_name,
+                        "model": getattr(provider, "model_name", ""),
+                        "base_url": getattr(provider, "base_url", ""),
+                        "protocol": getattr(provider, "api_protocol", "") or provider_name,
+                        "status": "error" if provider_error_message else "completed",
+                        "duration": duration,
+                        "timestamp": time.time(),
+                    })
 
                     if preserve_responses and not response_items_buffer:
                         if self.is_stopped:
@@ -2038,7 +2249,14 @@ class LLMWorker(QThread):
                         # failed before delivering the replay state required for
                         # the next request.
                         tool_calls_buffer.clear()
-                        content = f"⚠️ Provider Error: {provider_error_message}"
+                        self._append_pending_guidance(current_messages, generated_messages, close=True)
+                        self.finished_signal.emit({
+                            "error": str(provider_error_message),
+                            "generated_messages": generated_messages,
+                            "turn_id": self.turn_id,
+                            "request_id": self.request_id,
+                        })
+                        return
                     
                     # Reconstruct tool_calls list
                     tool_calls = []
@@ -2062,42 +2280,43 @@ class LLMWorker(QThread):
                             
                             tool_calls.append(t_obj)
 
-                    invalid_tool_calls = [
-                        tool for tool in tool_calls
-                        if not str(getattr(tool.function, "name", "") or "").strip()
-                    ]
+                    invalid_tool_calls = []
+                    seen_tool_call_ids = set()
+                    for tool in tool_calls:
+                        tool_call_id = str(getattr(tool, "id", "") or "").strip()
+                        tool_name = str(getattr(tool.function, "name", "") or "").strip()
+                        reason = ""
+                        if not tool_call_id:
+                            reason = "缺少 tool_call_id"
+                        elif tool_call_id in seen_tool_call_ids:
+                            reason = f"重复 tool_call_id={tool_call_id}"
+                        elif not tool_name:
+                            reason = "缺少 function.name"
+                        if reason:
+                            invalid_tool_calls.append(reason)
+                        else:
+                            seen_tool_call_ids.add(tool_call_id)
                     if invalid_tool_calls:
-                        malformed_prompt = (
-                            "上一轮 provider 返回了缺少 function.name 的无效 tool_call。"
-                            "忽略任何原始参数片段或内部工具发现说明；"
-                            "如果需要工具，请仅发出带完整函数名的有效 tool_call，否则直接回答用户。"
+                        malformed_error = (
+                            "Provider 返回了无法闭环的工具调用："
+                            + "；".join(invalid_tool_calls)
+                            + "。未提交不完整 assistant tool-call 消息，原历史不会被静默裁剪。"
                         )
-                        self.step_signal.emit(
-                            "System: Provider emitted malformed tool calls without function.name; ignoring them."
-                        )
-                        self.output_signal.emit(
-                            "Tool Call Error: Provider returned malformed tool calls without function.name."
-                        )
-                        self._append_ledger_message(current_messages, generated_messages, {
-                            "role": "system",
-                            "content": malformed_prompt,
-                            "meta": {
-                                "kind": "runtime_instruction",
-                                "hidden": True,
-                                "source": "invalid_tool_call_recovery",
-                                "content_hash": self._skill_context_hash(malformed_prompt),
-                            },
-                        })
+                        self.step_signal.emit(f"Tool Call Error: {malformed_error}")
+                        self.output_signal.emit(f"Tool Call Error: {malformed_error}")
                         self.observability_signal.emit({
-                            "type": "system_prompt_append",
-                            "content": malformed_prompt,
-                            "source": "invalid_tool_call_recovery",
+                            "type": "tool_validation_error",
+                            "reason": "provider_stream_tool_call_incomplete",
+                            "invalid_count": len(invalid_tool_calls),
                             "timestamp": time.time(),
                         })
-                    tool_calls = [
-                        tool for tool in tool_calls
-                        if str(getattr(tool.function, "name", "") or "").strip()
-                    ]
+                        self.finished_signal.emit({
+                            "error": malformed_error,
+                            "generated_messages": generated_messages,
+                            "turn_id": self.turn_id,
+                            "request_id": self.request_id,
+                        })
+                        return
 
                     if tool_calls:
                         self._append_skill_prompts(tool_calls, current_messages, disclosed_skills, generated_messages)
@@ -2163,6 +2382,15 @@ class LLMWorker(QThread):
                         generated_messages,
                         assistant_msg,
                     )
+                    if tool_calls:
+                        tool_round_context = {
+                            "assistant_message_id": assistant_msg.get("id") or "",
+                            "tool_call_ids": [
+                                str(tool.id or "").strip()
+                                for tool in tool_calls
+                                if str(tool.id or "").strip()
+                            ],
+                        }
                     
                     if tool_calls:
                         # --- Loop Detection ---
@@ -2194,6 +2422,7 @@ class LLMWorker(QThread):
 
                         self.step_signal.emit(f"Tool Calls Detected: {len(tool_calls)}")
                         successful_tool_results = []
+                        completed_tool_call_ids = set()
                         for tool in tool_calls:
                             # Check Control Flags inside tool loop
                             while self.is_paused:
@@ -2337,11 +2566,22 @@ class LLMWorker(QThread):
                                     "content": "澄清问题必须提供可选择的选项；请改用 questionnaire 选项卡片。",
                                 }
                             else:
-                                result = self.skill_manager.call_tool(
-                                    name,
-                                    args,
-                                    context=tool_context,
-                                )
+                                try:
+                                    result = self.skill_manager.call_tool(
+                                        name,
+                                        args,
+                                        context=tool_context,
+                                    )
+                                except Exception as exc:
+                                    result = {
+                                        "error": str(exc),
+                                        "status": "error",
+                                        "blocked_tool": name,
+                                        "content": f"工具 {name} 执行失败：{exc}",
+                                    }
+                                    self.output_signal.emit(
+                                        f"Tool Error: {name} 执行失败，已写入明确工具错误结果：{exc}"
+                                    )
                                 if name == "request_user_input":
                                     self.run_context["clarify_round_count"] = min(
                                         3,
@@ -2406,6 +2646,7 @@ class LLMWorker(QThread):
                                 generated_messages,
                                 tool_msg,
                             )
+                            completed_tool_call_ids.add(str(tool.id or "").strip())
                             structured_failure = isinstance(result_obj, dict) and (
                                 result_obj.get("ok") is False
                                 or str(result_obj.get("status") or "").lower()
@@ -2416,6 +2657,43 @@ class LLMWorker(QThread):
                             if name == "tool_search":
                                 self._append_tool_search_skill_prompts(result_obj, current_messages, disclosed_skills, generated_messages)
                             self.step_signal.emit(f"Tool Result: {result_text}")
+                        expected_tool_call_ids = set(tool_round_context.get("tool_call_ids") or [])
+                        if completed_tool_call_ids != expected_tool_call_ids:
+                            removed_count = self._discard_incomplete_tool_round(
+                                current_messages,
+                                generated_messages,
+                                tool_round_context,
+                            )
+                            stop_reason = (
+                                "用户停止了未完成的工具调用轮次"
+                                if self.is_stopped
+                                else "工具调用结果未完整返回"
+                            )
+                            message = (
+                                f"{stop_reason}（已移除 {removed_count} 条未提交的临时账本事件）。"
+                                "原历史不会被静默裁剪。"
+                            )
+                            self.step_signal.emit(f"Tool Call Error: {message}")
+                            self.output_signal.emit(f"Tool Call Error: {message}")
+                            self.observability_signal.emit({
+                                "type": "tool_round_discarded",
+                                "reason": "stopped" if self.is_stopped else "missing_tool_result",
+                                "tool_call_count": len(expected_tool_call_ids),
+                                "completed_tool_call_count": len(completed_tool_call_ids),
+                                "removed_message_count": removed_count,
+                                "timestamp": time.time(),
+                            })
+                            if not self.is_stopped:
+                                self.finished_signal.emit({
+                                    "error": message,
+                                    "generated_messages": generated_messages,
+                                    "turn_id": self.turn_id,
+                                    "request_id": self.request_id,
+                                })
+                                return
+                            final_content = "⚠️ " + message
+                            break
+                        tool_round_context = None
                         if successful_tool_results:
                             tool_names = ", ".join(sorted(set(successful_tool_results)))
                             result_prompt = (
@@ -2448,9 +2726,27 @@ class LLMWorker(QThread):
                         break
                         
                 except Exception as e:
+                    self._discard_incomplete_tool_round(
+                        current_messages,
+                        generated_messages,
+                        tool_round_context,
+                    )
                     self._append_pending_guidance(current_messages, generated_messages, close=True)
                     self.output_signal.emit(f"Provider Exception: {e}")
-                    self.finished_signal.emit({"error": str(e), "generated_messages": generated_messages})
+                    self.observability_signal.emit({
+                        "type": "provider_request_error",
+                        "request_id": f"{self.request_id or self.turn_id or self.session_id}:request:{turn_count}",
+                        "turn_id": self.turn_id,
+                        "provider": locals().get("provider_name", ""),
+                        "error": str(e),
+                        "timestamp": time.time(),
+                    })
+                    self.finished_signal.emit({
+                        "error": str(e),
+                        "generated_messages": generated_messages,
+                        "turn_id": self.turn_id,
+                        "request_id": self.request_id,
+                    })
                     return
             else:
                 # --- Mock Logic / Warning for Missing API Key ---
@@ -2474,7 +2770,9 @@ class LLMWorker(QThread):
             "content": final_content,
             "role": "assistant",
             "duration": total_duration,
-            "generated_messages": generated_messages
+            "generated_messages": generated_messages,
+            "turn_id": self.turn_id,
+            "request_id": self.request_id,
         })
 
         self.agent_state_signal.emit({

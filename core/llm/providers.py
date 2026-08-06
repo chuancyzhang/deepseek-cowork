@@ -14,6 +14,7 @@ from .deepseek import (
     normalize_reasoning_effort,
 )
 from .responses_replay import RESPONSES_REPLAY_INPUT_KEY
+from core.conversation_integrity import ensure_tool_call_sequence
 
 API_PROTOCOL_CHAT_COMPLETIONS = "chat_completions"
 API_PROTOCOL_RESPONSES = "responses"
@@ -266,6 +267,7 @@ class OpenAIProvider(LLMProvider):
 
     def chat_stream(self, messages, tools=None, prompt_cache_key=None):
         try:
+            ensure_tool_call_sequence(messages, context=f"{self.provider_name} request")
             if self.api_protocol == API_PROTOCOL_RESPONSES:
                 yield from self._responses_stream(messages, tools=tools, prompt_cache_key=prompt_cache_key)
                 return
@@ -852,24 +854,65 @@ class OpenAIProvider(LLMProvider):
                 payload[target] = value
 
         cached_tokens = None
+        uncached_tokens = None
+        cache_metrics_status = "unavailable"
+
+        # DeepSeek Chat Completions exposes cache usage as top-level hit/miss
+        # fields, while OpenAI-compatible responses commonly nest cached_tokens
+        # under prompt/input token details.  Keep the schemas explicit so a
+        # missing field cannot reuse a previous request's value.
+        deepseek_hit = _value(usage, "prompt_cache_hit_tokens")
+        deepseek_miss = _value(usage, "prompt_cache_miss_tokens")
+        if deepseek_hit is not None or deepseek_miss is not None:
+            cache_metrics_status = "deepseek_prompt_cache"
+            if deepseek_hit is not None:
+                cached_tokens = deepseek_hit
+            if deepseek_miss is not None:
+                uncached_tokens = deepseek_miss
+
         for details_name in ("prompt_tokens_details", "input_tokens_details"):
+            if cached_tokens is not None:
+                break
             details = _value(usage, details_name)
             if details is None:
                 continue
             cached_tokens = _value(details, "cached_tokens")
             if cached_tokens is not None:
+                cache_metrics_status = f"{details_name}.cached_tokens"
                 break
         if cached_tokens is not None:
             payload["cached_input_tokens"] = cached_tokens
+        if uncached_tokens is not None:
+            payload["uncached_input_tokens"] = uncached_tokens
+
         input_tokens = payload.get("input_tokens")
-        if input_tokens is not None and cached_tokens is not None:
+        if input_tokens is None and cached_tokens is not None and uncached_tokens is not None:
+            try:
+                payload["input_tokens"] = int(cached_tokens) + int(uncached_tokens)
+                input_tokens = payload["input_tokens"]
+            except Exception:
+                pass
+        if input_tokens is not None and cached_tokens is not None and uncached_tokens is None:
             try:
                 input_count = int(input_tokens)
                 cached_count = int(cached_tokens)
-                payload["uncached_input_tokens"] = max(0, input_count - cached_count)
+                uncached_tokens = max(0, input_count - cached_count)
+                payload["uncached_input_tokens"] = uncached_tokens
                 payload["cache_hit_rate"] = cached_count / input_count if input_count > 0 else 0
             except Exception:
                 pass
+        elif input_tokens is not None and cached_tokens is not None and uncached_tokens is not None:
+            try:
+                input_count = int(input_tokens)
+                cached_count = int(cached_tokens)
+                payload["uncached_input_tokens"] = max(0, int(uncached_tokens))
+                payload["cache_hit_rate"] = cached_count / input_count if input_count > 0 else 0
+            except Exception:
+                pass
+        if cache_metrics_status == "unavailable":
+            payload["cache_metrics_status"] = "unavailable"
+        else:
+            payload["cache_metrics_status"] = cache_metrics_status
         return payload or None
 
     def _prepare_messages(self, messages):

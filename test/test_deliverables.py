@@ -208,11 +208,12 @@ class TestDeliverableScanning(unittest.TestCase):
         existing = [{"role": "user", "content": "生成报告"}]
         generated = [
             {
+                "id": "skill-context-1",
                 "role": "system",
                 "content": "auto skill prompt",
                 "meta": {"kind": "skill_context", "source": "selected_skill_prompt"},
             },
-            {"role": "assistant", "content": "完成"},
+            {"id": "assistant-1", "role": "assistant", "content": "完成"},
         ]
 
         merged = MainWindow._merge_generated_messages(window, existing, generated)

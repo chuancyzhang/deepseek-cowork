@@ -69,6 +69,10 @@ from core.message_persistence import (
     filter_persistable_messages,
     is_auto_query_skill_context_message,
 )
+from core.conversation_integrity import (
+    ensure_tool_call_sequence,
+    merge_messages_by_id,
+)
 from core.deliverable_preview import (
     DELIVERABLE_TYPES,
     OFFICE_EXTENSIONS,
@@ -1260,6 +1264,58 @@ def normalize_token_usage_summary(summary):
     return normalized
 
 
+TOKEN_USAGE_METADATA_KEYS = (
+    "provider",
+    "base_url",
+    "model",
+    "protocol",
+    "profile_id",
+    "request_id",
+    "cache_namespace",
+    "cache_metrics_status",
+    "cache_bucket",
+)
+
+
+def normalize_last_token_usage(usage):
+    normalized = normalize_token_usage_summary(usage)
+    if not isinstance(usage, dict):
+        return normalized
+    for key in TOKEN_USAGE_METADATA_KEYS:
+        value = usage.get(key)
+        if value not in (None, ""):
+            normalized[key] = str(value)
+    return normalized
+
+
+def token_usage_bucket_key(usage):
+    """Build a stable, non-secret bucket for protocol/provider comparisons."""
+    if not isinstance(usage, dict):
+        usage = {}
+    values = [
+        str(usage.get("provider") or "").strip(),
+        str(usage.get("base_url") or "").strip(),
+        str(usage.get("model") or "").strip(),
+        str(usage.get("protocol") or "").strip(),
+        str(usage.get("profile_id") or "").strip(),
+    ]
+    if not any(values):
+        return "default"
+    return json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+
+
+def normalize_token_usage_buckets(buckets):
+    if not isinstance(buckets, dict):
+        return {}
+    normalized = {}
+    for key, value in buckets.items():
+        bucket_key = str(key or "").strip()
+        if not bucket_key:
+            continue
+        normalized[bucket_key] = normalize_token_usage_summary(value)
+    return normalized
+
+
 def compact_token_count(value):
     try:
         count = max(0, int(value or 0))
@@ -1296,7 +1352,7 @@ def format_token_usage_chip_text(summary):
 def format_token_usage_tooltip(summary, last_usage=None):
     usage = normalize_token_usage_summary(summary)
     lines = [
-        "本对话累计 token 用量",
+        "当前统计桶累计 token 用量（按 Provider / 模型 / 协议隔离）",
         f"总量：{usage.get('total_tokens', 0):,}",
         f"输入：{usage.get('input_tokens', 0):,}",
         f"输出：{usage.get('output_tokens', 0):,}",
@@ -1307,17 +1363,29 @@ def format_token_usage_tooltip(summary, last_usage=None):
     if usage.get("missing_usage_count", 0):
         lines.append(f"未返回用量的请求：{usage.get('missing_usage_count', 0):,}")
     if isinstance(last_usage, dict) and last_usage:
-        last = normalize_token_usage_summary(last_usage)
+        last = normalize_last_token_usage(last_usage)
         lines.extend(
             [
                 "",
-                "最近一轮",
+                "最近一轮请求（本轮，不是累计）",
                 f"总量：{last.get('total_tokens', 0):,}",
                 f"输入：{last.get('input_tokens', 0):,}",
                 f"输出：{last.get('output_tokens', 0):,}",
                 f"缓存输入：{last.get('cached_input_tokens', 0):,}",
             ]
         )
+        request_context = [
+            str(last.get(key) or "").strip()
+            for key in ("provider", "model", "protocol")
+            if str(last.get(key) or "").strip()
+        ]
+        if request_context:
+            lines.append("协议/模型：" + " / ".join(request_context))
+        cache_status = str(last.get("cache_metrics_status") or "").strip()
+        if cache_status:
+            lines.append("缓存口径：" + cache_status)
+        if str(last.get("request_id") or "").strip():
+            lines.append("request_id：" + str(last.get("request_id")))
     return "\n".join(lines)
 
 
@@ -14259,7 +14327,19 @@ class DaemonStreamWorker(QThread):
     interaction_signal = Signal(dict)
     turn_started_signal = Signal(str)
 
-    def __init__(self, client, session_id, content, workspace_dir=None, run_context=None, messages=None, turn_id=None, parent=None):
+    def __init__(
+        self,
+        client,
+        session_id,
+        content,
+        workspace_dir=None,
+        run_context=None,
+        messages=None,
+        turn_id=None,
+        request_id=None,
+        user_message_id=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.client = client
         self.session_id = session_id
@@ -14268,6 +14348,8 @@ class DaemonStreamWorker(QThread):
         self.run_context = run_context or {}
         self.messages = copy.deepcopy(messages or [])
         self.turn_id = str(turn_id or "")
+        self.request_id = str(request_id or "")
+        self.user_message_id = str(user_message_id or "")
         self._aborted = False
         self._sock = None
 
@@ -14315,6 +14397,8 @@ class DaemonStreamWorker(QThread):
                     "workspace_dir": self.workspace_dir,
                     "run_context": self.run_context,
                     "turn_id": self.turn_id,
+                    "request_id": self.request_id,
+                    "user_message_id": self.user_message_id,
                 }
                 if self.messages:
                     payload["messages"] = self.messages
@@ -19583,6 +19667,8 @@ class SessionState:
         self.virtualization_active = False
         self.active_turn_id = 0
         self.completed_turn_id = 0
+        self.active_turn_request_id = ""
+        self.active_turn_user_message_id = ""
         self.first_submit_diagnostic_turn_id = 0
         self.turn_steerable = False
         self.pending_guidance_messages = []
@@ -19632,6 +19718,8 @@ class SessionState:
         self.selected_deliverable_path = ""
         self.deliverable_preview_rendered = False
         self.token_usage_summary = normalize_token_usage_summary({})
+        self.token_usage_buckets = {}
+        self.counted_usage_request_ids = set()
         self.last_token_usage = {}
         self.chat_save_revision = 0
         self.last_chat_recovery_checkpoint_at = 0.0
@@ -24250,8 +24338,19 @@ class MainWindow(QMainWindow):
             state.token_usage_summary = summary
             self.refresh_token_usage_label(state.session_id)
             return
-        current = normalize_token_usage_summary(getattr(state, "token_usage_summary", {}))
-        last = normalize_token_usage_summary(usage)
+        usage_request_id = str(usage.get("request_id") or "").strip()
+        counted_request_ids = getattr(state, "counted_usage_request_ids", set())
+        if usage_request_id and usage_request_id in counted_request_ids:
+            log_ppt_agent_debug(
+                "token_usage_duplicate_request_ignored",
+                session_id=state.session_id,
+                request_id=usage_request_id,
+            )
+            return
+        bucket_key = token_usage_bucket_key(usage)
+        buckets = normalize_token_usage_buckets(getattr(state, "token_usage_buckets", {}))
+        current = normalize_token_usage_summary(buckets.get(bucket_key, {}))
+        last = normalize_last_token_usage(usage)
         counted = False
         for key in ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "uncached_input_tokens"):
             value = last.get(key, 0)
@@ -24260,13 +24359,20 @@ class MainWindow(QMainWindow):
                 counted = True
         if counted:
             current["request_count"] += 1
-            state.last_token_usage = last
+            if usage_request_id:
+                counted_request_ids.add(usage_request_id)
+                state.counted_usage_request_ids = counted_request_ids
+            state.last_token_usage = dict(last)
+            state.last_token_usage["cache_bucket"] = bucket_key
         else:
             current["missing_usage_count"] += 1
             state.last_token_usage = {}
+        buckets[bucket_key] = current
+        state.token_usage_buckets = buckets
         state.token_usage_summary = current
         meta = copy.deepcopy(getattr(state, "persisted_conversation_meta", {}) or {})
         meta["token_usage_summary"] = copy.deepcopy(current)
+        meta["token_usage_buckets"] = copy.deepcopy(buckets)
         state.persisted_conversation_meta = meta
         self.refresh_token_usage_label(state.session_id)
 
@@ -24525,7 +24631,8 @@ class MainWindow(QMainWindow):
 
     def _truncate_rewrite_state(self, state, target_index):
         retained_messages = self.chat_storage.normalize_messages(
-            copy.deepcopy((state.messages or [])[:target_index])
+            copy.deepcopy((state.messages or [])[:target_index]),
+            conversation_id=state.session_id,
         )
         retained_ids = {
             str(message.get("id") or "")
@@ -24853,7 +24960,10 @@ class MainWindow(QMainWindow):
         state.history_office_cards = [
             card for card in state.history_office_cards if card is not top_level
         ]
-        state.messages = self.chat_storage.normalize_messages(copy.deepcopy(remaining_messages))
+        state.messages = self.chat_storage.normalize_messages(
+            copy.deepcopy(remaining_messages),
+            conversation_id=state.session_id,
+        )
         affected_message_ids = list((node or {}).get("message_ids") or [message_id])
         for affected_id in affected_message_ids:
             state.render_node_by_message_id.pop(str(affected_id), None)
@@ -27160,6 +27270,8 @@ class MainWindow(QMainWindow):
         state.pending_scroll_force = False
         state.active_turn_id = 0
         state.completed_turn_id = 0
+        state.active_turn_request_id = ""
+        state.active_turn_user_message_id = ""
         state.active_skills_label.setText("本次会话使用的功能: ")
         state.active_skills_label.setVisible(False)
         state.displayed_count = 0
@@ -27194,6 +27306,8 @@ class MainWindow(QMainWindow):
         state.summoned_agent_pending_events = {}
         state.virtualization_active = False
         state.token_usage_summary = normalize_token_usage_summary({})
+        state.token_usage_buckets = {}
+        state.counted_usage_request_ids = set()
         state.last_token_usage = {}
         self.refresh_token_usage_label(state.session_id)
 
@@ -27928,11 +28042,21 @@ class MainWindow(QMainWindow):
         state.token_usage_summary = normalize_token_usage_summary(
             conversation_meta.get("token_usage_summary")
         )
+        state.token_usage_buckets = normalize_token_usage_buckets(
+            conversation_meta.get("token_usage_buckets")
+        )
         state.last_token_usage = (
-            normalize_token_usage_summary(conversation_meta.get("last_token_usage"))
+            normalize_last_token_usage(conversation_meta.get("last_token_usage"))
             if isinstance(conversation_meta.get("last_token_usage"), dict)
             else {}
         )
+        try:
+            state.chat_save_revision = max(
+                0,
+                int(conversation_meta.get("history_save_revision") or 0),
+            )
+        except (TypeError, ValueError):
+            state.chat_save_revision = 0
         self.refresh_token_usage_label(state.session_id)
         state.run_phase = conversation_meta.get("run_phase") or "Idle"
         state.has_file_changes = bool(conversation_meta.get("has_file_changes"))
@@ -31025,9 +31149,16 @@ class MainWindow(QMainWindow):
         meta["token_usage_summary"] = normalize_token_usage_summary(
             getattr(state, "token_usage_summary", {})
         )
+        meta["token_usage_buckets"] = normalize_token_usage_buckets(
+            getattr(state, "token_usage_buckets", {})
+        )
+        meta["history_save_revision"] = max(
+            0,
+            int(getattr(state, "chat_save_revision", 0) or 0),
+        )
         last_token_usage = getattr(state, "last_token_usage", {})
         if isinstance(last_token_usage, dict) and last_token_usage:
-            meta["last_token_usage"] = normalize_token_usage_summary(last_token_usage)
+            meta["last_token_usage"] = normalize_last_token_usage(last_token_usage)
         else:
             meta.pop("last_token_usage", None)
         meta.update(self._session_clarify_meta(state))
@@ -36488,7 +36619,10 @@ class MainWindow(QMainWindow):
                 },
             }
         )
-        state.messages = self.chat_storage.normalize_messages(state.messages)
+        state.messages = self.chat_storage.normalize_messages(
+            state.messages,
+            conversation_id=state.session_id,
+        )
         self._rebuild_session_render_spans(state)
         state.displayed_count = min(len(state.messages), state.displayed_count + 1)
         state.displayed_render_count = len(state.render_items)
@@ -36827,7 +36961,10 @@ class MainWindow(QMainWindow):
         for message in state.pending_guidance_messages:
             if message.get("id") not in existing_ids:
                 state.messages.append(copy.deepcopy(message))
-        state.messages = self.chat_storage.normalize_messages(state.messages)
+        state.messages = self.chat_storage.normalize_messages(
+            state.messages,
+            conversation_id=state.session_id,
+        )
         state.pending_guidance_messages = []
 
     def _submit_session_request(
@@ -36875,6 +37012,25 @@ class MainWindow(QMainWindow):
                     auto_close_ms=3500,
                 )
                 self.normalize_session_ui(state)
+            return False
+        try:
+            ensure_tool_call_sequence(
+                getattr(state, "messages", []) or [],
+                context="当前会话提交前检查",
+            )
+        except Exception as exc:
+            log_ppt_agent_debug(
+                "submit_session_tool_history_invalid",
+                session_id=state.session_id,
+                error=str(exc),
+            )
+            if state.session_id == self.current_session_id:
+                self.add_system_toast(
+                    f"当前会话无法继续：{exc}",
+                    "error",
+                    session_id=state.session_id,
+                    auto_close_ms=0,
+                )
             return False
         prompt_files = self._normalize_prompt_file_paths(prompt_files or [])
         if self._session_is_busy(state):
@@ -36949,23 +37105,30 @@ class MainWindow(QMainWindow):
                 self.add_system_toast(f"聊天工作目录不可用：{exc}", "error", session_id=state.session_id, auto_close_ms=6000)
             return False
         user_message_id = self._new_message_id()
+        next_turn_id = int(getattr(state, "active_turn_id", 0) or 0) + 1
+        submit_request_id = uuid.uuid4().hex
+        log_ppt_agent_debug(
+            "submit_session_ids_allocated",
+            session_id=state.session_id,
+            turn_id=next_turn_id,
+            user_message_id=user_message_id,
+            request_id=submit_request_id,
+        )
         delegated_payload = self._build_user_message_payload(
             delegated_text,
             prompt_files,
             supports_vision=supports_vision,
         ).get("content") or delegated_text
         if check_duplicates:
-            now = time.time()
-            submit_signature = json.dumps(
-                {"text": raw_user_text, "files": self._normalize_prompt_file_paths(prompt_files)},
-                ensure_ascii=False,
-                sort_keys=True,
+            # Compatibility flag retained for existing callers.  Idempotency
+            # is enforced by the generated message_id/turn_id/request_id and
+            # by the session busy state; text/time equality is not a ledger
+            # identity rule because two independent turns may have the same text.
+            log_ppt_agent_debug(
+                "submit_session_identity_dedup_enabled",
+                session_id=state.session_id,
+                strategy="message_id_turn_id_request_id",
             )
-            if submit_signature == self._last_submit_text and (now - self._last_submit_ts) < 0.8:
-                log_ppt_agent_debug("submit_session_duplicate_blocked", session_id=state.session_id)
-                return False
-            self._last_submit_text = submit_signature
-            self._last_submit_ts = now
         normalized_workflow_mode = normalize_workflow_mode(workflow_mode)
         office_workflow = self._is_office_workflow_context(normalized_workflow_mode)
         ppt_agent_mode = bool(ppt_agent_mode and normalized_workflow_mode == WORKFLOW_MODE_OFFICE_HTML_FIRST)
@@ -37020,10 +37183,31 @@ class MainWindow(QMainWindow):
         if payload.get("content_parts"):
             message_payload["content_parts"] = payload.get("content_parts")
         message_meta = dict(payload.get("meta") or {})
+        message_meta["turn_id"] = str(next_turn_id)
+        message_meta["request_id"] = submit_request_id
+        existing_sequences = []
+        for existing_message in state.messages:
+            existing_meta = existing_message.get("meta") if isinstance(existing_message, dict) else None
+            if not isinstance(existing_meta, dict):
+                continue
+            try:
+                existing_sequence = int(existing_meta.get("sequence"))
+            except (TypeError, ValueError):
+                continue
+            if existing_sequence >= 0:
+                existing_sequences.append(existing_sequence)
+        message_meta["sequence"] = max(existing_sequences, default=len(state.messages) - 1) + 1
         if turn_model_id:
             message_meta["selected_model_id"] = turn_model_id
         if turn_model_profile:
             message_meta["selected_model_profile"] = turn_model_profile
+            turn_protocol = str(
+                turn_model_profile.get("api_protocol")
+                or turn_model_profile.get("protocol")
+                or ""
+            ).strip()
+            if turn_protocol:
+                message_meta["protocol"] = turn_protocol
         if office_workflow:
             message_meta["workflow_mode"] = normalized_workflow_mode
             if normalized_workflow_mode == WORKFLOW_MODE_OFFICE_FILE_CONVERSION:
@@ -37127,7 +37311,9 @@ class MainWindow(QMainWindow):
         self.set_context_tab_hint(self.RIGHT_TAB_OBSERVABILITY, True)
         self.set_session_phase("Preparing", state.session_id)
         self.set_session_status("running", state.session_id)
-        state.active_turn_id += 1
+        state.active_turn_id = next_turn_id
+        state.active_turn_request_id = submit_request_id
+        state.active_turn_user_message_id = user_message_id
         if is_first_submit:
             state.first_submit_diagnostic_turn_id = state.active_turn_id
             log_ui_navigation(
@@ -37165,7 +37351,7 @@ class MainWindow(QMainWindow):
                     turn_id=current_turn_id,
                     runtime="agent_profiles",
                 )
-            self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
+                self._dispatch_agent_profiles(state, user_text, delegated_payload, mentioned_profiles, summon_source="mention")
             return True
         if ppt_agent_mode:
             ok, _skill_name, status_message = self._ppt_agent_skill_status(ppt_agent_selected_strategy)
@@ -37225,7 +37411,14 @@ class MainWindow(QMainWindow):
             self._append_office_process_note(state, "正在启动后台模型流。", tone="muted")
             log_ppt_agent_debug("submit_session_dispatch_daemon", session_id=state.session_id, turn_id=current_turn_id)
             try:
-                self.process_daemon_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
+                self.process_daemon_logic(
+                    user_text,
+                    turn_id=current_turn_id,
+                    request_id=submit_request_id,
+                    user_message_id=user_message_id,
+                    run_context=run_context,
+                    session_id=state.session_id,
+                )
             except Exception as exc:
                 if is_first_submit:
                     log_ui_navigation(
@@ -37248,7 +37441,13 @@ class MainWindow(QMainWindow):
             self._append_office_process_note(state, "正在启动本地模型流。", tone="muted")
             log_ppt_agent_debug("submit_session_dispatch_local", session_id=state.session_id, turn_id=current_turn_id)
             try:
-                self.process_agent_logic(user_text, turn_id=current_turn_id, run_context=run_context, session_id=state.session_id)
+                self.process_agent_logic(
+                    user_text,
+                    turn_id=current_turn_id,
+                    request_id=submit_request_id,
+                    run_context=run_context,
+                    session_id=state.session_id,
+                )
             except Exception as exc:
                 if is_first_submit:
                     log_ui_navigation(
@@ -37963,7 +38162,14 @@ class MainWindow(QMainWindow):
                 message.pop("meta", None)
         return messages
 
-    def process_agent_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
+    def process_agent_logic(
+        self,
+        user_text,
+        turn_id=None,
+        request_id=None,
+        run_context=None,
+        session_id=None,
+    ):
         state = self.get_session(session_id)
         if not state:
             log_ppt_agent_debug("process_agent_missing_session", session_id=session_id)
@@ -38018,6 +38224,7 @@ class MainWindow(QMainWindow):
             session_id=state.session_id,
             run_context=run_context,
             turn_id=turn_id,
+            request_id=request_id,
             skill_catalog_service=self.skill_catalog_service,
             dependency_coordinator=self.skill_dependency_coordinator,
         )
@@ -38046,7 +38253,15 @@ class MainWindow(QMainWindow):
         if state.session_id == self.current_session_id:
              self.normalize_session_ui(state)
 
-    def process_daemon_logic(self, user_text, turn_id=None, run_context=None, session_id=None):
+    def process_daemon_logic(
+        self,
+        user_text,
+        turn_id=None,
+        request_id=None,
+        user_message_id=None,
+        run_context=None,
+        session_id=None,
+    ):
         state = self.get_session(session_id)
         if not state:
             log_ppt_agent_debug("process_daemon_missing_session", session_id=session_id)
@@ -38101,6 +38316,8 @@ class MainWindow(QMainWindow):
             run_context=run_context,
             messages=self._messages_for_worker(state, run_context),
             turn_id=turn_id,
+            request_id=request_id,
+            user_message_id=user_message_id,
         )
         state.daemon_worker.finished_signal.connect(lambda result, sid=state.session_id, tid=turn_id: self.handle_daemon_response(result, sid, tid), Qt.QueuedConnection)
         state.daemon_worker.thinking_signal.connect(lambda text, sid=state.session_id, tid=turn_id: self.handle_thinking_signal(text, sid, tid), Qt.QueuedConnection)
@@ -38831,21 +39048,12 @@ class MainWindow(QMainWindow):
         ]
         if not new_messages:
             return []
-
-        existing_ids = {
-            msg.get("id")
-            for msg in (existing_messages or [])
-            if isinstance(msg, dict) and msg.get("id")
-        }
-        if existing_ids:
-            new_messages = [
-                msg for msg in new_messages
-                if not msg.get("id") or msg.get("id") not in existing_ids
-            ]
-            if not new_messages:
-                return []
-
-        return new_messages
+        existing = [
+            msg for msg in (existing_messages or [])
+            if isinstance(msg, dict)
+        ]
+        merged = merge_messages_by_id(existing, new_messages)
+        return merged[len(existing):]
 
     def _annotate_generated_messages_for_unified_turn(self, state, generated_messages):
         """Attach UI-only projection metadata without changing provider wire messages."""
@@ -39021,6 +39229,28 @@ class MainWindow(QMainWindow):
             bubble.set_message_actions_enabled(False)
             error_text = f"⚠️ Error: {result['error']}"
             bubble.set_main_content(error_text, final=True)
+            generated_on_error = self._merge_generated_messages(
+                state.messages,
+                filter_persistable_messages(result.get("generated_messages") or []),
+            )
+            if generated_on_error:
+                try:
+                    ensure_tool_call_sequence(
+                        list(state.messages) + generated_on_error,
+                        context="保存 Provider 错误前的会话账本",
+                    )
+                except Exception as exc:
+                    log_sub_agent_runtime(
+                        "ui_error_generated_messages_rejected",
+                        session_id=state.session_id,
+                        turn_id=str(turn_id or state.active_turn_id),
+                        error=str(exc),
+                        generated_message_count=len(generated_on_error),
+                    )
+                    generated_on_error = []
+                if generated_on_error:
+                    self._annotate_generated_messages_for_unified_turn(state, generated_on_error)
+                    state.messages.extend(generated_on_error)
             error_message_id = self._new_message_id()
             state.messages.append({
                 "id": error_message_id,
@@ -39036,7 +39266,10 @@ class MainWindow(QMainWindow):
                     "ui_reply_kind": "error",
                 },
             })
-            state.messages = self.chat_storage.normalize_messages(state.messages)
+            state.messages = self.chat_storage.normalize_messages(
+                state.messages,
+                conversation_id=state.session_id,
+            )
             self._rebuild_session_render_spans(state)
             self.save_chat_history(session_id=state.session_id)
             log_sub_agent_runtime(
@@ -39256,7 +39489,10 @@ class MainWindow(QMainWindow):
         )
         state.agent_stage_closed = True
         state.pending_guidance_messages = []
-        state.messages = self.chat_storage.normalize_messages(state.messages)
+        state.messages = self.chat_storage.normalize_messages(
+            state.messages,
+            conversation_id=state.session_id,
+        )
         self._rebuild_session_render_spans(state)
         if len(state.messages) > previous_message_count:
             newly_rendered = len(state.messages) - previous_message_count

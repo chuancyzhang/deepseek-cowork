@@ -100,6 +100,68 @@ class TestChatSaveQueue(unittest.TestCase):
         self.assertEqual(record_a.get("title"), "Alpha")
         self.assertEqual(record_b.get("status"), "completed")
 
+    def test_worker_does_not_allow_same_revision_with_different_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = ChatSaveWorker(os.path.join(temp_dir, "chat_history.sqlite"), debounce_ms=0)
+            first = ChatSaveRequest(
+                session_id="session-conflict",
+                messages=[{"id": "m1", "role": "user", "content": "first"}],
+                title="First",
+                status="draft",
+                meta={},
+                ready_at=0.0,
+                revision=4,
+            )
+            second = ChatSaveRequest(
+                session_id="session-conflict",
+                messages=[{"id": "m2", "role": "user", "content": "different"}],
+                title="Different",
+                status="draft",
+                meta={},
+                ready_at=0.0,
+                revision=4,
+            )
+
+            self.assertTrue(worker.enqueue(first))
+            self.assertFalse(worker.enqueue(second))
+
+    def test_worker_ignores_stale_revision_after_newer_snapshot_is_accepted(self):
+        app = QApplication.instance() or QApplication([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "chat_history.sqlite")
+            storage = ChatStorage(db_path)
+            worker = ChatSaveWorker(db_path, debounce_ms=0)
+            worker.start()
+            try:
+                self.assertTrue(worker.enqueue(ChatSaveRequest(
+                    session_id="session-stale",
+                    messages=[{"id": "m2", "role": "user", "content": "new"}],
+                    title="New",
+                    status="running",
+                    meta={},
+                    ready_at=0.0,
+                    revision=2,
+                )))
+                self.assertTrue(worker.enqueue(ChatSaveRequest(
+                    session_id="session-stale",
+                    messages=[{"id": "m1", "role": "user", "content": "old"}],
+                    title="Old",
+                    status="draft",
+                    meta={},
+                    ready_at=0.0,
+                    revision=1,
+                )))
+                self.assertTrue(worker.flush(session_id="session-stale", timeout_ms=2000))
+                messages = storage.get_messages("session-stale")
+            finally:
+                self.assertTrue(worker.stop_worker(timeout_ms=2000))
+                del worker
+                del storage
+                gc.collect()
+                app.processEvents()
+
+        self.assertEqual([message["content"] for message in messages], ["new"])
+
 
 if __name__ == "__main__":
     unittest.main()

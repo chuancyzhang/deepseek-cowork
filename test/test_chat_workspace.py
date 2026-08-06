@@ -239,7 +239,7 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
     def test_legacy_full_history_rewrite_is_explicitly_disabled(self):
         window = MainWindow.__new__(MainWindow)
         window.chat_storage = MagicMock()
-        window.chat_storage.normalize_messages.side_effect = lambda messages: messages
+        window.chat_storage.normalize_messages.side_effect = lambda messages, **kwargs: messages
         window.clear_chat_layout = MagicMock()
         window._render_session_history_spans = MagicMock()
         window.queue_session_bubble_virtualization = MagicMock()

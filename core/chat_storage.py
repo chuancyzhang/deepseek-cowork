@@ -1,10 +1,16 @@
 import json
+import logging
 import os
 import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
+
+from .conversation_integrity import normalize_message_ids
+
+
+logger = logging.getLogger(__name__)
 
 AGENT_TERMINAL_STATUSES = {
     "completed",
@@ -496,27 +502,21 @@ class ChatStorage:
         except Exception:
             return None
 
-    def normalize_messages(self, messages):
-        if not isinstance(messages, list):
-            return []
-
-        normalized = []
-        seen_ids = set()
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            msg_copy = dict(msg)
-            msg_id = msg_copy.get("id")
-            if not msg_id:
-                msg_id = uuid.uuid4().hex
-                msg_copy["id"] = msg_id
-            if msg_id in seen_ids:
-                raise ValueError(
-                    f"Conversation ledger contains duplicate message id: {msg_id}"
-                )
-            seen_ids.add(msg_id)
-            normalized.append(msg_copy)
-
+    def normalize_messages(self, messages, conversation_id=""):
+        """Normalize message identities without dropping legacy history."""
+        normalized, repairs = normalize_message_ids(
+            messages,
+            conversation_id=conversation_id,
+        )
+        if repairs:
+            logger.warning(
+                "conversation_history_identity_repaired",
+                extra={
+                    "conversation_id": str(conversation_id or ""),
+                    "repair_count": len(repairs),
+                    "repair_kinds": sorted({str(item.get("kind") or "") for item in repairs}),
+                },
+            )
         return normalized
 
     def upsert_conversation(self, conversation_id, title=None, status="active", meta=None):
@@ -776,7 +776,7 @@ class ChatStorage:
         return [self._agent_row_to_dict(row) for row in rows]
 
     def replace_agent_messages(self, agent_id, messages):
-        normalized_messages = self.normalize_messages(messages)
+        normalized_messages = self.normalize_messages(messages, conversation_id=f"agent:{agent_id}")
         now = int(time.time())
         with self._connect() as conn:
             rows = conn.execute(
@@ -829,7 +829,7 @@ class ChatStorage:
         messages = []
         for row in rows:
             messages.append(self._message_row_to_dict(row))
-        normalized_messages = self.normalize_messages(messages)
+        normalized_messages = self.normalize_messages(messages, conversation_id=f"agent:{agent_id}")
         try:
             changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(
                 normalized_messages,
@@ -925,7 +925,7 @@ class ChatStorage:
         return {"deleted": bool(updated), "hard": False, "agent": updated}
 
     def replace_messages(self, conversation_id, messages):
-        normalized_messages = self.normalize_messages(messages)
+        normalized_messages = self.normalize_messages(messages, conversation_id=conversation_id)
         with self._connect() as conn:
             normalized_messages = self._remap_cross_conversation_message_ids(
                 conn,
@@ -989,6 +989,14 @@ class ChatStorage:
                 meta["message_id_remapped"] = True
                 normalized_message["meta"] = meta
                 normalized_message["id"] = message_id
+                logger.warning(
+                    "conversation_message_id_cross_owner_repaired",
+                    extra={
+                        "conversation_id": str(conversation_id or ""),
+                        "original_message_id": original_id,
+                        "new_message_id": message_id,
+                    },
+                )
             seen.add(message_id)
             remapped.append(normalized_message)
         return remapped
@@ -1031,7 +1039,7 @@ class ChatStorage:
             )
 
     def save_conversation(self, conversation_id, messages, title=None, status="active", meta=None):
-        normalized_messages = self.normalize_messages(messages)
+        normalized_messages = self.normalize_messages(messages, conversation_id=conversation_id)
         with self._connect() as conn:
             normalized_messages = self._remap_cross_conversation_message_ids(
                 conn,
@@ -1343,10 +1351,63 @@ class ChatStorage:
                     raw_messages = json.load(f)
             except Exception:
                 continue
-            if not isinstance(raw_messages, list) or not raw_messages:
+            if not isinstance(raw_messages, list):
+                logger.error(
+                    "conversation_history_structure_invalid",
+                    extra={
+                        "conversation_id": session_id,
+                        "source": "legacy_json",
+                        "reason": "messages must be a list",
+                    },
+                )
+                transcripts.append(
+                    {
+                        "id": session_id,
+                        "title": "历史会话损坏",
+                        "created_at": None,
+                        "updated_at": None,
+                        "created_at_iso": None,
+                        "updated_at_iso": None,
+                        "status": "error",
+                        "meta": {"history_load_error": "messages 必须是数组"},
+                        "source": "legacy_json",
+                        "messages": [],
+                    }
+                )
+                continue
+            if not raw_messages:
                 continue
             messages = []
-            for position, raw_msg in enumerate(self.normalize_messages(raw_messages)):
+            try:
+                normalized_messages = self.normalize_messages(
+                    raw_messages,
+                    conversation_id=session_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "conversation_history_structure_invalid",
+                    extra={
+                        "conversation_id": session_id,
+                        "source": "legacy_json",
+                        "reason": str(exc),
+                    },
+                )
+                transcripts.append(
+                    {
+                        "id": session_id,
+                        "title": "历史会话损坏",
+                        "created_at": None,
+                        "updated_at": None,
+                        "created_at_iso": None,
+                        "updated_at_iso": None,
+                        "status": "error",
+                        "meta": {"history_load_error": str(exc)},
+                        "source": "legacy_json",
+                        "messages": [],
+                    }
+                )
+                continue
+            for position, raw_msg in enumerate(normalized_messages):
                 if not isinstance(raw_msg, dict):
                     continue
                 message = {
@@ -1415,7 +1476,17 @@ class ChatStorage:
                 continue
             if not isinstance(raw_messages, list) or not raw_messages:
                 continue
-            messages = self.normalize_messages(raw_messages)
+            try:
+                messages = self.normalize_messages(raw_messages, conversation_id=session_id)
+            except Exception as exc:
+                logger.error(
+                    "conversation_history_migration_skipped",
+                    extra={
+                        "conversation_id": session_id,
+                        "reason": str(exc),
+                    },
+                )
+                continue
             if not messages:
                 continue
             self.save_conversation(
@@ -1457,7 +1528,7 @@ class ChatStorage:
         messages = []
         for row in rows:
             messages.append(self._message_row_to_dict(row))
-        normalized_messages = self.normalize_messages(messages)
+        normalized_messages = self.normalize_messages(messages, conversation_id=conversation_id)
         try:
             changed = json.dumps(messages, ensure_ascii=False, sort_keys=True) != json.dumps(
                 normalized_messages,

@@ -22,6 +22,15 @@ function reportError(error) {
   if (bridge) bridge.reportError(errorText(error));
 }
 
+function sheetEditorStylesReady() {
+  try {
+    const stylesheet = document.getElementById("sheet-editor-styles");
+    return Boolean(stylesheet && stylesheet.sheet && stylesheet.sheet.cssRules.length);
+  } catch (_error) {
+    return false;
+  }
+}
+
 function sendTextPayload(kind, value) {
   const total = Math.max(1, Math.ceil(value.length / CHUNK_SIZE));
   bridge.beginPayload(sessionId, kind, total);
@@ -125,5 +134,9 @@ window.coworkEditor = {
 
 new QWebChannel(qt.webChannelTransport, (channel) => {
   bridge = channel.objects.deliverableEditorBridge;
+  if (!sheetEditorStylesReady()) {
+    bridge.reportError("表格编辑器样式资源加载失败，请修复安装后重试。");
+    return;
+  }
   bridge.ready("sheet");
 });

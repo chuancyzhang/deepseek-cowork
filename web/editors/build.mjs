@@ -45,6 +45,19 @@ for (const name of [
   await cp(join(root, "static", name), join(output, name));
 }
 
+const sheetHtml = await readFile(join(output, "sheet.html"), "utf8");
+const outputEntries = new Set(await readdir(output));
+if (!outputEntries.has("sheet-editor.css")) {
+  throw new Error("Sheet editor build did not emit sheet-editor.css.");
+}
+if (
+  !sheetHtml.includes(
+    '<link id="sheet-editor-styles" rel="stylesheet" href="sheet-editor.css">'
+  )
+) {
+  throw new Error("sheet.html does not reference the generated sheet-editor.css asset.");
+}
+
 for (const [source, target] of [
   [join(root, "node_modules", "@hufe921", "canvas-editor", "LICENSE"), "LICENSE-CANVAS-EDITOR.txt"],
   [join(root, "node_modules", "@hufe921", "canvas-editor-plugin-docx", "LICENSE"), "LICENSE-CANVAS-EDITOR-DOCX.txt"],

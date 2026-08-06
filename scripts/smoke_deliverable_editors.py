@@ -224,6 +224,10 @@ class SmokeCoordinator(QObject):
         self.page_started_at = time.perf_counter()
         self.model_load_started_at = 0.0
         self.current_shell_seconds = 0.0
+        if self.mode == "sheet":
+            self.view.resize(581, 700)
+        else:
+            self.view.resize(1100, 760)
         self.watchdog.start(45000)
         target = self.asset_dir / f"{self.mode}.html"
         if not target.is_file():
@@ -305,6 +309,53 @@ class SmokeCoordinator(QObject):
             return
         self.metrics.append((self.mode, self.current_shell_seconds, model_seconds))
         self.save_requested = True
+        if self.mode == "sheet":
+            QTimer.singleShot(250, self._probe_sheet_layout)
+            return
+        self.page.runJavaScript("window.coworkEditor.requestSave()")
+
+    def _probe_sheet_layout(self):
+        self.page.runJavaScript(
+            """
+            (() => {
+              const root = document.getElementById("sheet-root");
+              const stylesheet = document.getElementById("sheet-editor-styles");
+              const rootRect = root ? root.getBoundingClientRect() : null;
+              const canvasRects = [...document.querySelectorAll("#sheet-root canvas")]
+                .map((canvas) => canvas.getBoundingClientRect())
+                .map((rect) => ({ width: rect.width, height: rect.height }));
+              return JSON.stringify({
+                stylesheetLoaded: Boolean(
+                  stylesheet && stylesheet.sheet && stylesheet.sheet.cssRules.length
+                ),
+                rootWidth: rootRect ? rootRect.width : 0,
+                rootHeight: rootRect ? rootRect.height : 0,
+                canvasRects
+              });
+            })()
+            """,
+            self._handle_sheet_layout_probe,
+        )
+
+    def _handle_sheet_layout_probe(self, payload):
+        try:
+            result = json.loads(str(payload or ""))
+        except (TypeError, ValueError) as exc:
+            self.fail(f"sheet layout probe returned invalid data: {exc}")
+            return
+        if not result.get("stylesheetLoaded"):
+            self.fail("sheet editor stylesheet was not loaded")
+            return
+        if float(result.get("rootWidth") or 0) < 500:
+            self.fail("sheet editor root did not fill the narrow viewport")
+            return
+        if float(result.get("rootHeight") or 0) < 600:
+            self.fail("sheet editor root height collapsed in the narrow viewport")
+            return
+        canvas_rects = result.get("canvasRects") or []
+        if not canvas_rects:
+            self.fail(f"sheet grid canvas is not visible: {result}")
+            return
         self.page.runJavaScript("window.coworkEditor.requestSave()")
 
     def _handle_saved(self, session_id, kind, payload):

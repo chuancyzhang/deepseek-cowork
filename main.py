@@ -4057,6 +4057,9 @@ class CapabilityWorkbenchDialog(QDialog):
         if not fields:
             return
         page = QWidget()
+        page.setObjectName("CapabilityConfigPage")
+        page.setMinimumWidth(0)
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(12)
@@ -4195,7 +4198,15 @@ class CapabilityWorkbenchDialog(QDialog):
             mcp_layout.addLayout(preset_row)
             layout.addWidget(mcp_card)
         layout.addStretch()
-        self.tabs.addTab(page, "配置")
+        self.config_page_scroll = QScrollArea()
+        self.config_page_scroll.setObjectName("CapabilityConfigScroll")
+        self.config_page_scroll.setWidgetResizable(True)
+        self.config_page_scroll.setFrameShape(QFrame.NoFrame)
+        self.config_page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.config_page_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.config_page_scroll.setStyleSheet("QScrollArea#CapabilityConfigScroll { border: none; background: transparent; }")
+        self.config_page_scroll.setWidget(page)
+        self.tabs.addTab(self.config_page_scroll, "配置")
         self._refresh_config_status()
 
     def _open_skill_config_action_url(self, value):
@@ -4388,7 +4399,12 @@ class CapabilityWorkbenchDialog(QDialog):
         status = getattr(self, "managed_mcp_status", None)
         if status is not None:
             status.setText(f"正在测试 {server.get('name') or 'MCP'} ...")
-        self.mcp_worker = McpConnectionWorker(server, config_manager=self.config_manager, parent=self)
+        self.mcp_worker = McpConnectionWorker(
+            server,
+            config_manager=self.config_manager,
+            parent=self,
+            skill_manager=self.skill_manager,
+        )
         self.mcp_worker.finished_signal.connect(self._handle_managed_mcp_test_result)
         self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
         self.mcp_worker.start()
@@ -4695,7 +4711,13 @@ class CapabilityWorkbenchDialog(QDialog):
             QMessageBox.warning(self, "MCP 调试", "未找到 MCP 配置。")
             return
         self.mcp_result.setPlainText("Connecting...")
-        self.mcp_worker = McpToolDebugWorker("list", self.mcp_server, config_manager=self.config_manager, parent=self)
+        self.mcp_worker = McpToolDebugWorker(
+            "list",
+            self.mcp_server,
+            config_manager=self.config_manager,
+            parent=self,
+            skill_manager=self.skill_manager,
+        )
         self.mcp_worker.finished_signal.connect(self._handle_mcp_list_result)
         self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
         self.mcp_worker.start()
@@ -4719,7 +4741,13 @@ class CapabilityWorkbenchDialog(QDialog):
             return
         self.mcp_result.setPlainText("Calling...")
         self.mcp_worker = McpToolDebugWorker(
-            "call", self.mcp_server, tool_name, args, config_manager=self.config_manager, parent=self
+            "call",
+            self.mcp_server,
+            tool_name,
+            args,
+            config_manager=self.config_manager,
+            parent=self,
+            skill_manager=self.skill_manager,
         )
         self.mcp_worker.finished_signal.connect(self._handle_mcp_call_result)
         self.mcp_worker.finished.connect(self.mcp_worker.deleteLater)
@@ -6988,15 +7016,20 @@ class AutomationDialog(QDialog):
 class McpConnectionWorker(QThread):
     finished_signal = Signal(dict)
 
-    def __init__(self, server_config, config_manager=None, parent=None):
+    def __init__(self, server_config, config_manager=None, parent=None, skill_manager=None):
         super().__init__(parent)
         self.server_config = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
         self.config_manager = config_manager
+        self.skill_manager = skill_manager
 
     def run(self):
         try:
             self.finished_signal.emit(
-                test_mcp_server_connection(self.server_config, config_manager=self.config_manager)
+                test_mcp_server_connection(
+                    self.server_config,
+                    config_manager=self.config_manager,
+                    skill_manager=self.skill_manager,
+                )
             )
         except Exception as exc:
             self.finished_signal.emit({"ok": False, "error": str(exc)})
@@ -7022,19 +7055,33 @@ class SkillToolDebugWorker(QThread):
 class McpToolDebugWorker(QThread):
     finished_signal = Signal(dict)
 
-    def __init__(self, action, server_config, tool_name="", arguments=None, config_manager=None, parent=None):
+    def __init__(
+        self,
+        action,
+        server_config,
+        tool_name="",
+        arguments=None,
+        config_manager=None,
+        parent=None,
+        skill_manager=None,
+    ):
         super().__init__(parent)
         self.action = str(action or "")
         self.server_config = json.loads(json.dumps(server_config or {}, ensure_ascii=False))
         self.tool_name = str(tool_name or "")
         self.arguments = json.loads(json.dumps(arguments or {}, ensure_ascii=False))
         self.config_manager = config_manager
+        self.skill_manager = skill_manager
 
     def run(self):
         try:
             if self.action == "list":
                 self.finished_signal.emit(
-                    list_mcp_server_tools(self.server_config, config_manager=self.config_manager)
+                    list_mcp_server_tools(
+                        self.server_config,
+                        config_manager=self.config_manager,
+                        skill_manager=self.skill_manager,
+                    )
                 )
                 return
             if self.action == "call":
@@ -7044,6 +7091,7 @@ class McpToolDebugWorker(QThread):
                         self.tool_name,
                         self.arguments,
                         config_manager=self.config_manager,
+                        skill_manager=self.skill_manager,
                     )
                 )
                 return
@@ -7357,10 +7405,11 @@ class McpServerEditDialog(QDialog):
 class McpServerManager(QWidget):
     changed = Signal()
 
-    def __init__(self, servers, config_manager=None, parent=None):
+    def __init__(self, servers, config_manager=None, parent=None, skill_manager=None):
         super().__init__(parent)
         self.servers = json.loads(json.dumps(servers or [], ensure_ascii=False))
         self.config_manager = config_manager
+        self.skill_manager = skill_manager
         self.test_worker = None
 
         layout = QVBoxLayout(self)
@@ -7603,7 +7652,14 @@ class McpServerManager(QWidget):
             return
         server = self.servers[index]
         self.status_label.setText(f"正在测试 {server.get('name') or 'MCP Server'} ...")
-        self.test_worker = McpConnectionWorker(server, config_manager=self.config_manager, parent=self)
+        owner = getattr(self.window(), "_main", None)
+        skill_manager = getattr(owner, "skill_manager", None) or self.skill_manager
+        self.test_worker = McpConnectionWorker(
+            server,
+            config_manager=self.config_manager,
+            parent=self,
+            skill_manager=skill_manager,
+        )
         self.test_worker.finished_signal.connect(self._handle_test_result)
         self.test_worker.finished.connect(self.test_worker.deleteLater)
         self.test_worker.start()
@@ -8952,6 +9008,7 @@ class SettingsDialog(QDialog):
             self.config_manager.get_mcp_servers(),
             config_manager=self.config_manager,
             parent=self,
+            skill_manager=getattr(parent, "skill_manager", None),
         )
         permission_group, permission_group_layout = build_settings_surface(
             "扩展权限",
@@ -21204,6 +21261,9 @@ class MainWindow(QMainWindow):
             app_icon = QIcon(icon_path)
             self.setWindowIcon(app_icon)
 
+        self._display_fit_done = False
+        self._display_screen_signal_connected = False
+        self._auto_fitted_window_geometry = None
         self.resize(1280, 720)
         self.setAcceptDrops(True)
         self.workspace_dir = None
@@ -21408,12 +21468,13 @@ class MainWindow(QMainWindow):
         self.conversation_skill_capture_repository = ConversationSkillCaptureRepository()
         self._conversation_skill_completion_toast_keys = set()
         
+        self.skill_dependency_coordinator = DependencyCoordinator(self.config_manager)
         self.skill_catalog_service = SkillCatalogService(
             self.config_manager,
             logger=lambda message: log_startup_stage("skill_catalog", message=message),
+            dependency_coordinator=self.skill_dependency_coordinator,
         )
         self.skill_catalog_service.subscribe(self._relay_local_skill_catalog_changed)
-        self.skill_dependency_coordinator = DependencyCoordinator(self.config_manager)
         self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
         legacy_deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
         configured_file_workspace_mode = self.config_manager.get("file_workspace_view_mode", "")
@@ -21424,7 +21485,13 @@ class MainWindow(QMainWindow):
         self.deliverable_layout_mode = "focus" if self.file_workspace_view_mode == "detail" else "list"
         self.deliverables_splitter_sizes = self.config_manager.get("deliverables_splitter_sizes", [180, 320])
         self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
-        self.skill_manager = SkillManager(None, self.config_manager, auto_load=False, load_mcp_tools=False)
+        self.skill_manager = SkillManager(
+            None,
+            self.config_manager,
+            auto_load=False,
+            load_mcp_tools=False,
+            dependency_coordinator=self.skill_dependency_coordinator,
+        )
         self.skill_manager_ready = False
         self.skill_manager_loading = False
         self.skill_load_worker = None
@@ -21622,7 +21689,7 @@ class MainWindow(QMainWindow):
         # --- Main Content ---
         self.main_container = QWidget()
         self.main_container.setObjectName("MainContainer")
-        self.main_container.setMinimumWidth(400) # Protect main content
+        self.main_container.setMinimumWidth(0)
         self.main_splitter.addWidget(self.main_container)
 
         # Right Sidebar (Context Drawer)
@@ -22431,9 +22498,9 @@ class MainWindow(QMainWindow):
 
         self.conversation_column = QWidget()
         self.conversation_column.setObjectName("ConversationColumn")
-        self.conversation_column.setMinimumWidth(DesignTokens.conversation_compact_min_width)
+        self.conversation_column.setMinimumWidth(0)
         self.conversation_column.setMaximumWidth(DesignTokens.conversation_max_width)
-        self.conversation_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.conversation_column.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.conversation_column.setStyleSheet("QWidget#ConversationColumn { background: transparent; border: none; }")
         self.main_content_layout = QVBoxLayout(self.conversation_column)
         self.main_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -22470,9 +22537,9 @@ class MainWindow(QMainWindow):
         self.session_tabs.setTabsClosable(False)
         self.session_tabs.setTabBarAutoHide(False)
         self.session_tabs.tabBar().hide()
-        self.session_tabs.setMinimumWidth(DesignTokens.conversation_compact_min_width)
+        self.session_tabs.setMinimumWidth(0)
         self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
-        self.session_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.session_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.session_tabs.setStyleSheet(
             f"""
             QTabWidget#SessionTabs::pane {{
@@ -22491,8 +22558,9 @@ class MainWindow(QMainWindow):
         # Input Area
         self.input_card = QFrame()
         self.input_card.setObjectName("ContentCard")
-        self.input_card.setMinimumWidth(DesignTokens.conversation_compact_min_width)
+        self.input_card.setMinimumWidth(0)
         self.input_card.setMaximumWidth(DesignTokens.conversation_max_width)
+        self.input_card.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.input_card.setStyleSheet(
             f"QFrame#ContentCard {{ background: {DesignTokens.bg_main}; "
             f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
@@ -22530,6 +22598,8 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setCloseToolTip("移除本会话指定能力")
         self.selected_skills_badge.setCursor(Qt.PointingHandCursor)
         self.selected_skills_badge.setFixedHeight(30)
+        self.selected_skills_badge.setMinimumWidth(0)
+        self.selected_skills_badge.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.selected_skills_badge.setVisible(False)
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
 
@@ -22538,13 +22608,16 @@ class MainWindow(QMainWindow):
         self.agent_picker_btn.setToolTip("为当前输入添加智能体")
         self.agent_picker_btn.setCursor(Qt.PointingHandCursor)
         self.agent_picker_btn.setFixedHeight(30)
+        self.agent_picker_btn.setMinimumWidth(0)
+        self.agent_picker_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.agent_picker_btn.setStyleSheet(apple_button_style("ghost", radius=7))
         self.agent_picker_btn.clicked.connect(self.show_agent_picker)
 
         self.model_select_btn = QToolButton()
         self.model_select_btn.setCursor(Qt.PointingHandCursor)
-        self.model_select_btn.setMinimumWidth(170)
+        self.model_select_btn.setMinimumWidth(0)
         self.model_select_btn.setMaximumWidth(320)
+        self.model_select_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.model_select_btn.setPopupMode(QToolButton.DelayedPopup)
         self.model_select_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.model_select_btn.setStyleSheet(
@@ -22566,7 +22639,7 @@ class MainWindow(QMainWindow):
         self.action_btn.setText("开始")
         self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
         self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setFixedSize(88, 34)
+        self.action_btn.setFixedSize(100, 34)
         self.action_btn.setAutoDefault(False)
         self.action_btn.setDefault(False)
         self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
@@ -22613,27 +22686,15 @@ class MainWindow(QMainWindow):
         input_card_layout.addWidget(self.prompt_files_section)
         input_card_layout.addWidget(self.input_field)
 
-        prompt_toolbar = QHBoxLayout()
-        prompt_toolbar.setContentsMargins(0, 0, 0, 0)
-        prompt_toolbar.setSpacing(8)
-        prompt_toolbar.addWidget(self.tool_menu_btn)
-        prompt_toolbar.addWidget(self.agent_picker_btn)
-        prompt_toolbar.addWidget(self.selected_skills_badge)
-        prompt_toolbar.addWidget(self.pause_btn)
-        prompt_toolbar.addWidget(self.loop_hint, 1)
-        prompt_toolbar.addStretch()
-        prompt_toolbar.addWidget(self.model_select_btn)
-        prompt_toolbar.addWidget(self.stop_btn)
-        prompt_toolbar.addWidget(self.action_btn)
-        input_card_layout.addLayout(prompt_toolbar)
-
         self.project_selector_btn = QToolButton()
         self.project_selector_btn.setCursor(Qt.PointingHandCursor)
         self.project_selector_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.project_selector_btn.setIcon(sidebar_symbol_icon("folder", DesignTokens.text_secondary, 16))
         self.project_selector_btn.setIconSize(QSize(16, 16))
         self.project_selector_btn.setFixedHeight(32)
+        self.project_selector_btn.setMinimumWidth(0)
         self.project_selector_btn.setMaximumWidth(280)
+        self.project_selector_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.project_selector_btn.setStyleSheet(
             f"QToolButton {{ background: transparent; color: {DesignTokens.text_secondary}; border: none; "
             "border-radius: 12px; padding: 4px 10px; font-size: 12px; text-align: left; }}"
@@ -22641,7 +22702,26 @@ class MainWindow(QMainWindow):
             f"QToolButton:disabled {{ color: {DesignTokens.text_tertiary}; background: transparent; }}"
         )
         self.project_selector_btn.clicked.connect(self.show_project_selector_menu)
-        prompt_toolbar.insertWidget(3, self.project_selector_btn)
+
+        prompt_context_toolbar = QHBoxLayout()
+        prompt_context_toolbar.setContentsMargins(0, 0, 0, 0)
+        prompt_context_toolbar.setSpacing(8)
+        prompt_context_toolbar.addWidget(self.tool_menu_btn)
+        prompt_context_toolbar.addWidget(self.agent_picker_btn)
+        prompt_context_toolbar.addWidget(self.selected_skills_badge)
+        prompt_context_toolbar.addWidget(self.project_selector_btn)
+        prompt_context_toolbar.addWidget(self.pause_btn)
+        prompt_context_toolbar.addWidget(self.loop_hint, 1)
+        input_card_layout.addLayout(prompt_context_toolbar)
+
+        prompt_action_toolbar = QHBoxLayout()
+        prompt_action_toolbar.setContentsMargins(0, 0, 0, 0)
+        prompt_action_toolbar.setSpacing(8)
+        prompt_action_toolbar.addStretch()
+        prompt_action_toolbar.addWidget(self.model_select_btn, 1)
+        prompt_action_toolbar.addWidget(self.stop_btn)
+        prompt_action_toolbar.addWidget(self.action_btn)
+        input_card_layout.addLayout(prompt_action_toolbar)
 
         self.input_row = QWidget()
         self.input_row_layout = QHBoxLayout(self.input_row)
@@ -22893,7 +22973,7 @@ class MainWindow(QMainWindow):
             f"QWidget#ConversationColumn {{ background: {workspace_background}; "
             f"color: {DesignTokens.chat_text}; }}"
         )
-        self.session_tabs.setMinimumWidth(DesignTokens.conversation_compact_min_width)
+        self.session_tabs.setMinimumWidth(0)
         self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
         self.session_tabs.setStyleSheet(
             f"QTabWidget#SessionTabs::pane {{ background: {workspace_background}; "
@@ -23052,8 +23132,82 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             self.last_ui_update_time = now
 
+    def _connect_display_change_signal(self):
+        if self._display_screen_signal_connected:
+            return
+        handle = self.windowHandle()
+        signal = getattr(handle, "screenChanged", None) if handle is not None else None
+        if signal is None:
+            return
+        signal.connect(self._handle_display_changed)
+        self._display_screen_signal_connected = True
+
+    def _fit_window_to_available_screen(self, initial=False):
+        if self.isMaximized() or self.isFullScreen():
+            return
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        margin = 12
+        max_width = max(1, available.width() - margin * 2)
+        max_height = max(1, available.height() - margin * 2)
+        if initial:
+            target_width = min(1280, max_width)
+            target_height = min(720, max_height)
+        else:
+            target_width = min(self.width(), max_width)
+            target_height = min(self.height(), max_height)
+            if self._auto_fitted_window_geometry is not None and self.geometry() == self._auto_fitted_window_geometry:
+                target_width = min(1280, max_width)
+                target_height = min(720, max_height)
+
+        current = self.geometry()
+        target_x = max(
+            available.left() + margin,
+            min(current.x(), available.right() - target_width + 1 - margin),
+        )
+        target_y = max(
+            available.top() + margin,
+            min(current.y(), available.bottom() - target_height + 1 - margin),
+        )
+        target = QRect(target_x, target_y, target_width, target_height)
+        if current != target:
+            # Qt derives a top-level minimum from the initial layout hint when
+            # the window is first shown. Reset that implicit constraint before
+            # applying the logical available-screen geometry.
+            self.setMinimumSize(1, 1)
+            if target_width < current.width() or target_height < current.height():
+                for widget in (
+                    getattr(self, "conversation_column", None),
+                    getattr(self, "session_tabs", None),
+                    getattr(self, "input_card", None),
+                ):
+                    if widget is not None:
+                        widget.setMinimumWidth(0)
+                        widget.setMaximumWidth(DesignTokens.conversation_max_width)
+            self.setGeometry(target)
+        self._auto_fitted_window_geometry = self.geometry()
+        self._display_fit_done = True
+        if hasattr(self, "right_sidebar"):
+            self.sync_context_drawer_layout()
+        log_ui_navigation(
+            "main_window_display_fit",
+            initial=bool(initial),
+            screen_geometry=[available.x(), available.y(), available.width(), available.height()],
+            window_geometry=[self.x(), self.y(), self.width(), self.height()],
+            device_pixel_ratio=float(getattr(screen, "devicePixelRatio", lambda: 1.0)() or 1.0),
+        )
+
+    def _handle_display_changed(self, _screen=None):
+        QTimer.singleShot(0, lambda: self._fit_window_to_available_screen(initial=False))
+
     def showEvent(self, event):
         super().showEvent(event)
+        self._connect_display_change_signal()
+        if not self._display_fit_done:
+            self._fit_window_to_available_screen(initial=True)
+            QTimer.singleShot(0, lambda: self._fit_window_to_available_screen(initial=False))
         if not self._startup_hydration_scheduled:
             self._startup_hydration_scheduled = True
             QTimer.singleShot(0, self._run_startup_hydration)
@@ -23734,9 +23888,17 @@ class MainWindow(QMainWindow):
         self.dynamic_user_bubble_width = user_bubble_width
 
         self._apply_conversation_shell_metrics(metrics)
-        self.conversation_column.setFixedWidth(conversation_width)
-        self.session_tabs.setFixedWidth(conversation_width)
-        self.input_card.setFixedWidth(conversation_width)
+        if getattr(self, "_display_fit_done", False):
+            self.conversation_column.setFixedWidth(conversation_width)
+            self.session_tabs.setFixedWidth(conversation_width)
+            self.input_card.setFixedWidth(conversation_width)
+        else:
+            # Before the first display fit, fixed widths would become the
+            # QMainWindow minimum size and prevent high-DPI small screens from
+            # receiving the initial geometry requested above.
+            for widget in (self.conversation_column, self.session_tabs, self.input_card):
+                widget.setMinimumWidth(0)
+                widget.setMaximumWidth(DesignTokens.conversation_max_width)
 
         for bubble in self._iter_session_chat_bubbles():
             bubble.apply_dynamic_widths(message_width, user_bubble_width)

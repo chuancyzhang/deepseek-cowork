@@ -33,6 +33,7 @@ from .sandbox_runtime import (
     get_runtime_executable,
     install_skill_dependencies,
     read_skill_dependency_status,
+    skill_dependency_hash,
 )
 from .skill_adapter import (
     EXCLUDED_DIRS,
@@ -218,13 +219,14 @@ class SkillManager:
         auto_load=True,
         load_mcp_tools=True,
         prepare_dependencies=False,
+        dependency_coordinator=None,
     ):
         self.workspace_dir = workspace_dir
         self.config_manager = config_manager
         self.load_mcp_tools = bool(load_mcp_tools)
         self.prepare_dependencies = bool(prepare_dependencies)
         self.catalog_revision = 0
-        self.dependency_coordinator = None
+        self.dependency_coordinator = dependency_coordinator
         self.change_publisher = None
         self._runtime_lock = threading.RLock()
         self.skills_dirs = []
@@ -1584,6 +1586,8 @@ class SkillManager:
                         "servers": [],
                     }
                 dependency_status = self._prepare_skill_dependencies(skill_name, record.get("path") or "")
+                if self.dependency_coordinator is not None:
+                    dependency_status = self.ensure_skill_dependencies_ready(skill_name)
                 if not dependency_status.get("ok"):
                     return {"ok": False, "error": dependency_status.get("message") or "Skill dependencies are not ready.", "servers": []}
                 command = get_runtime_executable("python")
@@ -1797,7 +1801,13 @@ class SkillManager:
             def _handler(_arguments=None, _server=json.loads(json.dumps(server_config, ensure_ascii=False)), _remote_name=remote_name, **kwargs):
                 payload = dict(_arguments or {})
                 payload.update(kwargs)
-                return call_mcp_tool(_server, _remote_name, payload, config_manager=self.config_manager)
+                return call_mcp_tool(
+                    _server,
+                    _remote_name,
+                    payload,
+                    config_manager=self.config_manager,
+                    skill_manager=self,
+                )
 
             export = {
                 "name": local_name,
@@ -1872,7 +1882,11 @@ class SkillManager:
                     "message": "MCP server configured. Tools will be discovered on demand.",
                 }
             else:
-                result = list_mcp_server_tools(server_config, config_manager=self.config_manager)
+                result = list_mcp_server_tools(
+                    server_config,
+                    config_manager=self.config_manager,
+                    skill_manager=self,
+                )
                 if result.get("ok"):
                     tool_refs = self._register_mcp_tools_for_server(skill_name, server_config, result.get("tools"))
                     dependency_status = {
@@ -1904,7 +1918,11 @@ class SkillManager:
         if not mcp_package_available():
             record["dependency_status"] = {"ok": False, "message": "Python package 'mcp' is not installed."}
             return False
-        result = list_mcp_server_tools(server_config, config_manager=self.config_manager)
+        result = list_mcp_server_tools(
+            server_config,
+            config_manager=self.config_manager,
+            skill_manager=self,
+        )
         if not result.get("ok"):
             record["dependency_status"] = {
                 "ok": False,
@@ -2038,6 +2056,14 @@ class SkillManager:
                     "message": "Dependencies will be prepared on first use.",
                     "installed": False,
                 }
+            elif status.get("hash") != skill_dependency_hash(python_dependencies, node_dependencies):
+                status = {
+                    "ok": False,
+                    "pending": True,
+                    "message": "Dependency declaration changed; dependencies will be refreshed before use.",
+                    "installed": False,
+                    "hash": skill_dependency_hash(python_dependencies, node_dependencies),
+                }
             return status
         status = install_skill_dependencies(
             skill_name,
@@ -2052,6 +2078,10 @@ class SkillManager:
         """Prepare one loaded Skill's declared dependencies through the process coordinator."""
         normalized_name = str(skill_name or "").strip()
         record = self.skill_records.get(normalized_name)
+        if not record:
+            record = self._record_for_skill_name(normalized_name)
+            if record:
+                self.skill_records[normalized_name] = record
         if not record:
             return {"ok": False, "message": f"Skill '{normalized_name}' not found."}
 
@@ -2103,6 +2133,24 @@ class SkillManager:
                 }
             )
         return result
+
+    def ensure_mcp_server_dependencies(
+        self,
+        server_config,
+        progress=None,
+        observability=None,
+        retry=False,
+    ):
+        """Prepare the Skill-owned runtime before starting a managed MCP server."""
+        runtime_skill = str((server_config or {}).get("runtime_skill") or "").strip()
+        if not runtime_skill:
+            return {"ok": True, "message": "MCP server does not use a Skill runtime.", "installed": False}
+        return self.ensure_skill_dependencies_ready(
+            runtime_skill,
+            progress=progress,
+            observability=observability,
+            retry=retry,
+        )
 
     def _default_writable_skill_root(self):
         for candidate in self.skills_dirs:

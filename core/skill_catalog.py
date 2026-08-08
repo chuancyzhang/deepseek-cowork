@@ -53,10 +53,11 @@ class SkillCatalogSnapshot:
 class SkillCatalogService:
     """Owns process-level Skill snapshots and swaps them atomically after changes."""
 
-    def __init__(self, config_manager, workspace_dir=None, logger=None):
+    def __init__(self, config_manager, workspace_dir=None, logger=None, dependency_coordinator=None):
         self.config_manager = config_manager
         self.workspace_dir = workspace_dir
         self.logger = logger
+        self.dependency_coordinator = dependency_coordinator
         self._lock = threading.RLock()
         self._snapshot = None
         self._revision = 0
@@ -95,6 +96,7 @@ class SkillCatalogService:
                 auto_load=True,
                 load_mcp_tools=False,
                 prepare_dependencies=False,
+                dependency_coordinator=self.dependency_coordinator,
             )
             if required_event is not None and required_event.source != "filesystem" and required_event.action in {
                 "created",

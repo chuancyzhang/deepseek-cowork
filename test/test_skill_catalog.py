@@ -54,6 +54,16 @@ class TestSkillCatalogService(unittest.TestCase):
         self.assertEqual(factory.call_count, 2)
         listener.assert_called_once()
 
+    def test_catalog_passes_dependency_coordinator_to_snapshot_manager(self):
+        config = _Config()
+        coordinator = object()
+        manager = MagicMock(skill_records={}, skills_dirs=[])
+        with patch("core.skill_catalog.SkillManager", return_value=manager) as factory:
+            service = SkillCatalogService(config, dependency_coordinator=coordinator)
+            service.preload()
+
+        self.assertIs(factory.call_args.kwargs["dependency_coordinator"], coordinator)
+
     def test_declarative_tool_does_not_import_until_first_call(self):
         root = tempfile.mkdtemp()
         try:
@@ -144,6 +154,23 @@ class TestSkillCatalogService(unittest.TestCase):
             result = coordinator.ensure_ready("demo", python_dependencies=["missing"])
         installer.assert_not_called()
         self.assertEqual(result, failed)
+
+    def test_dependency_hash_change_reinstalls_previous_success(self):
+        coordinator = DependencyCoordinator(_Config())
+        refreshed = {"ok": True, "hash": "new", "message": "refreshed", "installed": True}
+        with patch("core.sandbox_runtime.read_skill_dependency_status", return_value={"ok": True, "hash": "old"}), patch(
+            "core.sandbox_runtime.skill_dependency_hash", return_value="new"
+        ), patch("core.sandbox_runtime.install_skill_dependencies", return_value=refreshed) as installer:
+            result = coordinator.ensure_ready("demo", python_dependencies=["requests"])
+
+        installer.assert_called_once_with(
+            "demo",
+            python_dependencies=["requests"],
+            node_dependencies=[],
+            force=False,
+            timeout_seconds=300,
+        )
+        self.assertEqual(result, refreshed)
 
 
 if __name__ == "__main__":

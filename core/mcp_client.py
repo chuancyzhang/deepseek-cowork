@@ -56,7 +56,20 @@ def describe_mcp_operation_error(server_config, exc):
     detail = _meaningful_exception_text(cause)
     lowered = detail.lower()
     source_skill = str(server_config.get("source_skill") or "").strip()
+    runtime_skill = str(server_config.get("runtime_skill") or "").strip()
     url = str(server_config.get("url") or "").strip()
+    if "list_tools" in lowered and "no attribute" in lowered:
+        if source_skill == "weknora" or runtime_skill == "weknora":
+            return (
+                "WeKnora MCP 服务端与 MCP Python SDK 不兼容："
+                "weknora-mcp-server==1.0.0 需要 MCP SDK v1（<2）。"
+                "请保存 WeKnora 配置后重新测试，系统会按依赖声明刷新 Skill 沙箱。"
+                f" 原始错误（阶段：{stage}）：{detail}"
+            )
+        return f"MCP 服务端与 MCP Python SDK 不兼容（阶段：{stage}）：{detail}"
+    if source_skill == "weknora" or runtime_skill == "weknora":
+        if "mcp python sdk v1" in lowered or "requires mcp" in lowered:
+            return f"WeKnora MCP 依赖检查失败（阶段：{stage}）：{detail}"
     if any(marker in lowered for marker in ("connection refused", "all connection attempts failed", "winerror 10061")):
         if source_skill == "superset-mcp":
             return (
@@ -546,7 +559,34 @@ def _managed_auth_error(server_config, exc):
     return describe_mcp_operation_error(server_config, exc)
 
 
-def list_mcp_server_tools(server_config, config_manager=None):
+def _ensure_runtime_skill_dependencies(server_config, skill_manager=None):
+    runtime_skill = str((server_config or {}).get("runtime_skill") or "").strip()
+    if not runtime_skill:
+        return None
+    if skill_manager is None:
+        return {
+            "ok": False,
+            "message": (
+                f"MCP server runtime Skill '{runtime_skill}' was not provided to the MCP client; "
+                "dependency preparation cannot be verified."
+            ),
+        }
+    ensure = getattr(skill_manager, "ensure_mcp_server_dependencies", None)
+    if not callable(ensure):
+        return {
+            "ok": False,
+            "message": f"Skill manager cannot prepare runtime Skill '{runtime_skill}' dependencies.",
+        }
+    result = ensure(server_config)
+    if not isinstance(result, dict):
+        return {
+            "ok": False,
+            "message": f"Dependency preparation for runtime Skill '{runtime_skill}' returned an invalid result.",
+        }
+    return result
+
+
+def list_mcp_server_tools(server_config, config_manager=None, skill_manager=None):
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"ok": False, "error": f"MCP server '{server_name}' is disabled.", "tools": []}
@@ -556,6 +596,13 @@ def list_mcp_server_tools(server_config, config_manager=None):
         normalize_mcp_transport(server_config.get("transport")),
     )
     try:
+        dependency_status = _ensure_runtime_skill_dependencies(server_config, skill_manager=skill_manager)
+        if dependency_status is not None and not dependency_status.get("ok"):
+            error = "MCP runtime dependency preparation failed: " + str(
+                dependency_status.get("message") or "unknown error"
+            )
+            logger.error("mcp_tools.list.error server=%s error=%s", server_name, error)
+            return {"ok": False, "error": error, "tools": [], "dependency_status": dependency_status}
         try:
             prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
         except Exception as exc:
@@ -569,8 +616,12 @@ def list_mcp_server_tools(server_config, config_manager=None):
         return {"ok": False, "error": error, "tools": []}
 
 
-def test_mcp_server_connection(server_config, config_manager=None):
-    result = list_mcp_server_tools(server_config, config_manager=config_manager)
+def test_mcp_server_connection(server_config, config_manager=None, skill_manager=None):
+    result = list_mcp_server_tools(
+        server_config,
+        config_manager=config_manager,
+        skill_manager=skill_manager,
+    )
     if not result.get("ok"):
         return result
     tool_names = [item.get("name") for item in result.get("tools") or [] if item.get("name")]
@@ -583,12 +634,30 @@ def test_mcp_server_connection(server_config, config_manager=None):
     }
 
 
-def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None):
+def call_mcp_tool(server_config, tool_name, arguments=None, config_manager=None, skill_manager=None):
     server_name = str(server_config.get("name") or server_config.get("id") or "MCP Server").strip()
     if not bool(server_config.get("enabled", True)):
         return {"status": "error", "error": f"MCP server '{server_name}' is disabled."}
     logger.info("mcp_tool.call.start server=%s tool=%s", server_name, str(tool_name or "").strip())
     try:
+        dependency_status = _ensure_runtime_skill_dependencies(server_config, skill_manager=skill_manager)
+        if dependency_status is not None and not dependency_status.get("ok"):
+            error = "MCP runtime dependency preparation failed: " + str(
+                dependency_status.get("message") or "unknown error"
+            )
+            logger.error(
+                "mcp_tool.call.error server=%s tool=%s error=%s",
+                server_name,
+                str(tool_name or "").strip(),
+                error,
+            )
+            return {
+                "status": "error",
+                "server": server_name,
+                "tool": str(tool_name or "").strip(),
+                "error": error,
+                "dependency_status": dependency_status,
+            }
         try:
             prepared = prepare_mcp_server_config(server_config, config_manager=config_manager)
         except Exception as exc:

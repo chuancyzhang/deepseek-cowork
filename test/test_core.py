@@ -32,6 +32,7 @@ from core.mcp_client import (
     clear_mcp_auth_cache,
     describe_mcp_import_error,
     describe_mcp_operation_error,
+    list_mcp_server_tools,
     prepare_mcp_server_config,
 )
 from core.single_instance import (
@@ -883,6 +884,30 @@ class TestConfigManager(unittest.TestCase):
 
         self.assertIn("TLS", error)
         self.assertIn("transport", error)
+
+    def test_weknora_sdk_mismatch_is_actionable(self):
+        error = describe_mcp_operation_error(
+            {"source_skill": "weknora", "runtime_skill": "weknora"},
+            McpOperationError("initialize", AttributeError("'Server' object has no attribute 'list_tools'")),
+        )
+
+        self.assertIn("WeKnora MCP", error)
+        self.assertIn("SDK v1", error)
+        self.assertIn("<2", error)
+
+    def test_runtime_mcp_requires_dependency_manager(self):
+        result = list_mcp_server_tools(
+            {
+                "id": "weknora",
+                "name": "WeKnora MCP",
+                "enabled": True,
+                "transport": "stdio",
+                "runtime_skill": "weknora",
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("dependency preparation cannot be verified", result["error"])
 
     def test_open_streamable_http_transport_prefers_new_api(self):
         calls = {}

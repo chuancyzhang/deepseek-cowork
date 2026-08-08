@@ -48,6 +48,20 @@ class MainWorkspaceLinearTests(unittest.TestCase):
         self.assertIsInstance(self.window.td_result_edit, ProductResultViewer)
         self.assertIsInstance(self.window.td_args_meta_edit, ProductCodeViewer)
 
+    def test_initial_window_and_composer_fit_logical_available_screen(self):
+        self.window.show()
+        self.app.processEvents()
+        self.app.processEvents()
+        screen = self.window.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry()
+        self.assertLessEqual(self.window.width(), available.width())
+        self.assertLessEqual(self.window.height(), available.height())
+        self.assertGreaterEqual(self.window.action_btn.geometry().right(), 0)
+        self.assertLessEqual(
+            self.window.action_btn.geometry().right(),
+            self.window.input_card.width() - 1,
+        )
+
     def test_tool_arguments_accept_json_and_python_literal_without_hiding_errors(self):
         parsed, error = parse_tool_arguments("{'code': 'print(1)', 'timeout': 3}")
         self.assertEqual(parsed["code"], "print(1)")

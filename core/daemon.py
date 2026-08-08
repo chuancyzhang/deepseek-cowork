@@ -90,8 +90,12 @@ class DaemonState:
         self.last_activity = time.time()
         idle_minutes = config_manager.get("daemon_idle_minutes", 10)
         self.idle_timeout = max(int(idle_minutes), 1) * 60
-        self.skill_catalog = SkillCatalogService(config_manager, logger=_log_daemon)
         self.dependency_coordinator = DependencyCoordinator(config_manager, logger=_log_daemon)
+        self.skill_catalog = SkillCatalogService(
+            config_manager,
+            logger=_log_daemon,
+            dependency_coordinator=self.dependency_coordinator,
+        )
         self.skill_catalog_error = ""
         try:
             self.skill_catalog.preload()

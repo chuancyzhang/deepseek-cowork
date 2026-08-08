@@ -56,7 +56,7 @@
       }
     }
   ],
-  "python_dependencies": ["weknora-mcp-server==1.0.0"],
+  "python_dependencies": ["weknora-mcp-server==1.0.0", "mcp>=1.27,<2.0.0"],
   "node_dependencies": [],
   "workflow": [
     "Saving WEKNORA_BASE_URL and WEKNORA_API_KEY automatically enables the managed WeKnora MCP server.",

@@ -1748,7 +1748,7 @@ class TestAgentSystemPrompt(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_clarification_count_is_dynamic_not_cached_in_stable_prompt(self):
+    def test_grilling_count_is_dynamic_not_cached_in_stable_prompt(self):
         temp_dir = tempfile.mkdtemp()
         try:
             worker = self._build_prompt_worker(temp_dir)
@@ -1758,14 +1758,17 @@ class TestAgentSystemPrompt(unittest.TestCase):
                 "bash": {"available": False},
             }
             stable_prompt = worker._build_stable_system_prompt()
-            worker.run_context["clarify_round_count"] = 1
+            worker.run_context["mode"] = "grilling"
+            worker.run_context["grill_round_count"] = 1
             first_runtime = worker._build_runtime_context_prompt(snapshot)
-            worker.run_context["clarify_round_count"] = 2
+            worker.run_context["grill_round_count"] = 2
             second_runtime = worker._build_runtime_context_prompt(snapshot)
 
             self.assertNotIn("当前任务已澄清", stable_prompt)
-            self.assertIn("当前任务已澄清 1/3 轮", first_runtime)
-            self.assertIn("当前任务已澄清 2/3 轮", second_runtime)
+            self.assertNotIn("最多澄清 3 轮", stable_prompt)
+            self.assertIn("已完成 1/10 轮", first_runtime)
+            self.assertIn("已完成 2/10 轮", second_runtime)
+            self.assertIn("仍未解决的问题、风险、显式假设", second_runtime)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

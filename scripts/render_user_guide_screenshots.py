@@ -1085,6 +1085,22 @@ def main_run():
         if SCREENSHOT_SCOPE == "history-performance":
             render_history_performance_screens(window)
             return
+        if SCREENSHOT_SCOPE == "grill-mode":
+            window.resize(1440, 900)
+            window.input_card.setMinimumWidth(720)
+            window.show()
+            process_events(180)
+            window.conversation_column.setFixedWidth(720)
+            window.session_tabs.setFixedWidth(720)
+            window.input_card.setFixedWidth(720)
+            process_events(120)
+            window.show_prompt_tool_menu()
+            save_window_with_popups(window, "s15-composer-add-menu.png", 200)
+            window.composer_action_popover.close()
+            window.toggle_grill_mode()
+            window.input_field.setPlainText("请先压力测试这份产品方案，再由我确认是否执行。")
+            save_widget(window, "s15a-grill-mode-armed.png", 200)
+            return
         if SCREENSHOT_SCOPE == "home":
             window.resize(1440, 900)
             window.show()

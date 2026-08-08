@@ -3,7 +3,13 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from core.clarify_mode import RUN_MODE_EXECUTION
+from core.clarify_mode import (
+    GRILL_MODE_ARMED,
+    GRILL_MODE_DISABLED,
+    RUN_MODE_EXECUTION,
+    RUN_MODE_GRILLING,
+    WORKFLOW_MODE_OFFICE_HTML_FIRST,
+)
 from main import HISTORY_RENDER_PAGE_SIZE, MainWindow
 
 
@@ -32,13 +38,64 @@ class _State:
         self.selected_model_id = ""
         self.clarify_mode_state = "exploring"
         self.pending_clarify_questions = []
-        self.clarify_round_count = 0
+        self.grill_mode_state = GRILL_MODE_DISABLED
+        self.grill_round_count = 0
+        self.grill_cycle_count = 0
+        self.grill_execution_confirmed = False
         self.office_conversion_source_files = []
         self.office_conversion_template_file = ""
         self.office_task_target_format = ""
 
 
 class TestChatWorkspaceHelpers(unittest.TestCase):
+    def test_grill_metadata_ignores_legacy_clarification_count(self):
+        state = _State()
+        state.grill_mode_state = GRILL_MODE_ARMED
+        state.grill_round_count = 4
+        state.grill_cycle_count = 2
+        state.clarify_round_count = 3
+
+        meta = MainWindow._session_clarify_meta(MainWindow.__new__(MainWindow), state)
+
+        self.assertNotIn("clarify_round_count", meta)
+        self.assertEqual(meta["grill_mode_state"], GRILL_MODE_ARMED)
+        self.assertEqual(meta["grill_round_count"], 4)
+        self.assertEqual(meta["grill_cycle_count"], 2)
+
+    def test_grill_submit_conflicts_preserve_input_before_any_runtime_start(self):
+        state = _State()
+        state.grill_mode_state = GRILL_MODE_ARMED
+        window = MainWindow.__new__(MainWindow)
+        window.current_session_id = state.session_id
+        window._session_is_busy = lambda _state: False
+        window._extract_agent_mentions = lambda _text: ([{"id": "agent-a"}], "执行任务")
+        window.add_system_toast = MagicMock()
+
+        submitted = MainWindow._submit_session_request(
+            window,
+            state,
+            "@Agent 执行任务",
+            [],
+        )
+
+        self.assertFalse(submitted)
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
+        toast_text = window.add_system_toast.call_args.args[0]
+        self.assertIn("输入和附件已保留", toast_text)
+
+        window._extract_agent_mentions = lambda _text: ([], "")
+        window.add_system_toast.reset_mock()
+        submitted = MainWindow._submit_session_request(
+            window,
+            state,
+            "生成办公稿",
+            [],
+            workflow_mode=WORKFLOW_MODE_OFFICE_HTML_FIRST,
+        )
+        self.assertFalse(submitted)
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
+        self.assertIn("输入和附件已保留", window.add_system_toast.call_args.args[0])
+
     def _window(self, base_dir):
         window = MainWindow.__new__(MainWindow)
         window.config_manager = MagicMock()
@@ -137,6 +194,21 @@ class TestChatWorkspaceHelpers(unittest.TestCase):
             self.assertEqual(ctx["selected_model_id"], "model-b")
             self.assertEqual(ctx["selected_model_profile"]["model_name"], "model-b-name")
             self.assertEqual(ctx["selected_model_profile"]["api_key"], "key-b")
+
+    def test_grill_run_context_is_identical_for_local_and_daemon_dispatch(self):
+        with tempfile.TemporaryDirectory() as base_dir, patch("main.get_base_dir", return_value=base_dir):
+            window = self._window(base_dir)
+            state = _State("grill-session")
+            state.grill_mode_state = GRILL_MODE_ARMED
+            state.grill_round_count = 7
+            state.grill_cycle_count = 3
+
+            ctx = window._build_run_context(state, RUN_MODE_GRILLING)
+
+            self.assertEqual(ctx["mode"], RUN_MODE_GRILLING)
+            self.assertEqual(ctx["grill_round_count"], 7)
+            self.assertEqual(ctx["grill_cycle_count"], 3)
+            self.assertFalse(ctx["grill_execution_confirmed"])
 
     def test_new_session_defaults_to_current_conversation_model(self):
         window = self._window(tempfile.gettempdir())

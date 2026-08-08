@@ -8,8 +8,11 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.clarify_mode import (
+    GRILL_CHECKPOINT_PURPOSE,
+    GRILL_MAX_ROUNDS,
     OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_EXECUTION,
+    RUN_MODE_GRILLING,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     normalize_selected_skill_names,
     normalize_run_context,
@@ -61,7 +64,9 @@ class TestClarifyModeHelpers(unittest.TestCase):
         self.assertEqual(ctx["channel"], "feishu")
         self.assertEqual(ctx["workflow_mode"], WORKFLOW_MODE_OFFICE_HTML_FIRST)
         self.assertEqual(ctx["office_output_profile"], OFFICE_OUTPUT_PROFILE_PPT)
-        self.assertEqual(ctx["clarify_round_count"], 0)
+        self.assertEqual(ctx["grill_round_count"], 0)
+        self.assertEqual(ctx["grill_cycle_count"], 0)
+        self.assertFalse(ctx["grill_execution_confirmed"])
 
     def test_normalize_selected_skill_names_deduplicates_and_filters_blanks(self):
         self.assertEqual(
@@ -266,7 +271,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             self.assertIn("默认直接执行用户任务", system_prompt)
             self.assertNotIn("当前任务已澄清 2/3 轮", system_prompt)
             self.assertIn("request_user_input", system_prompt)
-            self.assertIn("当前任务已澄清 2/3 轮", runtime_prompt)
+            self.assertNotIn("当前任务已澄清", runtime_prompt)
             self.assertNotIn("策略 [反问模式]", runtime_prompt)
             self.assertNotIn("<proposed_plan>", runtime_prompt)
             self.assertTrue(provider_events)
@@ -1070,7 +1075,7 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_llm_worker_blocks_user_input_after_three_clarification_rounds(self):
+    def test_llm_worker_does_not_limit_ordinary_clarification_rounds(self):
         class _SkillManagerStub:
             def __init__(self, *_args, **_kwargs):
                 pass
@@ -1149,7 +1154,391 @@ class TestClarifyModeLLMWorker(unittest.TestCase):
             generated = results[0]["generated_messages"]
             tool_messages = [msg for msg in generated if msg.get("role") == "tool"]
             self.assertTrue(tool_messages)
-            self.assertIn("clarification limit reached", tool_messages[0].get("content", ""))
+            self.assertIn("unexpected", tool_messages[0].get("content", ""))
+            self.assertNotIn("limit reached", tool_messages[0].get("content", ""))
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_grilling_allows_tenth_question_and_blocks_eleventh(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "request_user_input",
+                            "description": "",
+                            "parameters": {},
+                        },
+                    }
+                ]
+
+            def is_tool_allowed(self, name, run_mode):
+                return True
+
+            def is_tool_visible(self, name, run_mode, discovered_tool_names=None, **kwargs):
+                return True
+
+            def get_skill_of_tool(self, _tool_name):
+                return None
+
+            def get_brief_skill_prompt(self, _skill_name):
+                return ""
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                return {
+                    "source_tool": name,
+                    "purpose": "",
+                    "content": "accepted",
+                    "answers": {"scope": {"selected_options": ["recommended"], "text": ""}},
+                    "interaction_response": {"status": "completed", "approved": True},
+                }
+
+            def check_for_updates(self):
+                return False
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, messages, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {
+                        "type": "tool_call",
+                        "index": 0,
+                        "id": "input-1",
+                        "function": {
+                            "name": "request_user_input",
+                            "arguments": "{\"message\":\"choose\",\"questions\":[{\"id\":\"scope\",\"question\":\"scope?\",\"options\":[{\"label\":\"推荐\",\"value\":\"recommended\"}]}]}",
+                        },
+                    }
+                    return
+                yield {"type": "content", "content": "continued"}
+
+        from core.agent import LLMWorker
+
+        def run_with_round(round_count):
+            provider = _ProviderStub()
+            results = []
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "grill this"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_GRILLING, "grill_round_count": round_count},
+                )
+                worker.finished_signal.connect(results.append)
+                worker.run()
+            tool_messages = [
+                msg for msg in results[0]["generated_messages"] if msg.get("role") == "tool"
+            ]
+            return worker, tool_messages[0].get("content", "")
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            tenth_worker, tenth_result = run_with_round(GRILL_MAX_ROUNDS - 1)
+            self.assertIn("accepted", tenth_result)
+            self.assertEqual(tenth_worker.run_context["grill_round_count"], GRILL_MAX_ROUNDS)
+
+            eleventh_worker, eleventh_result = run_with_round(GRILL_MAX_ROUNDS)
+            self.assertIn("grilling round limit reached", eleventh_result)
+            self.assertEqual(eleventh_worker.run_context["grill_round_count"], GRILL_MAX_ROUNDS)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_grill_checkpoint_execute_continue_and_custom_transitions(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, run_mode=None, *args, **kwargs):
+                name = "apply_patch" if run_mode == RUN_MODE_EXECUTION else "text_file_read"
+                return [
+                    {
+                        "type": "function",
+                        "function": {"name": name, "description": "", "parameters": {}},
+                    }
+                ]
+
+            def check_for_updates(self):
+                return False
+
+        from core.agent import LLMWorker
+
+        args = {
+            "purpose": GRILL_CHECKPOINT_PURPOSE,
+            "questions": [
+                {
+                    "id": "grill_next_action",
+                    "question": "下一步？",
+                    "options": [
+                        {"label": "确认并执行", "value": "execute"},
+                        {"label": "继续拷问", "value": "continue"},
+                    ],
+                }
+            ],
+        }
+        temp_dir = tempfile.mkdtemp()
+        try:
+            with patch("core.agent.SkillManager", _SkillManagerStub):
+                execute_worker = LLMWorker(
+                    [{"role": "user", "content": "grill this"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_GRILLING, "grill_round_count": 4},
+                )
+                execute_result = execute_worker._apply_grill_checkpoint_result(
+                    args,
+                    {
+                        "answers": {
+                            "grill_next_action": {
+                                "selected_options": ["execute"],
+                                "text": "",
+                            }
+                        }
+                    },
+                )
+                self.assertEqual(execute_worker.run_context["mode"], RUN_MODE_EXECUTION)
+                self.assertTrue(execute_worker.run_context["grill_execution_confirmed"])
+                self.assertEqual(execute_result["mode_transition"]["to"], RUN_MODE_EXECUTION)
+                self.assertIn(
+                    "apply_patch",
+                    {item["function"]["name"] for item in execute_worker.tools},
+                )
+
+                for selected, expected_choice in (("continue", "continue"), ("__custom__", "custom")):
+                    continue_worker = LLMWorker(
+                        [{"role": "user", "content": "grill this"}],
+                        _ConfigStub(temp_dir),
+                        workspace_dir=temp_dir,
+                        run_context={
+                            "mode": RUN_MODE_GRILLING,
+                            "grill_round_count": GRILL_MAX_ROUNDS,
+                            "grill_cycle_count": 0,
+                        },
+                    )
+                    continued = continue_worker._apply_grill_checkpoint_result(
+                        args,
+                        {
+                            "answers": {
+                                "grill_next_action": {
+                                    "selected_options": [selected],
+                                    "text": "继续深入" if selected == "__custom__" else "",
+                                }
+                            }
+                        },
+                    )
+                    self.assertEqual(continue_worker.run_context["mode"], RUN_MODE_GRILLING)
+                    self.assertEqual(continue_worker.run_context["grill_round_count"], 0)
+                    self.assertEqual(continue_worker.run_context["grill_cycle_count"], 1)
+                    self.assertEqual(continued["grill_cycle_transition"]["choice"], expected_choice)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_grill_checkpoint_timeout_stops_without_another_model_request(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "request_user_input",
+                            "description": "",
+                            "parameters": {},
+                        },
+                    }
+                ]
+
+            def is_tool_allowed(self, *args, **kwargs):
+                return True
+
+            def is_tool_visible(self, *args, **kwargs):
+                return True
+
+            def get_skill_of_tool(self, _name):
+                return None
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, _name):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                return {
+                    "source_tool": name,
+                    "purpose": GRILL_CHECKPOINT_PURPOSE,
+                    "content": "未收到有效输入（timeout）。",
+                    "answers": {},
+                    "interaction_response": {"status": "timeout", "approved": False},
+                }
+
+            def check_for_updates(self):
+                return False
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, messages, tools=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {"type": "content", "content": "目标、风险和未决项总结。"}
+                    return
+                yield {
+                    "type": "tool_call",
+                    "index": 0,
+                    "id": "checkpoint-1",
+                    "function": {
+                        "name": "request_user_input",
+                        "arguments": "{\"message\":\"下一步\",\"purpose\":\"grill_checkpoint\",\"questions\":[{\"id\":\"grill_next_action\",\"question\":\"下一步？\",\"options\":[{\"label\":\"确认并执行\",\"value\":\"execute\"},{\"label\":\"继续拷问\",\"value\":\"continue\"}]}]}",
+                    },
+                }
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        provider = _ProviderStub()
+        results = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "grill this"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_GRILLING, "grill_round_count": 2},
+                )
+                worker.finished_signal.connect(results.append)
+                worker.run()
+
+            self.assertEqual(provider.calls, 2)
+            self.assertTrue(worker.run_context["grill_checkpoint_cancelled"])
+            self.assertEqual(results[0]["content"], "本次拷问已停止，未执行原任务。")
+            self.assertFalse(worker.run_context["grill_execution_confirmed"])
+            self.assertTrue(
+                any(
+                    message.get("role") == "assistant"
+                    and "目标、风险和未决项总结" in str(message.get("content") or "")
+                    for message in results[0]["generated_messages"]
+                )
+            )
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_grill_question_timeout_stops_without_another_model_request(self):
+        class _SkillManagerStub:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def get_tool_definitions(self, *args, **kwargs):
+                return [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "request_user_input",
+                            "description": "",
+                            "parameters": {},
+                        },
+                    }
+                ]
+
+            def is_tool_allowed(self, *args, **kwargs):
+                return True
+
+            def is_tool_visible(self, *args, **kwargs):
+                return True
+
+            def get_skill_of_tool(self, _name):
+                return None
+
+            def get_system_prompts(self, *args, **kwargs):
+                return ""
+
+            def get_brief_skill_prompt(self, _name):
+                return ""
+
+            def call_tool(self, name, args, context=None):
+                return {
+                    "source_tool": name,
+                    "purpose": "",
+                    "content": "未收到有效输入（timeout）。",
+                    "answers": {},
+                    "interaction_response": {"status": "timeout", "approved": False},
+                }
+
+            def check_for_updates(self):
+                return False
+
+        class _ProviderStub:
+            provider_name = "stub"
+            model_name = "stub-model"
+            base_url = ""
+            thinking_enabled = False
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, messages, tools=None):
+                self.calls += 1
+                yield {
+                    "type": "tool_call",
+                    "index": 0,
+                    "id": "question-1",
+                    "function": {
+                        "name": "request_user_input",
+                        "arguments": "{\"message\":\"选择范围\",\"questions\":[{\"id\":\"scope\",\"question\":\"范围？\",\"options\":[{\"label\":\"核心范围\",\"value\":\"core\"}]}]}",
+                    },
+                }
+
+        from core.agent import LLMWorker
+
+        temp_dir = tempfile.mkdtemp()
+        provider = _ProviderStub()
+        results = []
+        try:
+            with (
+                patch("core.agent.SkillManager", _SkillManagerStub),
+                patch("core.agent.LLMFactory.create_provider", return_value=provider),
+            ):
+                worker = LLMWorker(
+                    [{"role": "user", "content": "grill this"}],
+                    _ConfigStub(temp_dir),
+                    workspace_dir=temp_dir,
+                    run_context={"mode": RUN_MODE_GRILLING},
+                )
+                worker.finished_signal.connect(results.append)
+                worker.run()
+
+            self.assertEqual(provider.calls, 1)
+            self.assertTrue(worker.run_context["grill_input_cancelled"])
+            self.assertEqual(results[0]["content"], "本次拷问已停止，未执行原任务。")
+            self.assertFalse(worker.run_context["grill_execution_confirmed"])
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

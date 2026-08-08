@@ -12,12 +12,25 @@ CLARIFY_PHASES = {
 }
 
 RUN_MODE_NORMAL = "normal"
+RUN_MODE_GRILLING = "grilling"
 RUN_MODE_EXECUTION = "execution"
 
 RUN_MODES = {
     RUN_MODE_NORMAL,
+    RUN_MODE_GRILLING,
     RUN_MODE_EXECUTION,
 }
+
+GRILL_MODE_DISABLED = "disabled"
+GRILL_MODE_ARMED = "armed"
+GRILL_MODE_ACTIVE = "active"
+GRILL_MODE_STATES = {
+    GRILL_MODE_DISABLED,
+    GRILL_MODE_ARMED,
+    GRILL_MODE_ACTIVE,
+}
+GRILL_MAX_ROUNDS = 10
+GRILL_CHECKPOINT_PURPOSE = "grill_checkpoint"
 
 WORKFLOW_MODE_OFFICE_HTML_FIRST = "office_html_first"
 WORKFLOW_MODE_OFFICE_FILE_CONVERSION = "office_file_conversion"
@@ -60,6 +73,13 @@ def normalize_run_mode(value, default=RUN_MODE_EXECUTION):
     if text in {RUN_MODE_NORMAL, "planning", "clarifying"}:
         return RUN_MODE_EXECUTION
     if text in RUN_MODES:
+        return text
+    return default
+
+
+def normalize_grill_mode_state(value, default=GRILL_MODE_DISABLED):
+    text = str(value or "").strip().lower()
+    if text in GRILL_MODE_STATES:
         return text
     return default
 
@@ -148,7 +168,9 @@ def normalize_run_context(run_context):
         "pending_clarify_questions": normalize_pending_clarify_questions(
             pending_questions
         ),
-        "clarify_round_count": max(0, int(ctx.get("clarify_round_count") or 0)),
+        "grill_round_count": max(0, int(ctx.get("grill_round_count") or 0)),
+        "grill_cycle_count": max(0, int(ctx.get("grill_cycle_count") or 0)),
+        "grill_execution_confirmed": bool(ctx.get("grill_execution_confirmed")),
         "selected_skill_names": normalize_selected_skill_names(
             ctx.get("selected_skill_names")
         ),
@@ -203,3 +225,7 @@ def derive_clarify_phase(
 
 def is_execution_mode(run_context):
     return normalize_run_mode((run_context or {}).get("mode")) == RUN_MODE_EXECUTION
+
+
+def is_grilling_mode(run_context):
+    return normalize_run_mode((run_context or {}).get("mode")) == RUN_MODE_GRILLING

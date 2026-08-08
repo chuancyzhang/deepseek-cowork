@@ -255,16 +255,23 @@ from core.clarify_mode import (
     CLARIFY_MODE_DISABLED,
     CLARIFY_MODE_AWAITING_USER_INPUT,
     CLARIFY_MODE_EXPLORING,
+    GRILL_CHECKPOINT_PURPOSE,
+    GRILL_MAX_ROUNDS,
+    GRILL_MODE_ACTIVE,
+    GRILL_MODE_ARMED,
+    GRILL_MODE_DISABLED,
     OFFICE_OUTPUT_PROFILE_DESIGN,
     OFFICE_OUTPUT_PROFILE_DOCX,
     OFFICE_OUTPUT_PROFILE_FREE,
     OFFICE_OUTPUT_PROFILE_PPT,
     RUN_MODE_EXECUTION,
+    RUN_MODE_GRILLING,
     WORKFLOW_MODE_OFFICE_FILE_CONVERSION,
     WORKFLOW_MODE_OFFICE_HTML_FIRST,
     derive_clarify_phase,
     normalize_office_output_profile,
     normalize_clarify_phase,
+    normalize_grill_mode_state,
     normalize_pending_clarify_questions,
     normalize_selected_skill_names,
     normalize_run_context,
@@ -12519,6 +12526,19 @@ class ComposerActionPopover(ProductPopover):
                       qta.icon("fa5s.puzzle-piece", color=DesignTokens.text_secondary), window.open_session_skill_picker,
                       enabled=ready and not busy,
                       tooltip="当前任务结束后可调整" if busy else (window.skill_load_error or "能力加载中"))
+        grill_state = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED) if state else GRILL_MODE_DISABLED
+        )
+        grill_armed = grill_state == GRILL_MODE_ARMED
+        self._add_row(
+            layout,
+            "关闭拷问模式" if grill_armed else "拷问模式",
+            "已开启，仅作用于下一项任务" if grill_armed else "先澄清关键决策，再执行任务",
+            qta.icon("fa5s.question-circle", color=DesignTokens.primary if grill_armed else DesignTokens.text_secondary),
+            window.toggle_grill_mode,
+            enabled=not busy,
+            tooltip="当前任务结束后可调整" if busy else "",
+        )
         layout.addWidget(self._divider())
         has_messages = bool(state and getattr(state, "messages", []))
         worker_running = bool(window.conversation_skill_worker and window.conversation_skill_worker.isRunning())
@@ -20102,7 +20122,10 @@ class SessionState:
         self.pending_interactions = {}
         self.clarify_source_user_text = ""
         self.clarify_answers_context = []
-        self.clarify_round_count = 0
+        self.grill_mode_state = GRILL_MODE_DISABLED
+        self.grill_round_count = 0
+        self.grill_cycle_count = 0
+        self.grill_execution_confirmed = False
         self.selected_skill_names = []
         self.selected_model_id = ""
         self.workflow_mode = ""
@@ -21295,7 +21318,8 @@ class SessionContextChip(QWidget):
         self.close_btn.hide()
 
         self._text = str(text or "").strip()
-        self.main_btn = QPushButton(f" {self._text}  ▾")
+        self._menu_indicator_visible = True
+        self.main_btn = QPushButton()
         self.main_btn.setObjectName("ChipMainButton")
         self.main_btn.setCursor(Qt.PointingHandCursor)
         self.main_btn.setFixedHeight(32)
@@ -21303,9 +21327,15 @@ class SessionContextChip(QWidget):
         if icon is not None:
             self.main_btn.setIcon(icon)
         layout.addWidget(self.main_btn)
+        layout.addWidget(self.close_btn)
 
         self._apply_style()
+        self._refresh_main_text()
         bind_theme(self, self.refresh_theme, surface="composer")
+
+    def _refresh_main_text(self):
+        indicator = "  ▾" if self._menu_indicator_visible else ""
+        self.main_btn.setText(f" {self._text}{indicator}")
 
     def _apply_style(self):
         self.setStyleSheet(
@@ -21338,7 +21368,7 @@ class SessionContextChip(QWidget):
 
     def setText(self, text):
         self._text = str(text or "").strip()
-        self.main_btn.setText(f" {self._text}  ▾")
+        self._refresh_main_text()
 
     def text(self):
         return self._text
@@ -21352,6 +21382,13 @@ class SessionContextChip(QWidget):
 
     def setCloseToolTip(self, text):
         self.close_btn.setToolTip(text)
+
+    def setMenuIndicatorVisible(self, visible):
+        self._menu_indicator_visible = bool(visible)
+        self._refresh_main_text()
+
+    def setRemovable(self, removable):
+        self.close_btn.setVisible(bool(removable))
 
     def setEnabled(self, enabled):
         super().setEnabled(enabled)
@@ -22956,6 +22993,18 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setVisible(False)
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
 
+        self.grill_mode_badge = SessionContextChip(
+            "拷问模式",
+            qta.icon("fa5s.question-circle", color=DesignTokens.primary),
+        )
+        self.grill_mode_badge.setMenuIndicatorVisible(False)
+        self.grill_mode_badge.setRemovable(True)
+        self.grill_mode_badge.setCloseToolTip("取消拷问模式")
+        self.grill_mode_badge.setToolTip("先澄清关键决策，再执行任务")
+        self.grill_mode_badge.setVisible(False)
+        self.grill_mode_badge.clicked.connect(self.toggle_grill_mode)
+        self.grill_mode_badge.closeClicked.connect(self.toggle_grill_mode)
+
         self.agent_picker_btn = QPushButton(" Agent")
         self.agent_picker_btn.setIcon(qta.icon('fa5s.user-astronaut', color=DesignTokens.text_secondary))
         self.agent_picker_btn.setToolTip("为当前输入添加智能体")
@@ -23067,6 +23116,7 @@ class MainWindow(QMainWindow):
         prompt_context_layout.addWidget(self.tool_menu_btn)
         prompt_context_layout.addWidget(self.agent_picker_btn)
         prompt_context_layout.addWidget(self.selected_skills_badge)
+        prompt_context_layout.addWidget(self.grill_mode_badge)
         prompt_context_layout.addWidget(self.project_selector_btn)
         prompt_context_layout.addWidget(self.pause_btn)
         prompt_context_layout.addWidget(self.loop_hint)
@@ -23204,6 +23254,7 @@ class MainWindow(QMainWindow):
         controller.register_component("composer.input", self.input_field)
         controller.register_component("composer.add_context", self.tool_menu_btn)
         controller.register_component("composer.skills", self.selected_skills_badge)
+        controller.register_component("composer.grill_mode", self.grill_mode_badge)
         controller.register_component("composer.agent", self.agent_picker_btn)
         controller.register_component("composer.model", self.model_select_btn)
         controller.register_component("composer.pause", self.pause_btn)
@@ -23393,6 +23444,9 @@ class MainWindow(QMainWindow):
         )
         self.selected_skills_badge.setIcon(
             qta.icon("fa5s.puzzle-piece", color=DesignTokens.primary)
+        )
+        self.grill_mode_badge.setIcon(
+            qta.icon("fa5s.question-circle", color=DesignTokens.primary)
         )
         self.agent_picker_btn.setIcon(
             qta.icon("fa5s.user-astronaut", color=DesignTokens.icon_secondary)
@@ -24522,6 +24576,7 @@ class MainWindow(QMainWindow):
             ("add_files", "添加文件"),
             ("add_agent", "添加智能体"),
             ("select_skills", "指定能力"),
+            ("grill_mode", "拷问模式"),
         ]
 
     def _normalize_prompt_file_paths(self, paths):
@@ -25855,7 +25910,17 @@ class MainWindow(QMainWindow):
             "pending_clarify_questions": normalize_pending_clarify_questions(
                 getattr(state, "pending_clarify_questions", [])
             ),
-            "clarify_round_count": max(0, int(getattr(state, "clarify_round_count", 0) or 0)),
+            "grill_mode_state": normalize_grill_mode_state(
+                getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+            ),
+            "grill_round_count": min(
+                GRILL_MAX_ROUNDS,
+                max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+            ),
+            "grill_cycle_count": max(0, int(getattr(state, "grill_cycle_count", 0) or 0)),
+            "grill_execution_confirmed": bool(
+                getattr(state, "grill_execution_confirmed", False)
+            ),
         }
 
     def _session_selected_skills_meta(self, state):
@@ -26179,7 +26244,103 @@ class MainWindow(QMainWindow):
         state = self.get_session(session_id)
         if not state or state.session_id != self.current_session_id:
             return
-        return
+        self.refresh_grill_mode_controls(state.session_id)
+
+    def refresh_grill_mode_controls(self, session_id=None):
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if not state or state.session_id != self.current_session_id or not hasattr(self, "grill_mode_badge"):
+            return
+        grill_state = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        )
+        visible = grill_state in {GRILL_MODE_ARMED, GRILL_MODE_ACTIVE}
+        active = grill_state == GRILL_MODE_ACTIVE
+        round_count = min(
+            GRILL_MAX_ROUNDS,
+            max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+        )
+        cycle_number = max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1
+        self.grill_mode_badge.setText(
+            f"拷问中 {cycle_number} · {round_count}/{GRILL_MAX_ROUNDS}"
+            if active
+            else "拷问模式"
+        )
+        self.grill_mode_badge.setRemovable(grill_state == GRILL_MODE_ARMED)
+        self.grill_mode_badge.setEnabled(grill_state == GRILL_MODE_ARMED)
+        self.grill_mode_badge.setToolTip(
+            "正在先澄清关键决策；可使用停止按钮结束，绝不会自动执行"
+            if active
+            else "先澄清关键决策，再执行下一项任务"
+        )
+        self.grill_mode_badge.setVisible(visible)
+
+    def toggle_grill_mode(self):
+        state = self.get_current_session()
+        if not state:
+            return
+        if self._session_is_busy(state):
+            self.add_system_toast(
+                "当前任务结束后可调整拷问模式",
+                "info",
+                session_id=state.session_id,
+                auto_close_ms=3200,
+            )
+            return
+        current = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        )
+        enabled = current != GRILL_MODE_ARMED
+        state.grill_mode_state = GRILL_MODE_ARMED if enabled else GRILL_MODE_DISABLED
+        state.grill_round_count = 0
+        state.grill_cycle_count = 0
+        state.grill_execution_confirmed = False
+        log_ui_navigation(
+            "grill_mode_toggled",
+            session_id=state.session_id,
+            enabled=enabled,
+        )
+        self.refresh_grill_mode_controls(state.session_id)
+        self.refresh_composer_action_state()
+        self.save_chat_history(session_id=state.session_id)
+        self.add_system_toast(
+            "已开启拷问模式，仅作用于下一项任务" if enabled else "已取消拷问模式",
+            "success" if enabled else "info",
+            session_id=state.session_id,
+            auto_close_ms=3000,
+        )
+
+    def _finish_grill_mode(self, state, outcome):
+        if not state:
+            return False
+        active = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        ) == GRILL_MODE_ACTIVE
+        confirmed = bool(getattr(state, "grill_execution_confirmed", False))
+        if not active and not confirmed:
+            return False
+        log_ui_navigation(
+            "grill_finished",
+            session_id=state.session_id,
+            outcome=str(outcome or "finished"),
+            cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+            round=min(
+                GRILL_MAX_ROUNDS,
+                max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+            ),
+            execution_confirmed=confirmed,
+        )
+        if str(outcome or "").strip().lower() == "error":
+            log_ui_navigation(
+                "grill_error",
+                session_id=state.session_id,
+                stage="run",
+            )
+        state.grill_mode_state = GRILL_MODE_DISABLED
+        state.grill_round_count = 0
+        state.grill_cycle_count = 0
+        state.grill_execution_confirmed = False
+        self.refresh_grill_mode_controls(state.session_id)
+        return True
 
     def set_session_phase(self, phase, session_id=None):
         state = self.get_session(session_id)
@@ -27443,6 +27604,7 @@ class MainWindow(QMainWindow):
         self.refresh_observability_view(session_id)
         self.refresh_context_badges(session_id)
         self.refresh_selected_skill_controls(session_id)
+        self.refresh_grill_mode_controls(session_id)
         self.refresh_model_selector()
         self.refresh_prompt_file_chips(session_id)
         self.refresh_token_usage_label(session_id)
@@ -27534,7 +27696,10 @@ class MainWindow(QMainWindow):
                 self.pause_btn.setIcon(qta.icon('fa5s.pause', color=DesignTokens.text_secondary))
                 self.pause_btn.setToolTip("暂停")
         else:
-            self.action_btn.setText("开始")
+            grill_armed = normalize_grill_mode_state(
+                getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+            ) == GRILL_MODE_ARMED
+            self.action_btn.setText("开始拷问" if grill_armed else "开始")
             self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
             self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
             self.action_btn.setEnabled(history_ready)
@@ -27551,6 +27716,7 @@ class MainWindow(QMainWindow):
             self.pause_btn.setVisible(False)
             self.loop_hint.setVisible(False)
         self.refresh_selected_skill_controls(state.session_id)
+        self.refresh_grill_mode_controls(state.session_id)
         self.refresh_project_selector(state.session_id)
         self.refresh_context_badges(state.session_id)
         self.refresh_observability_view(state.session_id)
@@ -27811,7 +27977,10 @@ class MainWindow(QMainWindow):
         state.pending_clarify_questions = []
         state.clarify_source_user_text = ""
         state.clarify_answers_context = []
-        state.clarify_round_count = 0
+        state.grill_mode_state = GRILL_MODE_DISABLED
+        state.grill_round_count = 0
+        state.grill_cycle_count = 0
+        state.grill_execution_confirmed = False
         state.selected_skill_names = []
         state.selected_model_id = ""
         state.workflow_mode = ""
@@ -28604,7 +28773,33 @@ class MainWindow(QMainWindow):
         state.pending_clarify_questions = normalize_pending_clarify_questions(
             conversation_meta.get("pending_clarify_questions")
         )
-        state.clarify_round_count = max(0, int(conversation_meta.get("clarify_round_count") or 0))
+        persisted_grill_state = normalize_grill_mode_state(
+            conversation_meta.get("grill_mode_state")
+        )
+        grill_was_interrupted = persisted_grill_state == GRILL_MODE_ACTIVE
+        if grill_was_interrupted:
+            persisted_grill_state = GRILL_MODE_DISABLED
+            state.session_status = "interrupted"
+            state.run_phase = "Interrupted"
+            state.pending_clarify_questions = []
+            state.clarify_mode_state = CLARIFY_MODE_EXPLORING
+            log_ui_navigation(
+                "grill_restore_stopped",
+                session_id=state.session_id,
+                reason="active_session_interrupted",
+            )
+        state.grill_mode_state = persisted_grill_state
+        state.grill_round_count = (
+            min(GRILL_MAX_ROUNDS, max(0, int(conversation_meta.get("grill_round_count") or 0)))
+            if persisted_grill_state == GRILL_MODE_ARMED
+            else 0
+        )
+        state.grill_cycle_count = (
+            max(0, int(conversation_meta.get("grill_cycle_count") or 0))
+            if persisted_grill_state == GRILL_MODE_ARMED
+            else 0
+        )
+        state.grill_execution_confirmed = False
         state.clarify_phase = normalize_clarify_phase(
             conversation_meta.get("clarify_phase"),
             default=derive_clarify_phase(
@@ -29180,6 +29375,10 @@ class MainWindow(QMainWindow):
         if getattr(state, "messages", None):
             return True
         if bool(getattr(state, "pending_clarify_questions", [])):
+            return True
+        if normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        ) == GRILL_MODE_ARMED:
             return True
         if normalize_selected_skill_names(getattr(state, "selected_skill_names", [])):
             return True
@@ -31724,8 +31923,13 @@ class MainWindow(QMainWindow):
         has_clarify_state = bool(
             bool(getattr(state, "pending_clarify_questions", []))
         )
+        has_grill_state = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        ) == GRILL_MODE_ARMED or "grill_mode_state" in (
+            getattr(state, "persisted_conversation_meta", {}) or {}
+        )
         has_selected_skills = bool(normalize_selected_skill_names(getattr(state, "selected_skill_names", [])))
-        if not messages and not has_clarify_state and not has_selected_skills:
+        if not messages and not has_clarify_state and not has_grill_state and not has_selected_skills:
             return None
         title = self._resolved_session_title(state, messages) if messages else (
             self._resolved_session_title(state, []) if self._session_base_meta(state).get("manual_title") else "新任务"
@@ -36030,7 +36234,10 @@ class MainWindow(QMainWindow):
             self.action_btn.setText("发送引导" if steerable else "运行中")
             self.action_btn.setEnabled(steerable and bool(self.input_field.toPlainText().strip()))
             return
-        self.action_btn.setText("开始")
+        grill_armed = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        ) == GRILL_MODE_ARMED
+        self.action_btn.setText("开始拷问" if grill_armed else "开始")
         self.action_btn.setEnabled(session_history_ready(state))
 
     def review_pending_conversation_skill_draft(self, session_id=None):
@@ -36437,6 +36644,7 @@ class MainWindow(QMainWindow):
         state.llm_worker = None
         state.code_worker = None
         self.code_worker = None
+        self._finish_grill_mode(state, "stopped")
         self._reject_unapplied_guidance(state, restore_input=True)
         self._timeline_close_open_events(state, status="interrupted")
         self._timeline_append_event(
@@ -36510,16 +36718,8 @@ class MainWindow(QMainWindow):
             self.handle_send()
 
     def on_clarify_mode_toggled(self, checked):
-        state = self.get_current_session()
-        if not state:
-            return
-        state.clarify_mode_enabled = False
-        state.clarify_phase = CLARIFY_MODE_DISABLED
-        state.clarify_mode_state = CLARIFY_MODE_EXPLORING
-        state.pending_clarify_questions = []
-        self.refresh_clarify_controls(state.session_id)
-        self.save_chat_history(session_id=state.session_id)
-        self.normalize_session_ui(state)
+        del checked
+        self.toggle_grill_mode()
 
     def _build_run_context(
         self,
@@ -36570,7 +36770,17 @@ class MainWindow(QMainWindow):
                 "pending_clarify_questions": normalize_pending_clarify_questions(
                     getattr(state, "pending_clarify_questions", [])
                 ),
-                "clarify_round_count": max(0, int(getattr(state, "clarify_round_count", 0) or 0)),
+                "grill_round_count": min(
+                    GRILL_MAX_ROUNDS,
+                    max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+                ),
+                "grill_cycle_count": max(
+                    0,
+                    int(getattr(state, "grill_cycle_count", 0) or 0),
+                ),
+                "grill_execution_confirmed": bool(
+                    getattr(state, "grill_execution_confirmed", False)
+                ),
                 "selected_skill_names": effective_skill_names,
                 "selected_model_id": self._model_id_for_state(state),
                 "selected_model_profile": self._model_profile_snapshot_for_state(state),
@@ -38019,6 +38229,29 @@ class MainWindow(QMainWindow):
             log_ppt_agent_debug("submit_session_empty_payload", session_id=state.session_id)
             return False
         mentioned_profiles, delegated_text = self._extract_agent_mentions(raw_user_text) if raw_user_text else ([], "")
+        grill_armed = normalize_grill_mode_state(
+            getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+        ) == GRILL_MODE_ARMED
+        grill_conflicts = []
+        if mentioned_profiles:
+            grill_conflicts.append("显式 @Agent")
+        if self._is_office_workflow_context(normalize_workflow_mode(workflow_mode)) or ppt_agent_mode:
+            grill_conflicts.append("PPT/办公稿专用流程")
+        if grill_armed and grill_conflicts:
+            log_ui_navigation(
+                "grill_submit_conflict",
+                session_id=state.session_id,
+                conflict_types=list(grill_conflicts),
+                attachment_count=len(prompt_files),
+            )
+            if state.session_id == self.current_session_id:
+                self.add_system_toast(
+                    f"拷问模式不能与{'、'.join(grill_conflicts)}同时使用。请先取消其中一种；输入和附件已保留。",
+                    "warning",
+                    session_id=state.session_id,
+                    auto_close_ms=0,
+                )
+            return False
         if not self._model_profile_for_state(state):
             has_configured_models = bool(self.config_manager.iter_model_profiles())
             log_ppt_agent_debug(
@@ -38185,6 +38418,13 @@ class MainWindow(QMainWindow):
                     message_meta["ppt_agent_preference"] = ppt_agent_preference
                     if ppt_agent_template_file:
                         message_meta["ppt_agent_template_file"] = ppt_agent_template_file
+        grill_started = bool(grill_armed)
+        if grill_started:
+            message_meta["grill_mode"] = True
+            state.grill_mode_state = GRILL_MODE_ACTIVE
+            state.grill_round_count = 0
+            state.grill_cycle_count = 0
+            state.grill_execution_confirmed = False
         if message_meta:
             message_payload["meta"] = message_meta
         staged_save_request = self._stage_chat_save_request(
@@ -38193,6 +38433,14 @@ class MainWindow(QMainWindow):
             status="running",
         )
         if staged_save_request is None:
+            if grill_started:
+                state.grill_mode_state = GRILL_MODE_ARMED
+                self.refresh_grill_mode_controls(state.session_id)
+                log_ui_navigation(
+                    "grill_error",
+                    session_id=state.session_id,
+                    stage="persistence",
+                )
             if state.session_id == self.current_session_id:
                 self.add_system_toast(
                     "消息无法安全保存，已保留输入且未启动任务。请检查磁盘空间和目录权限。",
@@ -38298,15 +38546,39 @@ class MainWindow(QMainWindow):
             previous_render_total,
         )
         if not self._enqueue_staged_chat_save(staged_save_request):
+            if grill_started:
+                state.grill_mode_state = GRILL_MODE_ARMED
+                self.refresh_grill_mode_controls(state.session_id)
+                log_ui_navigation(
+                    "grill_error",
+                    session_id=state.session_id,
+                    stage="save_queue",
+                )
             return False
         self._ensure_session_visible_in_history(state)
         self.update_session_tab_title(state.session_id)
-        run_mode = RUN_MODE_EXECUTION
+        run_mode = RUN_MODE_GRILLING if grill_started else RUN_MODE_EXECUTION
         state.pending_clarify_questions = []
         state.clarify_source_user_text = user_text
         state.clarify_answers_context = []
-        state.clarify_round_count = 0
         current_turn_id = state.active_turn_id
+        if grill_started:
+            log_ui_navigation(
+                "grill_cycle_started",
+                session_id=state.session_id,
+                cycle=1,
+                round=0,
+            )
+            log_ui_navigation(
+                "grill_submit_started",
+                session_id=state.session_id,
+                turn_id=current_turn_id,
+                attachment_count=len(prompt_files),
+                selected_skill_count=len(
+                    normalize_selected_skill_names(getattr(state, "selected_skill_names", []))
+                ),
+            )
+            self.refresh_grill_mode_controls(state.session_id)
         if mentioned_profiles:
             if is_first_submit:
                 log_ui_navigation(
@@ -38384,6 +38656,7 @@ class MainWindow(QMainWindow):
                     session_id=state.session_id,
                 )
             except Exception as exc:
+                self._finish_grill_mode(state, "error")
                 if is_first_submit:
                     log_ui_navigation(
                         "first_submit_error",
@@ -38413,6 +38686,7 @@ class MainWindow(QMainWindow):
                     session_id=state.session_id,
                 )
             except Exception as exc:
+                self._finish_grill_mode(state, "error")
                 if is_first_submit:
                     log_ui_navigation(
                         "first_submit_error",
@@ -38607,6 +38881,9 @@ class MainWindow(QMainWindow):
         state.step_records = [r for r in state.step_records if r.get("tool_id") != data["id"]]
         state.step_records.append(record)
         if data.get("name") == "request_user_input":
+            purpose = str(
+                (args_obj or {}).get("purpose") if isinstance(args_obj, dict) else ""
+            ).strip().lower()
             pending_questions = self._extract_pending_clarify_questions_from_args(
                 args_obj if isinstance(args_obj, dict) else {}
             )
@@ -38614,10 +38891,33 @@ class MainWindow(QMainWindow):
                 state.pending_clarify_questions = pending_questions
                 state.clarify_mode_state = CLARIFY_MODE_AWAITING_USER_INPUT
                 state.clarify_phase = CLARIFY_MODE_AWAITING_USER_INPUT
-                state.clarify_round_count = min(
-                    3,
-                    max(0, int(getattr(state, "clarify_round_count", 0) or 0)) + 1,
-                )
+                if normalize_grill_mode_state(
+                    getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+                ) == GRILL_MODE_ACTIVE:
+                    if purpose == GRILL_CHECKPOINT_PURPOSE:
+                        log_ui_navigation(
+                            "grill_summary_presented",
+                            session_id=state.session_id,
+                            cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+                            round=min(
+                                GRILL_MAX_ROUNDS,
+                                max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+                            ),
+                        )
+                    else:
+                        state.grill_round_count = min(
+                            GRILL_MAX_ROUNDS,
+                            max(0, int(getattr(state, "grill_round_count", 0) or 0)) + 1,
+                        )
+                        log_ui_navigation(
+                            "grill_round_started",
+                            session_id=state.session_id,
+                            cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+                            round=state.grill_round_count,
+                            question_count=len(pending_questions),
+                        )
+                    self.refresh_grill_mode_controls(state.session_id)
+                    self.save_chat_history(session_id=state.session_id)
         if related_files and data.get("name") != "apply_patch":
             for path in related_files:
                 state.changed_files.append({"path": path, "type": "related", "summary": summary})
@@ -38720,6 +39020,69 @@ class MainWindow(QMainWindow):
             answers = result_obj.get("answers") if isinstance(result_obj.get("answers"), dict) else {}
             if answers:
                 state.clarify_answers_context.append(answers)
+            if (
+                normalize_grill_mode_state(
+                    getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+                ) == GRILL_MODE_ACTIVE
+                and str(result_obj.get("purpose") or "").strip().lower() != GRILL_CHECKPOINT_PURPOSE
+            ):
+                log_ui_navigation(
+                    "grill_round_completed",
+                    session_id=state.session_id,
+                    cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+                    round=min(
+                        GRILL_MAX_ROUNDS,
+                        max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+                    ),
+                    answered=bool(answers),
+                )
+            mode_transition = result_obj.get("mode_transition")
+            if isinstance(mode_transition, dict) and mode_transition.get("to") == RUN_MODE_EXECUTION:
+                state.grill_mode_state = GRILL_MODE_DISABLED
+                state.grill_execution_confirmed = True
+                log_ui_navigation(
+                    "grill_execution_confirmed",
+                    session_id=state.session_id,
+                    cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+                    round=min(
+                        GRILL_MAX_ROUNDS,
+                        max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+                    ),
+                )
+            cycle_transition = result_obj.get("grill_cycle_transition")
+            if isinstance(cycle_transition, dict):
+                state.grill_mode_state = GRILL_MODE_ACTIVE
+                state.grill_cycle_count = max(0, int(cycle_transition.get("cycle") or 0))
+                state.grill_round_count = 0
+                state.grill_execution_confirmed = False
+                log_ui_navigation(
+                    "grill_continue",
+                    session_id=state.session_id,
+                    cycle=state.grill_cycle_count + 1,
+                    custom=cycle_transition.get("choice") == "custom",
+                )
+            if result_obj.get("grill_checkpoint_cancelled"):
+                log_ui_navigation(
+                    "grill_checkpoint_cancelled",
+                    session_id=state.session_id,
+                    cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+                    round=min(
+                        GRILL_MAX_ROUNDS,
+                        max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+                    ),
+                )
+            elif result_obj.get("grill_input_cancelled"):
+                log_ui_navigation(
+                    "grill_input_cancelled",
+                    session_id=state.session_id,
+                    cycle=max(0, int(getattr(state, "grill_cycle_count", 0) or 0)) + 1,
+                    round=min(
+                        GRILL_MAX_ROUNDS,
+                        max(0, int(getattr(state, "grill_round_count", 0) or 0)),
+                    ),
+                )
+            self.refresh_grill_mode_controls(state.session_id)
+            self.save_chat_history(session_id=state.session_id)
         for record in state.step_records:
             if record.get("tool_id") != tool_id:
                 continue
@@ -40250,6 +40613,7 @@ class MainWindow(QMainWindow):
                 conversation_id=state.session_id,
             )
             self._rebuild_session_render_spans(state)
+            self._finish_grill_mode(state, "error")
             self.save_chat_history(session_id=state.session_id)
             log_sub_agent_runtime(
                 "ui_assistant_turn_failed",
@@ -40487,6 +40851,12 @@ class MainWindow(QMainWindow):
         state.last_flushed_content_buffer = ""
         self.update_session_tab_title(state.session_id)
         clarify_active = bool(normalize_pending_clarify_questions(getattr(state, "pending_clarify_questions", [])))
+        grill_read_only_active = bool(
+            normalize_grill_mode_state(
+                getattr(state, "grill_mode_state", GRILL_MODE_DISABLED)
+            ) == GRILL_MODE_ACTIVE
+            and not getattr(state, "grill_execution_confirmed", False)
+        )
         if clarify_active:
             self.set_session_phase("Clarifying", state.session_id)
         else:
@@ -40510,7 +40880,7 @@ class MainWindow(QMainWindow):
             return
 
         code_match = re.search(r'```\s*python(.*?)```', content, re.DOTALL | re.IGNORECASE)
-        should_run_code_block = not clarify_active
+        should_run_code_block = not clarify_active and not grill_read_only_active
         if code_match and should_run_code_block:
             code_block = code_match.group(1).strip()
             self.append_log("System: 检测到代码块，准备执行...")
@@ -40531,6 +40901,11 @@ class MainWindow(QMainWindow):
             state.code_worker.start()
             if is_current: self.normalize_session_ui(state)
         else:
+            if not clarify_active:
+                self._finish_grill_mode(
+                    state,
+                    "completed_without_execution" if grill_read_only_active else "completed",
+                )
             if clarify_active:
                 self.set_session_status("draft", state.session_id, save=True)
             else:
@@ -40594,6 +40969,7 @@ class MainWindow(QMainWindow):
                     code_text = state.last_agent_bubble.code_output_edit.toPlainText().strip()
                 except Exception:
                     code_text = ""
+            self._finish_grill_mode(state, "completed")
             self.set_session_phase("Completed", state.session_id)
             self.set_session_status("completed", state.session_id, save=True)
             diagnostic_turn_id = getattr(state, "first_submit_diagnostic_turn_id", 0)

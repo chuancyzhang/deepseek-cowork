@@ -133,6 +133,39 @@ class TestInteractionSkill(unittest.TestCase):
         self.assertTrue(result["approved"])
         self.assertEqual(result["answers"]["scope"]["selected_options"], ["current"])
 
+    def test_grilling_questionnaire_never_auto_selects_on_timeout(self):
+        with patch.object(
+            interaction_impl.interaction_service,
+            "create_request",
+            return_value={
+                "request_id": "req-grill",
+                "status": "timeout",
+                "approved": False,
+                "answers": {},
+            },
+        ) as create_mock:
+            result = interaction_impl.request_user_input(
+                message="下一步？",
+                purpose="grill_checkpoint",
+                questions=[
+                    {
+                        "id": "grill_next_action",
+                        "question": "请选择下一步",
+                        "options": [
+                            {"label": "确认并执行", "value": "execute"},
+                            {"label": "继续拷问", "value": "continue"},
+                        ],
+                    }
+                ],
+                timeout_seconds=0.01,
+                _context={"session_id": "session-grill", "run_context": {"mode": "grilling"}},
+            )
+
+        self.assertEqual(result["purpose"], "grill_checkpoint")
+        self.assertEqual(result["interaction_response"]["status"], "timeout")
+        self.assertFalse(create_mock.call_args.kwargs["metadata"]["auto_select_first_on_timeout"])
+        self.assertEqual(create_mock.call_args.kwargs["metadata"]["purpose"], "grill_checkpoint")
+
     def test_publish_artifacts_feishu_context_returns_structured_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             file_path = os.path.join(tmp, "sample.txt")

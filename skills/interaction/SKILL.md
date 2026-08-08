@@ -27,11 +27,13 @@ Ask the user for text, a single choice, or multiple choices.
 - **message** (string, required): The message to display to the user.
 - **title** (string, optional): dialog title.
 - **input_mode** (string, optional): `text`, `choice`, or `multi_choice`.
+- **purpose** (string, optional): runtime intent marker; `grill_checkpoint` is reserved for the grilling summary decision.
 - **options** (array, optional): list of selectable options.
 - **allow_free_text** (boolean, optional): allow arbitrary free-text input.
 - **timeout_seconds** (number, optional): timeout before the request is cancelled.
 
 For task clarification, use questionnaire questions with mutually exclusive choices and put the recommended choice first. The runtime removes any caller-supplied custom choice and appends exactly one `自定义` option automatically; callers must not add it themselves.
+Questionnaires issued while the runtime is in grilling mode never auto-select a recommended answer on timeout.
 
 ### publish_artifacts
 Publish generated artifacts only when the current messaging channel advertises artifact delivery.

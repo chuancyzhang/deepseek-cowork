@@ -154,11 +154,14 @@ def request_user_input(
     input_mode="text",
     options=None,
     questions=None,
+    purpose="",
     allow_free_text=True,
     timeout_seconds=120,
     _context=None,
 ):
     custom_option = {"label": "自定义", "value": "__custom__", "description": "选择后填写选项以外的自定义内容。"}
+    normalized_purpose = str(purpose or "").strip().lower()
+    grilling = str(_run_context(_context).get("mode") or "").strip().lower() == "grilling"
 
     def _normalize_question_specs(raw_questions):
         normalized = []
@@ -220,13 +223,18 @@ def request_user_input(
             allow_free_text=True,
             timeout_seconds=timeout_seconds,
             source_tool="request_user_input",
-            metadata={"input_mode": "questionnaire", "auto_select_first_on_timeout": True},
+            metadata={
+                "input_mode": "questionnaire",
+                "purpose": normalized_purpose,
+                "auto_select_first_on_timeout": not grilling,
+            },
         )
         answers = response.get("answers") if isinstance(response.get("answers"), dict) else {}
         answered_count = len(answers)
         response_summary = f"answers={answered_count}"
         return {
             "source_tool": "request_user_input",
+            "purpose": normalized_purpose,
             "content": (
                 f"已收到用户输入，共回答 {answered_count} 个问题。"
                 if response.get("approved")
@@ -245,6 +253,7 @@ def request_user_input(
                 "message": message,
                 "title": title or "需要你的输入",
                 "questions": normalized_questions,
+                "purpose": normalized_purpose,
                 "allow_free_text": True,
                 "timeout_seconds": timeout_seconds,
             },
@@ -276,7 +285,7 @@ def request_user_input(
         allow_free_text=bool(allow_free_text),
         timeout_seconds=timeout_seconds,
         source_tool="request_user_input",
-        metadata={"input_mode": mode},
+        metadata={"input_mode": mode, "purpose": normalized_purpose},
     )
     selection_preview = response.get("selected_options") or []
     response_summary = _result_preview(response)
@@ -284,6 +293,7 @@ def request_user_input(
         response_summary = f"{response_summary} | options={', '.join(str(item) for item in selection_preview)}"
     return {
         "source_tool": "request_user_input",
+        "purpose": normalized_purpose,
         "content": f"已收到用户输入：{response_summary}" if response.get("approved") else f"未收到有效输入（{response.get('status') or 'unknown'}）。",
         "content_parts": [
             {
@@ -299,6 +309,7 @@ def request_user_input(
             "title": title or "需要你的输入",
             "options": normalized_options,
             "questions": [],
+            "purpose": normalized_purpose,
             "allow_free_text": bool(allow_free_text),
             "timeout_seconds": timeout_seconds,
         },
@@ -792,6 +803,10 @@ TOOL_EXPORTS = [
                 "message": {"type": "string", "description": "The prompt shown to the user."},
                 "title": {"type": "string", "description": "Optional short dialog title."},
                 "input_mode": {"type": "string", "description": "One of text, choice, or multi_choice."},
+                "purpose": {
+                    "type": "string",
+                    "description": "Optional runtime purpose. Use grill_checkpoint only for the grilling summary decision.",
+                },
                 "options": {
                     "type": "array",
                     "description": "Optional list of choices.",

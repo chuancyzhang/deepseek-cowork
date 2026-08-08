@@ -16,6 +16,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from core.chat_storage import ChatStorage
+from core.clarify_mode import GRILL_MODE_ARMED, GRILL_MODE_DISABLED
 from core.conversation_render import is_legacy_skill_change_notice_message
 from core.theme import DesignTokens
 
@@ -196,7 +197,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
     def test_composer_add_popover_has_no_duplicate_agent_entry(self):
         source = inspect.getsource(ComposerActionPopover.__init__)
-        for title in ("添加文件", "指定能力", "沉淀为 Skill"):
+        for title in ("添加文件", "指定能力", "拷问模式", "沉淀为 Skill"):
             self.assertIn(title, source)
         self.assertNotIn("添加智能体", source)
 
@@ -206,7 +207,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         anchor = QPushButton("+", host)
         anchor.setGeometry(300, 420, 32, 32)
         hits = []
-        state = SimpleNamespace(selected_skill_names=[], messages=[])
+        state = SimpleNamespace(selected_skill_names=[], messages=[], grill_mode_state="disabled")
         window = SimpleNamespace(
             pending_conversation_skill_result=None,
             skill_manager_ready=True,
@@ -216,6 +217,7 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             _session_is_busy=lambda _state: False,
             select_files_for_prompt=lambda: hits.append("file"),
             open_session_skill_picker=lambda: hits.append("skill"),
+            toggle_grill_mode=lambda: hits.append("grill"),
             start_conversation_skill_flow=lambda: hits.append("capture"),
         )
         popover = ComposerActionPopover(window, host)
@@ -231,11 +233,18 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
         second_popover = ComposerActionPopover(window, host)
         second_rows = second_popover.findChildren(ProductActionRow)
-        self.assertFalse(second_rows[-1].isEnabled())
         second_popover.show_for(anchor, prefer_above=True)
-        QTest.mouseClick(second_rows[-1].title_label, Qt.LeftButton)
+        QTest.mouseClick(second_rows[2].title_label, Qt.LeftButton)
         self.app.processEvents()
-        self.assertEqual(hits, ["file"])
+        self.assertEqual(hits, ["file", "grill"])
+
+        third_popover = ComposerActionPopover(window, host)
+        third_rows = third_popover.findChildren(ProductActionRow)
+        self.assertFalse(third_rows[-1].isEnabled())
+        third_popover.show_for(anchor, prefer_above=True)
+        QTest.mouseClick(third_rows[-1].title_label, Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(hits, ["file", "grill"])
         host.deleteLater()
 
     def test_inline_choice_request_resolves_without_dialog(self):
@@ -444,6 +453,30 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.app.removeEventFilter(tracker)
             window.close()
             window.deleteLater()
+
+    def test_grill_mode_is_one_shot_composer_context(self):
+        state = SimpleNamespace(
+            session_id="grill-session",
+            grill_mode_state=GRILL_MODE_DISABLED,
+            grill_round_count=0,
+            grill_cycle_count=0,
+            grill_execution_confirmed=False,
+        )
+        window = MainWindow.__new__(MainWindow)
+        window.get_current_session = lambda: state
+        window._session_is_busy = lambda _state: False
+        window.refresh_grill_mode_controls = MagicMock()
+        window.refresh_composer_action_state = MagicMock()
+        window.add_system_toast = MagicMock()
+
+        MainWindow.toggle_grill_mode(window)
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_ARMED)
+        window.refresh_grill_mode_controls.assert_called_with(state.session_id)
+        window.refresh_composer_action_state.assert_called_once()
+
+        MainWindow.toggle_grill_mode(window)
+        self.assertEqual(state.grill_mode_state, GRILL_MODE_DISABLED)
+        self.assertEqual(window.refresh_composer_action_state.call_count, 2)
 
     def test_product_popover_keeps_native_window_target_click_inside(self):
         host = QWidget()

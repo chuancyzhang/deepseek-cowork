@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.clarify_mode import RUN_MODE_EXECUTION
+from core.clarify_mode import RUN_MODE_EXECUTION, RUN_MODE_GRILLING
 from core.skill_manager import SkillManager
 from core.tool_registry import (
     TOOL_SOURCE_CORE_BUILTIN,
@@ -18,6 +18,79 @@ from core.tool_registry import (
 
 
 class TestToolRegistry(unittest.TestCase):
+    def test_grilling_exposes_only_read_only_parallel_search_and_interaction_tools(self):
+        registry = ToolRegistry()
+        noop = lambda **_kwargs: None
+        registry.register(
+            "text_file_read",
+            noop,
+            "Read a workspace file",
+            {"type": "object", "properties": {}},
+            read_only=True,
+        )
+        registry.register(
+            "apply_patch",
+            noop,
+            "Apply a workspace patch",
+            {"type": "object", "properties": {}},
+            read_only=False,
+        )
+        registry.register(
+            "parallel_tools",
+            noop,
+            "Parallel reads",
+            {"type": "object", "properties": {}},
+            read_only=True,
+            always_load=True,
+        )
+        registry.register(
+            "tool_search",
+            noop,
+            "Search tools",
+            {"type": "object", "properties": {}},
+            read_only=True,
+            always_load=True,
+        )
+        registry.register(
+            "request_user_input",
+            noop,
+            "Ask user",
+            {"type": "object", "properties": {}},
+            always_load=True,
+        )
+        registry.register(
+            "list_agents",
+            noop,
+            "List agents",
+            {"type": "object", "properties": {}},
+            read_only=True,
+            always_load=True,
+        )
+
+        visible = {
+            item["function"]["name"]
+            for item in registry.definitions(
+                RUN_MODE_GRILLING,
+                discovered_tool_names={"text_file_read", "apply_patch"},
+            )
+        }
+        self.assertTrue(
+            {"text_file_read", "parallel_tools", "tool_search", "request_user_input"}.issubset(visible)
+        )
+        self.assertNotIn("apply_patch", visible)
+        self.assertNotIn("list_agents", visible)
+        self.assertNotIn(
+            "apply_patch",
+            {
+                item["name"]
+                for item in registry.search("apply patch", run_mode=RUN_MODE_GRILLING)
+            },
+        )
+        self.assertEqual(
+            registry.search("workspace file", run_mode=RUN_MODE_GRILLING)[0]["name"],
+            "text_file_read",
+        )
+
     def test_mode_filtering_and_deferred_discovery(self):
         registry = ToolRegistry()
 

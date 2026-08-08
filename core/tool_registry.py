@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from .clarify_mode import (
     RUN_MODE_EXECUTION,
+    RUN_MODE_GRILLING,
     RUN_MODE_NORMAL,
     normalize_run_mode,
 )
@@ -17,6 +18,18 @@ CORE_ALWAYS_LOAD_TOOLS = {
     "request_user_approval",
     "read_memories",
     "update_experience",
+}
+
+GRILL_INTERACTION_TOOLS = {
+    "request_user_input",
+    "request_user_approval",
+}
+GRILL_BLOCKED_AGENT_TOOLS = {
+    "spawn_agent",
+    "send_input",
+    "wait_agent",
+    "close_agent",
+    "list_agents",
 }
 
 TOOL_SOURCE_CORE_BUILTIN = "core_builtin"
@@ -349,4 +362,8 @@ class ToolRegistry:
             normalized.add(normalize_run_mode(mode))
         if RUN_MODE_NORMAL in raw_modes:
             normalized.add(RUN_MODE_EXECUTION)
+        if name in GRILL_BLOCKED_AGENT_TOOLS:
+            normalized.discard(RUN_MODE_GRILLING)
+        elif read_only or name in GRILL_INTERACTION_TOOLS:
+            normalized.add(RUN_MODE_GRILLING)
         return normalized or {RUN_MODE_EXECUTION}

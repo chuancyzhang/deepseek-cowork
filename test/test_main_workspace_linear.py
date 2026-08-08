@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QPushButton, QWidget
 
 from main import (
     ConversationHistoryRow,
@@ -61,6 +61,147 @@ class MainWorkspaceLinearTests(unittest.TestCase):
             self.window.action_btn.geometry().right(),
             self.window.input_card.width() - 1,
         )
+
+    def test_show_maximized_keeps_chat_and_composer_widths_nonzero(self):
+        self.window.showMaximized()
+        self.app.processEvents()
+        self.app.processEvents()
+
+        self.assertTrue(self.window.isMaximized())
+        self.assertGreater(self.window.input_card.width(), 0)
+        self.assertEqual(self.window.conversation_column.width(), self.window.session_tabs.width())
+        self.assertEqual(self.window.conversation_column.width(), self.window.input_card.width())
+        self.assertLessEqual(
+            self.window.action_btn.geometry().right(),
+            self.window.input_card.width() - 1,
+        )
+
+    def test_show_full_screen_keeps_chat_and_composer_widths_nonzero(self):
+        self.window.showFullScreen()
+        self.app.processEvents()
+        self.app.processEvents()
+
+        self.assertTrue(self.window.isFullScreen())
+        self.assertGreater(self.window.input_card.width(), 0)
+        self.assertEqual(self.window.conversation_column.width(), self.window.session_tabs.width())
+        self.assertEqual(self.window.conversation_column.width(), self.window.input_card.width())
+        self.assertLessEqual(
+            self.window.action_btn.geometry().right(),
+            self.window.input_card.width() - 1,
+        )
+
+    def test_show_respects_size_requested_before_first_display(self):
+        self.window.resize(900, 300)
+        self.window.show()
+        self.app.processEvents()
+        self.app.processEvents()
+
+        self.assertEqual(self.window.width(), 900)
+        self.assertEqual(self.window.height(), 300)
+
+    def test_programmatic_sidebar_restore_recomputes_conversation_spacers(self):
+        self.window.show()
+        self.app.processEvents()
+        self.window.resize(1707, 1019)
+        self.app.processEvents()
+        self.window.sync_context_drawer_layout()
+        self.app.processEvents()
+        total_width = sum(self.window.main_splitter.sizes())
+
+        self.window.main_splitter.setSizes([0, total_width])
+        self.app.processEvents()
+        self.app.processEvents()
+        collapsed_shell = self.window.dynamic_layout_metrics["shell_width"]
+        self.assertEqual(
+            self.window.conversation_left_spacer.width()
+            + self.window.conversation_column.width()
+            + self.window.conversation_right_spacer.width(),
+            collapsed_shell,
+        )
+
+        self.window.main_splitter.setSizes([DesignTokens.sidebar_width, total_width - DesignTokens.sidebar_width])
+        self.app.processEvents()
+        self.app.processEvents()
+        restored_shell = self.window.dynamic_layout_metrics["shell_width"]
+        self.assertLess(restored_shell, collapsed_shell)
+        self.assertEqual(
+            self.window.conversation_left_spacer.width()
+            + self.window.conversation_column.width()
+            + self.window.conversation_right_spacer.width(),
+            restored_shell,
+        )
+        self.assertGreaterEqual(self.window.sidebar.width(), DesignTokens.sidebar_min_width)
+        input_right = self.window.input_card.mapTo(
+            self.window.main_container,
+            self.window.input_card.rect().topRight(),
+        ).x()
+        self.assertLess(input_right, self.window.main_container.width())
+
+    def test_composer_toolbar_reflows_only_below_conversation_breakpoint(self):
+        wide_metrics = {
+            "drawer_open": False,
+            "shell_width": DesignTokens.conversation_max_width,
+            "conversation_width": DesignTokens.conversation_max_width,
+            "left_spacer_width": 0,
+            "right_spacer_width": 0,
+            "drawer_width": 0,
+        }
+        with patch.object(self.window, "_compute_conversation_shell_metrics", return_value=wide_metrics):
+            self.window.sync_conversation_widths()
+
+        self.assertEqual(self.window._composer_toolbar_mode, "wide")
+        self.assertEqual(self.window.prompt_toolbar.direction(), QBoxLayout.LeftToRight)
+        self.assertIs(self.window.prompt_context_group.parentWidget(), self.window.prompt_toolbar_container)
+        self.assertIs(self.window.prompt_action_group.parentWidget(), self.window.prompt_toolbar_container)
+
+        compact_width = DesignTokens.conversation_min_width - 1
+        compact_metrics = dict(wide_metrics)
+        compact_metrics.update(
+            shell_width=compact_width,
+            conversation_width=compact_width,
+        )
+        with patch.object(self.window, "_compute_conversation_shell_metrics", return_value=compact_metrics):
+            self.window.sync_conversation_widths()
+
+        self.assertEqual(self.window._composer_toolbar_mode, "compact")
+        self.assertEqual(self.window.prompt_toolbar.direction(), QBoxLayout.TopToBottom)
+        self.assertIs(self.window.prompt_context_group.parentWidget(), self.window.prompt_toolbar_container)
+        self.assertIs(self.window.prompt_action_group.parentWidget(), self.window.prompt_toolbar_container)
+        self.assertEqual(self.window.action_btn.size().width(), 88)
+        self.assertEqual(self.window.action_btn.size().height(), 34)
+        self.assertEqual(self.window.model_select_btn.minimumWidth(), 170)
+
+    def test_session_switch_after_sidebar_cycle_keeps_composer_in_bounds(self):
+        self.window.show()
+        self.window.resize(1707, 1019)
+        self.app.processEvents()
+        direct_session_id = self.window.current_session_id
+        total_width = sum(self.window.main_splitter.sizes())
+        self.window.main_splitter.setSizes([0, total_width])
+        self.app.processEvents()
+        self.window.main_splitter.setSizes([DesignTokens.sidebar_width, total_width - DesignTokens.sidebar_width])
+        self.app.processEvents()
+        self.app.processEvents()
+
+        with tempfile.TemporaryDirectory() as project_dir:
+            project_session_id = self.window.create_new_session(workspace_dir=project_dir)
+            self.app.processEvents()
+            self.assertEqual(self.window.current_session_id, project_session_id)
+            project_bounds = self.window.input_card.geometry()
+
+            self.window.activate_session(direct_session_id, ensure_loaded=False)
+            self.app.processEvents()
+            self.app.processEvents()
+            self.assertEqual(self.window.current_session_id, direct_session_id)
+            direct_bounds = self.window.input_card.geometry()
+            self.assertEqual(direct_bounds.x(), project_bounds.x())
+            self.assertEqual(direct_bounds.y(), project_bounds.y())
+            self.assertEqual(direct_bounds.width(), project_bounds.width())
+            input_right = self.window.input_card.mapTo(
+                self.window.main_container,
+                self.window.input_card.rect().topRight(),
+            ).x()
+            self.assertLess(input_right, self.window.main_container.width())
 
     def test_tool_arguments_accept_json_and_python_literal_without_hiding_errors(self):
         parsed, error = parse_tool_arguments("{'code': 'print(1)', 'timeout': 3}")

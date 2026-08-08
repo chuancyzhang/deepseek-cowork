@@ -301,7 +301,7 @@ import qtawesome as qta
 from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QImage, QPixmap,
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
                                QHBoxLayout, QBoxLayout, QTextEdit, QPlainTextEdit, QLineEdit, QPushButton, QLabel, QFileDialog, QScrollArea, QFrame, QDialog, QFormLayout, QCheckBox, QGroupBox, QMenu, QTabWidget, QToolButton, QFileSystemModel, QTreeView, QSplitter, QSplitterHandle, QStackedWidget, QSizePolicy, QGraphicsDropShadowEffect, QGridLayout, QComboBox, QSystemTrayIcon, QListWidget, QListWidgetItem, QDateTimeEdit, QSpinBox, QStyledItemDelegate, QStyle, QAbstractItemView)
 from PySide6.QtWidgets import QProgressBar, QScrollBar, QWidgetAction, QGraphicsOpacityEffect, QButtonGroup
 from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QUrl, QTimer, QSize, QRect, QPoint, QPointF, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QVariantAnimation, QEvent, QEventLoop, QDateTime, QFileSystemWatcher, QSortFilterProxyModel
@@ -20521,6 +20521,8 @@ class SmartSplitterHandle(QSplitterHandle):
             self.splitter().check_auto_collapse()
 
 class SmartSplitter(QSplitter):
+    sizesChanged = Signal()
+
     def __init__(self, orientation, parent=None):
         super().__init__(orientation, parent)
         self.setHandleWidth(1) # Visual width is 1px via CSS, but we keep this consistent
@@ -20563,6 +20565,10 @@ class SmartSplitter(QSplitter):
 
     def createHandle(self):
         return SmartSplitterHandle(self.orientation(), self)
+
+    def setSizes(self, sizes):
+        super().setSizes(sizes)
+        self.sizesChanged.emit()
 
     def on_handle_double_clicked(self, handle):
         # Find which handle was clicked
@@ -21497,15 +21503,12 @@ class MainWindow(QMainWindow):
             app_icon = QIcon(icon_path)
             self.setWindowIcon(app_icon)
 
-        self._display_fit_done = False
-        self._display_screen_signal_connected = False
-        self._auto_fitted_window_geometry = None
-        self.resize(1280, 720)
+        self._apply_initial_window_size()
         self.setAcceptDrops(True)
         self.workspace_dir = None
         self.right_drawer_open = False
         self.right_drawer_tab = self.RIGHT_TAB_FILES
-        self.main_layout_default_margins = (12, 20, 12, 20)
+        self.main_layout_default_margins = (16, 16, 16, 14)
         self.main_content_default_margins = (0, 0, 0, 0)
         self.context_drawer_margin = 8
         self.context_drawer_gap = 8
@@ -21769,9 +21772,11 @@ class MainWindow(QMainWindow):
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
+        self.layout().setSizeConstraint(QLayout.SetNoConstraint)
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
+        root_layout.setSizeConstraint(QLayout.SetNoConstraint)
         self.theme_preview_bar = ThemePreviewSafetyBar()
         self.theme_preview_bar.saveRequested.connect(self._save_theme_preview_from_bar)
         self.theme_preview_bar.restoreRequested.connect(self._restore_theme_preview_from_bar)
@@ -21925,7 +21930,7 @@ class MainWindow(QMainWindow):
         # --- Main Content ---
         self.main_container = QWidget()
         self.main_container.setObjectName("MainContainer")
-        self.main_container.setMinimumWidth(0)
+        self.main_container.setMinimumWidth(400) # Protect main content
         self.main_splitter.addWidget(self.main_container)
 
         # Right Sidebar (Context Drawer)
@@ -22620,7 +22625,7 @@ class MainWindow(QMainWindow):
 
         # Main Layout Construction
         layout = QVBoxLayout(self.main_container)
-        layout.setContentsMargins(16, 16, 16, 14)
+        layout.setContentsMargins(*self.main_layout_default_margins)
         layout.setSpacing(14)
 
         # Top Bar
@@ -22736,7 +22741,7 @@ class MainWindow(QMainWindow):
         self.conversation_column.setObjectName("ConversationColumn")
         self.conversation_column.setMinimumWidth(0)
         self.conversation_column.setMaximumWidth(DesignTokens.conversation_max_width)
-        self.conversation_column.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.conversation_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.conversation_column.setStyleSheet("QWidget#ConversationColumn { background: transparent; border: none; }")
         self.main_content_layout = QVBoxLayout(self.conversation_column)
         self.main_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -22775,7 +22780,7 @@ class MainWindow(QMainWindow):
         self.session_tabs.tabBar().hide()
         self.session_tabs.setMinimumWidth(0)
         self.session_tabs.setMaximumWidth(DesignTokens.conversation_max_width)
-        self.session_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.session_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self.session_tabs.setStyleSheet(
             f"""
             QTabWidget#SessionTabs::pane {{
@@ -22796,7 +22801,7 @@ class MainWindow(QMainWindow):
         self.input_card.setObjectName("ContentCard")
         self.input_card.setMinimumWidth(0)
         self.input_card.setMaximumWidth(DesignTokens.conversation_max_width)
-        self.input_card.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.input_card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.input_card.setStyleSheet(
             f"QFrame#ContentCard {{ background: {DesignTokens.bg_main}; "
             f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 8px; }}"
@@ -22834,8 +22839,6 @@ class MainWindow(QMainWindow):
         self.selected_skills_badge.setCloseToolTip("移除本会话指定能力")
         self.selected_skills_badge.setCursor(Qt.PointingHandCursor)
         self.selected_skills_badge.setFixedHeight(30)
-        self.selected_skills_badge.setMinimumWidth(0)
-        self.selected_skills_badge.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.selected_skills_badge.setVisible(False)
         self.selected_skills_badge.clicked.connect(self.open_session_skill_picker)
 
@@ -22844,16 +22847,13 @@ class MainWindow(QMainWindow):
         self.agent_picker_btn.setToolTip("为当前输入添加智能体")
         self.agent_picker_btn.setCursor(Qt.PointingHandCursor)
         self.agent_picker_btn.setFixedHeight(30)
-        self.agent_picker_btn.setMinimumWidth(0)
-        self.agent_picker_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.agent_picker_btn.setStyleSheet(apple_button_style("ghost", radius=7))
         self.agent_picker_btn.clicked.connect(self.show_agent_picker)
 
         self.model_select_btn = QToolButton()
         self.model_select_btn.setCursor(Qt.PointingHandCursor)
-        self.model_select_btn.setMinimumWidth(0)
+        self.model_select_btn.setMinimumWidth(170)
         self.model_select_btn.setMaximumWidth(320)
-        self.model_select_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.model_select_btn.setPopupMode(QToolButton.DelayedPopup)
         self.model_select_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.model_select_btn.setStyleSheet(
@@ -22875,7 +22875,7 @@ class MainWindow(QMainWindow):
         self.action_btn.setText("开始")
         self.action_btn.setIcon(qta.icon('fa5s.paper-plane', color='white'))
         self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setFixedSize(100, 34)
+        self.action_btn.setFixedSize(88, 34)
         self.action_btn.setAutoDefault(False)
         self.action_btn.setDefault(False)
         self.action_btn.setStyleSheet(apple_button_style("primary", radius=8))
@@ -22928,9 +22928,7 @@ class MainWindow(QMainWindow):
         self.project_selector_btn.setIcon(sidebar_symbol_icon("folder", DesignTokens.text_secondary, 16))
         self.project_selector_btn.setIconSize(QSize(16, 16))
         self.project_selector_btn.setFixedHeight(32)
-        self.project_selector_btn.setMinimumWidth(0)
         self.project_selector_btn.setMaximumWidth(280)
-        self.project_selector_btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.project_selector_btn.setStyleSheet(
             f"QToolButton {{ background: transparent; color: {DesignTokens.text_secondary}; border: none; "
             "border-radius: 12px; padding: 4px 10px; font-size: 12px; text-align: left; }}"
@@ -22939,25 +22937,43 @@ class MainWindow(QMainWindow):
         )
         self.project_selector_btn.clicked.connect(self.show_project_selector_menu)
 
-        prompt_context_toolbar = QHBoxLayout()
-        prompt_context_toolbar.setContentsMargins(0, 0, 0, 0)
-        prompt_context_toolbar.setSpacing(8)
-        prompt_context_toolbar.addWidget(self.tool_menu_btn)
-        prompt_context_toolbar.addWidget(self.agent_picker_btn)
-        prompt_context_toolbar.addWidget(self.selected_skills_badge)
-        prompt_context_toolbar.addWidget(self.project_selector_btn)
-        prompt_context_toolbar.addWidget(self.pause_btn)
-        prompt_context_toolbar.addWidget(self.loop_hint, 1)
-        input_card_layout.addLayout(prompt_context_toolbar)
+        self.prompt_toolbar_container = QWidget(self.input_card)
+        self.prompt_toolbar_container.setObjectName("ComposerToolbarContainer")
+        self.prompt_toolbar_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.prompt_toolbar = QBoxLayout(QBoxLayout.LeftToRight, self.prompt_toolbar_container)
+        self.prompt_toolbar.setContentsMargins(0, 0, 0, 0)
+        self.prompt_toolbar.setSpacing(8)
 
-        prompt_action_toolbar = QHBoxLayout()
-        prompt_action_toolbar.setContentsMargins(0, 0, 0, 0)
-        prompt_action_toolbar.setSpacing(8)
-        prompt_action_toolbar.addStretch()
-        prompt_action_toolbar.addWidget(self.model_select_btn, 1)
-        prompt_action_toolbar.addWidget(self.stop_btn)
-        prompt_action_toolbar.addWidget(self.action_btn)
-        input_card_layout.addLayout(prompt_action_toolbar)
+        self.prompt_context_group = QWidget(self.prompt_toolbar_container)
+        self.prompt_context_group.setObjectName("ComposerContextToolbar")
+        self.prompt_context_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        prompt_context_layout = QHBoxLayout(self.prompt_context_group)
+        prompt_context_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_context_layout.setSpacing(8)
+        prompt_context_layout.addWidget(self.tool_menu_btn)
+        prompt_context_layout.addWidget(self.agent_picker_btn)
+        prompt_context_layout.addWidget(self.selected_skills_badge)
+        prompt_context_layout.addWidget(self.project_selector_btn)
+        prompt_context_layout.addWidget(self.pause_btn)
+        prompt_context_layout.addWidget(self.loop_hint)
+        prompt_context_layout.addStretch(1)
+
+        self.prompt_action_group = QWidget(self.prompt_toolbar_container)
+        self.prompt_action_group.setObjectName("ComposerActionToolbar")
+        self.prompt_action_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        prompt_action_layout = QHBoxLayout(self.prompt_action_group)
+        prompt_action_layout.setContentsMargins(0, 0, 0, 0)
+        prompt_action_layout.setSpacing(8)
+        prompt_action_layout.addStretch(1)
+        prompt_action_layout.addWidget(self.model_select_btn)
+        prompt_action_layout.addWidget(self.stop_btn)
+        prompt_action_layout.addWidget(self.action_btn)
+
+        self.prompt_toolbar.addWidget(self.prompt_context_group, 1)
+        self.prompt_toolbar.addWidget(self.prompt_action_group)
+        self._composer_toolbar_mode = ""
+        input_card_layout.addWidget(self.prompt_toolbar_container)
+        self._apply_composer_toolbar_layout(compact=False)
 
         self.input_row = QWidget()
         self.input_row_layout = QHBoxLayout(self.input_row)
@@ -23013,6 +23029,14 @@ class MainWindow(QMainWindow):
         
         # Update UI state based on workspace
         self.update_ui_state_for_workspace()
+        self._pending_conversation_layout_sync_reasons = set()
+        self.conversation_layout_sync_timer = QTimer(self)
+        self.conversation_layout_sync_timer.setSingleShot(True)
+        self.conversation_layout_sync_timer.setInterval(0)
+        self.conversation_layout_sync_timer.timeout.connect(self._settle_conversation_layout)
+        self.main_splitter.sizesChanged.connect(
+            lambda: self._queue_conversation_layout_sync("splitter_programmatic")
+        )
         self.sync_context_drawer_layout()
         self._register_workspace_theme_components()
         bind_theme(self, self._apply_runtime_theme, surface="global")
@@ -23029,6 +23053,15 @@ class MainWindow(QMainWindow):
                     ),
                 )
         log_startup_stage("main_window_init_complete")
+
+    def _apply_composer_toolbar_layout(self, compact):
+        mode = "compact" if compact else "wide"
+        if self._composer_toolbar_mode == mode:
+            return
+        self.prompt_toolbar.setDirection(
+            QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        )
+        self._composer_toolbar_mode = mode
 
     def _register_workspace_theme_components(self):
         """Register stable presentation IDs without exposing application actions."""
@@ -23368,82 +23401,48 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             self.last_ui_update_time = now
 
-    def _connect_display_change_signal(self):
-        if self._display_screen_signal_connected:
-            return
-        handle = self.windowHandle()
-        signal = getattr(handle, "screenChanged", None) if handle is not None else None
-        if signal is None:
-            return
-        signal.connect(self._handle_display_changed)
-        self._display_screen_signal_connected = True
-
-    def _fit_window_to_available_screen(self, initial=False):
-        if self.isMaximized() or self.isFullScreen():
-            return
-        screen = self.screen() or QGuiApplication.primaryScreen()
+    def _apply_initial_window_size(self):
+        screen = QGuiApplication.primaryScreen()
         if screen is None:
-            return
+            raise RuntimeError("无法获取主屏幕逻辑尺寸，不能初始化主窗口。")
         available = screen.availableGeometry()
         margin = 12
         max_width = max(1, available.width() - margin * 2)
         max_height = max(1, available.height() - margin * 2)
-        if initial:
-            target_width = min(1280, max_width)
-            target_height = min(720, max_height)
-        else:
-            target_width = min(self.width(), max_width)
-            target_height = min(self.height(), max_height)
-            if self._auto_fitted_window_geometry is not None and self.geometry() == self._auto_fitted_window_geometry:
-                target_width = min(1280, max_width)
-                target_height = min(720, max_height)
-
-        current = self.geometry()
-        target_x = max(
-            available.left() + margin,
-            min(current.x(), available.right() - target_width + 1 - margin),
-        )
-        target_y = max(
-            available.top() + margin,
-            min(current.y(), available.bottom() - target_height + 1 - margin),
-        )
-        target = QRect(target_x, target_y, target_width, target_height)
-        if current != target:
-            # Qt derives a top-level minimum from the initial layout hint when
-            # the window is first shown. Reset that implicit constraint before
-            # applying the logical available-screen geometry.
-            self.setMinimumSize(1, 1)
-            if target_width < current.width() or target_height < current.height():
-                for widget in (
-                    getattr(self, "conversation_column", None),
-                    getattr(self, "session_tabs", None),
-                    getattr(self, "input_card", None),
-                ):
-                    if widget is not None:
-                        widget.setMinimumWidth(0)
-                        widget.setMaximumWidth(DesignTokens.conversation_max_width)
-            self.setGeometry(target)
-        self._auto_fitted_window_geometry = self.geometry()
-        self._display_fit_done = True
-        if hasattr(self, "right_sidebar"):
-            self.sync_context_drawer_layout()
+        target_width = min(1280, max_width)
+        target_height = min(720, max_height)
+        self.resize(target_width, target_height)
         log_ui_navigation(
-            "main_window_display_fit",
-            initial=bool(initial),
+            "main_window_initial_size",
             screen_geometry=[available.x(), available.y(), available.width(), available.height()],
-            window_geometry=[self.x(), self.y(), self.width(), self.height()],
+            target_size=[target_width, target_height],
             device_pixel_ratio=float(getattr(screen, "devicePixelRatio", lambda: 1.0)() or 1.0),
         )
 
-    def _handle_display_changed(self, _screen=None):
-        QTimer.singleShot(0, lambda: self._fit_window_to_available_screen(initial=False))
+    def _queue_conversation_layout_sync(self, reason="layout"):
+        self._pending_conversation_layout_sync_reasons.add(str(reason or "layout"))
+        self.conversation_layout_sync_timer.start()
+
+    def _settle_conversation_layout(self):
+        reasons = sorted(self._pending_conversation_layout_sync_reasons)
+        self._pending_conversation_layout_sync_reasons.clear()
+        self.sync_context_drawer_layout()
+        if "splitter_programmatic" in reasons:
+            metrics = dict(getattr(self, "dynamic_layout_metrics", {}) or {})
+            log_ui_navigation(
+                "main_splitter_programmatic_resize",
+                splitter_sizes=list(self.main_splitter.sizes()),
+                main_width=int(self.main_container.width()),
+                shell_width=int(metrics.get("shell_width", 0) or 0),
+                spacer_widths=[
+                    int(self.conversation_left_spacer.width()),
+                    int(self.conversation_right_spacer.width()),
+                ],
+            )
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._connect_display_change_signal()
-        if not self._display_fit_done:
-            self._fit_window_to_available_screen(initial=True)
-            QTimer.singleShot(0, lambda: self._fit_window_to_available_screen(initial=False))
+        self._queue_conversation_layout_sync("show")
         if not self._startup_hydration_scheduled:
             self._startup_hydration_scheduled = True
             QTimer.singleShot(0, self._run_startup_hydration)
@@ -24124,17 +24123,12 @@ class MainWindow(QMainWindow):
         self.dynamic_user_bubble_width = user_bubble_width
 
         self._apply_conversation_shell_metrics(metrics)
-        if getattr(self, "_display_fit_done", False):
-            self.conversation_column.setFixedWidth(conversation_width)
-            self.session_tabs.setFixedWidth(conversation_width)
-            self.input_card.setFixedWidth(conversation_width)
-        else:
-            # Before the first display fit, fixed widths would become the
-            # QMainWindow minimum size and prevent high-DPI small screens from
-            # receiving the initial geometry requested above.
-            for widget in (self.conversation_column, self.session_tabs, self.input_card):
-                widget.setMinimumWidth(0)
-                widget.setMaximumWidth(DesignTokens.conversation_max_width)
+        self.conversation_column.setFixedWidth(conversation_width)
+        self.session_tabs.setFixedWidth(conversation_width)
+        self.input_card.setFixedWidth(conversation_width)
+        self._apply_composer_toolbar_layout(
+            compact=conversation_width < DesignTokens.conversation_min_width
+        )
 
         for bubble in self._iter_session_chat_bubbles():
             bubble.apply_dynamic_widths(message_width, user_bubble_width)

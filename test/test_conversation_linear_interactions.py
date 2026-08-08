@@ -574,6 +574,71 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertIn("2.5 秒", bubble.think_toggle_btn.text())
         bubble.deleteLater()
 
+    def test_completed_live_turn_folds_process_and_can_expand_it_again(self):
+        group = AssistantTurnGroup("turn-1-group-1")
+        first = ChatBubble("Agent", "")
+        first.update_thinking("先检查环境")
+        first.set_main_content("阶段结果", final=True)
+        tool = ToolCallCard("run_command", {"command": "pytest"}, "tool-1")
+        first.add_tool_card(tool)
+        final = ChatBubble("Agent", "")
+        final.update_thinking("汇总结论")
+        final.set_main_content("检查完成。", final=True)
+        group.add_stage(first)
+        group.add_stage(final)
+
+        self.assertTrue(group.process_disclosure.isHidden())
+        self.assertTrue(first.isVisibleTo(group))
+        group.finalize_process(final)
+
+        self.assertFalse(group.process_disclosure.isHidden())
+        self.assertIn("2 个阶段", group.process_disclosure.text())
+        self.assertIn("1 次 Tool 调用", group.process_disclosure.text())
+        self.assertTrue(first.isHidden())
+        self.assertFalse(final.isHidden())
+        self.assertTrue(final.thinking_widget.isHidden())
+        self.assertEqual(final.main_content_text, "检查完成。")
+
+        group.process_disclosure.setChecked(True)
+        self.assertFalse(first.isHidden())
+        self.assertFalse(final.thinking_widget.isHidden())
+        self.assertFalse(first.think_container.isHidden())
+        self.assertFalse(final.think_container.isHidden())
+
+        group.process_disclosure.setChecked(False)
+        self.assertTrue(first.isHidden())
+        self.assertTrue(final.thinking_widget.isHidden())
+        group.deleteLater()
+
+    def test_live_process_waits_for_terminal_result_render_before_folding(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_live_process_fold_boundary")
+            state.active_turn_id = 1
+            window.set_session_status("running", state.session_id)
+            bubble = window._append_live_thinking_segment(state)
+            group = state.active_agent_turn_group
+            bubble.update_thinking("仍在分析")
+            bubble.set_main_content("正在输出", final=False)
+
+            self.assertTrue(group.process_disclosure.isHidden())
+            self.assertFalse(bubble.isHidden())
+            window.set_session_status("completed", state.session_id)
+            self.assertTrue(group.process_finalization_pending)
+            self.assertTrue(group.process_disclosure.isHidden())
+            self.assertFalse(bubble.isHidden())
+
+            bubble.set_main_content("最终结果", final=True)
+            self.assertFalse(group.process_finalization_pending)
+            self.assertFalse(group.process_disclosure.isHidden())
+            self.assertFalse(group.process_disclosure.isChecked())
+            self.assertTrue(bubble.thinking_widget.isHidden())
+            self.assertEqual(bubble.main_content_text, "最终结果")
+        finally:
+            window.close()
+            window.deleteLater()
+
     def test_agent_bubble_has_no_sub_agent_pip_or_raw_log_widgets(self):
         bubble = ChatBubble("Agent", "")
         self.assertFalse(hasattr(bubble, "sub_agent_indicators"))

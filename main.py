@@ -16960,6 +16960,10 @@ class AssistantTurnGroup(QFrame):
         self.group_id = str(group_id or uuid.uuid4().hex)
         self.stage_bubbles = []
         self.stage_separators = []
+        self.process_finalized = False
+        self.process_expanded = True
+        self.process_finalization_pending = False
+        self.process_result_bubble = None
         self.setObjectName("AssistantTurnGroup")
         self.setFrameShape(QFrame.NoFrame)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -16968,12 +16972,20 @@ class AssistantTurnGroup(QFrame):
         self.group_layout.setContentsMargins(0, 0, 0, 0)
         self.group_layout.setSpacing(0)
         self.group_layout.setAlignment(Qt.AlignTop)
+        self.process_disclosure = QPushButton(self)
+        self.process_disclosure.setObjectName("HistoricalProcessDisclosure")
+        self.process_disclosure.setCheckable(True)
+        self.process_disclosure.setCursor(Qt.PointingHandCursor)
+        self.process_disclosure.setVisible(False)
+        self.process_disclosure.toggled.connect(self.set_process_expanded)
+        self.group_layout.addWidget(self.process_disclosure)
         bind_theme(self, self.refresh_theme, surface="conversation")
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(
             "QFrame#AssistantTurnGroup { background: transparent; border: none; }"
         )
+        self.process_disclosure.setStyleSheet(apple_disclosure_button_style())
         for separator in self.stage_separators:
             separator_layout = separator.layout()
             if separator_layout is not None:
@@ -17021,6 +17033,17 @@ class AssistantTurnGroup(QFrame):
 
     def sync_stage_visibility(self):
         """Hide semantically empty stages and separators without changing stage order."""
+        if self.process_finalized and not self.process_expanded:
+            for bubble in self.stage_bubbles:
+                bubble.setVisible(bubble is self.process_result_bubble)
+                if bubble.thinking_widget is not None:
+                    bubble.thinking_widget.setVisible(False)
+            for separator in self.stage_separators:
+                separator.setVisible(False)
+            self.setVisible(bool(self.process_disclosure.isVisible() or self.process_result_bubble is not None))
+            self.group_layout.invalidate()
+            self.updateGeometry()
+            return
         visible_before = False
         for index, bubble in enumerate(self.stage_bubbles):
             visible = bubble.has_visible_stage_content()
@@ -17032,6 +17055,92 @@ class AssistantTurnGroup(QFrame):
         self.setVisible(visible_before)
         self.group_layout.invalidate()
         self.updateGeometry()
+
+    def _process_counts(self, result_bubble):
+        process_stage_count = 0
+        tool_count = 0
+        for bubble in self.stage_bubbles:
+            bubble_tool_count = sum(
+                1 for event in bubble.timeline_events if isinstance(event, ToolCallCard)
+            )
+            tool_count += bubble_tool_count
+            has_reasoning = bubble._has_thinking_details()
+            if bubble is not result_bubble or has_reasoning or bubble_tool_count:
+                process_stage_count += 1
+        return process_stage_count, tool_count
+
+    def _refresh_process_disclosure_text(self, stage_count, tool_count):
+        parts = []
+        if stage_count:
+            parts.append(f"{stage_count} 个阶段")
+        if tool_count:
+            parts.append(f"{tool_count} 次 Tool 调用")
+        summary = " · ".join(parts) or "执行详情"
+        arrow = "▴" if self.process_disclosure.isChecked() else "▾"
+        self.process_disclosure.setText(f" 执行过程 · {summary}  {arrow}")
+        self.process_disclosure.setAccessibleName(
+            f"执行过程，{summary}，{'已展开' if self.process_disclosure.isChecked() else '已折叠'}"
+        )
+
+    def request_process_finalization(self, result_bubble=None):
+        result_bubble = result_bubble or self.active_stage()
+        if result_bubble is None:
+            return False
+        if not bool(getattr(result_bubble, "_rendered_main_content_final", False)):
+            self.process_finalization_pending = True
+            self.process_result_bubble = result_bubble
+            return False
+        self.finalize_process(result_bubble)
+        return True
+
+    def complete_pending_process_finalization(self, result_bubble):
+        if not self.process_finalization_pending or result_bubble is not self.process_result_bubble:
+            return False
+        self.finalize_process(result_bubble)
+        return True
+
+    def finalize_process(self, result_bubble=None):
+        result_bubble = result_bubble or self.active_stage()
+        if result_bubble is None:
+            raise RuntimeError("折叠执行过程时缺少最终结果阶段。")
+        self.process_finalization_pending = False
+        self.process_finalized = True
+        self.process_result_bubble = result_bubble
+        stage_count, tool_count = self._process_counts(result_bubble)
+        has_process = bool(stage_count or tool_count)
+        self.process_disclosure.setVisible(has_process)
+        self.process_disclosure.blockSignals(True)
+        self.process_disclosure.setChecked(False)
+        self.process_disclosure.blockSignals(False)
+        self.process_expanded = False
+        self._refresh_process_disclosure_text(stage_count, tool_count)
+        self.sync_stage_visibility()
+        log_sub_agent_runtime(
+            "ui_assistant_process_folded",
+            session_id=str(getattr(result_bubble, "session_id", "") or ""),
+            group_id=self.group_id,
+            stage_count=stage_count,
+            tool_count=tool_count,
+            has_process=has_process,
+        )
+
+    def set_process_expanded(self, expanded):
+        if not self.process_finalized:
+            return
+        self.process_expanded = bool(expanded)
+        if self.process_expanded:
+            for bubble in self.stage_bubbles:
+                if bubble._has_thinking_details():
+                    bubble.thinking_widget.setVisible(True)
+                    bubble.think_toggle_btn.setChecked(True)
+        self._refresh_process_disclosure_text(*self._process_counts(self.process_result_bubble))
+        self.sync_stage_visibility()
+        log_sub_agent_runtime(
+            "ui_assistant_process_toggled",
+            session_id=str(getattr(self.process_result_bubble, "session_id", "") or ""),
+            group_id=self.group_id,
+            expanded=self.process_expanded,
+        )
 
     def active_stage(self):
         return self.stage_bubbles[-1] if self.stage_bubbles else None
@@ -18274,6 +18383,10 @@ class ChatBubble(QFrame):
         QTimer.singleShot(60, self.content_edit.scheduleAdjustHeight)
         QTimer.singleShot(0, self._refresh_conversation_geometry)
         QTimer.singleShot(60, self._refresh_conversation_geometry)
+        if final:
+            parent = self.parentWidget()
+            if isinstance(parent, AssistantTurnGroup):
+                parent.complete_pending_process_finalization(self)
 
     def _sync_inline_visualizations(self, text):
         marker = "::cowork-inline-vis{file="
@@ -19917,6 +20030,7 @@ class SessionState:
         self.temp_thinking_bubble = None
         self.last_agent_bubble = None
         self.active_agent_turn_group = None
+        self.live_agent_turn_groups = []
         self.agent_turn_group_sequence = 0
         self.agent_stage_closed = False
         self.llm_worker = None
@@ -26168,6 +26282,7 @@ class MainWindow(QMainWindow):
             state.live_activity = True
         elif status in {"completed", "error", "interrupted", "draft"}:
             state.live_activity = False
+            self._finalize_live_turn_process_groups(state)
         if status in {"completed", "error", "interrupted"}:
             self._mark_session_automation_completed(state, status)
         if save and state.messages:
@@ -26175,6 +26290,14 @@ class MainWindow(QMainWindow):
         self.refresh_session_activity_indicator(state.session_id)
         if state.session_id == self.current_session_id:
             self.refresh_context_badges(state.session_id)
+
+    def _finalize_live_turn_process_groups(self, state):
+        groups = list(getattr(state, "live_agent_turn_groups", []) or [])
+        state.live_agent_turn_groups = []
+        for group in groups:
+            if group is None or not _qt_object_alive(group):
+                continue
+            group.request_process_finalization(group.active_stage())
 
     def refresh_change_list(self, session_id=None):
         state = self.get_session(session_id)
@@ -27660,6 +27783,7 @@ class MainWindow(QMainWindow):
         state.temp_thinking_bubble = None
         state.last_agent_bubble = None
         state.active_agent_turn_group = None
+        state.live_agent_turn_groups = []
         state.agent_turn_group_sequence = 0
         state.agent_stage_closed = False
         state.ui_timeline_events = []
@@ -37146,6 +37270,7 @@ class MainWindow(QMainWindow):
         if group is None:
             group = AssistantTurnGroup(self._next_agent_turn_group_id(state))
             state.active_agent_turn_group = group
+            state.live_agent_turn_groups.append(group)
             office_card = self._office_draft_card_for_state(state) if getattr(state, "office_draft_preview_pending", False) else None
             if office_card is not None:
                 office_card.add_process_widget(group)

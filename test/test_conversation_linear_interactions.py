@@ -1127,6 +1127,357 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(checkpoint.status, "applied")
         checkpoint.deleteLater()
 
+    def test_pending_guidance_card_edits_inline_and_terminal_status_hides_actions(self):
+        checkpoint = GuidanceTimelineEvent(
+            "guide-editable",
+            "先检查测试",
+            status="queued",
+            mutation_ready=True,
+        )
+        try:
+            self.assertFalse(checkpoint.edit_btn.isHidden())
+            self.assertFalse(checkpoint.delete_btn.isHidden())
+
+            checkpoint.begin_inline_edit()
+            self.assertFalse(checkpoint.content_editor.isHidden())
+            self.assertTrue(checkpoint.edit_btn.isHidden())
+            checkpoint.content_editor.setPlainText("先检查缓存测试")
+
+            checkpoint.set_status("applied")
+            self.assertTrue(checkpoint.content_editor.isHidden())
+            self.assertTrue(checkpoint.edit_btn.isHidden())
+            self.assertTrue(checkpoint.delete_btn.isHidden())
+            self.assertEqual(checkpoint.content_label.text(), "先检查测试")
+        finally:
+            checkpoint.deleteLater()
+
+    def test_local_pending_guidance_edit_updates_worker_state_timeline_and_card(self):
+        class _Worker:
+            def __init__(self):
+                self.replacement = None
+
+            def isRunning(self):
+                return True
+
+            def update_guidance(self, message_id, message, expected_turn_id=None):
+                self.replacement = message
+                return {
+                    "updated": message_id == "guide-edit" and expected_turn_id == 1,
+                    "message_id": message_id,
+                    "turn_id": str(expected_turn_id),
+                }
+
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            worker = _Worker()
+            state.llm_worker = worker
+            state.active_turn_id = 1
+            message = {
+                "id": "guide-edit",
+                "role": "user",
+                "content": "原引导",
+                "meta": {
+                    "display_content": "原引导",
+                    "same_turn_guidance": True,
+                    "turn_id": "1",
+                },
+            }
+            state.pending_guidance_messages = [message]
+            state.messages = []
+            state.ui_timeline_events = [{
+                "kind": "guidance",
+                "message_id": "guide-edit",
+                "status": "queued",
+                "finished_at": None,
+                "text": "原引导",
+            }]
+            window.add_turn_guidance_inline(
+                message,
+                display_content="原引导",
+                status="queued",
+                session_id=state.session_id,
+                mutation_ready=True,
+            )
+            card = state.guidance_widgets["guide-edit"]
+            card.begin_inline_edit()
+            card.content_editor.setPlainText("新引导")
+            card.submit_inline_edit()
+
+            self.assertEqual(worker.replacement["content"], "新引导")
+            self.assertEqual(worker.replacement["meta"]["turn_id"], "1")
+            self.assertEqual(state.pending_guidance_messages[0]["content"], "新引导")
+            self.assertEqual(state.messages, [])
+            self.assertEqual(state.ui_timeline_events[0]["text"], "新引导")
+            self.assertEqual(card.content_label.text(), "新引导")
+            self.assertFalse(card.edit_btn.isHidden())
+        finally:
+            state.llm_worker = None
+            window.close()
+            window.deleteLater()
+
+    def test_pending_guidance_delete_restores_text_and_attachments_to_composer(self):
+        class _Worker:
+            def isRunning(self):
+                return True
+
+            def delete_guidance(self, message_id, expected_turn_id=None):
+                return {
+                    "deleted": message_id == "guide-delete" and expected_turn_id == 2,
+                    "message_id": message_id,
+                    "turn_id": str(expected_turn_id),
+                }
+
+        attachment = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+        attachment.close()
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.llm_worker = _Worker()
+            state.active_turn_id = 2
+            window.input_field.setPlainText("已有草稿")
+            state.composer_draft = "已有草稿"
+            message = {
+                "id": "guide-delete",
+                "role": "user",
+                "content": "撤回这条",
+                "content_parts": [
+                    {"type": "text", "text": "撤回这条"},
+                    {"type": "input_file", "path": attachment.name},
+                ],
+                "meta": {
+                    "display_content": "撤回这条",
+                    "user_added_files": [attachment.name],
+                    "same_turn_guidance": True,
+                    "turn_id": "2",
+                },
+            }
+            state.pending_guidance_messages = [message]
+            state.ui_timeline_events = [{
+                "kind": "guidance",
+                "message_id": "guide-delete",
+                "status": "waiting_tool",
+                "finished_at": None,
+                "text": "撤回这条",
+            }]
+            window.add_turn_guidance_inline(
+                message,
+                display_content="撤回这条",
+                attachments=window._message_user_attachments(message),
+                status="waiting_tool",
+                session_id=state.session_id,
+                mutation_ready=True,
+            )
+
+            self.assertTrue(window.delete_pending_guidance(state.session_id, "guide-delete"))
+            self.assertEqual(window.input_field.toPlainText(), "撤回这条\n\n已有草稿")
+            self.assertEqual(state.composer_draft, "撤回这条\n\n已有草稿")
+            self.assertIn(os.path.normpath(attachment.name), state.prompt_files)
+            self.assertEqual(state.pending_guidance_messages, [])
+            self.assertEqual(state.ui_timeline_events, [])
+            self.assertNotIn("guide-delete", state.guidance_widgets)
+        finally:
+            state.llm_worker = None
+            window.close()
+            window.deleteLater()
+            os.unlink(attachment.name)
+
+    def test_pending_guidance_mutation_never_rewrites_ledger_message(self):
+        class _Worker:
+            def __init__(self):
+                self.calls = []
+
+            def isRunning(self):
+                return True
+
+            def update_guidance(self, *_args, **_kwargs):
+                self.calls.append("update")
+                return {"updated": True, "turn_id": "9"}
+
+            def delete_guidance(self, *_args, **_kwargs):
+                self.calls.append("delete")
+                return {"deleted": True, "turn_id": "9"}
+
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            worker = _Worker()
+            state.llm_worker = worker
+            state.active_turn_id = 9
+            pending = {
+                "id": "guide-ledger",
+                "role": "user",
+                "content": "待应用内容",
+                "meta": {
+                    "display_content": "待应用内容",
+                    "same_turn_guidance": True,
+                    "turn_id": "9",
+                },
+            }
+            ledger_message = {
+                **pending,
+                "content": "已入账内容",
+                "meta": {**pending["meta"], "sequence": 7, "request_id": "request-1"},
+            }
+            state.pending_guidance_messages = [pending]
+            state.messages = [ledger_message]
+            state.ui_timeline_events = [{
+                "kind": "guidance",
+                "message_id": "guide-ledger",
+                "status": "queued",
+                "finished_at": None,
+                "text": "待应用内容",
+            }]
+            window.add_turn_guidance_inline(
+                pending,
+                display_content="待应用内容",
+                status="queued",
+                session_id=state.session_id,
+                mutation_ready=True,
+            )
+
+            with patch.object(window, "add_system_toast"):
+                self.assertFalse(
+                    window.edit_pending_guidance_inline(
+                        state.session_id,
+                        "guide-ledger",
+                        "不能改写账本",
+                    )
+                )
+                self.assertFalse(window.delete_pending_guidance(state.session_id, "guide-ledger"))
+
+            self.assertEqual(worker.calls, [])
+            self.assertIs(state.messages[0], ledger_message)
+            self.assertEqual(state.messages[0]["content"], "已入账内容")
+            self.assertEqual(state.messages[0]["meta"]["sequence"], 7)
+            self.assertEqual(state.messages[0]["meta"]["request_id"], "request-1")
+        finally:
+            state.llm_worker = None
+            window.close()
+            window.deleteLater()
+
+    def test_guidance_restore_targets_background_session_draft(self):
+        window = MainWindow()
+        try:
+            foreground = window.get_current_session()
+            window.input_field.setPlainText("前台草稿")
+            foreground.composer_draft = "前台草稿"
+            background_id = window.create_new_session(make_current=False)
+            background = window.get_session(background_id)
+            background.composer_draft = "后台原草稿"
+            with patch.object(window, "add_system_toast"):
+                self.assertTrue(
+                    window._restore_guidance_to_composer(
+                        background,
+                        "撤回内容",
+                        [],
+                        toast_text="已恢复",
+                        tone="success",
+                    )
+                )
+
+            self.assertEqual(window.input_field.toPlainText(), "前台草稿")
+            self.assertEqual(background.composer_draft, "撤回内容\n\n后台原草稿")
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_pending_guidance_edit_failure_keeps_unsaved_text_actionable(self):
+        class _Worker:
+            def isRunning(self):
+                return True
+
+            def update_guidance(self, *_args, **_kwargs):
+                return {"updated": False, "error": "daemon_unavailable", "turn_id": "3"}
+
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.llm_worker = _Worker()
+            state.active_turn_id = 3
+            message = {
+                "id": "guide-failed-edit",
+                "role": "user",
+                "content": "原内容",
+                "meta": {"display_content": "原内容", "same_turn_guidance": True, "turn_id": "3"},
+            }
+            state.pending_guidance_messages = [message]
+            state.ui_timeline_events = [{
+                "kind": "guidance",
+                "message_id": "guide-failed-edit",
+                "status": "queued",
+                "finished_at": None,
+                "text": "原内容",
+            }]
+            window.add_turn_guidance_inline(
+                message,
+                display_content="原内容",
+                status="queued",
+                session_id=state.session_id,
+                mutation_ready=True,
+            )
+            card = state.guidance_widgets["guide-failed-edit"]
+            card.begin_inline_edit()
+            card.content_editor.setPlainText("尚未保存的新内容")
+            card.submit_inline_edit()
+
+            self.assertTrue(card.editing)
+            self.assertFalse(card.content_editor.isHidden())
+            self.assertTrue(card.content_editor.isEnabled())
+            self.assertEqual(card.content_editor.toPlainText(), "尚未保存的新内容")
+            self.assertEqual(state.pending_guidance_messages[0]["content"], "原内容")
+        finally:
+            state.llm_worker = None
+            window.close()
+            window.deleteLater()
+
+    def test_safe_point_race_marks_guidance_applied_without_restoring_composer(self):
+        class _Worker:
+            def isRunning(self):
+                return True
+
+            def delete_guidance(self, *_args, **_kwargs):
+                return {"deleted": False, "error": "guidance_not_pending", "turn_id": "4"}
+
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.llm_worker = _Worker()
+            state.active_turn_id = 4
+            window.input_field.setPlainText("保留草稿")
+            message = {
+                "id": "guide-race",
+                "role": "user",
+                "content": "来不及撤回",
+                "meta": {"display_content": "来不及撤回", "same_turn_guidance": True, "turn_id": "4"},
+            }
+            state.pending_guidance_messages = [message]
+            state.ui_timeline_events = [{
+                "kind": "guidance",
+                "message_id": "guide-race",
+                "status": "queued",
+                "finished_at": None,
+                "text": "来不及撤回",
+            }]
+            window.add_turn_guidance_inline(
+                message,
+                display_content="来不及撤回",
+                status="queued",
+                session_id=state.session_id,
+                mutation_ready=True,
+            )
+
+            self.assertFalse(window.delete_pending_guidance(state.session_id, "guide-race"))
+            card = state.guidance_widgets["guide-race"]
+            self.assertEqual(card.status, "applied")
+            self.assertTrue(card.edit_btn.isHidden())
+            self.assertTrue(card.delete_btn.isHidden())
+            self.assertEqual(window.input_field.toPlainText(), "保留草稿")
+        finally:
+            state.llm_worker = None
+            window.close()
+            window.deleteLater()
+
     def test_live_guidance_splits_thinking_into_conversational_segments(self):
         window = MainWindow()
         try:
@@ -1149,6 +1500,9 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             }
             window._render_turn_guidance_checkpoint(state, message, "调整方向", [])
             guidance = state.guidance_widgets["guide-live"]
+            self.assertTrue(guidance.edit_btn.isHidden())
+            window._accept_turn_guidance(state, message, "调整方向", [])
+            self.assertFalse(guidance.edit_btn.isHidden())
             continuation = state.temp_thinking_bubble
             guidance_wrapper = guidance.parentWidget()
 
@@ -1450,7 +1804,12 @@ class ConversationLinearInteractionTests(unittest.TestCase):
                                 "function": {"name": "run_command", "arguments": "{}"},
                             }],
                         },
-                        {"role": "tool", "tool_call_id": "tool-live-missing-final", "content": "ok"},
+                        {
+                            "id": "tool-result-live-missing-final",
+                            "role": "tool",
+                            "tool_call_id": "tool-live-missing-final",
+                            "content": "ok",
+                        },
                         {"id": "assistant-empty-final", "role": "assistant", "content": ""},
                     ],
                 },

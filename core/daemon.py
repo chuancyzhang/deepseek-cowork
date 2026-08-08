@@ -409,6 +409,48 @@ class DaemonState:
             }
         return worker.steer(message, expected_turn_id=expected)
 
+    def update_guidance_session(self, session_id, expected_turn_id, message_id, message):
+        with self.lock:
+            active = self.active_workers.get(session_id)
+            if isinstance(active, dict):
+                worker = active.get("worker")
+                active_turn_id = str(active.get("turn_id") or "")
+            else:
+                worker = active
+                active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
+        expected = str(expected_turn_id or "")
+        if not worker:
+            return {"updated": False, "error": "turn_not_active", "turn_id": active_turn_id}
+        if not expected or expected != active_turn_id:
+            return {
+                "updated": False,
+                "error": "turn_mismatch",
+                "expected_turn_id": expected,
+                "turn_id": active_turn_id,
+            }
+        return worker.update_guidance(message_id, message, expected_turn_id=expected)
+
+    def delete_guidance_session(self, session_id, expected_turn_id, message_id):
+        with self.lock:
+            active = self.active_workers.get(session_id)
+            if isinstance(active, dict):
+                worker = active.get("worker")
+                active_turn_id = str(active.get("turn_id") or "")
+            else:
+                worker = active
+                active_turn_id = str(getattr(worker, "turn_id", "") or "") if worker else ""
+        expected = str(expected_turn_id or "")
+        if not worker:
+            return {"deleted": False, "error": "turn_not_active", "turn_id": active_turn_id}
+        if not expected or expected != active_turn_id:
+            return {
+                "deleted": False,
+                "error": "turn_mismatch",
+                "expected_turn_id": expected,
+                "turn_id": active_turn_id,
+            }
+        return worker.delete_guidance(message_id, expected_turn_id=expected)
+
     def _close_live_subagents(self, session_id, force=False):
         try:
             close_reason = "Daemon 会话已停止，子 Agent 被终止。" if force else "Daemon 会话已结束，子 Agent 已关闭。"
@@ -1079,6 +1121,36 @@ class DaemonRequestHandler(socketserver.StreamRequestHandler):
             result = self.server.state.steer_session(session_id, expected_turn_id, message)
             self._send({"status": "ok", **result})
             return
+        if action == "update_guidance":
+            session_id = data.get("session_id")
+            expected_turn_id = data.get("expected_turn_id")
+            message_id = data.get("message_id")
+            message = data.get("message")
+            if not session_id or expected_turn_id in (None, "") or not message_id:
+                self._send({"status": "error", "error": "Missing guidance update fields"})
+                return
+            result = self.server.state.update_guidance_session(
+                session_id,
+                expected_turn_id,
+                message_id,
+                message,
+            )
+            self._send({"status": "ok", **result})
+            return
+        if action == "delete_guidance":
+            session_id = data.get("session_id")
+            expected_turn_id = data.get("expected_turn_id")
+            message_id = data.get("message_id")
+            if not session_id or expected_turn_id in (None, "") or not message_id:
+                self._send({"status": "error", "error": "Missing guidance delete fields"})
+                return
+            result = self.server.state.delete_guidance_session(
+                session_id,
+                expected_turn_id,
+                message_id,
+            )
+            self._send({"status": "ok", **result})
+            return
         if action == "refresh_skills":
             try:
                 event = SkillChangeEvent.create(
@@ -1225,6 +1297,33 @@ class DaemonClient:
                     "session_id": session_id,
                     "expected_turn_id": str(expected_turn_id or ""),
                     "message": message,
+                }
+            )
+        except Exception:
+            return None
+
+    def update_guidance(self, session_id, expected_turn_id, message_id, message):
+        try:
+            return self._request(
+                {
+                    "action": "update_guidance",
+                    "session_id": session_id,
+                    "expected_turn_id": str(expected_turn_id or ""),
+                    "message_id": str(message_id or ""),
+                    "message": message,
+                }
+            )
+        except Exception:
+            return None
+
+    def delete_guidance(self, session_id, expected_turn_id, message_id):
+        try:
+            return self._request(
+                {
+                    "action": "delete_guidance",
+                    "session_id": session_id,
+                    "expected_turn_id": str(expected_turn_id or ""),
+                    "message_id": str(message_id or ""),
                 }
             )
         except Exception:

@@ -1014,6 +1014,76 @@ class LLMWorker(QThread):
         self.step_signal.emit("System: Guidance queued for the active turn.")
         return {"accepted": True, "turn_id": self.turn_id}
 
+    def update_guidance(self, message_id, message, expected_turn_id=None):
+        """Replace guidance only while it is still outside the request ledger."""
+        expected = str(expected_turn_id or "")
+        if expected and expected != self.turn_id:
+            return {
+                "updated": False,
+                "error": "turn_mismatch",
+                "expected_turn_id": expected,
+                "turn_id": self.turn_id,
+            }
+        target_id = str(message_id or "").strip()
+        if not target_id:
+            return {"updated": False, "error": "invalid_message_id", "turn_id": self.turn_id}
+        if not isinstance(message, dict):
+            return {"updated": False, "error": "invalid_message", "turn_id": self.turn_id}
+        guidance = json_copy(message, {})
+        guidance["id"] = target_id
+        guidance["role"] = "user"
+        has_content = bool(str(guidance.get("content") or "").strip())
+        has_parts = bool(guidance.get("content_parts"))
+        if not has_content and not has_parts:
+            return {"updated": False, "error": "empty_input", "turn_id": self.turn_id}
+        with self._guidance_lock:
+            if not self._guidance_open or self.is_stopped:
+                return {"updated": False, "error": "turn_not_active", "turn_id": self.turn_id}
+            for index, pending in enumerate(self._pending_guidance):
+                if str((pending or {}).get("id") or "") != target_id:
+                    continue
+                original_meta = pending.get("meta") if isinstance(pending.get("meta"), dict) else {}
+                replacement_meta = guidance.get("meta") if isinstance(guidance.get("meta"), dict) else {}
+                replacement_meta = dict(replacement_meta)
+                for key in ("same_turn_guidance", "turn_id", "request_id"):
+                    if key in original_meta:
+                        replacement_meta[key] = original_meta[key]
+                if replacement_meta:
+                    guidance["meta"] = replacement_meta
+                else:
+                    guidance.pop("meta", None)
+                self._pending_guidance[index] = guidance
+                break
+            else:
+                return {"updated": False, "error": "guidance_not_pending", "turn_id": self.turn_id}
+        self.step_signal.emit("System: Pending guidance updated for the active turn.")
+        return {"updated": True, "message_id": target_id, "turn_id": self.turn_id}
+
+    def delete_guidance(self, message_id, expected_turn_id=None):
+        """Remove guidance only while it is still outside the request ledger."""
+        expected = str(expected_turn_id or "")
+        if expected and expected != self.turn_id:
+            return {
+                "deleted": False,
+                "error": "turn_mismatch",
+                "expected_turn_id": expected,
+                "turn_id": self.turn_id,
+            }
+        target_id = str(message_id or "").strip()
+        if not target_id:
+            return {"deleted": False, "error": "invalid_message_id", "turn_id": self.turn_id}
+        with self._guidance_lock:
+            if not self._guidance_open or self.is_stopped:
+                return {"deleted": False, "error": "turn_not_active", "turn_id": self.turn_id}
+            for index, pending in enumerate(self._pending_guidance):
+                if str((pending or {}).get("id") or "") == target_id:
+                    del self._pending_guidance[index]
+                    break
+            else:
+                return {"deleted": False, "error": "guidance_not_pending", "turn_id": self.turn_id}
+        self.step_signal.emit("System: Pending guidance deleted from the active turn.")
+        return {"deleted": True, "message_id": target_id, "turn_id": self.turn_id}
+
     def _take_pending_guidance(self, close=False, close_if_empty=False):
         with self._guidance_lock:
             if close or (close_if_empty and not self._pending_guidance):

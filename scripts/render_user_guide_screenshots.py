@@ -95,8 +95,15 @@ def render_assistant_turn_screens(window):
     final.set_message_actions_enabled(False)
     window.add_turn_guidance_inline(
         {"id": "guide-timeline-demo", "content": "先验证现有测试，再继续修改界面。"},
-        status="applied",
+        status="waiting_tool",
+        mutation_ready=True,
     )
+    guidance = state.guidance_widgets["guide-timeline-demo"]
+    save_widget(window, "s18-guidance-running.png", 220)
+    if not guidance.edit_btn.isVisible() or not guidance.delete_btn.isVisible():
+        raise RuntimeError("Pending guidance actions were not visible in the running screenshot.")
+
+    guidance.set_status("applied")
     followup_group = main.AssistantTurnGroup("guide-followup-group")
     state.chat_layout.insertWidget(state.chat_layout.count() - 1, followup_group)
     followup = window._create_agent_chat_bubble(state)
@@ -106,6 +113,7 @@ def render_assistant_turn_screens(window):
     followup.update_thinking(duration=4.1, is_final=True)
     followup.set_source_message_id("guide-followup-final")
     followup.set_main_content("现有测试已经通过。我已按验证结果整理最终修改说明。", final=True)
+    save_widget(window, "s18-guidance-applied.png", 220)
     save_widget(window, "38-guidance-timeline.png", 220)
 
 
@@ -1070,6 +1078,8 @@ def main_run():
             )
             return
         if SCREENSHOT_SCOPE == "assistant-turn":
+            if os.environ.get("COWORK_SCREENSHOT_NARROW") == "1":
+                window.resize(900, 650)
             render_assistant_turn_screens(window)
             return
         if SCREENSHOT_SCOPE == "history-performance":

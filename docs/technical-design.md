@@ -211,6 +211,12 @@ Skill 指导、经验和参考资料仍按相关性渐进披露，只参与当�
 安全节点作为新用户消息应用，不中断已经启动的 Tool。UI 因此区分“等待下一安全
 节点”“完成当前步骤后应用”和“已应用”。
 
+待应用引导可以按 `turn_id + message_id` 原子更新或删除。修改与安全节点取队列
+共用同一把锁，只替换尚未进入追加式消息账本的队列项；安全节点取走后立即拒绝
+修改。编辑保留消息 ID、附件和 FIFO 位置，删除不产生 provider 消息。该过程不
+改写既有 provider 输入前缀、稳定系统提示或 `prompt_cache_key`，因此不会破坏
+多轮请求的缓存前缀命中。
+
 Worker 输出 step、thinking、message、tool、usage 和 observability 事件。
 Observability 与协议历史分离：稳定提示、动态上下文、Skill 披露和 Tool 执行可
 进入观测，但 UI 专用字段不会发送给模型。

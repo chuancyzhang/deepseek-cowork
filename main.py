@@ -14583,6 +14583,53 @@ class DaemonSteerWorker(QThread):
         self.finished_signal.emit(response)
 
 
+class DaemonGuidanceMutationWorker(QThread):
+    finished_signal = Signal(dict)
+
+    def __init__(
+        self,
+        client,
+        operation,
+        session_id,
+        expected_turn_id,
+        message_id,
+        message=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        if operation not in {"update", "delete"}:
+            raise ValueError(f"unsupported guidance mutation operation: {operation}")
+        self.client = client
+        self.operation = operation
+        self.session_id = session_id
+        self.expected_turn_id = str(expected_turn_id or "")
+        self.message_id = str(message_id or "")
+        self.message = copy.deepcopy(message or {})
+
+    def run(self):
+        if self.operation == "update":
+            response = self.client.update_guidance(
+                self.session_id,
+                self.expected_turn_id,
+                self.message_id,
+                self.message,
+            )
+        else:
+            response = self.client.delete_guidance(
+                self.session_id,
+                self.expected_turn_id,
+                self.message_id,
+            )
+        if not isinstance(response, dict):
+            response = {
+                "status": "error",
+                "error": "daemon_unavailable",
+                "updated": False,
+                "deleted": False,
+            }
+        self.finished_signal.emit(response)
+
+
 class DaemonConnectWorker(QThread):
     finished_signal = Signal(dict)
 
@@ -16339,17 +16386,34 @@ class FileChip(QFrame):
 class GuidanceTimelineEvent(QFrame):
     """Always-visible user guidance row between conversational reasoning segments."""
 
+    editSubmitRequested = Signal(str, str)
+    deleteRequested = Signal(str)
+
     STATUS_COPY = {
         "queued": "等待下一安全节点",
         "waiting_tool": "完成当前步骤后应用",
         "applied": "已应用",
         "rejected": "未应用",
     }
+    MUTABLE_STATUSES = {"queued", "waiting_tool"}
 
-    def __init__(self, message_id, text, status="queued", attachments=None, parent=None):
+    def __init__(
+        self,
+        message_id,
+        text,
+        status="queued",
+        attachments=None,
+        mutation_ready=False,
+        parent=None,
+    ):
         super().__init__(parent)
         self.message_id = str(message_id or "")
         self.status = status if status in self.STATUS_COPY else "queued"
+        self.attachment_items = list(attachments or [])
+        self.mutation_ready = bool(mutation_ready)
+        self.mutation_busy = False
+        self.editing = False
+        self.edit_original_text = str(text or "").strip()
         self.setObjectName("GuidanceTimelineEvent")
         self._theme_stylesheet_factory = lambda: f"""
             QFrame#GuidanceTimelineEvent {{
@@ -16359,7 +16423,7 @@ class GuidanceTimelineEvent(QFrame):
         """
         self.setStyleSheet(self._theme_stylesheet_factory())
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 7, 20, 7)
+        layout.setContentsMargins(10, 7, 10, 7)
         layout.setSpacing(4)
 
         head = QHBoxLayout()
@@ -16368,14 +16432,28 @@ class GuidanceTimelineEvent(QFrame):
         title = QLabel("补充引导")
         self.title_label = title
         title.setStyleSheet(f"color: {DesignTokens.primary}; font-size: 12px; font-weight: 700;")
+        self.edit_btn = self._create_action_button(
+            "GuidanceEditButton",
+            "fa5s.pen",
+            "编辑补充引导",
+            self.begin_inline_edit,
+        )
+        self.delete_btn = self._create_action_button(
+            "GuidanceDeleteButton",
+            "fa5s.trash-alt",
+            "删除并恢复到输入框",
+            lambda: self.deleteRequested.emit(self.message_id),
+        )
         self.status_label = QLabel()
         self.status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         head.addWidget(title)
         head.addStretch()
+        head.addWidget(self.edit_btn)
+        head.addWidget(self.delete_btn)
         head.addWidget(self.status_label)
         layout.addLayout(head)
 
-        self.content_label = QLabel(str(text or "").strip())
+        self.content_label = QLabel(self.edit_original_text)
         self.content_label.setWordWrap(True)
         self.content_label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         self.content_label.setStyleSheet(
@@ -16383,13 +16461,40 @@ class GuidanceTimelineEvent(QFrame):
         )
         layout.addWidget(self.content_label)
 
-        attachment_items = list(attachments or [])
-        if attachment_items:
+        self.content_editor = AutoResizingPlainTextEdit(self)
+        self.content_editor.setObjectName("GuidanceInlineEditor")
+        self.content_editor.setReadOnly(False)
+        self.content_editor.setPlainText(self.edit_original_text)
+        self.content_editor.setVisible(False)
+        self.content_editor.installEventFilter(self)
+        self.content_editor.textChanged.connect(self._sync_edit_submit_enabled)
+        layout.addWidget(self.content_editor)
+
+        self.edit_controls = QWidget(self)
+        self.edit_controls.setObjectName("GuidanceEditControls")
+        edit_controls_layout = QHBoxLayout(self.edit_controls)
+        edit_controls_layout.setContentsMargins(0, 4, 0, 0)
+        edit_controls_layout.setSpacing(6)
+        edit_controls_layout.addStretch()
+        self.cancel_edit_btn = QPushButton("取消", self.edit_controls)
+        self.cancel_edit_btn.setObjectName("GuidanceEditCancelButton")
+        self.cancel_edit_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_edit_btn.clicked.connect(self.cancel_inline_edit)
+        self.submit_edit_btn = QPushButton("保存", self.edit_controls)
+        self.submit_edit_btn.setObjectName("GuidanceEditSaveButton")
+        self.submit_edit_btn.setCursor(Qt.PointingHandCursor)
+        self.submit_edit_btn.clicked.connect(self.submit_inline_edit)
+        edit_controls_layout.addWidget(self.cancel_edit_btn)
+        edit_controls_layout.addWidget(self.submit_edit_btn)
+        self.edit_controls.setVisible(False)
+        layout.addWidget(self.edit_controls)
+
+        if self.attachment_items:
             chip_row = QWidget()
             chip_layout = QHBoxLayout(chip_row)
             chip_layout.setContentsMargins(0, 2, 0, 0)
             chip_layout.setSpacing(6)
-            for attachment in attachment_items:
+            for attachment in self.attachment_items:
                 path = attachment.get("path") if isinstance(attachment, dict) else str(attachment or "")
                 if path:
                     chip_layout.addWidget(FileChip(path, removable=False))
@@ -16397,6 +16502,20 @@ class GuidanceTimelineEvent(QFrame):
             layout.addWidget(chip_row)
         self.set_status(self.status)
         bind_theme(self, self.refresh_theme, surface="conversation")
+        self.refresh_theme()
+
+    def _create_action_button(self, object_name, icon_name, tooltip, slot):
+        button = QToolButton(self)
+        button.setObjectName(object_name)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setAutoRaise(True)
+        button.setFixedSize(24, 24)
+        button.setIconSize(QSize(12, 12))
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.clicked.connect(slot)
+        button._guidance_icon_name = icon_name
+        return button
 
     def refresh_theme(self, _resolved=None):
         self.setStyleSheet(self._theme_stylesheet_factory())
@@ -16410,6 +16529,25 @@ class GuidanceTimelineEvent(QFrame):
             f"font-size: {DesignTokens.font_size_body}px; "
             "line-height: 1.45; background: transparent;"
         )
+        self.content_editor.setStyleSheet(
+            f"QPlainTextEdit#GuidanceInlineEditor {{ color: {DesignTokens.chat_text}; "
+            f"font-size: {DesignTokens.font_size_body}px; background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.primary_focus}; border-radius: {DesignTokens.radius_sm}px; "
+            f"padding: {DesignTokens.spacing_xs}px; selection-background-color: {DesignTokens.selection_bg}; "
+            f"selection-color: {DesignTokens.selection_text}; }}"
+        )
+        apply_selection_palette(
+            self.content_editor,
+            DesignTokens.primary_focus,
+            DesignTokens.text_primary,
+        )
+        for button in (self.edit_btn, self.delete_btn):
+            button.setIcon(
+                qta.icon(button._guidance_icon_name, color=DesignTokens.text_tertiary)
+            )
+            button.setStyleSheet(apple_ghost_icon_button_style(radius=12))
+        self.cancel_edit_btn.setStyleSheet(apple_button_style("secondary", radius=8))
+        self.submit_edit_btn.setStyleSheet(apple_button_style("primary", radius=8))
         self.set_status(self.status)
 
     def set_status(self, status):
@@ -16430,6 +16568,104 @@ class GuidanceTimelineEvent(QFrame):
             f"font-weight: {DesignTokens.font_weight_semibold}; "
             "background: transparent;"
         )
+        if status not in self.MUTABLE_STATUSES and self.editing:
+            self._finish_inline_edit(revert=True)
+        self._sync_action_visibility()
+
+    def set_mutation_ready(self, ready):
+        self.mutation_ready = bool(ready)
+        self._sync_action_visibility()
+
+    def set_mutation_busy(self, busy):
+        self.mutation_busy = bool(busy)
+        self.content_editor.setEnabled(not self.mutation_busy)
+        self.cancel_edit_btn.setEnabled(not self.mutation_busy)
+        self._sync_edit_submit_enabled()
+        self._sync_action_visibility()
+
+    def _sync_action_visibility(self):
+        visible = bool(
+            self.mutation_ready
+            and not self.mutation_busy
+            and not self.editing
+            and self.status in self.MUTABLE_STATUSES
+        )
+        self.edit_btn.setVisible(visible)
+        self.delete_btn.setVisible(visible)
+
+    def _sync_edit_submit_enabled(self):
+        has_content = bool(self.content_editor.toPlainText().strip())
+        self.submit_edit_btn.setEnabled(
+            bool(not self.mutation_busy and (has_content or self.attachment_items))
+        )
+
+    def begin_inline_edit(self):
+        if (
+            not self.mutation_ready
+            or self.mutation_busy
+            or self.status not in self.MUTABLE_STATUSES
+        ):
+            return
+        self.editing = True
+        self.edit_original_text = self.content_label.text()
+        self.content_editor.setPlainText(self.edit_original_text)
+        self.content_label.setVisible(False)
+        self.content_editor.setVisible(True)
+        self.edit_controls.setVisible(True)
+        self._sync_action_visibility()
+        self._sync_edit_submit_enabled()
+        self.content_editor.setFocus()
+        self.content_editor.selectAll()
+
+    def eventFilter(self, obj, event):
+        if obj is self.content_editor and self.editing and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape and not self.mutation_busy:
+                self.cancel_inline_edit()
+                return True
+            if (
+                event.key() in {Qt.Key_Return, Qt.Key_Enter}
+                and event.modifiers() & Qt.ControlModifier
+                and self.submit_edit_btn.isEnabled()
+            ):
+                self.submit_inline_edit()
+                return True
+        return super().eventFilter(obj, event)
+
+    def cancel_inline_edit(self):
+        if self.mutation_busy:
+            return
+        self._finish_inline_edit(revert=True)
+
+    def submit_inline_edit(self):
+        if not self.editing or self.mutation_busy or not self.submit_edit_btn.isEnabled():
+            return
+        self.editSubmitRequested.emit(
+            self.message_id,
+            self.content_editor.toPlainText().strip(),
+        )
+
+    def _finish_inline_edit(self, revert=False):
+        if revert:
+            self.content_editor.setPlainText(self.edit_original_text)
+        self.editing = False
+        self.mutation_busy = False
+        self.content_editor.setEnabled(True)
+        self.content_editor.setVisible(False)
+        self.edit_controls.setVisible(False)
+        self.content_label.setVisible(True)
+        self._sync_action_visibility()
+
+    def commit_inline_edit(self, text):
+        normalized = str(text or "").strip()
+        self.content_label.setText(normalized)
+        self.content_editor.setPlainText(normalized)
+        self.edit_original_text = normalized
+        self._finish_inline_edit(revert=False)
+
+    def keep_inline_edit_after_failure(self):
+        self.set_mutation_busy(False)
+        if self.editing:
+            self.content_editor.setFocus()
 
 
 class InlineVisualizationBridge(QObject):
@@ -24606,10 +24842,21 @@ class MainWindow(QMainWindow):
             lines.append(f"  路径: {path}")
         return "\n".join(lines)
 
-    def _build_user_message_payload(self, user_text, file_paths, supports_vision=False):
+    def _build_user_message_payload(
+        self,
+        user_text,
+        file_paths,
+        supports_vision=False,
+        *,
+        resolve_text_references=True,
+    ):
         display_text = str(user_text or "").strip()
         normalized_files = self._normalize_prompt_file_paths(file_paths)
-        referenced_images = self._resolve_text_image_references(display_text, normalized_files)
+        referenced_images = (
+            self._resolve_text_image_references(display_text, normalized_files)
+            if resolve_text_references
+            else []
+        )
         if referenced_images:
             normalized_files = self._normalize_prompt_file_paths(normalized_files + referenced_images)
         image_paths = [path for path in normalized_files if self._is_supported_image_attachment(path)]
@@ -36790,21 +37037,45 @@ class MainWindow(QMainWindow):
         state.displayed_render_count = len(state.render_items)
         self.save_chat_history(session_id=state.session_id)
 
-    def _restore_rejected_guidance(self, state, raw_user_text, prompt_files):
+    def _restore_guidance_to_composer(
+        self,
+        state,
+        raw_user_text,
+        prompt_files,
+        *,
+        toast_text,
+        tone,
+    ):
         if not state:
-            return
+            return False
         state.prompt_files = self._normalize_prompt_file_paths(
             list(getattr(state, "prompt_files", []) or []) + list(prompt_files or [])
         )
+        restored_text = str(raw_user_text or "").strip()
         if state.session_id == self.current_session_id:
             current_text = self.input_field.toPlainText().strip()
-            restored_text = str(raw_user_text or "").strip()
-            if restored_text:
-                combined = f"{restored_text}\n\n{current_text}" if current_text else restored_text
+        else:
+            current_text = str(getattr(state, "composer_draft", "") or "").strip()
+        combined = f"{restored_text}\n\n{current_text}" if restored_text and current_text else (
+            restored_text or current_text
+        )
+        state.composer_draft = combined
+        if state.session_id == self.current_session_id:
+            if self.input_field.toPlainText() != combined:
                 self.input_field.setPlainText(combined)
             self.refresh_prompt_file_chips(state.session_id)
             self.input_field.setFocus()
-            self.add_system_toast("当前任务已结束，引导内容已恢复到输入框。", "warning", session_id=state.session_id)
+        self.add_system_toast(toast_text, tone, session_id=state.session_id)
+        return True
+
+    def _restore_rejected_guidance(self, state, raw_user_text, prompt_files):
+        return self._restore_guidance_to_composer(
+            state,
+            raw_user_text,
+            prompt_files,
+            toast_text="当前任务已结束，引导内容已恢复到输入框。",
+            tone="warning",
+        )
 
     def _reject_unapplied_guidance(self, state, restore_input=True):
         if not state:
@@ -36947,12 +37218,23 @@ class MainWindow(QMainWindow):
         bubble.apply_dynamic_widths(self.dynamic_message_width, self.dynamic_user_bubble_width)
         return self._attach_live_agent_stage(state, bubble)
 
-    def _render_turn_guidance_checkpoint(self, state, message, display_content, attachments):
+    def _render_turn_guidance_checkpoint(
+        self,
+        state,
+        message,
+        display_content,
+        attachments,
+        *,
+        mutation_ready=False,
+    ):
         if not state or not isinstance(message, dict):
             return None
         message_id = str(message.get("id") or "")
         existing = self._timeline_find_event(state, kind="guidance", message_id=message_id)
         if existing is not None:
+            widget = (getattr(state, "guidance_widgets", {}) or {}).get(message_id)
+            if widget is not None and mutation_ready:
+                widget.set_mutation_ready(True)
             return existing
         self.flush_session_thinking(state.session_id)
         self.flush_session_content(state.session_id, final=False)
@@ -36981,6 +37263,7 @@ class MainWindow(QMainWindow):
             status=waiting_status,
             force_scroll=True,
             session_id=state.session_id,
+            mutation_ready=mutation_ready,
         )
         # The next model delta belongs to a new conversational thought after
         # the user's guidance, never to the segment that preceded it.
@@ -37013,16 +37296,416 @@ class MainWindow(QMainWindow):
             isinstance(item, dict) and item.get("id") == message_id
             for item in state.messages
         )
-        if not already_persisted:
+        already_pending = any(
+            isinstance(item, dict) and item.get("id") == message_id
+            for item in state.pending_guidance_messages
+        )
+        if not already_persisted and not already_pending:
             state.pending_guidance_messages.append(copy.deepcopy(message))
         self._render_turn_guidance_checkpoint(
             state,
             message,
             display_content or "",
             attachments or [],
+            mutation_ready=not already_persisted,
         )
         if state.session_id == self.current_session_id:
             self.add_system_toast("已加入当前任务", "info", session_id=state.session_id, auto_close_ms=2200)
+
+    def _pending_guidance_message(self, state, message_id):
+        target_id = str(message_id or "")
+        if not state or not target_id:
+            return None
+        for message in list(getattr(state, "pending_guidance_messages", []) or []):
+            if isinstance(message, dict) and str(message.get("id") or "") == target_id:
+                return message
+        return None
+
+    def _build_edited_guidance_message(self, state, source_message, edited_text):
+        prompt_files = self._message_attachment_paths(source_message)
+        payload = self._build_user_message_payload(
+            edited_text,
+            prompt_files,
+            supports_vision=self._selected_model_supports_vision(state),
+            resolve_text_references=False,
+        )
+        if not payload.get("content"):
+            return None
+        replacement = copy.deepcopy(source_message)
+        replacement["id"] = str(source_message.get("id") or "")
+        replacement["role"] = "user"
+        replacement["content"] = payload.get("content") or ""
+        if payload.get("content_parts"):
+            replacement["content_parts"] = payload.get("content_parts")
+        else:
+            replacement.pop("content_parts", None)
+        meta = replacement.get("meta") if isinstance(replacement.get("meta"), dict) else {}
+        meta = dict(meta)
+        for key in (
+            "display_content",
+            "user_added_files",
+            "user_added_images",
+            "vision_requested",
+            "workspace_referenced_images",
+        ):
+            meta.pop(key, None)
+        meta.update(payload.get("meta") or {})
+        replacement["meta"] = meta
+        return replacement
+
+    def _guidance_mutation_card(self, state, message_id):
+        return (getattr(state, "guidance_widgets", {}) or {}).get(str(message_id or "")) if state else None
+
+    def _log_guidance_mutation(self, state, message_id, operation, phase, error=""):
+        log_sub_agent_runtime(
+            "ui_guidance_mutation",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            turn_id=str(getattr(state, "active_turn_id", "") or ""),
+            message_id=str(message_id or ""),
+            operation=str(operation or ""),
+            phase=str(phase or ""),
+            error=str(error or ""),
+        )
+
+    def _guidance_mutation_allowed(self, state, message_id):
+        event = self._timeline_find_event(state, kind="guidance", message_id=message_id)
+        already_in_ledger = any(
+            isinstance(message, dict)
+            and str(message.get("id") or "") == str(message_id or "")
+            for message in list(getattr(state, "messages", []) or [])
+        ) if state else False
+        return bool(
+            event
+            and event.get("status") in GuidanceTimelineEvent.MUTABLE_STATUSES
+            and event.get("finished_at") is None
+            and self._pending_guidance_message(state, message_id) is not None
+            and not already_in_ledger
+        )
+
+    def edit_pending_guidance_inline(self, session_id, message_id, edited_text):
+        state = self.get_session(session_id)
+        card = self._guidance_mutation_card(state, message_id)
+        if not state or not card or not self._guidance_mutation_allowed(state, message_id):
+            if card is not None:
+                card.set_mutation_ready(False)
+            self.add_system_toast(
+                "这条补充引导已不在待应用队列中。",
+                "warning",
+                session_id=session_id,
+            )
+            return False
+        source_message = self._pending_guidance_message(state, message_id)
+        replacement = self._build_edited_guidance_message(state, source_message, edited_text)
+        if replacement is None:
+            self.add_system_toast(
+                "补充引导内容不能为空。",
+                "warning",
+                session_id=session_id,
+            )
+            card.keep_inline_edit_after_failure()
+            return False
+        if self._message_display_content(source_message).strip() == str(edited_text or "").strip():
+            card.commit_inline_edit(edited_text)
+            return True
+
+        expected_turn_id = state.active_turn_id
+        card.set_mutation_busy(True)
+        self._log_guidance_mutation(state, message_id, "update", "submit")
+        if state.llm_worker and state.llm_worker.isRunning():
+            self._log_guidance_mutation(state, message_id, "update", "start")
+            result = state.llm_worker.update_guidance(
+                message_id,
+                replacement,
+                expected_turn_id=expected_turn_id,
+            )
+            self._log_guidance_mutation(state, message_id, "update", "run")
+            return self._handle_guidance_mutation_result(
+                result,
+                state.session_id,
+                expected_turn_id,
+                message_id,
+                "update",
+                replacement,
+                source_message,
+            )
+        if state.daemon_running and self.daemon_client:
+            return self._start_daemon_guidance_mutation(
+                state,
+                expected_turn_id,
+                message_id,
+                "update",
+                replacement,
+                source_message,
+            )
+        return self._handle_guidance_mutation_result(
+            {"updated": False, "error": "turn_not_active"},
+            state.session_id,
+            expected_turn_id,
+            message_id,
+            "update",
+            replacement,
+            source_message,
+        )
+
+    def delete_pending_guidance(self, session_id, message_id):
+        state = self.get_session(session_id)
+        card = self._guidance_mutation_card(state, message_id)
+        if not state or not card or not self._guidance_mutation_allowed(state, message_id):
+            if card is not None:
+                card.set_mutation_ready(False)
+            self.add_system_toast(
+                "这条补充引导已不在待应用队列中。",
+                "warning",
+                session_id=session_id,
+            )
+            return False
+        source_message = copy.deepcopy(self._pending_guidance_message(state, message_id))
+        expected_turn_id = state.active_turn_id
+        card.set_mutation_busy(True)
+        self._log_guidance_mutation(state, message_id, "delete", "submit")
+        if state.llm_worker and state.llm_worker.isRunning():
+            self._log_guidance_mutation(state, message_id, "delete", "start")
+            result = state.llm_worker.delete_guidance(
+                message_id,
+                expected_turn_id=expected_turn_id,
+            )
+            self._log_guidance_mutation(state, message_id, "delete", "run")
+            return self._handle_guidance_mutation_result(
+                result,
+                state.session_id,
+                expected_turn_id,
+                message_id,
+                "delete",
+                None,
+                source_message,
+            )
+        if state.daemon_running and self.daemon_client:
+            return self._start_daemon_guidance_mutation(
+                state,
+                expected_turn_id,
+                message_id,
+                "delete",
+                None,
+                source_message,
+            )
+        return self._handle_guidance_mutation_result(
+            {"deleted": False, "error": "turn_not_active"},
+            state.session_id,
+            expected_turn_id,
+            message_id,
+            "delete",
+            None,
+            source_message,
+        )
+
+    def _start_daemon_guidance_mutation(
+        self,
+        state,
+        expected_turn_id,
+        message_id,
+        operation,
+        replacement,
+        source_message,
+    ):
+        self._log_guidance_mutation(state, message_id, operation, "start")
+        worker = DaemonGuidanceMutationWorker(
+            self.daemon_client,
+            operation,
+            state.session_id,
+            expected_turn_id,
+            message_id,
+            message=replacement,
+            parent=self,
+        )
+        state.guidance_workers.append(worker)
+        worker.finished_signal.connect(
+            lambda response, w=worker, sid=state.session_id, tid=expected_turn_id,
+                   mid=str(message_id), op=operation, repl=copy.deepcopy(replacement),
+                   source=copy.deepcopy(source_message): self._handle_daemon_guidance_mutation_result(
+                       response,
+                       w,
+                       sid,
+                       tid,
+                       mid,
+                       op,
+                       repl,
+                       source,
+                   ),
+            Qt.QueuedConnection,
+        )
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        self._log_guidance_mutation(state, message_id, operation, "run")
+        return True
+
+    def _handle_daemon_guidance_mutation_result(
+        self,
+        response,
+        worker,
+        session_id,
+        expected_turn_id,
+        message_id,
+        operation,
+        replacement,
+        source_message,
+    ):
+        state = self.get_session(session_id)
+        if state and worker in state.guidance_workers:
+            state.guidance_workers.remove(worker)
+        return self._handle_guidance_mutation_result(
+            response,
+            session_id,
+            expected_turn_id,
+            message_id,
+            operation,
+            replacement,
+            source_message,
+        )
+
+    def _handle_guidance_mutation_result(
+        self,
+        response,
+        session_id,
+        expected_turn_id,
+        message_id,
+        operation,
+        replacement,
+        source_message,
+    ):
+        state = self.get_session(session_id)
+        success_field = "updated" if operation == "update" else "deleted"
+        succeeded = bool(
+            state
+            and isinstance(response, dict)
+            and response.get(success_field)
+            and str(response.get("turn_id") or expected_turn_id) == str(expected_turn_id)
+        )
+        if succeeded:
+            if operation == "update":
+                return self._commit_pending_guidance_update(
+                    state,
+                    message_id,
+                    replacement,
+                )
+            return self._commit_pending_guidance_delete(
+                state,
+                message_id,
+                source_message,
+            )
+        error = str((response or {}).get("error") or "daemon_unavailable")
+        self._fail_pending_guidance_mutation(state, message_id, operation, error)
+        return False
+
+    def _commit_pending_guidance_update(self, state, message_id, replacement):
+        updated = False
+        pending_messages = list(getattr(state, "pending_guidance_messages", []) or [])
+        for index, message in enumerate(pending_messages):
+            if not isinstance(message, dict) or str(message.get("id") or "") != str(message_id):
+                continue
+            pending_messages[index] = copy.deepcopy(replacement)
+            updated = True
+            break
+        state.pending_guidance_messages = pending_messages
+        event = self._timeline_find_event(state, kind="guidance", message_id=message_id)
+        if event is not None:
+            event["text"] = self._message_display_content(replacement).strip()
+        card = self._guidance_mutation_card(state, message_id)
+        if card is not None:
+            card.commit_inline_edit(self._message_display_content(replacement))
+        if not updated or event is None or card is None:
+            error = "local_guidance_projection_missing"
+            self._log_guidance_mutation(state, message_id, "update", "error", error)
+            self.add_system_toast(
+                "补充引导已更新，但界面状态同步失败，请重新打开当前会话。",
+                "error",
+                session_id=state.session_id,
+            )
+            return False
+        self.save_chat_history(session_id=state.session_id)
+        self._log_guidance_mutation(state, message_id, "update", "finish")
+        self.add_system_toast(
+            "已更新补充引导",
+            "success",
+            session_id=state.session_id,
+            auto_close_ms=2200,
+        )
+        return True
+
+    def _commit_pending_guidance_delete(self, state, message_id, source_message):
+        target_id = str(message_id or "")
+        state.pending_guidance_messages = [
+            message for message in list(getattr(state, "pending_guidance_messages", []) or [])
+            if str((message or {}).get("id") or "") != target_id
+        ]
+        state.ui_timeline_events = [
+            event for event in list(getattr(state, "ui_timeline_events", []) or [])
+            if not (
+                isinstance(event, dict)
+                and event.get("kind") == "guidance"
+                and str(event.get("message_id") or "") == target_id
+            )
+        ]
+        card = (getattr(state, "guidance_widgets", {}) or {}).pop(target_id, None)
+        projection_missing = card is None
+        if card is not None:
+            wrapper = card.parentWidget()
+            if wrapper is not None:
+                wrapper.hide()
+                wrapper.deleteLater()
+        restored_text = self._message_display_content(source_message)
+        restored_paths = [
+            item.get("path") for item in self._message_user_attachments(source_message)
+            if isinstance(item, dict) and item.get("path")
+        ]
+        self._restore_guidance_to_composer(
+            state,
+            restored_text,
+            restored_paths,
+            toast_text="已撤回补充引导，内容已恢复到输入框。",
+            tone="success",
+        )
+        self.save_chat_history(session_id=state.session_id)
+        self.queue_session_bubble_virtualization(state.session_id)
+        if projection_missing:
+            error = "local_guidance_widget_missing"
+            self._log_guidance_mutation(state, message_id, "delete", "error", error)
+            self.add_system_toast(
+                "补充引导已撤回，但界面状态同步失败，请重新打开当前会话。",
+                "error",
+                session_id=state.session_id,
+            )
+            return False
+        self._log_guidance_mutation(state, message_id, "delete", "finish")
+        return True
+
+    def _fail_pending_guidance_mutation(self, state, message_id, operation, error):
+        if not state:
+            return
+        card = self._guidance_mutation_card(state, message_id)
+        if error == "guidance_not_pending":
+            self._timeline_set_guidance_status(state, message_id, "applied")
+            message = "补充引导已进入安全节点，无法再编辑或删除。"
+        elif error in {"turn_not_active", "turn_mismatch"}:
+            if card is not None:
+                card.set_mutation_busy(False)
+                if card.editing:
+                    card.cancel_inline_edit()
+                card.set_mutation_ready(False)
+            message = "当前任务已结束，无法修改这条补充引导。"
+        elif error == "empty_input":
+            if card is not None:
+                card.keep_inline_edit_after_failure()
+            message = "补充引导内容不能为空。"
+        elif error == "daemon_unavailable":
+            if card is not None:
+                card.keep_inline_edit_after_failure() if operation == "update" else card.set_mutation_busy(False)
+            message = "后台服务暂时不可用，补充引导未修改，请重试。"
+        else:
+            if card is not None:
+                card.keep_inline_edit_after_failure() if operation == "update" else card.set_mutation_busy(False)
+            message = f"补充引导修改失败：{error}"
+        self._log_guidance_mutation(state, message_id, operation, "error", error)
+        self.add_system_toast(message, "warning", session_id=state.session_id)
 
     def _handle_daemon_guidance_result(
         self, response, worker, session_id, expected_turn_id, message,
@@ -38093,6 +38776,7 @@ class MainWindow(QMainWindow):
         force_scroll=False,
         session_id=None,
         target_layout=None,
+        mutation_ready=False,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state:
@@ -38118,6 +38802,20 @@ class MainWindow(QMainWindow):
             text,
             status=normalized_status,
             attachments=attachment_items,
+            mutation_ready=mutation_ready,
+        )
+        card.editSubmitRequested.connect(
+            lambda message_id, edited_text, sid=state.session_id: self.edit_pending_guidance_inline(
+                sid,
+                message_id,
+                edited_text,
+            )
+        )
+        card.deleteRequested.connect(
+            lambda message_id, sid=state.session_id: self.delete_pending_guidance(
+                sid,
+                message_id,
+            )
         )
         card.setMaximumWidth(DesignTokens.message_max_width)
         state.guidance_widgets[str((message or {}).get("id") or "")] = card

@@ -2682,6 +2682,71 @@ class TestLLMWorkerGuidance(unittest.TestCase):
         worker._take_pending_guidance(close=True)
         self.assertEqual(worker.steer(message, "turn-1")["error"], "turn_not_active")
 
+    def test_update_guidance_preserves_fifo_position_and_turn_metadata(self):
+        worker = self._worker()
+        first = {
+            "id": "g1",
+            "role": "user",
+            "content": "first",
+            "meta": {"same_turn_guidance": True, "turn_id": "turn-1"},
+        }
+        second = {"id": "g2", "role": "user", "content": "second"}
+        replacement = {
+            "id": "wrong-id",
+            "role": "assistant",
+            "content": "first edited",
+            "content_parts": [{"type": "text", "text": "first edited"}],
+            "meta": {"display_content": "first edited", "turn_id": "wrong-turn"},
+        }
+
+        self.assertTrue(worker.steer(first, "turn-1")["accepted"])
+        self.assertTrue(worker.steer(second, "turn-1")["accepted"])
+        result = worker.update_guidance("g1", replacement, "turn-1")
+
+        self.assertTrue(result["updated"])
+        self.assertEqual([item["id"] for item in worker._pending_guidance], ["g1", "g2"])
+        self.assertEqual(worker._pending_guidance[0]["role"], "user")
+        self.assertEqual(worker._pending_guidance[0]["content"], "first edited")
+        self.assertEqual(worker._pending_guidance[0]["meta"]["turn_id"], "turn-1")
+        self.assertTrue(worker._pending_guidance[0]["meta"]["same_turn_guidance"])
+
+    def test_delete_guidance_and_reject_mutation_after_safe_point(self):
+        worker = self._worker()
+        self.assertTrue(worker.steer({"id": "g1", "content": "first"}, "turn-1")["accepted"])
+        self.assertTrue(worker.steer({"id": "g2", "content": "second"}, "turn-1")["accepted"])
+
+        deleted = worker.delete_guidance("g1", "turn-1")
+        self.assertTrue(deleted["deleted"])
+        self.assertEqual([item["id"] for item in worker._pending_guidance], ["g2"])
+        self.assertEqual(worker.delete_guidance("missing", "turn-1")["error"], "guidance_not_pending")
+
+        worker._take_pending_guidance()
+        update = worker.update_guidance("g2", {"content": "too late"}, "turn-1")
+        self.assertEqual(update["error"], "guidance_not_pending")
+
+    def test_guidance_mutations_preserve_existing_request_prefix_for_cache_reuse(self):
+        worker = self._worker()
+        worker.request_id = "request-1"
+        worker.conversation_id = "conversation-cache-key"
+        previous_provider_messages = [
+            {"id": "system-1", "role": "system", "content": "stable"},
+            {"id": "assistant-1", "role": "assistant", "content": "working"},
+        ]
+        current_messages = [dict(item) for item in previous_provider_messages]
+        generated_messages = []
+
+        self.assertTrue(worker.steer({"id": "g1", "content": "draft"}, "turn-1")["accepted"])
+        self.assertTrue(
+            worker.update_guidance("g1", {"id": "g1", "content": "edited"}, "turn-1")["updated"]
+        )
+        self.assertEqual(current_messages, previous_provider_messages)
+        self.assertTrue(worker._append_pending_guidance(current_messages, generated_messages))
+        worker._verify_request_prefix(previous_provider_messages, current_messages, "test")
+
+        self.assertEqual(current_messages[:2], previous_provider_messages)
+        self.assertEqual(current_messages[2]["content"], "edited")
+        self.assertEqual(worker.conversation_id, "conversation-cache-key")
+
 
 class TestDaemonInteractionRoundtrip(unittest.TestCase):
     def setUp(self):
@@ -2753,6 +2818,41 @@ class TestDaemonInteractionRoundtrip(unittest.TestCase):
         self.assertTrue(accepted["accepted"])
         self.assertEqual(accepted["turn_id"], "turn-7")
         self.assertFalse(rejected["accepted"])
+        self.assertEqual(rejected["error"], "turn_mismatch")
+
+    def test_guidance_mutation_roundtrip(self):
+        class _Worker:
+            turn_id = "turn-8"
+
+            def update_guidance(self, message_id, message, expected_turn_id=None):
+                return {
+                    "updated": expected_turn_id == self.turn_id,
+                    "message_id": message_id,
+                    "turn_id": self.turn_id,
+                    "content": message.get("content"),
+                }
+
+            def delete_guidance(self, message_id, expected_turn_id=None):
+                return {
+                    "deleted": expected_turn_id == self.turn_id,
+                    "message_id": message_id,
+                    "turn_id": self.turn_id,
+                }
+
+        self.state.set_active_worker("session-8", _Worker(), turn_id="turn-8")
+        updated = self.client.update_guidance(
+            "session-8",
+            "turn-8",
+            "guide-8",
+            {"role": "user", "content": "edited"},
+        )
+        deleted = self.client.delete_guidance("session-8", "turn-8", "guide-8")
+        rejected = self.client.delete_guidance("session-8", "stale-turn", "guide-8")
+
+        self.assertTrue(updated["updated"])
+        self.assertEqual(updated["content"], "edited")
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(rejected["deleted"])
         self.assertEqual(rejected["error"], "turn_mismatch")
 
     def test_stream_message_waits_for_worker_without_model_response_timeout(self):

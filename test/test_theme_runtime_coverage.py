@@ -121,6 +121,7 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         late_guidance = GuidanceTimelineEvent(
             "guidance-1",
             "继续验证后创建的对话控件。",
+            mutation_ready=True,
         )
         late_interaction = InlineInteractionCard(
             {
@@ -135,6 +136,10 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             self.assertIn("#f0f0f0", late_bubble.user_content_edit.styleSheet())
             self.assertIn("#f0f0f0", late_file.text_label.styleSheet())
             self.assertIn("#f0f0f0", late_guidance.content_label.styleSheet())
+            self.assertIn("#f0f0f0", late_guidance.content_editor.styleSheet())
+            self.assertFalse(late_guidance.edit_btn.icon().isNull())
+            self.assertFalse(late_guidance.delete_btn.icon().isNull())
+            self.assertFalse(late_guidance.edit_btn.isHidden())
             self.assertIn("#171717", late_interaction.styleSheet())
             self.assertIn("#181818", late_chip.styleSheet())
         finally:

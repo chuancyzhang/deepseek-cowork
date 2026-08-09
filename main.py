@@ -21002,6 +21002,7 @@ class FileTabStrip(QWidget):
         self.paths = []
         self.active_path = ""
         self._tab_frames = {}
+        self._tab_bodies = {}
         self.setObjectName("FileTabStrip")
         self.setMinimumWidth(0)
         self.setFixedHeight(36)
@@ -21092,6 +21093,8 @@ class FileTabStrip(QWidget):
             qta.icon("fa5s.chevron-down", color=DesignTokens.text_secondary)
         )
         self.overflow_btn.setStyleSheet(apple_tool_button_style(False))
+        QTimer.singleShot(0, self._sync_tab_widths)
+        QTimer.singleShot(0, self._sync_overflow)
 
     def _clear_tabs(self):
         while self.tabs_layout.count():
@@ -21100,6 +21103,32 @@ class FileTabStrip(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._tab_frames = {}
+        self._tab_bodies = {}
+
+    def _sync_tab_widths(self):
+        count = len(self._tab_frames)
+        if not count:
+            self.tabs_host.setMinimumWidth(0)
+            return
+        spacing = self.tabs_layout.spacing()
+        available = max(0, self.scroll.viewport().width())
+        preferred = int(DesignTokens.file_tab_preferred_width)
+        minimum = int(DesignTokens.file_tab_min_width)
+        fitted = (available - spacing * (count - 1)) // count
+        tab_width = min(preferred, max(minimum, fitted))
+        total_width = tab_width * count + spacing * (count - 1)
+        self.tabs_host.setMinimumWidth(total_width)
+        for key, frame in self._tab_frames.items():
+            frame.setFixedWidth(tab_width)
+            body = self._tab_bodies.get(key)
+            if body is None:
+                continue
+            name = str(body.property("fullName") or "")
+            text_width = max(32, tab_width - 70)
+            body.setText(
+                QFontMetrics(body.font()).elidedText(name, Qt.ElideMiddle, text_width)
+            )
+        self.tabs_host.adjustSize()
 
     def _file_icon(self, path):
         if not os.path.isfile(path):
@@ -21153,11 +21182,12 @@ class FileTabStrip(QWidget):
             body.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             body.setIcon(self._file_icon(path))
             name = os.path.basename(path) or path
-            body.setText(QFontMetrics(body.font()).elidedText(name, Qt.ElideMiddle, 150))
+            body.setProperty("fullName", name)
+            body.setText(name)
             body.setToolTip(path if not missing else f"文件已不存在\n{path}")
             body.setCursor(Qt.PointingHandCursor)
-            body.setMinimumWidth(76)
-            body.setMaximumWidth(190)
+            body.setMinimumWidth(0)
+            body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             body.clicked.connect(lambda checked=False, value=path: self.activateRequested.emit(value))
             frame_layout.addWidget(body, 1)
             close_btn = QToolButton(frame)
@@ -21169,7 +21199,10 @@ class FileTabStrip(QWidget):
             close_btn.clicked.connect(lambda checked=False, value=path: self.closeRequested.emit(value))
             frame_layout.addWidget(close_btn)
             self.tabs_layout.addWidget(frame)
-            self._tab_frames[self._path_key(path)] = frame
+            key = self._path_key(path)
+            self._tab_frames[key] = frame
+            self._tab_bodies[key] = body
+        self._sync_tab_widths()
         self.tabs_host.adjustSize()
         self._rebuild_overflow_menu()
         QTimer.singleShot(0, self._sync_overflow)
@@ -21195,8 +21228,12 @@ class FileTabStrip(QWidget):
         if not self.paths:
             self.overflow_btn.hide()
             return
+        self._sync_tab_widths()
         overflow = self.tabs_host.sizeHint().width() > self.scroll.viewport().width()
+        visibility_changed = self.overflow_btn.isVisible() != overflow
         self.overflow_btn.setVisible(overflow)
+        if visibility_changed:
+            QTimer.singleShot(0, self._sync_tab_widths)
 
     def ensure_active_visible(self):
         frame = self._tab_frames.get(self._path_key(self.active_path)) if self.active_path else None
@@ -21205,6 +21242,7 @@ class FileTabStrip(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_tab_widths)
         QTimer.singleShot(0, self._sync_overflow)
 
 

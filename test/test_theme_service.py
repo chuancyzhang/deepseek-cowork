@@ -90,6 +90,21 @@ class ThemeServiceTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "0.8"):
             validate_theme_overrides({"font_scale": 2}, self.defaults)
+        with self.assertRaisesRegex(ValueError, "file_tab_min_width"):
+            resolve_theme(
+                {
+                    "id": "invalid-tabs",
+                    "name": "Invalid tabs",
+                    "base": DEFAULT_THEME_ID,
+                    "overrides": {
+                        "tokens": {
+                            "file_tab_min_width": 300,
+                            "file_tab_preferred_width": 200,
+                        }
+                    },
+                },
+                self.defaults,
+            )
 
     def test_repository_crud_and_active_theme(self):
         created = self.repository.upsert_theme(

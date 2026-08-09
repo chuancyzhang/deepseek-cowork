@@ -316,6 +316,103 @@ class DeliverableEditingCoreTest(unittest.TestCase):
             any(issue.code == "docx_complex_header_footer" for issue in report.issues)
         )
 
+    def test_docx_save_accepts_only_empty_exporter_comment_and_footnote_scaffolding(self):
+        from docx import Document
+
+        comments_xml = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<w:comments xmlns:w="http://schemas.openxmlformats.org/'
+            b'wordprocessingml/2006/main"/>'
+        )
+        footnotes_xml = (
+            b'<?xml version="1.0" encoding="UTF-8"?>'
+            b'<w:footnotes xmlns:w="http://schemas.openxmlformats.org/'
+            b'wordprocessingml/2006/main">'
+            b'<w:footnote w:type="separator" w:id="-1"><w:p><w:pPr>'
+            b'<w:spacing w:after="0"/></w:pPr><w:r><w:rPr>'
+            b'<w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/>'
+            b'</w:r><w:r><w:separator/></w:r></w:p></w:footnote>'
+            b'<w:footnote w:type="continuationSeparator" w:id="0"><w:p>'
+            b'<w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+            b'</w:footnotes>'
+        )
+
+        def add_parts(data, parts):
+            output = io.BytesIO()
+            with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(
+                output,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+            ) as target:
+                for item in source.infolist():
+                    if item.filename in parts:
+                        continue
+                    target.writestr(item, source.read(item.filename))
+                for name, content in parts.items():
+                    target.writestr(name, content)
+            return output.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "report.docx")
+            document = Document()
+            document.add_paragraph("原正文")
+            document.save(path)
+            session, report = create_edit_session(path)
+            self.assertTrue(report.allowed)
+            exported = add_parts(
+                Path(path).read_bytes(),
+                {
+                    "word/comments.xml": comments_xml,
+                    "word/footnotes.xml": footnotes_xml,
+                },
+            )
+            exported_path = os.path.join(directory, "exported.docx")
+            Path(exported_path).write_bytes(exported)
+
+            self.assertTrue(preflight_edit(exported_path).allowed)
+            atomic_save_session(
+                session,
+                exported,
+                backup_root=os.path.join(directory, "backups"),
+            )
+            self.assertEqual(Document(path).paragraphs[0].text, "原正文")
+
+            unsafe_comments = comments_xml.replace(
+                b"/>",
+                (
+                    '><w:comment w:id="1"><w:p><w:r><w:t>批注</w:t></w:r></w:p>'
+                    "</w:comment></w:comments>"
+                ).encode("utf-8"),
+                1,
+            )
+            unsafe = add_parts(
+                Path(path).read_bytes(),
+                {"word/comments.xml": unsafe_comments},
+            )
+            before = Path(path).read_bytes()
+            with self.assertRaises(DeliverableEditError) as raised:
+                atomic_save_session(
+                    session,
+                    unsafe,
+                    backup_root=os.path.join(directory, "backups"),
+                )
+            self.assertEqual(raised.exception.code, "docx_export_invalid")
+            self.assertEqual(Path(path).read_bytes(), before)
+
+            unsafe_footnotes = footnotes_xml.replace(b'w:id="0"', b'w:id="1"', 1)
+            unsafe = add_parts(
+                Path(path).read_bytes(),
+                {"word/footnotes.xml": unsafe_footnotes},
+            )
+            with self.assertRaises(DeliverableEditError) as raised:
+                atomic_save_session(
+                    session,
+                    unsafe,
+                    backup_root=os.path.join(directory, "backups"),
+                )
+            self.assertEqual(raised.exception.code, "docx_export_invalid")
+            self.assertEqual(Path(path).read_bytes(), before)
+
     def test_xlsx_snapshot_round_trip_keeps_values_formula_style_and_merge(self):
         import openpyxl
         from openpyxl.styles import Font, PatternFill

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import time
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal, Slot
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.deliverable_editing import (  # noqa: E402
+    _validate_serialized_path,
     create_edit_session,
     rows_to_univer_snapshot,
     serialize_editor_payload,
@@ -426,6 +428,10 @@ class SmokeCoordinator(QObject):
                         docx_bytes,
                     )
                 validate_docx_bytes(docx_bytes)
+                with tempfile.TemporaryDirectory() as directory:
+                    temp_path = Path(directory) / "editor-export.tmp"
+                    temp_path.write_bytes(docx_bytes)
+                    _validate_serialized_path(str(temp_path), ".docx")
             elif kind == "sheet":
                 snapshot = json.loads(payload)
                 if not isinstance(snapshot.get("sheets"), dict):

@@ -305,6 +305,10 @@ def theme_geometry_errors(tokens: dict[str, Any]) -> list[str]:
         tokens.get("conversation_max_width", 0)
     ):
         errors.append("message_max_width 不能大于 conversation_max_width。")
+    if float(tokens.get("file_tab_min_width", 0)) > float(
+        tokens.get("file_tab_preferred_width", 0)
+    ):
+        errors.append("file_tab_min_width 不能大于 file_tab_preferred_width。")
     return errors
 
 

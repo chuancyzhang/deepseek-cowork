@@ -358,6 +358,17 @@ _DOCX_BLOCKED_XML_MARKERS = {
     b"<wp:anchor": "浮动绘图对象",
 }
 
+_DOCX_EXPORT_SCAFFOLD_PARTS = {
+    "word/comments.xml",
+    "word/footnotes.xml",
+}
+_DOCX_EXPORT_SCAFFOLD_REFERENCE_MARKERS = (
+    b"<w:commentRangeStart",
+    b"<w:commentRangeEnd",
+    b"<w:commentReference",
+    b"<w:footnoteReference",
+)
+
 _DOCX_WORDPROCESSING_NS = (
     "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 )
@@ -378,6 +389,58 @@ _DOCX_HEADER_CONTENT_TYPE = (
 _DOCX_FOOTER_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
 )
+
+
+def _is_safe_docx_export_scaffold(
+    archive: zipfile.ZipFile,
+    part_name: str,
+    document_xml: bytes,
+) -> bool:
+    """Accept only the empty OOXML parts always emitted by the DOCX exporter."""
+    normalized_name = part_name.replace("\\", "/").lower()
+    if normalized_name not in _DOCX_EXPORT_SCAFFOLD_PARTS:
+        return False
+    if any(marker in document_xml for marker in _DOCX_EXPORT_SCAFFOLD_REFERENCE_MARKERS):
+        return False
+    try:
+        root = ElementTree.fromstring(archive.read(part_name))
+    except (KeyError, ElementTree.ParseError):
+        return False
+    namespace = f"{{{_DOCX_WORDPROCESSING_NS}}}"
+    if normalized_name == "word/comments.xml":
+        return root.tag == f"{namespace}comments" and not list(root)
+    if root.tag != f"{namespace}footnotes":
+        return False
+    allowed_descendants = {
+        f"{namespace}footnote",
+        f"{namespace}p",
+        f"{namespace}pPr",
+        f"{namespace}spacing",
+        f"{namespace}r",
+        f"{namespace}rPr",
+        f"{namespace}rStyle",
+        f"{namespace}footnoteRef",
+        f"{namespace}separator",
+        f"{namespace}continuationSeparator",
+    }
+    id_attribute = f"{namespace}id"
+    type_attribute = f"{namespace}type"
+    expected_types = {"-1": "separator", "0": "continuationSeparator"}
+    footnotes = list(root)
+    if len(footnotes) != len(expected_types):
+        return False
+    seen_ids: set[str] = set()
+    for footnote in footnotes:
+        footnote_id = str(footnote.attrib.get(id_attribute) or "")
+        if (
+            footnote.tag != f"{namespace}footnote"
+            or footnote_id in seen_ids
+            or footnote.attrib.get(type_attribute) != expected_types.get(footnote_id)
+            or any(node.tag not in allowed_descendants for node in footnote.iter())
+        ):
+            return False
+        seen_ids.add(footnote_id)
+    return seen_ids == set(expected_types)
 
 
 def _docx_part_relationships_name(part_name: str) -> str:
@@ -522,7 +585,10 @@ def _inspect_docx_header_footer(archive, names: set[str]) -> tuple[dict[str, Any
     }, []
 
 
-def _preflight_docx(path: str, descriptor: EditorDescriptor) -> CompatibilityReport:
+def _preflight_docx(
+    path: str,
+    descriptor: EditorDescriptor,
+) -> CompatibilityReport:
     issues: list[CompatibilityIssue] = []
     metadata: dict[str, Any] = {}
     try:
@@ -530,12 +596,19 @@ def _preflight_docx(path: str, descriptor: EditorDescriptor) -> CompatibilityRep
             names = {name.replace("\\", "/") for name in archive.namelist()}
             if "[Content_Types].xml" not in names or "word/document.xml" not in names:
                 raise DeliverableEditError("invalid_docx", "文件不是有效的 DOCX OOXML 文档。")
+            document_xml = archive.read("word/document.xml")
             for name in sorted(names):
                 lowered = name.lower()
                 if lowered == "word/vbaproject.bin":
                     issues.append(_issue("docx_macro", "文档包含宏，不能在应用内安全编辑。"))
                 for prefix in _DOCX_BLOCKED_PART_PREFIXES:
                     if lowered.startswith(prefix.lower()):
+                        if _is_safe_docx_export_scaffold(
+                            archive,
+                            name,
+                            document_xml,
+                        ):
+                            break
                         issues.append(
                             _issue(
                                 "docx_unsupported_part",
@@ -543,7 +616,6 @@ def _preflight_docx(path: str, descriptor: EditorDescriptor) -> CompatibilityRep
                             )
                         )
                         break
-            document_xml = archive.read("word/document.xml")
             for marker, label in _DOCX_BLOCKED_XML_MARKERS.items():
                 if marker in document_xml:
                     issues.append(

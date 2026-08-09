@@ -109,6 +109,60 @@ class FileTabStripTest(unittest.TestCase):
             self.app.processEvents()
             strip._sync_overflow()
             self.assertFalse(strip.overflow_btn.isHidden())
+            strip.resize(900, 36)
+            self.app.processEvents()
+            strip._sync_overflow()
+            self.app.processEvents()
+            self.assertTrue(strip.overflow_btn.isHidden())
+            self.assertEqual(
+                {frame.width() for frame in strip._tab_frames.values()},
+                {DesignTokens.file_tab_preferred_width},
+            )
+            strip.close()
+
+    def test_tabs_keep_preferred_width_until_the_strip_needs_to_compress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for name in ("first-document.txt", "second-document.py"):
+                path = os.path.join(directory, name)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(name)
+                paths.append(path)
+            strip = FileTabStrip()
+            strip.resize(760, 36)
+            strip.set_paths(paths[:1], paths[0])
+            strip.show()
+            self.app.processEvents()
+            strip._sync_tab_widths()
+
+            first_frame = strip._tab_frames[strip._path_key(paths[0])]
+            self.assertEqual(first_frame.width(), DesignTokens.file_tab_preferred_width)
+            self.assertLess(first_frame.width(), strip.scroll.viewport().width())
+
+            strip.set_paths(paths, paths[1])
+            self.app.processEvents()
+            strip._sync_tab_widths()
+            wide_widths = [
+                strip._tab_frames[strip._path_key(path)].width() for path in paths
+            ]
+            self.assertEqual(
+                wide_widths,
+                [DesignTokens.file_tab_preferred_width] * 2,
+            )
+
+            strip.resize(360, 36)
+            self.app.processEvents()
+            strip._sync_tab_widths()
+            compact_widths = [
+                strip._tab_frames[strip._path_key(path)].width() for path in paths
+            ]
+            self.assertEqual(compact_widths[0], compact_widths[1])
+            self.assertGreaterEqual(compact_widths[0], DesignTokens.file_tab_min_width)
+            self.assertLess(compact_widths[0], DesignTokens.file_tab_preferred_width)
+            self.assertLessEqual(
+                sum(compact_widths) + strip.tabs_layout.spacing(),
+                strip.scroll.viewport().width(),
+            )
             strip.close()
 
     def test_main_window_keeps_ordered_tabs_per_runtime_session(self):

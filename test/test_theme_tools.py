@@ -1,3 +1,4 @@
+import base64
 import os
 import shutil
 import tempfile
@@ -10,6 +11,11 @@ from core.clarify_mode import RUN_MODE_EXECUTION
 from core.config_manager import ConfigManager
 from core.skill_manager import SkillManager
 from core.theme_service import ThemeRepository
+
+
+ANIMATED_GIF = base64.b64decode(
+    "R0lGODlhBAADAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACAAAACwAAAAABAADAAAICAABCBxIUGBAACH5BAEMAAEALAAAAAAEAAMAgQAA/wAAAAAAAAAAAAgIAAEIHEhQYEAAOw=="
+)
 
 
 class ThemeToolTests(unittest.TestCase):
@@ -208,6 +214,32 @@ class ThemeToolTests(unittest.TestCase):
             context=self.context,
         )
         self.assertEqual(referenced["status"], "error")
+
+    def test_animated_asset_tool_returns_background_only_guidance(self):
+        image_path = os.path.join(self.temp_dir, "animated-theme.gif")
+        with open(image_path, "wb") as stream:
+            stream.write(ANIMATED_GIF)
+        preview = self.manager.call_tool(
+            "preview_ui_theme",
+            {"name": "Animated assets", "overrides": {}},
+            context=self.context,
+        )
+        imported = self.manager.call_tool(
+            "import_ui_theme_asset",
+            {
+                "preview_id": preview["preview_id"],
+                "preview_revision": preview["preview_revision"],
+                "asset_id": "animated-background",
+                "source_path": image_path,
+            },
+            context=self.context,
+        )
+
+        self.assertEqual(imported["status"], "ok")
+        self.assertEqual(imported["asset"]["media_type"], "image/gif")
+        self.assertEqual(imported["asset"]["animation"]["frame_count"], 2)
+        self.assertTrue(imported["workspace_scene_only"])
+        self.assertIn("only from workspace_scene", imported["content"])
 
 
 if __name__ == "__main__":

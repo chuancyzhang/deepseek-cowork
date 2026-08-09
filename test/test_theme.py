@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -6,7 +7,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication
 
-from core.theme import DesignTokens, apply_theme, apply_tooltip_theme, get_tech_stylesheet
+from core.theme import (
+    DesignTokens,
+    ThemeRuntimeManager,
+    apply_theme,
+    apply_tooltip_theme,
+    get_tech_stylesheet,
+)
+from core.theme_service import ThemeRepository
 
 
 class ThemeTests(unittest.TestCase):
@@ -45,6 +53,33 @@ class ThemeTests(unittest.TestCase):
         self.assertNotEqual(DesignTokens.selection_bg, DesignTokens.primary_soft)
         self.assertEqual(DesignTokens.sidebar_width, 240)
         self.assertEqual(DesignTokens.sidebar_max_width, 320)
+
+    def test_late_animation_failure_uses_existing_theme_error_channel_and_metadata_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ThemeRuntimeManager(self.app, ThemeRepository(directory))
+            manager.current = {
+                "id": "animated-theme",
+                "preview": True,
+                "assets": {
+                    "background": {
+                        "media_type": "image/gif",
+                        "animation": {"frame_count": 2, "duration_ms": 200},
+                    }
+                },
+            }
+            errors = []
+            manager.themeApplyFailed.connect(errors.append)
+
+            manager.report_runtime_error("主题动态背景播放失败：background；decode error")
+
+            self.assertEqual(errors, ["主题动态背景播放失败：background；decode error"])
+            self.assertEqual(manager.last_failure["reason"], "runtime_theme")
+            self.assertTrue(manager.last_failure["preview"])
+            with open(os.path.join(directory, "theme_debug.log"), encoding="utf-8") as stream:
+                log = stream.read()
+            self.assertIn("animation_error", log)
+            self.assertIn('animation_frame_count=2', log)
+            self.assertIn('animation_duration_ms=200', log)
 
 
 if __name__ == "__main__":

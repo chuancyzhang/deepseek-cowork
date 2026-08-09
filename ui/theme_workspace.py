@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import qtawesome as qta
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QBuffer, QEvent, QIODevice, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QMovie, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -56,6 +56,8 @@ def apply_theme_component_visibility(widget: QWidget, visible: bool) -> None:
 class WorkspaceSceneCanvas(QWidget):
     """The only image and procedural-background owner in the workspace."""
 
+    animationFailed = Signal(str)
+
     def __init__(self, host: QWidget):
         super().__init__(host)
         self.host = host
@@ -64,6 +66,12 @@ class WorkspaceSceneCanvas(QWidget):
         self.asset_records: dict[str, dict[str, Any]] = {}
         self._pixmap_cache: dict[str, QPixmap] = {}
         self._render_cache: dict[tuple, QPixmap] = {}
+        self._animation_buffers: dict[str, QBuffer] = {}
+        self._animation_movies: dict[str, QMovie] = {}
+        self._animation_started: set[str] = set()
+        self._animation_finished: set[str] = set()
+        self._animation_generation = 0
+        self._window_host = host.window()
         self.revision = ""
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -71,17 +79,29 @@ class WorkspaceSceneCanvas(QWidget):
         self.setAutoFillBackground(False)
         self.setFocusPolicy(Qt.NoFocus)
         host.installEventFilter(self)
+        if self._window_host is not host:
+            self._window_host.installEventFilter(self)
         self.setGeometry(host.rect())
         self.lower()
         self.hide()
 
     def eventFilter(self, watched, event):
-        if watched is self.host and event.type() in {QEvent.Resize, QEvent.Show, QEvent.LayoutRequest}:
-            self.setGeometry(self.host.rect())
-            self.lower()
+        if watched is self.host:
+            if event.type() in {QEvent.Resize, QEvent.Show, QEvent.LayoutRequest}:
+                self.setGeometry(self.host.rect())
+                self.lower()
+            if event.type() in {QEvent.Show, QEvent.Hide, QEvent.WindowStateChange}:
+                self._sync_animation_state()
+        elif watched is self._window_host and event.type() in {
+            QEvent.Show,
+            QEvent.Hide,
+            QEvent.WindowStateChange,
+        }:
+            self._sync_animation_state()
         return super().eventFilter(watched, event)
 
     def set_scene(self, scene, asset_records, asset_bytes, *, revision=""):
+        self._dispose_animations()
         layers = (scene or {}).get("layers") or []
         self.layers = copy.deepcopy(list(layers or []))
         self.asset_records = copy.deepcopy(dict(asset_records or {}))
@@ -91,10 +111,152 @@ class WorkspaceSceneCanvas(QWidget):
         self._render_cache.clear()
         for layer in self.layers:
             if layer.get("type") == "image":
-                self._pixmap(str(layer.get("asset") or ""))
+                asset_id = str(layer.get("asset") or "")
+                record = self.asset_records.get(asset_id) or {}
+                if record.get("animation"):
+                    self._create_animation(asset_id)
+                else:
+                    self._pixmap(asset_id)
         self.setVisible(bool(self.layers))
         self.lower()
+        self._sync_animation_state()
         self.update()
+
+    def _dispose_animations(self):
+        self._animation_generation += 1
+        for movie in self._animation_movies.values():
+            movie.stop()
+            try:
+                movie.frameChanged.disconnect()
+                movie.finished.disconnect()
+                movie.error.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            movie.deleteLater()
+        for buffer in self._animation_buffers.values():
+            buffer.close()
+            buffer.deleteLater()
+        self._animation_movies.clear()
+        self._animation_buffers.clear()
+        self._animation_started.clear()
+        self._animation_finished.clear()
+
+    def _create_animation(self, asset_id: str):
+        record = self.asset_records.get(asset_id) or {}
+        data = self.asset_bytes.get(record.get("path"), b"")
+        if not data:
+            raise ValueError(f"主题动态背景资产为空：{asset_id}")
+        media_type = str(record.get("media_type") or "")
+        movie_format = {
+            "image/gif": b"gif",
+            "image/webp": b"webp",
+        }.get(media_type)
+        if movie_format is None:
+            raise ValueError(f"主题动态背景格式无效：{asset_id}")
+        if movie_format not in {bytes(item) for item in QMovie.supportedFormats()}:
+            raise ValueError(f"当前运行环境不支持主题动态背景格式：{media_type}")
+        buffer = QBuffer(self)
+        buffer.setData(QByteArray(data))
+        if not buffer.open(QIODevice.ReadOnly):
+            buffer.deleteLater()
+            raise ValueError(f"主题动态背景资产无法读取：{asset_id}")
+        movie = QMovie(buffer, movie_format, self)
+        movie.setCacheMode(QMovie.CacheNone)
+        if not movie.isValid() or not movie.jumpToFrame(0) or movie.currentPixmap().isNull():
+            detail = movie.lastErrorString()
+            movie.deleteLater()
+            buffer.close()
+            buffer.deleteLater()
+            raise ValueError(f"主题动态背景资产无法解码：{asset_id}；{detail}")
+        generation = self._animation_generation
+        movie.frameChanged.connect(
+            lambda _frame, current=asset_id, current_generation=generation: self._on_animation_frame(
+                current,
+                current_generation,
+            )
+        )
+        movie.finished.connect(
+            lambda current=asset_id, current_generation=generation: self._on_animation_finished(
+                current,
+                current_generation,
+            )
+        )
+        movie.error.connect(
+            lambda _error, current=asset_id, current_generation=generation: self._on_animation_error(
+                current,
+                current_generation,
+            )
+        )
+        self._animation_buffers[asset_id] = buffer
+        self._animation_movies[asset_id] = movie
+
+    def _on_animation_frame(self, asset_id: str, generation: int):
+        if generation != self._animation_generation or asset_id not in self._animation_movies:
+            return
+        self._render_cache.clear()
+        self.update()
+
+    def _on_animation_finished(self, asset_id: str, generation: int):
+        if generation == self._animation_generation:
+            self._animation_finished.add(asset_id)
+
+    def _on_animation_error(self, asset_id: str, generation: int):
+        if generation != self._animation_generation:
+            return
+        movie = self._animation_movies.get(asset_id)
+        if movie is None:
+            return
+        detail = movie.lastErrorString()
+        frame_count = int(
+            ((self.asset_records.get(asset_id) or {}).get("animation") or {}).get("frame_count")
+            or 0
+        )
+        # With CacheNone, Qt reports UnknownError while rewinding a fully
+        # validated sequential GIF/WebP device. Playback remains Running and
+        # immediately advances to frame zero; this is a loop boundary, not a
+        # decoder failure.
+        if (
+            detail == "Unknown error"
+            and movie.state() == QMovie.Running
+            and frame_count > 1
+            and movie.currentFrameNumber() == frame_count - 1
+        ):
+            return
+        movie.stop()
+        self._animation_finished.add(asset_id)
+        self.animationFailed.emit(f"主题动态背景播放失败：{asset_id}；{detail}")
+
+    def _sync_animation_state(self):
+        if not self._animation_movies:
+            return
+        window = self.window()
+        should_play = bool(
+            self.layers
+            and self.isVisible()
+            and self.host.isVisible()
+            and (window is None or not window.isMinimized())
+        )
+        for asset_id, movie in self._animation_movies.items():
+            if asset_id in self._animation_finished:
+                continue
+            if should_play:
+                if asset_id not in self._animation_started:
+                    self._animation_started.add(asset_id)
+                    movie.start()
+                elif movie.state() == QMovie.Paused:
+                    movie.setPaused(False)
+            elif movie.state() == QMovie.Running:
+                movie.setPaused(True)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_animation_state()
+
+    def hideEvent(self, event):
+        for movie in self._animation_movies.values():
+            if movie.state() == QMovie.Running:
+                movie.setPaused(True)
+        super().hideEvent(event)
 
     def _pixmap(self, asset_id: str) -> QPixmap:
         record = self.asset_records.get(asset_id) or {}
@@ -107,6 +269,15 @@ class WorkspaceSceneCanvas(QWidget):
         if not data or not pixmap.loadFromData(data):
             raise ValueError(f"主题背景资产无法解码：{asset_id}")
         self._pixmap_cache[digest] = pixmap
+        return pixmap
+
+    def _image_pixmap(self, asset_id: str) -> QPixmap:
+        movie = self._animation_movies.get(asset_id)
+        if movie is None:
+            return self._pixmap(asset_id)
+        pixmap = movie.currentPixmap()
+        if pixmap.isNull():
+            raise ValueError(f"主题动态背景当前帧无法解码：{asset_id}")
         return pixmap
 
     @staticmethod
@@ -145,7 +316,7 @@ class WorkspaceSceneCanvas(QWidget):
         return target, QRect(source_x, source_y, visible_width, visible_height)
 
     def _paint_image(self, painter: QPainter, layer: dict):
-        pixmap = self._pixmap(layer["asset"])
+        pixmap = self._image_pixmap(layer["asset"])
         target = self.rect()
         fit = layer.get("fit", "cover")
         destination, source = self._image_target(
@@ -222,10 +393,24 @@ class WorkspaceSceneCanvas(QWidget):
         assets_key = tuple(
             sorted((asset_id, str(record.get("sha256") or "")) for asset_id, record in self.asset_records.items())
         )
+        animation_key = tuple(
+            sorted(
+                (asset_id, movie.currentFrameNumber())
+                for asset_id, movie in self._animation_movies.items()
+            )
+        )
         scene_digest = hashlib.sha256(
             json.dumps(self.layers, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        key = (self.revision, assets_key, scene_digest, self.width(), self.height(), round(dpr, 3))
+        key = (
+            self.revision,
+            assets_key,
+            animation_key,
+            scene_digest,
+            self.width(),
+            self.height(),
+            round(dpr, 3),
+        )
         cached = self._render_cache.get(key)
         if cached is not None:
             return cached

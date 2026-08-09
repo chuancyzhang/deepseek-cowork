@@ -1,3 +1,4 @@
+import base64
 import os
 import tempfile
 import unittest
@@ -6,11 +7,13 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QCloseEvent, QImage
+from PySide6.QtGui import QCloseEvent, QImage, QMovie
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid as is_qt_object_valid
 
 from core.theme import ThemeRuntimeManager
+from core.theme_package import build_asset_record
 from core.theme_service import ThemeRepository
 from core.conversation_render import build_conversation_render_spans
 from main import (
@@ -24,6 +27,16 @@ from main import (
     SessionContextChip,
 )
 from ui.theme_workspace import WorkspaceSceneCanvas
+
+
+ANIMATED_GIF = base64.b64decode(
+    "R0lGODlhBAADAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACAAAACwAAAAABAADAAAICAABCBxIUGBAACH5BAEMAAEALAAAAAAEAAMAgQAA/wAAAAAAAAAAAAgIAAEIHEhQYEAAOw=="
+)
+FINITE_ANIMATED_GIF = ANIMATED_GIF.replace(
+    b"\x03\x01\x00\x00\x00",
+    b"\x03\x01\x01\x00\x00",
+    1,
+)
 
 
 class TopLevelShowTracker(QObject):
@@ -413,6 +426,119 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
         finally:
             host.close()
             host.deleteLater()
+
+    def test_workspace_scene_canvas_animates_and_pauses_when_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = os.path.join(directory, "background.gif")
+            with open(image_path, "wb") as stream:
+                stream.write(ANIMATED_GIF)
+            record, data = build_asset_record("animated-bg", image_path)
+            host = QWidget()
+            host.resize(130, 98)
+            canvas = WorkspaceSceneCanvas(host)
+            canvas.set_scene(
+                {
+                    "attachment": "fixed",
+                    "layers": [
+                        {
+                            "type": "image",
+                            "asset": "animated-bg",
+                            "fit": "cover",
+                            "opacity": 1,
+                            "blend": "source_over",
+                        }
+                    ],
+                },
+                {"animated-bg": record},
+                {record["path"]: data},
+                revision="animated-1",
+            )
+            host.show()
+            self.app.processEvents()
+            try:
+                movie = canvas._animation_movies["animated-bg"]
+                self.assertEqual(movie.state(), QMovie.Running)
+                first_frame = movie.currentFrameNumber()
+                first_render = canvas._rendered_scene().cacheKey()
+                for _attempt in range(30):
+                    QTest.qWait(20)
+                    self.app.processEvents()
+                    if movie.currentFrameNumber() != first_frame:
+                        break
+                self.assertNotEqual(movie.currentFrameNumber(), first_frame)
+                self.assertNotEqual(canvas._rendered_scene().cacheKey(), first_render)
+
+                host.hide()
+                self.app.processEvents()
+                paused_frame = movie.currentFrameNumber()
+                self.assertEqual(movie.state(), QMovie.Paused)
+                QTest.qWait(140)
+                self.app.processEvents()
+                self.assertEqual(movie.currentFrameNumber(), paused_frame)
+
+                host.show()
+                self.app.processEvents()
+                self.assertEqual(movie.state(), QMovie.Running)
+                for _attempt in range(30):
+                    QTest.qWait(20)
+                    self.app.processEvents()
+                    if movie.currentFrameNumber() != paused_frame:
+                        break
+                self.assertNotEqual(movie.currentFrameNumber(), paused_frame)
+
+                host.showMinimized()
+                self.app.processEvents()
+                minimized_frame = movie.currentFrameNumber()
+                self.assertTrue(host.isMinimized())
+                self.assertEqual(movie.state(), QMovie.Paused)
+                QTest.qWait(140)
+                self.app.processEvents()
+                self.assertEqual(movie.currentFrameNumber(), minimized_frame)
+
+                host.showNormal()
+                self.app.processEvents()
+                self.assertEqual(movie.state(), QMovie.Running)
+
+                canvas.set_scene({}, {}, {}, revision="restore")
+                self.assertFalse(canvas._animation_movies)
+                self.assertEqual(movie.state(), QMovie.NotRunning)
+            finally:
+                host.close()
+                host.deleteLater()
+
+    def test_workspace_scene_canvas_honors_finite_source_loop_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = os.path.join(directory, "finite-background.gif")
+            with open(image_path, "wb") as stream:
+                stream.write(FINITE_ANIMATED_GIF)
+            record, data = build_asset_record("finite-bg", image_path)
+            host = QWidget()
+            host.resize(96, 72)
+            canvas = WorkspaceSceneCanvas(host)
+            canvas.set_scene(
+                {
+                    "attachment": "fixed",
+                    "layers": [{"type": "image", "asset": "finite-bg", "fit": "cover"}],
+                },
+                {"finite-bg": record},
+                {record["path"]: data},
+                revision="finite-loop",
+            )
+            host.show()
+            self.app.processEvents()
+            try:
+                movie = canvas._animation_movies["finite-bg"]
+                self.assertEqual(movie.loopCount(), 1)
+                for _attempt in range(80):
+                    if movie.state() == QMovie.NotRunning:
+                        break
+                    QTest.qWait(20)
+                    self.app.processEvents()
+                self.assertEqual(movie.state(), QMovie.NotRunning)
+                self.assertIn("finite-bg", canvas._animation_finished)
+            finally:
+                host.close()
+                host.deleteLater()
 
     def test_workspace_scene_decode_failure_restores_previous_scene_and_objects(self):
         state = self.window.get_current_session()

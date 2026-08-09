@@ -365,6 +365,28 @@ def _runtime_theme_stylesheet(resolved):
     """
 
 
+def _theme_animation_log_fields(profile):
+    animated = [
+        record
+        for record in ((profile or {}).get("assets") or {}).values()
+        if isinstance(record, dict) and isinstance(record.get("animation"), dict)
+    ]
+    return {
+        "animation_asset_count": len(animated),
+        "animation_formats": sorted(
+            {str(record.get("media_type") or "") for record in animated}
+        ),
+        "animation_frame_count": sum(
+            int((record.get("animation") or {}).get("frame_count") or 0)
+            for record in animated
+        ),
+        "animation_duration_ms": sum(
+            int((record.get("animation") or {}).get("duration_ms") or 0)
+            for record in animated
+        ),
+    }
+
+
 class ThemeRuntimeManager(QObject):
     """UI-only adapter that applies repository state to Qt and runtime tokens."""
 
@@ -396,6 +418,28 @@ class ThemeRuntimeManager(QObject):
 
     def stop(self):
         self._poll_timer.stop()
+
+    def report_runtime_error(self, error, *, reason="runtime_theme"):
+        """Surface a late theme rendering failure through the normal diagnostics path."""
+        message = str(error or "主题运行时发生未知错误。")
+        self.last_error = message
+        self.last_failure = {
+            "error": message,
+            "reason": str(reason or "runtime_theme"),
+            "theme_id": (self.current or {}).get("id", DEFAULT_THEME_ID),
+            "preview": bool((self.current or {}).get("preview")),
+            "saved_requires_restart": False,
+        }
+        append_theme_log(
+            self.repository.data_dir,
+            "animation_error",
+            reason=self.last_failure["reason"],
+            theme_id=self.last_failure["theme_id"],
+            preview=self.last_failure["preview"],
+            error=message,
+            **_theme_animation_log_fields(self.current),
+        )
+        self.themeApplyFailed.emit(message)
 
     @staticmethod
     def _path_stamp(path):
@@ -498,12 +542,14 @@ class ThemeRuntimeManager(QObject):
         reason="apply",
         persisted_on_failure=False,
     ):
+        animation_log = _theme_animation_log_fields(profile)
         append_theme_log(
             self.repository.data_dir,
             "apply_submit",
             reason=reason,
             theme_id=(profile or {}).get("id", DEFAULT_THEME_ID),
             preview=bool(preview),
+            **animation_log,
         )
         append_theme_log(
             self.repository.data_dir,
@@ -511,6 +557,7 @@ class ThemeRuntimeManager(QObject):
             reason=reason,
             theme_id=(profile or {}).get("id", DEFAULT_THEME_ID),
             preview=bool(preview),
+            **animation_log,
         )
         previous_tokens = {
             name: getattr(DesignTokens, name)
@@ -554,6 +601,7 @@ class ThemeRuntimeManager(QObject):
                 ),
                 preview_revision=int((profile or {}).get("preview_revision") or 0),
                 component_count=len((profile or {}).get("components") or {}),
+                **animation_log,
             )
             resolved["schema_version"] = int((profile or {}).get("schema_version") or 1)
             resolved["workspace_scene"] = _json_theme_copy(
@@ -607,6 +655,7 @@ class ThemeRuntimeManager(QObject):
                 preview=bool(preview),
                 refreshed_controls=int(self.current.get("_binding_count") or 0),
                 surface_elapsed_ms=self.current.get("_binding_surface_elapsed_ms") or {},
+                **animation_log,
             )
             return True
         except Exception as exc:
@@ -638,6 +687,7 @@ class ThemeRuntimeManager(QObject):
                 preview=bool(preview),
                 error=str(exc),
                 recovery_error=recovery_error,
+                **animation_log,
             )
             self.themeApplyFailed.emit(str(exc))
             return False

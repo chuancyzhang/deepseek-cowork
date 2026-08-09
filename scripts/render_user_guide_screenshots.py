@@ -1102,12 +1102,25 @@ def main_run():
             save_widget(window, "s15a-grill-mode-armed.png", 200)
             return
         if SCREENSHOT_SCOPE == "home":
-            window.resize(1440, 900)
+            narrow = os.environ.get("COWORK_SCREENSHOT_NARROW") == "1"
+            if narrow:
+                window.resize(900, 720)
+            else:
+                window.resize(1440, 900)
             window.show()
             process_events(180)
             window.sync_context_drawer_layout()
             process_events(120)
-            save_widget(window, "s04-home-and-settings.png", 250)
+            if narrow:
+                state = window.get_current_session()
+                scrollbar = state.chat_scroll.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+                process_events(120)
+            save_widget(
+                window,
+                "s04-home-and-settings-narrow.png" if narrow else "s04-home-and-settings.png",
+                250,
+            )
             return
         save_widget(window, "04-home-screen.png", 250)
         model_style = window.model_select_btn.styleSheet()

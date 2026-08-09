@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QColor, QPixmap, QWheelEvent
-from PySide6.QtWidgets import QApplication, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QWidget
 
 from main import (
     AgentModuleDialog,
@@ -469,10 +469,27 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(main_window.office_output_profile, "")
             self.assertIsNotNone(widget.findChild(QPushButton, None))
             labels = [label.text() for label in widget.findChildren(QLabel)]
+            self.assertIn("想换一种工作台风格？", labels)
             self.assertIn("需要处理文档或数据？", labels)
             self.assertTrue(any("文档工具包" in text and "数据分析工具包" in text for text in labels))
+            widget.theme_hint_button.click()
+            self.assertEqual(main_window.prepared_actions, ["finance", "finance", "theme"])
+            self.assertIn("Theme Customizer", main_window.input_field.text)
+            self.assertIn("不要直接保存或启用", main_window.input_field.text)
             widget.toolkit_hint_button.click()
             self.assertEqual(main_window.opened_settings_page, "组件与依赖")
+
+            widget.refresh_theme(
+                {
+                    "workspace_scene": {"attachment": "fixed", "layers": []},
+                    "surfaces": {},
+                    "components": {"home.theme_reminder": {"visible": False}},
+                    "content": {"home.theme_reminder.title": "主题入口"},
+                }
+            )
+            self.assertTrue(widget.theme_hint.isHidden())
+            self.assertFalse(widget.toolkit_hint.isHidden())
+            self.assertEqual(widget.theme_title_label.text(), "主题入口")
         finally:
             widget.deleteLater()
 
@@ -484,6 +501,7 @@ class TestDeliverableScanning(unittest.TestCase):
             widget.resize(720, 480)
             widget.show()
             app.processEvents()
+            self.assertEqual(widget.theme_hint._theme_layout.direction(), QBoxLayout.LeftToRight)
             widget.current_cols = 1
             widget.reflow_cards()
             app.processEvents()
@@ -494,6 +512,19 @@ class TestDeliverableScanning(unittest.TestCase):
                 self.assertIs(card.parentWidget(), widget.grid_widget)
                 self.assertFalse(card.isWindow())
                 self.assertFalse(card.windowFlags() & Qt.Window)
+
+            widget.resize(480, 640)
+            app.processEvents()
+            self.assertEqual(widget.theme_hint._theme_layout.direction(), QBoxLayout.TopToBottom)
+            self.assertEqual(widget.toolkit_hint._theme_layout.direction(), QBoxLayout.TopToBottom)
+            self.assertGreaterEqual(
+                widget.theme_hint.height(),
+                widget.theme_hint.minimumSizeHint().height(),
+            )
+            self.assertLessEqual(
+                widget.theme_hint_button.geometry().bottom(),
+                widget.theme_hint.contentsRect().bottom(),
+            )
         finally:
             widget.close()
             widget.deleteLater()
@@ -519,6 +550,7 @@ class TestDeliverableScanning(unittest.TestCase):
             {"name": "eastmoney-miaoxiang", "enabled": True},
             {"name": "python-runner", "enabled": True},
             {"name": "browser-automation", "enabled": True},
+            {"name": "theme-customizer", "enabled": True},
         ]
         config_values = configs or {
             "wind-aifinmarket": {"WIND_API_KEY": "wind-secret"},
@@ -554,6 +586,54 @@ class TestDeliverableScanning(unittest.TestCase):
         success_message = window.add_system_toast.call_args.args[0]
         self.assertIn("万得金融能力", success_message)
         self.assertIn("东方财富妙想", success_message)
+
+    def test_theme_home_reminder_loads_customizer_without_replacing_other_skills(self):
+        window, state = self._home_action_window()
+
+        with patch("main.log_ui_navigation") as log:
+            prepared = window.prepare_home_action("theme")
+
+        self.assertTrue(prepared)
+        window.set_session_selected_skills.assert_called_once_with(
+            ["command-tools", "theme-customizer"],
+            session_id=state.session_id,
+        )
+        self.assertTrue(
+            any(call.args and call.args[0] == "home_theme_reminder_finish" for call in log.call_args_list)
+        )
+        self.assertIn("Theme Customizer", window.add_system_toast.call_args.args[0])
+
+    def test_theme_home_reminder_preserves_prompt_when_customizer_is_disabled(self):
+        window, _state = self._home_action_window()
+        for skill in window.skill_manager.get_all_skills.return_value:
+            if skill["name"] == "theme-customizer":
+                skill["enabled"] = False
+
+        with patch("main.log_ui_navigation"):
+            prepared = window.prepare_home_action("theme")
+
+        self.assertFalse(prepared)
+        window.set_session_selected_skills.assert_not_called()
+        self.assertIn("开启 Theme Customizer", window.add_system_toast.call_args.args[0])
+
+    def test_theme_home_reminder_reports_missing_and_loading_recovery_paths(self):
+        missing_window, _state = self._home_action_window()
+        missing_window.skill_manager.get_all_skills.return_value = [
+            skill
+            for skill in missing_window.skill_manager.get_all_skills.return_value
+            if skill["name"] != "theme-customizer"
+        ]
+        with patch("main.log_ui_navigation"):
+            self.assertFalse(missing_window.prepare_home_action("theme"))
+        self.assertIn("未找到 Theme Customizer", missing_window.add_system_toast.call_args.args[0])
+        self.assertIn("高级能力管理", missing_window.add_system_toast.call_args.args[0])
+
+        loading_window, _state = self._home_action_window()
+        loading_window.skill_manager_ready = False
+        with patch("main.log_ui_navigation"):
+            self.assertFalse(loading_window.prepare_home_action("theme"))
+        self.assertIn("能力仍在加载中", loading_window.add_system_toast.call_args.args[0])
+        self.assertIn("稍后再次点击", loading_window.add_system_toast.call_args.args[0])
 
     def test_finance_home_action_requires_both_keys_without_partial_loading(self):
         window, _state = self._home_action_window(

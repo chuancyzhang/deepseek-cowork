@@ -15058,8 +15058,15 @@ class EmptyStateWidget(QWidget):
         layout.addSpacing(12)
         layout.addWidget(self.grid_widget)
         layout.addSpacing(12)
+        self.home_hints = QWidget(self)
+        self.home_hints_layout = QVBoxLayout(self.home_hints)
+        self.home_hints_layout.setContentsMargins(0, 0, 0, 0)
+        self.home_hints_layout.setSpacing(8)
+        self.theme_hint = self.create_theme_hint()
         self.toolkit_hint = self.create_toolkit_hint()
-        layout.addWidget(self.toolkit_hint)
+        self.home_hints_layout.addWidget(self.theme_hint)
+        self.home_hints_layout.addWidget(self.toolkit_hint)
+        layout.addWidget(self.home_hints)
         layout.addStretch()
         
         # Initial layout
@@ -15068,6 +15075,7 @@ class EmptyStateWidget(QWidget):
             "home.hero": self,
             "home.quick_actions": self.grid_widget,
             "home.reminder": self.toolkit_hint,
+            "home.theme_reminder": self.theme_hint,
         }
         self._theme_surface_bases = {
             surface_id: widget.styleSheet()
@@ -15080,6 +15088,7 @@ class EmptyStateWidget(QWidget):
             "home.card.data": self.action_cards[2].styleSheet(),
             "home.card.browser": self.action_cards[3].styleSheet(),
             "home.reminder": self.toolkit_hint.styleSheet(),
+            "home.theme_reminder": self.theme_hint.styleSheet(),
         }
         bind_theme(self, self.refresh_theme, surface="conversation")
         
@@ -15091,6 +15100,7 @@ class EmptyStateWidget(QWidget):
         # Calculate columns based on width
         # Keep task suggestions compact while retaining readable wrapping.
         w = self.width()
+        self._reflow_home_hints(w)
         if w > 600:
             cols = 2
         else:
@@ -15128,6 +15138,19 @@ class EmptyStateWidget(QWidget):
                 column_span = int(layout_spec.get("column_span", 1))
             self.grid_layout.addWidget(btn, row, column, row_span, column_span)
             visible_index += 1
+
+    def _reflow_home_hints(self, width):
+        compact = int(width) <= 520
+        direction = QBoxLayout.TopToBottom if compact else QBoxLayout.LeftToRight
+        for hint in (getattr(self, "theme_hint", None), getattr(self, "toolkit_hint", None)):
+            if hint is None:
+                continue
+            hint._theme_layout.setDirection(direction)
+            hint._theme_layout.setAlignment(
+                hint._theme_action_button,
+                (Qt.AlignLeft | Qt.AlignVCenter) if compact else Qt.AlignVCenter,
+            )
+            hint.setMinimumHeight(0 if compact else 72)
             
     def create_action_card(self, action):
         action_id = str(action.get("id") or "").strip()
@@ -15200,65 +15223,162 @@ class EmptyStateWidget(QWidget):
         self.main_window.input_field.setText(prompt)
         self.main_window.prepare_home_action(action_id)
 
-    def create_toolkit_hint(self):
-        hint = QFrame(self)
-        hint.setObjectName("ToolkitInstallHint")
-        hint.setMaximumWidth(820)
-        hint.setMinimumHeight(78)
-        hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        hint.setStyleSheet(
-            f"""
-            QFrame#ToolkitInstallHint {{
+    @staticmethod
+    def _home_hint_base_style(object_name):
+        return f"""
+            QFrame#{object_name} {{
                 background: {DesignTokens.bg_panel_strong};
                 border: 1px solid {DesignTokens.border_subtle};
                 border-radius: 18px;
             }}
             """
-        )
-        hint_layout = QHBoxLayout(hint)
+
+    def _create_home_hint(self, object_name, icon_name, title, description, button_text, callback):
+        hint = QFrame(self)
+        hint.setObjectName(object_name)
+        hint.setMaximumWidth(820)
+        hint.setMinimumHeight(72)
+        hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        hint.setStyleSheet(self._home_hint_base_style(object_name))
+        hint_layout = QBoxLayout(QBoxLayout.LeftToRight, hint)
         hint_layout.setContentsMargins(16, 12, 14, 12)
         hint_layout.setSpacing(12)
 
-        icon = QLabel()
-        icon.setPixmap(qta.icon("fa5s.puzzle-piece", color=DesignTokens.primary).pixmap(18, 18))
+        content_row = QWidget(hint)
+        content_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        content_layout = QHBoxLayout(content_row)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+
+        icon = QLabel(content_row)
+        icon.setPixmap(qta.icon(icon_name, color=DesignTokens.primary).pixmap(18, 18))
         icon.setStyleSheet("background: transparent; border: none;")
-        hint_layout.addWidget(icon, 0, Qt.AlignTop)
+        content_layout.addWidget(icon, 0, Qt.AlignTop)
 
         text_box = QVBoxLayout()
         text_box.setSpacing(3)
-        self.toolkit_title_label = QLabel("需要处理文档或数据？")
-        self.toolkit_title_label.setStyleSheet(
+        title_label = QLabel(title)
+        title_label.setStyleSheet(
             f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary}; "
             "background: transparent; border: none;"
         )
-        self.toolkit_desc_label = QLabel("可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。")
-        self.toolkit_desc_label.setWordWrap(True)
-        self.toolkit_desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.toolkit_desc_label.setStyleSheet(
+        description_label = QLabel(description)
+        description_label.setWordWrap(True)
+        description_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        description_label.setStyleSheet(
             f"font-size: 12px; color: {DesignTokens.text_secondary}; "
             "background: transparent; border: none;"
         )
-        text_box.addWidget(self.toolkit_title_label)
-        text_box.addWidget(self.toolkit_desc_label)
-        hint_layout.addLayout(text_box, 1)
+        text_box.addWidget(title_label)
+        text_box.addWidget(description_label)
+        content_layout.addLayout(text_box, 1)
+        hint_layout.addWidget(content_row, 1)
 
-        open_btn = QPushButton("打开设置")
+        open_btn = QPushButton(button_text)
         open_btn.setObjectName("SecondaryBtn")
         open_btn.setCursor(Qt.PointingHandCursor)
         open_btn.setFixedHeight(32)
         open_btn.setStyleSheet(apple_button_style("secondary", radius=16))
-        open_btn.clicked.connect(self.open_toolkit_settings)
+        open_btn.clicked.connect(callback)
         hint_layout.addWidget(open_btn, 0, Qt.AlignVCenter)
-        self.toolkit_hint_button = open_btn
+        hint._theme_icon_label = icon
+        hint._theme_default_icon = icon_name
+        hint._theme_title_label = title_label
+        hint._theme_desc_label = description_label
+        hint._theme_action_button = open_btn
+        hint._theme_layout = hint_layout
+        hint._theme_content_row = content_row
         return hint
+
+    def create_theme_hint(self):
+        hint = self._create_home_hint(
+            "ThemeCustomizerHint",
+            "fa5s.palette",
+            "想换一种工作台风格？",
+            "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；先预览，确认后再保存。",
+            "用 AI 设计主题",
+            self.activate_theme_customizer,
+        )
+        self.theme_title_label = hint._theme_title_label
+        self.theme_desc_label = hint._theme_desc_label
+        self.theme_hint_button = hint._theme_action_button
+        return hint
+
+    def create_toolkit_hint(self):
+        hint = self._create_home_hint(
+            "ToolkitInstallHint",
+            "fa5s.puzzle-piece",
+            "需要处理文档或数据？",
+            "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
+            "打开设置",
+            self.open_toolkit_settings,
+        )
+        self.toolkit_title_label = hint._theme_title_label
+        self.toolkit_desc_label = hint._theme_desc_label
+        self.toolkit_hint_button = hint._theme_action_button
+        return hint
+
+    def activate_theme_customizer(self):
+        self.main_window.input_field.setText(
+            "请使用 Theme Customizer 帮我设计一套 Cowork 界面主题。"
+            "先询问我的配色、字体、密度、布局和背景偏好；"
+            "生成后只创建预览，不要直接保存或启用。"
+        )
+        self.main_window.prepare_home_action("theme")
 
     def open_toolkit_settings(self):
         self.main_window.open_settings("组件与依赖")
+
+    def _apply_home_hint_theme(self, component_id, hint, surface_style, resolved):
+        spec = (resolved.get("components") or {}).get(component_id) or {}
+        apply_theme_component_visibility(hint, spec.get("visible", True))
+        hint.setStyleSheet(
+            WorkspaceThemeController._style_sheet(
+                hint,
+                spec.get("style") or {},
+                surface_style,
+            )
+        )
+        hint._theme_title_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 700; color: {DesignTokens.text_primary}; "
+            "background: transparent; border: none;"
+        )
+        hint._theme_desc_label.setStyleSheet(
+            f"font-size: 12px; color: {DesignTokens.text_secondary}; "
+            "background: transparent; border: none;"
+        )
+        hint._theme_action_button.setStyleSheet(apple_button_style("secondary", radius=16))
+        icon = spec.get("icon") or {}
+        if icon.get("source") == "builtin":
+            hint._theme_icon_label.setPixmap(
+                qta.icon(icon.get("name"), color=DesignTokens.icon_primary).pixmap(18, 18)
+            )
+        elif icon.get("source") == "asset":
+            record = (resolved.get("assets") or {}).get(icon.get("asset")) or {}
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(
+                (resolved.get("_asset_bytes") or {}).get(record.get("path"), b"")
+            ):
+                raise ValueError(f"主题首页提醒图标资产无法解码：{icon.get('asset')}")
+            hint._theme_icon_label.setPixmap(
+                pixmap.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        else:
+            hint._theme_icon_label.setPixmap(
+                qta.icon(hint._theme_default_icon, color=DesignTokens.primary).pixmap(18, 18)
+            )
 
     def refresh_theme(self, resolved=None):
         resolved = resolved or getattr(getattr(QApplication.instance(), "theme_manager", None), "current", None) or {}
         self._resolved_theme = resolved
         scene_active = bool(((resolved.get("workspace_scene") or {}).get("layers") or []))
+        for surface_id, hint in (
+            ("home.theme_reminder", self.theme_hint),
+            ("home.reminder", self.toolkit_hint),
+        ):
+            base = self._home_hint_base_style(hint.objectName())
+            self._theme_surface_bases[surface_id] = base
+            self._theme_component_bases[surface_id] = base
         resolved_surface_styles = {}
         for surface_id, widget in self._theme_surfaces.items():
             surface = (resolved.get("surfaces") or {}).get(surface_id) or {}
@@ -15306,6 +15426,16 @@ class EmptyStateWidget(QWidget):
                 button._theme_icon_label.setPixmap(
                     qta.icon(button._theme_default_icon, color=DesignTokens.primary).pixmap(20, 20)
                 )
+        self.theme_title_label.setText(
+            content.get("home.theme_reminder.title", "想换一种工作台风格？")
+        )
+        self.theme_desc_label.setText(
+            content.get(
+                "home.theme_reminder.description",
+                "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；"
+                "先预览，确认后再保存。",
+            )
+        )
         self.toolkit_title_label.setText(content.get("home.reminder.title", "需要处理文档或数据？"))
         self.toolkit_desc_label.setText(
             content.get(
@@ -15313,18 +15443,28 @@ class EmptyStateWidget(QWidget):
                 "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
             )
         )
-        reminder_spec = (resolved.get("components") or {}).get("home.reminder") or {}
-        apply_theme_component_visibility(
+        self._apply_home_hint_theme(
+            "home.theme_reminder",
+            self.theme_hint,
+            resolved_surface_styles["home.theme_reminder"],
+            resolved,
+        )
+        self._apply_home_hint_theme(
+            "home.reminder",
             self.toolkit_hint,
-            reminder_spec.get("visible", True),
+            resolved_surface_styles["home.reminder"],
+            resolved,
         )
-        self.toolkit_hint.setStyleSheet(
-            WorkspaceThemeController._style_sheet(
-                self.toolkit_hint,
-                reminder_spec.get("style") or {},
-                resolved_surface_styles["home.reminder"],
-            )
-        )
+        reminder_order = []
+        for default_order, component_id, hint in (
+            (0, "home.theme_reminder", self.theme_hint),
+            (1, "home.reminder", self.toolkit_hint),
+        ):
+            layout_spec = ((resolved.get("components") or {}).get(component_id) or {}).get("layout") or {}
+            reminder_order.append((int(layout_spec.get("order", default_order)), default_order, hint))
+            self.home_hints_layout.removeWidget(hint)
+        for _order, _default_order, hint in sorted(reminder_order, key=lambda item: (item[0], item[1])):
+            self.home_hints_layout.addWidget(hint)
         title_spec = (resolved.get("components") or {}).get("home.title") or {}
         apply_theme_component_visibility(
             self.title_label,
@@ -21943,6 +22083,10 @@ class MainWindow(QMainWindow):
         workspace_scene_layout.addWidget(self.main_splitter)
         root_layout.addWidget(self.workspace_scene_host)
         self.workspace_theme_controller.register_scene_host(self.workspace_scene_host)
+        if self.theme_manager is not None:
+            self.workspace_theme_controller.scene_canvas.animationFailed.connect(
+                self.theme_manager.report_runtime_error
+            )
 
         # --- Sidebar ---
         sidebar = QWidget()
@@ -35314,6 +35458,13 @@ class MainWindow(QMainWindow):
             session_id=state.session_id,
             missing=list(missing_codes or []),
         )
+        if action_id == "theme":
+            log_ui_navigation(
+                "home_theme_reminder_error",
+                session_id=state.session_id,
+                missing=list(missing_codes or []),
+                error=message,
+            )
         self.add_system_toast(
             message,
             "warning",
@@ -35330,8 +35481,19 @@ class MainWindow(QMainWindow):
             action_id=action_id,
             session_id=getattr(state, "session_id", "") if state else "",
         )
+        if action_id == "theme":
+            log_ui_navigation(
+                "home_theme_reminder_submit",
+                session_id=getattr(state, "session_id", "") if state else "",
+            )
+            log_ui_navigation(
+                "home_theme_reminder_start",
+                session_id=getattr(state, "session_id", "") if state else "",
+            )
         if not state:
             log_ui_navigation("home_action_prepare_error", action_id=action_id, error="session_missing")
+            if action_id == "theme":
+                log_ui_navigation("home_theme_reminder_error", error="session_missing")
             self.add_system_toast("当前会话不可用，无法加载任务能力。", "error", auto_close_ms=5200)
             return False
         if self._session_is_busy(state):
@@ -35359,6 +35521,12 @@ class MainWindow(QMainWindow):
                 session_id=state.session_id,
                 error=str(exc),
             )
+            if action_id == "theme":
+                log_ui_navigation(
+                    "home_theme_reminder_error",
+                    session_id=state.session_id,
+                    error=str(exc),
+                )
             self.add_system_toast(
                 f"无法检查能力状态：{exc}",
                 "error",
@@ -35366,6 +35534,40 @@ class MainWindow(QMainWindow):
                 auto_close_ms=7600,
             )
             return False
+
+        if action_id == "theme":
+            log_ui_navigation(
+                "home_theme_reminder_run",
+                session_id=state.session_id,
+            )
+            theme_skill = skill_records.get("theme-customizer")
+            if not theme_skill:
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    "已填入主题设计需求，但未找到 Theme Customizer。请在高级能力管理中检查内置能力。",
+                    ["theme_customizer_missing"],
+                )
+            if not bool(theme_skill.get("enabled")):
+                return self._show_home_action_setup_required(
+                    state,
+                    action_id,
+                    "已填入主题设计需求，请先在 AI 能力商城开启 Theme Customizer。",
+                    ["theme_customizer_disabled"],
+                )
+            self._merge_home_action_skills(state, action_id, ["theme-customizer"])
+            self.add_system_toast(
+                "已为当前会话加载 Theme Customizer，可补充主题偏好后发送。",
+                "success",
+                session_id=state.session_id,
+                auto_close_ms=3600,
+            )
+            log_ui_navigation(
+                "home_theme_reminder_finish",
+                session_id=state.session_id,
+                selected_skill="theme-customizer",
+            )
+            return True
 
         if action_id == "finance":
             required = (

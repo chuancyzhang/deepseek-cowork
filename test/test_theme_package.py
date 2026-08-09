@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tempfile
@@ -11,6 +12,18 @@ from PySide6.QtGui import QColor, QImage
 from core.theme import default_design_tokens
 from core.theme_package import build_asset_record
 from core.theme_service import ThemeRepository, theme_manifest_schema, validate_theme_manifest
+
+
+ANIMATED_GIF = base64.b64decode(
+    "R0lGODlhBAADAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACAAAACwAAAAABAADAAAICAABCBxIUGBAACH5BAEMAAEALAAAAAAEAAMAgQAA/wAAAAAAAAAAAAgIAAEIHEhQYEAAOw=="
+)
+STATIC_GIF = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+ANIMATED_WEBP = base64.b64decode(
+    "UklGRoQAAABXRUJQVlA4WAoAAAACAAAAAwAAAgAAQU5JTQYAAAAAAAAAAABBTk1GKAAAAAAAAAAAAAMAAAIAAFAAAAJWUDhMDwAAAC8DgAAABxD9j/4HIqL/AQBBTk1GKAAAAAAAAAAAAAMAAAIAAHgAAABWUDhMDwAAAC8DgAAABxDR//4HIqL/AQA="
+)
+TOO_FAST_WEBP = base64.b64decode(
+    "UklGRoQAAABXRUJQVlA4WAoAAAACAAAAAQAAAQAAQU5JTQYAAAAAAAAAAABBTk1GKAAAAAAAAAAAAAEAAAEAAAoAAAJWUDhMDwAAAC8BQAAABxD9j/4HIqL/AQBBTk1GKAAAAAAAAAAAAAEAAAEAAAoAAABWUDhMDwAAAC8BQAAABxDR//4HIqL/AQA="
+)
 
 
 class ThemePackageTests(unittest.TestCase):
@@ -27,6 +40,12 @@ class ThemePackageTests(unittest.TestCase):
         image = QImage(64, 48, QImage.Format_ARGB32)
         image.fill(QColor("#336699"))
         self.assertTrue(image.save(path, "PNG"))
+        return path
+
+    def _animated_path(self, suffix, data):
+        path = os.path.join(self.temp_dir.name, "background." + suffix)
+        with open(path, "wb") as stream:
+            stream.write(data)
         return path
 
     def test_manifest_rejects_hidden_protected_component_and_action_fields(self):
@@ -93,6 +112,11 @@ class ThemePackageTests(unittest.TestCase):
         self.assertIn("home.card.finance", schema["components"])
         self.assertIn("home.card.data", schema["components"])
         self.assertIn("home.card.browser", schema["components"])
+        self.assertIn("home.theme_reminder", schema["components"])
+        self.assertIn("home.theme_reminder", schema["surfaces"])
+        self.assertEqual(schema["animated_asset_formats"], ["gif", "webp"])
+        self.assertEqual(schema["animated_asset_usage"], ["workspace_scene"])
+        self.assertEqual(schema["workspace_scene_only_formats"], ["gif"])
         self.assertNotIn("home.card.files", schema["components"])
         self.assertEqual(
             schema["content_keys"]["home.card.data.title"],
@@ -215,6 +239,209 @@ class ThemePackageTests(unittest.TestCase):
             stream.write(b"not a png")
         with self.assertRaisesRegex(ValueError, "格式无效"):
             build_asset_record("fake", path)
+        disguised_path = os.path.join(self.temp_dir.name, "disguised.png")
+        with open(disguised_path, "wb") as stream:
+            stream.write(ANIMATED_GIF)
+        with self.assertRaisesRegex(ValueError, "后缀与文件内容不一致"):
+            build_asset_record("disguised", disguised_path)
+        with self.assertRaisesRegex(ValueError, "GIF 动画结构损坏"):
+            build_asset_record(
+                "truncated-animation",
+                self._animated_path("gif", ANIMATED_GIF[:-1]),
+            )
+
+    def test_animated_gif_and_webp_records_include_verified_metadata(self):
+        for suffix, media_type, data in (
+            ("gif", "image/gif", ANIMATED_GIF),
+            ("webp", "image/webp", ANIMATED_WEBP),
+        ):
+            record, loaded = build_asset_record(
+                "animated-" + suffix,
+                self._animated_path(suffix, data),
+            )
+            self.assertEqual(loaded, data)
+            self.assertEqual(record["media_type"], media_type)
+            self.assertEqual(record["animation"], {"frame_count": 2, "duration_ms": 200})
+            self.assertTrue(record["path"].endswith("." + suffix))
+
+    def test_animated_asset_round_trip_and_icon_reference_rejection(self):
+        record, data = build_asset_record(
+            "animated-bg",
+            self._animated_path("gif", ANIMATED_GIF),
+        )
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "animated-theme",
+            "name": "Animated",
+            "overrides": {},
+            "assets": {"animated-bg": record},
+            "workspace_scene": {
+                "attachment": "fixed",
+                "layers": [{"type": "image", "asset": "animated-bg", "fit": "cover"}],
+            },
+            "surfaces": {},
+            "components": {},
+            "content": {},
+        }
+        normalized = validate_theme_manifest(
+            payload,
+            self.defaults,
+            asset_bytes={record["path"]: data},
+        )
+        self.assertEqual(normalized["assets"]["animated-bg"]["animation"]["frame_count"], 2)
+
+        preview = self.repository.write_preview(
+            name="Animated round trip",
+            overrides={},
+            default_tokens=self.defaults,
+        )
+        imported = self.repository.import_preview_asset(
+            preview_id=preview["preview_id"],
+            preview_revision=preview["revision"],
+            asset_id="animated-bg",
+            source_path=self._animated_path("gif", ANIMATED_GIF),
+            default_tokens=self.defaults,
+        )
+        patched = self.repository.patch_preview(
+            preview_id=preview["preview_id"],
+            preview_revision=imported["revision"],
+            set_overrides={},
+            unset_tokens=[],
+            operations=[
+                {
+                    "op": "set",
+                    "path": "/workspace_scene/layers",
+                    "value": [{"type": "image", "asset": "animated-bg", "fit": "cover"}],
+                }
+            ],
+            default_tokens=self.defaults,
+        )
+        committed = self.repository.commit_preview(
+            preview_id=preview["preview_id"],
+            preview_revision=patched["revision"],
+            activate=False,
+            default_tokens=self.defaults,
+        )
+        export_path = os.path.join(self.temp_dir.name, "animated.cowork-theme")
+        self.repository.export_theme(
+            committed["theme"]["id"],
+            self.defaults,
+            export_path,
+        )
+        reopened, reopened_assets = self.repository.read_theme_file(export_path, self.defaults)
+        self.assertEqual(
+            reopened["assets"]["animated-bg"]["animation"],
+            {"frame_count": 2, "duration_ms": 200},
+        )
+        self.assertEqual(reopened_assets[reopened["assets"]["animated-bg"]["path"]], ANIMATED_GIF)
+        imported_repository = ThemeRepository(os.path.join(self.temp_dir.name, "imported"))
+        imported_theme = imported_repository.import_theme(export_path, self.defaults)
+        self.assertEqual(
+            imported_theme["theme"]["assets"]["animated-bg"]["animation"]["frame_count"],
+            2,
+        )
+
+        payload["components"] = {
+            "home.card.ppt": {"icon": {"source": "asset", "asset": "animated-bg"}}
+        }
+        with self.assertRaisesRegex(ValueError, "不能使用动态"):
+            validate_theme_manifest(payload, self.defaults)
+
+        static_gif_record, static_gif_data = build_asset_record(
+            "static-gif",
+            self._animated_path("gif", STATIC_GIF),
+        )
+        static_gif_payload = {
+            **payload,
+            "assets": {"static-gif": static_gif_record},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
+            "components": {
+                "home.card.ppt": {"icon": {"source": "asset", "asset": "static-gif"}}
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "不能使用动态"):
+            validate_theme_manifest(
+                static_gif_payload,
+                self.defaults,
+                asset_bytes={static_gif_record["path"]: static_gif_data},
+            )
+
+    def test_animation_metadata_apng_speed_and_resource_limits_are_enforced(self):
+        record, data = build_asset_record(
+            "animated-bg",
+            self._animated_path("gif", ANIMATED_GIF),
+        )
+        payload = {
+            "format": "cowork-theme",
+            "schema_version": 2,
+            "id": "animated-limits",
+            "name": "Animated limits",
+            "overrides": {},
+            "assets": {"animated-bg": {**record, "animation": {"frame_count": 2, "duration_ms": 201}}},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
+            "surfaces": {},
+            "components": {},
+            "content": {},
+        }
+        with self.assertRaisesRegex(ValueError, "动画元数据与文件不一致"):
+            validate_theme_manifest(
+                payload,
+                self.defaults,
+                asset_bytes={record["path"]: data},
+            )
+
+        impossible_metadata = {
+            **payload,
+            "assets": {
+                "animated-bg": {
+                    **record,
+                    "animation": {"frame_count": 300, "duration_ms": 40},
+                }
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "总时长与最短帧时长不一致"):
+            validate_theme_manifest(impossible_metadata, self.defaults)
+
+        fractional_metadata = {
+            **payload,
+            "assets": {
+                "animated-bg": {
+                    **record,
+                    "animation": {"frame_count": 2.5, "duration_ms": 200},
+                }
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "必须是整数"):
+            validate_theme_manifest(fractional_metadata, self.defaults)
+
+        with self.assertRaisesRegex(ValueError, "单帧时长"):
+            build_asset_record(
+                "too-fast",
+                self._animated_path("webp", TOO_FAST_WEBP),
+            )
+
+        png_path = self._image_path()
+        with open(png_path, "rb") as stream:
+            png = stream.read()
+        apng = png[:33] + b"\x00\x00\x00\x08acTL\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00" + png[33:]
+        with self.assertRaisesRegex(ValueError, "APNG"):
+            from core.theme_package import inspect_image_bytes
+            inspect_image_bytes(apng, filename="animated.png")
+
+        from unittest.mock import patch
+        with patch("core.theme_package.THEME_MAX_ANIMATION_FRAMES", 1):
+            with self.assertRaisesRegex(ValueError, "不能超过 1 帧"):
+                build_asset_record(
+                    "too-many-frames",
+                    self._animated_path("gif", ANIMATED_GIF),
+                )
+        with patch("core.theme_package.THEME_MAX_ANIMATION_DECODED_PIXELS", 12):
+            with self.assertRaisesRegex(ValueError, "累计解码像素"):
+                build_asset_record(
+                    "too-many-pixels",
+                    self._animated_path("gif", ANIMATED_GIF),
+                )
 
     def test_manifest_rejects_invalid_rgb_channels_and_duplicate_asset_hashes(self):
         record, _data = build_asset_record("one", self._image_path())

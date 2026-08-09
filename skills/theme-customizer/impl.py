@@ -361,13 +361,31 @@ def import_ui_theme_asset(
         preview_id=preview_id,
         preview_revision=preview["revision"],
         asset_id=asset_id,
+        media_type=((preview.get("assets") or {}).get(asset_id) or {}).get("media_type"),
+        animated=bool(((preview.get("assets") or {}).get(asset_id) or {}).get("animation")),
+        frame_count=int(
+            ((((preview.get("assets") or {}).get(asset_id) or {}).get("animation") or {}).get("frame_count"))
+            or 1
+        ),
+        duration_ms=int(
+            ((((preview.get("assets") or {}).get(asset_id) or {}).get("animation") or {}).get("duration_ms"))
+            or 0
+        ),
     )
+    asset = (preview.get("assets") or {}).get(asset_id) or {}
+    animated = bool(asset.get("animation"))
+    workspace_scene_only = animated or asset.get("media_type") == "image/gif"
     return {
         "status": "ok",
         "preview_id": preview["preview_id"],
         "preview_revision": preview["revision"],
-        "asset": (preview.get("assets") or {}).get(asset_id),
-        "content": "Theme image imported into the preview package. Reference it from workspace_scene or an icon.",
+        "asset": asset,
+        "workspace_scene_only": workspace_scene_only,
+        "content": (
+            "Theme image imported into the preview package. Reference it only from workspace_scene."
+            if workspace_scene_only
+            else "Theme image imported into the preview package. Reference it from workspace_scene or an icon."
+        ),
     }
 
 
@@ -713,14 +731,14 @@ TOOL_EXPORTS = [
     {
         "name": "import_ui_theme_asset",
         "handler": import_ui_theme_asset,
-        "description": "Copy and validate an existing local PNG, JPEG, or WebP into the current theme preview package.",
+        "description": "Copy and validate an existing local PNG, JPEG, GIF, or WebP into the current theme preview package; animated assets are workspace-background only.",
         "parameters": {
             "type": "object",
             "properties": {
                 "preview_id": {"type": "string"},
                 "preview_revision": {"type": "integer"},
                 "asset_id": {"type": "string", "description": "Stable manifest asset id."},
-                "source_path": {"type": "string", "description": "Existing local image path."}
+                "source_path": {"type": "string", "description": "Existing local PNG, JPEG, GIF, or WebP path."}
             },
             "required": ["preview_id", "preview_revision", "asset_id", "source_path"]
         },

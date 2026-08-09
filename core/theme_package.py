@@ -20,8 +20,12 @@ THEME_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 THEME_MAX_MANIFEST_BYTES = 512 * 1024
 THEME_MAX_IMAGE_EDGE = 8192
 THEME_MAX_IMAGE_PIXELS = 20_000_000
+THEME_MAX_ANIMATION_FRAMES = 300
+THEME_MAX_ANIMATION_DECODED_PIXELS = 240_000_000
+THEME_MIN_ANIMATION_FRAME_MS = 20
 
 ALLOWED_IMAGE_MEDIA = {
+    "gif": "image/gif",
     "png": "image/png",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
@@ -38,6 +42,7 @@ SURFACE_CATALOG = {
     "home.hero",
     "home.quick_actions",
     "home.reminder",
+    "home.theme_reminder",
 }
 
 COMPONENT_CATALOG = {
@@ -75,6 +80,7 @@ COMPONENT_CATALOG = {
     "home.card.data",
     "home.card.browser",
     "home.reminder",
+    "home.theme_reminder",
 }
 
 PROTECTED_COMPONENTS = {
@@ -97,6 +103,11 @@ CONTENT_DEFAULTS = {
     "home.card.browser.description": "读取网页、提取数据和填写表单",
     "home.reminder.title": "需要处理文档或数据？",
     "home.reminder.description": "可在设置里安装文档工具包和数据分析工具包，用于 Office/PDF、表格和数据分析。",
+    "home.theme_reminder.title": "想换一种工作台风格？",
+    "home.theme_reminder.description": (
+        "使用 Theme Customizer，用自然语言调整配色、字体、密度、布局和背景；"
+        "先预览，确认后再保存。"
+    ),
     "composer.placeholder": "描述你要完成的任务，例如：整理本周截图并生成周报摘要",
 }
 
@@ -150,6 +161,13 @@ def _bounded_number(value: Any, name: str, minimum: float, maximum: float) -> fl
     if not minimum <= result <= maximum:
         raise ValueError(f"{name} 必须位于 {minimum:g}–{maximum:g} 之间。")
     return result
+
+
+def _bounded_integer(value: Any, name: str, minimum: int, maximum: int) -> int:
+    result = _bounded_number(value, name, minimum, maximum)
+    if not result.is_integer():
+        raise ValueError(f"{name} 必须是整数。")
+    return int(result)
 
 
 def _normalize_color(value: Any, name: str) -> str:
@@ -380,7 +398,9 @@ def normalize_theme_manifest(
         asset_id = str(asset_id or "").strip()
         if not _ASSET_ID_RE.fullmatch(asset_id) or not isinstance(raw, dict):
             raise ValueError(f"主题资产 ID 或记录无效：{asset_id or '<empty>'}")
-        unknown_asset = sorted(set(raw) - {"path", "media_type", "sha256", "width", "height"})
+        unknown_asset = sorted(
+            set(raw) - {"path", "media_type", "sha256", "width", "height", "animation"}
+        )
         if unknown_asset:
             raise ValueError(f"主题资产 {asset_id} 包含未知字段：{', '.join(unknown_asset)}")
         path = str(raw.get("path") or "").replace("\\", "/").strip()
@@ -404,6 +424,39 @@ def normalize_theme_manifest(
         height = int(_bounded_number(raw.get("height"), f"{asset_id}.height", 1, THEME_MAX_IMAGE_EDGE))
         if width * height > THEME_MAX_IMAGE_PIXELS:
             raise ValueError(f"主题资产像素总量超限：{asset_id}")
+        raw_animation = raw.get("animation")
+        animation = None
+        if raw_animation is not None:
+            if not isinstance(raw_animation, dict):
+                raise ValueError(f"主题资产动画元数据无效：{asset_id}")
+            unknown_animation = sorted(set(raw_animation) - {"frame_count", "duration_ms"})
+            if unknown_animation:
+                raise ValueError(
+                    f"主题资产 {asset_id} 的动画元数据包含未知字段："
+                    + ", ".join(unknown_animation)
+                )
+            animation = {
+                "frame_count": _bounded_integer(
+                    raw_animation.get("frame_count"),
+                    f"{asset_id}.animation.frame_count",
+                    2,
+                    THEME_MAX_ANIMATION_FRAMES,
+                ),
+                "duration_ms": _bounded_integer(
+                    raw_animation.get("duration_ms"),
+                    f"{asset_id}.animation.duration_ms",
+                    THEME_MIN_ANIMATION_FRAME_MS * 2,
+                    2_147_483_647,
+                ),
+            }
+            if animation["duration_ms"] < (
+                animation["frame_count"] * THEME_MIN_ANIMATION_FRAME_MS
+            ):
+                raise ValueError(
+                    f"主题资产动画总时长与最短帧时长不一致：{asset_id}"
+                )
+            if width * height * animation["frame_count"] > THEME_MAX_ANIMATION_DECODED_PIXELS:
+                raise ValueError(f"主题资产动画累计解码像素超限：{asset_id}")
         if asset_bytes is not None:
             data = asset_bytes.get(path)
             if data is None:
@@ -413,6 +466,8 @@ def normalize_theme_manifest(
             actual = inspect_image_bytes(data, filename=path)
             if actual["media_type"] != expected_media or actual["width"] != width or actual["height"] != height:
                 raise ValueError(f"主题资产元数据与文件不一致：{asset_id}")
+            if actual.get("animation") != animation:
+                raise ValueError(f"主题资产动画元数据与文件不一致：{asset_id}")
         assets[asset_id] = {
             "path": path,
             "media_type": expected_media,
@@ -420,6 +475,8 @@ def normalize_theme_manifest(
             "width": width,
             "height": height,
         }
+        if animation is not None:
+            assets[asset_id]["animation"] = animation
         paths.add(path)
         hashes.add(sha256)
 
@@ -489,6 +546,13 @@ def normalize_theme_manifest(
                 asset_id = str(icon.get("asset") or "").strip()
                 if asset_id not in assets:
                     raise ValueError(f"{component_id}.icon 引用了不存在的资产：{asset_id}")
+                if (
+                    assets[asset_id].get("media_type") == "image/gif"
+                    or assets[asset_id].get("animation")
+                ):
+                    raise ValueError(
+                        f"{component_id}.icon 不能使用动态图标（GIF 或动态主题资产）：{asset_id}"
+                    )
                 item["icon"] = {"source": "asset", "asset": asset_id}
             else:
                 raise ValueError(f"{component_id}.icon.source 无效。")
@@ -566,7 +630,9 @@ def inspect_image_bytes(data: bytes, *, filename: str = "") -> dict:
 
     payload = QByteArray(bytes(data))
     raw = bytes(data)
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        image_format = "gif"
+    elif raw.startswith(b"\x89PNG\r\n\x1a\n"):
         image_format = "png"
     elif raw.startswith(b"\xff\xd8\xff"):
         image_format = "jpg"
@@ -576,29 +642,111 @@ def inspect_image_bytes(data: bytes, *, filename: str = "") -> dict:
         image_format = ""
     if image_format not in ALLOWED_IMAGE_MEDIA:
         raise ValueError(f"主题图片格式无效：{filename or '<memory>'}")
+    filename_extension = os.path.splitext(str(filename or ""))[1].lower().lstrip(".")
+    if filename_extension:
+        if filename_extension not in ALLOWED_IMAGE_MEDIA:
+            raise ValueError(f"主题图片后缀无效：{filename or '<memory>'}")
+        if ALLOWED_IMAGE_MEDIA[filename_extension] != ALLOWED_IMAGE_MEDIA[image_format]:
+            raise ValueError(f"主题图片后缀与文件内容不一致：{filename or '<memory>'}")
+    if image_format == "gif" and not raw.endswith(b"\x3b"):
+        raise ValueError(f"主题 GIF 动画结构损坏：{filename or '<memory>'}")
+    if image_format == "webp" and (
+        len(raw) < 12 or int.from_bytes(raw[4:8], "little") + 8 != len(raw)
+    ):
+        raise ValueError(f"主题 WebP 动画结构损坏：{filename or '<memory>'}")
+    if image_format == "png" and _png_contains_animation(raw):
+        raise ValueError(f"主题图片不支持 APNG 动画：{filename or '<memory>'}")
     buffer = QBuffer()
     buffer.setData(payload)
     if not buffer.open(QIODevice.ReadOnly):
         raise ValueError(f"主题图片无法读取：{filename or '<memory>'}")
     reader = QImageReader(buffer)
     reader.setDecideFormatFromContent(True)
-    if reader.supportsAnimation() or reader.imageCount() > 1:
-        raise ValueError(f"主题图片不能包含动画：{filename or '<memory>'}")
-    image = reader.read()
-    if image.isNull():
+    declared_frames = int(reader.imageCount())
+    if declared_frames > THEME_MAX_ANIMATION_FRAMES:
+        raise ValueError(
+            f"主题动画不能超过 {THEME_MAX_ANIMATION_FRAMES} 帧：{filename or '<memory>'}"
+        )
+    frames = 0
+    decoded_pixels = 0
+    delays = []
+    width = 0
+    height = 0
+    while reader.canRead():
+        image = reader.read()
+        if image.isNull():
+            raise ValueError(
+                f"主题图片无法解码：{filename or '<memory>'}；{reader.errorString()}"
+            )
+        frames += 1
+        if frames > THEME_MAX_ANIMATION_FRAMES:
+            raise ValueError(
+                f"主题动画不能超过 {THEME_MAX_ANIMATION_FRAMES} 帧：{filename or '<memory>'}"
+            )
+        frame_width, frame_height = image.width(), image.height()
+        if not width:
+            width, height = frame_width, frame_height
+        if (
+            frame_width > THEME_MAX_IMAGE_EDGE
+            or frame_height > THEME_MAX_IMAGE_EDGE
+            or frame_width * frame_height > THEME_MAX_IMAGE_PIXELS
+        ):
+            raise ValueError(f"主题图片尺寸超限：{filename or '<memory>'}")
+        decoded_pixels += frame_width * frame_height
+        if decoded_pixels > THEME_MAX_ANIMATION_DECODED_PIXELS:
+            raise ValueError(
+                "主题动画累计解码像素不能超过 "
+                f"{THEME_MAX_ANIMATION_DECODED_PIXELS}：{filename or '<memory>'}"
+            )
+        delays.append(int(reader.nextImageDelay()))
+    if frames < 1:
         raise ValueError(
             f"主题图片无法解码：{filename or '<memory>'}；{reader.errorString()}"
         )
-    width, height = image.width(), image.height()
-    if width > THEME_MAX_IMAGE_EDGE or height > THEME_MAX_IMAGE_EDGE or width * height > THEME_MAX_IMAGE_PIXELS:
-        raise ValueError(f"主题图片尺寸超限：{filename or '<memory>'}")
-    return {
+    if declared_frames > 0 and declared_frames != frames:
+        raise ValueError(f"主题动画帧数据不完整：{filename or '<memory>'}")
+    animation = None
+    if frames > 1:
+        if image_format not in {"gif", "webp"}:
+            raise ValueError(f"主题图片动画格式无效：{filename or '<memory>'}")
+        too_fast = next((delay for delay in delays if delay < THEME_MIN_ANIMATION_FRAME_MS), None)
+        if too_fast is not None:
+            raise ValueError(
+                "主题动画单帧时长不能小于 "
+                f"{THEME_MIN_ANIMATION_FRAME_MS} ms：{filename or '<memory>'}"
+            )
+        animation = {
+            "frame_count": frames,
+            "duration_ms": sum(delays),
+        }
+    result = {
         "media_type": ALLOWED_IMAGE_MEDIA[image_format],
         "extension": "jpg" if image_format in {"jpg", "jpeg"} else image_format,
         "width": width,
         "height": height,
         "sha256": hashlib.sha256(bytes(data)).hexdigest(),
     }
+    if animation is not None:
+        result["animation"] = animation
+    return result
+
+
+def _png_contains_animation(data: bytes) -> bool:
+    """Detect APNG's animation-control chunk even when Qt lacks APNG playback."""
+    offset = 8
+    length = len(data)
+    while offset + 12 <= length:
+        chunk_length = int.from_bytes(data[offset:offset + 4], "big")
+        chunk_type = data[offset + 4:offset + 8]
+        chunk_end = offset + 12 + chunk_length
+        if chunk_end > length:
+            return False
+        if chunk_type == b"acTL":
+            return True
+        if chunk_type == b"IEND":
+            return False
+        offset = chunk_end
+    return False
 
 
 def read_theme_package(path: str, *, validate_overrides: Callable[[Any], dict]) -> tuple[dict, dict[str, bytes]]:
@@ -700,13 +848,16 @@ def build_asset_record(asset_id: str, source_path: str) -> tuple[dict, bytes]:
         data = stream.read(THEME_MAX_ASSET_BYTES + 1)
     metadata = inspect_image_bytes(data, filename=absolute)
     package_path = f"assets/{metadata['sha256'][:16]}.{metadata['extension']}"
-    return {
+    record = {
         "path": package_path,
         "media_type": metadata["media_type"],
         "sha256": metadata["sha256"],
         "width": metadata["width"],
         "height": metadata["height"],
-    }, data
+    }
+    if metadata.get("animation"):
+        record["animation"] = metadata["animation"]
+    return record, data
 
 
 def copy_manifest(value: dict) -> dict:

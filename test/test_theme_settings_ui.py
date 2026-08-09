@@ -1,3 +1,4 @@
+import base64
 import os
 import json
 import tempfile
@@ -15,6 +16,11 @@ from core.theme import DesignTokens, ThemeRuntimeManager, default_design_tokens
 from core.theme_package import build_asset_record
 from core.theme_service import DEFAULT_THEME_ID, ThemeRepository
 from ui.theme_settings import ThemeSettingsPanel
+
+
+ANIMATED_GIF = base64.b64decode(
+    "R0lGODlhBAADAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQACAAAACwAAAAABAADAAAICAABCBxIUGBAACH5BAEMAAEALAAAAAAEAAMAgQAA/wAAAAAAAAAAAAgIAAEIHEhQYEAAOw=="
+)
 
 
 class ThemeSettingsUiTests(unittest.TestCase):
@@ -67,6 +73,29 @@ class ThemeSettingsUiTests(unittest.TestCase):
         self.assertEqual(signature["themes"][0]["assets"]["background"]["sha256"], record["sha256"])
         self.assertNotIn("_asset_bytes", signature["themes"][0])
         json.dumps(signature, ensure_ascii=False, sort_keys=True)
+
+    def test_animated_asset_import_shows_verified_frame_metadata(self):
+        self.panel._new_theme()
+        image_path = os.path.join(self.temp_dir.name, "background.gif")
+        with open(image_path, "wb") as stream:
+            stream.write(ANIMATED_GIF)
+
+        with patch(
+            "ui.theme_settings.QFileDialog.getOpenFileName",
+            return_value=(image_path, "主题图片"),
+        ):
+            self.panel._add_asset()
+
+        self.assertEqual(self.panel.asset_list.count(), 1)
+        item_text = self.panel.asset_list.item(0).text()
+        self.assertIn("image/gif", item_text)
+        self.assertIn("动态 2 帧", item_text)
+        self.assertIn("0.2 秒", item_text)
+        profile = self.panel._profile(self.panel._current_theme_id)
+        self.assertEqual(
+            profile["assets"]["background"]["animation"],
+            {"frame_count": 2, "duration_ms": 200},
+        )
 
     def test_state_signature_projects_editor_values_without_mutating_draft(self):
         self.panel._new_theme()

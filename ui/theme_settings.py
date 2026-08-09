@@ -344,7 +344,7 @@ class ThemeSettingsPanel(QWidget):
     def _build_asset_section(self):
         frame, layout = self._section(
             "主题图片资源",
-            "图片会复制进主题包；仅支持经过校验的静态 PNG、JPEG 和 WebP。",
+            "图片会复制进主题包；支持 PNG、JPEG、GIF，以及静态或动态 WebP。GIF 和动态 WebP 仅可作为工作区背景。",
         )
         self.asset_list = QListWidget()
         self.asset_list.setMaximumHeight(132)
@@ -496,8 +496,16 @@ class ThemeSettingsPanel(QWidget):
         self.asset_list.clear()
         asset_bytes = self._ensure_profile_asset_bytes(profile) if profile.get("id") != DEFAULT_THEME_ID else {}
         for asset_id, record in sorted((profile.get("assets") or {}).items()):
+            animation = record.get("animation") or {}
+            animation_text = ""
+            if animation:
+                animation_text = (
+                    f"  ·  动态 {animation.get('frame_count')} 帧"
+                    f" / {int(animation.get('duration_ms') or 0) / 1000:g} 秒"
+                )
             self.asset_list.addItem(
-                f"{asset_id}  ·  {record.get('width')}×{record.get('height')}  ·  {record.get('media_type')}"
+                f"{asset_id}  ·  {record.get('width')}×{record.get('height')}"
+                f"  ·  {record.get('media_type')}{animation_text}"
             )
             item = self.asset_list.item(self.asset_list.count() - 1)
             item.setData(Qt.UserRole, asset_id)
@@ -878,7 +886,7 @@ class ThemeSettingsPanel(QWidget):
             self,
             "导入主题图片",
             "",
-            "主题图片 (*.png *.jpg *.jpeg *.webp)",
+            "主题图片 (*.png *.jpg *.jpeg *.gif *.webp)",
         )
         if not path:
             return
@@ -911,6 +919,10 @@ class ThemeSettingsPanel(QWidget):
                 theme_id=profile.get("id"),
                 asset_id=asset_id,
                 bytes=len(data),
+                media_type=record.get("media_type"),
+                animated=bool(record.get("animation")),
+                frame_count=int((record.get("animation") or {}).get("frame_count") or 1),
+                duration_ms=int((record.get("animation") or {}).get("duration_ms") or 0),
             )
         except Exception as exc:
             append_theme_log(

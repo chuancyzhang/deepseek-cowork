@@ -267,7 +267,7 @@ class ConfigManager:
             "base_url": DEFAULT_DEEPSEEK_BASE_URL,
             "model_name": DEFAULT_DEEPSEEK_MODEL,
             "llm_provider": "openai",
-            "selected_model_id": "openai-default",
+            "selected_model_id": "deepseek-v4-flash",
             "model_channels": self._default_model_channels(),
             "model_provider_configs": self._default_model_provider_configs(),
             "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
@@ -434,14 +434,23 @@ class ConfigManager:
     def _default_model_provider_configs(self):
         return {
             "openai": {
-                "display_name": "OpenAI 兼容服务",
+                "display_name": "deepseek官方",
                 "api_key": "",
                 "base_url": DEFAULT_DEEPSEEK_BASE_URL,
                 "models": [
                     {
-                        "id": "openai-default",
-                        "display_name": "DeepSeek V4 Pro",
+                        "id": "deepseek-v4-flash",
+                        "display_name": "deepseek-v4-flash",
+                        "model_name": "deepseek-v4-flash",
+                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
+                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
+                    },
+                    {
+                        "id": "deepseek-v4-pro",
+                        "display_name": "deepseek-v4-pro",
                         "model_name": DEFAULT_DEEPSEEK_MODEL,
+                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
                         "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
                         "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
                     }
@@ -464,32 +473,27 @@ class ConfigManager:
     def _default_model_channels(self):
         return [
             {
-                "channel_id": "openai-default-channel",
-                "display_name": "OpenAI 兼容服务",
+                "channel_id": "deepseek-official-channel",
+                "display_name": "deepseek官方",
                 "provider_type": "openai",
                 "api_key": "",
                 "base_url": DEFAULT_DEEPSEEK_BASE_URL,
                 "models": [
                     {
-                        "id": "openai-default",
-                        "display_name": "DeepSeek V4 Pro",
-                        "model_name": DEFAULT_DEEPSEEK_MODEL,
+                        "id": "deepseek-v4-flash",
+                        "display_name": "deepseek-v4-flash",
+                        "model_name": "deepseek-v4-flash",
+                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
                         "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
                         "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
-                    }
-                ],
-            },
-            {
-                "channel_id": "anthropic-default-channel",
-                "display_name": "Anthropic",
-                "provider_type": "anthropic",
-                "api_key": "",
-                "base_url": DEFAULT_ANTHROPIC_BASE_URL,
-                "models": [
+                    },
                     {
-                        "id": "anthropic-default",
-                        "display_name": "Claude Sonnet",
-                        "model_name": DEFAULT_ANTHROPIC_MODEL,
+                        "id": "deepseek-v4-pro",
+                        "display_name": "deepseek-v4-pro",
+                        "model_name": DEFAULT_DEEPSEEK_MODEL,
+                        "api_protocol": API_PROTOCOL_CHAT_COMPLETIONS,
+                        "deepseek_thinking_enabled": DEFAULT_DEEPSEEK_THINKING_ENABLED,
+                        "deepseek_reasoning_effort": DEFAULT_DEEPSEEK_REASONING_EFFORT,
                     }
                 ],
             },
@@ -814,11 +818,20 @@ class ConfigManager:
             ]
         return provider_configs
 
-    def _channels_from_provider_configs(self, provider_configs):
+    def _channels_from_provider_configs(self, provider_configs, include_missing=True):
         defaults = self._default_model_provider_configs()
         source = provider_configs if isinstance(provider_configs, dict) else {}
         channels = []
-        for provider_id in ("openai", "anthropic"):
+        provider_ids = (
+            ("openai", "anthropic")
+            if include_missing
+            else tuple(
+                provider_id
+                for provider_id in ("openai", "anthropic")
+                if isinstance(source.get(provider_id), dict)
+            )
+        )
+        for provider_id in provider_ids:
             raw_config = source.get(provider_id) if isinstance(source.get(provider_id), dict) else defaults.get(provider_id)
             provider_config = self._normalize_provider_config(provider_id, raw_config)
             channels.append(
@@ -837,25 +850,63 @@ class ConfigManager:
         if isinstance(value, list):
             raw_channels = value
         elif isinstance(legacy_provider_configs, dict) and legacy_provider_configs:
-            raw_channels = self._channels_from_provider_configs(legacy_provider_configs)
+            raw_channels = self._channels_from_provider_configs(
+                legacy_provider_configs,
+                include_missing=False,
+            )
         else:
             raw_channels = json.loads(json.dumps(self._default_model_channels(), ensure_ascii=False))
-            legacy_provider = self._normalize_provider_type(self.config.get("llm_provider", "openai"))
-            legacy_model = self.config.get("model_name", DEFAULT_DEEPSEEK_MODEL)
-            if should_migrate_legacy_model(legacy_model):
-                legacy_model = DEFAULT_DEEPSEEK_MODEL
-            for channel in raw_channels:
-                if channel.get("provider_type") != legacy_provider:
-                    continue
-                channel["api_key"] = str(self.config.get("api_key", "") or "")
-                channel["base_url"] = str(
+            legacy_model_keys = {
+                "llm_provider",
+                "api_key",
+                "base_url",
+                "model_name",
+                "deepseek_thinking_enabled",
+                "deepseek_reasoning_effort",
+            }
+            if legacy_model_keys.intersection(getattr(self, "_loaded_config_keys", set())):
+                legacy_provider = self._normalize_provider_type(self.config.get("llm_provider", "openai"))
+                legacy_model = self.config.get("model_name", DEFAULT_DEEPSEEK_MODEL)
+                if should_migrate_legacy_model(legacy_model):
+                    legacy_model = DEFAULT_DEEPSEEK_MODEL
+                matching_channel = next(
+                    (
+                        channel
+                        for channel in raw_channels
+                        if channel.get("provider_type") == legacy_provider
+                    ),
+                    None,
+                )
+                if matching_channel is None:
+                    matching_channel = {
+                        "channel_id": f"{legacy_provider}-default-channel",
+                        "display_name": (
+                            "Anthropic" if legacy_provider == "anthropic" else "OpenAI 兼容服务"
+                        ),
+                        "provider_type": legacy_provider,
+                        "api_key": "",
+                        "base_url": (
+                            DEFAULT_ANTHROPIC_BASE_URL
+                            if legacy_provider == "anthropic"
+                            else DEFAULT_DEEPSEEK_BASE_URL
+                        ),
+                        "models": [],
+                    }
+                    raw_channels = [matching_channel]
+                else:
+                    matching_channel["channel_id"] = f"{legacy_provider}-default-channel"
+                    matching_channel["display_name"] = (
+                        "Anthropic" if legacy_provider == "anthropic" else "OpenAI 兼容服务"
+                    )
+                matching_channel["api_key"] = str(self.config.get("api_key", "") or "")
+                matching_channel["base_url"] = str(
                     self.config.get(
                         "base_url",
                         DEFAULT_DEEPSEEK_BASE_URL if legacy_provider == "openai" else DEFAULT_ANTHROPIC_BASE_URL,
                     )
                     or ""
                 )
-                channel["models"] = [
+                matching_channel["models"] = [
                     {
                         "id": f"{legacy_provider}-default",
                         "display_name": legacy_model,

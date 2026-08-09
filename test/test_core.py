@@ -178,7 +178,8 @@ class TestConfigManager(unittest.TestCase):
 
     def test_defaults_include_new_deepseek_settings(self):
         cm = self._create_config_manager()
-        self.assertEqual(cm.get("model_name"), DEFAULT_DEEPSEEK_MODEL)
+        self.assertEqual(DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro")
+        self.assertEqual(cm.get("model_name"), "deepseek-v4-flash")
         self.assertEqual(cm.get("deepseek_reasoning_effort"), DEFAULT_DEEPSEEK_REASONING_EFFORT)
         self.assertEqual(cm.get("deepseek_thinking_enabled"), DEFAULT_DEEPSEEK_THINKING_ENABLED)
         self.assertEqual(cm.get("deepseek_v4_context_window_tokens"), 1000000)
@@ -186,7 +187,7 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(cm.get("context_compression_recent_keep_turns"), 40)
         self.assertTrue(cm.get("model_channels"))
         self.assertTrue(cm.get("model_provider_configs"))
-        self.assertEqual(cm.get_selected_model_id(), "openai-default")
+        self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
         self.assertEqual(
             cm.get_chat_workspace_root(),
             os.path.join(self.temp_dir, "conversation_workspaces"),
@@ -266,6 +267,37 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(reloaded.get_model_channels(), [])
         self.assertEqual(reloaded.get_selected_model_id(), "")
 
+    def test_fresh_config_initializes_only_official_deepseek_models(self):
+        cm = self._create_config_manager()
+
+        channels = cm.get_model_channels()
+
+        self.assertEqual(len(channels), 1)
+        channel = channels[0]
+        self.assertEqual(channel["channel_id"], "deepseek-official-channel")
+        self.assertEqual(channel["display_name"], "deepseek官方")
+        self.assertEqual(channel["provider_type"], "openai")
+        self.assertEqual(channel["base_url"], "https://api.deepseek.com")
+        self.assertEqual(
+            [model["id"] for model in channel["models"]],
+            ["deepseek-v4-flash", "deepseek-v4-pro"],
+        )
+        for model in channel["models"]:
+            self.assertEqual(model["display_name"], model["id"])
+            self.assertEqual(model["model_name"], model["id"])
+            self.assertEqual(model["api_protocol"], "chat_completions")
+        self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
+        self.assertEqual(cm.get("model_name"), "deepseek-v4-flash")
+
+    def test_unrelated_existing_config_uses_fresh_deepseek_defaults(self):
+        cm = self._create_config_manager({"god_mode": True})
+
+        self.assertEqual(
+            [channel["channel_id"] for channel in cm.get_model_channels()],
+            ["deepseek-official-channel"],
+        )
+        self.assertEqual(cm.get_selected_model_id(), "deepseek-v4-flash")
+
     def test_project_config_migrates_hidden_to_archived(self):
         project_dir = os.path.join(self.temp_dir, "legacy-hidden")
         os.makedirs(project_dir)
@@ -312,6 +344,25 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(profile["channel_id"], "openai-default-channel")
         self.assertEqual(profile["channel_display_name"], "OpenAI 兼容服务")
 
+    def test_migrates_legacy_anthropic_without_injecting_deepseek_channel(self):
+        cm = self._create_config_manager(
+            {
+                "llm_provider": "anthropic",
+                "api_key": "anthropic-key",
+                "base_url": "https://anthropic.example",
+                "model_name": "claude-legacy",
+            }
+        )
+
+        channels = cm.get_model_channels()
+        profile = cm.get_model_profile()
+
+        self.assertEqual(len(channels), 1)
+        self.assertEqual(channels[0]["channel_id"], "anthropic-default-channel")
+        self.assertEqual(channels[0]["provider_type"], "anthropic")
+        self.assertEqual(profile["model_name"], "claude-legacy")
+        self.assertEqual(profile["api_key"], "anthropic-key")
+
     def test_migrates_provider_configs_to_model_channels(self):
         cm = self._create_config_manager(
             {
@@ -336,6 +387,7 @@ class TestConfigManager(unittest.TestCase):
         channels = cm.get_model_channels()
         profile = cm.get_model_profile("openai-custom")
 
+        self.assertEqual(len(channels), 1)
         self.assertTrue(any(channel["channel_id"] == "openai-default-channel" for channel in channels))
         self.assertEqual(profile["channel_display_name"], "Tencent OpenAI")
         self.assertEqual(profile["base_url"], "https://tencent.example/v1")

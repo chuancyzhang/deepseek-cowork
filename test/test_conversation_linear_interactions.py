@@ -32,6 +32,7 @@ from main import (
     InteractionChoiceButton,
     MainWindow,
     ModelSelectorPopover,
+    ModelSwitchInlineNotice,
     SearchableSkillPickerButton,
     SessionSkillPickerPopover,
     GuidanceTimelineEvent,
@@ -562,6 +563,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
 
         class WindowStub:
             _set_session_model_id = MainWindow._set_session_model_id
+            _model_id_for_state = MainWindow._model_id_for_state
+            _session_has_visible_conversation = staticmethod(MainWindow._session_has_visible_conversation)
 
             def __init__(self):
                 self.saved_session_ids = []
@@ -597,6 +600,127 @@ class ConversationLinearInteractionTests(unittest.TestCase):
         self.assertEqual(window.saved_session_ids, ["session-1"])
         self.assertEqual(window.model_refreshes, 1)
         self.assertEqual(window.badge_refreshes, 1)
+
+    def test_model_switch_notice_is_runtime_only_and_uses_divider_copy(self):
+        container = QWidget()
+        chat_layout = QVBoxLayout(container)
+        chat_layout.addStretch()
+        messages = [
+            {"id": "user-1", "role": "user", "content": "继续处理"},
+            {"id": "assistant-1", "role": "assistant", "content": "好的"},
+        ]
+        state = SimpleNamespace(
+            session_id="session-model-switch",
+            selected_model_id="model-a",
+            persisted_conversation_meta={},
+            messages=messages,
+            chat_layout=chat_layout,
+        )
+
+        class WindowStub:
+            _set_session_model_id = MainWindow._set_session_model_id
+            _model_id_for_state = MainWindow._model_id_for_state
+            _session_has_visible_conversation = staticmethod(MainWindow._session_has_visible_conversation)
+            _append_model_switch_notice = MainWindow._append_model_switch_notice
+
+            def __init__(self):
+                self.saved_session_ids = []
+                self.scroll_requests = []
+
+            def get_current_session(self):
+                return state
+
+            def _model_profile_for_state(self, _state=None, model_id=None):
+                if model_id == "model-b":
+                    return {"id": "model-b", "display_name": "B"}
+                return {}
+
+            def save_chat_history(self, session_id=None):
+                self.saved_session_ids.append(session_id)
+
+            def refresh_model_selector(self):
+                return None
+
+            def refresh_context_badges(self):
+                return None
+
+            def request_session_scroll_to_bottom(self, session_id, force=False):
+                self.scroll_requests.append((session_id, force))
+
+            def add_system_toast(self, *_args, **_kwargs):
+                raise AssertionError("successful selection must not show an error toast")
+
+        original_messages = list(messages)
+        window = WindowStub()
+        with patch("main.log_ui_navigation") as log_mock:
+            self.assertTrue(MainWindow.on_model_selection_changed(window, "model-b"))
+
+        self.assertEqual(state.messages, original_messages)
+        self.assertEqual(state.selected_model_id, "model-b")
+        self.assertEqual(window.saved_session_ids, ["session-model-switch"])
+        self.assertEqual(window.scroll_requests, [("session-model-switch", False)])
+        self.assertEqual(chat_layout.count(), 2)
+        notice = chat_layout.itemAt(0).widget()
+        self.assertIsInstance(notice, ModelSwitchInlineNotice)
+        self.assertEqual(notice.label.text(), "模型已切换，下一轮可能变慢，缓存将重新建立")
+        self.assertEqual(notice.left_line.height(), 1)
+        self.assertEqual(notice.right_line.height(), 1)
+        log_mock.assert_called_once_with(
+            "model_switch",
+            session_id="session-model-switch",
+            previous_model_id="model-a",
+            selected_model_id="model-b",
+            outcome="changed",
+            notice_shown=True,
+        )
+        container.deleteLater()
+
+    def test_model_selection_skips_notice_for_empty_or_unchanged_session(self):
+        state = SimpleNamespace(
+            session_id="session-empty",
+            selected_model_id="model-a",
+            persisted_conversation_meta={},
+            messages=[],
+        )
+
+        class WindowStub:
+            _set_session_model_id = MainWindow._set_session_model_id
+            _model_id_for_state = MainWindow._model_id_for_state
+            _session_has_visible_conversation = staticmethod(MainWindow._session_has_visible_conversation)
+
+            def __init__(self):
+                self.saved = 0
+                self.notices = 0
+
+            def get_current_session(self):
+                return state
+
+            def _model_profile_for_state(self, _state=None, model_id=None):
+                return {"id": model_id} if model_id in {"model-a", "model-b"} else {}
+
+            def save_chat_history(self, session_id=None):
+                self.saved += 1
+
+            def refresh_model_selector(self):
+                return None
+
+            def refresh_context_badges(self):
+                return None
+
+            def _append_model_switch_notice(self, _state):
+                self.notices += 1
+
+            def add_system_toast(self, *_args, **_kwargs):
+                raise AssertionError("valid selection must not show an error toast")
+
+        window = WindowStub()
+        with patch("main.log_ui_navigation"):
+            self.assertTrue(MainWindow.on_model_selection_changed(window, "model-a"))
+            self.assertEqual(window.saved, 0)
+            self.assertTrue(MainWindow.on_model_selection_changed(window, "model-b"))
+
+        self.assertEqual(window.saved, 1)
+        self.assertEqual(window.notices, 0)
 
     def test_thinking_stays_expanded_when_finalized(self):
         bubble = ChatBubble("Agent", "")

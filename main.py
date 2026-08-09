@@ -20017,6 +20017,63 @@ class ConversationSkillStatusRow(QFrame):
         self.review_btn.setStyleSheet(product_button_style("ghost", radius=6))
 
 
+class ModelSwitchInlineNotice(QFrame):
+    """Compact runtime-only divider shown after a conversation changes model."""
+
+    TEXT = "模型已切换，下一轮可能变慢，缓存将重新建立"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ModelSwitchInlineNotice")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setAccessibleName(self.TEXT)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(24, 7, 24, 7)
+        layout.setSpacing(10)
+
+        self.left_line = QFrame(self)
+        self.left_line.setObjectName("ModelSwitchInlineNoticeLine")
+        self.left_line.setFixedHeight(1)
+        layout.addWidget(self.left_line, 1, Qt.AlignVCenter)
+
+        self.label = QLabel(self.TEXT, self)
+        self.label.setObjectName("ModelSwitchInlineNoticeText")
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        layout.addWidget(self.label, 0, Qt.AlignCenter)
+
+        self.right_line = QFrame(self)
+        self.right_line.setObjectName("ModelSwitchInlineNoticeLine")
+        self.right_line.setFixedHeight(1)
+        layout.addWidget(self.right_line, 1, Qt.AlignVCenter)
+
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        set_stylesheet_if_changed(
+            self,
+            f"""
+            QFrame#ModelSwitchInlineNotice {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#ModelSwitchInlineNoticeLine {{
+                background: {DesignTokens.separator};
+                border: none;
+            }}
+            QLabel#ModelSwitchInlineNoticeText {{
+                color: {DesignTokens.text_secondary};
+                background: transparent;
+                border: none;
+                font-size: 11px;
+                font-weight: 500;
+            }}
+            """,
+        )
+
+
 class SessionSkillCaptureIndicator(QToolButton):
     """Independent sidebar indicator for background Skill capture state."""
 
@@ -25918,14 +25975,64 @@ class MainWindow(QMainWindow):
 
     def on_model_selection_changed(self, model_id):
         state = self.get_current_session()
-        if model_id and self._set_session_model_id(state, model_id):
+        previous_model_id = self._model_id_for_state(state)
+        requested_model_id = str(model_id or "").strip()
+        if requested_model_id and requested_model_id == previous_model_id:
+            log_ui_navigation(
+                "model_switch",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                previous_model_id=previous_model_id,
+                selected_model_id=requested_model_id,
+                outcome="unchanged",
+                notice_shown=False,
+            )
+            self.refresh_model_selector()
+            return True
+        if requested_model_id and self._set_session_model_id(state, requested_model_id):
             self.save_chat_history(session_id=state.session_id)
             self.refresh_model_selector()
             self.refresh_context_badges()
+            notice_shown = self._session_has_visible_conversation(state)
+            if notice_shown:
+                self._append_model_switch_notice(state)
+            log_ui_navigation(
+                "model_switch",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                previous_model_id=previous_model_id,
+                selected_model_id=requested_model_id,
+                outcome="changed",
+                notice_shown=notice_shown,
+            )
             return True
+        log_ui_navigation(
+            "model_switch",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            previous_model_id=previous_model_id,
+            selected_model_id=requested_model_id,
+            outcome="failed",
+            notice_shown=False,
+        )
         self.add_system_toast("模型切换失败，已保留原选择。", "error", auto_close_ms=5000)
         self.refresh_model_selector()
         return False
+
+    @staticmethod
+    def _session_has_visible_conversation(state):
+        for message in getattr(state, "messages", []) or []:
+            if not isinstance(message, dict) or message.get("role") not in {"user", "assistant"}:
+                continue
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            if not meta.get("hidden") and not meta.get("ui_only"):
+                return True
+        return False
+
+    def _append_model_switch_notice(self, state):
+        if state is None or getattr(state, "chat_layout", None) is None:
+            raise RuntimeError("模型切换提示缺少会话布局，无法显示。")
+        notice = ModelSwitchInlineNotice()
+        state.chat_layout.insertWidget(max(0, state.chat_layout.count() - 1), notice)
+        self.request_session_scroll_to_bottom(state.session_id, force=False)
+        return notice
 
     def on_reasoning_effort_selected(self, effort):
         model_id = self._model_id_for_state(self.get_current_session())

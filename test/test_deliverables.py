@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QColor, QPixmap, QWheelEvent
+from PySide6.QtGui import QAction, QColor, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QApplication, QBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QStackedWidget, QTextEdit, QWidget
 
 from main import (
@@ -44,7 +44,7 @@ class TestDeliverableScanning(unittest.TestCase):
         QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
         window.workspace_dir = workspace
-        window.file_workspace_section = window.FILE_SECTION_ALL
+        window.file_navigator_scope = window.FILE_SCOPE_WORKSPACE
         window.file_browser_empty_state = ProductEmptyState(
             "占位标题",
             "占位说明",
@@ -54,8 +54,6 @@ class TestDeliverableScanning(unittest.TestCase):
             action_kind="secondary",
         )
         window.file_source_stack = QStackedWidget()
-        window.file_product_toolbar = QWidget()
-        window.file_filter_sort_container = QWidget()
         window._session_workspace_source = MagicMock(return_value=source)
         return window
 
@@ -71,8 +69,6 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIn("Agent 创建文件", window.file_browser_empty_state.description_label.text())
             self.assertEqual(window.file_browser_empty_action, "open_workspace")
             self.assertFalse(window.file_browser_empty_state.action_button.isHidden())
-            self.assertTrue(window.file_product_toolbar.isHidden())
-            self.assertTrue(window.file_filter_sort_container.isHidden())
             self.assertTrue(window.file_source_stack.isHidden())
             window.reveal_in_explorer.assert_called_once_with(workspace)
 
@@ -97,13 +93,12 @@ class TestDeliverableScanning(unittest.TestCase):
             window._sync_file_browser_empty_state()
 
             self.assertTrue(window.file_browser_empty_state.isHidden())
-            self.assertFalse(window.file_product_toolbar.isHidden())
             self.assertFalse(window.file_source_stack.isHidden())
 
     def test_filtered_deliverables_keep_controls_and_clear_action(self):
         with tempfile.TemporaryDirectory() as workspace:
             window = self._file_empty_state_window(workspace, source="project")
-            window.file_workspace_section = window.FILE_SECTION_DELIVERABLES
+            window.file_navigator_scope = window.FILE_SCOPE_DELIVERABLES
             window.file_browser_search_text = "missing"
             window.deliverable_type_filter = "all"
             window._filtered_deliverable_items = MagicMock(return_value=[])
@@ -114,8 +109,6 @@ class TestDeliverableScanning(unittest.TestCase):
 
             self.assertEqual(window.file_browser_empty_action, "clear_filters")
             self.assertEqual(window.file_browser_empty_state.action_button.text(), "清除筛选")
-            self.assertFalse(window.file_product_toolbar.isHidden())
-            self.assertFalse(window.file_filter_sort_container.isHidden())
             window.clear_deliverable_filters.assert_called_once_with()
 
     def test_invalid_workspace_hides_controls_and_action(self):
@@ -129,7 +122,6 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertIn(unavailable, window.file_browser_empty_state.description_label.text())
             self.assertEqual(window.file_browser_empty_action, "")
             self.assertTrue(window.file_browser_empty_state.action_button.isHidden())
-            self.assertTrue(window.file_product_toolbar.isHidden())
 
     def test_workspace_read_failure_surfaces_error_without_action(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -360,15 +352,13 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertFalse(bubble.deliverable_cards.isVisible())
             self.assertEqual(bubble.deliverable_cards_layout.count(), 0)
 
-    def test_main_window_loads_deliverable_preferences_after_config_initialization(self):
+    def test_main_window_uses_only_new_file_navigator_preferences(self):
         source = inspect.getsource(MainWindow.__init__)
 
-        config_init = source.index("self.config_manager = ConfigManager()")
-        layout_preference = source.index(
-            'legacy_deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")'
-        )
-
-        self.assertLess(config_init, layout_preference)
+        self.assertNotIn('get("deliverable_layout_mode"', source)
+        self.assertNotIn('get("file_workspace_view_mode"', source)
+        self.assertIn('get("file_navigator_scope"', source)
+        self.assertIn('get("file_navigator_pinned"', source)
 
     def test_scans_supported_deliverables_sorted_by_modified_time(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1053,7 +1043,7 @@ class TestDeliverableScanning(unittest.TestCase):
             self.assertEqual(len(messages), 2)
             self.assertNotIn("旧的办公稿生成请求", "\n".join(message.get("content", "") for message in messages))
 
-    def test_chat_file_link_opens_deliverable_in_focus_mode(self):
+    def test_chat_file_link_opens_deliverable_in_single_workbench(self):
         with tempfile.TemporaryDirectory() as workspace:
             path = os.path.join(workspace, "报告.doc")
             with open(path, "wb") as handle:
@@ -1062,6 +1052,7 @@ class TestDeliverableScanning(unittest.TestCase):
             state = type("_Session", (), {"selected_deliverable_path": ""})()
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
+            window.file_navigator_visible = True
             window.show_context_drawer = MagicMock()
             window.select_deliverable = MagicMock()
             window.add_system_toast = MagicMock()
@@ -1069,8 +1060,8 @@ class TestDeliverableScanning(unittest.TestCase):
             window.open_deliverable_from_chat(path, "session-1")
 
             self.assertEqual(state.selected_deliverable_path, os.path.normpath(path))
-            self.assertEqual(window.file_workspace_view_mode, "detail")
-            self.assertEqual(window.file_workspace_route_origin, "chat")
+            self.assertEqual(window.file_navigator_scope, window.FILE_SCOPE_DELIVERABLES)
+            self.assertFalse(window.file_navigator_visible)
             window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_DELIVERABLES)
             window.select_deliverable.assert_called_once_with(os.path.normpath(path), render_html=True)
             window.add_system_toast.assert_not_called()
@@ -1087,7 +1078,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window.current_session_id = "session-1"
             window.right_drawer_open = True
             window.right_drawer_tab = window.RIGHT_TAB_FILES
-            window.file_workspace_section = window.FILE_SECTION_DELIVERABLES
+            window.file_navigator_scope = window.FILE_SCOPE_DELIVERABLES
             window.current_deliverable_path = first
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
@@ -1170,31 +1161,19 @@ class TestDeliverableScanning(unittest.TestCase):
         self.assertEqual(observed, [True])
         self.assertFalse(state.rendering_history_bubbles)
 
-    def test_file_rail_entry_opens_browse_view(self):
-        class Stack:
-            def __init__(self):
-                self.current = None
-
-            def setCurrentWidget(self, widget):
-                self.current = widget
-
+    def test_file_rail_entry_opens_shared_navigator(self):
         window = MainWindow.__new__(MainWindow)
-        window.file_workspace_view_mode = "detail"
-        window.file_workspace_route_origin = "chat"
-        window.file_workspace_return_section = window.FILE_SECTION_DELIVERABLES
-        window.file_workspace_section = window.FILE_SECTION_DELIVERABLES
-        window.file_workspace_stack = Stack()
-        window.file_browse_page = object()
-        window.file_detail_page = object()
+        window.file_navigator_scope = window.FILE_SCOPE_DELIVERABLES
+        window.file_navigator_visible = False
+        window.file_navigator_navigation_state = {"scope": window.FILE_SCOPE_DELIVERABLES}
         window.config_manager = MagicMock()
         window._sync_file_workspace_for_current_session = MagicMock()
         window.show_context_drawer = MagicMock()
+        window._sync_file_navigator_layout = MagicMock()
 
         window.open_file_workspace_from_rail()
 
-        self.assertEqual(window.file_workspace_view_mode, "browse")
-        self.assertEqual(window.file_workspace_route_origin, "browse")
-        self.assertIs(window.file_workspace_stack.current, window.file_browse_page)
+        self.assertTrue(window.file_navigator_visible)
         window._sync_file_workspace_for_current_session.assert_called_once_with("files_rail")
         window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
 
@@ -1254,7 +1233,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 },
             )()
             navigation_state = {
-                "section": MainWindow.FILE_SECTION_ALL,
+                "scope": MainWindow.FILE_SCOPE_WORKSPACE,
                 "tree_scroll": 37,
                 "expanded_paths": {os.path.join(workspace, "folder")},
             }
@@ -1262,7 +1241,7 @@ class TestDeliverableScanning(unittest.TestCase):
             window.sessions = {state.session_id: state}
             window.current_session_id = state.session_id
             window.workspace_dir = workspace
-            window.file_workspace_navigation_state = navigation_state
+            window.file_navigator_navigation_state = navigation_state
             window.file_model = MagicMock()
             window.file_model.rootPath.return_value = workspace
             window._apply_workspace_to_ui = MagicMock()
@@ -1271,7 +1250,7 @@ class TestDeliverableScanning(unittest.TestCase):
                 changed = window._sync_file_workspace_for_current_session("files_rail")
 
             self.assertFalse(changed)
-            self.assertIs(window.file_workspace_navigation_state, navigation_state)
+            self.assertIs(window.file_navigator_navigation_state, navigation_state)
             window._apply_workspace_to_ui.assert_not_called()
 
     def test_file_workspace_entry_clears_stale_root_without_current_workspace(self):
@@ -1304,32 +1283,29 @@ class TestDeliverableScanning(unittest.TestCase):
             persist_default=False,
         )
 
-    def test_deliverable_section_does_not_show_unmounted_legacy_buttons(self):
+    def test_file_scope_switch_reuses_single_navigator(self):
         class Stack:
             def setCurrentIndex(self, index):
                 self.index = index
 
-            def setVisible(self, visible):
-                self.visible = visible
-
         window = MainWindow.__new__(MainWindow)
         window.file_source_stack = Stack()
-        window.file_section_buttons = {}
-        window.file_workspace_view_mode = "browse"
-        window.deliverable_layout_btn = MagicMock()
-        window.deliverable_render_btn = MagicMock()
-        window.deliverables_refresh_btn = MagicMock()
-        window.deliverable_expand_btn = MagicMock()
-        window._sync_deliverable_action_visibility = MagicMock()
-        window.refresh_deliverables = MagicMock()
-        window.update_context_drawer_header = MagicMock()
+        window.file_navigator_scope = window.FILE_SCOPE_WORKSPACE
+        window.file_navigator_navigation_state = {}
+        window.file_scope_actions = {
+            window.FILE_SCOPE_WORKSPACE: MagicMock(),
+            window.FILE_SCOPE_DELIVERABLES: MagicMock(),
+        }
+        window.file_scope_btn = MagicMock()
+        window.file_search_input = MagicMock()
+        window.file_filter_btn = MagicMock()
+        window.apply_file_workspace_filters = MagicMock()
 
-        window.set_file_workspace_section(window.FILE_SECTION_DELIVERABLES, refresh=False)
+        window.set_file_navigator_scope(window.FILE_SCOPE_DELIVERABLES, refresh=False)
 
-        window.deliverable_layout_btn.setVisible.assert_not_called()
-        window.deliverable_render_btn.setVisible.assert_not_called()
-        window.deliverables_refresh_btn.setVisible.assert_not_called()
-        window.deliverable_expand_btn.setVisible.assert_called_once_with(True)
+        self.assertEqual(window.file_source_stack.index, 1)
+        window.file_filter_btn.setEnabled.assert_called_once_with(True)
+        window.apply_file_workspace_filters.assert_called_once_with()
 
     def test_chat_path_refreshes_browse_state_when_drawer_is_closed(self):
         with tempfile.TemporaryDirectory() as workspace:
@@ -1375,16 +1351,18 @@ class TestDeliverableScanning(unittest.TestCase):
             )()
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
-            window.set_file_workspace_section = MagicMock()
+            window._office_draft_card_for_state = MagicMock(return_value=None)
+            window._is_office_workflow_enabled = MagicMock(return_value=True)
+            window.set_file_navigator_scope = MagicMock()
+            window.set_file_navigator_visible = MagicMock()
             window.show_context_drawer = MagicMock()
             window.select_deliverable = MagicMock()
 
             window.handle_chat_deliverable_paths_changed([latest], "session-1")
 
             self.assertEqual(state.selected_deliverable_path, os.path.normpath(latest))
-            self.assertEqual(window.file_workspace_view_mode, "detail")
-            self.assertEqual(window.file_workspace_route_origin, "chat")
-            window.set_file_workspace_section.assert_called_once_with(window.FILE_SECTION_DELIVERABLES, refresh=False)
+            window.set_file_navigator_scope.assert_called_once_with(window.FILE_SCOPE_DELIVERABLES, refresh=False)
+            window.set_file_navigator_visible.assert_called_once_with(False, reason="generated_file_open")
             window.show_context_drawer.assert_called_once_with(window.RIGHT_TAB_FILES)
             window.select_deliverable.assert_called_once_with(os.path.normpath(latest), render_html=True)
 
@@ -1411,7 +1389,6 @@ class TestDeliverableScanning(unittest.TestCase):
             )()
             window.get_session = MagicMock(return_value=state)
             window._workspace_dir_for_state = MagicMock(return_value=workspace)
-            window._apply_deliverable_layout_mode = MagicMock()
             window.select_deliverable = MagicMock()
 
             try:
@@ -1420,7 +1397,6 @@ class TestDeliverableScanning(unittest.TestCase):
 
                 self.assertEqual(card.result_layout.count(), 1)
                 self.assertFalse(card.result_container.isHidden())
-                window._apply_deliverable_layout_mode.assert_not_called()
                 window.select_deliverable.assert_not_called()
             finally:
                 card.deleteLater()
@@ -1685,7 +1661,6 @@ class TestDeliverableScanning(unittest.TestCase):
                 handle.write("<html></html>")
             window = MainWindow.__new__(MainWindow)
             window.current_deliverable_path = html_path
-            window.file_workspace_view_mode = "detail"
             window.deliverable_conversion_status_label = QLabel()
             window.deliverable_conversion_cancel_btn = QPushButton("取消")
             pptx_btn = QPushButton("生成 PPTX")
@@ -2100,13 +2075,11 @@ class TestDeliverableScanning(unittest.TestCase):
 
     def test_file_navigation_state_is_available_to_lightweight_windows(self):
         window = MainWindow.__new__(MainWindow)
-        window.file_workspace_return_section = window.FILE_SECTION_DELIVERABLES
-        window.file_workspace_route_origin = "chat"
+        window.file_navigator_scope = window.FILE_SCOPE_DELIVERABLES
 
-        state = window._file_navigation_state()
+        state = window._file_navigator_state()
 
-        self.assertEqual(state["section"], window.FILE_SECTION_DELIVERABLES)
-        self.assertEqual(state["origin"], "chat")
+        self.assertEqual(state["scope"], window.FILE_SCOPE_DELIVERABLES)
         self.assertEqual(state["expanded_paths"], set())
 
     def test_deliverable_filter_supports_type_search_and_sort(self):
@@ -2167,20 +2140,23 @@ class TestDeliverableScanning(unittest.TestCase):
     def test_deliverable_type_counts_disable_empty_categories(self):
         QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
-        window.deliverable_type_combo = QComboBox()
+        window.file_type_actions = {}
         for label, value in (
             ("全部类型", "all"), ("网页", "html"), ("演示文稿", "presentation"),
             ("文档", "document"), ("PDF", "pdf"), ("表格", "spreadsheet"), ("图片", "image"),
         ):
-            window.deliverable_type_combo.addItem(label, value)
+            action = QAction(label, None)
+            action.setCheckable(True)
+            window.file_type_actions[value] = action
+        window.deliverable_type_filter = "all"
         window.deliverable_items = [
             {"kind": "pptx"}, {"kind": "pptx"}, {"kind": "pdf"},
         ]
         window._sync_deliverable_filter_options()
-        self.assertEqual(window.deliverable_type_combo.itemText(0), "全部类型 (3)")
-        self.assertEqual(window.deliverable_type_combo.itemText(2), "演示文稿 (2)")
-        self.assertTrue(window.deliverable_type_combo.model().item(2).isEnabled())
-        self.assertFalse(window.deliverable_type_combo.model().item(1).isEnabled())
+        self.assertEqual(window.file_type_actions["all"].text(), "全部类型 (3)")
+        self.assertEqual(window.file_type_actions["presentation"].text(), "演示文稿 (2)")
+        self.assertTrue(window.file_type_actions["presentation"].isEnabled())
+        self.assertFalse(window.file_type_actions["html"].isEnabled())
 
     def test_directory_click_only_toggles_tree_expansion(self):
         window = MainWindow.__new__(MainWindow)
@@ -2192,36 +2168,29 @@ class TestDeliverableScanning(unittest.TestCase):
         window.file_model.filePath.return_value = r"D:\workspace\folder"
         window.file_tree = MagicMock()
         window.file_tree.isExpanded.return_value = False
-        window.file_workspace_return_section = window.FILE_SECTION_ALL
-        window.file_workspace_route_origin = "browse"
-        window.show_file_workspace_detail_view = MagicMock()
+        window.file_navigator_scope = window.FILE_SCOPE_WORKSPACE
+        window.file_navigator_navigation_state = {}
 
         with patch("main.os.path.isdir", return_value=True):
             window.on_file_clicked(index)
 
         window.file_tree.setExpanded.assert_called_once_with(index, True)
-        window.show_file_workspace_detail_view.assert_not_called()
 
-    def test_preview_and_edit_are_explicit_modes(self):
+    def test_preview_and_edit_use_single_mode_action(self):
         QApplication.instance() or QApplication([])
         window = MainWindow.__new__(MainWindow)
         window.current_deliverable_path = r"D:\workspace\report.html"
         window.deliverable_edit_state = "idle"
-        window.deliverable_preview_btn = QPushButton("预览")
-        window.deliverable_preview_btn.setCheckable(True)
-        window.deliverable_edit_btn = QPushButton("编辑")
-        window.deliverable_edit_btn.setCheckable(True)
         window.begin_deliverable_edit = MagicMock()
+        window.cancel_deliverable_edit = MagicMock(return_value=True)
         window.render_selected_deliverable = MagicMock()
 
-        window.set_deliverable_preview_mode("edit")
-        self.assertFalse(window.deliverable_preview_btn.isChecked())
-        self.assertTrue(window.deliverable_edit_btn.isChecked())
+        window.toggle_deliverable_preview_mode()
         window.begin_deliverable_edit.assert_called_once_with()
 
-        window.set_deliverable_preview_mode("preview")
-        self.assertTrue(window.deliverable_preview_btn.isChecked())
-        self.assertFalse(window.deliverable_edit_btn.isChecked())
+        window.deliverable_edit_state = "ready"
+        window.toggle_deliverable_preview_mode()
+        window.cancel_deliverable_edit.assert_called_once_with()
         window.render_selected_deliverable.assert_called_once_with(force=False)
 
 

@@ -63,6 +63,7 @@ COMPONENT_CATALOG = {
     "conversation.thinking_stage",
     "conversation.tool_stage",
     "conversation.message_actions",
+    "conversation.question_navigator",
     "composer.input",
     "composer.add_context",
     "composer.skills",

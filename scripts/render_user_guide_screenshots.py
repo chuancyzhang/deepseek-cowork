@@ -212,6 +212,105 @@ def render_history_performance_screens(window):
     save_widget(window, "s38-component-status-cache.png", 260)
 
 
+def render_file_workbench_screens(window, workspace):
+    window.load_workspace(
+        str(workspace),
+        refresh_sidebar=False,
+        remember_workspace=False,
+        persist_default=False,
+        bind_session=True,
+    )
+    paths = [
+        workspace / "weekly-brief.html",
+        workspace / "meeting-notes.md",
+        workspace / "release-notes.txt",
+        workspace / "quarterly-review.pptx",
+        workspace / "project-summary.pdf",
+    ]
+    for path in paths:
+        window.chat_storage.register_deliverable(
+            str(workspace),
+            str(path),
+            conversation_id=window.current_session_id,
+            source="generated",
+        )
+    window.resize(1280, 760)
+    window.show()
+    window.context_drawer_expanded = False
+    window.context_drawer_user_width = 470
+    window.show_context_drawer(window.RIGHT_TAB_FILES)
+    window.set_file_navigator_scope(
+        window.FILE_SCOPE_DELIVERABLES,
+        refresh=True,
+        user_initiated=True,
+    )
+    window.file_navigator_pinned = False
+    window.set_file_navigator_visible(True, reason="screenshot_list")
+    for _attempt in range(160):
+        process_events(20)
+        if getattr(window, "deliverable_scan_worker", None) is None:
+            break
+    window.sync_context_drawer_layout()
+    process_events(220)
+    scale_label = str(os.environ.get("QT_SCALE_FACTOR") or "1").replace(".", "_")
+    save_widget(window, f"file-workbench-narrow-{scale_label}x.png", 220)
+    if scale_label == "1":
+        save_widget(window, "s21-deliverables-list.png", 120)
+
+    window.select_deliverable(str(workspace / "release-notes.txt"), render_html=True)
+    window.context_drawer_expanded = True
+    window.context_drawer_user_width = 820
+    window.file_navigator_pinned = True
+    window.file_navigator_visible = True
+    window.sync_context_drawer_layout()
+    window._sync_file_navigator_layout()
+    process_events(300)
+    save_widget(window, f"file-workbench-expanded-{scale_label}x.png", 220)
+    if scale_label == "1":
+        save_widget(window, "s22-deliverable-preview.png", 120)
+
+    window.hide_context_drawer(reason="screenshot_question_navigator")
+    state = window.get_current_session()
+    window.clear_chat_layout(state.chat_layout)
+    state.empty_state = None
+    state.render_nodes = {}
+    state.render_node_by_message_id = {}
+    messages = []
+    for index, (question, answer) in enumerate(
+        (
+            ("请先检查工作区中有哪些资料", "已完成目录检查，并按文件类型整理了可用资料。"),
+            ("把会议记录整理成一份项目简报", "简报已整理为目标、进展、风险与下周行动四部分。"),
+            ("再生成一个适合汇报的 HTML 版本", "HTML 工作稿已生成，可在文件工作台中继续预览或编辑。"),
+            ("最后核对交付物和测试结果", "交付物路径与关键测试均已核对完成。"),
+        ),
+        start=1,
+    ):
+        messages.extend(
+            [
+                {"id": f"guide-question-{index}", "role": "user", "content": question},
+                {
+                    "id": f"guide-answer-{index}",
+                    "role": "assistant",
+                    "content": answer,
+                    "meta": {"ui_reply_kind": "final"},
+                },
+            ]
+        )
+    state.messages = messages
+    state.render_items = main.build_conversation_render_spans(messages)
+    state.displayed_render_count = len(state.render_items)
+    window._render_session_history_spans(state, state.render_items)
+    window._sync_question_navigator(state.session_id)
+    process_events(220)
+    entries = window._question_navigator_entries_for_state(state)
+    anchor = QPoint(window.question_navigator_rail.width() + 10, window.question_navigator_rail.height() // 2)
+    window._show_question_navigator_preview(entries[1], anchor)
+    process_events(160)
+    save_widget(window, f"question-navigator-{scale_label}x.png", 220)
+    if scale_label == "1":
+        save_widget(window, "s19a-question-navigator.png", 120)
+
+
 def select_settings_page(dialog, label):
     for row in range(dialog.nav_list.count()):
         if dialog.nav_list.item(row).text() == label:
@@ -489,6 +588,14 @@ def main_run():
         "# 项目会议记录\n\n- 完成本周报告\n- 整理交付物\n- 确认下周计划\n",
         encoding="utf-8",
     )
+    (workspace / "release-notes.txt").write_text(
+        "文件工作台验收\n\n"
+        "1. 导航支持交付物与工作区文件切换。\n"
+        "2. 搜索保持可见，类型和排序集中在筛选菜单。\n"
+        "3. 预览与编辑通过工具栏中的铅笔和眼睛按钮切换。\n"
+        "4. 未保存修改在切换文件、会话或关闭抽屉前需要确认。\n",
+        encoding="utf-8",
+    )
     pptx_path = workspace / "quarterly-review.pptx"
     pptx_path.write_bytes(b"demo-pptx")
     pdf_path = workspace / "project-summary.pdf"
@@ -555,12 +662,12 @@ def main_run():
                 source="generated",
             )
             window.show_context_drawer(window.RIGHT_TAB_FILES)
-            window.set_file_workspace_section(
-                window.FILE_SECTION_DELIVERABLES,
+            window.set_file_navigator_scope(
+                window.FILE_SCOPE_DELIVERABLES,
                 refresh=True,
                 user_initiated=True,
             )
-            window.show_file_workspace_detail_view(origin="browse")
+            window.set_file_navigator_visible(False, reason="screenshot_editor")
             window.select_deliverable(str(markdown_path), render_html=True)
             window.begin_deliverable_edit()
             for _attempt in range(200):
@@ -578,9 +685,10 @@ def main_run():
             window.sync_context_drawer_layout()
             process_events(260)
             if (
-                window.deliverable_edit_action_bar.isHidden()
+                not window.deliverable_edit_action_bar.isHidden()
                 or window.deliverable_edit_save_btn.isHidden()
                 or window.deliverable_edit_save_btn.width() <= 0
+                or window.deliverable_mode_btn.isHidden()
                 or window.preview_stack.currentWidget()
                 is not window.deliverable_text_editor_container
             ):
@@ -622,7 +730,7 @@ def main_run():
                     f"DOCX editor did not become ready: {window.deliverable_edit_state}"
                 )
             if (
-                window.deliverable_preview_mode_bar.isHidden()
+                window.deliverable_mode_btn.isHidden()
                 or window.preview_stack.currentWidget()
                 is not window.deliverable_editor_web_view
                 or "页眉页脚将原样保留"
@@ -1085,6 +1193,9 @@ def main_run():
         if SCREENSHOT_SCOPE == "history-performance":
             render_history_performance_screens(window)
             return
+        if SCREENSHOT_SCOPE == "file-workbench":
+            render_file_workbench_screens(window, workspace)
+            return
         if SCREENSHOT_SCOPE == "grill-mode":
             window.resize(1440, 900)
             window.input_card.setMinimumWidth(720)
@@ -1336,10 +1447,11 @@ def main_run():
         save_widget(window, "15-generate-html-example.png")
 
         window.show_context_drawer(window.RIGHT_TAB_FILES)
-        window.set_file_workspace_section(window.FILE_SECTION_ALL, refresh=True, user_initiated=True)
+        window.set_file_navigator_scope(window.FILE_SCOPE_WORKSPACE, refresh=True, user_initiated=True)
+        window.set_file_navigator_visible(True, reason="screenshot_workspace")
         process_events(500)
         save_widget(window, "16-open-deliverables.png")
-        window.set_file_workspace_section(window.FILE_SECTION_DELIVERABLES, refresh=True, user_initiated=True)
+        window.set_file_navigator_scope(window.FILE_SCOPE_DELIVERABLES, refresh=True, user_initiated=True)
         process_events(250)
         save_widget(window, "17-deliverables-panel.png")
         window.add_system_toast("PPTX 已生成，可在交付物中打开。", "success", auto_close_ms=0)
@@ -1349,7 +1461,7 @@ def main_run():
         for toast in list(window._visible_system_toasts):
             window._dismiss_system_toast(toast)
 
-        window.show_file_workspace_detail_view(origin="browse")
+        window.set_file_navigator_visible(False, reason="screenshot_preview")
         window.select_deliverable(str(html_path), render_html=True)
         process_events(1200)
         save_widget(window, "18-open-html-preview.png")

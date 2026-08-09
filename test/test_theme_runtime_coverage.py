@@ -323,6 +323,50 @@ class ThemeRuntimeCoverageTests(unittest.TestCase):
             self.assertTrue(self.manager.restore_saved_theme(reason="brand_title_restore"))
         self.assertEqual(self.window.windowTitle(), "DeepSeek Cowork")
 
+    def test_question_navigator_visibility_restores_after_theme_preview_cancel(self):
+        self.window.show()
+        self.app.processEvents()
+        rail = self.window.question_navigator_rail
+        host = self.window.question_navigator_theme_host
+        state = self.window.get_current_session()
+        state.messages = [
+            {"id": "question-1", "role": "user", "content": "第一问"},
+            {"id": "answer-1", "role": "assistant", "content": "答复一", "meta": {"ui_reply_kind": "final"}},
+            {"id": "question-2", "role": "user", "content": "第二问"},
+            {"id": "answer-2", "role": "assistant", "content": "答复二", "meta": {"ui_reply_kind": "final"}},
+        ]
+        self.window._sync_question_navigator(state.session_id)
+        self.app.processEvents()
+        self.assertFalse(rail.isHidden())
+        profile = {
+            "id": "hide-question-navigator",
+            "name": "Hide question navigator",
+            "schema_version": 2,
+            "overrides": {},
+            "assets": {},
+            "workspace_scene": {"attachment": "fixed", "layers": []},
+            "surfaces": {},
+            "components": {"conversation.question_navigator": {"visible": False}},
+            "content": {},
+        }
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            self.assertTrue(
+                self.manager.apply_profile(profile, preview=True, reason="hide_question_navigator")
+            )
+        self.assertTrue(host.isHidden())
+        self.assertFalse(rail.isVisible())
+        with patch(
+            "core.theme.QFontDatabase.families",
+            return_value=["Microsoft YaHei UI", "Consolas"],
+        ):
+            self.assertTrue(self.manager.restore_saved_theme(reason="cancel_question_navigator_preview"))
+        self.app.processEvents()
+        self.assertFalse(host.isHidden())
+        self.assertTrue(rail.isVisible())
+
     def test_image_preview_dialog_tracks_theme_preview_and_restore(self):
         image_path = os.path.join(self.temp_dir.name, "theme-preview.png")
         image = QImage(320, 180, QImage.Format_ARGB32)

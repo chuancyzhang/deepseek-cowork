@@ -53,7 +53,6 @@ class DeliverableEditorUiTest(unittest.TestCase):
                     remember_workspace=False,
                     persist_default=False,
                 )
-                self.window.show_file_workspace_detail_view()
                 self.window.select_deliverable(source, render_html=False)
                 self.window.begin_deliverable_edit()
                 self._wait_until(
@@ -92,18 +91,18 @@ class DeliverableEditorUiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "editor_assets_missing")
 
-    def test_docx_editor_mode_is_visible_in_file_detail(self):
+    def test_docx_editor_uses_compact_mode_button(self):
         with tempfile.TemporaryDirectory() as directory:
             source = os.path.join(directory, "report.docx")
             with open(source, "wb") as handle:
                 handle.write(b"placeholder")
             self.window.current_deliverable_path = source
-            self.window.file_workspace_view_mode = "detail"
 
             self.window._set_deliverable_controls_enabled(source)
 
-            self.assertFalse(self.window.deliverable_preview_mode_bar.isHidden())
-            self.assertTrue(self.window.deliverable_edit_btn.isEnabled())
+            self.assertFalse(self.window.deliverable_mode_btn.isHidden())
+            self.assertTrue(self.window.deliverable_mode_btn.isEnabled())
+            self.assertTrue(self.window.deliverable_read_only_label.isHidden())
 
 
 if __name__ == "__main__":

@@ -305,7 +305,7 @@ from core.ppt_agent import (
 import shutil
 import traceback
 import qtawesome as qta
-from PySide6.QtGui import (QAction, QTextOption, QIcon, QFont, QFontMetrics, QImage, QPixmap,
+from PySide6.QtGui import (QAction, QActionGroup, QTextOption, QIcon, QFont, QFontMetrics, QImage, QPixmap,
                           QDesktopServices, QGuiApplication, QColor, QPainter, 
                           QBrush, QPainterPath, QTextCursor, QPen, QPalette, QWheelEvent)
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QLayout,
@@ -20272,6 +20272,8 @@ class SessionState:
         self.history_page_loading = False
         self.history_page_anchor_widget = None
         self.history_page_anchor_offset = 0
+        self.history_page_jump_target_id = ""
+        self.history_page_jump_started_at = 0.0
         self.rendering_history_bubbles = False
         self.content_flush_timer = None
         self.thinking_flush_timer = None
@@ -20959,6 +20961,317 @@ class SmartSplitter(QSplitter):
                     sizes[1] += sizes[2]
                     sizes[2] = 0
                     self.setSizes(sizes)
+
+
+class FileNavigatorProxyModel(QSortFilterProxyModel):
+    """Workspace tree filtering with an explicit full-path tooltip."""
+
+    def data(self, index, role=Qt.DisplayRole):
+        if role == Qt.ToolTipRole and index.isValid():
+            source = self.sourceModel()
+            source_index = self.mapToSource(index)
+            if source is not None and hasattr(source, "filePath"):
+                return source.filePath(source_index)
+        return super().data(index, role)
+
+
+class FileWorkbench(QWidget):
+    """Single-surface file workspace with one movable navigator panel."""
+
+    effectiveModeChanged = Signal(str)
+
+    def __init__(self, navigator, content, parent=None):
+        super().__init__(parent)
+        self.navigator = navigator
+        self.content = content
+        self.navigator.setParent(self)
+        self.content.setParent(self)
+        self.navigator_visible = True
+        self.navigator_pinned = False
+        self.navigator_width = int(getattr(DesignTokens, "file_navigator_width", 320))
+        self.pin_min_width = int(getattr(DesignTokens, "file_workbench_pin_min_width", 720))
+        self._effective_mode = "overlay"
+        self.setMinimumSize(0, 0)
+        self.content.show()
+        self.navigator.show()
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    def refresh_theme(self, _resolved=None):
+        self.navigator.setStyleSheet(
+            f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 10px; }}"
+        )
+        self.update_layout()
+
+    def set_navigator_state(self, *, visible=None, pinned=None, width=None):
+        if visible is not None:
+            self.navigator_visible = bool(visible)
+        if pinned is not None:
+            self.navigator_pinned = bool(pinned)
+        if width is not None:
+            self.navigator_width = max(260, min(420, int(width)))
+        self.update_layout()
+
+    def is_effectively_pinned(self):
+        return bool(self.navigator_pinned and self.width() >= self.pin_min_width)
+
+    def update_layout(self):
+        width = max(0, self.width())
+        height = max(0, self.height())
+        if not width or not height:
+            return
+        nav_width = min(self.navigator_width, max(260, width - 24))
+        pinned = self.is_effectively_pinned()
+        mode = "pinned" if pinned else "overlay"
+        if mode != self._effective_mode:
+            self._effective_mode = mode
+            self.effectiveModeChanged.emit(mode)
+        show_nav = bool(self.navigator_visible or pinned)
+        self.navigator.setVisible(show_nav)
+        if pinned:
+            self.navigator.setGeometry(0, 0, nav_width, height)
+            self.content.setGeometry(nav_width + 1, 0, max(0, width - nav_width - 1), height)
+            self.navigator.setStyleSheet(
+                f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
+                f"border: none; border-right: 1px solid {DesignTokens.separator}; border-radius: 0px; }}"
+            )
+        else:
+            self.content.setGeometry(0, 0, width, height)
+            self.navigator.setGeometry(10, 8, nav_width, max(0, height - 16))
+            self.navigator.setStyleSheet(
+                f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
+                f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 10px; }}"
+            )
+        self.content.show()
+        if show_nav:
+            self.navigator.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_layout()
+
+
+class QuestionNavigatorThemeHost(QFrame):
+    visibilityChanged = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QuestionNavigatorThemeHost")
+        self.setStyleSheet("QFrame#QuestionNavigatorThemeHost { background: transparent; border: none; }")
+
+    def setVisible(self, visible):
+        super().setVisible(bool(visible))
+        self.visibilityChanged.emit(bool(visible))
+
+
+class QuestionNavigatorPreviewCard(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QuestionNavigatorPreviewCard")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.title_label = QLabel()
+        self.title_label.setWordWrap(True)
+        self.answer_label = QLabel()
+        self.answer_label.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(5)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.answer_label)
+        self.hide()
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"QFrame#QuestionNavigatorPreviewCard {{ background: {DesignTokens.bg_main}; "
+            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 10px; }}"
+        )
+        self.title_label.setStyleSheet(
+            f"color: {DesignTokens.text_primary}; font-size: 12px; font-weight: 650; border: none;"
+        )
+        self.answer_label.setStyleSheet(
+            f"color: {DesignTokens.text_secondary}; font-size: 11px; border: none;"
+        )
+
+    def show_entry(self, entry, anchor, bounds):
+        self.title_label.setText(str((entry or {}).get("title") or "未命名提问"))
+        self.answer_label.setText(str((entry or {}).get("answer") or "尚无回复"))
+        width = min(420, max(260, int(bounds.width()) - int(anchor.x()) - 16))
+        self.setFixedWidth(width)
+        self.adjustSize()
+        height = min(max(self.sizeHint().height(), 72), 156)
+        x = max(8, min(int(anchor.x()), int(bounds.width()) - width - 8))
+        y = max(8, min(int(anchor.y()) - 18, int(bounds.height()) - height - 8))
+        self.setGeometry(x, y, width, height)
+        self.show()
+        self.raise_()
+
+
+class QuestionNavigatorRail(QFrame):
+    jumpRequested = Signal(str)
+    previewRequested = Signal(object, QPoint)
+    previewDismissed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("QuestionNavigatorRail")
+        self.setFixedWidth(40)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setAccessibleName("历史提问导航")
+        self.entries = []
+        self.active_message_id = ""
+        self.window_start = 0
+        self.hover_index = -1
+        self._marker_hits = []
+        self._feature_visible = False
+        self._theme_visible = True
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="conversation")
+        super().setVisible(False)
+
+    def setVisible(self, visible):
+        self._theme_visible = bool(visible)
+        super().setVisible(self._theme_visible and self._feature_visible)
+        if not self._theme_visible:
+            self.previewDismissed.emit()
+
+    def set_feature_visible(self, visible):
+        self._feature_visible = bool(visible)
+        super().setVisible(self._theme_visible and self._feature_visible)
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet("QFrame#QuestionNavigatorRail { background: transparent; border: none; }")
+        self.update()
+
+    def _capacity(self):
+        return max(1, int(max(18, self.height()) // 18))
+
+    def _active_index(self):
+        return next(
+            (index for index, entry in enumerate(self.entries)
+             if str(entry.get("message_id") or "") == self.active_message_id),
+            -1,
+        )
+
+    def _ensure_active_visible(self):
+        capacity = self._capacity()
+        maximum_start = max(0, len(self.entries) - capacity)
+        active_index = self._active_index()
+        if active_index >= 0:
+            if active_index < self.window_start:
+                self.window_start = active_index
+            elif active_index >= self.window_start + capacity:
+                self.window_start = active_index - capacity + 1
+        self.window_start = max(0, min(self.window_start, maximum_start))
+
+    def set_entries(self, entries):
+        self.entries = list(entries or [])
+        valid_ids = {str(entry.get("message_id") or "") for entry in self.entries}
+        if self.active_message_id not in valid_ids:
+            self.active_message_id = str((self.entries[-1] if self.entries else {}).get("message_id") or "")
+        self._ensure_active_visible()
+        self.set_feature_visible(len(self.entries) >= 2)
+        self.setAccessibleDescription(f"共 {len(self.entries)} 个历史提问")
+        self.update()
+
+    def set_active_message_id(self, message_id):
+        message_id = str(message_id or "")
+        if message_id == self.active_message_id:
+            return
+        self.active_message_id = message_id
+        self._ensure_active_visible()
+        self.update()
+
+    def _visible_entries(self):
+        capacity = self._capacity()
+        return list(enumerate(self.entries[self.window_start:self.window_start + capacity], self.window_start))
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        visible = self._visible_entries()
+        if not visible:
+            return
+        cell_height = 18
+        total_height = len(visible) * cell_height
+        top = max(0, (self.height() - total_height) // 2)
+        self._marker_hits = []
+        for offset, (entry_index, entry) in enumerate(visible):
+            message_id = str(entry.get("message_id") or "")
+            active = message_id == self.active_message_id
+            hovered = entry_index == self.hover_index
+            line_width = 28 if active else (22 if hovered else 15)
+            color = QColor(DesignTokens.text_primary if active else DesignTokens.text_tertiary)
+            if hovered and not active:
+                color = QColor(DesignTokens.text_secondary)
+            y = top + offset * cell_height + cell_height // 2
+            painter.setPen(QPen(color, 2 if active else 1.5, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(4, y, 4 + line_width, y)
+            self._marker_hits.append((QRect(0, y - 8, 38, 16), entry_index))
+
+    def _entry_index_at(self, point):
+        for rect, index in self._marker_hits:
+            if rect.contains(point):
+                return index
+        return -1
+
+    def mouseMoveEvent(self, event):
+        index = self._entry_index_at(event.position().toPoint())
+        if index != self.hover_index:
+            self.hover_index = index
+            self.update()
+            if 0 <= index < len(self.entries):
+                self.previewRequested.emit(self.entries[index], event.position().toPoint())
+            else:
+                self.previewDismissed.emit()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self.hover_index = -1
+        self.previewDismissed.emit()
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            index = self._entry_index_at(event.position().toPoint())
+            if 0 <= index < len(self.entries):
+                self.jumpRequested.emit(str(self.entries[index].get("message_id") or ""))
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def wheelEvent(self, event):
+        delta = -1 if event.angleDelta().y() > 0 else 1
+        maximum_start = max(0, len(self.entries) - self._capacity())
+        self.window_start = max(0, min(maximum_start, self.window_start + delta))
+        self.update()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if not self.entries:
+            return super().keyPressEvent(event)
+        active = self._active_index()
+        if event.key() in {Qt.Key_Up, Qt.Key_Down}:
+            step = -1 if event.key() == Qt.Key_Up else 1
+            active = max(0, min(len(self.entries) - 1, (active if active >= 0 else 0) + step))
+            self.set_active_message_id(self.entries[active].get("message_id"))
+            self.previewRequested.emit(self.entries[active], QPoint(self.width(), self.height() // 2))
+            event.accept()
+            return
+        if event.key() in {Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space} and active >= 0:
+            self.jumpRequested.emit(str(self.entries[active].get("message_id") or ""))
+            event.accept()
+            return
+        if event.key() == Qt.Key_Escape:
+            self.previewDismissed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class MemoryUpdateWorker(QThread):
@@ -21825,8 +22138,8 @@ class MainWindow(QMainWindow):
     RIGHT_TAB_DELIVERABLES = RIGHT_TAB_FILES
     RIGHT_TAB_OBSERVABILITY = 1
     RIGHT_TAB_SUB_AGENTS = 2
-    FILE_SECTION_ALL = "all"
-    FILE_SECTION_DELIVERABLES = "deliverables"
+    FILE_SCOPE_WORKSPACE = "workspace"
+    FILE_SCOPE_DELIVERABLES = "deliverables"
     PAGE_CONVERSATION = "conversation"
     PAGE_CAPABILITIES = "capabilities"
     PAGE_AUTOMATION = "automation"
@@ -21871,14 +22184,25 @@ class MainWindow(QMainWindow):
         self.context_available_tabs = set()
         self.current_deliverable_path = ""
         self.current_deliverable_stale = False
-        self.file_workspace_view_mode = "browse"
-        self.file_workspace_route_origin = "browse"
-        self.file_workspace_return_section = self.FILE_SECTION_DELIVERABLES
-        self.file_section_user_selected = False
-        self.file_section_workspace_key = ""
-        self.file_workspace_navigation_state = {
-            "section": self.FILE_SECTION_ALL,
-            "origin": "browse",
+        configured_file_scope = str(
+            self.config_manager.get("file_navigator_scope", self.FILE_SCOPE_DELIVERABLES) or ""
+        )
+        self.file_navigator_scope = (
+            configured_file_scope
+            if configured_file_scope in {self.FILE_SCOPE_WORKSPACE, self.FILE_SCOPE_DELIVERABLES}
+            else self.FILE_SCOPE_DELIVERABLES
+        )
+        self.file_navigator_visible = bool(
+            self.config_manager.get("file_navigator_visible", True)
+        )
+        self.file_navigator_pinned = bool(self.config_manager.get("file_navigator_pinned", False))
+        self.file_navigator_width = int(
+            self.config_manager.get("file_navigator_width", DesignTokens.file_navigator_width)
+            or DesignTokens.file_navigator_width
+        )
+        self.file_navigator_user_selected_scope = False
+        self.file_navigator_workspace_key = ""
+        self.file_navigator_navigation_state = {
             "selected_path": "",
             "tree_scroll": 0,
             "deliverables_scroll": 0,
@@ -22063,14 +22387,6 @@ class MainWindow(QMainWindow):
         )
         self.skill_catalog_service.subscribe(self._relay_local_skill_catalog_changed)
         self.context_drawer_user_width = int(self.config_manager.get("context_drawer_width", 0) or 0)
-        legacy_deliverable_layout_mode = self.config_manager.get("deliverable_layout_mode", "list")
-        configured_file_workspace_mode = self.config_manager.get("file_workspace_view_mode", "")
-        if configured_file_workspace_mode in {"browse", "detail"}:
-            self.file_workspace_view_mode = configured_file_workspace_mode
-        else:
-            self.file_workspace_view_mode = "detail" if legacy_deliverable_layout_mode == "focus" else "browse"
-        self.deliverable_layout_mode = "focus" if self.file_workspace_view_mode == "detail" else "list"
-        self.deliverables_splitter_sizes = self.config_manager.get("deliverables_splitter_sizes", [180, 320])
         self.sidebar_sort_mode = self.config_manager.get("sidebar_sort_mode", "recent")
         self.skill_manager = SkillManager(
             None,
@@ -22314,12 +22630,80 @@ class MainWindow(QMainWindow):
         self.right_title_label.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {DesignTokens.text_primary};")
         self.right_desc_label = QLabel("查看文件与执行步骤")
         self.right_desc_label.setStyleSheet(f"font-size: 12px; color: {DesignTokens.text_secondary};")
-        right_title_box = QVBoxLayout()
+        self.right_title_block = QWidget(right_header)
+        right_title_box = QVBoxLayout(self.right_title_block)
         right_title_box.setContentsMargins(0, 0, 0, 0)
         right_title_box.setSpacing(4)
         right_title_box.addWidget(self.right_title_label)
         right_title_box.addWidget(self.right_desc_label)
-        right_header_layout.addLayout(right_title_box, 1)
+        right_header_layout.addWidget(self.right_title_block, 1)
+
+        self.file_header_controls = QWidget(right_header)
+        file_header_layout = QHBoxLayout(self.file_header_controls)
+        file_header_layout.setContentsMargins(0, 0, 0, 0)
+        file_header_layout.setSpacing(6)
+        self.file_navigator_btn = QToolButton(self.file_header_controls)
+        self.file_navigator_btn.setObjectName("FileNavigatorButton")
+        self.file_navigator_btn.setIcon(qta.icon("fa5s.bars", color=DesignTokens.text_secondary))
+        self.file_navigator_btn.setToolTip("显示文件导航")
+        self.file_navigator_btn.setCursor(Qt.PointingHandCursor)
+        self.file_navigator_btn.setFixedSize(30, 30)
+        self.file_navigator_btn.setStyleSheet(apple_tool_button_style(False))
+        self.file_navigator_btn.clicked.connect(self.toggle_file_navigator)
+        file_header_layout.addWidget(self.file_navigator_btn)
+
+        self.file_header_identity_label = QLabel("文件与交付物")
+        self.file_header_identity_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 650; color: {DesignTokens.text_primary};"
+        )
+        file_header_layout.addWidget(self.file_header_identity_label)
+
+        self.file_header_chip = QFrame(self.file_header_controls)
+        self.file_header_chip.setObjectName("FileHeaderChip")
+        self.file_header_chip.setStyleSheet(
+            f"QFrame#FileHeaderChip {{ background: {DesignTokens.bg_secondary}; border: none; "
+            "border-radius: 8px; }}"
+        )
+        file_chip_layout = QHBoxLayout(self.file_header_chip)
+        file_chip_layout.setContentsMargins(8, 3, 4, 3)
+        file_chip_layout.setSpacing(6)
+        self.file_header_icon_label = QLabel()
+        self.file_header_icon_label.setPixmap(
+            qta.icon("fa5s.file-alt", color=DesignTokens.text_secondary).pixmap(16, 16)
+        )
+        file_chip_layout.addWidget(self.file_header_icon_label)
+        self.file_header_name_label = QLabel()
+        self.file_header_name_label.setMinimumWidth(0)
+        self.file_header_name_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 650; color: {DesignTokens.text_primary}; border: none;"
+        )
+        file_chip_layout.addWidget(self.file_header_name_label, 1)
+        self.file_header_close_file_btn = QToolButton(self.file_header_chip)
+        self.file_header_close_file_btn.setIcon(
+            qta.icon("fa5s.times", color=DesignTokens.text_secondary)
+        )
+        self.file_header_close_file_btn.setToolTip("关闭文件")
+        self.file_header_close_file_btn.setCursor(Qt.PointingHandCursor)
+        self.file_header_close_file_btn.setFixedSize(24, 24)
+        self.file_header_close_file_btn.setStyleSheet(apple_tool_button_style(False))
+        self.file_header_close_file_btn.clicked.connect(self.close_current_file)
+        file_chip_layout.addWidget(self.file_header_close_file_btn)
+        self.file_header_chip.setVisible(False)
+        file_header_layout.addWidget(self.file_header_chip, 1)
+        file_header_layout.addStretch(1)
+
+        self.file_header_expand_btn = QToolButton(self.file_header_controls)
+        self.file_header_expand_btn.setIcon(
+            qta.icon("fa5s.expand-alt", color=DesignTokens.text_secondary)
+        )
+        self.file_header_expand_btn.setToolTip("放大文件工作台")
+        self.file_header_expand_btn.setCursor(Qt.PointingHandCursor)
+        self.file_header_expand_btn.setFixedSize(30, 30)
+        self.file_header_expand_btn.setStyleSheet(apple_tool_button_style(False))
+        self.file_header_expand_btn.clicked.connect(self.toggle_deliverable_preview_expanded)
+        file_header_layout.addWidget(self.file_header_expand_btn)
+        self.file_header_controls.setVisible(False)
+        right_header_layout.addWidget(self.file_header_controls, 1)
         self.right_close_btn = QToolButton()
         self.right_close_btn.setIcon(qta.icon('fa5s.times', color=DesignTokens.text_secondary))
         self.right_close_btn.setToolTip("收起上下文")
@@ -22341,48 +22725,154 @@ class MainWindow(QMainWindow):
         ws_tab_layout.setContentsMargins(14, 12, 14, 14)
         ws_tab_layout.setSpacing(10)
 
-        self.file_workspace_stack = QStackedWidget()
-        self.file_workspace_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
-        self.file_browse_page = QWidget()
-        file_browse_layout = QVBoxLayout(self.file_browse_page)
-        file_browse_layout.setContentsMargins(0, 0, 0, 0)
-        file_browse_layout.setSpacing(10)
-        self.file_detail_page = QWidget()
-        file_detail_layout = QVBoxLayout(self.file_detail_page)
-        file_detail_layout.setContentsMargins(0, 0, 0, 0)
-        file_detail_layout.setSpacing(10)
+        self.file_navigator_panel = QFrame()
+        self.file_navigator_panel.setObjectName("FileNavigatorPanel")
+        file_navigator_layout = QVBoxLayout(self.file_navigator_panel)
+        file_navigator_layout.setContentsMargins(12, 12, 12, 12)
+        file_navigator_layout.setSpacing(8)
 
-        file_mode_row = QHBoxLayout()
-        file_mode_row.setContentsMargins(0, 0, 0, 0)
-        file_mode_row.setSpacing(8)
-        self.file_mode_title = QLabel("工作区")
-        self.file_mode_title.setStyleSheet(apple_settings_section_title_style())
-        file_mode_row.addWidget(self.file_mode_title)
-        file_mode_row.addStretch()
-        self.file_workspace_toggle_btn = QPushButton("浏览工作区")
-        self.file_workspace_toggle_btn.setObjectName("SecondaryBtn")
-        self.file_workspace_toggle_btn.setCursor(Qt.PointingHandCursor)
-        self.file_workspace_toggle_btn.setFixedHeight(DesignTokens.control_height)
-        self.file_workspace_toggle_btn.setStyleSheet(product_button_style("secondary"))
-        self.file_workspace_toggle_btn.clicked.connect(self.toggle_file_workspace_section)
-        self.file_workspace_toggle_btn.setVisible(False)
-        file_mode_row.addWidget(self.file_workspace_toggle_btn)
-        file_browse_layout.addLayout(file_mode_row)
-        self.file_section_buttons = {}
-        
-        self.right_inner_splitter = SmartSplitter(Qt.Vertical)
-        self.right_inner_splitter.setChildrenCollapsible(False)
+        file_scope_row = QHBoxLayout()
+        file_scope_row.setContentsMargins(0, 0, 0, 0)
+        file_scope_row.setSpacing(6)
+        self.file_scope_btn = QToolButton(self.file_navigator_panel)
+        self.file_scope_btn.setObjectName("FileScopeButton")
+        self.file_scope_btn.setText("交付物")
+        self.file_scope_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.file_scope_btn.setIcon(qta.icon("fa5s.chevron-down", color=DesignTokens.text_secondary))
+        self.file_scope_btn.setPopupMode(QToolButton.InstantPopup)
+        self.file_scope_btn.setCursor(Qt.PointingHandCursor)
+        self.file_scope_btn.setFixedHeight(30)
+        self.file_scope_btn.setStyleSheet(apple_tool_button_style(False))
+        self.file_scope_menu = create_styled_menu(self.file_scope_btn)
+        self.file_scope_action_group = QActionGroup(self.file_scope_menu)
+        self.file_scope_action_group.setExclusive(True)
+        self.file_scope_actions = {}
+        for label, scope in (
+            ("交付物", self.FILE_SCOPE_DELIVERABLES),
+            ("工作区文件", self.FILE_SCOPE_WORKSPACE),
+        ):
+            action = QAction(label, self.file_scope_menu)
+            action.setCheckable(True)
+            action.setData(scope)
+            action.triggered.connect(
+                lambda checked=False, selected_scope=scope: self.set_file_navigator_scope(
+                    selected_scope, user_initiated=True
+                )
+            )
+            self.file_scope_action_group.addAction(action)
+            self.file_scope_menu.addAction(action)
+            self.file_scope_actions[scope] = action
+        self.file_scope_btn.setMenu(self.file_scope_menu)
+        file_scope_row.addWidget(self.file_scope_btn)
+        self.file_result_count_label = QLabel("0 项")
+        self.file_result_count_label.setStyleSheet(apple_caption_style())
+        file_scope_row.addWidget(self.file_result_count_label)
+        file_scope_row.addStretch(1)
+        self.file_navigator_pin_btn = QToolButton(self.file_navigator_panel)
+        self.file_navigator_pin_btn.setCheckable(True)
+        self.file_navigator_pin_btn.setChecked(self.file_navigator_pinned)
+        self.file_navigator_pin_btn.setIcon(
+            qta.icon("fa5s.thumbtack", color=DesignTokens.text_secondary)
+        )
+        self.file_navigator_pin_btn.setToolTip("固定文件导航")
+        self.file_navigator_pin_btn.setCursor(Qt.PointingHandCursor)
+        self.file_navigator_pin_btn.setFixedSize(30, 30)
+        self.file_navigator_pin_btn.setStyleSheet(apple_tool_button_style(False))
+        self.file_navigator_pin_btn.clicked.connect(self.toggle_file_navigator_pinned)
+        file_scope_row.addWidget(self.file_navigator_pin_btn)
+        file_navigator_layout.addLayout(file_scope_row)
+
+        file_search_row = QHBoxLayout()
+        file_search_row.setContentsMargins(0, 0, 0, 0)
+        file_search_row.setSpacing(6)
+        self.file_search_input = QLineEdit()
+        self.file_search_input.setPlaceholderText("搜索文件")
+        self.file_search_input.setClearButtonEnabled(True)
+        self.file_search_input.setFixedHeight(DesignTokens.control_height)
+        self.file_search_input.textChanged.connect(self.apply_file_workspace_filters)
+        file_search_row.addWidget(self.file_search_input, 1)
+        self.file_filter_btn = QToolButton(self.file_navigator_panel)
+        self.file_filter_btn.setObjectName("FileFilterButton")
+        self.file_filter_btn.setIcon(qta.icon("fa5s.filter", color=DesignTokens.text_secondary))
+        self.file_filter_btn.setToolTip("类型与排序")
+        self.file_filter_btn.setPopupMode(QToolButton.InstantPopup)
+        self.file_filter_btn.setCursor(Qt.PointingHandCursor)
+        self.file_filter_btn.setFixedSize(DesignTokens.control_height, DesignTokens.control_height)
+        self.file_filter_btn.setStyleSheet(apple_tool_button_style(False))
+        self.file_filter_menu = create_styled_menu(self.file_filter_btn)
+        self.file_type_action_group = QActionGroup(self.file_filter_menu)
+        self.file_type_action_group.setExclusive(True)
+        self.file_type_actions = {}
+        for label, value in DELIVERABLE_FILTER_CATEGORIES:
+            action = QAction(label, self.file_filter_menu)
+            action.setCheckable(True)
+            action.setData(value)
+            action.triggered.connect(
+                lambda checked=False, selected=value: self._set_file_type_filter(selected)
+            )
+            self.file_type_action_group.addAction(action)
+            self.file_filter_menu.addAction(action)
+            self.file_type_actions[value] = action
+        self.file_filter_menu.addSeparator()
+        self.file_sort_action_group = QActionGroup(self.file_filter_menu)
+        self.file_sort_action_group.setExclusive(True)
+        self.file_sort_actions = {}
+        for label, value in (
+            ("最近更新", "modified_desc"),
+            ("最早更新", "modified_asc"),
+            ("名称 A–Z", "name_asc"),
+            ("名称 Z–A", "name_desc"),
+            ("文件从大到小", "size_desc"),
+            ("文件从小到大", "size_asc"),
+        ):
+            action = QAction(label, self.file_filter_menu)
+            action.setCheckable(True)
+            action.setData(value)
+            action.triggered.connect(
+                lambda checked=False, selected=value: self._set_file_sort_mode(selected)
+            )
+            self.file_sort_action_group.addAction(action)
+            self.file_filter_menu.addAction(action)
+            self.file_sort_actions[value] = action
+        self.file_filter_btn.setMenu(self.file_filter_menu)
+        file_search_row.addWidget(self.file_filter_btn)
+        file_navigator_layout.addLayout(file_search_row)
+
+        self.file_navigator_current_frame = QFrame(self.file_navigator_panel)
+        self.file_navigator_current_frame.setObjectName("FileNavigatorCurrent")
+        self.file_navigator_current_frame.setStyleSheet(
+            f"QFrame#FileNavigatorCurrent {{ background: {DesignTokens.primary_soft}; border: none; "
+            "border-radius: 8px; }}"
+        )
+        file_current_layout = QVBoxLayout(self.file_navigator_current_frame)
+        file_current_layout.setContentsMargins(8, 7, 8, 7)
+        file_current_layout.setSpacing(3)
+        file_current_caption = QLabel("当前文件")
+        file_current_caption.setStyleSheet(
+            f"font-size: 10px; font-weight: 650; color: {DesignTokens.text_secondary}; border: none;"
+        )
+        file_current_layout.addWidget(file_current_caption)
+        self.file_navigator_current_btn = QPushButton()
+        self.file_navigator_current_btn.setFlat(True)
+        self.file_navigator_current_btn.setCursor(Qt.PointingHandCursor)
+        self.file_navigator_current_btn.setStyleSheet(apple_button_style("ghost", radius=6))
+        self.file_navigator_current_btn.clicked.connect(self._open_current_file_from_navigator)
+        file_current_layout.addWidget(self.file_navigator_current_btn)
+        self.file_navigator_current_frame.setVisible(False)
+        file_navigator_layout.addWidget(self.file_navigator_current_frame)
+
         self.file_source_stack = QStackedWidget()
         self.file_source_stack.setStyleSheet("QStackedWidget { border: none; background: transparent; }")
         
         self.file_model = QFileSystemModel()
         self.file_model.setRootPath("") 
 
-        self.file_filter_model = QSortFilterProxyModel(self)
+        self.file_filter_model = FileNavigatorProxyModel(self)
         self.file_filter_model.setSourceModel(self.file_model)
         self.file_filter_model.setFilterKeyColumn(0)
         self.file_filter_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.file_filter_model.setRecursiveFilteringEnabled(True)
+        self.file_model.directoryLoaded.connect(lambda _path: self.apply_file_workspace_filters())
         
         self.file_tree = QTreeView()
         self.file_tree.setModel(self.file_filter_model)
@@ -22405,46 +22895,6 @@ class MainWindow(QMainWindow):
         self.deliverables_list.itemClicked.connect(self.on_deliverable_item_clicked)
         self.file_source_stack.addWidget(self.deliverables_list)
 
-        self.file_product_toolbar = ProductToolbar()
-        self.file_search_input = QLineEdit()
-        self.file_search_input.setPlaceholderText("搜索当前工作区")
-        self.file_search_input.setClearButtonEnabled(True)
-        self.file_search_input.setFixedHeight(DesignTokens.control_height)
-        self.file_search_input.textChanged.connect(self.apply_file_workspace_filters)
-        self.file_product_toolbar.add_widget(self.file_search_input)
-        self.file_product_toolbar.finish()
-        file_browse_layout.addWidget(self.file_product_toolbar)
-
-        self.file_filter_sort_container = QWidget()
-        filter_sort_row = QHBoxLayout(self.file_filter_sort_container)
-        filter_sort_row.setContentsMargins(0, 0, 0, 0)
-        filter_sort_row.setSpacing(6)
-
-        self.deliverable_type_combo = QComboBox()
-        self.deliverable_type_combo.setAccessibleName("交付物文件类型")
-        for label, value in DELIVERABLE_FILTER_CATEGORIES:
-            self.deliverable_type_combo.addItem(label, value)
-        self.deliverable_type_combo.setFixedHeight(DesignTokens.control_height)
-        self.deliverable_type_combo.setMinimumWidth(0)
-        apply_settings_combo_style(self.deliverable_type_combo)
-        self.deliverable_type_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
-        filter_sort_row.addWidget(self.deliverable_type_combo, 1)
-
-        self.deliverable_sort_combo = QComboBox()
-        self.deliverable_sort_combo.setAccessibleName("交付物排序")
-        self.deliverable_sort_combo.addItem("最近更新", "modified_desc")
-        self.deliverable_sort_combo.addItem("最早更新", "modified_asc")
-        self.deliverable_sort_combo.addItem("名称 A–Z", "name_asc")
-        self.deliverable_sort_combo.addItem("名称 Z–A", "name_desc")
-        self.deliverable_sort_combo.addItem("文件从大到小", "size_desc")
-        self.deliverable_sort_combo.addItem("文件从小到大", "size_asc")
-        self.deliverable_sort_combo.setFixedHeight(DesignTokens.control_height)
-        self.deliverable_sort_combo.setMinimumWidth(0)
-        apply_settings_combo_style(self.deliverable_sort_combo)
-        self.deliverable_sort_combo.currentIndexChanged.connect(self.apply_file_workspace_filters)
-        filter_sort_row.addWidget(self.deliverable_sort_combo, 1)
-        file_browse_layout.addWidget(self.file_filter_sort_container)
-
         self.file_browser_empty_state = ProductEmptyState(
             "还没有可浏览的内容",
             "选择工作区后，可以在这里查找文件并预览交付物。",
@@ -22456,8 +22906,8 @@ class MainWindow(QMainWindow):
         self.file_browser_empty_action = ""
         self.file_browser_empty_state.action_button.clicked.connect(self._handle_file_browser_empty_action)
         self.file_browser_empty_state.setVisible(False)
-        file_browse_layout.addWidget(self.file_browser_empty_state, 1)
-        file_browse_layout.addWidget(self.file_source_stack, 1)
+        file_navigator_layout.addWidget(self.file_browser_empty_state, 1)
+        file_navigator_layout.addWidget(self.file_source_stack, 1)
         
         # Unified Preview Area in Workspace Tab
         preview_container = QWidget()
@@ -22471,20 +22921,13 @@ class MainWindow(QMainWindow):
         r_preview_header_layout = QHBoxLayout(r_preview_header)
         r_preview_header_layout.setContentsMargins(12, 10, 10, 10)
         r_preview_header_layout.setSpacing(8)
-        self.file_detail_back_btn = QPushButton()
-        self.file_detail_back_btn.setIcon(qta.icon("fa5s.chevron-left", color=DesignTokens.text_secondary))
-        self.file_detail_back_btn.setToolTip("返回文件列表")
-        self.file_detail_back_btn.setCursor(Qt.PointingHandCursor)
-        self.file_detail_back_btn.setFixedSize(30, 30)
-        self.file_detail_back_btn.setStyleSheet(apple_button_style("ghost", radius=7))
-        self.file_detail_back_btn.clicked.connect(self.show_file_workspace_browse_view)
-        r_preview_header_layout.addWidget(self.file_detail_back_btn)
         preview_title_box = QVBoxLayout()
         preview_title_box.setContentsMargins(0, 0, 0, 0)
         preview_title_box.setSpacing(2)
         self.preview_title_label = QLabel("内容预览")
         self.preview_title_label.setMinimumWidth(0)
         self.preview_title_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 12px;")
+        self.preview_title_label.setVisible(False)
         self.preview_meta_label = QLabel("选择文件查看内容")
         self.preview_meta_label.setMinimumWidth(0)
         self.preview_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
@@ -22512,8 +22955,6 @@ class MainWindow(QMainWindow):
         self.preview_copy_btn.setFixedSize(30, 30)
         self.preview_copy_btn.setStyleSheet(apple_tool_button_style(False))
         self.preview_copy_btn.clicked.connect(lambda: self.copy_path_to_clipboard(getattr(self, "current_preview_path", "")))
-        self.deliverable_layout_btn = QToolButton()
-        self.deliverable_layout_btn.setVisible(False)
         self.deliverable_render_btn = QToolButton()
         self.deliverable_render_btn.setIcon(qta.icon("fa5s.sync-alt", color=DesignTokens.primary))
         self.deliverable_render_btn.setToolTip("刷新预览")
@@ -22521,13 +22962,29 @@ class MainWindow(QMainWindow):
         self.deliverable_render_btn.setFixedSize(30, 30)
         self.deliverable_render_btn.setStyleSheet(apple_tool_button_style(False))
         self.deliverable_render_btn.clicked.connect(lambda: self.render_selected_deliverable(force=True))
-        self.deliverable_expand_btn = QToolButton()
-        self.deliverable_expand_btn.setIcon(qta.icon("fa5s.expand-alt", color=DesignTokens.text_secondary))
-        self.deliverable_expand_btn.setToolTip("放大预览")
-        self.deliverable_expand_btn.setCursor(Qt.PointingHandCursor)
-        self.deliverable_expand_btn.setFixedSize(30, 30)
-        self.deliverable_expand_btn.setStyleSheet(apple_tool_button_style(False))
-        self.deliverable_expand_btn.clicked.connect(self.toggle_deliverable_preview_expanded)
+        self.deliverable_read_only_label = QLabel("只读预览")
+        self.deliverable_read_only_label.setStyleSheet(
+            f"font-size: 11px; color: {DesignTokens.text_secondary};"
+        )
+        self.deliverable_read_only_label.setVisible(False)
+        r_preview_header_layout.addWidget(self.deliverable_read_only_label)
+        self.deliverable_mode_btn = QToolButton()
+        self.deliverable_mode_btn.setIcon(qta.icon("fa5s.pen", color=DesignTokens.text_secondary))
+        self.deliverable_mode_btn.setToolTip("编辑文件")
+        self.deliverable_mode_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_mode_btn.setFixedSize(30, 30)
+        self.deliverable_mode_btn.setStyleSheet(apple_tool_button_style(False))
+        self.deliverable_mode_btn.clicked.connect(self.toggle_deliverable_preview_mode)
+        self.deliverable_mode_btn.setVisible(False)
+        r_preview_header_layout.addWidget(self.deliverable_mode_btn)
+        self.deliverable_edit_save_btn = QPushButton("保存")
+        self.deliverable_edit_save_btn.setCursor(Qt.PointingHandCursor)
+        self.deliverable_edit_save_btn.setFixedHeight(30)
+        self.deliverable_edit_save_btn.setStyleSheet(product_button_style("primary"))
+        self.deliverable_edit_save_btn.clicked.connect(self.save_deliverable_edit)
+        self.deliverable_edit_save_btn.setVisible(False)
+        r_preview_header_layout.addWidget(self.deliverable_edit_save_btn)
+        self.deliverable_expand_btn = self.file_header_expand_btn
         self.deliverable_more_btn = QToolButton()
         self.deliverable_more_btn.setIcon(qta.icon("fa5s.ellipsis-h", color=DesignTokens.text_secondary))
         self.deliverable_more_btn.setToolTip("更多操作")
@@ -22577,41 +23034,10 @@ class MainWindow(QMainWindow):
         for btn in (self.preview_open_btn, self.preview_reveal_btn, self.preview_copy_btn):
             btn.setEnabled(False)
             btn.setVisible(False)
-        for btn in (
-            self.deliverable_expand_btn,
-            self.deliverable_more_btn,
-        ):
-            r_preview_header_layout.addWidget(btn)
-        for btn in (self.deliverable_layout_btn, self.deliverable_render_btn, self.deliverables_refresh_btn):
+        r_preview_header_layout.addWidget(self.deliverable_more_btn)
+        for btn in (self.deliverable_render_btn, self.deliverables_refresh_btn):
             btn.setVisible(False)
         preview_layout.addWidget(r_preview_header)
-
-        self.deliverable_preview_mode_bar = QFrame()
-        self.deliverable_preview_mode_bar.setProperty("productSurface", "subtle")
-        self.deliverable_preview_mode_bar.setStyleSheet(product_surface_style("subtle"))
-        preview_mode_layout = QHBoxLayout(self.deliverable_preview_mode_bar)
-        preview_mode_layout.setContentsMargins(4, 4, 4, 4)
-        preview_mode_layout.setSpacing(4)
-        self.deliverable_preview_btn = QPushButton("预览")
-        self.deliverable_preview_btn.setCheckable(True)
-        self.deliverable_preview_btn.setChecked(True)
-        self.deliverable_preview_btn.setStyleSheet(product_segmented_style())
-        self.deliverable_preview_btn.clicked.connect(
-            lambda checked=False: self.set_deliverable_preview_mode("preview")
-        )
-        preview_mode_layout.addWidget(self.deliverable_preview_btn, 1)
-        self.deliverable_edit_btn = QPushButton("编辑")
-        self.deliverable_edit_btn.setCheckable(True)
-        self.deliverable_edit_btn.setStyleSheet(product_segmented_style())
-        self.deliverable_edit_btn.clicked.connect(
-            lambda checked=False: self.set_deliverable_preview_mode("edit")
-        )
-        preview_mode_layout.addWidget(self.deliverable_edit_btn, 1)
-        # Compatibility alias for integrations that still locate the former
-        # preview/source segmented control by attribute name.
-        self.deliverable_source_btn = self.deliverable_edit_btn
-        self.deliverable_preview_mode_bar.setVisible(False)
-        preview_layout.addWidget(self.deliverable_preview_mode_bar)
 
         conversion_row_widget = QWidget()
         conversion_row_widget.setObjectName("DeliverableConversionBar")
@@ -22755,18 +23181,6 @@ class MainWindow(QMainWindow):
         self.deliverable_edit_status_label.setWordWrap(True)
         self.deliverable_edit_status_label.setStyleSheet(apple_caption_style())
         edit_action_layout.addWidget(self.deliverable_edit_status_label, 1)
-        self.deliverable_edit_cancel_btn = QPushButton("退出编辑")
-        self.deliverable_edit_cancel_btn.setCursor(Qt.PointingHandCursor)
-        self.deliverable_edit_cancel_btn.setFixedHeight(DesignTokens.control_height)
-        self.deliverable_edit_cancel_btn.setStyleSheet(product_button_style("secondary"))
-        self.deliverable_edit_cancel_btn.clicked.connect(self.cancel_deliverable_edit)
-        edit_action_layout.addWidget(self.deliverable_edit_cancel_btn)
-        self.deliverable_edit_save_btn = QPushButton("保存")
-        self.deliverable_edit_save_btn.setCursor(Qt.PointingHandCursor)
-        self.deliverable_edit_save_btn.setFixedHeight(DesignTokens.control_height)
-        self.deliverable_edit_save_btn.setStyleSheet(product_button_style("primary"))
-        self.deliverable_edit_save_btn.clicked.connect(self.save_deliverable_edit)
-        edit_action_layout.addWidget(self.deliverable_edit_save_btn)
         self.deliverable_edit_action_bar.setVisible(False)
         preview_layout.addWidget(self.deliverable_edit_action_bar)
         bind_theme(
@@ -22776,19 +23190,17 @@ class MainWindow(QMainWindow):
         )
         preview_layout.addWidget(self.deliverable_conversion_row)
         
-        file_detail_layout.addWidget(preview_container, 1)
-        self.deliverables_splitter = self.right_inner_splitter
-        sizes = self.deliverables_splitter_sizes
-        if not isinstance(sizes, list) or len(sizes) != 2:
-            sizes = [180, 320]
-        self.right_inner_splitter.setSizes([max(80, int(sizes[0])), max(160, int(sizes[1]))])
-        self.right_inner_splitter.splitterMoved.connect(self.persist_deliverables_splitter_sizes)
-        
-        self.file_workspace_stack.addWidget(self.file_browse_page)
-        self.file_workspace_stack.addWidget(self.file_detail_page)
-        ws_tab_layout.addWidget(self.file_workspace_stack, 1)
-        self.set_file_workspace_section(self.FILE_SECTION_ALL, refresh=False)
-        self._apply_deliverable_layout_mode(self.deliverable_layout_mode, persist=False)
+        self.file_workbench = FileWorkbench(self.file_navigator_panel, preview_container)
+        self.file_workbench.effectiveModeChanged.connect(self._on_file_navigator_effective_mode_changed)
+        self.file_workbench.set_navigator_state(
+            visible=self.file_navigator_visible,
+            pinned=self.file_navigator_pinned,
+            width=self.file_navigator_width,
+        )
+        ws_tab_layout.addWidget(self.file_workbench, 1)
+        self.set_file_navigator_scope(self.file_navigator_scope, refresh=False)
+        self._sync_file_navigator_layout()
+        self._sync_file_header()
         self._set_deliverable_controls_enabled("")
         
         self.right_stack.addWidget(self.workspace_tab)
@@ -23145,6 +23557,15 @@ class MainWindow(QMainWindow):
         self.session_tabs.currentChanged.connect(self.on_session_tab_changed)
         self.session_tabs.tabCloseRequested.connect(self.close_session_tab)
         self.chat_row_layout.addWidget(self.session_tabs, 1)
+        self.question_navigator_theme_host = QuestionNavigatorThemeHost(self.session_tabs)
+        self.question_navigator_rail = QuestionNavigatorRail(self.question_navigator_theme_host)
+        self.question_navigator_preview = QuestionNavigatorPreviewCard(self.session_tabs)
+        self.question_navigator_rail.jumpRequested.connect(self.jump_to_question)
+        self.question_navigator_rail.previewRequested.connect(self._show_question_navigator_preview)
+        self.question_navigator_rail.previewDismissed.connect(self.question_navigator_preview.hide)
+        self.question_navigator_theme_host.visibilityChanged.connect(
+            lambda visible: None if visible else self.question_navigator_preview.hide()
+        )
         self.chat_row_layout.addStretch(1)
         self.main_content_layout.addWidget(self.chat_row, 1)
 
@@ -23460,6 +23881,10 @@ class MainWindow(QMainWindow):
         controller.register_component("composer.model", self.model_select_btn)
         controller.register_component("composer.pause", self.pause_btn)
         controller.register_component("composer.submit", self.action_btn)
+        controller.register_component(
+            "conversation.question_navigator",
+            self.question_navigator_theme_host,
+        )
 
         controller.register_component("right.header", self.right_header)
         controller.register_component("right.files", self.workspace_tab)
@@ -23867,24 +24292,24 @@ class MainWindow(QMainWindow):
         drawer_open = getattr(self, "right_drawer_open", False)
         files_open = drawer_open and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_FILES
         if files_open and event.key() == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
-            self.show_file_workspace_browse_view()
+            self.set_file_navigator_visible(True, reason="shortcut_search")
             self.file_search_input.setFocus()
             self.file_search_input.selectAll()
             event.accept()
             return
         if files_open and event.key() == Qt.Key_Left and event.modifiers() & Qt.AltModifier:
-            self.show_file_workspace_browse_view()
+            self.set_file_navigator_visible(True, reason="shortcut_back")
             event.accept()
             return
         if files_open and event.key() == Qt.Key_F5:
-            if getattr(self, "file_workspace_view_mode", "browse") == "detail":
+            if getattr(self, "current_preview_path", ""):
                 self.render_selected_deliverable(force=True)
             else:
                 self.refresh_deliverables()
             event.accept()
             return
-        if files_open and event.key() in {Qt.Key_Return, Qt.Key_Enter} and getattr(self, "file_workspace_view_mode", "browse") == "browse":
-            if getattr(self, "file_workspace_section", self.FILE_SECTION_ALL) == self.FILE_SECTION_DELIVERABLES:
+        if files_open and event.key() in {Qt.Key_Return, Qt.Key_Enter} and getattr(self, "file_navigator_visible", False):
+            if getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES) == self.FILE_SCOPE_DELIVERABLES:
                 self.on_deliverable_item_clicked(self.deliverables_list.currentItem())
             else:
                 self.on_file_clicked(self.file_tree.currentIndex())
@@ -23913,83 +24338,207 @@ class MainWindow(QMainWindow):
         if getattr(self, "config_manager", None) and self.context_drawer_user_width:
             self.config_manager.set("context_drawer_width", int(self.context_drawer_user_width))
 
-    def persist_deliverables_splitter_sizes(self, *_args):
-        splitter = getattr(self, "deliverables_splitter", None)
-        if not splitter or not getattr(self, "config_manager", None):
-            return
-        sizes = [int(value) for value in splitter.sizes()]
-        if len(sizes) == 2 and all(value > 0 for value in sizes):
-            self.config_manager.set("deliverables_splitter_sizes", sizes)
-
-    def toggle_file_workspace_section(self):
-        current = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
-        target = self.FILE_SECTION_DELIVERABLES if current == self.FILE_SECTION_ALL else self.FILE_SECTION_ALL
-        self.set_file_workspace_section(target, user_initiated=True)
-
-    def set_file_workspace_section(self, section, refresh=True, user_initiated=False):
-        section = section if section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables") else getattr(self, "FILE_SECTION_ALL", "all")
+    def set_file_navigator_scope(self, scope, refresh=True, user_initiated=False):
+        scope = (
+            self.FILE_SCOPE_WORKSPACE
+            if str(scope or "") == self.FILE_SCOPE_WORKSPACE
+            else self.FILE_SCOPE_DELIVERABLES
+        )
+        previous = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
+        self.file_navigator_scope = scope
+        if getattr(self, "config_manager", None):
+            self.config_manager.set("file_navigator_scope", scope)
         if user_initiated:
-            self.file_section_user_selected = True
-        self.file_workspace_section = section
-        self._file_navigation_state()["section"] = section
+            self.file_navigator_user_selected_scope = True
+        self._file_navigator_state()["scope"] = scope
         stack = getattr(self, "file_source_stack", None)
         if stack is not None:
-            stack.setCurrentIndex(1 if section == self.FILE_SECTION_DELIVERABLES else 0)
-            stack.setVisible(True)
-        if hasattr(self, "file_mode_title"):
-            self.file_mode_title.setText("交付物" if section == self.FILE_SECTION_DELIVERABLES else "工作区")
-        has_deliverables = bool(getattr(self, "deliverable_items", []) or [])
-        toggle = getattr(self, "file_workspace_toggle_btn", None)
-        if toggle is not None:
-            toggle.setVisible(has_deliverables)
-            toggle.setText("浏览工作区" if section == self.FILE_SECTION_DELIVERABLES else "返回交付物")
+            stack.setCurrentIndex(0 if scope == self.FILE_SCOPE_WORKSPACE else 1)
+        labels = {
+            self.FILE_SCOPE_WORKSPACE: "工作区文件",
+            self.FILE_SCOPE_DELIVERABLES: "交付物",
+        }
+        button = getattr(self, "file_scope_btn", None)
+        if button is not None:
+            button.setText(labels[scope])
+        for value, action in getattr(self, "file_scope_actions", {}).items():
+            action.setChecked(value == scope)
         search = getattr(self, "file_search_input", None)
         if search is not None:
-            search.setPlaceholderText("搜索交付物" if section == self.FILE_SECTION_DELIVERABLES else "搜索当前工作区")
-        for control_name in ("deliverable_type_combo", "deliverable_sort_combo"):
-            control = getattr(self, control_name, None)
-            if control is not None:
-                control.setVisible(section == self.FILE_SECTION_DELIVERABLES)
-        deliverable_controls_visible = section == self.FILE_SECTION_DELIVERABLES
-        expand_btn = getattr(self, "deliverable_expand_btn", None)
-        if expand_btn is not None:
-            expand_btn.setVisible(deliverable_controls_visible)
-        self._sync_deliverable_action_visibility()
-        if deliverable_controls_visible and refresh:
+            search.setPlaceholderText("搜索工作区文件" if scope == self.FILE_SCOPE_WORKSPACE else "搜索交付物")
+        filter_button = getattr(self, "file_filter_btn", None)
+        if filter_button is not None:
+            filter_button.setEnabled(scope == self.FILE_SCOPE_DELIVERABLES)
+            filter_button.setToolTip("类型与排序" if scope == self.FILE_SCOPE_DELIVERABLES else "工作区文件按名称显示")
+        if scope == self.FILE_SCOPE_DELIVERABLES and refresh:
             self.refresh_deliverables(render_current=True)
         self.apply_file_workspace_filters()
-        self.update_context_drawer_header(getattr(self, "right_drawer_tab", self.RIGHT_TAB_FILES))
-        if getattr(self, "file_workspace_view_mode", "browse") == "browse":
-            self.file_workspace_return_section = section
+        if previous != scope:
+            log_ui_navigation(
+                "file_navigator_scope_changed",
+                scope=scope,
+                user_initiated=bool(user_initiated),
+            )
+
+    def _set_file_type_filter(self, value):
+        self.deliverable_type_filter = str(value or "all")
+        self.apply_file_workspace_filters()
+
+    def _set_file_sort_mode(self, value):
+        self.deliverable_sort_mode = str(value or "modified_desc")
+        self.apply_file_workspace_filters()
+
+    def toggle_file_navigator(self):
+        self.set_file_navigator_visible(
+            not bool(getattr(self, "file_navigator_visible", False)),
+            reason="header_button",
+        )
+
+    def set_file_navigator_visible(self, visible, reason="programmatic"):
+        visible = bool(visible)
+        if bool(getattr(self, "file_navigator_visible", False)) == visible:
+            self._sync_file_navigator_layout()
+            return
+        self.file_navigator_visible = visible
+        if getattr(self, "config_manager", None):
+            self.config_manager.set("file_navigator_visible", visible)
+        self._sync_file_navigator_layout()
+        log_ui_navigation(
+            "file_navigator_visibility_changed",
+            visible=visible,
+            pinned=bool(getattr(self, "file_navigator_pinned", False)),
+            reason=reason,
+        )
+
+    def toggle_file_navigator_pinned(self, checked=False):
+        pinned = bool(checked)
+        workbench = getattr(self, "file_workbench", None)
+        if pinned and workbench is not None and workbench.width() < workbench.pin_min_width:
+            if not getattr(self, "context_drawer_expanded", False):
+                self.toggle_deliverable_preview_expanded()
+        self.file_navigator_pinned = pinned
+        self.file_navigator_visible = True
+        if getattr(self, "config_manager", None):
+            self.config_manager.set("file_navigator_pinned", pinned)
+            self.config_manager.set("file_navigator_width", int(self.file_navigator_width))
+        self._sync_file_navigator_layout()
+        log_ui_navigation("file_navigator_pin_changed", pinned=pinned)
+
+    def _on_file_navigator_effective_mode_changed(self, mode):
+        log_ui_navigation(
+            "file_navigator_effective_mode_changed",
+            mode=str(mode or "overlay"),
+            pinned_preference=bool(getattr(self, "file_navigator_pinned", False)),
+        )
+        self._sync_file_navigator_layout()
+
+    def _sync_file_navigator_layout(self):
+        workbench = getattr(self, "file_workbench", None)
+        if workbench is None:
+            return
+        workbench.set_navigator_state(
+            visible=bool(getattr(self, "file_navigator_visible", True)),
+            pinned=bool(getattr(self, "file_navigator_pinned", False)),
+            width=int(getattr(self, "file_navigator_width", DesignTokens.file_navigator_width)),
+        )
+        effective_pinned = workbench.is_effectively_pinned()
+        pin = getattr(self, "file_navigator_pin_btn", None)
+        if pin is not None:
+            pin.blockSignals(True)
+            pin.setChecked(bool(getattr(self, "file_navigator_pinned", False)))
+            pin.blockSignals(False)
+            pin.setIcon(
+                qta.icon(
+                    "fa5s.thumbtack",
+                    color=DesignTokens.primary
+                    if getattr(self, "file_navigator_pinned", False)
+                    else DesignTokens.text_secondary,
+                )
+            )
+            pin.setToolTip(
+                "取消固定文件导航"
+                if getattr(self, "file_navigator_pinned", False)
+                else "固定文件导航"
+            )
+        nav_button = getattr(self, "file_navigator_btn", None)
+        if nav_button is not None:
+            shown = bool(getattr(self, "file_navigator_visible", False) or effective_pinned)
+            nav_button.setIcon(
+                qta.icon("fa5s.bars", color=DesignTokens.primary if shown else DesignTokens.text_secondary)
+            )
+            nav_button.setToolTip("隐藏文件导航" if shown and not effective_pinned else "显示文件导航")
+
+    def close_current_file(self):
+        if not self.confirm_leave_deliverable_edit("关闭当前文件"):
+            return False
+        self.current_preview_path = ""
+        self.current_deliverable_path = ""
+        self.current_deliverable_item = None
+        self._file_navigator_state()["selected_path"] = ""
+        self._release_deliverable_edit_session(show_preview=False)
+        self.preview_stack.setCurrentWidget(self.preview_text)
+        self.preview_text.clear()
+        self.preview_title_label.setText("内容预览")
+        self.preview_meta_label.setText("选择文件查看内容")
+        self.deliverable_status_label.setText("选择文件后会在这里预览")
+        self._set_deliverable_controls_enabled("")
+        self._sync_file_header()
+        self.set_file_navigator_visible(True, reason="close_file")
+        return True
+
+    def _sync_file_header(self):
+        path = str(getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", ""))
+        chip = getattr(self, "file_header_chip", None)
+        identity = getattr(self, "file_header_identity_label", None)
+        if chip is None or identity is None:
+            return
+        has_file = bool(path)
+        chip.setVisible(has_file)
+        identity.setVisible(not has_file)
+        if has_file:
+            name = os.path.basename(path) or path
+            self.file_header_name_label.setText(name)
+            self.file_header_name_label.setToolTip(path)
+            self.file_header_chip.setToolTip(path)
+            descriptor = editor_descriptor(path)
+            icon_name = "fa5s.file-code" if descriptor else "fa5s.file-alt"
+            self.file_header_icon_label.setPixmap(
+                qta.icon(icon_name, color=DesignTokens.text_secondary).pixmap(16, 16)
+            )
+
+    def _open_current_file_from_navigator(self):
+        path = str(getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", ""))
+        if path:
+            if os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
+                self.select_deliverable(path, render_html=True)
+            else:
+                source = self.file_filter_model.mapFromSource(self.file_model.index(path))
+                if source.isValid():
+                    self.on_file_clicked(source)
+            if not self.file_workbench.is_effectively_pinned():
+                self.set_file_navigator_visible(False, reason="current_file_selected")
 
     def _sync_deliverable_action_visibility(self):
-        section = getattr(self, "file_workspace_section", getattr(self, "FILE_SECTION_ALL", "all"))
-        in_deliverables = section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables")
         path = getattr(self, "current_deliverable_path", "")
         ext = os.path.splitext(path)[1].lower() if path else ""
         is_html = ext in {".html", ".htm"} and os.path.isfile(path)
         row = getattr(self, "deliverable_conversion_row", None)
         if row is not None:
-            row.setVisible(
-                getattr(self, "file_workspace_view_mode", "browse") == "detail"
-                and is_html
-            )
+            row.setVisible(is_html)
         status = getattr(self, "deliverable_status_label", None)
         if status is not None:
             status.setVisible(True)
-        preview_mode_bar = getattr(self, "deliverable_preview_mode_bar", None)
-        if preview_mode_bar is not None:
-            preview_mode_bar.setVisible(
-                getattr(self, "file_workspace_view_mode", "browse") == "detail"
-                and bool(path)
-                and os.path.isfile(path)
-                and editor_descriptor(path) is not None
-            )
+        editable = bool(path and os.path.isfile(path) and editor_descriptor(path) is not None)
+        mode_button = getattr(self, "deliverable_mode_btn", None)
+        if mode_button is not None:
+            mode_button.setVisible(editable)
+        read_only = getattr(self, "deliverable_read_only_label", None)
+        if read_only is not None:
+            read_only.setVisible(bool(path) and not editable)
 
-    def _snapshot_file_browser_state(self):
-        state = self._file_navigation_state()
-        state["section"] = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
-        state["origin"] = getattr(self, "file_workspace_route_origin", "browse")
+    def _snapshot_file_navigator_state(self):
+        state = self._file_navigator_state()
+        state["scope"] = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
         state["selected_path"] = getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", "")
         tree = getattr(self, "file_tree", None)
         if tree is not None:
@@ -24016,8 +24565,8 @@ class MainWindow(QMainWindow):
         if deliverables is not None:
             state["deliverables_scroll"] = deliverables.verticalScrollBar().value()
 
-    def _restore_file_browser_state(self):
-        state = self._file_navigation_state()
+    def _restore_file_navigator_state(self):
+        state = self._file_navigator_state()
         tree = getattr(self, "file_tree", None)
         if tree is not None:
             expanded = state.get("expanded_paths") or set()
@@ -24037,40 +24586,81 @@ class MainWindow(QMainWindow):
         self.file_browser_search_text = query
         if hasattr(self, "file_filter_model"):
             self.file_filter_model.setFilterFixedString(query)
-        type_combo = getattr(self, "deliverable_type_combo", None)
-        sort_combo = getattr(self, "deliverable_sort_combo", None)
-        self.deliverable_type_filter = str(type_combo.currentData() if type_combo is not None else "all")
-        self.deliverable_sort_mode = str(sort_combo.currentData() if sort_combo is not None else "modified_desc")
+        self.deliverable_type_filter = str(getattr(self, "deliverable_type_filter", "all") or "all")
+        self.deliverable_sort_mode = str(getattr(self, "deliverable_sort_mode", "modified_desc") or "modified_desc")
+        for value, action in getattr(self, "file_type_actions", {}).items():
+            action.setChecked(value == self.deliverable_type_filter)
+        for value, action in getattr(self, "file_sort_actions", {}).items():
+            action.setChecked(value == self.deliverable_sort_mode)
         if hasattr(self, "deliverables_list"):
             self._render_deliverable_items()
-        toolbar = getattr(self, "file_product_toolbar", None)
-        if toolbar is not None:
-            count = len(self._filtered_deliverable_items()) if getattr(self, "file_workspace_section", "") == self.FILE_SECTION_DELIVERABLES else 0
-            toolbar.set_result_text(f"{count} 项" if count else "")
+        scope = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
+        if scope == self.FILE_SCOPE_DELIVERABLES:
+            count = len(self._filtered_deliverable_items())
+        else:
+            root = self.file_tree.rootIndex() if hasattr(self, "file_tree") else None
+            count = self.file_filter_model.rowCount(root) if root is not None and root.isValid() else 0
+        result_label = getattr(self, "file_result_count_label", None)
+        if result_label is not None:
+            result_label.setText(f"{count} 项")
+        filter_active = self.deliverable_type_filter != "all" or self.deliverable_sort_mode != "modified_desc"
+        filter_button = getattr(self, "file_filter_btn", None)
+        if filter_button is not None:
+            filter_button.setIcon(
+                qta.icon("fa5s.filter", color=DesignTokens.primary if filter_active else DesignTokens.text_secondary)
+            )
+            filter_button.setToolTip("类型与排序（已筛选）" if filter_active else "类型与排序")
+        self._sync_current_file_filter_notice()
         self._sync_file_browser_empty_state()
 
     def clear_deliverable_filters(self):
         search = getattr(self, "file_search_input", None)
-        type_combo = getattr(self, "deliverable_type_combo", None)
         if search is not None:
             search.clear()
-        if type_combo is not None:
-            type_combo.setCurrentIndex(0)
+        self.deliverable_type_filter = "all"
         self.apply_file_workspace_filters()
 
-    def _file_navigation_state(self):
-        state = getattr(self, "file_workspace_navigation_state", None)
+    def _file_navigator_state(self):
+        state = getattr(self, "file_navigator_navigation_state", None)
         if not isinstance(state, dict):
             state = {
-                "section": getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL),
-                "origin": getattr(self, "file_workspace_route_origin", "browse"),
+                "scope": getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES),
                 "selected_path": "",
                 "tree_scroll": 0,
                 "deliverables_scroll": 0,
                 "expanded_paths": set(),
             }
-            self.file_workspace_navigation_state = state
+            self.file_navigator_navigation_state = state
         return state
+
+    def _sync_current_file_filter_notice(self):
+        frame = getattr(self, "file_navigator_current_frame", None)
+        button = getattr(self, "file_navigator_current_btn", None)
+        if frame is None or button is None:
+            return
+        path = str(getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", ""))
+        if not path:
+            frame.setVisible(False)
+            return
+        query = str(getattr(self, "file_browser_search_text", "") or "").casefold()
+        scope = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
+        excluded = False
+        if scope == self.FILE_SCOPE_DELIVERABLES:
+            visible_paths = {
+                os.path.normcase(os.path.abspath(str(item.get("path") or "")))
+                for item in self._filtered_deliverable_items()
+            }
+            excluded = os.path.normcase(os.path.abspath(path)) not in visible_paths
+        elif query:
+            try:
+                relative = os.path.relpath(path, getattr(self, "workspace_dir", "") or os.path.dirname(path))
+            except ValueError:
+                relative = path
+            excluded = query not in os.path.basename(path).casefold() and query not in relative.casefold()
+        frame.setVisible(excluded)
+        if excluded:
+            button.setText(os.path.basename(path) or path)
+            button.setToolTip(path)
 
     def _deliverable_matches_type(self, item, filter_key):
         kind = str(item.get("kind") or "").strip().lower()
@@ -24080,10 +24670,10 @@ class MainWindow(QMainWindow):
         return filter_key == "all" or DELIVERABLE_KIND_CATEGORIES.get(kind) == filter_key
 
     def _sync_deliverable_filter_options(self):
-        combo = getattr(self, "deliverable_type_combo", None)
-        if combo is None:
+        actions = getattr(self, "file_type_actions", None)
+        if not actions:
             return
-        current = str(combo.currentData() or "all")
+        current = str(getattr(self, "deliverable_type_filter", "all") or "all")
         counts = {value: 0 for _label, value in DELIVERABLE_FILTER_CATEGORIES}
         items = list(getattr(self, "deliverable_items", []) or [])
         counts["all"] = len(items)
@@ -24092,20 +24682,14 @@ class MainWindow(QMainWindow):
             category = DELIVERABLE_KIND_CATEGORIES.get(kind)
             if category:
                 counts[category] += 1
-        combo.blockSignals(True)
-        try:
-            for index, (label, value) in enumerate(DELIVERABLE_FILTER_CATEGORIES):
-                combo.setItemText(index, f"{label} ({counts[value]})")
-                model_item = combo.model().item(index)
-                if model_item is not None:
-                    model_item.setEnabled(value == "all" or counts[value] > 0)
-            selected_index = combo.findData(current)
-            if selected_index < 0 or (current != "all" and counts.get(current, 0) == 0):
-                selected_index = 0
-            combo.setCurrentIndex(selected_index)
-        finally:
-            combo.blockSignals(False)
-        self.deliverable_type_filter = str(combo.currentData() or "all")
+        for label, value in DELIVERABLE_FILTER_CATEGORIES:
+            action = actions[value]
+            action.setText(f"{label} ({counts[value]})")
+            action.setEnabled(value == "all" or counts[value] > 0)
+        if current not in actions:
+            current = "all"
+        actions[current].setChecked(True)
+        self.deliverable_type_filter = current
 
     def _filtered_deliverable_items(self):
         query = str(getattr(self, "file_browser_search_text", "") or "").casefold()
@@ -24142,22 +24726,18 @@ class MainWindow(QMainWindow):
         if empty is None or stack is None:
             return
         workspace = getattr(self, "workspace_dir", "")
-        section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
+        scope = getattr(self, "file_navigator_scope", self.FILE_SCOPE_DELIVERABLES)
         action = ""
-        controls_visible = True
         if loading:
             title, description, visible = "正在扫描交付物", "正在读取当前工作区中的可预览文件。", True
-            controls_visible = False
         elif error:
             title, description, visible = "无法读取文件", str(error), True
-            controls_visible = False
+            action = "retry_scan"
         elif not workspace:
             title, description, visible = "还没有选择工作区", "从左侧选择项目后，可以在这里查找和预览文件。", True
-            controls_visible = False
         elif not os.path.isdir(workspace):
             title, description, visible = "当前工作区不可用", f"目录不存在或无法访问：{workspace}", True
-            controls_visible = False
-        elif section == self.FILE_SECTION_DELIVERABLES and not self._filtered_deliverable_items():
+        elif scope == self.FILE_SCOPE_DELIVERABLES and not self._filtered_deliverable_items():
             has_filters = bool(str(getattr(self, "file_browser_search_text", "") or "").strip()) or str(
                 getattr(self, "deliverable_type_filter", "all") or "all"
             ) != "all"
@@ -24168,14 +24748,12 @@ class MainWindow(QMainWindow):
                 else "生成 HTML、PDF、PPTX、DOCX 或图片后，它们会自动出现在这里。"
             )
             visible = True
-            controls_visible = has_filters
             action = "clear_filters" if has_filters else ""
-        elif section == self.FILE_SECTION_ALL:
+        elif scope == self.FILE_SCOPE_WORKSPACE:
             try:
                 visible = not bool(os.listdir(workspace))
             except OSError as exc:
                 title, description, visible = "无法读取工作区", str(exc), True
-                controls_visible = False
             else:
                 if visible:
                     source = self._session_workspace_source()
@@ -24185,7 +24763,6 @@ class MainWindow(QMainWindow):
                     else:
                         title = "还没有文件"
                         description = "在对话中让 Agent 创建文件后，它们会显示在这里。"
-                    controls_visible = False
                     action = "open_workspace"
                 else:
                     title, description = "", ""
@@ -24193,18 +24770,13 @@ class MainWindow(QMainWindow):
             title, description, visible = "", "", False
         if visible:
             empty.set_content(title, description)
-        toolbar = getattr(self, "file_product_toolbar", None)
-        if toolbar is not None:
-            toolbar.setVisible(controls_visible)
-        filter_container = getattr(self, "file_filter_sort_container", None)
-        if filter_container is not None:
-            filter_container.setVisible(controls_visible and section == self.FILE_SECTION_DELIVERABLES)
         self.file_browser_empty_action = action
         action_button = getattr(empty, "action_button", None)
         if action_button is not None:
             action_text = {
                 "open_workspace": "在资源管理器中打开",
                 "clear_filters": "清除筛选",
+                "retry_scan": "重试",
             }.get(action, "")
             empty.set_action(action_text, visible=visible and bool(action_text))
         empty.setVisible(visible)
@@ -24219,85 +24791,8 @@ class MainWindow(QMainWindow):
             workspace = getattr(self, "workspace_dir", "")
             if workspace and os.path.isdir(workspace):
                 self.reveal_in_explorer(workspace)
-
-    def _sync_file_workspace_detail_header(self):
-        back_btn = getattr(self, "file_detail_back_btn", None)
-        if not back_btn:
-            return
-        origin = getattr(self, "file_workspace_route_origin", "browse")
-        section = getattr(self, "file_workspace_return_section", getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"))
-        if origin == "chat":
-            label = "返回交付物列表"
-        elif section == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
-            label = "返回交付物"
-        else:
-            label = "返回文件"
-        back_btn.setText("")
-        back_btn.setToolTip(label)
-
-    def _set_file_workspace_view_mode(self, mode, origin="browse", persist=True):
-        mode = "detail" if mode == "detail" else "browse"
-        if mode == "detail" and getattr(self, "file_workspace_view_mode", "browse") == "browse":
-            self._snapshot_file_browser_state()
-        self.file_workspace_view_mode = mode
-        if origin:
-            self.file_workspace_route_origin = origin
-        stack = getattr(self, "file_workspace_stack", None)
-        if stack is not None:
-            stack.setCurrentWidget(self.file_detail_page if mode == "detail" else self.file_browse_page)
-        self.deliverable_layout_mode = "focus" if mode == "detail" else "list"
-        self._sync_file_workspace_detail_header()
-        self._sync_deliverable_action_visibility()
-        if mode == "browse":
-            QTimer.singleShot(0, self._restore_file_browser_state)
-        if persist and getattr(self, "config_manager", None):
-            self.config_manager.set("file_workspace_view_mode", mode)
-            self.config_manager.set("deliverable_layout_mode", self.deliverable_layout_mode)
-
-    def show_file_workspace_browse_view(self):
-        if not self.confirm_leave_deliverable_edit("返回文件列表"):
-            return False
-        self._set_file_workspace_view_mode("browse", origin="browse")
-        self.set_file_workspace_section(
-            getattr(self, "file_workspace_return_section", self.FILE_SECTION_DELIVERABLES),
-            refresh=False,
-        )
-        self._file_navigation_state()["origin"] = "browse"
-        return True
-
-    def show_file_workspace_detail_view(self, origin="browse"):
-        self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_DELIVERABLES)
-        self._set_file_workspace_view_mode("detail", origin=origin)
-        self._file_navigation_state()["origin"] = origin
-
-    def _apply_deliverable_layout_mode(self, mode, persist=True):
-        mode = "focus" if mode == "focus" else "list"
-        self.deliverable_layout_mode = mode
-        self._set_file_workspace_view_mode("detail" if mode == "focus" else "browse", origin=getattr(self, "file_workspace_route_origin", "browse"), persist=persist)
-        btn = getattr(self, "deliverable_layout_btn", None)
-        if btn is not None:
-            if mode == "focus":
-                btn.setIcon(qta.icon("fa5s.list", color=DesignTokens.text_secondary))
-                btn.setToolTip("显示交付物列表")
-            else:
-                btn.setIcon(qta.icon("fa5s.file-alt", color=DesignTokens.text_secondary))
-                btn.setToolTip("专注预览")
-        if persist:
-            self.config_manager.set("deliverable_layout_mode", mode)
-        meta = getattr(self, "preview_meta_label", None)
-        if meta is not None:
-            if mode == "focus" and getattr(self, "current_deliverable_path", ""):
-                try:
-                    meta.setText(os.path.relpath(self.current_deliverable_path, self.workspace_dir))
-                except ValueError:
-                    meta.setText(self.current_deliverable_path)
-            elif mode == "list":
-                meta.setText(f"最近 {len(getattr(self, 'deliverable_items', []) or [])} 个产物 · 选择文件预览")
-        self._sync_deliverable_action_visibility()
-
-    def toggle_deliverable_layout_mode(self):
-        target = "list" if getattr(self, "deliverable_layout_mode", "list") == "focus" else "focus"
-        self._apply_deliverable_layout_mode(target)
+        if action == "retry_scan":
+            self.refresh_deliverables(render_current=True)
 
     def _sync_deliverable_expand_button(self):
         btn = getattr(self, "deliverable_expand_btn", None)
@@ -24502,6 +24997,261 @@ class MainWindow(QMainWindow):
         for bubble in self._iter_session_chat_bubbles():
             bubble.apply_dynamic_widths(message_width, user_bubble_width)
         self._position_active_system_toast()
+        self._sync_question_navigator()
+
+    @staticmethod
+    def _question_navigator_plain_text(value, limit=180):
+        text = str(value or "").replace("\r", "\n")
+        text = re.sub(r"```[\s\S]*?```", " [代码] ", text)
+        text = re.sub(r"`([^`]*)`", r"\1", text)
+        text = re.sub(r"(?:^|\s)[#>*_~-]+\s*", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return ""
+        return text[:limit] + ("…" if len(text) > limit else "")
+
+    def _question_navigator_entries_for_state(self, state):
+        if state is None:
+            return []
+        messages = list(getattr(state, "messages", []) or [])
+        entries = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            if is_same_turn_guidance_message(message) or is_auto_query_skill_context_message(message):
+                continue
+            meta = message.get("meta") if isinstance(message.get("meta"), dict) else {}
+            hidden_kind = str(meta.get("kind") or "") in {
+                "runtime_context",
+                "runtime_context_update",
+                "runtime_instruction",
+                "skill_context",
+                "skill_context_update",
+                "skill_state_update",
+            }
+            if bool(
+                meta.get("ui_hidden")
+                or meta.get("hidden_run_context")
+                or meta.get("runtime_context")
+                or (meta.get("hidden") and hidden_kind)
+                or meta.get("embedded_agent_result")
+            ):
+                continue
+            message_id = str(message.get("id") or "").strip()
+            if not message_id:
+                continue
+            display = self._message_display_content(message)
+            first_line = next((line.strip() for line in str(display or "").splitlines() if line.strip()), "")
+            if not first_line:
+                attachments = self._message_user_attachments(message)
+                first_line = str((attachments[0] if attachments else {}).get("name") or "附件提问")
+            answer_candidates = []
+            for following in messages[index + 1:]:
+                if isinstance(following, dict) and following.get("role") == "user":
+                    if not is_same_turn_guidance_message(following) and not is_auto_query_skill_context_message(following):
+                        break
+                    continue
+                if not isinstance(following, dict) or following.get("role") != "assistant":
+                    continue
+                content = str(following.get("content") or "").strip()
+                if not content:
+                    continue
+                reply_meta = following.get("meta") if isinstance(following.get("meta"), dict) else {}
+                priority = 1 if str(reply_meta.get("ui_reply_kind") or "") == "final" else 0
+                answer_candidates.append((priority, content))
+            answer = ""
+            if answer_candidates:
+                final_candidates = [content for priority, content in answer_candidates if priority]
+                answer = final_candidates[-1] if final_candidates else answer_candidates[-1][1]
+            entries.append(
+                {
+                    "message_id": message_id,
+                    "message_index": index,
+                    "title": self._question_navigator_plain_text(first_line, limit=96) or "未命名提问",
+                    "answer": self._question_navigator_plain_text(answer, limit=220) or "尚无回复",
+                }
+            )
+        return entries
+
+    def _sync_question_navigator_geometry(self):
+        rail = getattr(self, "question_navigator_rail", None)
+        state = self.get_current_session() if hasattr(self, "get_current_session") else None
+        if rail is None or state is None or not getattr(state, "chat_scroll", None):
+            return
+        viewport = state.chat_scroll.viewport()
+        if not _qt_object_alive(viewport) or not viewport.isVisible():
+            rail.set_feature_visible(False)
+            self.question_navigator_theme_host.setGeometry(0, 0, 0, 0)
+            return
+        origin = viewport.mapTo(self.session_tabs, QPoint(0, 0))
+        height = max(54, viewport.height() - 24)
+        if len(rail.entries) < 2:
+            self.question_navigator_theme_host.setGeometry(0, 0, 0, 0)
+            return
+        self.question_navigator_theme_host.setGeometry(
+            max(0, origin.x() + 2), origin.y() + 12, 40, height
+        )
+        rail.setGeometry(0, 0, 40, height)
+        self.question_navigator_theme_host.raise_()
+        rail.raise_()
+        if self.question_navigator_preview.isVisible():
+            self.question_navigator_preview.raise_()
+
+    def _sync_question_navigator(self, session_id=None):
+        rail = getattr(self, "question_navigator_rail", None)
+        if rail is None:
+            return
+        state = self.get_session(session_id) if session_id else self.get_current_session()
+        if state is None or state.session_id != getattr(self, "current_session_id", None):
+            return
+        entries = self._question_navigator_entries_for_state(state)
+        rail.set_entries(entries)
+        active_id = ""
+        viewport = state.chat_scroll.viewport() if getattr(state, "chat_scroll", None) else None
+        if viewport is not None:
+            threshold = max(24, int(viewport.height() * 0.28))
+            below = None
+            for entry in entries:
+                node = (getattr(state, "render_node_by_message_id", {}) or {}).get(entry["message_id"])
+                widget = (node or {}).get("widget") if isinstance(node, dict) else None
+                if widget is None or not _qt_object_alive(widget):
+                    continue
+                top_widget = self._top_level_chat_widget(state, widget) or widget
+                try:
+                    y = top_widget.mapTo(viewport, QPoint(0, 0)).y()
+                except RuntimeError:
+                    continue
+                if y <= threshold:
+                    active_id = entry["message_id"]
+                elif below is None:
+                    below = entry["message_id"]
+            if not active_id:
+                active_id = below or str((entries[-1] if entries else {}).get("message_id") or "")
+        rail.set_active_message_id(active_id)
+        self._sync_question_navigator_geometry()
+
+    def _show_question_navigator_preview(self, entry, point):
+        rail = getattr(self, "question_navigator_rail", None)
+        card = getattr(self, "question_navigator_preview", None)
+        if rail is None or card is None:
+            return
+        anchor = rail.mapTo(self.session_tabs, QPoint(rail.width() + 6, int(point.y())))
+        card.show_entry(entry, anchor, self.session_tabs.rect())
+
+    def _question_jump_error(self, state, message_id, reason):
+        if state is not None:
+            state.history_page_jump_target_id = ""
+            state.history_page_jump_started_at = 0.0
+        reason = str(reason or "无法定位该提问")
+        log_ui_navigation(
+            "question_navigator_jump_error",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            message_id=str(message_id or ""),
+            error=reason,
+        )
+        self.add_system_toast(reason, "error", session_id=getattr(state, "session_id", None), auto_close_ms=6000)
+
+    def _finalize_question_navigator_jump(self, state, message_id):
+        node = (getattr(state, "render_node_by_message_id", {}) or {}).get(str(message_id or ""))
+        widget = (node or {}).get("widget") if isinstance(node, dict) else None
+        if widget is None or not _qt_object_alive(widget):
+            self._question_jump_error(state, message_id, "目标提问加载完成，但未能建立可见定位点。")
+            return False
+        top_widget = self._top_level_chat_widget(state, widget) or widget
+        viewport = state.chat_scroll.viewport()
+        try:
+            y = top_widget.mapTo(viewport, QPoint(0, 0)).y()
+        except RuntimeError as exc:
+            self._question_jump_error(state, message_id, f"定位提问失败：{exc}")
+            return False
+        bar = state.chat_scroll.verticalScrollBar()
+        state.auto_scroll_enabled = False
+        state.pending_scroll_force = False
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), bar.value() + int(y) - 20)))
+        started_at = float(getattr(state, "history_page_jump_started_at", 0.0) or 0.0)
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000) if started_at else 0
+        state.history_page_jump_target_id = ""
+        state.history_page_jump_started_at = 0.0
+        self.question_navigator_rail.set_active_message_id(message_id)
+        self.question_navigator_preview.hide()
+        log_ui_navigation(
+            "question_navigator_jump_finish",
+            session_id=state.session_id,
+            message_id=str(message_id or ""),
+            elapsed_ms=elapsed_ms,
+        )
+        QTimer.singleShot(0, lambda sid=state.session_id: self._sync_question_navigator(sid))
+        return True
+
+    def jump_to_question(self, message_id):
+        state = self.get_current_session()
+        message_id = str(message_id or "").strip()
+        if state is None or not message_id:
+            return
+        state.auto_scroll_enabled = False
+        state.pending_scroll_force = False
+        state.history_page_jump_target_id = message_id
+        state.history_page_jump_started_at = time.perf_counter()
+        log_ui_navigation(
+            "question_navigator_jump_start",
+            session_id=state.session_id,
+            message_id=message_id,
+        )
+        if message_id in (getattr(state, "render_node_by_message_id", {}) or {}):
+            self._finalize_question_navigator_jump(state, message_id)
+            return
+        if not getattr(state, "history_loaded", False) or getattr(state, "history_loading", False):
+            self._question_jump_error(state, message_id, "历史会话仍在加载，请稍后重试。")
+            return
+        if getattr(state, "auto_loading_history", False):
+            self._question_jump_error(state, message_id, "历史分页正在加载，请稍后重试。")
+            return
+        message_index = next(
+            (
+                index for index, message in enumerate(getattr(state, "messages", []) or [])
+                if isinstance(message, dict) and str(message.get("id") or "") == message_id
+            ),
+            -1,
+        )
+        if message_index < 0:
+            self._question_jump_error(state, message_id, "该提问已不存在，可能已被删除。")
+            return
+        spans = list(getattr(state, "render_items", []) or [])
+        target_span_index = next(
+            (
+                index for index, span in enumerate(spans)
+                if int(span.get("start") or 0) <= message_index < int(span.get("end") or 0)
+            ),
+            -1,
+        )
+        rendered_start = max(0, len(spans) - int(getattr(state, "displayed_render_count", 0) or 0))
+        if target_span_index < 0 or target_span_index >= rendered_start:
+            self._question_jump_error(state, message_id, "该提问缺少可加载的历史分页。")
+            return
+        viewport = state.chat_scroll.viewport()
+        anchor_widget = None
+        anchor_offset = 0
+        for index in range(state.chat_layout.count() - 1):
+            candidate = state.chat_layout.itemAt(index).widget()
+            if candidate is None or not _qt_object_alive(candidate) or not candidate.isVisible():
+                continue
+            try:
+                offset = candidate.mapTo(viewport, QPoint(0, 0)).y()
+            except RuntimeError:
+                continue
+            if offset + max(candidate.height(), candidate.sizeHint().height(), 1) > 0:
+                anchor_widget = candidate
+                anchor_offset = int(offset)
+                break
+        spans_to_load = spans[target_span_index:rendered_start]
+        state.auto_loading_history = True
+        state.history_page_loading = True
+        state.history_page_queue = list(spans_to_load)
+        state.history_page_insert_index = 0
+        state.history_page_anchor_widget = anchor_widget
+        state.history_page_anchor_offset = anchor_offset
+        state.displayed_render_count += len(spans_to_load)
+        QTimer.singleShot(0, lambda sid=state.session_id: self._render_next_history_page_span(sid))
 
     def sync_context_drawer_layout(self):
         geometry = self._compute_context_drawer_geometry()
@@ -24515,6 +25265,7 @@ class MainWindow(QMainWindow):
             geometry["width"],
             geometry["height"],
         )
+        self._sync_file_navigator_layout()
         if hasattr(self, "right_resize_handle"):
             self.right_resize_handle.setGeometry(0, 18, 8, max(40, geometry["height"] - 36))
             self.right_resize_handle.raise_()
@@ -24589,16 +25340,12 @@ class MainWindow(QMainWindow):
         return True
 
     def open_file_workspace_from_rail(self, entrypoint="files_rail"):
-        if not self.confirm_leave_deliverable_edit("切换文件视图"):
-            return
-        self._set_file_workspace_view_mode("browse", origin="browse")
         self._sync_file_workspace_for_current_session(entrypoint)
-        self.set_file_workspace_section(
-            self._file_navigation_state().get(
-                "section", getattr(self, "file_workspace_return_section", self.FILE_SECTION_ALL)
-            ),
+        self.set_file_navigator_scope(
+            self._file_navigator_state().get("scope", self.FILE_SCOPE_DELIVERABLES),
             refresh=False,
         )
+        self.set_file_navigator_visible(True, reason=str(entrypoint or "files_rail"))
         self.show_context_drawer(self.RIGHT_TAB_FILES)
 
     def show_context_drawer(self, tab_index=None):
@@ -24681,6 +25428,15 @@ class MainWindow(QMainWindow):
         title, description = page_titles.get(tab_index, ("任务上下文", "查看文件与执行步骤"))
         self.right_title_label.setText(title)
         self.right_desc_label.setText(description)
+        files_active = tab_index == self.RIGHT_TAB_FILES
+        title_block = getattr(self, "right_title_block", None)
+        if title_block is not None:
+            title_block.setVisible(not files_active)
+        file_controls = getattr(self, "file_header_controls", None)
+        if file_controls is not None:
+            file_controls.setVisible(files_active)
+        if files_active:
+            self._sync_file_header()
 
     def hide_context_drawer(self, reason="manual", source_obj=None, source_window=None, in_drawer=None, in_rail=None, is_popup=None):
         if not hasattr(self, "right_sidebar"):
@@ -27850,6 +28606,7 @@ class MainWindow(QMainWindow):
         self.chat_layout = state.chat_layout
         self.active_skills_label = state.active_skills_label
         self.current_deliverable_path = getattr(state, "selected_deliverable_path", "") or ""
+        self.current_preview_path = self.current_deliverable_path
         self.refresh_change_list(session_id)
         self.refresh_step_list(session_id)
         self.refresh_observability_view(session_id)
@@ -27878,6 +28635,8 @@ class MainWindow(QMainWindow):
             and getattr(self, "right_drawer_tab", None) == self.RIGHT_TAB_DELIVERABLES
         ):
             self.refresh_deliverables(render_current=True)
+        self._sync_file_header()
+        QTimer.singleShot(0, lambda sid=session_id: self._sync_question_navigator(sid))
 
     def normalize_session_ui(self, state):
         if not state: return
@@ -28122,7 +28881,7 @@ class MainWindow(QMainWindow):
         chat_container = QWidget()
         chat_container.setStyleSheet("background: transparent;")
         chat_layout = QVBoxLayout(chat_container)
-        chat_layout.setContentsMargins(22, 18, 26, 22)
+        chat_layout.setContentsMargins(52, 18, 26, 22)
         chat_layout.setSpacing(10)
         
         # Add Empty State
@@ -28295,6 +29054,8 @@ class MainWindow(QMainWindow):
             max(int(getattr(state, "displayed_render_count", 0) or 0), 0),
             len(state.render_items),
         )
+        if state.session_id == getattr(self, "current_session_id", None):
+            QTimer.singleShot(0, lambda sid=state.session_id: self._sync_question_navigator(sid))
 
     def _sync_displayed_render_count_after_live_append(self, state, previous_render_count, previous_render_total):
         if not state:
@@ -28810,6 +29571,7 @@ class MainWindow(QMainWindow):
             elapsed_ms=elapsed_ms,
         )
         self.queue_session_bubble_virtualization(session_id)
+        self._sync_question_navigator(session_id)
         completion = getattr(state, "history_initial_render_completion", None)
         state.history_initial_render_completion = None
         if callable(completion):
@@ -29549,7 +30311,7 @@ class MainWindow(QMainWindow):
             self.file_model.setRootPath(directory)
             source_root = self.file_model.index(directory)
             self.file_tree.setRootIndex(self.file_filter_model.mapFromSource(source_root))
-            self._file_navigation_state().update(
+            self._file_navigator_state().update(
                 selected_path="",
                 tree_scroll=0,
                 deliverables_scroll=0,
@@ -30895,6 +31657,8 @@ class MainWindow(QMainWindow):
         if not state:
             return
         self.queue_session_bubble_virtualization(session_id)
+        if session_id == getattr(self, "current_session_id", None):
+            self._sync_question_navigator(session_id)
         vbar = state.chat_scroll.verticalScrollBar() if getattr(state, "chat_scroll", None) else None
         if vbar is not None:
             distance_to_bottom = max(0, vbar.maximum() - value)
@@ -31127,12 +31891,20 @@ class MainWindow(QMainWindow):
                     auto_close_ms=6000,
                 )
                 log_ui_navigation("history_load_error", session_id=session_id, stage="page", error=str(exc))
+                jump_target = str(getattr(state, "history_page_jump_target_id", "") or "")
+                if jump_target:
+                    self._question_jump_error(state, jump_target, f"加载目标提问失败：{exc}")
                 return
             QTimer.singleShot(0, lambda sid=session_id: self._render_next_history_page_span(sid))
             return
         state.auto_loading_history = False
         state.history_page_loading = False
         self.queue_session_bubble_virtualization(session_id)
+        jump_target = str(getattr(state, "history_page_jump_target_id", "") or "")
+        if jump_target:
+            self._finalize_question_navigator_jump(state, jump_target)
+        else:
+            self._sync_question_navigator(session_id)
 
     def _render_persisted_timeline_items(self, render_items, state, insert_index=None, animate=True):
         """Project a guided turn back into natural conversational order."""
@@ -32592,34 +33364,32 @@ class MainWindow(QMainWindow):
             action = getattr(self, name, None)
             if action:
                 action.setEnabled(is_file)
-        edit_btn = getattr(self, "deliverable_edit_btn", None)
-        if edit_btn:
-            edit_state = getattr(self, "deliverable_edit_state", "idle")
-            edit_busy = edit_state in {"loading", "saving", "restoring"}
-            edit_session = getattr(self, "deliverable_edit_session", None)
-            editing_current = bool(
-                is_editable
-                and edit_state != "idle"
-                and (
-                    edit_session is None
-                    or os.path.normcase(edit_session.path)
-                    == os.path.normcase(os.path.abspath(path))
+        edit_state = getattr(self, "deliverable_edit_state", "idle")
+        edit_busy = edit_state in {"loading", "saving", "restoring"}
+        edit_session = getattr(self, "deliverable_edit_session", None)
+        editing_current = bool(
+            is_editable
+            and edit_state != "idle"
+            and (
+                edit_session is None
+                or os.path.normcase(edit_session.path)
+                == os.path.normcase(os.path.abspath(path))
+            )
+        )
+        mode_btn = getattr(self, "deliverable_mode_btn", None)
+        if mode_btn:
+            mode_btn.setVisible(is_editable)
+            mode_btn.setEnabled(is_editable and not edit_busy)
+            mode_btn.setIcon(
+                qta.icon(
+                    "fa5s.eye" if editing_current else "fa5s.pen",
+                    color=DesignTokens.text_secondary,
                 )
             )
-            edit_btn.setEnabled(is_editable and not edit_busy)
-            edit_btn.setChecked(
-                editing_current
-            )
-            preview_btn = getattr(self, "deliverable_preview_btn", None)
-            if preview_btn:
-                preview_btn.setChecked(not editing_current)
-                preview_btn.setEnabled(not edit_busy)
-            mode_bar = getattr(self, "deliverable_preview_mode_bar", None)
-            if mode_bar:
-                mode_bar.setVisible(
-                    is_editable
-                    and getattr(self, "file_workspace_view_mode", "browse") == "detail"
-                )
+            mode_btn.setToolTip("返回预览" if editing_current else "编辑文件")
+        read_only = getattr(self, "deliverable_read_only_label", None)
+        if read_only:
+            read_only.setVisible(is_file and not is_editable)
         save_copy_action = getattr(self, "deliverable_more_save_copy_action", None)
         if save_copy_action:
             save_copy_action.setEnabled(
@@ -32639,17 +33409,14 @@ class MainWindow(QMainWindow):
             btn.setEnabled(is_file and is_html)
         self._sync_deliverable_action_visibility()
 
-    def toggle_deliverable_source_view(self):
-        self.begin_deliverable_edit()
+    def toggle_deliverable_preview_mode(self):
+        if getattr(self, "deliverable_edit_state", "idle") == "idle":
+            self.set_deliverable_preview_mode("edit")
+        else:
+            self.set_deliverable_preview_mode("preview")
 
     def set_deliverable_preview_mode(self, mode):
         mode = "edit" if mode in {"edit", "source"} else "preview"
-        preview_btn = getattr(self, "deliverable_preview_btn", None)
-        edit_btn = getattr(self, "deliverable_edit_btn", None)
-        if preview_btn:
-            preview_btn.setChecked(mode == "preview")
-        if edit_btn:
-            edit_btn.setChecked(mode == "edit")
         log_sub_agent_runtime(
             "deliverable_preview_mode_changed",
             mode=mode,
@@ -32660,10 +33427,6 @@ class MainWindow(QMainWindow):
         else:
             if getattr(self, "deliverable_edit_state", "idle") != "idle":
                 if not self.cancel_deliverable_edit():
-                    if preview_btn:
-                        preview_btn.setChecked(False)
-                    if edit_btn:
-                        edit_btn.setChecked(True)
                     return
             self.render_selected_deliverable(force=False)
 
@@ -32721,25 +33484,22 @@ class MainWindow(QMainWindow):
         active = self.deliverable_edit_state != "idle"
         action_bar = getattr(self, "deliverable_edit_action_bar", None)
         if action_bar:
-            action_bar.setVisible(active)
+            action_bar.setVisible(self.deliverable_edit_state in {"conflict", "blocked", "failed"})
         save_btn = getattr(self, "deliverable_edit_save_btn", None)
         if save_btn:
+            save_btn.setVisible(active)
             save_btn.setEnabled(
                 active
                 and not busy
                 and bool(getattr(self, "deliverable_edit_dirty", False))
             )
             save_btn.setText("保存中…" if self.deliverable_edit_state == "saving" else "保存")
-        cancel_btn = getattr(self, "deliverable_edit_cancel_btn", None)
-        if cancel_btn:
-            cancel_btn.setEnabled(active and self.deliverable_edit_state != "saving")
-        edit_btn = getattr(self, "deliverable_edit_btn", None)
-        preview_btn = getattr(self, "deliverable_preview_btn", None)
-        if edit_btn:
-            edit_btn.setChecked(active)
-            edit_btn.setEnabled(not busy or active)
-        if preview_btn:
-            preview_btn.setChecked(not active)
+        mode_btn = getattr(self, "deliverable_mode_btn", None)
+        if mode_btn:
+            mode_btn.setIcon(
+                qta.icon("fa5s.eye" if active else "fa5s.pen", color=DesignTokens.text_secondary)
+            )
+            mode_btn.setToolTip("返回预览" if active else "编辑文件")
         if not message:
             labels = {
                 "loading": "正在预检并加载文件…",
@@ -33482,12 +34242,10 @@ class MainWindow(QMainWindow):
             self.render_selected_deliverable(force=False)
 
     def _reset_deliverable_mode_buttons(self):
-        preview_btn = getattr(self, "deliverable_preview_btn", None)
-        edit_btn = getattr(self, "deliverable_edit_btn", None)
-        if preview_btn:
-            preview_btn.setChecked(True)
-        if edit_btn:
-            edit_btn.setChecked(False)
+        mode_btn = getattr(self, "deliverable_mode_btn", None)
+        if mode_btn:
+            mode_btn.setIcon(qta.icon("fa5s.pen", color=DesignTokens.text_secondary))
+            mode_btn.setToolTip("编辑文件")
 
     def _ensure_deliverable_web_view(self):
         if getattr(self, "deliverable_web_view", None) is not None:
@@ -33641,73 +34399,49 @@ class MainWindow(QMainWindow):
         selected_key = os.path.normcase(os.path.normpath(getattr(self, "current_deliverable_path", "") or ""))
         self.deliverable_items = list(items or [])
         workspace_key = os.path.normcase(os.path.abspath(getattr(self, "workspace_dir", "") or ""))
-        if workspace_key != getattr(self, "file_section_workspace_key", ""):
-            self.file_section_workspace_key = workspace_key
-            self.file_section_user_selected = False
+        if workspace_key != getattr(self, "file_navigator_workspace_key", ""):
+            self.file_navigator_workspace_key = workspace_key
+            self.file_navigator_user_selected_scope = False
             search = getattr(self, "file_search_input", None)
-            type_combo = getattr(self, "deliverable_type_combo", None)
             if search is not None:
                 search.blockSignals(True)
                 search.clear()
                 search.blockSignals(False)
-            if type_combo is not None:
-                type_combo.blockSignals(True)
-                type_combo.setCurrentIndex(0)
-                type_combo.blockSignals(False)
             self.file_browser_search_text = ""
             self.deliverable_type_filter = "all"
         self._sync_deliverable_filter_options()
-        if (
-            getattr(self, "file_workspace_view_mode", "browse") == "browse"
-            and not getattr(self, "file_section_user_selected", False)
-        ):
-            self.set_file_workspace_section(
-                self.FILE_SECTION_DELIVERABLES if self.deliverable_items else self.FILE_SECTION_ALL,
+        if not getattr(self, "file_navigator_user_selected_scope", False):
+            self.set_file_navigator_scope(
+                self.FILE_SCOPE_DELIVERABLES if self.deliverable_items else self.FILE_SCOPE_WORKSPACE,
                 refresh=False,
             )
-        else:
-            toggle = getattr(self, "file_workspace_toggle_btn", None)
-            if toggle is not None:
-                toggle.setVisible(bool(self.deliverable_items))
-                toggle.setText(
-                    "浏览工作区"
-                    if getattr(self, "file_workspace_section", self.FILE_SECTION_ALL) == self.FILE_SECTION_DELIVERABLES
-                    else "返回交付物"
-                )
         self._render_deliverable_items(selected_key=selected_key)
         self._sync_file_browser_empty_state()
-        if hasattr(self, "preview_meta_label") and getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
+        if hasattr(self, "preview_meta_label"):
             count = len(self.deliverable_items)
-            if self.current_deliverable_path and getattr(self, "file_workspace_view_mode", "browse") == "detail":
-                try:
-                    relative = os.path.relpath(self.current_deliverable_path, self.workspace_dir)
-                except ValueError:
-                    relative = self.current_deliverable_path
-                self.preview_meta_label.setText(relative)
+            if self.current_deliverable_path:
+                self.preview_meta_label.setText(
+                    self.describe_path_for_preview(self.current_deliverable_path)
+                )
             else:
                 self.preview_meta_label.setText(f"{count} 个交付物 · 选择文件预览" if count else "生成的文件会自动出现在这里")
         self._watch_deliverable_paths()
         if not self.current_deliverable_path or not os.path.isfile(self.current_deliverable_path):
             self.current_deliverable_path = ""
             self.current_deliverable_stale = False
-            if getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
-                self._set_deliverable_controls_enabled("")
-                if hasattr(self, "deliverable_status_label"):
-                    self.deliverable_status_label.setText("选择交付物后会在这里预览")
-                if hasattr(self, "deliverable_preview_stack"):
-                    self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            else:
-                if hasattr(self, "deliverable_render_btn"):
-                    self.deliverable_render_btn.setEnabled(False)
-                for btn in getattr(self, "deliverable_convert_buttons", []) or []:
-                    btn.setEnabled(False)
-                self._sync_deliverable_action_visibility()
+            self._set_deliverable_controls_enabled("")
+            if hasattr(self, "deliverable_status_label") and not getattr(self, "current_preview_path", ""):
+                self.deliverable_status_label.setText("选择文件后会在这里预览")
+            if hasattr(self, "deliverable_preview_stack") and not getattr(self, "current_preview_path", ""):
+                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             state = self.get_current_session() if hasattr(self, "get_current_session") else None
             if state:
                 state.selected_deliverable_path = ""
                 state.deliverable_preview_rendered = False
-        elif render_current and getattr(self, "file_workspace_section", "") == getattr(self, "FILE_SECTION_DELIVERABLES", "deliverables"):
+        elif render_current:
             self.select_deliverable(self.current_deliverable_path, render_html=True)
+        self.apply_file_workspace_filters()
+        self._sync_file_header()
 
     def _render_deliverable_items(self, selected_key=""):
         deliverables = getattr(self, "deliverables_list", None)
@@ -33727,7 +34461,7 @@ class MainWindow(QMainWindow):
             text = f"{name}\n{'  ·  '.join([part for part in meta_parts if part])}"
             list_item = QListWidgetItem(qta.icon(item.get("icon") or "fa5s.file", color=DesignTokens.text_secondary), text)
             list_item.setData(Qt.UserRole, item.get("path") or "")
-            list_item.setToolTip(item.get("relative_path") or item.get("path") or "")
+            list_item.setToolTip(item.get("path") or item.get("relative_path") or "")
             list_item.setSizeHint(QSize(0, 48))
             deliverables.addItem(list_item)
             if selected_key and os.path.normcase(os.path.normpath(item.get("path") or "")) == selected_key:
@@ -33821,9 +34555,9 @@ class MainWindow(QMainWindow):
         if not path or not os.path.isfile(path):
             return
         log_sub_agent_runtime("deliverable_list_item_selected", path=path)
-        self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
-        self.show_file_workspace_detail_view(origin="browse")
-        self.select_deliverable(path)
+        self.set_file_navigator_scope(self.FILE_SCOPE_DELIVERABLES, refresh=False)
+        if self.select_deliverable(path) and not self.file_workbench.is_effectively_pinned():
+            self.set_file_navigator_visible(False, reason="deliverable_selected")
 
     def open_deliverable_from_chat(self, path, session_id=None):
         state = self.get_session(session_id) if session_id else self.get_current_session()
@@ -33843,8 +34577,8 @@ class MainWindow(QMainWindow):
             [normalized], session_id=session_id, source="history", workspace_dir=workspace_dir
         )
         self.current_deliverable_path = normalized
-        self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
-        self.show_file_workspace_detail_view(origin="chat")
+        self.set_file_navigator_scope(self.FILE_SCOPE_DELIVERABLES, refresh=False)
+        self.set_file_navigator_visible(False, reason="chat_file_open")
         self.show_context_drawer(self.RIGHT_TAB_FILES)
         self.select_deliverable(normalized, render_html=True)
 
@@ -33897,13 +34631,11 @@ class MainWindow(QMainWindow):
             state.selected_deliverable_path = latest
         self.current_deliverable_path = latest
         if office_enabled:
-            self.set_file_workspace_section(self.FILE_SECTION_DELIVERABLES, refresh=False)
-            self.show_file_workspace_detail_view(origin="chat")
+            self.set_file_navigator_scope(self.FILE_SCOPE_DELIVERABLES, refresh=False)
+            self.set_file_navigator_visible(False, reason="generated_file_open")
             self.show_context_drawer(self.RIGHT_TAB_FILES)
             if state:
                 state.office_draft_preview_pending = False
-        else:
-            self.show_file_workspace_detail_view(origin="chat")
         self.select_deliverable(latest, render_html=True)
 
     def register_deliverable_paths(self, paths, session_id=None, source="generated", workspace_dir=None):
@@ -33971,12 +34703,17 @@ class MainWindow(QMainWindow):
             == os.path.normcase(os.path.abspath(path))
         ):
             self.current_deliverable_path = path
+            self.current_preview_path = path
+            self._file_navigator_state()["selected_path"] = path
             self._set_deliverable_controls_enabled(path)
+            self._sync_file_header()
             self._watch_deliverable_paths()
             return True
         previous_path = getattr(self, "current_deliverable_path", "") or ""
         can_reuse_render = bool(path and self._can_reuse_deliverable_render(path))
         self.current_deliverable_path = path if os.path.isfile(path) else ""
+        self.current_preview_path = self.current_deliverable_path
+        self._file_navigator_state()["selected_path"] = self.current_deliverable_path
         if previous_path and os.path.normcase(os.path.abspath(previous_path)) != os.path.normcase(os.path.abspath(path)):
             self.current_deliverable_stale = False
         state = self.get_current_session() if hasattr(self, "get_current_session") else None
@@ -33984,12 +34721,8 @@ class MainWindow(QMainWindow):
             state.selected_deliverable_path = self.current_deliverable_path
             state.deliverable_preview_rendered = False
         self._set_deliverable_controls_enabled(self.current_deliverable_path)
-        if self.current_deliverable_path and hasattr(self, "preview_meta_label"):
-            try:
-                relative = os.path.relpath(self.current_deliverable_path, self.workspace_dir)
-            except ValueError:
-                relative = self.current_deliverable_path
-            self.preview_meta_label.setText(relative)
+        self._sync_file_header()
+        self._sync_current_file_filter_notice()
         self._watch_deliverable_paths()
         if not self.current_deliverable_path:
             return False
@@ -34034,6 +34767,9 @@ class MainWindow(QMainWindow):
             return
         ext = os.path.splitext(path)[1].lower()
         kind = (DELIVERABLE_EXTENSIONS.get(ext) or ("", "", ""))[0]
+        if kind in {"text", "table"}:
+            self._show_text_deliverable(path)
+            return
         if kind == "markdown":
             self._render_markdown_deliverable(path, force=force)
             return
@@ -34116,6 +34852,43 @@ class MainWindow(QMainWindow):
         self.current_deliverable_stale = False
         self.deliverable_status_label.setText(
             f"正在预览 {os.path.basename(path)} · 图片 · {pixmap.width()}×{pixmap.height()}"
+        )
+
+    def _show_text_deliverable(self, path):
+        max_preview_bytes = 2 * 1024 * 1024
+        try:
+            size = os.path.getsize(path)
+            if size > max_preview_bytes:
+                self.deliverable_text_preview.setPlainText(
+                    f"文本文件过大，暂不在应用内预览。\n\n文件大小：{format_file_size(size)}"
+                )
+                self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+                self.deliverable_status_label.setText("文本过大，可使用系统应用打开。")
+                return
+            with open(path, "r", encoding="utf-8", errors="strict") as handle:
+                content = handle.read()
+        except UnicodeDecodeError as exc:
+            message = f"无法按 UTF-8 预览文本：{exc}。可进入编辑并明确选择编码。"
+            self.deliverable_text_preview.setPlainText(message)
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText(message)
+            log_ui_navigation("deliverable_text_preview_error", path=path, error=str(exc))
+            return
+        except OSError as exc:
+            message = f"无法读取文本文件：{exc}"
+            self.deliverable_text_preview.setPlainText(message)
+            self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+            self.deliverable_status_label.setText(message)
+            log_ui_navigation("deliverable_text_preview_error", path=path, error=str(exc))
+            return
+        self.deliverable_text_preview.setPlainText(content)
+        self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
+        self.deliverable_render_fingerprint = self._deliverable_fingerprint(path)
+        self.deliverable_render_path = path
+        self.deliverable_render_loading = False
+        self.current_deliverable_stale = False
+        self.deliverable_status_label.setText(
+            f"正在预览 {os.path.basename(path)} · {format_file_size(size)}"
         )
 
     def _render_markdown_deliverable(self, path, force=False):
@@ -34449,6 +35222,8 @@ class MainWindow(QMainWindow):
 
     def set_preview_header(self, path="", title=None, meta=None, enabled=False):
         self.current_preview_path = path or ""
+        if hasattr(self, "file_navigator_navigation_state"):
+            self._file_navigator_state()["selected_path"] = self.current_preview_path
         if hasattr(self, "preview_title_label"):
             self.preview_title_label.setText(title or "内容预览")
             self.preview_title_label.setToolTip(title or "内容预览")
@@ -34459,6 +35234,7 @@ class MainWindow(QMainWindow):
             btn = getattr(self, name, None)
             if btn:
                 btn.setEnabled(bool(enabled and path))
+        self._sync_file_header()
 
     def describe_path_for_preview(self, path):
         if not path:
@@ -34615,21 +35391,22 @@ class MainWindow(QMainWindow):
             return
         if os.path.isdir(path):
             self.file_tree.setExpanded(index, not self.file_tree.isExpanded(index))
-            self._file_navigation_state()["selected_path"] = path
+            self._file_navigator_state()["selected_path"] = path
             return
         log_sub_agent_runtime(
             "file_workspace_item_selected",
             path=path,
-            section=getattr(self, "file_workspace_section", self.FILE_SECTION_ALL),
+            scope=getattr(self, "file_navigator_scope", self.FILE_SCOPE_WORKSPACE),
         )
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in DELIVERABLE_EXTENSIONS:
-            self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
-            self.show_file_workspace_detail_view(origin="browse")
-            self.select_deliverable(path, render_html=True)
+            if self.select_deliverable(path, render_html=True) and not self.file_workbench.is_effectively_pinned():
+                self.set_file_navigator_visible(False, reason="workspace_file_selected")
             return
-        self.file_workspace_return_section = getattr(self, "file_workspace_section", self.FILE_SECTION_ALL)
-        self.show_file_workspace_detail_view(origin="browse")
+        if not self.confirm_leave_deliverable_edit("切换文件"):
+            return
+        self.current_preview_path = path
         self.current_deliverable_path = ""
+        self._file_navigator_state()["selected_path"] = path
         if hasattr(self, "deliverable_render_btn"):
             self.deliverable_render_btn.setEnabled(False)
         for btn in getattr(self, "deliverable_convert_buttons", []) or []:
@@ -34637,8 +35414,12 @@ class MainWindow(QMainWindow):
         self._sync_deliverable_action_visibility()
         title = os.path.basename(path) or path
         self.set_preview_header(path, title=title, meta=self.describe_path_for_preview(path), enabled=True)
+        self._sync_file_header()
+        self._sync_current_file_filter_notice()
         if hasattr(self, "deliverable_status_label"):
             self.deliverable_status_label.setText(self.describe_path_for_preview(path))
+        if not self.file_workbench.is_effectively_pinned():
+            self.set_file_navigator_visible(False, reason="workspace_file_selected")
         if not os.path.isfile(path): return
         ext = os.path.splitext(path)[1].lower()
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
@@ -34666,7 +35447,14 @@ class MainWindow(QMainWindow):
             except UnicodeDecodeError:
                 self.preview_text.setPlainText("二进制文件")
                 self.preview_stack.setCurrentWidget(self.preview_text)
-        except Exception: pass
+        except Exception as exc:
+            message = f"无法预览文件：{exc}"
+            self.preview_text.setPlainText(message)
+            self.preview_stack.setCurrentWidget(self.preview_text)
+            self.deliverable_status_label.setText(message)
+            log_ui_navigation("file_preview_error", path=path, error=str(exc))
+            self.add_system_toast(message, "error", auto_close_ms=6000)
+            return
 
     def _prepare_embedded_product_page(self, page, route):
         page.setParent(self.main_page_stack)

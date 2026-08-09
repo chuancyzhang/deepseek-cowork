@@ -165,6 +165,9 @@ class DesignTokens:
     drawer_max_width = 500
     drawer_width_ratio = 0.28
 
+    file_navigator_width = 320
+    file_workbench_pin_min_width = 680
+
     conversation_min_width = 840
     conversation_compact_min_width = 560
     conversation_preferred_width = 1040

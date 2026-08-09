@@ -1,16 +1,18 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from core.conversation_render import build_conversation_render_spans
+from core.theme import DesignTokens
 from core.theme_package import COMPONENT_CATALOG
-from main import FileWorkbench, MainWindow, QuestionNavigatorRail
+from main import FileTabStrip, FileWorkbench, MainWindow, QuestionNavigatorRail
 
 
 class FileWorkbenchTest(unittest.TestCase):
@@ -31,11 +33,13 @@ class FileWorkbenchTest(unittest.TestCase):
         self.assertTrue(workbench.is_effectively_pinned())
         self.assertEqual(content.geometry().left(), 301)
 
-        workbench.resize(560, 520)
+        workbench.resize(500, 520)
         self.app.processEvents()
         self.assertFalse(workbench.is_effectively_pinned())
         self.assertTrue(workbench.navigator_pinned)
         self.assertEqual(content.geometry().left(), 0)
+        self.assertEqual(navigator.geometry().topLeft(), QPoint(0, 0))
+        self.assertEqual(navigator.height(), workbench.height())
 
         workbench.set_navigator_state(visible=False)
         self.app.processEvents()
@@ -43,7 +47,7 @@ class FileWorkbenchTest(unittest.TestCase):
         self.assertTrue(workbench.navigator_pinned)
         workbench.close()
 
-    def test_editor_focus_hides_navigator_without_changing_preferences(self):
+    def test_editor_focus_keeps_pinned_navigator_on_the_left(self):
         navigator = QFrame()
         navigator.setObjectName("FileNavigatorPanel")
         content = QWidget()
@@ -55,8 +59,8 @@ class FileWorkbenchTest(unittest.TestCase):
 
         workbench.set_editor_focus(True)
         self.app.processEvents()
-        self.assertTrue(navigator.isHidden())
-        self.assertEqual(content.geometry().left(), 0)
+        self.assertFalse(navigator.isHidden())
+        self.assertEqual(content.geometry().left(), 301)
         self.assertTrue(workbench.navigator_visible)
         self.assertTrue(workbench.navigator_pinned)
 
@@ -66,6 +70,122 @@ class FileWorkbenchTest(unittest.TestCase):
         self.assertEqual(content.geometry().left(), 301)
         self.assertTrue(workbench.navigator_pinned)
         workbench.close()
+
+
+class FileTabStripTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_tabs_deduplicate_emit_paths_and_mark_missing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = os.path.join(directory, "first.txt")
+            second = os.path.join(directory, "second.py")
+            missing = os.path.join(directory, "missing.md")
+            for path in (first, second):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(os.path.basename(path))
+            strip = FileTabStrip()
+            strip.resize(320, 36)
+            activated = []
+            closed = []
+            strip.activateRequested.connect(activated.append)
+            strip.closeRequested.connect(closed.append)
+            strip.set_paths([first, second, first, missing], second)
+            strip.show()
+            self.app.processEvents()
+
+            self.assertEqual(strip.paths, [first, second, missing])
+            self.assertEqual(strip.active_path, second)
+            missing_frame = strip._tab_frames[strip._path_key(missing)]
+            self.assertTrue(missing_frame.property("missing"))
+            second_frame = strip._tab_frames[strip._path_key(second)]
+            second_frame.findChild(QWidget, "FileTabBody").click()
+            second_frame.findChild(QWidget, "FileTabClose").click()
+
+            self.assertEqual(activated, [second])
+            self.assertEqual(closed, [second])
+            strip.resize(180, 36)
+            self.app.processEvents()
+            strip._sync_overflow()
+            self.assertFalse(strip.overflow_btn.isHidden())
+            strip.close()
+
+    def test_main_window_keeps_ordered_tabs_per_runtime_session(self):
+        window = MainWindow()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                paths = []
+                for name in ("one.txt", "two.py", "three.json"):
+                    path = os.path.join(directory, name)
+                    with open(path, "w", encoding="utf-8") as handle:
+                        handle.write(name)
+                    paths.append(path)
+                window._apply_workspace_to_ui(directory, refresh_sidebar=False)
+                for path in paths:
+                    self.assertTrue(window.select_deliverable(path, render_html=False))
+                state = window.get_current_session()
+
+                self.assertEqual(state.open_file_paths, paths)
+                self.assertEqual(state.selected_deliverable_path, paths[-1])
+                self.assertNotIn(os.path.basename(paths[-1]), window.preview_meta_label.text())
+                self.assertTrue(window.deliverable_status_label.isHidden())
+                self.assertTrue(window.select_deliverable(paths[0], render_html=False))
+                self.assertEqual(state.open_file_paths, paths)
+                self.assertEqual(state.selected_deliverable_path, paths[0])
+
+                with patch.object(window, "confirm_leave_deliverable_edit", return_value=False):
+                    self.assertFalse(window.close_file_tab(paths[0]))
+                self.assertEqual(state.open_file_paths, paths)
+                self.assertEqual(state.selected_deliverable_path, paths[0])
+
+                self.assertTrue(window.close_file_tab(paths[0]))
+                self.assertEqual(state.open_file_paths, paths[1:])
+                self.assertEqual(state.selected_deliverable_path, paths[1])
+
+                second_session_id = window.create_new_session(
+                    make_current=False,
+                    workspace_dir=directory,
+                )
+                second_state = window.get_session(second_session_id)
+                second_state.open_file_paths = [paths[2]]
+                second_state.selected_deliverable_path = paths[2]
+                window.set_current_session(second_session_id)
+                self.assertEqual(window.file_tab_strip.paths, [paths[2]])
+                self.assertEqual(window.file_tab_strip.active_path, paths[2])
+                window.set_current_session(state.session_id)
+                self.assertEqual(window.file_tab_strip.paths, paths[1:])
+                self.assertEqual(window.file_tab_strip.active_path, paths[1])
+
+                window.resize(1280, 760)
+                window.show()
+                window.show_context_drawer(window.RIGHT_TAB_FILES)
+                window.file_navigator_pinned = False
+                window.file_navigator_pin_btn.setChecked(False)
+                window._sync_file_navigator_layout()
+                window.file_navigator_pin_btn.click()
+                self.app.processEvents()
+                QTest.qWait(20)
+                self.app.processEvents()
+                self.assertTrue(window.context_drawer_expanded)
+                self.assertTrue(window.file_navigator_pinned)
+                self.assertTrue(window.file_workbench.is_effectively_pinned())
+                self.assertGreater(window.file_workbench.content.geometry().left(), 0)
+
+                window.file_workbench.resize(500, window.file_workbench.height())
+                window._sync_file_navigator_layout()
+                self.assertFalse(window.file_workbench.is_effectively_pinned())
+                self.assertTrue(window.file_navigator_pin_btn.isChecked())
+                self.assertFalse(window.file_navigator_pin_notice.isHidden())
+
+                window.file_workbench.resize(860, window.file_workbench.height())
+                window._sync_file_navigator_layout()
+                self.assertTrue(window.file_workbench.is_effectively_pinned())
+                self.assertTrue(window.file_navigator_pin_notice.isHidden())
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
 
 
 class QuestionNavigatorTest(unittest.TestCase):
@@ -131,6 +251,31 @@ class QuestionNavigatorTest(unittest.TestCase):
 
     def test_question_navigator_is_theme_configurable(self):
         self.assertIn("conversation.question_navigator", COMPONENT_CATALOG)
+
+    def test_question_navigator_is_anchored_near_sidebar_edge(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            state.messages = [
+                {"id": "u1", "role": "user", "content": "第一问"},
+                {"id": "a1", "role": "assistant", "content": "答复一"},
+                {"id": "u2", "role": "user", "content": "第二问"},
+            ]
+            window.resize(1280, 760)
+            window.show()
+            self.app.processEvents()
+            window._sync_question_navigator(state.session_id)
+            self.app.processEvents()
+
+            self.assertIs(window.question_navigator_theme_host.parentWidget(), window.main_container)
+            self.assertEqual(
+                window.question_navigator_theme_host.x(),
+                DesignTokens.question_navigator_sidebar_gap,
+            )
+        finally:
+            window.close()
+            window.deleteLater()
+            self.app.processEvents()
 
     def test_unmaterialized_question_loads_every_span_through_current_history_page(self):
         window = MainWindow.__new__(MainWindow)

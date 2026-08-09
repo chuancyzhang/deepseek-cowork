@@ -20346,6 +20346,7 @@ class SessionState:
         self.automation_run_id = ""
         self.automation_trigger_source = ""
         self.selected_deliverable_path = ""
+        self.open_file_paths = []
         self.deliverable_preview_rendered = False
         self.token_usage_summary = normalize_token_usage_summary({})
         self.token_usage_buckets = {}
@@ -20976,6 +20977,237 @@ class FileNavigatorProxyModel(QSortFilterProxyModel):
         return super().data(index, role)
 
 
+class FileTabScrollArea(QScrollArea):
+    """Horizontal-only scroll surface for the file tab strip."""
+
+    def wheelEvent(self, event):
+        bar = self.horizontalScrollBar()
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        if delta:
+            step = max(72, int(bar.pageStep() * 0.45))
+            bar.setValue(bar.value() - step if delta > 0 else bar.value() + step)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+
+class FileTabStrip(QWidget):
+    """Ordered runtime file tabs with activation, close, scroll, and overflow."""
+
+    activateRequested = Signal(str)
+    closeRequested = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.paths = []
+        self.active_path = ""
+        self._tab_frames = {}
+        self.setObjectName("FileTabStrip")
+        self.setMinimumWidth(0)
+        self.setFixedHeight(36)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.scroll = FileTabScrollArea(self)
+        self.scroll.setObjectName("FileTabScrollArea")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.scroll.setFixedHeight(36)
+        self.tabs_host = QWidget()
+        self.tabs_host.setObjectName("FileTabsHost")
+        self.tabs_layout = QHBoxLayout(self.tabs_host)
+        self.tabs_layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs_layout.setSpacing(4)
+        self.tabs_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.scroll.setWidget(self.tabs_host)
+        layout.addWidget(self.scroll, 1)
+
+        self.overflow_btn = QToolButton(self)
+        self.overflow_btn.setObjectName("FileTabOverflowButton")
+        self.overflow_btn.setIcon(qta.icon("fa5s.chevron-down", color=DesignTokens.text_secondary))
+        self.overflow_btn.setToolTip("全部已打开文件")
+        self.overflow_btn.setPopupMode(QToolButton.InstantPopup)
+        self.overflow_btn.setFixedSize(30, 30)
+        self.overflow_btn.setCursor(Qt.PointingHandCursor)
+        self.overflow_btn.setStyleSheet(apple_tool_button_style(False))
+        self.overflow_menu = create_styled_menu(self.overflow_btn)
+        self.overflow_btn.setMenu(self.overflow_menu)
+        self.overflow_btn.hide()
+        layout.addWidget(self.overflow_btn)
+
+        self.refresh_theme()
+        bind_theme(self, self.refresh_theme, surface="preview_shell")
+
+    @staticmethod
+    def _path_key(path):
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(path or ""))))
+
+    def refresh_theme(self, _resolved=None):
+        self.setStyleSheet(
+            f"""
+            QWidget#FileTabStrip, QWidget#FileTabsHost {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#FileTabScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#FileTab {{
+                background: transparent;
+                border: 1px solid transparent;
+                border-radius: 7px;
+            }}
+            QFrame#FileTab[active="true"] {{
+                background: {DesignTokens.bg_secondary};
+                border-color: {DesignTokens.border_subtle};
+            }}
+            QFrame#FileTab[missing="true"] {{
+                border-color: {DesignTokens.warning_border};
+            }}
+            QToolButton#FileTabBody {{
+                background: transparent;
+                color: {DesignTokens.text_primary};
+                border: none;
+                padding: 0px 3px;
+                text-align: left;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QToolButton#FileTabBody:hover {{ color: {DesignTokens.primary}; }}
+            QToolButton#FileTabClose {{
+                background: transparent;
+                border: none;
+                border-radius: 5px;
+                padding: 0px;
+            }}
+            QToolButton#FileTabClose:hover {{ background: {DesignTokens.bg_hover}; }}
+            """
+        )
+        self.overflow_btn.setIcon(
+            qta.icon("fa5s.chevron-down", color=DesignTokens.text_secondary)
+        )
+        self.overflow_btn.setStyleSheet(apple_tool_button_style(False))
+
+    def _clear_tabs(self):
+        while self.tabs_layout.count():
+            item = self.tabs_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._tab_frames = {}
+
+    def _file_icon(self, path):
+        if not os.path.isfile(path):
+            return qta.icon("fa5s.exclamation-triangle", color=DesignTokens.warning_text)
+        ext = os.path.splitext(path)[1].lower()
+        if ext in {".py", ".js", ".ts", ".json", ".html", ".htm", ".css"}:
+            name = "fa5s.file-code"
+        elif ext in OFFICE_EXTENSIONS:
+            name = "fa5s.file-powerpoint" if ext == ".pptx" else "fa5s.file-alt"
+        elif ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
+            name = "fa5s.file-image"
+        elif ext == ".pdf":
+            name = "fa5s.file-pdf"
+        else:
+            name = "fa5s.file-alt"
+        return qta.icon(name, color=DesignTokens.text_secondary)
+
+    def set_paths(self, paths, active_path=""):
+        normalized = []
+        seen = set()
+        for path in paths or []:
+            raw_value = str(path or "").strip()
+            if not raw_value:
+                continue
+            value = os.path.normpath(raw_value)
+            key = self._path_key(value)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        active_key = self._path_key(active_path) if active_path else ""
+        self.paths = normalized
+        self.active_path = next(
+            (path for path in normalized if self._path_key(path) == active_key),
+            "",
+        )
+        self._clear_tabs()
+        for path in normalized:
+            active = self._path_key(path) == self._path_key(self.active_path)
+            missing = not os.path.isfile(path)
+            frame = QFrame(self.tabs_host)
+            frame.setObjectName("FileTab")
+            frame.setProperty("active", active)
+            frame.setProperty("missing", missing)
+            frame.setFixedHeight(32)
+            frame_layout = QHBoxLayout(frame)
+            frame_layout.setContentsMargins(6, 2, 3, 2)
+            frame_layout.setSpacing(3)
+            body = QToolButton(frame)
+            body.setObjectName("FileTabBody")
+            body.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            body.setIcon(self._file_icon(path))
+            name = os.path.basename(path) or path
+            body.setText(QFontMetrics(body.font()).elidedText(name, Qt.ElideMiddle, 150))
+            body.setToolTip(path if not missing else f"文件已不存在\n{path}")
+            body.setCursor(Qt.PointingHandCursor)
+            body.setMinimumWidth(76)
+            body.setMaximumWidth(190)
+            body.clicked.connect(lambda checked=False, value=path: self.activateRequested.emit(value))
+            frame_layout.addWidget(body, 1)
+            close_btn = QToolButton(frame)
+            close_btn.setObjectName("FileTabClose")
+            close_btn.setIcon(qta.icon("fa5s.times", color=DesignTokens.text_secondary))
+            close_btn.setToolTip(f"关闭 {name}")
+            close_btn.setCursor(Qt.PointingHandCursor)
+            close_btn.setFixedSize(22, 22)
+            close_btn.clicked.connect(lambda checked=False, value=path: self.closeRequested.emit(value))
+            frame_layout.addWidget(close_btn)
+            self.tabs_layout.addWidget(frame)
+            self._tab_frames[self._path_key(path)] = frame
+        self.tabs_host.adjustSize()
+        self._rebuild_overflow_menu()
+        QTimer.singleShot(0, self._sync_overflow)
+        QTimer.singleShot(0, self.ensure_active_visible)
+
+    def _rebuild_overflow_menu(self):
+        self.overflow_menu.clear()
+        active_key = self._path_key(self.active_path) if self.active_path else ""
+        for path in self.paths:
+            name = os.path.basename(path) or path
+            if not os.path.isfile(path):
+                name = f"{name}（已不存在）"
+            action = QAction(self._file_icon(path), name, self.overflow_menu)
+            action.setCheckable(True)
+            action.setChecked(self._path_key(path) == active_key)
+            action.setToolTip(path)
+            action.triggered.connect(
+                lambda checked=False, value=path: self.activateRequested.emit(value)
+            )
+            self.overflow_menu.addAction(action)
+
+    def _sync_overflow(self):
+        if not self.paths:
+            self.overflow_btn.hide()
+            return
+        overflow = self.tabs_host.sizeHint().width() > self.scroll.viewport().width()
+        self.overflow_btn.setVisible(overflow)
+
+    def ensure_active_visible(self):
+        frame = self._tab_frames.get(self._path_key(self.active_path)) if self.active_path else None
+        if frame is not None and _qt_object_alive(frame):
+            self.scroll.ensureWidgetVisible(frame, 8, 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_overflow)
+
+
 class FileWorkbench(QWidget):
     """Single-surface file workspace with one movable navigator panel."""
 
@@ -20991,7 +21223,8 @@ class FileWorkbench(QWidget):
         self.navigator_pinned = False
         self.editor_focus = False
         self.navigator_width = int(getattr(DesignTokens, "file_navigator_width", 320))
-        self.pin_min_width = int(getattr(DesignTokens, "file_workbench_pin_min_width", 720))
+        self.navigator_min_width = int(getattr(DesignTokens, "file_navigator_min_width", 240))
+        self.content_min_width = int(getattr(DesignTokens, "file_workbench_content_min_width", 280))
         self._effective_mode = "overlay"
         self.setMinimumSize(0, 0)
         self.content.show()
@@ -21002,7 +21235,7 @@ class FileWorkbench(QWidget):
     def refresh_theme(self, _resolved=None):
         self.navigator.setStyleSheet(
             f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
-            f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 10px; }}"
+            f"border: none; border-right: 1px solid {DesignTokens.separator}; border-radius: 0px; }}"
         )
         self.update_layout()
 
@@ -21012,7 +21245,7 @@ class FileWorkbench(QWidget):
         if pinned is not None:
             self.navigator_pinned = bool(pinned)
         if width is not None:
-            self.navigator_width = max(260, min(420, int(width)))
+            self.navigator_width = max(self.navigator_min_width, min(420, int(width)))
         self.update_layout()
 
     def set_editor_focus(self, enabled):
@@ -21023,40 +21256,41 @@ class FileWorkbench(QWidget):
         self.editor_focus = enabled
         self.update_layout()
 
+    def pinned_layout_metrics(self):
+        width = max(0, self.width())
+        preferred = min(self.navigator_width, max(self.navigator_min_width, width - self.content_min_width - 1))
+        available = width >= self.navigator_min_width + self.content_min_width + 1
+        return available, max(self.navigator_min_width, preferred)
+
     def is_effectively_pinned(self):
-        return bool(
-            not self.editor_focus
-            and self.navigator_pinned
-            and self.width() >= self.pin_min_width
-        )
+        available, _nav_width = self.pinned_layout_metrics()
+        return bool(self.navigator_pinned and available)
 
     def update_layout(self):
         width = max(0, self.width())
         height = max(0, self.height())
         if not width or not height:
             return
-        nav_width = min(self.navigator_width, max(260, width - 24))
+        available, pinned_nav_width = self.pinned_layout_metrics()
+        nav_width = min(self.navigator_width, max(self.navigator_min_width, width - 1))
         pinned = self.is_effectively_pinned()
         mode = "pinned" if pinned else "overlay"
         if mode != self._effective_mode:
             self._effective_mode = mode
             self.effectiveModeChanged.emit(mode)
-        show_nav = bool(not self.editor_focus and (self.navigator_visible or pinned))
+        show_nav = bool(self.navigator_visible or pinned)
         self.navigator.setVisible(show_nav)
         if pinned:
+            nav_width = pinned_nav_width
             self.navigator.setGeometry(0, 0, nav_width, height)
             self.content.setGeometry(nav_width + 1, 0, max(0, width - nav_width - 1), height)
-            self.navigator.setStyleSheet(
-                f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
-                f"border: none; border-right: 1px solid {DesignTokens.separator}; border-radius: 0px; }}"
-            )
         else:
             self.content.setGeometry(0, 0, width, height)
-            self.navigator.setGeometry(10, 8, nav_width, max(0, height - 16))
-            self.navigator.setStyleSheet(
-                f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
-                f"border: 1px solid {DesignTokens.border_subtle}; border-radius: 10px; }}"
-            )
+            self.navigator.setGeometry(0, 0, nav_width, height)
+        self.navigator.setStyleSheet(
+            f"QFrame#FileNavigatorPanel {{ background: {DesignTokens.bg_main}; "
+            f"border: none; border-right: 1px solid {DesignTokens.separator}; border-radius: 0px; }}"
+        )
         self.content.show()
         if show_nav:
             self.navigator.raise_()
@@ -22673,39 +22907,11 @@ class MainWindow(QMainWindow):
         )
         file_header_layout.addWidget(self.file_header_identity_label)
 
-        self.file_header_chip = QFrame(self.file_header_controls)
-        self.file_header_chip.setObjectName("FileHeaderChip")
-        self.file_header_chip.setStyleSheet(
-            f"QFrame#FileHeaderChip {{ background: {DesignTokens.bg_secondary}; border: none; "
-            "border-radius: 8px; }}"
-        )
-        file_chip_layout = QHBoxLayout(self.file_header_chip)
-        file_chip_layout.setContentsMargins(8, 3, 4, 3)
-        file_chip_layout.setSpacing(6)
-        self.file_header_icon_label = QLabel()
-        self.file_header_icon_label.setPixmap(
-            qta.icon("fa5s.file-alt", color=DesignTokens.text_secondary).pixmap(16, 16)
-        )
-        file_chip_layout.addWidget(self.file_header_icon_label)
-        self.file_header_name_label = QLabel()
-        self.file_header_name_label.setMinimumWidth(0)
-        self.file_header_name_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 650; color: {DesignTokens.text_primary}; border: none;"
-        )
-        file_chip_layout.addWidget(self.file_header_name_label, 1)
-        self.file_header_close_file_btn = QToolButton(self.file_header_chip)
-        self.file_header_close_file_btn.setIcon(
-            qta.icon("fa5s.times", color=DesignTokens.text_secondary)
-        )
-        self.file_header_close_file_btn.setToolTip("关闭文件")
-        self.file_header_close_file_btn.setCursor(Qt.PointingHandCursor)
-        self.file_header_close_file_btn.setFixedSize(24, 24)
-        self.file_header_close_file_btn.setStyleSheet(apple_tool_button_style(False))
-        self.file_header_close_file_btn.clicked.connect(self.close_current_file)
-        file_chip_layout.addWidget(self.file_header_close_file_btn)
-        self.file_header_chip.setVisible(False)
-        file_header_layout.addWidget(self.file_header_chip, 1)
-        file_header_layout.addStretch(1)
+        self.file_tab_strip = FileTabStrip(self.file_header_controls)
+        self.file_tab_strip.activateRequested.connect(self.activate_file_tab)
+        self.file_tab_strip.closeRequested.connect(self.close_file_tab)
+        self.file_tab_strip.setVisible(False)
+        file_header_layout.addWidget(self.file_tab_strip, 1)
 
         self.file_header_expand_btn = QToolButton(self.file_header_controls)
         self.file_header_expand_btn.setIcon(
@@ -22737,8 +22943,8 @@ class MainWindow(QMainWindow):
         # Tab 1: Files and deliverables
         self.workspace_tab = QWidget()
         ws_tab_layout = QVBoxLayout(self.workspace_tab)
-        ws_tab_layout.setContentsMargins(14, 12, 14, 14)
-        ws_tab_layout.setSpacing(10)
+        ws_tab_layout.setContentsMargins(0, 0, 0, 0)
+        ws_tab_layout.setSpacing(0)
 
         self.file_navigator_panel = QFrame()
         self.file_navigator_panel.setObjectName("FileNavigatorPanel")
@@ -22796,6 +23002,18 @@ class MainWindow(QMainWindow):
         self.file_navigator_pin_btn.clicked.connect(self.toggle_file_navigator_pinned)
         file_scope_row.addWidget(self.file_navigator_pin_btn)
         file_navigator_layout.addLayout(file_scope_row)
+
+        self.file_navigator_pin_notice = QLabel("窗口较窄，暂以浮层显示；放宽后会自动固定。")
+        self.file_navigator_pin_notice.setObjectName("FileNavigatorPinNotice")
+        self.file_navigator_pin_notice.setWordWrap(True)
+        self._refresh_file_navigator_notice_theme()
+        bind_theme(
+            self.file_navigator_pin_notice,
+            self._refresh_file_navigator_notice_theme,
+            surface="preview_shell",
+        )
+        self.file_navigator_pin_notice.setVisible(False)
+        file_navigator_layout.addWidget(self.file_navigator_pin_notice)
 
         file_search_row = QHBoxLayout()
         file_search_row.setContentsMargins(0, 0, 0, 0)
@@ -22927,7 +23145,7 @@ class MainWindow(QMainWindow):
         # Unified Preview Area in Workspace Tab
         preview_container = QWidget()
         preview_layout = QVBoxLayout(preview_container)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setContentsMargins(14, 12, 14, 14)
         preview_layout.setSpacing(10)
 
         r_preview_header = QFrame()
@@ -22936,19 +23154,9 @@ class MainWindow(QMainWindow):
         r_preview_header_layout = QHBoxLayout(r_preview_header)
         r_preview_header_layout.setContentsMargins(12, 10, 10, 10)
         r_preview_header_layout.setSpacing(8)
-        preview_title_box = QVBoxLayout()
-        preview_title_box.setContentsMargins(0, 0, 0, 0)
-        preview_title_box.setSpacing(2)
-        self.preview_title_label = QLabel("内容预览")
-        self.preview_title_label.setMinimumWidth(0)
-        self.preview_title_label.setStyleSheet(f"font-weight: 600; color: {DesignTokens.text_primary}; font-size: 12px;")
-        self.preview_title_label.setVisible(False)
-        self.preview_meta_label = QLabel("选择文件查看内容")
-        self.preview_meta_label.setMinimumWidth(0)
+        self.preview_meta_label = ElidedToolLabel("选择文件查看内容")
         self.preview_meta_label.setStyleSheet(f"color: {DesignTokens.text_secondary}; font-size: 11px;")
-        preview_title_box.addWidget(self.preview_title_label)
-        preview_title_box.addWidget(self.preview_meta_label)
-        r_preview_header_layout.addLayout(preview_title_box, 1)
+        r_preview_header_layout.addWidget(self.preview_meta_label, 1)
         self.preview_open_btn = QToolButton()
         self.preview_open_btn.setIcon(qta.icon('fa5s.external-link-alt', color=DesignTokens.text_secondary))
         self.preview_open_btn.setToolTip("打开")
@@ -23104,6 +23312,7 @@ class MainWindow(QMainWindow):
         self.deliverable_status_label = QLabel("选择文件后会在这里预览")
         self.deliverable_status_label.setWordWrap(True)
         self.deliverable_status_label.setStyleSheet(apple_caption_style())
+        self.deliverable_status_label.setVisible(False)
         preview_layout.addWidget(self.deliverable_status_label)
 
         self.preview_stack = QStackedWidget()
@@ -23572,9 +23781,12 @@ class MainWindow(QMainWindow):
         self.session_tabs.currentChanged.connect(self.on_session_tab_changed)
         self.session_tabs.tabCloseRequested.connect(self.close_session_tab)
         self.chat_row_layout.addWidget(self.session_tabs, 1)
-        self.question_navigator_theme_host = QuestionNavigatorThemeHost(self.session_tabs)
+        # Keep the question rail tied to the stable main-surface edge.  The
+        # conversation column is centered and can move independently, which
+        # would make the rail appear detached from the left sidebar.
+        self.question_navigator_theme_host = QuestionNavigatorThemeHost(self.main_container)
         self.question_navigator_rail = QuestionNavigatorRail(self.question_navigator_theme_host)
-        self.question_navigator_preview = QuestionNavigatorPreviewCard(self.session_tabs)
+        self.question_navigator_preview = QuestionNavigatorPreviewCard(self.main_container)
         self.question_navigator_rail.jumpRequested.connect(self.jump_to_question)
         self.question_navigator_rail.previewRequested.connect(self._show_question_navigator_preview)
         self.question_navigator_rail.previewDismissed.connect(self.question_navigator_preview.hide)
@@ -24405,6 +24617,16 @@ class MainWindow(QMainWindow):
         self.deliverable_sort_mode = str(value or "modified_desc")
         self.apply_file_workspace_filters()
 
+    def _refresh_file_navigator_notice_theme(self, _resolved=None):
+        notice = getattr(self, "file_navigator_pin_notice", None)
+        if notice is None:
+            return
+        notice.setStyleSheet(
+            f"QLabel#FileNavigatorPinNotice {{ background: {DesignTokens.warning_bg}; "
+            f"color: {DesignTokens.warning_text}; border: 1px solid {DesignTokens.warning_border}; "
+            "border-radius: 6px; padding: 6px 8px; font-size: 10px; }}"
+        )
+
     def toggle_file_navigator(self):
         self.set_file_navigator_visible(
             not bool(getattr(self, "file_navigator_visible", False)),
@@ -24429,17 +24651,62 @@ class MainWindow(QMainWindow):
 
     def toggle_file_navigator_pinned(self, checked=False):
         pinned = bool(checked)
-        workbench = getattr(self, "file_workbench", None)
-        if pinned and workbench is not None and workbench.width() < workbench.pin_min_width:
-            if not getattr(self, "context_drawer_expanded", False):
-                self.toggle_deliverable_preview_expanded()
+        log_ui_navigation(
+            "file_navigator_pin_request",
+            pinned=pinned,
+            drawer_width=int(getattr(getattr(self, "right_sidebar", None), "width", lambda: 0)()),
+        )
         self.file_navigator_pinned = pinned
         self.file_navigator_visible = True
         if getattr(self, "config_manager", None):
             self.config_manager.set("file_navigator_pinned", pinned)
             self.config_manager.set("file_navigator_width", int(self.file_navigator_width))
+        if pinned:
+            parent = getattr(self, "main_container", None)
+            if parent is not None:
+                required = (
+                    int(getattr(DesignTokens, "file_navigator_min_width", 240))
+                    + int(getattr(DesignTokens, "file_workbench_content_min_width", 280))
+                    + 30
+                )
+                maximum = max(self.context_drawer_min_width, int(parent.width() * 0.72))
+                self.context_drawer_expanded = True
+                self.context_drawer_user_width = min(
+                    maximum,
+                    max(required, self._expanded_file_workbench_width(parent)),
+                )
+                self._sync_deliverable_expand_button()
+                self.sync_context_drawer_layout()
+                log_ui_navigation(
+                    "file_navigator_drawer_expanded",
+                    requested_width=int(self.context_drawer_user_width),
+                    actual_width=int(getattr(self.right_sidebar, "width", lambda: 0)()),
+                    required_width=required,
+                )
         self._sync_file_navigator_layout()
-        log_ui_navigation("file_navigator_pin_changed", pinned=pinned)
+        QTimer.singleShot(0, lambda requested=pinned: self._finalize_file_navigator_pin_request(requested))
+
+    def _finalize_file_navigator_pin_request(self, requested):
+        self._sync_file_navigator_layout()
+        workbench = getattr(self, "file_workbench", None)
+        effective = bool(workbench and workbench.is_effectively_pinned())
+        if requested and effective:
+            log_ui_navigation(
+                "file_navigator_pin_finish",
+                pinned=True,
+                workbench_width=int(workbench.width()),
+            )
+        elif requested:
+            available, _width = workbench.pinned_layout_metrics() if workbench is not None else (False, 0)
+            reason = "文件工作台宽度不足" if not available else "文件工作台布局尚未就绪"
+            log_ui_navigation(
+                "file_navigator_pin_error",
+                pinned_preference=True,
+                workbench_width=int(workbench.width()) if workbench is not None else 0,
+                reason=reason,
+            )
+        else:
+            log_ui_navigation("file_navigator_pin_finish", pinned=False)
 
     def _on_file_navigator_effective_mode_changed(self, mode):
         log_ui_navigation(
@@ -24459,69 +24726,233 @@ class MainWindow(QMainWindow):
             width=int(getattr(self, "file_navigator_width", DesignTokens.file_navigator_width)),
         )
         effective_pinned = workbench.is_effectively_pinned()
+        pinned_preference = bool(getattr(self, "file_navigator_pinned", False))
+        pin_pending = bool(pinned_preference and not effective_pinned)
         pin = getattr(self, "file_navigator_pin_btn", None)
         if pin is not None:
             pin.blockSignals(True)
-            pin.setChecked(bool(getattr(self, "file_navigator_pinned", False)))
+            pin.setChecked(pinned_preference)
             pin.blockSignals(False)
             pin.setIcon(
                 qta.icon(
                     "fa5s.thumbtack",
                     color=DesignTokens.primary
-                    if getattr(self, "file_navigator_pinned", False)
+                    if effective_pinned
                     else DesignTokens.text_secondary,
                 )
             )
-            pin.setToolTip(
-                "取消固定文件导航"
-                if getattr(self, "file_navigator_pinned", False)
-                else "固定文件导航"
-            )
+            pin.setStyleSheet(apple_tool_button_style(effective_pinned))
+            if effective_pinned:
+                pin.setToolTip("取消固定文件导航")
+            elif pin_pending:
+                pin.setToolTip("取消固定偏好；当前窗口较窄，放宽后会自动固定")
+            else:
+                pin.setToolTip("固定文件导航")
+        notice = getattr(self, "file_navigator_pin_notice", None)
+        if notice is not None:
+            notice.setVisible(pin_pending)
         nav_button = getattr(self, "file_navigator_btn", None)
         if nav_button is not None:
             shown = bool(getattr(self, "file_navigator_visible", False) or effective_pinned)
             nav_button.setIcon(
                 qta.icon("fa5s.bars", color=DesignTokens.primary if shown else DesignTokens.text_secondary)
             )
-            nav_button.setToolTip("隐藏文件导航" if shown and not effective_pinned else "显示文件导航")
+            nav_button.setStyleSheet(apple_tool_button_style(shown))
+            if effective_pinned:
+                nav_button.setToolTip("文件导航已固定；使用图钉取消固定")
+            elif shown:
+                nav_button.setToolTip("隐藏文件导航")
+            else:
+                nav_button.setToolTip("显示文件导航")
 
-    def close_current_file(self):
-        if not self.confirm_leave_deliverable_edit("关闭当前文件"):
+    @staticmethod
+    def _file_tab_path_key(path):
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(path or ""))))
+
+    def _session_open_file_paths(self, state=None):
+        state = state or (self.get_current_session() if hasattr(self, "get_current_session") else None)
+        if state is None:
+            return []
+        normalized = []
+        seen = set()
+        for path in list(getattr(state, "open_file_paths", []) or []):
+            raw_value = str(path or "").strip()
+            if not raw_value:
+                continue
+            value = os.path.normpath(raw_value)
+            key = self._file_tab_path_key(value)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(value)
+        selected_raw = str(getattr(state, "selected_deliverable_path", "") or "").strip()
+        selected = os.path.normpath(selected_raw) if selected_raw else ""
+        if selected and self._file_tab_path_key(selected) not in seen:
+            normalized.append(selected)
+        state.open_file_paths = normalized
+        return normalized
+
+    def _ensure_open_file_tab(self, path, state=None):
+        raw_path = str(path or "").strip()
+        path = os.path.normpath(raw_path) if raw_path else ""
+        state = state or (self.get_current_session() if hasattr(self, "get_current_session") else None)
+        if not path or state is None:
             return False
+        key = self._file_tab_path_key(path)
+        raw_open_keys = {
+            self._file_tab_path_key(raw)
+            for raw in list(getattr(state, "open_file_paths", []) or [])
+            if str(raw or "").strip()
+        }
+        paths = self._session_open_file_paths(state)
+        existing = next((item for item in paths if self._file_tab_path_key(item) == key), "")
+        opened = key not in raw_open_keys
+        if not existing:
+            paths.append(path)
+            state.open_file_paths = paths
+        state.selected_deliverable_path = existing or path
+        self._sync_file_header(state)
+        if opened:
+            log_ui_navigation(
+                "file_tab_open",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                path=path,
+                tab_count=len(paths),
+            )
+        return True
+
+    def _clear_active_file_surface(self):
         self.current_preview_path = ""
         self.current_deliverable_path = ""
         self.current_deliverable_item = None
         self._file_navigator_state()["selected_path"] = ""
-        self._release_deliverable_edit_session(show_preview=False)
+        if getattr(self, "deliverable_edit_state", "idle") != "idle":
+            self._release_deliverable_edit_session(show_preview=False)
         self.preview_stack.setCurrentWidget(self.preview_text)
         self.preview_text.clear()
-        self.preview_title_label.setText("内容预览")
-        self.preview_meta_label.setText("选择文件查看内容")
-        self.deliverable_status_label.setText("选择文件后会在这里预览")
+        self.preview_meta_label.setFullText("选择文件查看内容")
+        self._set_deliverable_status("")
         self._set_deliverable_controls_enabled("")
-        self._sync_file_header()
+
+    def activate_file_tab(self, path):
+        state = self.get_current_session()
+        raw_path = str(path or "").strip()
+        path = os.path.normpath(raw_path) if raw_path else ""
+        if state is None or not path:
+            return False
+        if not any(
+            self._file_tab_path_key(item) == self._file_tab_path_key(path)
+            for item in self._session_open_file_paths(state)
+        ):
+            return False
+        if os.path.isfile(path):
+            selected = self.select_deliverable(path, render_html=True)
+            if selected is False:
+                self._sync_file_header(state)
+                return False
+        else:
+            active_session = getattr(self, "deliverable_edit_session", None)
+            if active_session is not None and self._file_tab_path_key(active_session.path) != self._file_tab_path_key(path):
+                if not self.confirm_leave_deliverable_edit("切换文件"):
+                    self._sync_file_header(state)
+                    return False
+            state.selected_deliverable_path = path
+            self.current_deliverable_path = path
+            self.current_preview_path = path
+            self.preview_stack.setCurrentWidget(self.preview_text)
+            self.preview_text.setPlainText(f"文件已不存在或无法访问。\n\n{path}\n\n请关闭该标签，或恢复文件后刷新。")
+            self.preview_meta_label.setFullText("文件不可用")
+            self.preview_meta_label.setToolTip(path)
+            self._set_deliverable_status("文件已不存在或无法访问；可关闭标签后重新选择。", tone="error")
+            self._set_deliverable_controls_enabled("")
+            self._sync_file_header(state)
+        log_ui_navigation(
+            "file_tab_activate",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            path=path,
+            available=os.path.isfile(path),
+        )
+        return True
+
+    def close_file_tab(self, path):
+        state = self.get_current_session()
+        raw_path = str(path or "").strip()
+        path = os.path.normpath(raw_path) if raw_path else ""
+        if state is None or not path:
+            return False
+        paths = self._session_open_file_paths(state)
+        target_index = next(
+            (index for index, item in enumerate(paths) if self._file_tab_path_key(item) == self._file_tab_path_key(path)),
+            -1,
+        )
+        if target_index < 0:
+            return False
+        active = self._file_tab_path_key(getattr(state, "selected_deliverable_path", "")) == self._file_tab_path_key(path)
+        if active and not self.confirm_leave_deliverable_edit("关闭当前文件"):
+            return False
+        paths.pop(target_index)
+        state.open_file_paths = paths
+        if active:
+            next_path = paths[target_index] if target_index < len(paths) else (paths[-1] if paths else "")
+            state.selected_deliverable_path = next_path
+            self._clear_active_file_surface()
+            if next_path:
+                self.activate_file_tab(next_path)
+            else:
+                self._sync_file_header(state)
+                self.set_file_navigator_visible(True, reason="last_file_tab_closed")
+        else:
+            self._sync_file_header(state)
+        log_ui_navigation(
+            "file_tab_close",
+            session_id=str(getattr(state, "session_id", "") or ""),
+            path=path,
+            active=active,
+            remaining=len(paths),
+        )
+        return True
+
+    def close_current_file(self):
+        state = self.get_current_session()
+        path = str(
+            getattr(state, "selected_deliverable_path", "") if state is not None
+            else getattr(self, "current_deliverable_path", "")
+        )
+        if path:
+            return self.close_file_tab(path)
+        self._clear_active_file_surface()
+        self._sync_file_header(state)
         self.set_file_navigator_visible(True, reason="close_file")
         return True
 
-    def _sync_file_header(self):
-        path = str(getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", ""))
-        chip = getattr(self, "file_header_chip", None)
+    def _sync_file_header(self, state=None):
+        state = state or (self.get_current_session() if hasattr(self, "get_current_session") else None)
         identity = getattr(self, "file_header_identity_label", None)
-        if chip is None or identity is None:
+        strip = getattr(self, "file_tab_strip", None)
+        if identity is None or strip is None:
             return
-        has_file = bool(path)
-        chip.setVisible(has_file)
-        identity.setVisible(not has_file)
-        if has_file:
-            name = os.path.basename(path) or path
-            self.file_header_name_label.setText(name)
-            self.file_header_name_label.setToolTip(path)
-            self.file_header_chip.setToolTip(path)
-            descriptor = editor_descriptor(path)
-            icon_name = "fa5s.file-code" if descriptor else "fa5s.file-alt"
-            self.file_header_icon_label.setPixmap(
-                qta.icon(icon_name, color=DesignTokens.text_secondary).pixmap(16, 16)
-            )
+        paths = self._session_open_file_paths(state) if state is not None else []
+        active = str(getattr(state, "selected_deliverable_path", "") or "") if state is not None else ""
+        strip.set_paths(paths, active)
+        strip.setVisible(bool(paths))
+        identity.setVisible(not bool(paths))
+
+    def _set_deliverable_status(self, text="", tone="info"):
+        label = getattr(self, "deliverable_status_label", None)
+        if label is None:
+            return
+        text = str(text or "").strip()
+        label.setText(text)
+        label.setVisible(bool(text))
+        color = {
+            "error": DesignTokens.error_text,
+            "warning": DesignTokens.warning_text,
+            "success": DesignTokens.success_text,
+        }.get(str(tone or "info"), DesignTokens.text_secondary)
+        label.setStyleSheet(
+            f"QLabel {{ color: {color}; font-size: {DesignTokens.font_size_meta}px; "
+            "background: transparent; border: none; }}"
+        )
 
     def _open_current_file_from_navigator(self):
         path = str(getattr(self, "current_preview_path", "") or getattr(self, "current_deliverable_path", ""))
@@ -24543,8 +24974,6 @@ class MainWindow(QMainWindow):
         if row is not None:
             row.setVisible(is_html)
         status = getattr(self, "deliverable_status_label", None)
-        if status is not None:
-            status.setVisible(True)
         editable = bool(path and os.path.isfile(path) and editor_descriptor(path) is not None)
         mode_button = getattr(self, "deliverable_mode_btn", None)
         if mode_button is not None:
@@ -25179,13 +25608,16 @@ class MainWindow(QMainWindow):
             rail.set_feature_visible(False)
             self.question_navigator_theme_host.setGeometry(0, 0, 0, 0)
             return
-        origin = viewport.mapTo(self.session_tabs, QPoint(0, 0))
+        origin = viewport.mapTo(self.main_container, QPoint(0, 0))
         height = max(54, viewport.height() - 24)
         if len(rail.entries) < 2:
             self.question_navigator_theme_host.setGeometry(0, 0, 0, 0)
             return
         self.question_navigator_theme_host.setGeometry(
-            max(0, origin.x() + 2), origin.y() + 12, 40, height
+            int(getattr(DesignTokens, "question_navigator_sidebar_gap", 8)),
+            origin.y() + 12,
+            40,
+            height,
         )
         rail.setGeometry(0, 0, 40, height)
         self.question_navigator_theme_host.raise_()
@@ -25231,8 +25663,8 @@ class MainWindow(QMainWindow):
         card = getattr(self, "question_navigator_preview", None)
         if rail is None or card is None:
             return
-        anchor = rail.mapTo(self.session_tabs, QPoint(rail.width() + 6, int(point.y())))
-        card.show_entry(entry, anchor, self.session_tabs.rect())
+        anchor = rail.mapTo(self.main_container, QPoint(rail.width() + 6, int(point.y())))
+        card.show_entry(entry, anchor, self.main_container.rect())
 
     def _question_jump_error(self, state, message_id, reason):
         if state is not None:
@@ -28701,6 +29133,9 @@ class MainWindow(QMainWindow):
         self.code_worker = state.code_worker
         self.chat_layout = state.chat_layout
         self.active_skills_label = state.active_skills_label
+        open_paths = self._session_open_file_paths(state)
+        if not getattr(state, "selected_deliverable_path", "") and open_paths:
+            state.selected_deliverable_path = open_paths[-1]
         self.current_deliverable_path = getattr(state, "selected_deliverable_path", "") or ""
         self.current_preview_path = self.current_deliverable_path
         self.refresh_change_list(session_id)
@@ -30337,6 +30772,15 @@ class MainWindow(QMainWindow):
         if not state:
             return ""
         normalized = self._normalize_project_path(workspace_dir)
+        previous_workspace = self._normalize_project_path(getattr(state, "workspace_dir", ""))
+        workspace_changed = self._project_key(previous_workspace) != self._project_key(normalized)
+        if (
+            workspace_changed
+            and getattr(state, "session_id", "") == getattr(self, "current_session_id", "")
+            and getattr(self, "deliverable_edit_dirty", False)
+            and not self.confirm_leave_deliverable_edit("切换项目")
+        ):
+            return ""
         normalized_source = str(source or "").strip().lower()
         if normalized and normalized_source not in {"chat", "project"}:
             normalized_source = "chat" if self._is_chat_workspace_path(normalized, getattr(state, "session_id", "")) else "project"
@@ -30352,6 +30796,36 @@ class MainWindow(QMainWindow):
             meta.pop("workspace_dir", None)
             meta.pop("workspace_source", None)
         state.persisted_conversation_meta = meta
+        if workspace_changed:
+            retained = []
+            for path in list(getattr(state, "open_file_paths", []) or []):
+                try:
+                    inside = bool(
+                        normalized
+                        and os.path.commonpath([os.path.abspath(path), os.path.abspath(normalized)])
+                        == os.path.abspath(normalized)
+                    )
+                except (OSError, ValueError):
+                    inside = False
+                if inside:
+                    retained.append(os.path.normpath(path))
+            state.open_file_paths = retained
+            if not any(
+                self._file_tab_path_key(path)
+                == self._file_tab_path_key(getattr(state, "selected_deliverable_path", ""))
+                for path in retained
+            ):
+                state.selected_deliverable_path = retained[-1] if retained else ""
+            if getattr(state, "session_id", "") == getattr(self, "current_session_id", ""):
+                self.current_deliverable_path = state.selected_deliverable_path
+                self.current_preview_path = state.selected_deliverable_path
+                self._sync_file_header(state)
+            log_ui_navigation(
+                "file_tabs_workspace_reconciled",
+                session_id=str(getattr(state, "session_id", "") or ""),
+                workspace=normalized,
+                retained=len(retained),
+            )
         return normalized
 
     def _bind_session_to_project(self, state, directory, *, allow_existing_content=False):
@@ -33818,10 +34292,9 @@ class MainWindow(QMainWindow):
                 self.deliverable_text_loading = False
             self._render_deliverable_markdown_edit_preview()
             self.preview_stack.setCurrentWidget(self.deliverable_text_editor_container)
-            if hasattr(self, "deliverable_status_label"):
-                self.deliverable_status_label.setText(
-                    f"正在编辑 {os.path.basename(session.path)} · {session.descriptor.label}"
-                )
+            self._set_deliverable_status(
+                f"正在编辑 · {session.descriptor.label}"
+            )
             self._set_deliverable_dirty(False)
             self._set_deliverable_edit_state(
                 "ready",
@@ -33838,10 +34311,9 @@ class MainWindow(QMainWindow):
             self._handle_deliverable_editor_error(message)
             return
         self.preview_stack.setCurrentWidget(self.deliverable_editor_web_view)
-        if hasattr(self, "deliverable_status_label"):
-            self.deliverable_status_label.setText(
-                f"正在编辑 {os.path.basename(session.path)} · {session.descriptor.label}"
-            )
+        self._set_deliverable_status(
+            f"正在编辑 · {session.descriptor.label}"
+        )
         self._load_deliverable_web_editor(payload)
 
     def _ensure_deliverable_editor_web_view(self):
@@ -34531,25 +35003,30 @@ class MainWindow(QMainWindow):
         self._sync_file_browser_empty_state()
         if hasattr(self, "preview_meta_label"):
             count = len(self.deliverable_items)
-            if self.current_deliverable_path:
-                self.preview_meta_label.setText(
+            if self.current_deliverable_path and os.path.isfile(self.current_deliverable_path):
+                self.preview_meta_label.setFullText(
                     self.describe_path_for_preview(self.current_deliverable_path)
                 )
+            elif self.current_deliverable_path:
+                self.preview_meta_label.setFullText("文件不可用")
             else:
-                self.preview_meta_label.setText(f"{count} 个交付物 · 选择文件预览" if count else "生成的文件会自动出现在这里")
+                self.preview_meta_label.setFullText(
+                    f"{count} 个交付物 · 选择文件预览" if count else "生成的文件会自动出现在这里"
+                )
         self._watch_deliverable_paths()
         if not self.current_deliverable_path or not os.path.isfile(self.current_deliverable_path):
-            self.current_deliverable_path = ""
             self.current_deliverable_stale = False
             self._set_deliverable_controls_enabled("")
-            if hasattr(self, "deliverable_status_label") and not getattr(self, "current_preview_path", ""):
-                self.deliverable_status_label.setText("选择文件后会在这里预览")
-            if hasattr(self, "deliverable_preview_stack") and not getattr(self, "current_preview_path", ""):
+            if not self.current_deliverable_path:
+                self._set_deliverable_status("")
+            if hasattr(self, "deliverable_preview_stack") and not self.current_deliverable_path:
                 self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             state = self.get_current_session() if hasattr(self, "get_current_session") else None
-            if state:
+            if state and not self.current_deliverable_path:
                 state.selected_deliverable_path = ""
                 state.deliverable_preview_rendered = False
+            elif state and self.current_deliverable_path:
+                self.activate_file_tab(self.current_deliverable_path)
         elif render_current:
             self.select_deliverable(self.current_deliverable_path, render_html=True)
         self.apply_file_workspace_filters()
@@ -34578,6 +35055,26 @@ class MainWindow(QMainWindow):
             deliverables.addItem(list_item)
             if selected_key and os.path.normcase(os.path.normpath(item.get("path") or "")) == selected_key:
                 deliverables.setCurrentItem(list_item)
+
+    def _sync_deliverable_list_selection(self, path):
+        deliverables = getattr(self, "deliverables_list", None)
+        if deliverables is None:
+            return
+        raw_path = str(path or "").strip()
+        target_key = self._file_tab_path_key(raw_path) if raw_path else ""
+        matched = None
+        for index in range(deliverables.count()):
+            item = deliverables.item(index)
+            item_path = str(item.data(Qt.UserRole) or "").strip()
+            if target_key and item_path and self._file_tab_path_key(item_path) == target_key:
+                matched = item
+                break
+        if matched is None:
+            deliverables.clearSelection()
+            deliverables.setCurrentItem(None)
+            return
+        deliverables.setCurrentItem(matched)
+        deliverables.scrollToItem(matched, QAbstractItemView.EnsureVisible)
 
     def _watch_deliverable_paths(self):
         watcher = getattr(self, "deliverable_watcher", None)
@@ -34654,8 +35151,7 @@ class MainWindow(QMainWindow):
                     "deliverable_edit_external_conflict",
                     path=current,
                 )
-            if hasattr(self, "deliverable_status_label"):
-                self.deliverable_status_label.setText("文件已更新，点击“刷新预览”查看最新内容。")
+            self._set_deliverable_status("文件已更新，点击“刷新预览”查看最新内容。", tone="warning")
         timer = getattr(self, "deliverable_refresh_timer", None)
         if timer is not None:
             timer.start()
@@ -34797,7 +35293,11 @@ class MainWindow(QMainWindow):
         self.add_system_toast(message, "success", auto_close_ms=2400)
 
     def select_deliverable(self, path, render_html=True):
-        path = os.path.normpath(str(path or ""))
+        raw_path = str(path or "").strip()
+        path = os.path.normpath(raw_path) if raw_path else ""
+        if not path:
+            return False
+        state = self.get_current_session() if hasattr(self, "get_current_session") else None
         active_session = getattr(self, "deliverable_edit_session", None)
         if (
             active_session is not None
@@ -34814,9 +35314,11 @@ class MainWindow(QMainWindow):
             and os.path.normcase(active_session.path)
             == os.path.normcase(os.path.abspath(path))
         ):
+            self._ensure_open_file_tab(path, state)
             self.current_deliverable_path = path
             self.current_preview_path = path
             self._file_navigator_state()["selected_path"] = path
+            self._sync_deliverable_list_selection(path)
             self._set_deliverable_controls_enabled(path)
             self._sync_file_header()
             self._watch_deliverable_paths()
@@ -34826,10 +35328,11 @@ class MainWindow(QMainWindow):
         self.current_deliverable_path = path if os.path.isfile(path) else ""
         self.current_preview_path = self.current_deliverable_path
         self._file_navigator_state()["selected_path"] = self.current_deliverable_path
+        self._sync_deliverable_list_selection(self.current_deliverable_path)
         if previous_path and os.path.normcase(os.path.abspath(previous_path)) != os.path.normcase(os.path.abspath(path)):
             self.current_deliverable_stale = False
-        state = self.get_current_session() if hasattr(self, "get_current_session") else None
         if state:
+            self._ensure_open_file_tab(self.current_deliverable_path, state)
             state.selected_deliverable_path = self.current_deliverable_path
             state.deliverable_preview_rendered = False
         self._set_deliverable_controls_enabled(self.current_deliverable_path)
@@ -34839,14 +35342,11 @@ class MainWindow(QMainWindow):
         if not self.current_deliverable_path:
             return False
         ext = os.path.splitext(self.current_deliverable_path)[1].lower()
-        if hasattr(self, "deliverable_status_label"):
-            self.deliverable_status_label.setText(self.describe_path_for_preview(self.current_deliverable_path))
+        self._set_deliverable_status("")
         if ext in {".html", ".htm"}:
             if render_html and can_reuse_render and self._ensure_deliverable_web_view():
                 self._show_deliverable_web_preview()
-                self.deliverable_status_label.setText(
-                    f"正在预览 {os.path.basename(self.current_deliverable_path)} · 轻量模式"
-                )
+                self._set_deliverable_status("")
                 if state:
                     state.deliverable_preview_rendered = True
                 return
@@ -34895,7 +35395,7 @@ class MainWindow(QMainWindow):
             self._render_office_deliverable(path, force=force)
             return
         if kind != "html":
-            self.deliverable_status_label.setText("当前格式暂不支持内嵌渲染，可使用系统应用打开。")
+            self._set_deliverable_status("当前格式暂不支持内嵌渲染，可使用系统应用打开。", tone="warning")
             return
         if not self._ensure_deliverable_web_view():
             self.deliverable_text_preview.setPlainText(self.deliverable_web_configuration_error or webengine_unavailable_message())
@@ -34905,11 +35405,11 @@ class MainWindow(QMainWindow):
         if configuration_error:
             self.deliverable_text_preview.setPlainText(configuration_error)
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText(configuration_error)
+            self._set_deliverable_status(configuration_error, tone="error")
             return
         if not force and self._can_reuse_deliverable_render(path):
             self._show_deliverable_web_preview()
-            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · 轻量模式")
+            self._set_deliverable_status("")
             return
         fingerprint = self._deliverable_fingerprint(path)
         previous_fingerprint = getattr(self, "deliverable_render_fingerprint", None)
@@ -34927,7 +35427,7 @@ class MainWindow(QMainWindow):
         self.current_deliverable_stale = False
         self.deliverable_web_view.setUrl(url)
         self._show_deliverable_web_preview()
-        self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · 轻量模式")
+        self._set_deliverable_status("正在渲染轻量预览…")
 
     def _show_image_deliverable(self, path):
         max_preview_bytes = 25 * 1024 * 1024
@@ -34936,20 +35436,20 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self.deliverable_text_preview.setPlainText(f"无法读取图片文件：{exc}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("图片预览失败。")
+            self._set_deliverable_status("图片预览失败。", tone="error")
             return
         if size > max_preview_bytes:
             self.deliverable_text_preview.setPlainText(
                 f"图片文件过大，暂不在应用内预览。\n\n文件大小：{format_file_size(size)}"
             )
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("图片过大，可使用系统应用打开。")
+            self._set_deliverable_status("图片过大，可使用系统应用打开。", tone="warning")
             return
         pixmap = QPixmap(path)
         if pixmap.isNull():
             self.deliverable_text_preview.setPlainText("无法解码图片文件，可使用系统应用打开。")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("图片预览失败。")
+            self._set_deliverable_status("图片预览失败。", tone="error")
             return
         self.preview_pixmap = pixmap
         target_size = self.deliverable_preview_stack.size()
@@ -34962,9 +35462,7 @@ class MainWindow(QMainWindow):
         self.deliverable_render_path = path
         self.deliverable_render_loading = False
         self.current_deliverable_stale = False
-        self.deliverable_status_label.setText(
-            f"正在预览 {os.path.basename(path)} · 图片 · {pixmap.width()}×{pixmap.height()}"
-        )
+        self._set_deliverable_status("")
 
     def _show_text_deliverable(self, path):
         max_preview_bytes = TEXT_FILE_MAX_BYTES
@@ -34975,7 +35473,7 @@ class MainWindow(QMainWindow):
                     f"文本文件过大，暂不在应用内预览。\n\n文件大小：{format_file_size(size)}"
                 )
                 self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-                self.deliverable_status_label.setText("文本过大，可使用系统应用打开。")
+                self._set_deliverable_status("文本过大，可使用系统应用打开。", tone="warning")
                 return
             with open(path, "r", encoding="utf-8", errors="strict") as handle:
                 content = handle.read()
@@ -34983,14 +35481,14 @@ class MainWindow(QMainWindow):
             message = f"无法按 UTF-8 预览文本：{exc}。可进入编辑并明确选择编码。"
             self.deliverable_text_preview.setPlainText(message)
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText(message)
+            self._set_deliverable_status(message, tone="error")
             log_ui_navigation("deliverable_text_preview_error", path=path, error=str(exc))
             return
         except OSError as exc:
             message = f"无法读取文本文件：{exc}"
             self.deliverable_text_preview.setPlainText(message)
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText(message)
+            self._set_deliverable_status(message, tone="error")
             log_ui_navigation("deliverable_text_preview_error", path=path, error=str(exc))
             return
         self.deliverable_text_preview.setPlainText(content)
@@ -34999,9 +35497,7 @@ class MainWindow(QMainWindow):
         self.deliverable_render_path = path
         self.deliverable_render_loading = False
         self.current_deliverable_stale = False
-        self.deliverable_status_label.setText(
-            f"正在预览 {os.path.basename(path)} · {format_file_size(size)}"
-        )
+        self._set_deliverable_status("")
 
     def _render_markdown_deliverable(self, path, force=False):
         if not self._ensure_deliverable_web_view():
@@ -35011,7 +35507,7 @@ class MainWindow(QMainWindow):
         fingerprint = self._deliverable_fingerprint(path)
         if not force and self._can_reuse_deliverable_render(path):
             self._show_deliverable_web_preview()
-            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · Markdown")
+            self._set_deliverable_status("")
             return
         try:
             with open(path, "r", encoding="utf-8") as handle:
@@ -35019,7 +35515,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.deliverable_text_preview.setPlainText(f"无法读取 Markdown 文件：{exc}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("Markdown 预览失败。")
+            self._set_deliverable_status("Markdown 预览失败。", tone="error")
             return
         body = markdown.markdown(source, extensions=["fenced_code", "tables", "nl2br", "sane_lists"])
         document = markdown_render_style() + f"<main>{body}</main>"
@@ -35030,7 +35526,7 @@ class MainWindow(QMainWindow):
         base_url = QUrl.fromLocalFile(os.path.abspath(os.path.dirname(path)) + os.sep)
         self.deliverable_web_view.setHtml(document, base_url)
         self._show_deliverable_web_preview()
-        self.deliverable_status_label.setText(f"正在渲染：{os.path.basename(path)} · Markdown")
+        self._set_deliverable_status("正在渲染 Markdown 预览…")
 
     def _ensure_deliverable_pdf_view(self):
         if getattr(self, "deliverable_pdf_view", None) is not None:
@@ -35062,25 +35558,25 @@ class MainWindow(QMainWindow):
                 self.deliverable_text_preview.setPlainText(
                     f"无法加载 PDF 版式预览组件：{detail}\n\nPDF 文本预览也无法生成：{exc}"
                 )
-                self.deliverable_status_label.setText("PDF 预览失败。")
+                self._set_deliverable_status("PDF 预览失败。", tone="error")
                 self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
                 return
             self.deliverable_text_preview.setPlainText(text)
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
             self.current_deliverable_stale = False
-            self.deliverable_status_label.setText("QtPdf 不可用，正在显示 PDF 文本预览。")
+            self._set_deliverable_status("QtPdf 不可用，当前显示 PDF 文本预览。", tone="warning")
             return
         error = self.deliverable_pdf_document.load(os.path.abspath(pdf_path))
         no_error = getattr(type(error), "None_", None)
         if no_error is not None and error != no_error:
             self.deliverable_text_preview.setPlainText(f"PDF 加载失败：{error}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("PDF 预览失败。")
+            self._set_deliverable_status("PDF 预览失败。", tone="error")
             return
         self.deliverable_preview_stack.setCurrentWidget(view)
         display_path = source_path or pdf_path
         self.current_deliverable_stale = False
-        self.deliverable_status_label.setText(f"正在预览 {os.path.basename(display_path)} · PDF")
+        self._set_deliverable_status("")
 
     def _render_office_deliverable(self, path, force=False):
         try:
@@ -35088,7 +35584,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.deliverable_text_preview.setPlainText(f"无法生成内置文档预览：{exc}")
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText("内置文档预览失败。")
+            self._set_deliverable_status("内置文档预览失败。", tone="error")
             return
         fingerprint = self._deliverable_fingerprint(path)
         self.deliverable_render_fingerprint = fingerprint
@@ -35105,16 +35601,12 @@ class MainWindow(QMainWindow):
                 note = configuration_error + "\n\n" + note
             self.deliverable_text_preview.setPlainText(note + "\n\n" + preview.get("text", ""))
             self.deliverable_preview_stack.setCurrentWidget(self.deliverable_text_preview)
-            self.deliverable_status_label.setText(
-                f"正在预览 {os.path.basename(path)} · {preview.get('format') or '文档'} 文本"
-            )
+            self._set_deliverable_status("")
             return
         base_url = QUrl.fromLocalFile(os.path.abspath(os.path.dirname(path)) + os.sep)
         self.deliverable_web_view.setHtml(preview.get("html", ""), base_url)
         self._show_deliverable_web_preview()
-        self.deliverable_status_label.setText(
-            f"正在预览 {os.path.basename(path)} · {preview.get('format') or '文档'} 内置预览"
-        )
+        self._set_deliverable_status("")
 
     def handle_deliverable_render_progress(self, progress):
         if not getattr(self, "deliverable_render_loading", False):
@@ -35123,8 +35615,8 @@ class MainWindow(QMainWindow):
             return
         path = getattr(self, "current_deliverable_path", "")
         if path and hasattr(self, "deliverable_status_label"):
-            self.deliverable_status_label.setText(
-                f"正在渲染 {max(0, min(100, int(progress)))}% · {os.path.basename(path)}"
+            self._set_deliverable_status(
+                f"正在渲染 {max(0, min(100, int(progress)))}%"
             )
 
     def handle_deliverable_render_finished(self, ok):
@@ -35155,10 +35647,13 @@ class MainWindow(QMainWindow):
             return
         if ok and path:
             mode_label = "Markdown" if current_ext in {".md", ".markdown"} else "轻量模式"
-            self.deliverable_status_label.setText(f"正在预览 {os.path.basename(path)} · {mode_label}")
+            self._set_deliverable_status("")
         elif path:
             self.deliverable_render_fingerprint = None
-            self.deliverable_status_label.setText("页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。")
+            self._set_deliverable_status(
+                "页面渲染失败，可刷新重试或使用“打开”在系统浏览器中查看。",
+                tone="error",
+            )
 
     def _set_deliverable_conversion_running(self, target_format=""):
         target_format = str(target_format or "").strip().lower()
@@ -35336,12 +35831,8 @@ class MainWindow(QMainWindow):
         self.current_preview_path = path or ""
         if hasattr(self, "file_navigator_navigation_state"):
             self._file_navigator_state()["selected_path"] = self.current_preview_path
-        if hasattr(self, "preview_title_label"):
-            self.preview_title_label.setText(title or "内容预览")
-            self.preview_title_label.setToolTip(title or "内容预览")
         if hasattr(self, "preview_meta_label"):
-            self.preview_meta_label.setText(meta or "选择文件查看内容")
-            self.preview_meta_label.setToolTip(meta or "选择文件查看内容")
+            self.preview_meta_label.setFullText(meta or "选择文件查看内容")
         for name in ("preview_open_btn", "preview_reveal_btn", "preview_copy_btn"):
             btn = getattr(self, name, None)
             if btn:
@@ -35358,14 +35849,7 @@ class MainWindow(QMainWindow):
                 return f"文件夹  ·  {count} 项  ·  修改于 {modified}"
             size = format_file_size(os.path.getsize(path))
             ext = os.path.splitext(path)[1].lower().lstrip(".") or "文件"
-            relative = ""
-            workspace = getattr(self, "workspace_dir", "")
-            if workspace:
-                try:
-                    relative = os.path.relpath(path, workspace)
-                except ValueError:
-                    relative = ""
-            parts = [relative, ext.upper(), size, f"修改于 {modified}"]
+            parts = [ext.upper(), size, f"修改于 {modified}"]
             return "  ·  ".join([part for part in parts if part])
         except Exception:
             return ""
@@ -35516,8 +36000,12 @@ class MainWindow(QMainWindow):
             return
         if not self.confirm_leave_deliverable_edit("切换文件"):
             return
+        state = self.get_current_session()
+        self._ensure_open_file_tab(path, state)
         self.current_preview_path = path
-        self.current_deliverable_path = ""
+        self.current_deliverable_path = path
+        if state is not None:
+            state.selected_deliverable_path = path
         self._file_navigator_state()["selected_path"] = path
         if hasattr(self, "deliverable_render_btn"):
             self.deliverable_render_btn.setEnabled(False)
@@ -35528,8 +36016,7 @@ class MainWindow(QMainWindow):
         self.set_preview_header(path, title=title, meta=self.describe_path_for_preview(path), enabled=True)
         self._sync_file_header()
         self._sync_current_file_filter_notice()
-        if hasattr(self, "deliverable_status_label"):
-            self.deliverable_status_label.setText(self.describe_path_for_preview(path))
+        self._set_deliverable_status("")
         if not self.file_workbench.is_effectively_pinned():
             self.set_file_navigator_visible(False, reason="workspace_file_selected")
         if not os.path.isfile(path): return
@@ -35563,7 +36050,7 @@ class MainWindow(QMainWindow):
             message = f"无法预览文件：{exc}"
             self.preview_text.setPlainText(message)
             self.preview_stack.setCurrentWidget(self.preview_text)
-            self.deliverable_status_label.setText(message)
+            self._set_deliverable_status(message, tone="error")
             log_ui_navigation("file_preview_error", path=path, error=str(exc))
             self.add_system_toast(message, "error", auto_close_ms=6000)
             return

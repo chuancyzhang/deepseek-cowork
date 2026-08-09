@@ -112,7 +112,7 @@ class DeliverableEditorUiTest(unittest.TestCase):
 
             self.assertTrue(self.window.file_workbench.editor_focus)
             self.assertTrue(self.window.context_drawer_expanded)
-            self.assertTrue(self.window.file_workbench.navigator.isHidden())
+            self.assertFalse(self.window.file_workbench.navigator.isHidden())
             self.assertTrue(self.window.file_navigator_visible)
             self.assertTrue(self.window.file_navigator_pinned)
             with patch.object(self.window.config_manager, "set") as persist_mock:
@@ -171,6 +171,10 @@ class DeliverableEditorUiTest(unittest.TestCase):
             self.assertNotIn(
                 '"ready": true', self.window.deliverable_text_preview.toPlainText()
             )
+
+            self.assertTrue(self.window.close_current_file())
+            self.assertEqual(self.window.current_preview_path, source)
+            self.assertIn('"ready": true', self.window.deliverable_text_preview.toPlainText())
 
             self.assertTrue(self.window.close_current_file())
             self.assertIs(self.window.preview_stack.currentWidget(), self.window.preview_text)

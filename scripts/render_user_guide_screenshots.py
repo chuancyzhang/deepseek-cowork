@@ -257,7 +257,13 @@ def render_file_workbench_screens(window, workspace):
     if scale_label == "1":
         save_widget(window, "s21-deliverables-list.png", 120)
 
-    window.select_deliverable(str(workspace / "release-notes.txt"), render_html=True)
+    for tab_path in (
+        workspace / "weekly-brief.html",
+        workspace / "meeting-notes.md",
+        workspace / "quarterly-review.pptx",
+        workspace / "release-notes.txt",
+    ):
+        window.select_deliverable(str(tab_path), render_html=True)
     window.context_drawer_expanded = True
     window.context_drawer_user_width = 820
     window.file_navigator_pinned = True
@@ -265,9 +271,17 @@ def render_file_workbench_screens(window, workspace):
     window.sync_context_drawer_layout()
     window._sync_file_navigator_layout()
     process_events(300)
+    if len(window.file_tab_strip.paths) < 4:
+        raise RuntimeError("File tab strip did not retain all opened files")
+    if not window.file_workbench.is_effectively_pinned():
+        raise RuntimeError("Pinned file navigator did not move into the left column")
     save_widget(window, f"file-workbench-expanded-{scale_label}x.png", 220)
     if scale_label == "1":
         save_widget(window, "s22-deliverable-preview.png", 120)
+
+    window.select_deliverable(str(workspace / "quarterly-review.pptx"), render_html=True)
+    process_events(240)
+    save_widget(window, f"file-workbench-readonly-{scale_label}x.png", 180)
 
     window.hide_context_drawer(reason="screenshot_question_navigator")
     state = window.get_current_session()
@@ -596,8 +610,14 @@ def main_run():
         "4. 未保存修改在切换文件、会话或关闭抽屉前需要确认。\n",
         encoding="utf-8",
     )
+    from pptx import Presentation
+
     pptx_path = workspace / "quarterly-review.pptx"
-    pptx_path.write_bytes(b"demo-pptx")
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+    slide.shapes.title.text = "季度项目复盘"
+    slide.placeholders[1].text = "进展：完成文件工作台重构\n风险：窄窗口下导航转为浮层\n下一步：完成缩放验收"
+    presentation.save(str(pptx_path))
     pdf_path = workspace / "project-summary.pdf"
     pdf_path.write_bytes(b"%PDF-1.4\n% demo")
 

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
@@ -1735,11 +1735,116 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIsInstance(continuation_group, AssistantTurnGroup)
             self.assertLess(state.chat_layout.indexOf(guidance_wrapper), state.chat_layout.indexOf(continuation_group))
             self.assertIn("深度思考", first.think_toggle_btn.text())
+            self.assertNotIn("深度思考中", first.think_toggle_btn.text())
             self.assertIn("深度思考", continuation.think_toggle_btn.text())
+            self.assertTrue(first_group.process_finalized)
+            self.assertFalse(first_group.process_disclosure.isChecked())
+            self.assertFalse(first.think_timer.isActive())
             self.assertEqual(continuation.session_id, state.session_id)
             self.assertIs(continuation.chat_storage, window.chat_storage)
             self.assertFalse(first.copy_result_btn.isVisible())
             self.assertFalse(first.office_draft_btn.isVisible())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_guidance_boundary_routes_reentrant_thinking_to_new_group(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_guidance_reentrant")
+            state.live_activity = True
+            state.active_turn_id = 1
+            first = window._append_live_thinking_segment(state)
+            first_group = state.active_agent_turn_group
+            first.update_thinking("旧组分析")
+            first.set_main_content("旧组阶段回复", final=False)
+            state.current_content_buffer = "旧组阶段回复"
+            state.current_thinking_buffer = "旧组分析"
+
+            message = {
+                "id": "guide-reentrant",
+                "role": "user",
+                "content": "切换方向",
+                "meta": {"same_turn_guidance": True, "turn_id": "1"},
+            }
+            reentrant_timer = QTimer(window)
+            reentrant_timer.setSingleShot(True)
+            reentrant_timer.timeout.connect(
+                lambda: window.handle_thinking_signal(
+                    "新组分析",
+                    state.session_id,
+                    turn_id=1,
+                )
+            )
+            reentrant_timer.start(0)
+
+            window._render_turn_guidance_checkpoint(state, message, "切换方向", [])
+            self.assertTrue(reentrant_timer.isActive())
+            reentrant_timer.timeout.emit()
+            reentrant_timer.stop()
+            continuation_group = state.active_agent_turn_group
+
+            self.assertIsNot(first_group, continuation_group)
+            self.assertEqual(len(first_group.stage_bubbles), 1)
+            self.assertTrue(first_group.process_finalized)
+            self.assertFalse(first_group.process_disclosure.isChecked())
+            self.assertFalse(first.think_timer.isActive())
+            self.assertNotIn("深度思考中", first.think_toggle_btn.text())
+            routed_event = next(
+                event
+                for event in reversed(state.ui_timeline_events)
+                if event.get("kind") == "thinking" and event.get("text") == "新组分析"
+            )
+            self.assertEqual(routed_event["group_id"], continuation_group.group_id)
+            self.assertEqual(
+                routed_event["stage_id"],
+                state.temp_thinking_bubble.ui_stage_id,
+            )
+
+            first_group.process_disclosure.setChecked(True)
+            self.assertFalse(first.isHidden())
+            self.assertNotIn("深度思考中", first.think_toggle_btn.text())
+        finally:
+            window.close()
+            window.deleteLater()
+
+    def test_terminal_state_folds_process_only_group_and_waits_for_final_result(self):
+        window = MainWindow()
+        try:
+            state = window.get_current_session()
+            window._retire_session_empty_state(state, reason="test_terminal_process_only")
+            state.live_activity = True
+            state.active_turn_id = 1
+
+            orphan = window._append_live_thinking_segment(state)
+            orphan_group = state.active_agent_turn_group
+            orphan.update_thinking("边界前的孤立思考")
+
+            state.active_agent_turn_group = None
+            state.agent_stage_closed = False
+            result = window._append_live_thinking_segment(state)
+            result_group = state.active_agent_turn_group
+            result.update_thinking("最终分析")
+            result.set_main_content("正在输出", final=False)
+
+            window.set_session_status("completed", state.session_id)
+
+            self.assertTrue(orphan_group.process_finalized)
+            self.assertFalse(orphan_group.process_disclosure.isChecked())
+            self.assertFalse(orphan.think_timer.isActive())
+            self.assertNotIn("深度思考中", orphan.think_toggle_btn.text())
+            self.assertTrue(result_group.process_finalization_pending)
+            self.assertFalse(result_group.process_finalized)
+
+            result.update_thinking(duration=1.5, is_final=True)
+            result.set_main_content("最终结果", final=True)
+
+            self.assertFalse(result_group.process_finalization_pending)
+            self.assertTrue(result_group.process_finalized)
+            self.assertFalse(result_group.process_disclosure.isChecked())
+            self.assertFalse(result.think_timer.isActive())
+            self.assertNotIn("深度思考中", result.think_toggle_btn.text())
         finally:
             window.close()
             window.deleteLater()
@@ -1787,6 +1892,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIn("任务已停止", bubble.main_content_text)
             self.assertTrue(bubble.copy_result_btn.isHidden())
             self.assertTrue(bubble.office_draft_btn.isHidden())
+            self.assertFalse(bubble.think_timer.isActive())
+            self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
         finally:
             window.close()
             window.deleteLater()
@@ -1803,6 +1910,8 @@ class ConversationLinearInteractionTests(unittest.TestCase):
             self.assertIn("provider failed", bubble.main_content_text)
             self.assertTrue(bubble.copy_result_btn.isHidden())
             self.assertTrue(bubble.office_draft_btn.isHidden())
+            self.assertFalse(bubble.think_timer.isActive())
+            self.assertNotIn("深度思考中", bubble.think_toggle_btn.text())
             error_message = state.messages[-1]
             self.assertTrue(error_message["meta"]["ui_only"])
             self.assertEqual(error_message["meta"]["ui_reply_kind"], "error")

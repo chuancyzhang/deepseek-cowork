@@ -17196,7 +17196,10 @@ class AssistantTurnGroup(QFrame):
         """Hide semantically empty stages and separators without changing stage order."""
         if self.process_finalized and not self.process_expanded:
             for bubble in self.stage_bubbles:
-                bubble.setVisible(bubble is self.process_result_bubble)
+                bubble.setVisible(
+                    self.process_result_bubble is not None
+                    and bubble is self.process_result_bubble
+                )
                 if bubble.thinking_widget is not None:
                     bubble.thinking_widget.setVisible(False)
             for separator in self.stage_separators:
@@ -17259,6 +17262,64 @@ class AssistantTurnGroup(QFrame):
             return False
         self.finalize_process(result_bubble)
         return True
+
+    def _finish_stage_thinking(self, bubble):
+        if bubble is None or not _qt_object_alive(bubble):
+            return
+        replay_timer = getattr(bubble, "_thinking_replay_timer", None)
+        if replay_timer is not None and replay_timer.isActive():
+            replay_timer.stop()
+        bubble.update_thinking(duration=None, is_final=True)
+
+    def finalize_non_result_stages(self, result_bubble):
+        for bubble in self.stage_bubbles:
+            if bubble is result_bubble:
+                continue
+            self._finish_stage_thinking(bubble)
+            bubble.set_message_actions_enabled(False)
+
+    def finalize_process_only(self):
+        """Fold a completed process group that does not own the turn's final answer."""
+        active_timer_count = sum(
+            1
+            for bubble in self.stage_bubbles
+            if (
+                bubble.think_timer.isActive()
+                or bool(
+                    getattr(bubble, "_thinking_replay_timer", None)
+                    and bubble._thinking_replay_timer.isActive()
+                )
+            )
+        )
+        for bubble in self.stage_bubbles:
+            self._finish_stage_thinking(bubble)
+            bubble.set_message_actions_enabled(False)
+
+        self.process_finalization_pending = False
+        self.process_finalized = True
+        self.process_result_bubble = None
+        stage_count, tool_count = self._process_counts(None)
+        has_process = bool(stage_count or tool_count)
+        self.process_disclosure.setVisible(has_process)
+        self.process_disclosure.blockSignals(True)
+        self.process_disclosure.setChecked(False)
+        self.process_disclosure.blockSignals(False)
+        self.process_expanded = False
+        self._refresh_process_disclosure_text(stage_count, tool_count)
+        self.sync_stage_visibility()
+        log_sub_agent_runtime(
+            "ui_assistant_process_only_folded",
+            session_id=str(
+                getattr(self.stage_bubbles[-1], "session_id", "")
+                if self.stage_bubbles
+                else ""
+            ),
+            group_id=self.group_id,
+            stage_count=stage_count,
+            tool_count=tool_count,
+            active_timer_count=active_timer_count,
+            has_process=has_process,
+        )
 
     def finalize_process(self, result_bubble=None):
         result_bubble = result_bubble or self.active_stage()
@@ -28027,11 +28088,47 @@ class MainWindow(QMainWindow):
 
     def _finalize_live_turn_process_groups(self, state):
         groups = list(getattr(state, "live_agent_turn_groups", []) or [])
+        result_group = getattr(state, "active_agent_turn_group", None)
+        result_bubble = (
+            result_group.active_stage()
+            if isinstance(result_group, AssistantTurnGroup)
+            else None
+        )
+        if groups and result_group not in groups:
+            log_sub_agent_runtime(
+                "ui_assistant_terminal_group_invariant_failed",
+                session_id=state.session_id,
+                group_count=len(groups),
+                result_group_id=str(getattr(result_group, "group_id", "") or ""),
+            )
+            raise RuntimeError("实时执行过程终态缺少当前结果组，无法安全折叠。")
         state.live_agent_turn_groups = []
         for group in groups:
             if group is None or not _qt_object_alive(group):
                 continue
-            group.request_process_finalization(group.active_stage())
+            if group is result_group:
+                group.finalize_non_result_stages(result_bubble)
+                group.request_process_finalization(result_bubble)
+                log_sub_agent_runtime(
+                    "ui_assistant_terminal_result_group",
+                    session_id=state.session_id,
+                    group_id=group.group_id,
+                    stage_count=len(group.stage_bubbles),
+                    pending=bool(group.process_finalization_pending),
+                    result_ready=bool(
+                        result_bubble is not None
+                        and getattr(result_bubble, "_rendered_main_content_final", False)
+                    ),
+                )
+                continue
+            group.finalize_process_only()
+        log_sub_agent_runtime(
+            "ui_assistant_terminal_groups_finalized",
+            session_id=state.session_id,
+            terminal_status=str(getattr(state, "session_status", "") or ""),
+            group_count=len(groups),
+            result_group_id=str(getattr(result_group, "group_id", "") or ""),
+        )
 
     def refresh_change_list(self, session_id=None):
         state = self.get_session(session_id)
@@ -39318,6 +39415,9 @@ class MainWindow(QMainWindow):
             running_tool=waiting_status == "waiting_tool",
         )
         bubble = self._close_live_agent_stage(state, reply_kind="stage")
+        previous_group = bubble.parentWidget() if bubble is not None else None
+        if not isinstance(previous_group, AssistantTurnGroup):
+            previous_group = None
         previous_group_id = str(getattr(bubble, "ui_turn_group_id", "")) if bubble is not None else ""
         self.add_turn_guidance_inline(
             message,
@@ -39327,7 +39427,10 @@ class MainWindow(QMainWindow):
             force_scroll=True,
             session_id=state.session_id,
             mutation_ready=mutation_ready,
+            process_events=False,
         )
+        if previous_group is not None:
+            previous_group.finalize_process_only()
         # The next model delta belongs to a new conversational thought after
         # the user's guidance, never to the segment that preceded it.
         state.active_agent_turn_group = None
@@ -39340,6 +39443,15 @@ class MainWindow(QMainWindow):
             previous_group_id=previous_group_id,
             next_group_id=str(getattr(state.active_agent_turn_group, "group_id", "")),
             message_id=message_id,
+            previous_stage_count=(
+                len(previous_group.stage_bubbles)
+                if previous_group is not None
+                else 0
+            ),
+            previous_group_finalized=bool(
+                previous_group is not None
+                and previous_group.process_finalized
+            ),
         )
         # Content buffers are presentation-only; generated_messages remain canonical.
         state.current_content_buffer = ""
@@ -40993,6 +41105,7 @@ class MainWindow(QMainWindow):
         session_id=None,
         target_layout=None,
         mutation_ready=False,
+        process_events=True,
     ):
         state = self.get_session(session_id) if session_id else self.get_current_session()
         if not state:
@@ -41047,7 +41160,8 @@ class MainWindow(QMainWindow):
             else:
                 layout.addWidget(wrapper)
 
-        self.process_ui_events(force=False)
+        if process_events:
+            self.process_ui_events(force=False)
         if index is None:
             self.request_session_scroll_to_bottom(state.session_id, force=force_scroll)
         self.queue_session_bubble_virtualization(state.session_id)

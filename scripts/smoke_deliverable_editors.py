@@ -249,12 +249,15 @@ class SmokeCoordinator(QObject):
                 else _docx_payload()
             )
             return base64.b64encode(payload).decode("ascii")
+        rows = [
+            [str(row * 10 + column) for column in range(10)]
+            for row in range(10_000)
+        ]
+        rows[0][0] = "00123"
+        rows[0][1] = "9007199254740993"
         return json.dumps(
             rows_to_univer_snapshot(
-                [
-                    [str(row * 10 + column) for column in range(10)]
-                    for row in range(10_000)
-                ],
+                rows,
                 "十万单元格",
             ),
             ensure_ascii=False,
@@ -312,6 +315,51 @@ class SmokeCoordinator(QObject):
         if self.mode == "sheet":
             QTimer.singleShot(250, self._probe_sheet_layout)
             return
+        QTimer.singleShot(100, self._probe_editor_chrome)
+
+    def _probe_editor_chrome(self):
+        self.page.runJavaScript(
+            """
+            (() => {
+              const toolbar = document.querySelector(".editor-toolbar");
+              const control = toolbar && toolbar.querySelector("button, select, input");
+              const content = document.getElementById("docx-canvas")
+                || document.getElementById("html-frame");
+              const toolbarRect = toolbar ? toolbar.getBoundingClientRect() : null;
+              const controlRect = control ? control.getBoundingClientRect() : null;
+              const contentRect = content ? content.getBoundingClientRect() : null;
+              return JSON.stringify({
+                fontSize: parseFloat(getComputedStyle(document.body).fontSize),
+                toolbarHeight: toolbarRect ? toolbarRect.height : 0,
+                controlHeight: controlRect ? controlRect.height : 0,
+                contentWidth: contentRect ? contentRect.width : 0,
+                contentHeight: contentRect ? contentRect.height : 0
+              });
+            })()
+            """,
+            self._handle_editor_chrome_probe,
+        )
+
+    def _handle_editor_chrome_probe(self, payload):
+        try:
+            result = json.loads(str(payload or ""))
+        except (TypeError, ValueError) as exc:
+            self.fail(f"{self.mode} chrome probe returned invalid data: {exc}")
+            return
+        if float(result.get("fontSize") or 0) < 14:
+            self.fail(f"{self.mode} editor font is too small: {result}")
+            return
+        if float(result.get("toolbarHeight") or 0) < 44:
+            self.fail(f"{self.mode} editor toolbar collapsed: {result}")
+            return
+        if float(result.get("controlHeight") or 0) < 32:
+            self.fail(f"{self.mode} editor controls are too small: {result}")
+            return
+        if float(result.get("contentWidth") or 0) < 900 or float(
+            result.get("contentHeight") or 0
+        ) < 600:
+            self.fail(f"{self.mode} editor content did not fill the viewport: {result}")
+            return
         self.page.runJavaScript("window.coworkEditor.requestSave()")
 
     def _probe_sheet_layout(self):
@@ -330,6 +378,7 @@ class SmokeCoordinator(QObject):
                 ),
                 rootWidth: rootRect ? rootRect.width : 0,
                 rootHeight: rootRect ? rootRect.height : 0,
+                unresolvedLocale: document.body.innerText.includes("sheets-ui.info."),
                 canvasRects
               });
             })()
@@ -351,6 +400,9 @@ class SmokeCoordinator(QObject):
             return
         if float(result.get("rootHeight") or 0) < 600:
             self.fail("sheet editor root height collapsed in the narrow viewport")
+            return
+        if result.get("unresolvedLocale"):
+            self.fail("sheet editor displayed unresolved locale keys")
             return
         canvas_rects = result.get("canvasRects") or []
         if not canvas_rects:
@@ -378,6 +430,12 @@ class SmokeCoordinator(QObject):
                 snapshot = json.loads(payload)
                 if not isinstance(snapshot.get("sheets"), dict):
                     raise ValueError("sheet snapshot has no sheets")
+                sheet_id = snapshot["sheetOrder"][0]
+                first_row = snapshot["sheets"][sheet_id]["cellData"]["0"]
+                if first_row["0"].get("v") != "00123":
+                    raise ValueError("sheet output coerced a leading-zero string")
+                if first_row["1"].get("v") != "9007199254740993":
+                    raise ValueError("sheet output coerced a long numeric string")
             elif "<h1" not in payload.lower():
                 raise ValueError("HTML output lost edited document body")
         except Exception as exc:

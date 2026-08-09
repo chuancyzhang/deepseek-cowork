@@ -3,46 +3,25 @@ import os
 import re
 from urllib.parse import quote, unquote, urlparse
 
+from core.file_capabilities import FILE_CAPABILITIES
 
 DELIVERABLE_TYPES = {
-    ".html": ("html", "HTML", "fa5s.file-code"),
-    ".htm": ("html", "HTML", "fa5s.file-code"),
-    ".md": ("markdown", "Markdown", "fa5s.file-alt"),
-    ".markdown": ("markdown", "Markdown", "fa5s.file-alt"),
-    ".txt": ("text", "TXT", "fa5s.file-alt"),
-    ".json": ("text", "JSON", "fa5s.file-code"),
-    ".xml": ("text", "XML", "fa5s.file-code"),
-    ".yaml": ("text", "YAML", "fa5s.file-code"),
-    ".yml": ("text", "YAML", "fa5s.file-code"),
-    ".log": ("text", "LOG", "fa5s.file-alt"),
-    ".csv": ("table", "CSV", "fa5s.file-csv"),
-    ".tsv": ("table", "TSV", "fa5s.file-csv"),
-    ".png": ("image", "图片", "fa5s.file-image"),
-    ".jpg": ("image", "图片", "fa5s.file-image"),
-    ".jpeg": ("image", "图片", "fa5s.file-image"),
-    ".gif": ("image", "图片", "fa5s.file-image"),
-    ".webp": ("image", "图片", "fa5s.file-image"),
-    ".bmp": ("image", "图片", "fa5s.file-image"),
-    ".pdf": ("pdf", "PDF", "fa5s.file-pdf"),
-    ".doc": ("doc", "DOC", "fa5s.file-word"),
-    ".docx": ("docx", "DOCX", "fa5s.file-word"),
-    ".ppt": ("ppt", "PPT", "fa5s.file-powerpoint"),
-    ".pptx": ("pptx", "PPTX", "fa5s.file-powerpoint"),
-    ".xls": ("xls", "XLS", "fa5s.file-excel"),
-    ".xlsx": ("xlsx", "XLSX", "fa5s.file-excel"),
+    extension: (capability.preview_kind, capability.label, capability.icon)
+    for extension, capability in FILE_CAPABILITIES.items()
 }
 
 OFFICE_EXTENSIONS = {
-    ".doc": "word",
-    ".docx": "word",
-    ".ppt": "powerpoint",
-    ".pptx": "powerpoint",
-    ".xls": "excel",
-    ".xlsx": "excel",
+    extension: capability.office_family
+    for extension, capability in FILE_CAPABILITIES.items()
+    if capability.office_family
 }
+_PATH_EXTENSION_PATTERN = "|".join(
+    re.escape(extension)
+    for extension in sorted(DELIVERABLE_TYPES, key=len, reverse=True)
+)
 _PATH_PATTERN = re.compile(
     r"(?P<path>(?:file://|/?[A-Za-z]:[\\/]|\\\\)[^\r\n<>\"|?*]*?"
-    r"(?:\.markdown|\.html|\.docx|\.pptx|\.xlsx|\.jpeg|\.webp|\.json|\.yaml|\.yml|\.xml|\.csv|\.tsv|\.txt|\.log|\.htm|\.pdf|\.doc|\.ppt|\.xls|\.png|\.jpg|\.gif|\.bmp|\.md))"
+    rf"(?:{_PATH_EXTENSION_PATTERN}))"
     r"(?=$|[\s\]\[(){}<>，。；：、,;:!?！？'\"`])",
     re.IGNORECASE,
 )

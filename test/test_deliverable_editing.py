@@ -24,6 +24,7 @@ from core.deliverable_editing import (
     prepare_html_edit_source,
     restore_html_edit_source,
     restore_previous_version,
+    save_copy,
     serialize_editor_payload,
     sha256_file,
 )
@@ -46,11 +47,73 @@ class DeliverableEditingCoreTest(unittest.TestCase):
             ".yaml",
             ".yml",
             ".log",
+            ".py",
+            ".pyw",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",
+            ".ts",
+            ".tsx",
+            ".css",
+            ".scss",
+            ".less",
+            ".vue",
+            ".svelte",
+            ".sql",
+            ".sh",
+            ".bash",
+            ".zsh",
+            ".fish",
+            ".ps1",
+            ".psm1",
+            ".bat",
+            ".cmd",
+            ".toml",
+            ".ini",
+            ".cfg",
+            ".conf",
+            ".properties",
+            ".java",
+            ".kt",
+            ".kts",
+            ".go",
+            ".rs",
+            ".c",
+            ".h",
+            ".cc",
+            ".cpp",
+            ".cxx",
+            ".hpp",
+            ".cs",
+            ".php",
+            ".rb",
+            ".swift",
+            ".dart",
+            ".lua",
+            ".r",
+            ".jsonl",
+            ".ndjson",
         ):
             self.assertIn(extension, EDITABLE_EXTENSIONS)
             self.assertIsNotNone(editor_descriptor(extension))
         for extension in (".pdf", ".pptx", ".doc", ".xls", ".ppt", ".png"):
             self.assertIsNone(editor_descriptor(extension))
+
+    def test_python_round_trip_preserves_utf8_bom_and_crlf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "script.py")
+            original = b"\xef\xbb\xbfprint('one')\r\n"
+            Path(path).write_bytes(original)
+
+            session, report = create_edit_session(path)
+            payload = load_editor_payload(session)
+            output = serialize_editor_payload(session, "print('two')\n")
+
+        self.assertTrue(report.allowed)
+        self.assertEqual(payload["kind"], "text")
+        self.assertEqual(payload["content"], "print('one')\r\n")
+        self.assertEqual(output, b"\xef\xbb\xbfprint('two')\r\n")
 
     def test_legacy_text_encoding_requires_explicit_choice(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -77,6 +140,19 @@ class DeliverableEditingCoreTest(unittest.TestCase):
                 serialize_editor_payload(session, '{"ready": true, "ready": false}')
             with self.assertRaisesRegex(DeliverableEditError, "不允许常量"):
                 serialize_editor_payload(session, '{"value": NaN}')
+
+            jsonl_path = os.path.join(directory, "events.jsonl")
+            Path(jsonl_path).write_bytes(b'{"id": 1}\n')
+            jsonl_session, _report = create_edit_session(jsonl_path)
+            self.assertEqual(
+                serialize_editor_payload(
+                    jsonl_session,
+                    '{"id": 1}\n\n{"id": 2}\n',
+                ),
+                b'{"id": 1}\n\n{"id": 2}\n',
+            )
+            with self.assertRaisesRegex(DeliverableEditError, "第 2 行无效"):
+                serialize_editor_payload(jsonl_session, '{"id": 1}\n{"id":')
 
     def test_html_edit_copy_preserves_scripts_and_embeds(self):
         source = (
@@ -296,6 +372,45 @@ class DeliverableEditingCoreTest(unittest.TestCase):
 
         self.assertFalse(report.allowed)
         self.assertTrue(any(issue.code == "xlsx_unsupported_part" for issue in report.issues))
+
+    def test_xlsx_atomic_save_copy_and_restore_validate_temp_bytes(self):
+        import openpyxl
+
+        with tempfile.TemporaryDirectory() as directory:
+            backup_root = os.path.join(directory, "backups")
+            path = os.path.join(directory, "data.xlsx")
+            workbook = openpyxl.Workbook()
+            workbook.active["A1"] = "original"
+            workbook.save(path)
+            workbook.close()
+
+            session, _report = create_edit_session(path)
+            snapshot = load_editor_payload(session)["snapshot"]
+            sheet = snapshot["sheets"][snapshot["sheetOrder"][0]]
+            sheet["cellData"]["0"]["0"] = {"v": "edited", "t": 1}
+            output = serialize_editor_payload(session, snapshot)
+
+            atomic_save_session(session, output, backup_root=backup_root)
+            saved = openpyxl.load_workbook(path, data_only=False)
+            try:
+                self.assertEqual(saved.active["A1"].value, "edited")
+            finally:
+                saved.close()
+
+            copy_path = os.path.join(directory, "copy.xlsx")
+            save_copy(session, output, copy_path)
+            copied = openpyxl.load_workbook(copy_path, data_only=False)
+            try:
+                self.assertEqual(copied.active["A1"].value, "edited")
+            finally:
+                copied.close()
+
+            restore_previous_version(path, backup_root=backup_root)
+            restored = openpyxl.load_workbook(path, data_only=False)
+            try:
+                self.assertEqual(restored.active["A1"].value, "original")
+            finally:
+                restored.close()
 
     def test_atomic_save_keeps_one_backup_detects_conflict_and_restores_by_swap(self):
         with tempfile.TemporaryDirectory() as directory:

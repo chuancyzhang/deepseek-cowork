@@ -32,6 +32,25 @@ class TestDeliverablePreviewHelpers(unittest.TestCase):
         self.assertIn(".bmp", DELIVERABLE_TYPES)
         for extension in (".txt", ".json", ".xml", ".yaml", ".yml", ".log", ".csv", ".tsv"):
             self.assertIn(extension, DELIVERABLE_TYPES)
+        for extension in (".py", ".js", ".ts", ".css", ".sql", ".toml", ".cpp", ".jsonl"):
+            self.assertIn(extension, DELIVERABLE_TYPES)
+
+    def test_finds_code_file_paths_from_shared_capability_registry(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            paths = [
+                os.path.join(workspace, "script.py"),
+                os.path.join(workspace, "config.toml"),
+            ]
+            for path in paths:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("ready")
+
+            matches = iter_workspace_file_paths("文件：" + "；".join(paths), workspace)
+
+        self.assertEqual(
+            [item[2] for item in matches],
+            [os.path.normpath(path) for path in paths],
+        )
 
     def test_only_accepts_existing_workspace_files(self):
         with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:

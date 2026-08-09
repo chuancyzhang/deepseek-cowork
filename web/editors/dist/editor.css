@@ -7,6 +7,9 @@
   --cowork-border-subtle: #e7e8eb;
   --cowork-primary: #5b5bd6;
   --cowork-selection: #e9e9ff;
+  --cowork-font-size: 14px;
+  --cowork-control-height: 32px;
+  --cowork-toolbar-height: 44px;
 }
 
 * {
@@ -21,7 +24,7 @@ body {
   overflow: hidden;
   background: var(--cowork-bg-primary);
   color: var(--cowork-text-primary);
-  font: 13px/1.45 "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  font: var(--cowork-font-size)/1.45 "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
 }
 
 button,
@@ -44,7 +47,7 @@ input {
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
-  min-height: 42px;
+  min-height: var(--cowork-toolbar-height);
   padding: 6px 8px;
   overflow-x: auto;
   border-bottom: 1px solid var(--cowork-border-subtle);
@@ -54,13 +57,24 @@ input {
 .editor-toolbar button,
 .editor-toolbar select,
 .editor-toolbar input {
-  height: 28px;
-  min-width: 30px;
+  flex: 0 0 auto;
+  height: var(--cowork-control-height);
+  min-width: var(--cowork-control-height);
   padding: 0 8px;
   color: var(--cowork-text-primary);
   border: 0;
   border-radius: 6px;
   background: transparent;
+}
+
+.editor-toolbar button,
+.editor-toolbar select,
+.editor-toolbar label {
+  white-space: nowrap;
+}
+
+.editor-toolbar label {
+  flex: 0 0 auto;
 }
 
 .editor-toolbar button:hover,
@@ -84,6 +98,10 @@ input {
 
 #docx-canvas {
   overflow: auto;
+}
+
+#docx-canvas > .ce-page-container {
+  margin-inline: auto;
 }
 
 #sheet-root {

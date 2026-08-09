@@ -70,7 +70,9 @@ function loadWorkbook() {
           container: "sheet-root",
           header: true,
           toolbar: true,
-          footer: true
+          footer: true,
+          disableForceStringAlert: true,
+          disableForceStringMark: true
         })
       ]
     });

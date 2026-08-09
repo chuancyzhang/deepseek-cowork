@@ -136,7 +136,8 @@ async function loadDocument() {
     editor = new Editor(document.getElementById("docx-canvas"), { main: [] }, {
       mode: "edit",
       pageMode: "paging",
-      defaultFont: "Microsoft YaHei"
+      defaultFont: "Microsoft YaHei",
+      scale: 1.1
     });
     editor.use(docxPlugin);
     editor.listener.contentChange = setDirty;

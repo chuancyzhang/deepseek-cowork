@@ -94,6 +94,7 @@ from core.deliverable_editing import (
     save_copy,
     serialize_editor_payload,
 )
+from core.file_capabilities import TEXT_FILE_MAX_BYTES
 from core.html_render import extract_renderable_html_response
 from core.inline_visualization import (
     build_visualization_document,
@@ -20988,6 +20989,7 @@ class FileWorkbench(QWidget):
         self.content.setParent(self)
         self.navigator_visible = True
         self.navigator_pinned = False
+        self.editor_focus = False
         self.navigator_width = int(getattr(DesignTokens, "file_navigator_width", 320))
         self.pin_min_width = int(getattr(DesignTokens, "file_workbench_pin_min_width", 720))
         self._effective_mode = "overlay"
@@ -21013,8 +21015,20 @@ class FileWorkbench(QWidget):
             self.navigator_width = max(260, min(420, int(width)))
         self.update_layout()
 
+    def set_editor_focus(self, enabled):
+        enabled = bool(enabled)
+        if self.editor_focus == enabled:
+            self.update_layout()
+            return
+        self.editor_focus = enabled
+        self.update_layout()
+
     def is_effectively_pinned(self):
-        return bool(self.navigator_pinned and self.width() >= self.pin_min_width)
+        return bool(
+            not self.editor_focus
+            and self.navigator_pinned
+            and self.width() >= self.pin_min_width
+        )
 
     def update_layout(self):
         width = max(0, self.width())
@@ -21027,7 +21041,7 @@ class FileWorkbench(QWidget):
         if mode != self._effective_mode:
             self._effective_mode = mode
             self.effectiveModeChanged.emit(mode)
-        show_nav = bool(self.navigator_visible or pinned)
+        show_nav = bool(not self.editor_focus and (self.navigator_visible or pinned))
         self.navigator.setVisible(show_nav)
         if pinned:
             self.navigator.setGeometry(0, 0, nav_width, height)
@@ -22180,6 +22194,7 @@ class MainWindow(QMainWindow):
         self.context_drawer_user_width = 0
         self.context_drawer_expanded = False
         self.context_drawer_width_before_expand = 0
+        self.deliverable_edit_focus_snapshot = None
         self.context_rail_buttons = {}
         self.context_available_tabs = set()
         self.current_deliverable_path = ""
@@ -24335,6 +24350,8 @@ class MainWindow(QMainWindow):
         self._sync_deliverable_text_editor_layout()
 
     def persist_context_drawer_width(self):
+        if getattr(self, "deliverable_edit_focus_snapshot", None) is not None:
+            return
         if getattr(self, "config_manager", None) and self.context_drawer_user_width:
             self.config_manager.set("context_drawer_width", int(self.context_drawer_user_width))
 
@@ -24802,9 +24819,91 @@ class MainWindow(QMainWindow):
         btn.setIcon(qta.icon("fa5s.compress-alt" if expanded else "fa5s.expand-alt", color=DesignTokens.text_secondary))
         btn.setToolTip("退出放大" if expanded else "放大预览")
 
+    def _expanded_file_workbench_width(self, parent):
+        return max(
+            DesignTokens.drawer_max_width + 1,
+            min(
+                int(parent.width() * 0.68),
+                parent.width() - (self.context_drawer_margin * 2),
+            ),
+        )
+
+    def _enter_deliverable_edit_focus(self):
+        if getattr(self, "deliverable_edit_focus_snapshot", None) is not None:
+            return
+        parent = getattr(self, "main_container", None)
+        workbench = getattr(self, "file_workbench", None)
+        if parent is None or workbench is None:
+            return
+        self.deliverable_edit_focus_snapshot = {
+            "expanded": bool(getattr(self, "context_drawer_expanded", False)),
+            "user_width": int(getattr(self, "context_drawer_user_width", 0) or 0),
+            "width_before_expand": int(
+                getattr(self, "context_drawer_width_before_expand", 0) or 0
+            ),
+        }
+        self.context_drawer_width_before_expand = (
+            self.right_sidebar.width() if hasattr(self, "right_sidebar") else 0
+        )
+        self.context_drawer_expanded = True
+        self.context_drawer_user_width = self._expanded_file_workbench_width(parent)
+        workbench.set_editor_focus(True)
+        self._sync_deliverable_expand_button()
+        self.sync_context_drawer_layout()
+        log_ui_navigation(
+            "deliverable_edit_focus_enter",
+            path=getattr(self, "current_deliverable_path", ""),
+            drawer_width=int(self.context_drawer_user_width),
+        )
+
+    def _exit_deliverable_edit_focus(self):
+        snapshot = getattr(self, "deliverable_edit_focus_snapshot", None)
+        workbench = getattr(self, "file_workbench", None)
+        if workbench is not None:
+            workbench.set_editor_focus(False)
+        if snapshot is None:
+            return
+        self.context_drawer_expanded = bool(snapshot.get("expanded", False))
+        self.context_drawer_user_width = int(snapshot.get("user_width", 0) or 0)
+        self.context_drawer_width_before_expand = int(
+            snapshot.get("width_before_expand", 0) or 0
+        )
+        self.deliverable_edit_focus_snapshot = None
+        self._sync_deliverable_expand_button()
+        self.sync_context_drawer_layout()
+        log_ui_navigation(
+            "deliverable_edit_focus_exit",
+            path=getattr(self, "current_deliverable_path", ""),
+            drawer_width=int(self.context_drawer_user_width),
+        )
+
     def toggle_deliverable_preview_expanded(self):
         parent = getattr(self, "main_container", None)
         if not parent:
+            return
+        if getattr(self, "deliverable_edit_focus_snapshot", None) is not None:
+            if getattr(self, "context_drawer_expanded", False):
+                self.context_drawer_expanded = False
+                content_width = (
+                    parent.width()
+                    - self.main_layout_default_margins[0]
+                    - self.main_layout_default_margins[2]
+                )
+                self.context_drawer_user_width = self._clamp_int(
+                    int(content_width * DesignTokens.drawer_width_ratio),
+                    self.context_drawer_preferred_min_width,
+                    self.context_drawer_max_width,
+                )
+            else:
+                self.context_drawer_expanded = True
+                self.context_drawer_user_width = self._expanded_file_workbench_width(parent)
+            self._sync_deliverable_expand_button()
+            self.sync_context_drawer_layout()
+            log_ui_navigation(
+                "deliverable_edit_focus_width_toggled",
+                expanded=bool(self.context_drawer_expanded),
+                drawer_width=int(self.context_drawer_user_width),
+            )
             return
         if getattr(self, "context_drawer_expanded", False):
             self.context_drawer_expanded = False
@@ -24815,10 +24914,7 @@ class MainWindow(QMainWindow):
         else:
             self.context_drawer_width_before_expand = self.right_sidebar.width() if hasattr(self, "right_sidebar") else 0
             self.context_drawer_expanded = True
-            self.context_drawer_user_width = max(
-                DesignTokens.drawer_max_width + 1,
-                min(int(parent.width() * 0.68), parent.width() - (self.context_drawer_margin * 2)),
-            )
+            self.context_drawer_user_width = self._expanded_file_workbench_width(parent)
         self._sync_deliverable_expand_button()
         self.persist_context_drawer_width()
         self.sync_context_drawer_layout()
@@ -33470,6 +33566,9 @@ class MainWindow(QMainWindow):
                 "border-subtle": DesignTokens.border_subtle,
                 "primary": DesignTokens.primary,
                 "selection": DesignTokens.selection_bg,
+                "font-size": f"{DesignTokens.font_size_body}px",
+                "control-height": f"{DesignTokens.control_height}px",
+                "toolbar-height": f"{max(44, DesignTokens.control_height + 12)}px",
             }
             script = (
                 "window.coworkEditor && window.coworkEditor.setTheme("
@@ -33657,6 +33756,7 @@ class MainWindow(QMainWindow):
             and os.path.normcase(session.path) == os.path.normcase(path)
             and getattr(self, "deliverable_edit_state", "idle") != "idle"
         ):
+            self._enter_deliverable_edit_focus()
             if session.descriptor.kind == "text":
                 self.preview_stack.setCurrentWidget(self.deliverable_text_editor_container)
             elif getattr(self, "deliverable_editor_web_view", None) is not None:
@@ -33706,6 +33806,7 @@ class MainWindow(QMainWindow):
         session = result["session"]
         session.metadata["ui_session_id"] = uuid.uuid4().hex
         self.deliverable_edit_session = session
+        self._enter_deliverable_edit_focus()
         self.deliverable_editor_external_conflict = False
         payload = result["payload"]
         if payload.get("kind") == "text":
@@ -33828,6 +33929,16 @@ class MainWindow(QMainWindow):
         self.deliverable_editor_bridge.reset(session_id)
         self.deliverable_editor_pending_payload = (mode, session_id, payload)
         self.deliverable_editor_mode = mode
+        zoom_factor = 1.10 if mode == "sheet" else 1.00
+        self.deliverable_editor_web_view.setZoomFactor(zoom_factor)
+        if mode == "sheet":
+            log_sub_agent_runtime(
+                "deliverable_sheet_editor_configured",
+                path=session.path,
+                zoom_factor=zoom_factor,
+                force_string_alert=False,
+                force_string_mark=False,
+            )
         if self.deliverable_editor_ready_mode == mode:
             self._send_deliverable_editor_payload()
             return
@@ -34238,6 +34349,7 @@ class MainWindow(QMainWindow):
         self.deliverable_edit_dirty = False
         self._set_deliverable_edit_state("idle")
         self._reset_deliverable_mode_buttons()
+        self._exit_deliverable_edit_focus()
         if show_preview:
             self.render_selected_deliverable(force=False)
 
@@ -34855,7 +34967,7 @@ class MainWindow(QMainWindow):
         )
 
     def _show_text_deliverable(self, path):
-        max_preview_bytes = 2 * 1024 * 1024
+        max_preview_bytes = TEXT_FILE_MAX_BYTES
         try:
             size = os.path.getsize(path)
             if size > max_preview_bytes:

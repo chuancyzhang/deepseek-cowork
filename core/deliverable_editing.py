@@ -28,11 +28,18 @@ from xml.etree import ElementTree
 from xml.parsers.expat import ExpatError
 
 from core.env_utils import get_app_data_dir
+from core.file_capabilities import (
+    FILE_CAPABILITIES,
+    OFFICE_FILE_MAX_BYTES,
+    TEXT_FILE_MAX_BYTES,
+    editable_extensions,
+    editor_extensions,
+)
 
 
 MIB = 1024 * 1024
-OFFICE_MAX_BYTES = 25 * MIB
-TEXT_MAX_BYTES = 10 * MIB
+OFFICE_MAX_BYTES = OFFICE_FILE_MAX_BYTES
+TEXT_MAX_BYTES = TEXT_FILE_MAX_BYTES
 MAX_WORKSHEETS = 50
 MAX_POPULATED_CELLS = 250_000
 MAX_WORKSHEET_ROWS = 1_048_576
@@ -42,27 +49,20 @@ MAX_DOCX_IMAGES = 200
 MAX_OFFICE_UNCOMPRESSED_BYTES = 200 * MIB
 PAYLOAD_CHUNK_CHARS = 256 * 1024
 
-TEXT_EXTENSIONS = (
-    ".txt",
-    ".md",
-    ".markdown",
-    ".json",
-    ".xml",
-    ".yaml",
-    ".yml",
-    ".log",
+TEXT_EXTENSIONS = editor_extensions("text")
+HTML_EXTENSIONS = editor_extensions("html")
+TABULAR_EXTENSIONS = tuple(
+    extension
+    for extension, capability in FILE_CAPABILITIES.items()
+    if capability.preview_kind == "table" and capability.editor_kind == "sheet"
 )
-HTML_EXTENSIONS = (".html", ".htm")
-TABULAR_EXTENSIONS = (".csv", ".tsv")
-DOCX_EXTENSIONS = (".docx",)
-XLSX_EXTENSIONS = (".xlsx",)
-EDITABLE_EXTENSIONS = frozenset(
-    TEXT_EXTENSIONS
-    + HTML_EXTENSIONS
-    + TABULAR_EXTENSIONS
-    + DOCX_EXTENSIONS
-    + XLSX_EXTENSIONS
+DOCX_EXTENSIONS = editor_extensions("docx")
+XLSX_EXTENSIONS = tuple(
+    extension
+    for extension, capability in FILE_CAPABILITIES.items()
+    if capability.preview_kind == "xlsx" and capability.editor_kind == "sheet"
 )
+EDITABLE_EXTENSIONS = editable_extensions()
 
 
 class DeliverableEditError(RuntimeError):
@@ -140,13 +140,33 @@ class SaveResult:
     bytes_written: int
 
 
-EDITOR_DESCRIPTORS = (
-    EditorDescriptor("text", "文本", TEXT_EXTENSIONS, TEXT_MAX_BYTES, False),
-    EditorDescriptor("html", "HTML", HTML_EXTENSIONS, TEXT_MAX_BYTES, True, True),
-    EditorDescriptor("sheet", "表格", TABULAR_EXTENSIONS, TEXT_MAX_BYTES, True),
-    EditorDescriptor("docx", "DOCX", DOCX_EXTENSIONS, OFFICE_MAX_BYTES, True, True),
-    EditorDescriptor("sheet", "XLSX", XLSX_EXTENSIONS, OFFICE_MAX_BYTES, True),
-)
+def _editor_descriptors_from_capabilities() -> tuple[EditorDescriptor, ...]:
+    groups: dict[tuple[str, str, int, bool, bool], list[str]] = {}
+    for extension, capability in FILE_CAPABILITIES.items():
+        if not capability.editable:
+            continue
+        key = (
+            capability.editor_kind,
+            capability.editor_label,
+            capability.max_bytes,
+            capability.web_based,
+            capability.visual,
+        )
+        groups.setdefault(key, []).append(extension)
+    return tuple(
+        EditorDescriptor(
+            kind=kind,
+            label=label,
+            extensions=tuple(extensions),
+            max_bytes=max_bytes,
+            web_based=web_based,
+            visual=visual,
+        )
+        for (kind, label, max_bytes, web_based, visual), extensions in groups.items()
+    )
+
+
+EDITOR_DESCRIPTORS = _editor_descriptors_from_capabilities()
 EDITOR_BY_EXTENSION = {
     extension: descriptor
     for descriptor in EDITOR_DESCRIPTORS
@@ -702,7 +722,11 @@ def _preflight_xlsx(path: str, descriptor: EditorDescriptor) -> CompatibilityRep
         try:
             import openpyxl
 
-            workbook = openpyxl.load_workbook(path, read_only=True, data_only=False)
+            workbook = openpyxl.load_workbook(
+                io.BytesIO(Path(path).read_bytes()),
+                read_only=True,
+                data_only=False,
+            )
             try:
                 metadata["worksheets"] = len(workbook.sheetnames)
                 if len(workbook.sheetnames) > MAX_WORKSHEETS:
@@ -1570,26 +1594,38 @@ def load_editor_payload(session: EditSession) -> dict[str, Any]:
     return {"kind": "text", "content": text}
 
 
+def _strict_json_loads(content: str) -> Any:
+    def reject_constant(value):
+        raise ValueError(f"JSON 不允许常量 {value}")
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"JSON 对象包含重复键 {key!r}")
+            result[key] = value
+        return result
+
+    return json.loads(
+        content,
+        parse_constant=reject_constant,
+        object_pairs_hook=reject_duplicate_keys,
+    )
+
+
 def validate_text_content(extension: str, content: str) -> None:
     extension = str(extension or "").lower()
     try:
         if extension == ".json":
-            def reject_constant(value):
-                raise ValueError(f"JSON 不允许常量 {value}")
-
-            def reject_duplicate_keys(pairs):
-                result = {}
-                for key, value in pairs:
-                    if key in result:
-                        raise ValueError(f"JSON 对象包含重复键 {key!r}")
-                    result[key] = value
-                return result
-
-            json.loads(
-                content,
-                parse_constant=reject_constant,
-                object_pairs_hook=reject_duplicate_keys,
-            )
+            _strict_json_loads(content)
+        elif extension in {".jsonl", ".ndjson"}:
+            for line_number, line in enumerate(content.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    _strict_json_loads(line)
+                except Exception as exc:
+                    raise ValueError(f"第 {line_number} 行无效：{exc}") from exc
         elif extension == ".xml":
             if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", content, flags=re.IGNORECASE):
                 raise ValueError("XML 编辑文件不允许 DTD 或实体声明")

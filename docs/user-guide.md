@@ -470,13 +470,15 @@ AI 生成文件后，不必先去资源管理器里找。右侧“文件与交�
 
 *截图 S22 交付物预览*
 
-当前可内嵌预览 Markdown、HTML、图片、PDF、DOCX、PPTX 和 XLSX。旧版 DOC、PPT、XLS 需要先转换为新版格式。
+当前可内嵌预览 Markdown、HTML、TXT、JSON、XML、YAML、日志、常用代码/配置文件、CSV/TSV、图片、PDF、DOCX、PPTX 和 XLSX。旧版 DOC、PPT、XLS 需要先转换为新版格式。
 
 > 预览没有自动刷新 如果同一个文件在后台被修改，应用会保留你正在看的内容并提示手动刷新，避免阅读位置突然跳动。
 
 ### 9.3 安全编辑和保存
 
-可以直接编辑 DOCX、HTML、XLSX、CSV/TSV、Markdown、JSON、XML、YAML 及常见文本文件。PDF、PPTX、图片和旧版 DOC/PPT/XLS 保持只读。
+可以直接编辑 DOCX、HTML、XLSX、CSV/TSV、Markdown、JSON、XML、YAML、常见文本，以及 Python、JavaScript/TypeScript、CSS、SQL、Shell、PowerShell、TOML、INI、Java、Go、Rust、C/C++ 等常用代码和配置文件。PDF、PPTX、图片和旧版 DOC/PPT/XLS 保持只读。
+
+兼容预检通过后，文件工作台会临时放大并隐藏文件导航，为编辑器保留更多空间；退出编辑后恢复原有宽度及导航固定状态。保存失败或检测到外部修改时，工作台保持编辑状态，方便继续处理。
 
 ![交付物内嵌编辑](../images/user-guide/s22a-deliverable-edit.png)
 

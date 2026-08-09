@@ -43,6 +43,30 @@ class FileWorkbenchTest(unittest.TestCase):
         self.assertTrue(workbench.navigator_pinned)
         workbench.close()
 
+    def test_editor_focus_hides_navigator_without_changing_preferences(self):
+        navigator = QFrame()
+        navigator.setObjectName("FileNavigatorPanel")
+        content = QWidget()
+        workbench = FileWorkbench(navigator, content)
+        workbench.resize(860, 520)
+        workbench.set_navigator_state(visible=True, pinned=True, width=300)
+        workbench.show()
+        self.app.processEvents()
+
+        workbench.set_editor_focus(True)
+        self.app.processEvents()
+        self.assertTrue(navigator.isHidden())
+        self.assertEqual(content.geometry().left(), 0)
+        self.assertTrue(workbench.navigator_visible)
+        self.assertTrue(workbench.navigator_pinned)
+
+        workbench.set_editor_focus(False)
+        self.app.processEvents()
+        self.assertFalse(navigator.isHidden())
+        self.assertEqual(content.geometry().left(), 301)
+        self.assertTrue(workbench.navigator_pinned)
+        workbench.close()
+
 
 class QuestionNavigatorTest(unittest.TestCase):
     @classmethod

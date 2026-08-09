@@ -296,8 +296,9 @@ Observability 与协议历史分离：稳定提示、动态上下文、Skill 披
 
 ## 8. 文件与交付物安全编辑
 
-`core/deliverable_editing.py` 是与 Qt 解耦的编辑内核，定义格式注册、兼容预检、
-编辑会话、快照转换、冲突检测、备份和保存结果。UI 只投影状态并调度 Worker。
+`core/file_capabilities.py` 是预览、编辑和聊天路径识别共用的文件能力注册表；
+`core/deliverable_editing.py` 是与 Qt 解耦的编辑内核，定义兼容预检、编辑会话、
+快照转换、冲突检测、备份和保存结果。UI 只投影状态并调度 Worker。
 
 文件 UI 只有一个 `FileWorkbench`。同一 `FileNavigatorPanel` 在窄宽度覆盖内容，
 在放大且宽度足够时固定到左侧；缩窄只改变有效布局，不清除固定偏好。导航常驻
@@ -313,7 +314,7 @@ Observability 与协议历史分离：稳定提示、动态上下文、Skill 披
 | XLSX | 编辑值、公式、常用格式、合并和行列结构 |
 | HTML | 隔离编辑 body，原始 head 保持权威，脚本不执行 |
 | CSV/TSV | 使用表格快照，限制为单表并保留引号语义 |
-| Markdown/JSON/XML/YAML/文本 | 文本编辑；结构化格式保存前严格解析 |
+| Markdown/JSON/XML/YAML/文本/代码/配置 | 等宽文本编辑；结构化格式保存前严格解析 |
 | PDF/PPTX/图片/旧版 Office | 只读 |
 
 修订、内容控件、域、嵌入对象、复杂页眉页脚、图表、数据透视表、外部链接等会
@@ -341,6 +342,10 @@ Observability 与协议历史分离：稳定提示、动态上下文、Skill 披
 通信。Canvas Editor、DOCX 插件与 Univer 构建为离线 bundle，运行时不依赖 Node
 或 CDN。页面使用严格 CSP，禁止远程访问和剪贴板脚本；主题只经受控 CSS 变量
 进入编辑器外壳，预览仍可隔离和取消。
+
+编辑预检成功后，现有 `FileWorkbench` 进入临时专注状态：复用抽屉放大几何并隐藏
+导航，但不写入用户的宽度、固定或可见性偏好。退出编辑时原样恢复；保存失败和冲突
+继续保留专注布局及未保存内容。
 
 ## 9. 后台运行时与外部连接
 
